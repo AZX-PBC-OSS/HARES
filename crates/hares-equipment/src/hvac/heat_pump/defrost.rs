@@ -101,6 +101,26 @@ pub struct DefrostConfig {
     /// dedicated heater.
     #[serde(default)]
     pub resistive_defrost_capacity_w: f64,
+    /// Share of the resistive defrost element's output that reaches the zone
+    /// [0..1]. The element heats the outdoor coil: the zone share is cabinet
+    /// leakage and the remainder is frost-melt loss to the outdoors. Default
+    /// 0: the element's heat is all frost-melt loss. Both the continuous and
+    /// the discrete defrost paths route the element through the same
+    /// [`resistive_defrost_destination`] split.
+    #[serde(default)]
+    pub resistive_defrost_zone_fraction: f64,
+    /// Whether the discrete frost cycle resolves the defrost penalty into
+    /// explicit events. Enabled (the default): `evaluate_defrost` feeds only
+    /// the frost accumulator and the cycle's phases own the per-step
+    /// multipliers, applied exactly once per step. Disabled: the continuous
+    /// model's average multipliers apply on every frost-condition step and
+    /// the cycle tracker stays dormant.
+    #[serde(default = "default_true")]
+    pub defrost_discrete_cycle: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_capacity_reduction_factor() -> f64 {
@@ -128,6 +148,8 @@ impl DefrostConfig {
             max_oat_defrost_c: DEFROST_ENABLE_TEMP_C,
             defrost_eir_coeffs: None,
             resistive_defrost_capacity_w: 0.0,
+            resistive_defrost_zone_fraction: 0.0,
+            defrost_discrete_cycle: true,
         }
     }
 
@@ -138,6 +160,7 @@ impl DefrostConfig {
     /// - `defrost_time_fraction` outside [0.0, 1.0]
     /// - `max_oat_defrost_c` outside [-30.0, 21.0]
     /// - `resistive_defrost_capacity_w` < 0
+    /// - `resistive_defrost_zone_fraction` outside [0.0, 1.0]
     /// - `Resistive` strategy with `resistive_defrost_capacity_w == 0.0`
     ///   (a resistive defrost heater with zero capacity is a config error)
     pub fn validate(&self) -> Result<(), String> {
@@ -163,6 +186,12 @@ impl DefrostConfig {
             return Err(format!(
                 "resistive_defrost_capacity_w must be >= 0, got {}",
                 self.resistive_defrost_capacity_w
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.resistive_defrost_zone_fraction) {
+            return Err(format!(
+                "resistive_defrost_zone_fraction must be in [0.0, 1.0], got {}",
+                self.resistive_defrost_zone_fraction
             ));
         }
         if self.strategy == DefrostStrategy::Resistive && self.resistive_defrost_capacity_w == 0.0 {
@@ -226,11 +255,18 @@ impl std::fmt::Display for DefrostCycleState {
 
 /// Tracks discrete defrost cycle state for a heat pump.
 ///
-/// The inter-defrost interval is derived from `cycle_duration_s / time_fraction`:
-/// at a given `time_fraction`, this produces the same average time-in-defrost as the
-/// continuous model but with distinct ON/OFF phases. Source: mathematically equivalent
-/// to the EnergyPlus ERM 26.1 — Coils: Single-Speed Electric DX Air Heating Coil — Defrost Operation continuous model when averaged over full cycles; the
-/// formula `interval = duration / dtf` is HARES-specific (not from E+ source).
+/// The FSM resolves the continuous model's defrost penalty into explicit
+/// events with the documented duty: one defrost cycle lasting
+/// `cycle_duration_s` fires once per `cycle_duration_s / time_fraction`
+/// seconds, so the average time-in-defrost equals the continuous model's
+/// time fraction. Frost accumulates at `dt * time_fraction` per step
+/// (frost-seconds), so the accumulation phase lasts
+/// `cycle_duration_s * (1 - time_fraction) / time_fraction` seconds and the
+/// trigger fires at `cycle_duration_s * (1 - time_fraction)` frost-seconds.
+/// Source: EnergyPlus ERM 26.1 - Coils: Single-Speed Electric DX Air Heating
+/// Coil - Defrost Operation for the continuous model the duty mirrors; the
+/// explicit ON/OFF cycle and its EWMA-smoothed trigger are HARES-specific
+/// (not from E+ source).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefrostCycleTracker {
     /// Current cycle state.
@@ -244,9 +280,12 @@ pub struct DefrostCycleTracker {
     pub cycle_duration_s: f64,
     /// Hard cap on defrost cycle duration (s) (default 600 s = 10 min).
     pub max_defrost_duration_s: f64,
-    /// EWMA of defrost `time_fraction` used for inter-defrost interval calculation.
+    /// EWMA of defrost `time_fraction` used for the cycle trigger.
     /// Smooths step-to-step fluctuations when OAT oscillates around the defrost
-    /// threshold. Reset to 0.0 when transitioning from Defrosting to Accumulating.
+    /// threshold. Persists across the Defrosting -> Accumulating transition so
+    /// every cycle's trigger uses the long-run duty: resetting it per event
+    /// would re-ramp the threshold each cycle and under-fire the documented
+    /// duty.
     #[serde(default)]
     pub ewma_time_fraction: f64,
 }
@@ -298,9 +337,15 @@ impl DefrostCycleTracker {
                         alpha * time_fraction + (1.0 - alpha) * self.ewma_time_fraction;
 
                     self.accumulated_frost_s += dt_s * time_fraction;
-                    let interval_s =
-                        self.cycle_duration_s / self.ewma_time_fraction.max(f64::EPSILON);
-                    if self.accumulated_frost_s >= interval_s {
+                    // Documented duty: one `cycle_duration_s` defrost per
+                    // `cycle_duration_s / ewma_time_fraction` seconds. Frost
+                    // accumulates at `ewma_time_fraction` frost-seconds per
+                    // second, so the accumulation phase lasts
+                    // `cycle_duration_s * (1 - ewma) / ewma` seconds and the
+                    // trigger fires at `cycle_duration_s * (1 - ewma)`
+                    // frost-seconds.
+                    let trigger_frost_s = self.cycle_duration_s * (1.0 - self.ewma_time_fraction);
+                    if self.accumulated_frost_s >= trigger_frost_s {
                         self.state = DefrostCycleState::Defrosting;
                         self.defrost_elapsed_s = 0.0;
                     }
@@ -323,7 +368,6 @@ impl DefrostCycleTracker {
                 {
                     self.state = DefrostCycleState::Accumulating;
                     self.accumulated_frost_s = 0.0;
-                    self.ewma_time_fraction = 0.0;
                     self.defrost_elapsed_s = 0.0;
                 }
             }
@@ -404,6 +448,18 @@ impl Default for DefrostCycleTracker {
     }
 }
 
+/// Destination split for resistive-defrost element heat.
+///
+/// The element heats the outdoor coil: only `zone_fraction` of its output
+/// reaches the zone (cabinet leakage) and the remainder is frost-melt loss
+/// to the outdoors. Both the continuous and the discrete defrost paths route
+/// the element through this one split so the two paths agree on the
+/// destination. Returns `(zone_w, melt_loss_w)`.
+pub fn resistive_defrost_destination(element_w: f64, zone_fraction: f64) -> (f64, f64) {
+    let zone = zone_fraction.clamp(0.0, 1.0);
+    (element_w * zone, element_w * (1.0 - zone))
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefrostResult {
     pub active: bool,
@@ -415,7 +471,7 @@ pub struct DefrostResult {
 }
 
 impl DefrostResult {
-    fn inactive() -> Self {
+    pub(crate) fn inactive() -> Self {
         Self {
             active: false,
             capacity_multiplier: 1.0,
@@ -561,7 +617,16 @@ pub fn evaluate_defrost(config: &DefrostConfig, inputs: DefrostInputs) -> Defros
                     let power =
                         config.resistive_defrost_capacity_w * time_fraction * runtime_fraction
                             + config.defrost_power_w * time_fraction;
-                    (0.0, power)
+                    // The element heats the outdoor coil; the configured zone
+                    // fraction is cabinet leakage. A negative q_defrost_w
+                    // adds the zone share when the heater applies
+                    // `capacity * multiplier - q_defrost_w`; the remainder is
+                    // frost-melt loss.
+                    let (zone_w, _) = resistive_defrost_destination(
+                        config.resistive_defrost_capacity_w * time_fraction * runtime_fraction,
+                        config.resistive_defrost_zone_fraction,
+                    );
+                    (-zone_w, power)
                 }
             };
 
@@ -597,6 +662,8 @@ mod defrost_tests {
             max_oat_defrost_c: DEFROST_ENABLE_TEMP_C,
             defrost_eir_coeffs: None,
             resistive_defrost_capacity_w: 0.0,
+            resistive_defrost_zone_fraction: 0.0,
+            defrost_discrete_cycle: true,
         }
     }
 
@@ -1177,16 +1244,20 @@ mod defrost_tests {
         let mut tracker = DefrostCycleTracker::new();
         tracker.cycle_duration_s = 210.0;
         let time_fraction: f64 = 0.2;
-        // interval = cycle_duration / time_fraction = 210 / 0.2 = 1050 s
-        // Each step accumulates dt * time_fraction = 60 * 0.2 = 12 s of frost.
-        let interval_s: f64 = 210.0 / 0.2;
-        let dt: f64 = 60.0;
-        let frost_per_step = dt * time_fraction;
+        // Documented duty: one 210 s defrost per 210/0.2 = 1050 s. Frost
+        // accumulates at dt * tf = 60 * 0.2 = 12 frost-seconds per step, so
+        // the trigger fires at cycle_duration * (1 - tf) = 168 frost-seconds
+        // (the accumulation phase lasts 168 / 0.2 = 840 s; with the 210 s
+        // event the cycle period is 1050 s).
+        tracker.ewma_time_fraction = time_fraction;
+        let trigger_frost_s: f64 = 210.0 * (1.0 - time_fraction);
+        let frost_per_step: f64 = 60.0 * time_fraction;
 
-        // Simulate steps until just before threshold
-        let steps_before: usize = (interval_s / frost_per_step).floor() as usize;
+        // Simulate steps until just before threshold (the largest whole-step
+        // frost sum still under it)
+        let steps_before: usize = ((trigger_frost_s / frost_per_step) - 1e-9).floor() as usize;
         for _ in 0..steps_before {
-            tracker.advance(dt, time_fraction, true, 0.0).unwrap();
+            tracker.advance(60.0, time_fraction, true, 0.0).unwrap();
         }
         assert_eq!(
             tracker.state,
@@ -1195,11 +1266,11 @@ mod defrost_tests {
         );
 
         // One more step crosses the threshold
-        tracker.advance(dt, time_fraction, true, 0.0).unwrap();
+        tracker.advance(60.0, time_fraction, true, 0.0).unwrap();
         assert_eq!(
             tracker.state,
             DefrostCycleState::Defrosting,
-            "must transition to Defrosting after accumulated frost >= interval"
+            "must transition to Defrosting after accumulated frost >= the documented-duty trigger"
         );
         assert!(tracker.is_defrosting());
         assert_eq!(tracker.defrost_elapsed_s, 0.0, "elapsed resets on entry");
@@ -1336,13 +1407,15 @@ mod defrost_tests {
         let mut tracker = DefrostCycleTracker::new();
         tracker.cycle_duration_s = 210.0;
         let time_fraction: f64 = 0.2;
-        // interval = 210 / 0.2 = 1050 s
+        // trigger = cycle_duration * (1 - tf) = 168 frost-seconds (with the
+        // EWMA at tf; it starts lower and ramps up, so the threshold is
+        // between 168 and 210)
 
         // Phase 1: heating season — accumulate frost with cold OAT.
         // Each 60s step accumulates 60 * 0.2 = 12 s of frost.
-        // After 50 steps (3000 s), frost = 600.0 — not enough to trigger defrost
-        // (threshold is 1050 s).
-        for _ in 0..50 {
+        // After 10 steps (600 s), frost = 120.0, below the trigger
+        // threshold (>= 168 frost-seconds), so no defrost fires.
+        for _ in 0..10 {
             tracker.advance(60.0, time_fraction, true, -5.0).unwrap();
         }
         let frost_after_heating = tracker.accumulated_frost_s;
@@ -1426,10 +1499,12 @@ mod defrost_tests {
         );
     }
 
-    /// When transitioning from Defrosting to Accumulating, `ewma_time_fraction`
-    /// must reset to 0.0.
+    /// When transitioning from Defrosting to Accumulating, the EWMA must
+    /// persist: the cycle trigger reads the long-run duty, and resetting it
+    /// per event would re-ramp the threshold every cycle and under-fire the
+    /// documented duty. Frost and elapsed time do reset.
     #[test]
-    fn ewma_resets_on_defrost_to_accumulating_transition() {
+    fn ewma_persists_on_defrost_to_accumulating_transition() {
         let mut tracker = DefrostCycleTracker::new();
         tracker.cycle_duration_s = 210.0;
         let dt = 60.0;
@@ -1447,9 +1522,12 @@ mod defrost_tests {
         tracker.advance(dt, tf, true, 0.0).unwrap();
         // Should have transitioned back to Accumulating.
         assert_eq!(tracker.state, DefrostCycleState::Accumulating);
-        assert_eq!(
-            tracker.ewma_time_fraction, 0.0,
-            "ewma_time_fraction must reset to 0.0 after leaving Defrosting"
+        assert_eq!(tracker.accumulated_frost_s, 0.0, "frost must reset");
+        assert_eq!(tracker.defrost_elapsed_s, 0.0, "elapsed must reset");
+        assert!(
+            (tracker.ewma_time_fraction - tf).abs() < 0.02,
+            "ewma_time_fraction {:.6} must persist across the transition (the duty reads it every cycle)",
+            tracker.ewma_time_fraction
         );
     }
 
@@ -1460,11 +1538,13 @@ mod defrost_tests {
     /// Pre-warms the EWMA to steady state with a large `cycle_duration_s` to
     /// prevent triggering during warmup, then resets frost and measures steps
     /// to the first `Accumulating → Defrosting` transition under normal
-    /// `cycle_duration_s`. With EWMA ≈ 0.2 the expected interval is
-    /// ≈ 210 / 0.2 = 1050 s and frost accumulation per step is ≈ 12 s/step,
-    /// so ~88 steps. Instantaneous tf would trigger at ~60 (tf=0.3 → interval
-    /// 700 s) or ~175 (tf=0.1 → interval 2100 s) — this test catches a
-    /// regression where `interval_s` reverts to the instantaneous value.
+    /// `cycle_duration_s`. With EWMA ≈ 0.2 the documented-duty trigger fires
+    /// at `210 * (1 - 0.2)` = 168 frost-seconds; frost accumulates at
+    /// ≈ 12 s/step (the 0.1/0.3 alternation's mean), so ~14 steps.
+    /// Instantaneous tf would trigger at ~9 (tf=0.3 → threshold 147,
+    /// 18 s/step) or ~32 (tf=0.1 → threshold 189, 6 s/step): this test
+    /// catches a regression where `trigger_frost_s` reverts to the
+    /// instantaneous value or to the old `duration / dtf` under-fire.
     #[test]
     fn ewma_driven_interval_determines_cycle_trigger_timing_under_oscillation() {
         let mut tracker = DefrostCycleTracker::new();
@@ -1496,14 +1576,16 @@ mod defrost_tests {
             if old_state == DefrostCycleState::Accumulating
                 && tracker.state == DefrostCycleState::Defrosting
             {
-                // With EWMA ≈ 0.2: interval = 1050 s, frost/step ≈ 12 s → ~88 steps.
-                // With instantaneous tf=0.3: interval = 700 s → ~60 steps.
-                // With instantaneous tf=0.1: interval = 2100 s → ~175 steps.
-                let expected = 210.0 / 0.2 / (dt * 0.2); // ≈ 87.5
+                // With EWMA ≈ 0.2: threshold = 210 * 0.8 = 168 frost-s,
+                // frost/step ≈ 12 → ~14 steps. With instantaneous tf=0.3:
+                // threshold 147, 18 s/step → ~9 steps. With instantaneous
+                // tf=0.1: threshold 189, 6 s/step → ~32 steps.
+                let expected = 210.0 * (1.0 - 0.2) / (dt * 0.2); // = 14
                 assert!(
-                    (70..=110).contains(&steps),
-                    "first defrost trigger at step {steps}; expected near {expected:.0} (±25 %) \
-                     with EWMA (≈ 88), not at the instantaneous-tf extremes (≈ 60 or ≈ 175)"
+                    (10..=20).contains(&steps),
+                    "first defrost trigger at step {steps}; expected near {expected:.0} \
+                     with the EWMA-smoothed documented-duty trigger, not at the \
+                     instantaneous-tf extremes (≈ 9 or ≈ 32)"
                 );
                 return;
             }
@@ -1516,9 +1598,9 @@ mod defrost_tests {
     /// 0.25, mean 0.2). Frost should decay during warm periods and accumulate
     /// during cold periods; the number of defrost cycles should be proportional
     /// to the time spent below the threshold, not spurious from threshold
-    /// crossings. The EWMA smoothing ensures the inter-defrost interval is
-    /// based on the long-run average time_fraction, not the instantaneous
-    /// value that would drift under oscillation.
+    /// crossings. The EWMA smoothing ensures the cycle trigger is based on
+    /// the long-run average time_fraction, not the instantaneous value that
+    /// would drift under oscillation.
     #[test]
     fn multi_cycle_defrost_proportional_to_cold_duration() {
         let mut tracker = DefrostCycleTracker::new();
@@ -1527,8 +1609,9 @@ mod defrost_tests {
         let mut tfs = [0.15_f64, 0.25_f64].into_iter().cycle(); // mean = 0.2
 
         // Phase 1: 2 hours continuous cold (7200 s).
-        // Mean frost/step = 60 * 0.2 = 12 s. With EWMA → 0.2, interval ≈
-        // 210 / 0.2 = 1050 s → defrost fires after ~88 steps (and resets frost).
+        // Mean frost/step = 60 * 0.2 = 12 s. The documented-duty trigger
+        // fires at 210 * (1 - 0.2) = 168 frost-seconds (the EWMA ramps
+        // toward 0.2), so defrost fires about every 14 steps.
         let mut defrost_count = 0u32;
         for _ in 0..120 {
             let tf = tfs.next().unwrap();
@@ -1584,6 +1667,99 @@ mod defrost_tests {
             tracker.ewma_time_fraction > 0.0,
             "ewma_time_fraction {:.6} should be non-zero after second cold-weather accumulation",
             tracker.ewma_time_fraction
+        );
+    }
+    /// The documented duty over many full cycles: with a timestep that divides
+    /// the cycle duration, the Defrosting fraction must equal the time
+    /// fraction. The old trigger divided the cycle duration by the time
+    /// fraction while frost accumulated at dt x tf per step, under-firing its
+    /// own documented duty by about 1/tf.
+    #[test]
+    fn tracker_duty_matches_documented_time_fraction_over_many_cycles() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        let tf = 0.2_f64;
+        let dt = 30.0_f64; // divides the 210 s cycle exactly: the event spans 7 steps
+
+        // Pre-warm the EWMA without triggering (huge cycle duration).
+        tracker.cycle_duration_s = 1_000_000.0;
+        for _ in 0..400 {
+            tracker.advance(dt, tf, true, 0.0).unwrap();
+        }
+        tracker.cycle_duration_s = 210.0;
+        tracker.accumulated_frost_s = 0.0;
+
+        // Run 200 cycles' worth of steps and measure the Defrosting fraction.
+        let total_steps = 7_000_u32;
+        let mut defrost_steps = 0_u32;
+        for _ in 0..total_steps {
+            tracker.advance(dt, tf, true, 0.0).unwrap();
+            if tracker.is_defrosting() {
+                defrost_steps += 1;
+            }
+        }
+        let duty = f64::from(defrost_steps) / f64::from(total_steps);
+        assert!(
+            (duty - tf).abs() < 0.05 * tf,
+            "the FSM duty {duty:.5} must match the documented duty {tf} over many cycles"
+        );
+    }
+
+    /// The resistive destination split: the configured zone fraction is
+    /// cabinet leakage, the remainder is frost-melt loss.
+    #[test]
+    fn resistive_destination_splits_element_heat_by_the_zone_fraction() {
+        let (zone_w, melt_w) = super::resistive_defrost_destination(1000.0, 0.0);
+        assert_eq!(zone_w, 0.0);
+        assert_eq!(melt_w, 1000.0);
+
+        let (zone_w, melt_w) = super::resistive_defrost_destination(1000.0, 0.25);
+        assert!((zone_w - 250.0).abs() < 1e-9);
+        assert!((melt_w - 750.0).abs() < 1e-9);
+
+        let (zone_w, melt_w) = super::resistive_defrost_destination(1000.0, 1.0);
+        assert_eq!(zone_w, 1000.0);
+        assert_eq!(melt_w, 0.0);
+    }
+
+    /// The continuous Resistive path routes the configured zone fraction to
+    /// the zone as a negative q_defrost_w (the heater applies
+    /// `capacity * multiplier - q_defrost_w`), leaving the metered defrost
+    /// power untouched. With the default fraction the path stays exactly at
+    /// zero zone heat.
+    #[test]
+    fn timed_resistive_zone_fraction_reaches_the_zone_as_negative_q() {
+        let inputs = DefrostInputs {
+            outdoor_db_c: -5.0,
+            outdoor_humidity_ratio: 0.005,
+            pressure_pa: P_PA,
+            inlet_wb_c: 10.0,
+            rated_capacity_w: 8_000.0,
+            current_capacity_w: 6_000.0,
+            runtime_fraction: 1.0,
+        };
+        let default_cfg = DefrostConfig {
+            strategy: DefrostStrategy::Resistive,
+            resistive_defrost_capacity_w: 1_000.0,
+            ..timed_config()
+        };
+        let default_result = evaluate_defrost(&default_cfg, inputs);
+        assert_eq!(default_result.q_defrost_w, 0.0);
+
+        let zone_cfg = DefrostConfig {
+            resistive_defrost_zone_fraction: 0.3,
+            ..default_cfg
+        };
+        let zone_result = evaluate_defrost(&zone_cfg, inputs);
+        let expected = -0.3 * 1_000.0 * DEFAULT_DEFROST_TIME_FRACTION * 1.0;
+        assert!(
+            (zone_result.q_defrost_w - expected).abs() < 1e-9,
+            "the zone share must reach the zone as a negative q, got {} != {expected}",
+            zone_result.q_defrost_w
+        );
+        assert!(
+            (zone_result.extra_power_w - default_result.extra_power_w).abs() < 1e-9,
+            "the zone share must not change the metered defrost power"
         );
     }
 }

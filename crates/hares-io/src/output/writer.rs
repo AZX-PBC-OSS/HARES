@@ -1,26 +1,30 @@
-//! Streaming output writer (Parquet / CSV).
+//! Streaming output writer (Parquet / CSV) and the in-memory destination.
 //!
-//! Rows are buffered up to `chunk_size` and flushed incrementally, keeping
-//! peak memory proportional to `chunk_size` rather than simulation length.
+//! One recorder per report. A `Memory` destination retains every flushed
+//! batch; a `Parquet` or `Csv` destination streams rows to a partial file
+//! created lazily at the first batch and published at close. Rows are
+//! buffered up to `chunk_size` and flushed incrementally, keeping peak
+//! memory proportional to `chunk_size` rather than simulation length.
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use arrow::array::{Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, Float64Array, RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::Schema;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::metrics::{FullSimulationMetrics, MetricsCalculator, MetricsError};
-use crate::config::SimulationConfig;
+use super::callback::CallbackAttachment;
+use crate::output::report::Destination;
 use tracing;
 
 use super::OutputSummary;
-use crate::config::{OutputFormat, RotationPolicy};
 
 #[derive(Debug, Error)]
 pub enum OutputError {
@@ -28,14 +32,48 @@ pub enum OutputError {
     Arrow(#[from] arrow::error::ArrowError),
     #[error("parquet error: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
+    #[error("I/O error at {path}: {source}")]
+    PathIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("row has {got} values but schema has {expected} columns")]
     ColumnMismatch { expected: usize, got: usize },
     #[error("chunk_size must be > 0")]
     InvalidChunkSize,
-    #[error("metrics error: {0}")]
-    Metrics(#[from] MetricsError),
+    #[error(
+        "cannot publish {target}: the target exists and the report does not \
+         overwrite it; set overwrite: true to replace it"
+    )]
+    TargetExists { target: PathBuf },
+    #[error(
+        "cannot publish {target}: this filesystem provides no hard links, and \
+         a report that does not overwrite publishes by hard link; set \
+         overwrite: true to publish by rename"
+    )]
+    HardLinkUnavailable { target: PathBuf },
+    #[error("callback for report '{report}' failed: {message}")]
+    Callback { report: String, message: String },
+    /// A rows snapshot did not fit the recorder it restores into: the
+    /// values' width does not match the schema, the buffered tail exceeds
+    /// the rows, or the batch count disagrees with the flushed shape.
+    #[error("report rows snapshot: {0}")]
+    Snapshot(String),
+}
+
+/// Whether a `hard_link` failure means this filesystem cannot complete a
+/// hard link, as opposed to an ordinary path failure: the capability
+/// errors are `Unsupported` and `CrossesDevices`. `PermissionDenied`
+/// (EPERM, a filesystem that refuses links without declaring them
+/// unsupported) and every other kind is a path error.
+fn hard_link_unavailable(source: &std::io::Error) -> bool {
+    matches!(
+        source.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::CrossesDevices
+    )
 }
 
 /// Inner writer abstraction over Parquet and CSV backends.
@@ -44,71 +82,298 @@ enum Backend {
     Csv(Box<arrow::csv::Writer<BufWriter<File>>>),
 }
 
-/// Streaming recorder that buffers rows and flushes to disk in chunks.
+/// The per-recorder partial-name counter: two recorders in one process
+/// never share a partial file. The pid and the creation nanos in the name
+/// do the cross-process part: a pid is only unique among concurrently
+/// running processes, so a reused pid must not reconstruct a stale
+/// partial name.
+static PARTIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A recorder's row stream, as a checkpoint section: every row's
+/// timestamp and values in row order, the trailing rows that were still
+/// buffered when the checkpoint was taken, the batch count (the
+/// batch index a resumed run's callback deliveries continue from) and
+/// the chunk size the writing run's recorder flushed at.
 ///
-/// When `retain_batches` is `false`, peak memory is bounded at
-/// `O(chunk_size)`. When `true`, all flushed batches are retained in
-/// memory and peak memory is `O(total_rows)`.
-///
-/// When `rotation_policy` is not [`RotationPolicy::None`], output is
-/// split across multiple files at time-interval boundaries. Each file
-/// gets a timestamp suffix derived from the first row written to it.
-pub struct StreamingRecorder {
-    schema: Arc<Schema>,
-    chunk_size: usize,
-    timestamp_buf: Vec<String>,
-    value_bufs: Vec<Vec<f64>>,
-    backend: Option<Backend>,
-    total_rows: usize,
-    output_path: PathBuf,
-    flushed_batches: Vec<RecordBatch>,
-    retain_batches: bool,
-    /// Incremental metrics calculator fed on every flushed batch. Attached
-    /// via [`StreamingRecorder::enable_metrics`] so streaming
-    /// (non-retaining) runs still produce run metrics at O(chunk_size)
-    /// memory. `None` when not enabled or already taken.
-    metrics_calculator: Option<MetricsCalculator>,
-    /// Number of batches retained since construction
-    /// (available when feature `observe` is enabled).
-    #[cfg(feature = "observe")]
-    retained_batch_count: usize,
-    /// File rotation policy. `None` means a single output file.
-    rotation_policy: RotationPolicy,
-    /// Output format, retained so rotated files are created with the
-    /// same backend type.
-    format: OutputFormat,
-    /// Prefix of the current rotation boundary (e.g. `2024-01-01` for daily).
-    /// Used to detect boundary crossings without parsing timestamps on every row.
-    current_boundary: String,
-    /// All output file paths written so far (first file + rotated successors).
-    rotated_paths: Vec<PathBuf>,
-    /// Number of files created (1 for single file, N for N rotations).
-    #[cfg(feature = "observe")]
-    rotated_file_count: usize,
+/// The rows carry the recorder's whole output state: a fresh recorder
+/// restored from the snapshot holds the written run's batches bitwise,
+/// the batches rebuilt from the rows deterministically (the flushes ran
+/// at the chunk boundaries, so the batch boundaries follow from the row
+/// stream and the chunk size, which is why the chunk size travels with
+/// the rows: a recorder built at another chunk size would rebuild the
+/// same rows into batches of different shapes).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReportRowsSnapshot {
+    /// Every row's timestamps, in row order (the naive local wall-clock
+    /// milliseconds the Time field carries).
+    pub timestamps: Vec<i64>,
+    /// Every row's values, row-major: `timestamps.len()` rows of one
+    /// entry per value column, in the schema's order.
+    pub values: Vec<f64>,
+    /// Every row's per-column validity, row-major in the same shape as
+    /// `values`: a false entry is a null cell. The null cells the engine
+    /// writes (a not-applicable value is null, never a substituted 0.0)
+    /// survive the checkpoint bit for bit.
+    #[serde(default)]
+    pub valid: Vec<bool>,
+    /// The trailing rows that were still buffered (not yet flushed) when
+    /// the checkpoint was taken.
+    pub buffered_rows: usize,
+    /// Batches the recorder had built (and delivered) so far.
+    pub batches_built: u64,
+    /// The chunk size the writing run's recorder flushed at. The restore
+    /// refuses a recorder built at another: its flush boundaries would
+    /// re-chunk the rows into batches the writing run never built.
+    pub chunk_size: usize,
+}
+
+impl ReportRowsSnapshot {
+    /// The batch count the rows rebuild at `chunk_size` (the flushed
+    /// prefix, divided at the chunk boundaries, the final batch short
+    /// only when the rows end mid-chunk): the number a restore's
+    /// batch-count gate expects `batches_built` to name. One formula for
+    /// every checker, so the pre-mutation validators and the restore
+    /// cannot drift apart.
+    #[must_use]
+    pub fn expected_batches(&self, chunk_size: usize) -> u64 {
+        let flushed = self.timestamps.len().saturating_sub(self.buffered_rows);
+        if flushed == 0 {
+            0
+        } else {
+            u64::try_from(flushed.div_ceil(chunk_size)).expect("row count fits u64")
+        }
+    }
 }
 
 impl StreamingRecorder {
-    /// Create a new streaming recorder.
+    /// The recorder's row stream as a checkpoint section; the counterpart
+    /// of [`Self::restore_rows`].
+    #[must_use]
+    pub fn rows_snapshot(&self) -> ReportRowsSnapshot {
+        let width = self.value_bufs.len();
+        let buffered = self.timestamp_buf.len();
+        let mut timestamps = Vec::with_capacity(self.total_rows);
+        let mut values = Vec::with_capacity(self.total_rows * width);
+        let mut valid = Vec::with_capacity(self.total_rows * width);
+        // The flushed batches' rows first, in flush order: the batches'
+        // schema is the recorder's own.
+        for batch in &self.flushed_batches {
+            let ts = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("the recorder's batches carry the Time column");
+            let columns: Vec<&Float64Array> = batch
+                .columns()
+                .iter()
+                .skip(1)
+                .map(|c| {
+                    c.as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("the recorder's batches carry f64 value columns")
+                })
+                .collect();
+            for r in 0..batch.num_rows() {
+                timestamps.push(ts.value(r));
+                for column in &columns {
+                    valid.push(column.is_valid(r));
+                    values.push(column.value(r));
+                }
+            }
+        }
+        // Then the buffered rows.
+        for r in 0..buffered {
+            timestamps.push(self.timestamp_buf[r]);
+            for (buf, valid_buf) in self.value_bufs.iter().zip(&self.valid_bufs) {
+                valid.push(valid_buf[r]);
+                values.push(buf[r]);
+            }
+        }
+        ReportRowsSnapshot {
+            timestamps,
+            values,
+            valid,
+            buffered_rows: buffered,
+            batches_built: self.batches_built,
+            chunk_size: self.chunk_size,
+        }
+    }
+
+    /// Restores the recorder's row stream from its checkpoint section:
+    /// the flushed batches rebuild from the rows (the flushes ran at the
+    /// chunk boundaries, the section's buffered tail marks the boundary),
+    /// and the counters take the snapshot's. The attached callback, if
+    /// any, sees none of the restored rows: the run that wrote the
+    /// checkpoint delivered them from its own recorder; the restored
+    /// counters keep the resumed run's deliveries continuing the
+    /// original's index.
+    ///
+    /// # Errors
+    ///
+    /// [`OutputError::Snapshot`] when the section does not fit this
+    /// recorder: a chunk size off this recorder's, a values width off the
+    /// schema's column count, a buffered tail beyond the rows, or a batch
+    /// count that disagrees with the flushed shape.
+    pub fn restore_rows(&mut self, snapshot: &ReportRowsSnapshot) -> Result<(), OutputError> {
+        if snapshot.chunk_size != self.chunk_size {
+            return Err(OutputError::Snapshot(format!(
+                "the report was written with chunk size {}, this run uses {}",
+                snapshot.chunk_size, self.chunk_size
+            )));
+        }
+        let width = self.value_bufs.len();
+        let rows = snapshot.timestamps.len();
+        if snapshot.values.len() != rows * width {
+            return Err(OutputError::Snapshot(format!(
+                "the rows carry {} values for {} rows of {} columns",
+                snapshot.values.len(),
+                rows,
+                width
+            )));
+        }
+        if snapshot.valid.len() != rows * width {
+            return Err(OutputError::Snapshot(format!(
+                "the rows carry {} validity entries for {} rows of {} columns",
+                snapshot.valid.len(),
+                rows,
+                width
+            )));
+        }
+        if snapshot.buffered_rows > rows {
+            return Err(OutputError::Snapshot(format!(
+                "the buffered tail ({}) exceeds the rows ({rows})",
+                snapshot.buffered_rows
+            )));
+        }
+        let expected_batches = snapshot.expected_batches(self.chunk_size);
+        if snapshot.batches_built != expected_batches {
+            return Err(OutputError::Snapshot(format!(
+                "the section names {} built batches but its rows rebuild {}",
+                snapshot.batches_built, expected_batches
+            )));
+        }
+        let flushed = rows - snapshot.buffered_rows;
+
+        let row_at = |r: usize| -> (i64, &[f64], &[bool]) {
+            (
+                snapshot.timestamps[r],
+                &snapshot.values[r * width..(r + 1) * width],
+                &snapshot.valid[r * width..(r + 1) * width],
+            )
+        };
+
+        // The flushed prefix rebuilds as batches of the chunk size, the
+        // final one possibly short when the written run closed its output
+        // before the checkpoint.
+        self.flushed_batches.clear();
+        let mut start = 0;
+        while start < flushed {
+            let end = (start + self.chunk_size).min(flushed);
+            let mut columns: Vec<Arc<dyn arrow::array::Array>> = Vec::with_capacity(width + 1);
+            columns.push(Arc::new(TimestampMillisecondArray::from(
+                snapshot.timestamps[start..end].to_vec(),
+            )));
+            for c in 0..width {
+                let column: Vec<Option<f64>> = (start..end)
+                    .map(|r| {
+                        snapshot.valid[r * width + c].then_some(snapshot.values[r * width + c])
+                    })
+                    .collect();
+                columns.push(Arc::new(Float64Array::from(column)));
+            }
+            let batch = RecordBatch::try_new(Arc::clone(&self.schema), columns)?;
+            self.flushed_batches.push(batch);
+            start = end;
+        }
+
+        // The buffered tail lands back in the buffers.
+        self.timestamp_buf.clear();
+        for buf in &mut self.value_bufs {
+            buf.clear();
+        }
+        for valid_buf in &mut self.valid_bufs {
+            valid_buf.clear();
+        }
+        for r in flushed..rows {
+            let (timestamp, values, valid) = row_at(r);
+            self.timestamp_buf.push(timestamp);
+            for (buf, &value) in self.value_bufs.iter_mut().zip(values) {
+                buf.push(value);
+            }
+            for (buf, &valid) in self.valid_bufs.iter_mut().zip(valid) {
+                buf.push(valid);
+            }
+        }
+        self.total_rows = rows;
+        self.batches_built = snapshot.batches_built;
+        Ok(())
+    }
+}
+
+/// One report's streaming recorder: buffers rows, flushes batches to the
+/// report's destination.
+///
+/// A `Memory` destination retains every flushed batch (the report's frame).
+/// A `Parquet` or `Csv` destination creates its file lazily at the first
+/// batch, under a unique partial name in the target's directory, and
+/// publishes it at close: by hard link (which never replaces an existing
+/// file) with `overwrite: false`, by rename with `overwrite: true`. A run
+/// that produces zero rows creates no file. `flush_and_close` publishes;
+/// on a failed run the partial file is removed with
+/// [`StreamingRecorder::discard_partial`].
+pub struct StreamingRecorder {
+    schema: Arc<Schema>,
+    chunk_size: usize,
+    timestamp_buf: Vec<i64>,
+    value_bufs: Vec<Vec<f64>>,
+    /// Per-column validity parallel to `value_bufs`: the null cells the
+    /// rows carry (a not-applicable value is null, never a substituted
+    /// 0.0), flushed into the batches' validity bitmaps.
+    valid_bufs: Vec<Vec<bool>>,
+    /// The report's destination: the retention rule and, for a file, the
+    /// publish target.
+    destination: Destination,
+    /// The unique partial file the rows stream to, decided at construction
+    /// and created at the first batch. `None` for a `Memory` destination.
+    partial_path: Option<PathBuf>,
+    backend: Option<Backend>,
+    total_rows: usize,
+    flushed_batches: Vec<RecordBatch>,
+    /// Whether the partial file has been published (or discarded): a second
+    /// close is a no-op, not a second publish.
+    published: bool,
+    /// The attached batch callback, if any: every built batch is handed to
+    /// it in flush order. `None` when nothing is attached, which costs one
+    /// branch per flush and nothing else.
+    callback: Option<CallbackAttachment>,
+    /// Batches built so far, the `batch_index` every delivery carries.
+    batches_built: u64,
+    /// Whether the recorder's outputs are published (the final flush and
+    /// close has run). After this, no batch reaches the callback: the
+    /// buffered rows still record, the callback does not see them.
+    closed: bool,
+}
+
+impl StreamingRecorder {
+    /// Create a new streaming recorder for one report's destination.
     ///
     /// # Arguments
-    /// - `schema` -- Arrow schema defining all output columns.
+    /// - `schema` -- Arrow schema defining the report's output columns.
     /// - `chunk_size` -- Maximum rows to buffer before flushing. Must be > 0.
-    /// - `format` -- Output format (CSV or Parquet).
-    /// - `output_path` -- Destination file path. When `rotation_policy` is not
-    ///   [`RotationPolicy::None`], rotated files derive their paths from this
-    ///   base path by inserting a timestamp suffix before the extension.
-    /// - `retain_batches` -- When `false`, flushed batches are not retained
-    ///   in memory after writing; `flushed_batches()` returns an empty slice.
-    ///   Set `true` only when post-hoc batch access is required (e.g. Python
-    ///   bindings, metrics computation from in-memory batches).
-    /// - `rotation_policy` -- File rotation interval.
+    /// - `destination` -- Where the report's batches go.
+    ///
+    /// # Errors
+    ///
+    /// [`OutputError::InvalidChunkSize`] for a zero chunk size; for a file
+    /// destination, the freeze-time checks run here, before the first step:
+    /// [`OutputError::TargetExists`] when the target exists and the report
+    /// does not overwrite it, and [`OutputError::PathIo`] when the target's
+    /// parent directory is missing. The file itself is not created until
+    /// the first batch.
     pub fn new(
         schema: Schema,
         chunk_size: usize,
-        format: OutputFormat,
-        output_path: &Path,
-        retain_batches: bool,
-        rotation_policy: RotationPolicy,
+        destination: Destination,
     ) -> Result<Self, OutputError> {
         if chunk_size == 0 {
             return Err(OutputError::InvalidChunkSize);
@@ -118,46 +383,48 @@ impl StreamingRecorder {
         // Number of f64 value columns (everything except the timestamp).
         let n_value_cols = schema.fields().len() - 1;
 
-        // When rotation is enabled, defer file creation until the first row
-        // is pushed (we need a timestamp to derive the boundary suffix).
-        let (backend, rotated_paths, current_boundary) = if rotation_policy == RotationPolicy::None
-        {
-            let file = File::create(output_path)?;
-            let buf_writer = BufWriter::new(file);
-            let backend = match format {
-                OutputFormat::Parquet => {
-                    let props = WriterProperties::builder()
-                        .set_compression(Compression::SNAPPY)
-                        .build();
-                    let writer =
-                        ArrowWriter::try_new(buf_writer, Arc::clone(&schema), Some(props))?;
-                    Backend::Parquet(Box::new(writer))
+        let partial_path = match &destination {
+            Destination::Memory | Destination::Callback => None,
+            Destination::Parquet { path, overwrite } | Destination::Csv { path, overwrite } => {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                match std::fs::metadata(parent) {
+                    Ok(meta) if meta.is_dir() => {}
+                    _ => {
+                        return Err(OutputError::PathIo {
+                            path: path.clone(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "the destination's parent directory does not exist",
+                            ),
+                        });
+                    }
                 }
-                OutputFormat::Csv => {
-                    let writer = arrow::csv::WriterBuilder::new()
-                        .with_header(true)
-                        .build(buf_writer);
-                    Backend::Csv(Box::new(writer))
+                if path.exists() && !overwrite {
+                    return Err(OutputError::TargetExists {
+                        target: path.clone(),
+                    });
                 }
-            };
-            (
-                Some(backend),
-                vec![output_path.to_path_buf()],
-                String::new(),
-            )
-        } else {
-            (None, Vec::new(), String::new())
+                // The unique partial name: a dot file in the target's own
+                // directory, named after it. The pid namespaces concurrent
+                // processes, and the creation nanos keep the name unique
+                // across a pid's reuse; the process-global counter separates
+                // recorders created within one process.
+                let file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "output".to_string());
+                let n = PARTIAL_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                Some(parent.join(format!(
+                    ".{file_name}.partial-{}-{}-{n}",
+                    std::process::id(),
+                    nanos
+                )))
+            }
         };
-
-        if retain_batches {
-            // When enabled, every flush accumulates an in-memory RecordBatch
-            // that is never freed until the recorder is dropped, unbounded
-            // memory growth for long simulations.
-            tracing::warn!(
-                "StreamingRecorder: retain_batches=true — flushed batches \
-                 accumulate in memory (unbounded growth risk for long simulations)"
-            );
-        }
 
         Ok(Self {
             schema,
@@ -166,160 +433,99 @@ impl StreamingRecorder {
             value_bufs: (0..n_value_cols)
                 .map(|_| Vec::with_capacity(chunk_size))
                 .collect(),
-            backend,
+            valid_bufs: (0..n_value_cols)
+                .map(|_| Vec::with_capacity(chunk_size))
+                .collect(),
+            destination,
+            partial_path,
+            backend: None,
             total_rows: 0,
-            output_path: output_path.to_path_buf(),
             flushed_batches: Vec::new(),
-            retain_batches,
-            metrics_calculator: None,
-            #[cfg(feature = "observe")]
-            retained_batch_count: 0,
-            rotation_policy,
-            format,
-            current_boundary,
-            rotated_paths,
-            #[cfg(feature = "observe")]
-            rotated_file_count: if rotation_policy == RotationPolicy::None {
-                1
-            } else {
-                0
-            },
+            published: false,
+            callback: None,
+            batches_built: 0,
+            closed: false,
         })
     }
 
-    /// Check whether the given timestamp has crossed a rotation boundary
-    /// and create a new output file if so.
-    fn check_rotation(&mut self, timestamp: &str) -> Result<(), OutputError> {
-        if self.rotation_policy == RotationPolicy::None {
+    /// Whether this recorder's destination is [`Destination::Memory`].
+    #[must_use]
+    pub fn is_memory(&self) -> bool {
+        matches!(self.destination, Destination::Memory)
+    }
+
+    /// The report's destination.
+    #[must_use]
+    pub fn destination(&self) -> &Destination {
+        &self.destination
+    }
+
+    /// Whether a batch callback is attached: a `Callback` destination
+    /// recorder without one has nowhere to deliver its batches, and the
+    /// freeze refuses the run rather than dropping them.
+    #[must_use]
+    pub fn has_attachment(&self) -> bool {
+        self.callback.is_some()
+    }
+
+    /// Attaches a batch callback: every built batch is handed to it in
+    /// flush order, with the context naming the report, the building and
+    /// the batch index. A later attach replaces the earlier one.
+    pub fn attach_callback(&mut self, attachment: CallbackAttachment) {
+        self.callback = Some(attachment);
+    }
+
+    /// Creates the partial file's backend writer at the first batch: the
+    /// lazy creation the destinations model runs on.
+    fn ensure_backend(&mut self) -> Result<(), OutputError> {
+        if self.backend.is_some() || self.partial_path.is_none() {
             return Ok(());
         }
-
-        let boundary = Self::extract_boundary(timestamp, self.rotation_policy);
-
-        // First row: open the initial file.
-        if self.backend.is_none() {
-            let path = Self::derive_rotated_path(&self.output_path, &boundary);
-            self.backend = Some(Self::create_backend_from_path(
-                &path,
-                self.schema.clone(),
-                self.format,
-            )?);
-            self.current_boundary = boundary;
-            self.rotated_paths.push(path.clone());
-            #[cfg(feature = "observe")]
-            {
-                self.rotated_file_count = 1;
+        let Some(partial) = &self.partial_path else {
+            return Ok(());
+        };
+        let file = File::create(partial).map_err(|source| OutputError::PathIo {
+            path: partial.clone(),
+            source,
+        })?;
+        let buf_writer = BufWriter::new(file);
+        self.backend = Some(match self.destination {
+            Destination::Parquet { .. } => {
+                let props = WriterProperties::builder()
+                    .set_compression(Compression::SNAPPY)
+                    .build();
+                let writer =
+                    ArrowWriter::try_new(buf_writer, Arc::clone(&self.schema), Some(props))?;
+                Backend::Parquet(Box::new(writer))
             }
-            tracing::info!(
-                path = %path.display(),
-                "created output file"
-            );
-            return Ok(());
-        }
-
-        // Boundary unchanged — continue writing to current file.
-        if boundary == self.current_boundary {
-            return Ok(());
-        }
-
-        // Boundary crossed: flush and close current file, open new one.
-        self.flush_inner()?;
-        self.close_backend_inner()?;
-
-        let path = Self::derive_rotated_path(&self.output_path, &boundary);
-        self.backend = Some(Self::create_backend_from_path(
-            &path,
-            self.schema.clone(),
-            self.format,
-        )?);
-        self.current_boundary = boundary;
-        self.rotated_paths.push(path.clone());
-        #[cfg(feature = "observe")]
-        {
-            self.rotated_file_count += 1;
-        }
+            Destination::Csv { .. } => {
+                let writer = arrow::csv::WriterBuilder::new()
+                    .with_header(true)
+                    .build(buf_writer);
+                Backend::Csv(Box::new(writer))
+            }
+            Destination::Memory => unreachable!("a memory destination has no partial file"),
+            Destination::Callback => unreachable!("a callback destination has no partial file"),
+        });
         tracing::info!(
-            path = %path.display(),
-            "rotating output file"
+            path = %partial.display(),
+            "created partial output file"
         );
         Ok(())
     }
 
-    /// Extract the rotation boundary prefix from an RFC 3339 timestamp.
-    /// For example, `"2024-01-01T12:30:00Z"` with [`RotationPolicy::Daily`]
-    /// returns `"2024-01-01"`.
-    fn extract_boundary(timestamp: &str, policy: RotationPolicy) -> String {
-        let len = match policy {
-            RotationPolicy::None => unreachable!("extract_boundary not called for None"),
-            RotationPolicy::Hourly => 13, // "2024-01-01T12"
-            RotationPolicy::Daily => 10,  // "2024-01-01"
-            RotationPolicy::Monthly => 7, // "2024-01"
-            RotationPolicy::Yearly => 4,  // "2024"
-        };
-        if timestamp.len() < len {
-            timestamp.to_string()
-        } else {
-            timestamp[..len].to_string()
-        }
-    }
-
-    /// Derive a rotated file path from the base output path and a boundary
-    /// suffix.
-    ///
-    /// `base_output_path` is, e.g., `dwelling_42.parquet`.
-    /// The result is, e.g., `dwelling_42_2024-01-01.parquet` for daily rotation.
-    fn derive_rotated_path(base_path: &Path, boundary: &str) -> PathBuf {
-        let stem = base_path
-            .file_stem()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_else(|| std::borrow::Cow::Borrowed("output"));
-        let ext = base_path
-            .extension()
-            .map(|e| e.to_string_lossy())
-            .unwrap_or_else(|| std::borrow::Cow::Borrowed("parquet"));
-        let parent = base_path.parent().unwrap_or_else(|| Path::new("."));
-
-        let rotated_stem = format!("{}_{}", stem, boundary);
-        parent.join(rotated_stem).with_extension(ext.as_ref())
-    }
-
-    /// Create a backend writer for a given file path, using the specified format.
-    fn create_backend_from_path(
-        path: &Path,
-        schema: Arc<Schema>,
-        format: OutputFormat,
-    ) -> Result<Backend, OutputError> {
-        let file = File::create(path)?;
-        let buf_writer = BufWriter::new(file);
-        match format {
-            OutputFormat::Csv => {
-                let writer = arrow::csv::WriterBuilder::new()
-                    .with_header(true)
-                    .build(buf_writer);
-                Ok(Backend::Csv(Box::new(writer)))
-            }
-            OutputFormat::Parquet => {
-                let props = WriterProperties::builder()
-                    .set_compression(Compression::SNAPPY)
-                    .build();
-                let writer = ArrowWriter::try_new(buf_writer, schema, Some(props))?;
-                Ok(Backend::Parquet(Box::new(writer)))
-            }
-        }
-    }
-
-    /// Flush the current buffer to disk, draining it into a `RecordBatch`.
+    /// Flush the current buffer to the destination, draining it into a
+    /// `RecordBatch`.
     fn flush_inner(&mut self) -> Result<(), OutputError> {
         if self.timestamp_buf.is_empty() {
             return Ok(());
         }
 
         let batch = self.build_batch()?;
+        let batch_index = self.batches_built;
+        self.batches_built += 1;
 
-        if let Some(calculator) = self.metrics_calculator.as_mut() {
-            calculator.accumulate(&batch)?;
-        }
-
+        self.ensure_backend()?;
         match self.backend.as_mut() {
             Some(Backend::Parquet(w)) => {
                 w.write(&batch)?;
@@ -330,12 +536,24 @@ impl StreamingRecorder {
             None => {}
         }
 
-        if self.retain_batches {
+        // The callback sees every built batch exactly once, in flush
+        // order, until the outputs are published. Its error fails the
+        // flush, naming the report; the batch itself is already written
+        // to the destination file, but a failed delivery ends the flush
+        // before the retention push, so the batch is not retained.
+        if let Some(attachment) = &self.callback
+            && !self.closed
+        {
+            attachment
+                .deliver(&batch, batch_index)
+                .map_err(|err| OutputError::Callback {
+                    report: attachment.report().to_string(),
+                    message: err.message,
+                })?;
+        }
+
+        if self.is_memory() {
             self.flushed_batches.push(batch);
-            #[cfg(feature = "observe")]
-            {
-                self.retained_batch_count += 1;
-            }
         }
 
         Ok(())
@@ -358,19 +576,91 @@ impl StreamingRecorder {
         Ok(())
     }
 
-    /// Append a single row. The first element of `timestamp` is the time
-    /// string; `values` contains all numeric columns in schema order
-    /// (excluding the timestamp column).
+    /// Publishes the partial file at the report's target path: by hard link
+    /// plus partial removal with `overwrite: false` (the no-clobber form of
+    /// the rename: the final name appears atomically and complete, and
+    /// never replaces a file the caller asked to keep), by rename with
+    /// `overwrite: true`. A zero-row run has no partial file and publishes
+    /// nothing.
+    fn publish(&mut self) -> Result<(), OutputError> {
+        if self.published {
+            return Ok(());
+        }
+        self.published = true;
+        let Some(partial) = self.partial_path.clone() else {
+            return Ok(());
+        };
+        if self.total_rows == 0 {
+            // Zero rows: no file was ever created, nothing to publish.
+            return Ok(());
+        }
+        let Some(target) = self.destination.path().cloned() else {
+            return Ok(());
+        };
+        let overwrite = match self.destination {
+            Destination::Parquet { overwrite, .. } | Destination::Csv { overwrite, .. } => {
+                overwrite
+            }
+            Destination::Memory => unreachable!("a memory destination publishes nothing"),
+            Destination::Callback => unreachable!("a callback destination publishes nothing"),
+        };
+        if overwrite {
+            std::fs::rename(&partial, &target).map_err(|source| OutputError::PathIo {
+                path: target.clone(),
+                source,
+            })?;
+        } else {
+            if let Err(source) = std::fs::hard_link(&partial, &target) {
+                let _ = std::fs::remove_file(&partial);
+                return Err(match source.kind() {
+                    std::io::ErrorKind::AlreadyExists => OutputError::TargetExists {
+                        target: target.clone(),
+                    },
+                    _ if hard_link_unavailable(&source) => OutputError::HardLinkUnavailable {
+                        target: target.clone(),
+                    },
+                    _ => OutputError::PathIo {
+                        path: target.clone(),
+                        source,
+                    },
+                });
+            }
+            std::fs::remove_file(&partial).map_err(|source| OutputError::PathIo {
+                path: partial.clone(),
+                source,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Removes the partial file: every failed run calls this for each of
+    /// its recorders, so a failed run leaves no partial file.
+    pub fn discard_partial(&mut self) {
+        self.published = true;
+        if let Some(partial) = &self.partial_path {
+            let _ = std::fs::remove_file(partial);
+        }
+    }
+
+    /// Append a single row. The `timestamp` is the row's naive local
+    /// wall-clock milliseconds (the `Timestamp(Millisecond, None)` Time
+    /// field's value; the schema metadata's `hares:utc_offset_s` recovers
+    /// the instant); `values` contains the report's numeric columns in the
+    /// report's schema order (excluding the timestamp column), and `valid`
+    /// their validity in the same order: a false entry writes a null cell.
     ///
     /// Automatically flushes when the buffer reaches `chunk_size`.
     ///
-    /// When `rotation_policy` is not [`RotationPolicy::None`], this method
-    /// checks the timestamp against the current rotation boundary and
-    /// creates a new file if the boundary has been crossed.
-    pub fn push_row(&mut self, timestamp: &str, values: &[f64]) -> Result<(), OutputError> {
-        // Check rotation before buffering so the row lands in the correct file.
-        self.check_rotation(timestamp)?;
-
+    /// # Errors
+    ///
+    /// [`OutputError::ColumnMismatch`] when either slice is not one entry
+    /// per value column.
+    pub fn push_row(
+        &mut self,
+        timestamp: i64,
+        values: &[f64],
+        valid: &[bool],
+    ) -> Result<(), OutputError> {
         let expected = self.value_bufs.len();
         if values.len() != expected {
             return Err(OutputError::ColumnMismatch {
@@ -378,129 +668,71 @@ impl StreamingRecorder {
                 got: values.len(),
             });
         }
+        if valid.len() != expected {
+            return Err(OutputError::ColumnMismatch {
+                expected,
+                got: valid.len(),
+            });
+        }
 
-        self.timestamp_buf.push(timestamp.to_string());
+        self.timestamp_buf.push(timestamp);
         for (buf, &val) in self.value_bufs.iter_mut().zip(values.iter()) {
             buf.push(val);
+        }
+        for (buf, &valid) in self.valid_bufs.iter_mut().zip(valid.iter()) {
+            buf.push(valid);
         }
         self.total_rows += 1;
 
         if self.timestamp_buf.len() >= self.chunk_size {
-            self.flush()?;
+            self.flush_inner()?;
         }
         Ok(())
     }
 
-    /// Flush the current buffer to disk. No-op if buffer is empty.
+    /// Flush the current buffer to the destination. No-op if buffer is empty.
     pub fn flush(&mut self) -> Result<(), OutputError> {
         self.flush_inner()
     }
 
-    /// Flush remaining rows and close the backend file writer.
+    /// Flush remaining rows, close the backend file writer and publish the
+    /// report's file.
     ///
     /// After this call, `push_row()` will still buffer but no further data
-    /// will be written to disk. `flushed_batches()` remains available.
-    ///
-    /// When rotation is enabled, logs the total number of files produced.
+    /// will be written. `flushed_batches()` remains available. A second
+    /// call is a no-op.
     pub fn flush_and_close(&mut self) -> Result<(), OutputError> {
         self.flush_inner()?;
         self.close_backend_inner()?;
-
-        #[cfg(feature = "observe")]
-        {
-            if self.rotated_file_count > 1 {
-                let file_count = self.rotated_file_count;
-                tracing::info!(file_count, "output rotation produced {file_count} files");
-            }
-        }
-
+        self.publish()?;
+        // The outputs are published: the final partial batch was delivered
+        // by the flush above, and nothing reaches the callback after this.
+        self.closed = true;
         Ok(())
     }
 
-    /// Returns all batches that have been flushed so far.
-    ///
-    /// When `retain_batches` is `false` (the default), this always
-    /// returns an empty slice — flushed batches are written to disk
-    /// and dropped. When `true`, returns all batches flushed since
-    /// construction.
+    /// Returns the batches the report retained: every flushed batch for a
+    /// `Memory` destination, empty for a file destination.
     #[must_use]
     pub fn flushed_batches(&self) -> &[RecordBatch] {
         &self.flushed_batches
     }
 
-    /// Number of batches retained since construction.
-    ///
-    /// Available when feature `observe` is enabled; allows an external
-    /// observer to verify that no batches are retained when
-    /// `retain_batches` is `false`.
-    #[cfg(feature = "observe")]
-    #[must_use]
-    pub fn retained_batch_count(&self) -> usize {
-        self.retained_batch_count
-    }
-
-    /// Attaches an incremental metrics calculator, fed on every flushed
-    /// batch.
-    ///
-    /// For streaming runs (`retain_batches = false`) this is the only way
-    /// run metrics remain available: flushed batches are written to disk and
-    /// dropped, so post-hoc computation from [`Self::flushed_batches`] is
-    /// impossible. The calculator sees the same batches in the same order a
-    /// post-hoc pass over retained batches would, so both paths produce
-    /// identical metrics.
-    ///
-    /// Must be called before the first row is recorded. Falls within the
-    /// same degradation contract as post-hoc metrics: callers decide how to
-    /// surface an init failure (e.g. zeroed metrics plus a warning) rather
-    /// than treating it as fatal.
-    pub fn enable_metrics(
-        &mut self,
-        time_res_secs: u32,
-        config: &SimulationConfig,
-    ) -> Result<(), MetricsError> {
-        MetricsCalculator::new(&self.schema, time_res_secs, config).map(|calculator| {
-            self.metrics_calculator = Some(calculator);
-        })
-    }
-
-    /// Takes the incrementally collected run metrics, consuming the
-    /// calculator. `None` when metrics were never enabled (or already
-    /// taken). Only meaningful after `flush_and_close` — the final partial
-    /// batch is fed at close.
-    pub fn take_metrics(&mut self) -> Option<Result<FullSimulationMetrics, MetricsError>> {
-        self.metrics_calculator
-            .take()
-            .map(MetricsCalculator::finish)
-    }
-
-    /// Flush remaining rows, close all files, and return summary statistics
-    /// covering every rotated file.
+    /// Flush remaining rows, publish the report's file, and return summary
+    /// statistics for it.
     pub fn finish(mut self) -> Result<OutputSummary, OutputError> {
         self.flush_and_close()?;
 
-        // Aggregate byte size across all files (rotated + primary).
-        let mut byte_size: u64 = 0;
-        for path in &self.rotated_paths {
-            if let Ok(meta) = std::fs::metadata(path) {
-                byte_size += meta.len();
-            }
-        }
-        if self.rotated_paths.is_empty() {
-            // No rows written under rotation — no files were created.
-            byte_size = 0;
-        }
-
-        let primary_path = self
-            .rotated_paths
-            .first()
-            .cloned()
-            .unwrap_or_else(|| self.output_path.clone());
+        let byte_size = self
+            .destination
+            .path()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map_or(0, |meta| meta.len());
 
         Ok(OutputSummary {
             row_count: self.total_rows,
             byte_size,
-            path: primary_path,
-            rotated_paths: self.rotated_paths,
+            path: self.destination.path().cloned().unwrap_or_default(),
         })
     }
 
@@ -524,20 +756,47 @@ impl StreamingRecorder {
         self.total_rows
     }
 
+    /// Batches the recorder has built (and delivered) so far, the final
+    /// partial batch included.
+    #[must_use]
+    pub fn batches_built(&self) -> u64 {
+        self.batches_built
+    }
+
+    /// The chunk size the recorder flushes at: what a rows snapshot
+    /// carries, and what a restore refuses a mismatch with.
+    #[must_use]
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
+
     /// Build a `RecordBatch` from the current buffer, draining buffers to
     /// avoid cloning. After this call, all buffers are empty.
     fn build_batch(&mut self) -> Result<RecordBatch, OutputError> {
         let mut columns: Vec<Arc<dyn arrow::array::Array>> =
             Vec::with_capacity(self.schema.fields().len());
 
-        // Drain timestamp buffer into a StringArray (avoids clone).
+        // Drain timestamp buffer into a TimestampMillisecondArray (avoids
+        // clone); the Time field's type pins the array type.
         let timestamps = std::mem::take(&mut self.timestamp_buf);
-        columns.push(Arc::new(StringArray::from(timestamps)));
+        columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)));
 
-        // Drain each f64 buffer into a Float64Array.
-        for buf in &mut self.value_bufs {
+        // Drain each f64 buffer into a Float64Array carrying the rows'
+        // validity: a cleared entry is a null cell in the batch. The
+        // all-valid common case builds no validity bitmap at all.
+        let valids: Vec<Vec<bool>> = self.valid_bufs.iter_mut().map(std::mem::take).collect();
+        for (buf, valid) in self.value_bufs.iter_mut().zip(valids) {
             let data = std::mem::take(buf);
-            columns.push(Arc::new(Float64Array::from(data)));
+            let column = if valid.iter().all(|&valid| valid) {
+                Float64Array::from(data)
+            } else {
+                Float64Array::from_iter(
+                    data.into_iter()
+                        .zip(valid)
+                        .map(|(value, valid)| valid.then_some(value)),
+                )
+            };
+            columns.push(Arc::new(column));
         }
 
         let batch = RecordBatch::try_new(Arc::clone(&self.schema), columns)?;
@@ -547,36 +806,44 @@ impl StreamingRecorder {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Float64Array, RecordBatchReader};
+    use arrow::array::Float64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::output::callback::{BatchCallback, BatchContext, CallbackError, TIMESTEP_REPORT};
 
     fn test_schema() -> Schema {
         Schema::new(vec![
-            Field::new("Time", DataType::Utf8, false),
+            Field::new(
+                "Time",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
             Field::new("Total Electric Power (kW)", DataType::Float64, true),
             Field::new("Total Gas Power (therms/hour)", DataType::Float64, true),
         ])
     }
 
+    fn recorder_at(schema: Schema, path: &Path, chunk: usize) -> StreamingRecorder {
+        StreamingRecorder::new(
+            schema,
+            chunk,
+            Destination::Parquet {
+                path: path.to_path_buf(),
+                overwrite: false,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn parquet_round_trip_preserves_values() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
 
         let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            100,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
+        let mut recorder = recorder_at(schema, &path, 100);
 
         let test_values: Vec<(f64, f64)> = vec![
             (1.5, 0.3),
@@ -588,7 +855,11 @@ mod tests {
 
         for (i, (e, g)) in test_values.iter().enumerate() {
             recorder
-                .push_row(&format!("2024-01-01T00:{i:02}:00Z"), &[*e, *g])
+                .push_row(
+                    i64::try_from(i).expect("row index") * 60_000,
+                    &[*e, *g],
+                    &[true, true],
+                )
                 .unwrap();
         }
 
@@ -639,25 +910,23 @@ mod tests {
 
     #[test]
     fn csv_round_trip_produces_valid_output() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.csv");
 
         let schema = test_schema();
         let mut recorder = StreamingRecorder::new(
             schema,
             100,
-            OutputFormat::Csv,
-            &path,
-            false,
-            RotationPolicy::None,
+            Destination::Csv {
+                path: path.clone(),
+                overwrite: false,
+            },
         )
         .unwrap();
 
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
         recorder
-            .push_row("2024-01-01T00:00:00Z", &[1.0, 2.0])
-            .unwrap();
-        recorder
-            .push_row("2024-01-01T00:01:00Z", &[3.0, 4.0])
+            .push_row(60_000, &[3.0, 4.0], &[true, true])
             .unwrap();
 
         let summary = recorder.finish().unwrap();
@@ -670,25 +939,21 @@ mod tests {
 
     #[test]
     fn flush_count_matches_chunk_size() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
 
         let schema = test_schema();
         let chunk_size = 10_000;
         let total_rows = 100_000;
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            chunk_size,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
+        let mut recorder = recorder_at(schema, &path, chunk_size);
 
         for i in 0..total_rows {
             recorder
-                .push_row(&format!("T{i}"), &[i as f64, 0.0])
+                .push_row(
+                    i64::try_from(i).expect("row index"),
+                    &[i as f64, 0.0],
+                    &[true, true],
+                )
                 .unwrap();
         }
 
@@ -696,110 +961,67 @@ mod tests {
         // (last push_row triggered the 10th flush).
         assert_eq!(recorder.buffered_rows(), 0);
         assert_eq!(recorder.total_rows(), total_rows);
-
         let summary = recorder.finish().unwrap();
         assert_eq!(summary.row_count, total_rows);
     }
 
+    /// `zero_row_run_creates_no_file`: a recorder that closed with zero
+    /// rows published no file at all (the declared replacement for
+    /// `finish_on_empty_recorder_produces_valid_file`).
     #[test]
-    fn finish_on_empty_recorder_produces_valid_file() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
+    fn zero_row_run_creates_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
 
         let schema = test_schema();
-        let recorder = StreamingRecorder::new(
-            schema,
-            100,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
+        let recorder = recorder_at(schema, &path, 100);
 
         let summary = recorder.finish().unwrap();
         assert_eq!(summary.row_count, 0);
-        assert!(summary.byte_size > 0); // Parquet writes metadata even for 0 rows.
-
-        // Verify the file is valid Parquet.
-        let file = File::open(&path).unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        assert!(
+            !path.exists(),
+            "a zero-row run creates no file, not even an empty one"
+        );
+        let files: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .build()
-            .unwrap();
-        let batches: Vec<_> = reader.collect();
-        let total: usize = batches
-            .iter()
-            .filter_map(|r| r.as_ref().ok())
-            .map(|b| b.num_rows())
-            .sum();
-        assert_eq!(total, 0);
-    }
-
-    #[test]
-    fn finish_on_empty_recorder_with_rotation_produces_valid_summary() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let path = tmp_dir.path().join("output.parquet");
-
-        let schema = test_schema();
-        let recorder = StreamingRecorder::new(
-            schema,
-            100,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::Daily,
-        )
-        .unwrap();
-
-        let summary = recorder.finish().unwrap();
-        assert_eq!(summary.row_count, 0);
-        assert_eq!(summary.byte_size, 0);
-        assert!(summary.rotated_paths.is_empty());
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            files.is_empty(),
+            "no partial file survives a zero-row run either"
+        );
     }
 
     #[test]
     fn column_mismatch_returns_error() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
 
         let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            100,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
+        let mut recorder = recorder_at(schema, &path, 100);
 
-        let result = recorder.push_row("T0", &[1.0]); // 1 value, expects 2
+        let result = recorder.push_row(0, &[1.0], &[true]); // 1 value, expects 2
         assert!(result.is_err());
     }
 
     #[test]
     fn partial_chunk_flushed_on_finish() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
 
         let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            1000,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
+        let mut recorder = recorder_at(schema, &path, 1000);
 
         for i in 0..5 {
             recorder
-                .push_row(&format!("T{i}"), &[i as f64, 0.0])
+                .push_row(i64::from(i), &[i as f64, 0.0], &[true, true])
                 .unwrap();
         }
         assert_eq!(recorder.buffered_rows(), 5);
+        assert!(
+            !path.exists(),
+            "the file is created lazily at the first batch, not at construction"
+        );
 
         let summary = recorder.finish().unwrap();
         assert_eq!(summary.row_count, 5);
@@ -814,71 +1036,30 @@ mod tests {
         assert_eq!(total, 5);
     }
 
+    /// Structural: a recorder with no callback attached constructs no
+    /// adapter, so a run that never attaches one pays a branch per flush
+    /// and nothing else.
+    #[test]
+    fn no_callback_report_constructs_no_adapter() {
+        let schema = test_schema();
+        let recorder = StreamingRecorder::new(schema, 10, Destination::Memory).unwrap();
+        assert!(recorder.callback.is_none());
+    }
+
     #[test]
     fn zero_chunk_size_rejected() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-
-        let schema = test_schema();
-        let result = StreamingRecorder::new(
-            schema,
-            0,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        );
+        let result = StreamingRecorder::new(test_schema(), 0, Destination::Memory);
         assert!(matches!(result, Err(OutputError::InvalidChunkSize)));
     }
 
     #[test]
-    fn batch_retention_disabled() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-
+    fn memory_destination_retains_batches() {
         let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            10,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
+        let mut recorder = StreamingRecorder::new(schema, 10, Destination::Memory).unwrap();
 
         for i in 0..25 {
             recorder
-                .push_row(&format!("T{i}"), &[i as f64, i as f64 * 2.0])
-                .unwrap();
-        }
-        // 25 rows with chunk_size=10 → 2 full flushes triggered by push_row,
-        // 5 rows remain buffered. When retain_batches=false, flushed_batches
-        // is always empty.
-        assert!(recorder.flushed_batches().is_empty());
-
-        recorder.finish().unwrap();
-    }
-
-    #[test]
-    fn batch_retention_enabled() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-
-        let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            10,
-            OutputFormat::Parquet,
-            &path,
-            true,
-            RotationPolicy::None,
-        )
-        .unwrap();
-
-        for i in 0..25 {
-            recorder
-                .push_row(&format!("T{i}"), &[i as f64, i as f64 * 2.0])
+                .push_row(i64::from(i), &[i as f64, i as f64 * 2.0], &[true, true])
                 .unwrap();
         }
         // 25 rows with chunk_size=10 → 2 flushes triggered by push_row.
@@ -888,405 +1069,449 @@ mod tests {
     }
 
     #[test]
-    fn retention_disabled_memory_bounded() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
+    fn file_destination_does_not_retain_batches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
 
-        let schema = test_schema();
         let chunk_size = 50;
         let total_rows = 10 * chunk_size; // exercise 10x chunk_size
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            chunk_size,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
+        let mut recorder = recorder_at(test_schema(), &path, chunk_size);
 
         for i in 0..total_rows {
             recorder
-                .push_row(&format!("T{i}"), &[i as f64, 0.0])
+                .push_row(
+                    i64::try_from(i).expect("row index"),
+                    &[i as f64, 0.0],
+                    &[true, true],
+                )
                 .unwrap();
         }
-        // With retain_batches=false, flushed_batches is always empty.
+        // A file destination streams: flushed batches are written and
+        // dropped, never retained.
         assert!(recorder.flushed_batches().is_empty());
         assert_eq!(recorder.total_rows(), total_rows);
 
         recorder.finish().unwrap();
     }
 
-    // ---------------------------------------------------------------------------
-    // Rotation tests
-    // ---------------------------------------------------------------------------
-
     #[test]
-    fn rotation_none_produces_single_file_with_original_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dwelling_42.parquet");
+    fn existing_target_without_overwrite_fails_at_construction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
+        std::fs::write(&path, b"existing").unwrap();
 
-        let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema,
+        let err = StreamingRecorder::new(
+            test_schema(),
             100,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
-
-        recorder
-            .push_row("2024-01-01T00:00:00Z", &[1.0, 2.0])
-            .unwrap();
-        recorder
-            .push_row("2024-01-02T00:00:00Z", &[3.0, 4.0])
-            .unwrap();
-
-        let summary = recorder.finish().unwrap();
-        assert_eq!(summary.row_count, 2);
-        // Exactly one file, at the original path.
-        assert_eq!(summary.rotated_paths.len(), 1);
-        assert_eq!(summary.path, path);
-        assert!(path.exists());
-        assert!(summary.byte_size > 0);
-
-        // No extra files created in the directory.
-        let files: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .collect();
-        assert_eq!(files.len(), 1);
-    }
-
-    #[test]
-    fn rotation_none_csv_single_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("output.csv");
-
-        let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            100,
-            OutputFormat::Csv,
-            &path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
-
-        recorder
-            .push_row("2024-01-01T00:00:00Z", &[1.0, 2.0])
-            .unwrap();
-        recorder
-            .push_row("2024-01-02T00:00:00Z", &[3.0, 4.0])
-            .unwrap();
-        recorder.flush_and_close().unwrap();
-
-        assert!(path.exists());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn rotation_daily_boundary_crossing_two_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dwelling_42.parquet");
-
-        let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema.clone(),
-            100,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::Daily,
-        )
-        .unwrap();
-
-        // Day 1 rows
-        recorder
-            .push_row("2024-01-01T12:00:00Z", &[1.0, 10.0])
-            .unwrap();
-        recorder
-            .push_row("2024-01-01T23:59:00Z", &[2.0, 20.0])
-            .unwrap();
-
-        // Day 2 row — crosses boundary
-        recorder
-            .push_row("2024-01-02T00:01:00Z", &[3.0, 30.0])
-            .unwrap();
-        recorder
-            .push_row("2024-01-02T12:00:00Z", &[4.0, 40.0])
-            .unwrap();
-
-        let summary = recorder.finish().unwrap();
-        assert_eq!(summary.row_count, 4);
-
-        // Two files with correct timestamp suffixes.
-        assert_eq!(summary.rotated_paths.len(), 2);
-
-        let day1_path = dir.path().join("dwelling_42_2024-01-01.parquet");
-        let day2_path = dir.path().join("dwelling_42_2024-01-02.parquet");
-        assert!(day1_path.exists(), "day 1 file missing");
-        assert!(day2_path.exists(), "day 2 file missing");
-
-        // Read back and verify row counts per file.
-        let file1 = File::open(&day1_path).unwrap();
-        let reader1 = ParquetRecordBatchReaderBuilder::try_new(file1)
-            .unwrap()
-            .build()
-            .unwrap();
-        let rows1: usize = reader1.filter_map(Result::ok).map(|b| b.num_rows()).sum();
-        assert_eq!(rows1, 2, "day 1 should have 2 rows");
-
-        let file2 = File::open(&day2_path).unwrap();
-        let reader2 = ParquetRecordBatchReaderBuilder::try_new(file2)
-            .unwrap()
-            .build()
-            .unwrap();
-        let rows2: usize = reader2.filter_map(Result::ok).map(|b| b.num_rows()).sum();
-        assert_eq!(rows2, 2, "day 2 should have 2 rows");
-    }
-
-    #[test]
-    fn rotation_monthly_schema_consistency() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dwelling.parquet");
-
-        let schema = test_schema();
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            100,
-            OutputFormat::Parquet,
-            &path,
-            false,
-            RotationPolicy::Monthly,
-        )
-        .unwrap();
-
-        // January row
-        recorder
-            .push_row("2024-01-15T00:00:00Z", &[1.0, 10.0])
-            .unwrap();
-
-        // February row — crosses month boundary
-        recorder
-            .push_row("2024-02-01T00:00:00Z", &[2.0, 20.0])
-            .unwrap();
-
-        recorder.flush_and_close().unwrap();
-
-        let jan = dir.path().join("dwelling_2024-01.parquet");
-        let feb = dir.path().join("dwelling_2024-02.parquet");
-        assert!(jan.exists());
-        assert!(feb.exists());
-
-        // Read schemas from both files.
-        let schema1 = ParquetRecordBatchReaderBuilder::try_new(File::open(&jan).unwrap())
-            .unwrap()
-            .build()
-            .unwrap()
-            .schema();
-        let schema2 = ParquetRecordBatchReaderBuilder::try_new(File::open(&feb).unwrap())
-            .unwrap()
-            .build()
-            .unwrap()
-            .schema();
-        assert_eq!(
-            schema1, schema2,
-            "schemas must be identical across rotated files"
+            Destination::Parquet {
+                path: path.clone(),
+                overwrite: false,
+            },
+        );
+        let err = err
+            .err()
+            .expect("an existing target without overwrite fails at freeze");
+        assert!(
+            err.to_string().contains("out.parquet"),
+            "the error names the path, got: {err}"
         );
     }
 
     #[test]
-    fn rotation_no_data_loss_parquet() {
-        let dir = tempfile::tempdir().unwrap();
-        let rotated_path = dir.path().join("dwelling_42.parquet");
-        let single_path = dir.path().join("dwelling_single.parquet");
-
-        let test_rows: Vec<(&str, f64, f64)> = vec![
-            ("2024-01-01T00:00:00Z", 1.0, 10.0),
-            ("2024-01-01T12:00:00Z", 2.0, 20.0),
-            ("2024-01-02T00:00:00Z", 3.0, 30.0), // day boundary
-            ("2024-01-02T12:00:00Z", 4.0, 40.0),
-            ("2024-01-03T06:00:00Z", 5.0, 50.0), // another day
-        ];
-
-        // Run with daily rotation.
-        let schema = test_schema();
-        let mut rot_recorder = StreamingRecorder::new(
-            schema.clone(),
-            100,
-            OutputFormat::Parquet,
-            &rotated_path,
-            false,
-            RotationPolicy::Daily,
-        )
-        .unwrap();
-        for (ts, a, b) in &test_rows {
-            rot_recorder.push_row(ts, &[*a, *b]).unwrap();
-        }
-        let rot_summary = rot_recorder.finish().unwrap();
-
-        // Run without rotation (single file).
-        let mut single_recorder = StreamingRecorder::new(
-            schema.clone(),
-            100,
-            OutputFormat::Parquet,
-            &single_path,
-            false,
-            RotationPolicy::None,
-        )
-        .unwrap();
-        for (ts, a, b) in &test_rows {
-            single_recorder.push_row(ts, &[*a, *b]).unwrap();
-        }
-        single_recorder.finish().unwrap();
-
-        // Row counts must match.
-        assert_eq!(rot_summary.row_count, test_rows.len());
-
-        // Read back all rows from all rotated files and compare with single file.
-        let mut rot_electric: Vec<f64> = Vec::new();
-        let mut rot_gas: Vec<f64> = Vec::new();
-        for path in &rot_summary.rotated_paths {
-            let file = File::open(path).unwrap();
-            let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-                .unwrap()
-                .build()
-                .unwrap();
-            for batch in reader {
-                let batch = batch.unwrap();
-                let e = batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap();
-                let g = batch
-                    .column(2)
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap();
-                for i in 0..batch.num_rows() {
-                    rot_electric.push(e.value(i));
-                    rot_gas.push(g.value(i));
-                }
-            }
-        }
-
-        let file = File::open(&single_path).unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .unwrap()
-            .build()
-            .unwrap();
-        let mut single_electric: Vec<f64> = Vec::new();
-        let mut single_gas: Vec<f64> = Vec::new();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let e = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            let g = batch
-                .column(2)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                single_electric.push(e.value(i));
-                single_gas.push(g.value(i));
-            }
-        }
-
-        assert_eq!(
-            rot_electric.len(),
-            test_rows.len(),
-            "rotated file row count mismatch"
-        );
-        assert_eq!(rot_electric, single_electric, "electric power mismatch");
-        assert_eq!(rot_gas, single_gas, "gas power mismatch");
-    }
-
-    #[test]
-    fn rotation_csv_daily_produces_two_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("output.csv");
+    fn overwrite_true_replaces_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
+        std::fs::write(&path, b"existing").unwrap();
 
         let schema = test_schema();
         let mut recorder = StreamingRecorder::new(
             schema,
             100,
-            OutputFormat::Csv,
-            &path,
-            false,
-            RotationPolicy::Daily,
+            Destination::Parquet {
+                path: path.clone(),
+                overwrite: true,
+            },
         )
         .unwrap();
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
+        recorder.finish().unwrap();
 
-        recorder
-            .push_row("2024-01-01T00:00:00Z", &[1.0, 2.0])
-            .unwrap();
-        recorder
-            .push_row("2024-01-02T00:00:00Z", &[3.0, 4.0])
-            .unwrap();
-
-        let summary = recorder.finish().unwrap();
-        assert_eq!(summary.row_count, 2);
-        assert_eq!(summary.rotated_paths.len(), 2);
-
-        let day1 = dir.path().join("output_2024-01-01.csv");
-        let day2 = dir.path().join("output_2024-01-02.csv");
-        assert!(day1.exists());
-        assert!(day2.exists());
-
-        // Both files should have headers.
-        let d1 = std::fs::read_to_string(&day1).unwrap();
-        let d2 = std::fs::read_to_string(&day2).unwrap();
-        assert!(d1.contains("Total Electric Power (kW)"));
-        assert!(d2.contains("Total Electric Power (kW)"));
+        let bytes = std::fs::read(&path).unwrap();
+        assert_ne!(&bytes[..3], b"exi", "the target was replaced");
+        // No partial file survives.
+        let files: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(files.len(), 1, "exactly the published target remains");
     }
 
     #[test]
-    fn rotation_hourly_and_yearly() {
-        let dir = tempfile::tempdir().unwrap();
+    fn missing_parent_dir_is_io_error_naming_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing_dir").join("out.parquet");
 
-        // Hourly
-        let h_path = dir.path().join("h.parquet");
+        let err = StreamingRecorder::new(
+            test_schema(),
+            100,
+            Destination::Parquet {
+                path: path.clone(),
+                overwrite: false,
+            },
+        );
+        let err = err
+            .err()
+            .expect("a missing parent directory fails at freeze");
+        assert!(
+            err.to_string().contains("out.parquet"),
+            "the error names the path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn publish_leaves_no_partial_file_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.csv");
+
         let schema = test_schema();
-        let mut hr = StreamingRecorder::new(
-            schema.clone(),
-            100,
-            OutputFormat::Parquet,
-            &h_path,
-            false,
-            RotationPolicy::Hourly,
-        )
-        .unwrap();
-        hr.push_row("2024-01-01T00:30:00Z", &[1.0, 1.0]).unwrap();
-        hr.push_row("2024-01-01T01:00:00Z", &[2.0, 2.0]).unwrap();
-        let hs = hr.finish().unwrap();
-        assert_eq!(hs.rotated_paths.len(), 2);
-        assert!(dir.path().join("h_2024-01-01T00.parquet").exists());
-        assert!(dir.path().join("h_2024-01-01T01.parquet").exists());
-
-        // Yearly
-        let y_path = dir.path().join("y.parquet");
-        let mut yr = StreamingRecorder::new(
+        let mut recorder = StreamingRecorder::new(
             schema,
-            100,
-            OutputFormat::Parquet,
-            &y_path,
-            false,
-            RotationPolicy::Yearly,
+            2,
+            Destination::Csv {
+                path: path.clone(),
+                overwrite: false,
+            },
         )
         .unwrap();
-        yr.push_row("2024-06-15T00:00:00Z", &[1.0, 1.0]).unwrap();
-        yr.push_row("2025-01-01T00:00:00Z", &[2.0, 2.0]).unwrap();
-        let ys = yr.finish().unwrap();
-        assert_eq!(ys.rotated_paths.len(), 2);
-        assert!(dir.path().join("y_2024.parquet").exists());
-        assert!(dir.path().join("y_2025.parquet").exists());
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
+        recorder.push_row(1, &[3.0, 4.0], &[true, true]).unwrap();
+        // The chunk flushed: the partial file exists mid-run.
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        let partial_is_hidden = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .all(|e| e.unwrap().file_name().to_string_lossy().starts_with('.'));
+        assert!(partial_is_hidden, "the mid-run file is the hidden partial");
+
+        recorder.finish().unwrap();
+        assert!(path.exists());
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            1,
+            "the partial is gone; exactly the published target remains"
+        );
+    }
+
+    #[test]
+    fn discard_partial_removes_the_streaming_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
+
+        let schema = test_schema();
+        let mut recorder = recorder_at(schema, &path, 1);
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+
+        recorder.discard_partial();
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            0,
+            "a failed run leaves no partial file"
+        );
+    }
+
+    #[test]
+    fn second_close_is_a_noop_not_a_second_publish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.parquet");
+
+        let schema = test_schema();
+        let mut recorder = recorder_at(schema, &path, 100);
+        recorder.push_row(0, &[1.0, 2.0], &[true, true]).unwrap();
+        recorder.flush_and_close().unwrap();
+        recorder.flush_and_close().unwrap();
+        assert!(path.exists());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn link_capability_errors_classify_as_hard_link_unavailable() {
+        // The capability refusals: a filesystem that reports the operation
+        // unsupported, and one that refuses the cross-device link.
+        for source in [
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
+            std::io::Error::from(std::io::ErrorKind::CrossesDevices),
+        ] {
+            assert!(
+                super::hard_link_unavailable(&source),
+                "{source} must classify as a link-capability failure"
+            );
+        }
+    }
+
+    #[test]
+    fn eperm_and_ordinary_errors_classify_as_path_errors() {
+        // EPERM, the errno a filesystem that merely refuses links raises:
+        // a raw OS error, not an ErrorKind construction.
+        let eperm = std::io::Error::from_raw_os_error(1);
+        assert_eq!(eperm.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            !super::hard_link_unavailable(&eperm),
+            "EPERM is a path error, not a link-capability failure"
+        );
+        for source in [
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+            std::io::Error::other("something else"),
+        ] {
+            assert!(
+                !super::hard_link_unavailable(&source),
+                "{source} must classify as a path error"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_link_refusal_from_the_os_is_a_path_error() {
+        // The integration probe: the one link refusal a test filesystem
+        // can raise portably is link(2) on a directory, EPERM on Linux.
+        // The real error must land in the path-error class, the class the
+        // publish reports as PathIo.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        let err = std::fs::hard_link(&dir, tmp.path().join("target"))
+            .expect_err("directories do not hard link");
+        assert!(
+            !super::hard_link_unavailable(&err),
+            "the OS refused the link with {err} ({:?}); it must classify as a path error",
+            err.kind()
+        );
+    }
+
+    #[test]
+    fn two_recorders_never_share_a_partial_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = test_schema();
+        let first = StreamingRecorder::new(
+            schema.clone(),
+            10,
+            Destination::Csv {
+                path: tmp.path().join("a.csv"),
+                overwrite: false,
+            },
+        )
+        .unwrap();
+        let second = StreamingRecorder::new(
+            schema,
+            10,
+            Destination::Csv {
+                path: tmp.path().join("b.csv"),
+                overwrite: false,
+            },
+        )
+        .unwrap();
+        assert_ne!(
+            first.partial_path, second.partial_path,
+            "two recorder creations in one process produce distinct partial names"
+        );
+    }
+
+    fn memory_recorder(schema: &Schema, chunk: usize) -> StreamingRecorder {
+        StreamingRecorder::new(schema.clone(), chunk, Destination::Memory).unwrap()
+    }
+
+    fn rows_of(batches: &[RecordBatch]) -> Vec<(i64, Vec<u64>)> {
+        let mut out = Vec::new();
+        for batch in batches {
+            let ts = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("timestamp column");
+            let values: Vec<&Float64Array> = batch
+                .columns()
+                .iter()
+                .skip(1)
+                .map(|c| {
+                    c.as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("f64 column")
+                })
+                .collect();
+            for r in 0..batch.num_rows() {
+                out.push((
+                    ts.value(r),
+                    values.iter().map(|c| c.value(r).to_bits()).collect(),
+                ));
+            }
+        }
+        out
+    }
+
+    /// A recorder's rows snapshot restores a fresh recorder to the same
+    /// state: the flushed batches bitwise (values, timestamps, order), the
+    /// buffered tail, and the counters.
+    #[test]
+    fn recorder_rows_snapshot_restores_flushed_batches_and_buffers_bitwise() {
+        let schema = test_schema();
+        let mut original = memory_recorder(&schema, 4);
+        for i in 0..9_i64 {
+            original
+                .push_row(
+                    1_000 * i,
+                    &[i as f64 * 1.5, i as f64 * -0.25],
+                    &[true, true],
+                )
+                .unwrap();
+        }
+        // 9 rows at chunk 4: two full flushes, one buffered row.
+        assert_eq!(original.buffered_rows(), 1);
+        assert_eq!(original.batches_built(), 2);
+
+        let snapshot = original.rows_snapshot();
+        assert_eq!(
+            snapshot.chunk_size, 4,
+            "the section carries the writing run's chunk size"
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize the snapshot");
+        let decoded: ReportRowsSnapshot = serde_json::from_str(&json).expect("decode");
+
+        let mut restored = memory_recorder(&schema, 4);
+        restored.restore_rows(&decoded).expect("restore");
+        assert_eq!(restored.total_rows(), 9);
+        assert_eq!(restored.buffered_rows(), 1);
+        assert_eq!(restored.batches_built(), 2);
+        let before = rows_of(original.flushed_batches());
+        let after = rows_of(restored.flushed_batches());
+        assert_eq!(
+            before, after,
+            "the flushed batches are bitwise the original's"
+        );
+
+        // And the restored recorder keeps recording exactly as the
+        // original: the next flush builds the third batch.
+        original
+            .push_row(9_000, &[13.5, -2.25], &[true, true])
+            .unwrap();
+        restored
+            .push_row(9_000, &[13.5, -2.25], &[true, true])
+            .unwrap();
+        assert_eq!(
+            original.flushed_batches().len(),
+            restored.flushed_batches().len()
+        );
+        let a = rows_of(original.flushed_batches());
+        let b = rows_of(restored.flushed_batches());
+        assert_eq!(a, b, "the post-restore batches continue bitwise");
+    }
+
+    /// A snapshot written at another chunk size is refused by name: the
+    /// resumed batches' shapes would differ from the writing run's, and
+    /// the refusal must name the chunk sizes, not blame the rows.
+    #[test]
+    fn recorder_rows_snapshot_refuses_a_foreign_chunk_size_by_name() {
+        let schema = test_schema();
+        let mut original = memory_recorder(&schema, 4);
+        for i in 0..9_i64 {
+            original
+                .push_row(
+                    1_000 * i,
+                    &[i as f64 * 1.5, i as f64 * -0.25],
+                    &[true, true],
+                )
+                .unwrap();
+        }
+        let snapshot = original.rows_snapshot();
+
+        let mut other = memory_recorder(&schema, 2);
+        let err = other
+            .restore_rows(&snapshot)
+            .expect_err("a foreign chunk size refuses the restore")
+            .to_string();
+        assert!(
+            err.contains("chunk size 4") && err.contains("this run uses 2"),
+            "the refusal names both chunk sizes: {err}"
+        );
+    }
+
+    /// The batch-count check alone lets a chunk-size drift through when
+    /// the row count rebuilds the same batch count both ways (100 flushed
+    /// rows: one batch at chunk 100, one at chunk 150): the carried chunk
+    /// size is what refuses it, so a resumed run's batches cannot be
+    /// re-chunked out of the writing run's shapes.
+    #[test]
+    fn recorder_rows_snapshot_refuses_a_chunk_drift_the_batch_count_misses() {
+        let schema = test_schema();
+        let mut original = memory_recorder(&schema, 100);
+        for i in 0..100_i64 {
+            original
+                .push_row(1_000 * i, &[i as f64, 0.0], &[true, true])
+                .unwrap();
+        }
+        assert_eq!(original.batches_built(), 1);
+        let snapshot = original.rows_snapshot();
+
+        let mut other = memory_recorder(&schema, 150);
+        let err = other
+            .restore_rows(&snapshot)
+            .expect_err("the chunk drift must not re-chunk the batches")
+            .to_string();
+        assert!(
+            err.contains("chunk size 100") && err.contains("this run uses 150"),
+            "the refusal names both chunk sizes: {err}"
+        );
+    }
+
+    /// A restored recorder's next callback delivery carries the batch
+    /// index the interrupted run reached, so a resumed run's callback
+    /// stream continues the original's.
+    #[test]
+    fn restored_recorder_continues_the_callback_index() {
+        use std::sync::atomic::AtomicU64;
+
+        struct Counting(std::sync::Arc<AtomicU64>);
+        impl BatchCallback for Counting {
+            fn on_batch(
+                &mut self,
+                ctx: &BatchContext<'_>,
+                _batch: &RecordBatch,
+            ) -> Result<(), CallbackError> {
+                self.0.store(ctx.batch_index, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let schema = test_schema();
+        let mut original = memory_recorder(&schema, 4);
+        let seen = std::sync::Arc::new(AtomicU64::new(0));
+        original.attach_callback(CallbackAttachment::new(
+            TIMESTEP_REPORT,
+            1,
+            Box::new(Counting(std::sync::Arc::clone(&seen))),
+        ));
+        for i in 0..9_i64 {
+            original
+                .push_row(1_000 * i, &[i as f64, 0.0], &[true, true])
+                .unwrap();
+        }
+        // Two deliveries: indices 0 and 1.
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+
+        let snapshot = original.rows_snapshot();
+        let mut restored = memory_recorder(&schema, 4);
+        restored.restore_rows(&snapshot).expect("restore");
+        restored.attach_callback(CallbackAttachment::new(
+            TIMESTEP_REPORT,
+            1,
+            Box::new(Counting(std::sync::Arc::clone(&seen))),
+        ));
+        // The next flush delivers with the continued index 2.
+        restored
+            .push_row(9_000, &[9.0, 0.0], &[true, true])
+            .unwrap();
+        restored.flush().unwrap();
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "the restored recorder's deliveries continue the interrupted run's index"
+        );
     }
 }

@@ -19,11 +19,12 @@ use uom::si::heat_transfer::{
 };
 use uom::si::length::{centimeter, foot, inch, meter, millimeter};
 use uom::si::mass_density::{kilogram_per_cubic_meter, pound_per_cubic_foot};
+use uom::si::power::watt;
 use uom::si::pressure::pascal;
 use uom::si::specific_heat_capacity::{
     btu_per_pound_degree_fahrenheit, joule_per_kilogram_kelvin, kilojoule_per_kilogram_kelvin,
 };
-use uom::si::thermodynamic_temperature::{degree_celsius, degree_fahrenheit, kelvin};
+use uom::si::thermodynamic_temperature::{degree_celsius, kelvin};
 use uom::si::volume::{cubic_foot, cubic_meter, gallon, liter};
 
 pub type Temperature = UomTemperature;
@@ -117,58 +118,23 @@ pub fn length_m_to_mm(m: f64) -> f64 {
 }
 
 // --- Power (BTU/h ↔ W) ---
-// uom's Power module does not include BTU/h, so we use the exact conversion.
-// 1 BTU(IT)/h = 0.293_071_07 W (NIST).
-
-const BTU_PER_HOUR_TO_WATT: f64 = 0.293_071_07;
+// `uom`'s Power module does not include BTU/h, so HARES defines the unit
+// once in `hares-types::si_units` (0.293_071_07 W, the parent factor) and
+// converts through it.
 
 #[inline]
 pub fn power_btu_h_to_w(btu_h: f64) -> f64 {
-    btu_h * BTU_PER_HOUR_TO_WATT
+    UomPower::new::<hares_types::si_units::power::btu_it_per_hour>(btu_h).get::<watt>()
 }
 
 #[inline]
 pub fn power_w_to_btu_h(w: f64) -> f64 {
-    w / BTU_PER_HOUR_TO_WATT
+    UomPower::new::<watt>(w).get::<hares_types::si_units::power::btu_it_per_hour>()
 }
 
 #[inline]
 pub fn power_btu_h_to_kbtu_h(btu_h: f64) -> f64 {
     btu_h * 0.001
-}
-
-// --- Power (kW ↔ W) ---
-// Exact SI prefix conversion. Defined here so no call site writes `* 1_000.0`
-// or `/ 1_000.0` inline — the conversion factor lives in one place.
-const WATTS_PER_KILOWATT: f64 = 1_000.0;
-
-/// Convert kilowatts to watts.  1 kW = 1000 W (exact SI).
-#[inline]
-pub fn power_kw_to_w(kw: f64) -> f64 {
-    kw * WATTS_PER_KILOWATT
-}
-
-/// Convert watts to kilowatts.  1000 W = 1 kW (exact SI).
-#[inline]
-pub fn power_w_to_kw(w: f64) -> f64 {
-    w / WATTS_PER_KILOWATT
-}
-
-// --- Energy: therms → kWh ---
-// 1 therm = 100,000 BTU (IT). uom converts BTU → joule → kWh.
-use uom::si::energy::{btu_it, kilowatt_hour};
-
-/// Convert therms to kilowatt-hours. 1 therm = 100,000 BTU(IT) ≈ 29.3071 kWh.
-#[inline]
-pub fn energy_therms_to_kwh(therms: f64) -> f64 {
-    UomEnergy::new::<btu_it>(therms * 100_000.0).get::<kilowatt_hour>()
-}
-
-/// Convert kilowatt-hours to therms. Inverse of `energy_therms_to_kwh`.
-/// 1 therm = 100,000 BTU(IT) ≈ 29.3071 kWh.
-#[inline]
-pub fn energy_kwh_to_therms(kwh: f64) -> f64 {
-    UomEnergy::new::<kilowatt_hour>(kwh).get::<btu_it>() / 100_000.0
 }
 
 // --- Thermal resistance (R-value) and transmittance (U-value) ---
@@ -261,14 +227,21 @@ pub fn volume_l_to_m3(l: f64) -> f64 {
 
 // --- Temperature (plain f64) ---
 
+/// Fahrenheit to Celsius through the faithful formula
+/// `(t - 32.0) * 5.0 / 9.0`, not the `uom` conversion: `uom` reaches
+/// Celsius through the kelvin base with its rounded offset constants
+/// (`(t + 459.67) * 5/9 - 273.15`), whose rounding leaves the result
+/// ulps off the formula's exact value (70 F converted to
+/// 21.1111111111112 instead of 21.111111111111114, 25 ulps high; found
+/// by the Fahrenheit setpoint test's independent bit pin).
 #[inline]
 pub fn temperature_f_to_c(f: f64) -> f64 {
-    UomTemperature::new::<degree_fahrenheit>(f).get::<degree_celsius>()
+    (f - 32.0) * 5.0 / 9.0
 }
 
 #[inline]
 pub fn temperature_c_to_f(c: f64) -> f64 {
-    UomTemperature::new::<degree_celsius>(c).get::<degree_fahrenheit>()
+    c * 9.0 / 5.0 + 32.0
 }
 
 /// Temperature delta conversion: °C range → °F range (multiply by 9/5, no +32 offset).
@@ -278,33 +251,30 @@ pub fn temperature_delta_c_to_f(delta_c: f64) -> f64 {
 }
 
 // --- Composite: BTU/(hr·°F) → W/K ---
-// Used for water-heater UA conversions.  1 BTU/(hr·°F) = BTU_PER_HOUR_TO_W * 9/5.
+// Used for water-heater UA conversions.  1 BTU/(hr·°F) = 0.293_071_07 * 9/5 W/K.
 #[inline]
 pub fn btu_hr_per_f_to_w_per_k(x: f64) -> f64 {
-    x * BTU_PER_HOUR_TO_WATT * 9.0 / 5.0
+    x * power_btu_h_to_w(1.0) * 9.0 / 5.0
 }
 
 // --- Power → annual energy (W → kWh/year, Btuh → therms/year) ---
 // Used for HPXML PlugLoadUnits / PoolHeaterUnits parsing where W and Btuh
 // are power units that must be converted to annual energy equivalents.
-// NIST: 1 BTU(IT)/h = 0.293_071_07 W.
-// 1 therm = 100,000 BTU(IT).
 // 1 year = 8760 h (non-leap).
 
 const HOURS_PER_YEAR: f64 = 8760.0;
 
-/// Convert power in watts to annual energy in kWh/year.
-/// W * 8760 h/year / 1000 Wh/kWh = kWh/year.
+/// Convert power in watts to annual energy in joules per year.
+/// W * 8760 h/year * 3600 s/h = J/year.
 #[inline]
-pub fn power_watt_to_kwh_per_year(w: f64) -> f64 {
-    w * HOURS_PER_YEAR / 1000.0
+pub fn power_watt_to_j_per_year(w: f64) -> f64 {
+    w * HOURS_PER_YEAR * 3600.0
 }
 
-/// Convert power in BTU(IT)/h to annual energy in therms/year.
-/// Btuh * 8760 h/year / 100000 BTU(IT)/therm = therms/year.
+/// Convert power in BTU(IT)/h to annual energy in joules per year.
 #[inline]
-pub fn power_btuh_to_therms_per_year(btuh: f64) -> f64 {
-    btuh * HOURS_PER_YEAR / 100_000.0
+pub fn power_btuh_to_j_per_year(btuh: f64) -> f64 {
+    power_watt_to_j_per_year(power_btu_h_to_w(btuh))
 }
 
 #[cfg(test)]
@@ -366,6 +336,7 @@ mod tests {
     #[test]
     fn power_btu_h_to_w_matches_old_constant() {
         approx_eq(power_btu_h_to_w(1.0), 0.293_071_07, 1e-12);
+        assert_eq!(power_btu_h_to_w(1.0).to_bits(), 0.293_071_07f64.to_bits());
     }
 
     #[test]
@@ -376,30 +347,6 @@ mod tests {
     #[test]
     fn power_btu_h_to_kbtu_h_is_divide_by_1000() {
         approx_eq(power_btu_h_to_kbtu_h(12345.0), 12.345, 1e-12);
-    }
-
-    #[test]
-    fn power_kw_to_w_converts() {
-        approx_eq(power_kw_to_w(1.0), 1_000.0, 1e-12);
-        approx_eq(power_kw_to_w(0.5), 500.0, 1e-12);
-        approx_eq(power_kw_to_w(0.0), 0.0, 1e-12);
-    }
-
-    #[test]
-    fn power_w_to_kw_converts() {
-        approx_eq(power_w_to_kw(1_000.0), 1.0, 1e-12);
-        approx_eq(power_w_to_kw(500.0), 0.5, 1e-12);
-        approx_eq(power_w_to_kw(0.0), 0.0, 1e-12);
-    }
-
-    #[test]
-    fn power_kw_w_round_trip() {
-        let original_kw = 3.75;
-        approx_eq(
-            power_w_to_kw(power_kw_to_w(original_kw)),
-            original_kw,
-            1e-12,
-        );
     }
 
     #[test]
@@ -477,6 +424,15 @@ mod tests {
     fn temperature_c_to_f_known_values() {
         approx_eq(temperature_c_to_f(0.0), 32.0, 1e-10);
         approx_eq(temperature_c_to_f(100.0), 212.0, 1e-10);
+        // The exact bits of the faithful formula, pinned independently of
+        // the production code (0 C is exactly 32 F; 100 C exactly 212 F;
+        // 23.5 C the repeating-pattern value the uom offset path missed).
+        assert_eq!(temperature_c_to_f(0.0).to_bits(), 0x4040_0000_0000_0000);
+        assert_eq!(temperature_c_to_f(100.0).to_bits(), 0x406A_8000_0000_0000);
+        assert_eq!(
+            temperature_c_to_f(23.5).to_bits(),
+            (23.5f64 * 9.0 / 5.0 + 32.0).to_bits()
+        );
     }
 
     #[test]
@@ -497,36 +453,20 @@ mod tests {
     }
 
     #[test]
-    fn power_watt_to_kwh_per_year_converts() {
-        // 1000 W = 1 kW * 8760 h = 8760 kWh/year
-        approx_eq(power_watt_to_kwh_per_year(1000.0), 8760.0, 1e-10);
+    fn power_watt_to_j_per_year_converts() {
+        // 1000 W = 1 kW * 8760 h = 8760 kWh/year = 3.1536e10 J/year
+        approx_eq(power_watt_to_j_per_year(1000.0), 8760.0 * 3.6e6, 1e-3);
         // 1 W = 8.76 kWh/year
-        approx_eq(power_watt_to_kwh_per_year(1.0), 8.76, 1e-12);
+        approx_eq(power_watt_to_j_per_year(1.0), 8.76 * 3.6e6, 1e-6);
     }
 
     #[test]
-    fn power_btuh_to_therms_per_year_converts() {
-        // 100,000 Btuh * 8760 / 100,000 = 8760 therms/year
-        approx_eq(power_btuh_to_therms_per_year(100_000.0), 8760.0, 1e-10);
-        // 1 Btuh * 8760 / 100000 = 0.08760 therms/year
-        approx_eq(power_btuh_to_therms_per_year(1.0), 0.0876, 1e-12);
-    }
-
-    #[test]
-    fn energy_therms_to_kwh_converts() {
-        // 1 therm = 100,000 BTU(IT) ≈ 29.3071 kWh (uom IT BTU → J conversion)
-        let kwh = energy_therms_to_kwh(1.0);
-        approx_eq(kwh, 29.307_1, 1e-3);
-    }
-
-    #[test]
-    fn energy_kwh_to_therms_converts() {
-        // Inverse of therms → kWh; round-trip must hold.
-        let original = 100.0;
-        approx_eq(
-            energy_kwh_to_therms(energy_therms_to_kwh(original)),
-            original,
-            1e-10,
-        );
+    fn power_btuh_to_j_per_year_converts() {
+        // 100,000 Btuh * 8760 / 100,000 = 8760 therms/year, to the parent
+        // factors' own agreement (the btu_it_per_hour rate the parent kept
+        // and the therm are consistent to 5.9e-10 relative per hour, so
+        // the year product agrees to about 1.4e-7 relative).
+        let therms_per_year = power_btuh_to_j_per_year(100_000.0) / 105_505_600.0;
+        approx_eq(therms_per_year, 8760.0, 0.01);
     }
 }

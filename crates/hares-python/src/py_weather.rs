@@ -88,8 +88,8 @@ impl PyWeatherTimeSeries {
     }
 
     #[getter]
-    fn midpoint_offset_secs(&self) -> u32 {
-        self.inner.meta.midpoint_offset_secs
+    fn record_label(&self) -> String {
+        self.inner.meta.record_label.to_string()
     }
 
     #[getter]

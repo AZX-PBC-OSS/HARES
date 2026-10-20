@@ -7,6 +7,8 @@
 //! by water heaters, tankless units and wet appliances, never named in any
 //! spec), and loops declared only by equipment added at runtime.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -15,7 +17,6 @@ use hares_equipment::{
     DHW_DEMAND_LOOP, ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig,
     EquipmentRegistry,
 };
-use hares_io::OutputFormat;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse, EquipmentDescriptor,
     EquipmentId, ExecutionStage, FluidType, FuelType, HaresError, LoopId, OperatingMode,
@@ -39,18 +40,19 @@ fn sim_config(duration: Duration) -> SimulationConfig {
             .unwrap(),
         duration,
         time_res: Duration::seconds(900),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -61,16 +63,11 @@ fn dwelling_config(
     sim: SimulationConfig,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(schedule_path),
-        weather_path,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(schedule_path)),
+        weather: WeatherInput::Path(weather_path),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, None, 100, None),
     }
 }
 
@@ -116,6 +113,7 @@ fn probe_wh_config() -> ElectricResistanceWaterHeaterConfig {
         draw_flow_rate_kg_s: None,
         draw_flow_rate_source: None,
         mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
         performance_adjustment: None,
         zone_type: None,
         first_hour_rating_m3: None,
@@ -288,6 +286,10 @@ impl GlycolDemandPortEquipment {
 impl Equipment for GlycolDemandPortEquipment {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
     }
 
     fn rename(&mut self, name: String) {

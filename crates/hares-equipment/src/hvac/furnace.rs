@@ -6,15 +6,14 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory, ZoneId,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField,
+    ThermalCategory, Warning, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
-
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::hvac::heating_config::{ElectricFurnaceConfig, GasFurnaceConfig};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -24,8 +23,8 @@ use super::{
     helpers::{
         apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
         apply_simple_mode_override_in_control, outage_forces_off, register_ebm_telemetry_keys,
-        served_zone_ports, step_equivalent_battery, update_heating_control, write_ebm_telemetry,
-        zone_id_from_config,
+        served_zone_ports, step_equivalent_battery, unavailable_period_forces_off,
+        update_heating_control, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -80,7 +79,7 @@ pub struct GasFurnace {
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
     /// Rule R1 reactive-only ZIP: blower fan motor pf 0.87;
-    /// Q comes from ZipLoad::reactive_kvar.
+    /// Q comes from ZipLoad::reactive_var.
     zip: hares_types::zip::ResolvedZip,
 }
 
@@ -97,12 +96,12 @@ struct FurnaceState {
     thermostat_hysteresis_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
-    electric_kw: f64,
+    electric_w: f64,
     thermal_output_w: f64,
     fuel_input_w: f64,
     speed_index: f64,
     runtime_fraction: f64,
-    main_power_kw: f64,
+    main_power_w: f64,
     duct_loss_w: f64,
     mode_override: Option<OperatingMode>,
     dr_level: DRLevel,
@@ -158,6 +157,13 @@ impl ElectricFurnace {
 }
 
 impl Equipment for ElectricFurnace {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         FURNACE_CHECKPOINT_VERSION
     }
@@ -220,7 +226,9 @@ impl Equipment for ElectricFurnace {
         // calls or overrides. Gated before override handling; islanded
         // (battery/generator-backed) homes keep an energized bus and are
         // not affected. See docs/outage-behavior.md.
-        if outage_forces_off(&mut self.hvac, env) {
+        if outage_forces_off(&mut self.hvac, env)
+            || unavailable_period_forces_off(&mut self.hvac, env, true, false)
+        {
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
         }
@@ -256,30 +264,26 @@ impl Equipment for ElectricFurnace {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let gross_capacity_w = self.rated_capacity_w * duty * sf;
-        let fan_kw = power_w_to_kw(self.fan_power_w * duty) * sf;
+        let fan_w = (self.fan_power_w * duty) * sf;
         // Heating element power + fan power
-        let element_kw = power_w_to_kw(gross_capacity_w * self.eir);
-        let electric_kw = element_kw + fan_kw;
+        let element_w = gross_capacity_w * self.eir;
+        let electric_w = element_w + fan_w;
 
         // Per-component reactive (see `hvac::reactive`): the resistance
         // element at the unit ZIP (pf 1.0 → Q ≡ 0), the blower fan motor at
         // pf 0.87.
-        let reactive_power_kvar = self
-            .zip
-            .reactive_kvar(element_kw, env.grid.bus_voltage_pu())
-            + self
-                .fan_zip
-                .reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
+        let reactive_power_var = self.zip.reactive_var(element_w, env.grid.bus_voltage_pu())
+            + self.fan_zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
         // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
-        let fan_heat_w = power_kw_to_w(fan_kw);
+        let fan_heat_w = fan_w;
         let total_sensible_w = gross_capacity_w + fan_heat_w;
         let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
 
-        if electric_kw > 0.0 {
+        if electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar,
+                active_power_w: (electric_w),
+                reactive_power_var,
             })?;
         }
         if total_sensible_w > 0.0 {
@@ -298,9 +302,9 @@ impl Equipment for ElectricFurnace {
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
         let duct_loss_w = gross_capacity_w * (1.0 - self.hvac.config.duct_dse.clamp(0.0, 1.0));
         // OCHRE HVAC.py:575: main_power = total_input - fan.
-        // Electric furnace: main = heating elements = electric_kw - fan_kw.
-        let main_power_kw = (electric_kw - fan_kw).max(0.0);
-        let has_nonzero_flow = electric_kw > 0.0 || thermal_output_w != 0.0;
+        // Electric furnace: main = heating elements = electric_w - fan_w.
+        let main_power_w = (electric_w - fan_w).max(0.0);
+        let has_nonzero_flow = electric_w > 0.0 || thermal_output_w != 0.0;
         self.operating_mode = self
             .operating_mode
             .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
@@ -310,10 +314,10 @@ impl Equipment for ElectricFurnace {
             0.0
         };
         let sp = self.hvac.effective_setpoints();
-        self.telemetry.set(tk::FAN_KW, fan_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::FAN_KW, fan_w);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
             .set(tk::OPERATING_MODE, self.operating_mode.as_code());
@@ -337,7 +341,7 @@ impl Equipment for ElectricFurnace {
                 .set(tk::RUNTIME_COOLING_SETPOINT_C, rt.cooling_c.unwrap_or(0.0));
         }
         self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
-        self.telemetry.set(tk::MAIN_POWER_KW, main_power_kw);
+        self.telemetry.set(tk::MAIN_POWER_KW, main_power_w);
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
@@ -373,8 +377,8 @@ impl Equipment for ElectricFurnace {
         write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: Some(thermal_output_w),
                 sensible_cooling_w: None,
@@ -388,7 +392,7 @@ impl Equipment for ElectricFurnace {
             },
             performance: CorePerformance {
                 cop: None,
-                main_power_kw: Some(main_power_kw),
+                main_power_w: Some(main_power_w),
             },
         };
 
@@ -417,6 +421,17 @@ impl Equipment for ElectricFurnace {
         Some(self.zip)
     }
 
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
+            ..Default::default()
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        self.hvac.take_warnings(out);
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &FurnaceState {
@@ -427,12 +442,12 @@ impl Equipment for ElectricFurnace {
                 thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 fuel_input_w: 0.0,
                 speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
                 runtime_fraction: self.telemetry.get(tk::RUNTIME_FRACTION).unwrap_or(0.0),
-                main_power_kw: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
+                main_power_w: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
                 duct_loss_w: self.telemetry.get(tk::DUCT_LOSS_W).unwrap_or(0.0),
                 mode_override: self.mode_override,
                 dr_level: self.dr_level,
@@ -460,7 +475,7 @@ impl Equipment for ElectricFurnace {
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
         self.dr_level = decoded.dr_level;
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry
@@ -471,11 +486,11 @@ impl Equipment for ElectricFurnace {
         self.telemetry
             .insert(tk::RUNTIME_FRACTION, decoded.runtime_fraction);
         self.telemetry
-            .insert(tk::MAIN_POWER_KW, decoded.main_power_kw);
+            .insert(tk::MAIN_POWER_KW, decoded.main_power_w);
         self.telemetry.insert(tk::DUCT_LOSS_W, decoded.duct_loss_w);
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the flows from the
-        // checkpointed `electric_kw`/`thermal_output_w`, the mode from the
+        // checkpointed `electric_w`/`thermal_output_w`, the mode from the
         // checkpointed `operating_mode` (the pair the step published was
         // guard-valid), the setpoint from the restored thermostat state.
         // The reactive ZIP power is not checkpointed and publishes as 0.
@@ -487,8 +502,8 @@ impl Equipment for ElectricFurnace {
         let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: Some(decoded.thermal_output_w),
                 sensible_cooling_w: None,
@@ -502,7 +517,7 @@ impl Equipment for ElectricFurnace {
             },
             performance: CorePerformance {
                 cop: None,
-                main_power_kw: Some(decoded.main_power_kw),
+                main_power_w: Some(decoded.main_power_w),
             },
         };
         Ok(())
@@ -528,6 +543,26 @@ impl Equipment for ElectricFurnace {
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "efficiency",
+                1.0 / self.eir,
+                hares_types::Unit::Fraction,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.eir,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
     }
 }
 
@@ -587,6 +622,13 @@ impl GasFurnace {
 }
 
 impl Equipment for GasFurnace {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         FURNACE_CHECKPOINT_VERSION
     }
@@ -658,7 +700,9 @@ impl Equipment for GasFurnace {
         // calls or overrides. Gated before override handling; islanded
         // (battery/generator-backed) homes keep an energized bus and are
         // not affected. See docs/outage-behavior.md.
-        if outage_forces_off(&mut self.hvac, env) {
+        if outage_forces_off(&mut self.hvac, env)
+            || unavailable_period_forces_off(&mut self.hvac, env, true, false)
+        {
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
         }
@@ -696,15 +740,15 @@ impl Equipment for GasFurnace {
         // Fuel is computed from gross capacity: the furnace burns fuel regardless
         // of duct losses. zone_heat_fractions distributes gross output by DSE.
         let gross_capacity_w = self.rated_capacity_w * duty * sf;
-        let fan_kw = power_w_to_kw(self.fan_power_w * duty) * sf;
+        let fan_w = (self.fan_power_w * duty) * sf;
         let fuel_input_w = if gross_capacity_w > 0.0 {
             gross_capacity_w / self.fuel_efficiency
         } else {
             0.0
         };
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
+        let reactive_power_var = self.zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
         // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
-        let fan_heat_w = power_kw_to_w(fan_kw);
+        let fan_heat_w = fan_w;
         let total_sensible_w = gross_capacity_w + fan_heat_w;
         // Telemetry reports delivered capacity (post-DSE) for the conditioned zone.
         let thermal_output_w = total_sensible_w * self.hvac.config.duct_dse.clamp(0.0, 1.0);
@@ -716,10 +760,10 @@ impl Equipment for GasFurnace {
                 consumption_w: fuel_input_w,
             })?;
         }
-        if fan_kw > 0.0 {
+        if fan_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(fan_kw),
-                reactive_power_kvar,
+                active_power_w: (fan_w),
+                reactive_power_var,
             })?;
         }
         if total_sensible_w > 0.0 {
@@ -737,11 +781,11 @@ impl Equipment for GasFurnace {
 
         // ASHRAE 152: duct_loss = gross_capacity * (1 - dse).
         let duct_loss_w = gross_capacity_w * (1.0 - self.hvac.config.duct_dse.clamp(0.0, 1.0));
-        // OCHRE HVAC.py:575: main_power = total_input_kw - fan_kw.
+        // OCHRE HVAC.py:575: main_power = total_input_w - fan_w.
         // Gas furnace: main = gas input converted to kW. Fan is separate (electric).
         // OCHRE uses gas_therms_per_hour / kwh_to_therms; HARES uses fuel_input_w / 1000.
-        let main_power_kw = power_w_to_kw(fuel_input_w);
-        let has_nonzero_flow = fan_kw > 0.0 || fuel_input_w > 0.0 || thermal_output_w != 0.0;
+        let main_power_w = fuel_input_w;
+        let has_nonzero_flow = fan_w > 0.0 || fuel_input_w > 0.0 || thermal_output_w != 0.0;
         self.operating_mode = self
             .operating_mode
             .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
@@ -751,10 +795,10 @@ impl Equipment for GasFurnace {
             0.0
         };
         let sp = self.hvac.effective_setpoints();
-        self.telemetry.set(tk::FAN_KW, fan_kw);
-        self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
+        self.telemetry.set(tk::FAN_KW, fan_w);
+        self.telemetry.set(tk::ELECTRIC_KW, fan_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry
@@ -781,7 +825,7 @@ impl Equipment for GasFurnace {
         self.telemetry
             .set(tk::SPEED_INDEX, self.hvac.runtime.last_speed_index as f64);
         self.telemetry.set(tk::RUNTIME_FRACTION, rtf);
-        self.telemetry.set(tk::MAIN_POWER_KW, main_power_kw);
+        self.telemetry.set(tk::MAIN_POWER_KW, main_power_w);
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
         self.telemetry
             .set(tk::SPEED_FRAC, self.hvac.runtime.last_speed_frac);
@@ -813,8 +857,8 @@ impl Equipment for GasFurnace {
         write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(fan_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
@@ -831,7 +875,7 @@ impl Equipment for GasFurnace {
             },
             performance: CorePerformance {
                 cop: None,
-                main_power_kw: Some(main_power_kw),
+                main_power_w: Some(main_power_w),
             },
         };
 
@@ -860,6 +904,17 @@ impl Equipment for GasFurnace {
         Some(self.zip)
     }
 
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
+            ..Default::default()
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        self.hvac.take_warnings(out);
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &FurnaceState {
@@ -870,12 +925,12 @@ impl Equipment for GasFurnace {
                 thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
                 runtime_fraction: self.telemetry.get(tk::RUNTIME_FRACTION).unwrap_or(0.0),
-                main_power_kw: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
+                main_power_w: self.telemetry.get(tk::MAIN_POWER_KW).unwrap_or(0.0),
                 duct_loss_w: self.telemetry.get(tk::DUCT_LOSS_W).unwrap_or(0.0),
                 mode_override: self.mode_override,
                 dr_level: self.dr_level,
@@ -905,8 +960,8 @@ impl Equipment for GasFurnace {
         self.dr_level = decoded.dr_level;
         self.hvac.runtime.last_speed_index = decoded.speed_index as usize;
 
-        self.telemetry.insert(tk::FAN_KW, decoded.electric_kw);
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::FAN_KW, decoded.electric_w);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
             .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
         self.telemetry
@@ -919,20 +974,20 @@ impl Equipment for GasFurnace {
         self.telemetry
             .insert(tk::RUNTIME_FRACTION, decoded.runtime_fraction);
         self.telemetry
-            .insert(tk::MAIN_POWER_KW, decoded.main_power_kw);
+            .insert(tk::MAIN_POWER_KW, decoded.main_power_w);
         self.telemetry.insert(tk::DUCT_LOSS_W, decoded.duct_loss_w);
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the gas step's own literal (fuel and speed
         // arms included): the flows from the checkpointed
-        // `electric_kw`/`thermal_output_w`/`fuel_input_w`, the mode from
+        // `electric_w`/`thermal_output_w`/`fuel_input_w`, the mode from
         // the checkpointed `operating_mode`, the speed from the restored
         // `last_speed_index`, the setpoint from the restored thermostat
         // state. Same restore contract as the electric furnace.
         let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(0.0),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: decoded.fuel_input_w.max(0.0),
@@ -949,7 +1004,7 @@ impl Equipment for GasFurnace {
             },
             performance: CorePerformance {
                 cop: None,
-                main_power_kw: Some(decoded.main_power_kw),
+                main_power_w: Some(decoded.main_power_w),
             },
         };
         Ok(())
@@ -975,6 +1030,21 @@ impl Equipment for GasFurnace {
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "afue",
+                self.fuel_efficiency,
+                hares_types::Unit::Fraction,
+            ),
+        ]
     }
 }
 
@@ -1048,159 +1118,115 @@ fn gas_furnace_default_telemetry() -> Telemetry {
 
 fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active heating setpoint from thermostat schedule".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active cooling setpoint from thermostat schedule".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage heating setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage cooling setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override heating setpoint (0.0 when no override active)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override cooling setpoint (0.0 when no override active)"
-                .to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::HEATING_SETPOINT_C,
+            "Active heating setpoint from thermostat schedule",
+        ),
+        TelemetryField::temp_c(
+            tk::COOLING_SETPOINT_C,
+            "Active cooling setpoint from thermostat schedule",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_HEATING_SETPOINT_C,
+            "Schedule-stage heating setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_COOLING_SETPOINT_C,
+            "Schedule-stage cooling setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_HEATING_SETPOINT_C,
+            "Runtime override heating setpoint (0.0 when no override active)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_COOLING_SETPOINT_C,
+            "Runtime override cooling setpoint (0.0 when no override active)",
+        ),
     ]
 }
 
 fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::FAN_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric furnace fan electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric furnace active power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Delivered sensible heat to conditioned zone after duct DSE".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_AIR_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Configured furnace supply-air temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Runtime fraction (duty cycle / PLR) [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::MAIN_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Main power (total_input - fan) per OCHRE HVAC.py:575".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUCT_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_INDEX.to_string(),
-            unit: "-".to_string(),
-            description: "Active heating speed stage index (0-based)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_FRAC.to_string(),
-            unit: "-".to_string(),
-            description: "Interpolation weight between speed stages [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Heating load fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_FACTOR.to_string(),
-            unit: "-".to_string(),
-            description: "Part-load factor for cycling degradation (PLF)".to_string(),
-        },
-        TelemetryField {
-            name: tk::STARTUP_MULTIPLIER.to_string(),
-            unit: "-".to_string(),
-            description: "Capacity ramp multiplier on startup (1.0 for furnace)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUTY_CYCLE.to_string(),
-            unit: "-".to_string(),
-            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last speed-stage change".to_string(),
-        },
-        TelemetryField {
-            name: tk::MODE_DURATION_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last thermostat mode change".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(tk::FAN_KW, "Electric furnace fan electric power").not_nullable(),
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "Electric furnace active power draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Delivered sensible heat to conditioned zone after duct DSE",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::SUPPLY_AIR_TEMP_C,
+            "Configured furnace supply-air temperature",
+        ),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Runtime fraction (duty cycle / PLR) [0..1]",
+        )
+        .not_nullable(),
+        TelemetryField::power_kw(
+            tk::MAIN_POWER_KW,
+            "Main power (total_input - fan) per OCHRE HVAC.py:575",
+        ),
+        TelemetryField::power_w(
+            tk::DUCT_LOSS_W,
+            "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)",
+        ),
+        TelemetryField::code_code(
+            tk::SPEED_INDEX,
+            &["0", "1", "2", "3"],
+            "Active heating speed stage index (0-based)",
+        ),
+        TelemetryField::ratio(
+            tk::SPEED_FRAC,
+            "Interpolation weight between speed stages [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Heating load fraction this timestep [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_FACTOR,
+            "Part-load factor for cycling degradation (PLF)",
+        ),
+        TelemetryField::ratio(
+            tk::STARTUP_MULTIPLIER,
+            "Capacity ramp multiplier on startup (1.0 for furnace)",
+        ),
+        TelemetryField::ratio(
+            tk::DUTY_CYCLE,
+            "Thermostat on/off fraction this timestep [0..1]",
+        ),
+        TelemetryField::timer_s(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            "Seconds since the last speed-stage change",
+        ),
+        TelemetryField::timer_s(
+            tk::MODE_DURATION_S,
+            "Seconds since the last thermostat mode change",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -1208,128 +1234,93 @@ fn electric_furnace_telemetry_fields() -> Vec<TelemetryField> {
 
 fn gas_furnace_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::FAN_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Gas furnace fan-only electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electric power draw (fan-only for gas furnace)".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Fuel input power derived from delivered capacity and fuel efficiency"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Delivered sensible heat to conditioned zone after duct DSE".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_AIR_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Configured furnace supply-air temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_INDEX.to_string(),
-            unit: "-".to_string(),
-            description: "Active heating speed stage index (0-based)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Runtime fraction (duty cycle / PLR) [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::MAIN_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Main power (gas input in kW) per OCHRE HVAC.py:575".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUCT_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SPEED_FRAC.to_string(),
-            unit: "-".to_string(),
-            description: "Interpolation weight between speed stages [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Heating load fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_FACTOR.to_string(),
-            unit: "-".to_string(),
-            description: "Part-load factor for cycling degradation (PLF)".to_string(),
-        },
-        TelemetryField {
-            name: tk::STARTUP_MULTIPLIER.to_string(),
-            unit: "-".to_string(),
-            description: "Capacity ramp multiplier on startup (1.0 for furnace)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DUTY_CYCLE.to_string(),
-            unit: "-".to_string(),
-            description: "Thermostat on/off fraction this timestep [0..1]".to_string(),
-        },
-        TelemetryField {
-            name: tk::TIME_AT_CURRENT_SPEED_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last speed-stage change".to_string(),
-        },
-        TelemetryField {
-            name: tk::MODE_DURATION_S.to_string(),
-            unit: "s".to_string(),
-            description: "Seconds since the last thermostat mode change".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(tk::FAN_KW, "Gas furnace fan-only electric power").not_nullable(),
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Total electric power draw (fan-only for gas furnace)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(
+            tk::FUEL_INPUT_W,
+            "Fuel input power derived from delivered capacity and fuel efficiency",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Delivered sensible heat to conditioned zone after duct DSE",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::SUPPLY_AIR_TEMP_C,
+            "Configured furnace supply-air temperature",
+        ),
+        TelemetryField::code_code(
+            tk::SPEED_INDEX,
+            &["0", "1", "2", "3"],
+            "Active heating speed stage index (0-based)",
+        ),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Runtime fraction (duty cycle / PLR) [0..1]",
+        )
+        .not_nullable(),
+        TelemetryField::power_kw(
+            tk::MAIN_POWER_KW,
+            "Main power (gas input in kW) per OCHRE HVAC.py:575",
+        ),
+        TelemetryField::power_w(
+            tk::DUCT_LOSS_W,
+            "Duct distribution losses per ASHRAE 152: gross_capacity * (1 - dse)",
+        ),
+        TelemetryField::ratio(
+            tk::SPEED_FRAC,
+            "Interpolation weight between speed stages [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Heating load fraction this timestep [0..1]",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_FACTOR,
+            "Part-load factor for cycling degradation (PLF)",
+        ),
+        TelemetryField::ratio(
+            tk::STARTUP_MULTIPLIER,
+            "Capacity ramp multiplier on startup (1.0 for furnace)",
+        ),
+        TelemetryField::ratio(
+            tk::DUTY_CYCLE,
+            "Thermostat on/off fraction this timestep [0..1]",
+        ),
+        TelemetryField::timer_s(
+            tk::TIME_AT_CURRENT_SPEED_S,
+            "Seconds since the last speed-stage change",
+        ),
+        TelemetryField::timer_s(
+            tk::MODE_DURATION_S,
+            "Seconds since the last thermostat mode change",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -1382,6 +1373,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1770,8 +1762,12 @@ mod tests {
             let mut restored = ElectricFurnace::new(cfg);
             restored.init(&ef_config(8_000.0, 1.05), &env).unwrap();
             restored.load_state(&state).unwrap();
-            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-                .expect("an electric furnace checkpoint must restore a contract-valid output");
+            hares_types::validate_core_contract(
+                restored.descriptor(),
+                restored.core_output(),
+                &mut Vec::new(),
+            )
+            .expect("an electric furnace checkpoint must restore a contract-valid output");
         }
         // Gas furnace face (the fuel and speed arms).
         {
@@ -1813,8 +1809,12 @@ mod tests {
             let mut restored = GasFurnace::new(gas_cfg);
             restored.init(&cfg, &env).unwrap();
             restored.load_state(&state).unwrap();
-            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-                .expect("a gas furnace checkpoint must restore a contract-valid output");
+            hares_types::validate_core_contract(
+                restored.descriptor(),
+                restored.core_output(),
+                &mut Vec::new(),
+            )
+            .expect("a gas furnace checkpoint must restore a contract-valid output");
         }
     }
 
@@ -2059,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    fn electric_furnace_telemetry_fields_declares_fan_kw() {
+    fn electric_furnace_telemetry_fields_declares_fan_w() {
         use super::electric_furnace_telemetry_fields;
         let fields = electric_furnace_telemetry_fields();
         assert!(
@@ -2268,7 +2268,7 @@ mod tests {
     /// Gas furnace main_power = gas fuel input in kW.
     /// OCHRE HVAC.py:575: main_power = total_input - fan.
     #[test]
-    fn gas_furnace_main_power_equals_fuel_input_in_kw() {
+    fn gas_furnace_main_power_equals_fuel_input_in_w() {
         const CAP_W: f64 = 10_000.0;
         const AFUE: f64 = 0.80;
         let cfg = EquipmentConfig::from_typed(
@@ -2294,11 +2294,11 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let main_kw = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap();
-        let expected_fuel_kw = (CAP_W / AFUE) / 1000.0;
+        let main_w = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap();
+        let expected_fuel_w = CAP_W / AFUE;
         assert!(
-            (main_kw - expected_fuel_kw).abs() < 1e-6,
-            "gas furnace main_power_kw must equal fuel_input in kW ({expected_fuel_kw}), got {main_kw}"
+            (main_w - expected_fuel_w).abs() < 1e-6,
+            "gas furnace main_power_w must equal the fuel input in W ({expected_fuel_w}), got {main_w}"
         );
     }
 
@@ -2355,16 +2355,16 @@ mod tests {
         eq.update_control(&env);
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let main_kw = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap();
-        let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap();
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).unwrap();
-        // main_power = electric_kw - fan_kw = (elements + fan) - fan = elements only
-        let expected = electric_kw - fan_kw;
+        let main_w = eq.telemetry().get(tk::MAIN_POWER_KW).unwrap();
+        let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap();
+        let fan_w = eq.telemetry().get(tk::FAN_KW).unwrap();
+        // main_power = electric_w - fan_w = (elements + fan) - fan = elements only
+        let expected = electric_w - fan_w;
         assert!(
-            (main_kw - expected).abs() < 1e-9,
-            "electric furnace main_power must equal electric_kw - fan_kw ({expected}), got {main_kw}"
+            (main_w - expected).abs() < 1e-9,
+            "electric furnace main_power must equal electric_w - fan_w ({expected}), got {main_w}"
         );
-        assert!(main_kw > 0.0, "main_power must be positive during heating");
+        assert!(main_w > 0.0, "main_power must be positive during heating");
     }
 
     #[test]
@@ -2525,18 +2525,18 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert!(ports.electrical.load_power_w > 0.0);
-        let fan_kw = eq.telemetry().get(tk::FAN_KW).expect("fan");
-        assert!(fan_kw > 0.0, "blower must run while heating");
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = fan_kw * 0.87_f64.acos().tan();
+        let fan_w = eq.telemetry().get(tk::FAN_KW).expect("fan");
+        assert!(fan_w > 0.0, "blower must run while heating");
+        let q = ports.electrical.reactive_power_var;
+        let expected = fan_w * 0.87_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-12,
             "Q must be the blower component only (element resistive): \
              q={q}, expected={expected}"
         );
-        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(q));
+        assert_eq!(eq.core_output().flows.reactive_power_var, Some(q));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(q));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2583,7 +2583,7 @@ mod tests {
                 ports_nopf.electrical.load_power_w.to_bits(),
                 "step {i} (v={v}): real power diverged"
             );
-            assert_eq!(ports_nopf.electrical.reactive_power_kvar, 0.0);
+            assert_eq!(ports_nopf.electrical.reactive_power_var, 0.0);
         }
     }
 
@@ -2619,15 +2619,15 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let p_kw = ports.electrical.net_active_w() / 1000.0;
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = p_kw * pf.acos().tan();
+        let p_w = ports.electrical.net_active_w();
+        let q = ports.electrical.reactive_power_var;
+        let expected = p_w * pf.acos().tan();
         assert!(
-            (q - expected).abs() < 1e-9,
+            (q - expected).abs() < 1e-6,
             "Q/P must equal tan(acos({pf})): {q} vs {expected}"
         );
 
-        let co_q = eq.core_output().flows.reactive_power_kvar.expect("Some");
+        let co_q = eq.core_output().flows.reactive_power_var.expect("Some");
         assert_eq!(
             co_q.to_bits(),
             q.to_bits(),
@@ -2641,7 +2641,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must match port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2671,9 +2671,9 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert_eq!(ports.electrical.load_power_w, 0.0);
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
         assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "off equipment must report Some(0.0)"
         );
@@ -2737,10 +2737,10 @@ mod tests {
                 ports_nopf.electrical.load_power_w.to_bits(),
                 "step {i} (v={v}): real power diverged"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
-            assert_eq!(ports_nopf.electrical.reactive_power_kvar, 0.0);
+            assert_eq!(ports_nopf.electrical.reactive_power_var, 0.0);
         }
         assert!(any_reactive, "the pf 0.87 twin must produce reactive power");
     }

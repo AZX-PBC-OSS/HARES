@@ -59,7 +59,7 @@ mod tests {
             fs::read_to_string(bestest_fixture("900ff.toml")).expect("900ff.toml must be readable");
 
         // Shorten the simulation to 48 hours (172800 s) for test speed.
-        let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
+        let shortened = original.replace("duration = 31536000", "duration = 172800");
 
         // Fix the relative EPW path to be absolute.
         let epw_abs = project_root()
@@ -82,11 +82,19 @@ mod tests {
         let original =
             fs::read_to_string(bestest_fixture("900ff.toml")).expect("900ff.toml must be readable");
 
-        let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
+        let shortened = original.replace("duration = 31536000", "duration = 172800");
+        // The warm-up is disabled in the [simulation] table: the warm-up's
+        // default is the converging warm-up, and this fixture's premise is
+        // the cold construction state.
         let stripped: String = shortened
             .lines()
-            .filter(|line| !line.trim_start().starts_with("initialization_duration_s"))
-            .map(|line| format!("{line}\n"))
+            .map(|line| {
+                if line.trim_start() == "master_seed = 0" {
+                    format!("{line}\nwarmup = \"disabled\"\n")
+                } else {
+                    format!("{line}\n")
+                }
+            })
             .collect();
 
         let epw_abs = project_root()
@@ -112,7 +120,7 @@ mod tests {
             fs::read_to_string(bestest_fixture("900ff.toml")).expect("900ff.toml must be readable");
 
         // Shorten simulation and keep warmup config present so warmup runs.
-        let shortened = original.replace("duration_s = 31536000", "duration_s = 172800");
+        let shortened = original.replace("duration = 31536000", "duration = 172800");
 
         let epw_abs = project_root()
             .join("data/examples/USA_CO_Denver.epw")
@@ -155,10 +163,10 @@ mod tests {
         let no_warmup_toml = write_short_no_warmup_toml();
 
         let mut with_warmup =
-            Dwelling::from_toml_config_with_write_output(warmup_toml.path(), Some(false))
+            Dwelling::from_toml_config_with_reports(warmup_toml.path(), Some(Vec::new()))
                 .expect("warmup dwelling must build");
         let mut without_warmup =
-            Dwelling::from_toml_config_with_write_output(no_warmup_toml.path(), Some(false))
+            Dwelling::from_toml_config_with_reports(no_warmup_toml.path(), Some(Vec::new()))
                 .expect("no-warmup dwelling must build");
 
         let t_with = first_step_zone_temp(&mut with_warmup);
@@ -197,7 +205,7 @@ mod tests {
 
         // Use 1-hour timesteps so warmup convergence (24 h/day iterations) is fast.
         // A short duration keeps the test lightweight.
-        let mut dwelling = Dwelling::from_hpxml_with_write_output(
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
             hares_core::HpxmlInputs {
                 hpxml_path: &hpxml,
                 schedule_path: &schedule,
@@ -207,11 +215,11 @@ mod tests {
             Duration::hours(1),
             Duration::hours(2),
             None,
-            Some(false),
+            Vec::new(),
             // The BEopt example schedule does not name every mapped column,
             // and an equipment with no schedule source is a construction
             // error: the profiles load from the repo's defaults directory.
-            Some(project_root().join("defaults")),
+            project_root().join("python/hares/defaults"),
         )
         .expect("HPXML dwelling must build");
 
@@ -242,7 +250,7 @@ mod tests {
         let toml_file = write_short_convergence_toml();
 
         let mut dwelling =
-            Dwelling::from_toml_config_with_write_output(toml_file.path(), Some(false))
+            Dwelling::from_toml_config_with_reports(toml_file.path(), Some(Vec::new()))
                 .expect("dwelling with convergence warmup must build");
 
         // The dwelling built successfully, which means warmup convergence

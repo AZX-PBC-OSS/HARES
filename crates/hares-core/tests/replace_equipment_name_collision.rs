@@ -11,6 +11,8 @@
 //! the observation-misbinding class the identity contract exists to
 //! prevent, reached through a public, Python-reachable entrance.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
@@ -40,34 +42,31 @@ fn sim_config() -> SimulationConfig {
             .unwrap(),
         duration: Duration::hours(1),
         time_res: Duration::seconds(900),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: hares_io::OutputFormat::Csv,
+        reports: Vec::new(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
 fn dwelling_config(hpxml: &std::path::Path) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(),
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim_config(), None, 100, None),
     }
 }
 
@@ -99,11 +98,7 @@ impl NameProbeEquipment {
                 stage: ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::empty(),
-                telemetry_fields: vec![TelemetryField {
-                    name: "probe".to_string(),
-                    unit: "-".to_string(),
-                    description: "name-collision probe".to_string(),
-                }],
+                telemetry_fields: vec![TelemetryField::ratio("probe", "name-collision probe")],
                 zone_type: None,
             },
             telemetry: Telemetry::with_capacity(1),
@@ -115,6 +110,10 @@ impl NameProbeEquipment {
 impl Equipment for NameProbeEquipment {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
     }
 
     fn rename(&mut self, name: String) {

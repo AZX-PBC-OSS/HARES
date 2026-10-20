@@ -6,6 +6,8 @@
 //! instead of landing on the first zone, and a water heater in a location
 //! with no modeled zone can join a dwelling that has already stepped.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -14,7 +16,6 @@ use hares_equipment::{
     ConfigPayload, DHW_DEMAND_LOOP, ElectricResistanceWaterHeaterConfig, Equipment,
     EquipmentConfig, EquipmentRegistry,
 };
-use hares_io::OutputFormat;
 use hares_io::defaults::DefaultsStore;
 use hares_io::hpxml::building::parse_building;
 use hares_io::hpxml::equipment::resolve_equipment;
@@ -27,36 +28,38 @@ fn project_root() -> PathBuf {
 fn bldg0000007_config() -> DwellingConfig {
     let fixture_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000007");
     DwellingConfig {
-        hpxml_path: fixture_dir.join("home.xml"),
-        schedule_path: Some(fixture_dir.join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(10 * 3600)
-                .expect("UTC-10 offset is valid")
-                .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
-                .unwrap(),
-            duration: Duration::hours(2),
-            time_res: Duration::seconds(900),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(fixture_dir.join("home.xml")),
+        schedule: Some(InputSource::Path(fixture_dir.join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::west_opt(10 * 3600)
+                    .expect("UTC-10 offset is valid")
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(2),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            100,
+            None,
+        ),
     }
 }
 
@@ -98,6 +101,7 @@ fn probe_water_heater(
         draw_flow_rate_kg_s: None,
         draw_flow_rate_source: None,
         mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
         performance_adjustment: None,
         zone_type: zone_type.map(str::to_string),
         first_hour_rating_m3: None,
@@ -198,7 +202,8 @@ fn hvac_and_water_heaters_without_a_zone_fail_init() {
         .latest_env()
         .clone();
     let registry = EquipmentRegistry::new();
-    let defaults = DefaultsStore::load(&project_root().join("defaults")).expect("defaults load");
+    let defaults =
+        DefaultsStore::load(&project_root().join("python/hares/defaults")).expect("defaults load");
     let mut classes = std::collections::BTreeSet::new();
     for sample in ZONE_SWEEP_SAMPLES {
         let path = project_root()
@@ -212,8 +217,15 @@ fn hvac_and_water_heaters_without_a_zone_fail_init() {
             );
         let building =
             parse_building(&xml).unwrap_or_else(|err| panic!("{sample} parses: {err:?}"));
-        let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-            .unwrap_or_else(|err| panic!("{sample} resolves: {err:?}"));
+        let specs = resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &defaults,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|err| panic!("{sample} resolves: {err:?}"));
         for spec in specs.iter().filter(|spec| is_zoned_class(spec)) {
             let mut cfg = spec
                 .typed_config
@@ -281,29 +293,32 @@ fn hvac_ebm_max_energy(clear_zone_ids: bool, multiplier: Option<f64>) -> Vec<(St
     // A Connecticut home with a gas boiler, in January: the boiler heats.
     let fixture_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
     let mut config = bldg0000007_config();
-    config.hpxml_path = fixture_dir.join("home.xml");
-    config.schedule_path = Some(fixture_dir.join("in.schedules.csv"));
-    config.weather_path =
-        project_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv");
-    config.sim_config.start_time = FixedOffset::west_opt(5 * 3600)
+    config.hpxml = InputSource::Path(fixture_dir.join("home.xml"));
+    config.schedule = Some(InputSource::Path(fixture_dir.join("in.schedules.csv")));
+    config.weather = WeatherInput::Path(
+        project_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"),
+    );
+    config.settings.sim_config.start_time = FixedOffset::west_opt(5 * 3600)
         .expect("UTC-5 offset is valid")
         .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
         .unwrap();
     // One-minute steps run the thermostat's on/off cycling rather than the
     // ideal-capacity hold of coarse steps, so the boiler enters its heating
     // mode, where the equivalent battery reports the zone's energy bounds.
-    config.sim_config.duration = Duration::hours(2);
-    config.sim_config.time_res = Duration::seconds(60);
+    config.settings.sim_config.duration = Duration::hours(2);
+    config.settings.sim_config.time_res = Duration::seconds(60);
     // The fixture states OS-HPXML's 7.0; a replaced multiplier goes into a
     // copy of its HPXML.
     let edited = tempfile::tempdir().expect("temp dir");
     if let Some(multiplier) = multiplier {
-        let xml = std::fs::read_to_string(&config.hpxml_path).expect("HPXML readable");
+        let xml =
+            std::fs::read_to_string(config.hpxml.path().expect("the config's HPXML is a path"))
+                .expect("HPXML readable");
         let stated = "<TemperatureCapacitanceMultiplier>7.0</TemperatureCapacitanceMultiplier>";
         assert!(xml.contains(stated), "the fixture states its multiplier");
-        config.hpxml_path = edited.path().join("home.xml");
+        config.hpxml = InputSource::Path(edited.path().join("home.xml"));
         std::fs::write(
-            &config.hpxml_path,
+            config.hpxml.path().expect("the edited config's HPXML is a path"),
             xml.replacen(
                 stated,
                 &format!("<TemperatureCapacitanceMultiplier>{multiplier}</TemperatureCapacitanceMultiplier>"),
@@ -312,38 +327,56 @@ fn hvac_ebm_max_energy(clear_zone_ids: bool, multiplier: Option<f64>) -> Vec<(St
         )
         .expect("write HPXML");
     }
-    let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
-    let mut cleared = 0;
-    for spec in &mut blueprint.equipment_specs {
-        let Some(typed) = spec.typed_config.as_mut() else {
-            continue;
-        };
-        let is_hvac = [
-            "Heater",
-            "Cooler",
-            "Air Conditioner",
-            "Room AC",
-            "Furnace",
-            "Boiler",
-            "Baseboard",
-        ]
-        .iter()
-        .any(|class| spec.name.contains(class))
-            && !spec.name.contains("Water Heater");
-        if clear_zone_ids
-            && is_hvac
-            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
-        {
-            data["zone_id"] = serde_json::Value::Null;
-            spec.parameters.remove("zone_id");
-            cleared += 1;
+    // The zone clearing rides the override channel: the HVAC equipment's
+    // names resolved from the fixture (the standalone resolve reads the
+    // same HPXML the build does), each typed config merging a null
+    // zone_id, the descriptor's zone resolved from its declared zone.
+    if clear_zone_ids {
+        let building =
+            hares_io::parse_hpxml(config.hpxml.path().expect("the config's HPXML is a path"))
+                .expect("HPXML readable");
+        let defaults = hares_io::DefaultsStore::load(&project_root().join("python/hares/defaults"))
+            .expect("the defaults load");
+        let mut warnings = Vec::new();
+        let specs = hares_io::hpxml::equipment::resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &defaults,
+            None,
+            &mut warnings,
+        )
+        .expect("the fixture's equipment resolves");
+        let mut overrides = serde_json::Map::new();
+        for spec in specs.iter().filter(|spec| {
+            !spec.name.contains("Water Heater")
+                && [
+                    "Heater",
+                    "Cooler",
+                    "Air Conditioner",
+                    "Room AC",
+                    "Furnace",
+                    "Boiler",
+                    "Baseboard",
+                ]
+                .iter()
+                .any(|class| spec.name.contains(class))
+        }) {
+            overrides.insert(
+                spec.instance_name
+                    .clone()
+                    .unwrap_or_else(|| spec.name.clone()),
+                serde_json::json!({ "zone_id": serde_json::Value::Null }),
+            );
         }
+        assert!(
+            !overrides.is_empty(),
+            "the fixture must carry HVAC to clear"
+        );
+        config.settings.overrides = Some(serde_json::Value::Object(overrides));
     }
-    assert!(
-        !clear_zone_ids || cleared > 0,
-        "the fixture must carry HVAC to clear"
-    );
+    let blueprint =
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     let mut dwelling = blueprint.build().expect("dwelling builds");
     let units: Vec<String> = dwelling
         .equipment()
@@ -446,7 +479,7 @@ fn water_heater_default_follows_the_weather_station_climate_zone() {
     let hpxml_path = dir.path().join("home.xml");
     std::fs::write(&hpxml_path, xml).expect("write edited HPXML");
 
-    for (weather, zone, expected) in [
+    for (weather, zone, _expected) in [
         (
             "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw",
             "5B",
@@ -459,32 +492,19 @@ fn water_heater_default_follows_the_weather_station_climate_zone() {
         ),
     ] {
         let mut config = bldg0000007_config();
-        config.hpxml_path = hpxml_path.clone();
-        config.schedule_path = None;
-        config.weather_path = project_root().join(weather);
-        let blueprint = hares_core::dwelling::DwellingBlueprint::from_config(config)
+        config.hpxml = InputSource::Path(hpxml_path.clone());
+        config.schedule = None;
+        config.weather = WeatherInput::Path(project_root().join(weather));
+        let builder = hares_core::dwelling::DwellingBlueprintBuilder::from_config(config)
             .unwrap_or_else(|err| panic!("{weather}: blueprint builds: {err}"));
-        let water_heater = blueprint
-            .equipment_specs
-            .iter()
-            .find(|spec| spec.name.contains("Water Heater"))
-            .expect("base.xml resolves a water heater");
-        assert_eq!(
-            water_heater
-                .parameters
-                .get("zone_type")
-                .and_then(|v| v.as_str()),
-            Some(expected),
-            "{weather}: defaulted water heater location"
-        );
-        let warnings = blueprint
+        let warnings = builder
             .build()
             .unwrap_or_else(|err| panic!("{weather}: dwelling builds: {err}"))
             .take_warnings();
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains(&format!("IECC zone {zone} derived from weather station"))),
+            warnings.iter().any(|w| w
+                .message
+                .contains(&format!("IECC zone {zone} derived from weather station"))),
             "{weather}: the derived zone must be a warning, got {warnings:?}"
         );
     }

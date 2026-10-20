@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use hares_physics::constants::KW_TO_W;
 use hares_physics::ground::SourceTemperature;
-use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
@@ -171,7 +170,7 @@ impl HpCooler {
             hysteresis_c: hp_cfg.common.hysteresis_c,
             airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
-            crankcase_heater_kw: hp_cfg.crankcase_heater_kw,
+            crankcase_heater_w: hp_cfg.crankcase_heater_w,
             crankcase_heater_threshold_c: hp_cfg.crankcase_heater_threshold_c,
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
@@ -208,12 +207,19 @@ impl HpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
-        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
+        cfg.zone_capacitance_j_per_k = source.zone_capacitance_j_per_k;
         Ok(cfg)
     }
 }
 
 impl Equipment for HpCooler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.inner.core.hvac.reset_stochastic_state();
+    }
+
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
     }
@@ -315,6 +321,10 @@ impl Equipment for HpCooler {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        self.inner.resolved_parameters()
     }
 
     fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
@@ -456,7 +466,7 @@ impl GshpCooler {
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
             // Crankcase values are overridden post-init (compressor indoors,
             // no crankcase heater needed). Not set here to avoid redundancy.
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
@@ -486,7 +496,7 @@ impl GshpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
-        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
+        cfg.zone_capacitance_j_per_k = source.zone_capacitance_j_per_k;
         Ok(cfg)
     }
 
@@ -497,6 +507,13 @@ impl GshpCooler {
 }
 
 impl Equipment for GshpCooler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.inner.core.hvac.reset_stochastic_state();
+    }
+
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
     }
@@ -523,9 +540,9 @@ impl Equipment for GshpCooler {
         self.ports = self.inner.ports().to_vec();
         // GSHP: compressor is indoors; no crankcase heater needed.
         // Override post-init because AirConditioner::init_from_typed unconditionally
-        // writes the central-AC default (0.05 kW / 12.8°C) when crankcase_heater_kw
+        // writes the central-AC default (0.05 kW / 12.8°C) when crankcase_heater_w
         // is None in the mapped config.
-        self.inner.core.crankcase_rated_kw = 0.0;
+        self.inner.core.crankcase_rated_w = 0.0;
         self.inner.core.crankcase_threshold_c = f64::NEG_INFINITY;
 
         // Ground-loop circulation pump parameters from typed config.
@@ -635,8 +652,8 @@ impl Equipment for GshpCooler {
         let coil_lat_w = tel.get(tk::COIL_LATENT_COOLING_W).unwrap_or(0.0);
         // Gross compressor power (pre-space_fraction) to match the gross coil
         // values above; COMPRESSOR_KW telemetry is scaled by space_fraction.
-        let compressor_kw = self.inner.core.last_compressor_kw;
-        let borehole_heat_w = coil_sens_w + coil_lat_w + compressor_kw * KW_TO_W;
+        let compressor_w = self.inner.core.last_compressor_w;
+        let borehole_heat_w = coil_sens_w + coil_lat_w + compressor_w * KW_TO_W;
         self.inner
             .core
             .source_temp
@@ -646,11 +663,11 @@ impl Equipment for GshpCooler {
         // active. `last_cooling_rtf > 0` means the compressor was on this step.
         // space_fraction scales the pump draw exactly like the inner unit's
         // compressor/fan/crankcase (the GSHP heater likewise applies
-        // space_fraction to its combined electric_kw, pump included).
+        // space_fraction to its combined electric_w, pump included).
         let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
         let sf = self.inner.core.hvac.config.space_fraction;
-        let pump_kw = if compressor_ran {
-            hares_physics::pump::compute_ground_loop_pump_power_kw(
+        let pump_w = if compressor_ran {
+            hares_physics::pump::compute_ground_loop_pump_power_w(
                 self.pump_loop_depth_m,
                 self.pump_pipe_diameter_m,
                 self.pump_flow_rate_m3_per_s,
@@ -669,38 +686,37 @@ impl Equipment for GshpCooler {
         // added on top so the port and CoreOutput stay consistent.
         let pump_q = self
             .pump_zip
-            .reactive_kvar(pump_kw, env.grid.bus_voltage_pu());
-        if pump_kw > 0.0 || pump_q != 0.0 {
+            .reactive_var(pump_w, env.grid.bus_voltage_pu());
+        if pump_w > 0.0 || pump_q != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(pump_kw),
-                reactive_power_kvar: pump_q,
+                active_power_w: (pump_w),
+                reactive_power_var: pump_q,
             })?;
         }
 
         // Publish pump power in telemetry.
-        self.inner.set_telemetry(tk::PUMP_POWER_KW, pump_kw);
+        self.inner.set_telemetry(tk::PUMP_POWER_KW, pump_w);
 
         // Rebuild the CoreOutput so it includes the pump's active and reactive
         // contribution (the inner CoreOutput covers only compressor + fan +
         // crankcase). This keeps port and CoreOutput consistent — the
         // debug-build validator would otherwise flag the pump delta.
         let inner_co = self.inner.core_output().clone();
-        let inner_kw = match inner_co.flows.electric_kw {
+        let inner_w = match inner_co.flows.electric_w {
             Some(hares_types::ElectricPower::Consumption(kw)) => kw,
             Some(hares_types::ElectricPower::Bidirectional(kw)) => kw,
             _ => 0.0,
         };
-        let inner_q = inner_co.flows.reactive_power_kvar.unwrap_or(0.0);
-        let total_kw = inner_kw + pump_kw;
+        let inner_q = inner_co.flows.reactive_power_var.unwrap_or(0.0);
+        let total_w = inner_w + pump_w;
         let total_q = inner_q + pump_q;
         // Fold the pump into the unit-total telemetry so port, CoreOutput, and
         // telemetry agree on both active and reactive power.
-        self.inner.set_telemetry(tk::ELECTRIC_KW, total_kw);
+        self.inner.set_telemetry(tk::ELECTRIC_KW, total_w);
         self.inner.set_telemetry(tk::REACTIVE_POWER_KVAR, total_q);
         let mut combined = inner_co;
-        combined.flows.electric_kw =
-            Some(hares_types::ElectricPower::Consumption(total_kw.max(0.0)));
-        combined.flows.reactive_power_kvar = Some(total_q);
+        combined.flows.electric_w = Some(hares_types::ElectricPower::Consumption(total_w.max(0.0)));
+        combined.flows.reactive_power_var = Some(total_q);
         self.core_output = combined;
 
         Ok(())
@@ -754,6 +770,10 @@ impl Equipment for GshpCooler {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        self.inner.resolved_parameters()
     }
 
     fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
@@ -888,7 +908,7 @@ impl WshpCooler {
             hysteresis_c: hp_cfg.common.hysteresis_c,
             airflow_m3_s_per_w: hp_cfg.common.airflow_m3_s_per_w,
             fraction_load_served: hp_cfg.common.fraction_cooling_load_served,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: hp_cfg.common.duct.clone(),
@@ -918,7 +938,7 @@ impl WshpCooler {
         // resolves its ZIP through the mapped "Air Conditioner" config.
         cfg.zip = source.zip;
         cfg.zone_map = source.zone_map.clone();
-        cfg.zone_capacitance_kwh_per_k = source.zone_capacitance_kwh_per_k;
+        cfg.zone_capacitance_j_per_k = source.zone_capacitance_j_per_k;
         Ok(cfg)
     }
 
@@ -928,6 +948,13 @@ impl WshpCooler {
 }
 
 impl Equipment for WshpCooler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.inner.core.hvac.reset_stochastic_state();
+    }
+
     fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
         &self.descriptor
     }
@@ -953,7 +980,7 @@ impl Equipment for WshpCooler {
         self.descriptor.zone = self.inner.descriptor().zone;
         self.ports = self.inner.ports().to_vec();
         // WSHP: compressor is indoors; no crankcase heater needed.
-        self.inner.core.crankcase_rated_kw = 0.0;
+        self.inner.core.crankcase_rated_w = 0.0;
         self.inner.core.crankcase_threshold_c = f64::NEG_INFINITY;
 
         self.pump_loop_depth_m = typed_hp_cfg
@@ -1009,8 +1036,8 @@ impl Equipment for WshpCooler {
         // compressor/fan (see GshpCooler::step).
         let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
         let sf = self.inner.core.hvac.config.space_fraction;
-        let pump_kw = if compressor_ran {
-            hares_physics::pump::compute_ground_loop_pump_power_kw(
+        let pump_w = if compressor_ran {
+            hares_physics::pump::compute_ground_loop_pump_power_w(
                 self.pump_loop_depth_m,
                 self.pump_pipe_diameter_m,
                 self.pump_flow_rate_m3_per_s,
@@ -1027,34 +1054,33 @@ impl Equipment for WshpCooler {
         // See GshpCooler::step for the full rationale.
         let pump_q = self
             .pump_zip
-            .reactive_kvar(pump_kw, env.grid.bus_voltage_pu());
-        if pump_kw > 0.0 || pump_q != 0.0 {
+            .reactive_var(pump_w, env.grid.bus_voltage_pu());
+        if pump_w > 0.0 || pump_q != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(pump_kw),
-                reactive_power_kvar: pump_q,
+                active_power_w: (pump_w),
+                reactive_power_var: pump_q,
             })?;
         }
 
-        self.inner.set_telemetry(tk::PUMP_POWER_KW, pump_kw);
+        self.inner.set_telemetry(tk::PUMP_POWER_KW, pump_w);
 
         // Rebuild the CoreOutput so it includes the pump's active and reactive
         // contribution (the inner CoreOutput covers only compressor + fan +
         // crankcase). This keeps port and CoreOutput consistent.
         let inner_co = self.inner.core_output().clone();
-        let inner_kw = match inner_co.flows.electric_kw {
+        let inner_w = match inner_co.flows.electric_w {
             Some(hares_types::ElectricPower::Consumption(kw)) => kw,
             Some(hares_types::ElectricPower::Bidirectional(kw)) => kw,
             _ => 0.0,
         };
-        let inner_q = inner_co.flows.reactive_power_kvar.unwrap_or(0.0);
-        let total_kw = inner_kw + pump_kw;
+        let inner_q = inner_co.flows.reactive_power_var.unwrap_or(0.0);
+        let total_w = inner_w + pump_w;
         let total_q = inner_q + pump_q;
-        self.inner.set_telemetry(tk::ELECTRIC_KW, total_kw);
+        self.inner.set_telemetry(tk::ELECTRIC_KW, total_w);
         self.inner.set_telemetry(tk::REACTIVE_POWER_KVAR, total_q);
         let mut combined = inner_co;
-        combined.flows.electric_kw =
-            Some(hares_types::ElectricPower::Consumption(total_kw.max(0.0)));
-        combined.flows.reactive_power_kvar = Some(total_q);
+        combined.flows.electric_w = Some(hares_types::ElectricPower::Consumption(total_w.max(0.0)));
+        combined.flows.reactive_power_var = Some(total_q);
         self.core_output = combined;
 
         Ok(())
@@ -1105,6 +1131,10 @@ impl Equipment for WshpCooler {
 
     fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
         self.inner.ideal_target()
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        self.inner.resolved_parameters()
     }
 
     fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
@@ -1160,6 +1190,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1213,14 +1244,14 @@ mod tests {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
                     ..Default::default()
                 },
                 stage_shrs: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 min_oat_cooling_c: 10.0,
             },
@@ -1262,7 +1293,7 @@ mod tests {
                 },
             )
             .unwrap();
-            cfg.zone_capacitance_kwh_per_k = 2.5;
+            cfg.zone_capacitance_j_per_k = 2.5 * 3.6e6;
             cfg
         };
         let env = cooling_env(21.0, 10.0);
@@ -1278,21 +1309,12 @@ mod tests {
         wshp.init(&cfg, &env).unwrap();
 
         for (class, capacitance) in [
-            (
-                "ASHP",
-                ashp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
-            ),
-            (
-                "GSHP",
-                gshp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
-            ),
-            (
-                "WSHP",
-                wshp.inner.core.hvac.config.zone_capacitance_kwh_per_k,
-            ),
+            ("ASHP", ashp.inner.core.hvac.config.zone_capacitance_j_per_k),
+            ("GSHP", gshp.inner.core.hvac.config.zone_capacitance_j_per_k),
+            ("WSHP", wshp.inner.core.hvac.config.zone_capacitance_j_per_k),
         ] {
             assert_eq!(
-                capacitance, 2.5,
+                capacitance, 9000000.0,
                 "{class} cooler dropped the zone capacitance"
             );
         }
@@ -1373,6 +1395,60 @@ mod tests {
             (eq.inner.core.hvac.config.airflow_m3_s_per_w - expected).abs() < 1e-12,
             "MSHP cooler airflow mismatch, got {} m3/s/W",
             eq.inner.core.hvac.config.airflow_m3_s_per_w
+        );
+    }
+
+    /// The declared fan power is the TOP stage's fan power, the same
+    /// normalization the heater's init applies: OCHRE's fan power per unit
+    /// flow divides by `rated_flow_rate = max(flow_rate_list)` with the
+    /// per-stage flows derived from the per-stage capacities
+    /// (HVAC.py:126-150), so a declared MSHP Cooler FanPowerWatts draws at
+    /// the top stage. A declared raw-watt fan power that never reached the
+    /// fan (a dead config field leaving the per-m3s default in place) is a
+    /// silently dropped input.
+    #[test]
+    fn mshp_cooler_fan_power_normalizes_to_the_top_stage() {
+        const FAN_POWER_W: f64 = 300.0;
+        const AIRFLOW_M3_S_PER_W: f64 = 4.0e-5;
+
+        let cfg = EquipmentConfig::from_typed(
+            "mshp_cooler_fan_norm".to_string(),
+            "MSHP Cooler".to_string(),
+            crate::HeatPumpCoolerConfig {
+                common: crate::HeatPumpCommonConfig {
+                    zone_id: Some(1),
+                    cooling_capacity_w: Some(10_000.0),
+                    cooling_eir: Some(0.30),
+                    stage_cooling_capacities_w: Some(vec![4_000.0, 6_000.0, 8_500.0, 12_000.0]),
+                    stage_cooling_eirs: Some(vec![0.34, 0.32, 0.31, 0.30]),
+                    number_of_speeds: 4,
+                    is_mini_split: true,
+                    fan_power_w: Some(FAN_POWER_W),
+                    airflow_m3_s_per_w: Some(AIRFLOW_M3_S_PER_W),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut eq = HpCooler::mshp_cooler(cfg.clone());
+        let e = cooling_env(30.0, 35.0);
+        eq.init(&cfg, &e).unwrap();
+
+        let top_cap_w = eq
+            .inner
+            .core
+            .hvac
+            .config
+            .cooling_capacities_w
+            .last()
+            .copied()
+            .unwrap();
+        let fan_power_per_m3_s = eq.inner.core.hvac.config.fan_power_w_per_m3_s;
+        let top_stage_fan_w = fan_power_per_m3_s * AIRFLOW_M3_S_PER_W * top_cap_w;
+        assert!(
+            (top_stage_fan_w - FAN_POWER_W).abs() < 1e-6,
+            "top-stage fan power = {top_stage_fan_w} W, expected the declared {FAN_POWER_W} W"
         );
     }
 
@@ -1613,7 +1689,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// After `init()`, GSHP cooler must have crankcase heater disabled:
-    /// crankcase_rated_kw == 0.0, crankcase_threshold_c == NEG_INFINITY.
+    /// crankcase_rated_w == 0.0, crankcase_threshold_c == NEG_INFINITY.
     /// The compressor is indoors; no crankcase heater is needed.
     /// Regression test for the finding where crankcase overrides were placed
     /// before `inner.init()` and overwritten by `AirConditioner::init_from_typed`.
@@ -1672,8 +1748,12 @@ mod tests {
             .unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a GSHP cooler checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a GSHP cooler checkpoint must restore a contract-valid output");
     }
 
     /// The WSHP cooler shares the GSHP's delegation mechanism (inner
@@ -1712,8 +1792,12 @@ mod tests {
         restored.init(&make_source(), &env).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a WSHP cooler checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a WSHP cooler checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -1737,10 +1821,10 @@ mod tests {
         eq.init(&cfg, &env).unwrap();
 
         assert_eq!(
-            eq.inner.core.crankcase_rated_kw, 0.0,
+            eq.inner.core.crankcase_rated_w, 0.0,
             "GSHP crankcase rated kW must be 0.0 after init (compressor indoors), \
              got {} kW",
-            eq.inner.core.crankcase_rated_kw
+            eq.inner.core.crankcase_rated_w
         );
         assert_eq!(
             eq.inner.core.crankcase_threshold_c,
@@ -2146,20 +2230,20 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let p_kw = ports.electrical.load_power_w / 1000.0;
-        assert!(p_kw > 0.0, "cooling call must draw real power");
-        let compressor_kw = eq
+        let p_w = ports.electrical.load_power_w;
+        assert!(p_w > 0.0, "cooling call must draw real power");
+        let compressor_w = eq
             .telemetry()
             .get(hares_types::telemetry_keys::COMPRESSOR_KW)
             .expect("compressor");
-        let fan_kw = eq
+        let fan_w = eq
             .telemetry()
             .get(hares_types::telemetry_keys::FAN_KW)
             .expect("fan");
-        assert!(compressor_kw > 0.0 && fan_kw > 0.0);
-        let q = ports.electrical.reactive_power_kvar;
+        assert!(compressor_w > 0.0 && fan_w > 0.0);
+        let q = ports.electrical.reactive_power_var;
         // Per-component: Q = P_comp·tan(acos(0.96)) + P_fan·tan(acos(0.87)).
-        let expected = compressor_kw * 0.96_f64.acos().tan() + fan_kw * 0.87_f64.acos().tan();
+        let expected = compressor_w * 0.96_f64.acos().tan() + fan_w * 0.87_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-9,
             "per-component Q must be comp·tan(acos(0.96)) + fan·tan(acos(0.87)): \
@@ -2168,7 +2252,7 @@ mod tests {
         assert_eq!(
             eq.core_output()
                 .flows
-                .reactive_power_kvar
+                .reactive_power_var
                 .expect("Some")
                 .to_bits(),
             q.to_bits(),
@@ -2182,7 +2266,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must equal port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
 
         // Off case: zone in deadband (21 °C) ⇒ no cooling call ⇒ Q == 0.
@@ -2194,10 +2278,7 @@ mod tests {
         };
         eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
             .unwrap();
-        assert_eq!(
-            off_ports.electrical.reactive_power_kvar, 0.0,
-            "off ⇒ Q == 0"
-        );
+        assert_eq!(off_ports.electrical.reactive_power_var, 0.0, "off ⇒ Q == 0");
     }
 
     /// Reactive-power contract for the GSHP cooler: per-component Q — the
@@ -2249,40 +2330,40 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let p_kw = ports.electrical.load_power_w / 1000.0;
-        assert!(p_kw > 0.0, "GSHP cooling call must draw real power");
-        let compressor_kw = eq
+        let p_w = ports.electrical.load_power_w;
+        assert!(p_w > 0.0, "GSHP cooling call must draw real power");
+        let compressor_w = eq
             .telemetry()
             .get(hares_types::telemetry_keys::COMPRESSOR_KW)
             .expect("compressor");
-        let fan_kw = eq
+        let fan_w = eq
             .telemetry()
             .get(hares_types::telemetry_keys::FAN_KW)
             .expect("fan");
-        let pump_kw = eq
+        let pump_w = eq
             .telemetry()
             .get(hares_types::telemetry_keys::PUMP_POWER_KW)
             .expect("pump");
         assert!(
-            compressor_kw > 0.0 && fan_kw > 0.0 && pump_kw > 0.0,
+            compressor_w > 0.0 && fan_w > 0.0 && pump_w > 0.0,
             "compressor, fan, and loop pump must all draw power: \
-             comp={compressor_kw} fan={fan_kw} pump={pump_kw}"
+             comp={compressor_w} fan={fan_w} pump={pump_w}"
         );
-        let q = ports.electrical.reactive_power_kvar;
+        let q = ports.electrical.reactive_power_var;
         // Per-component: compressor 0.96, fan 0.87, loop pump 0.84.
-        let expected = compressor_kw * 0.96_f64.acos().tan()
-            + fan_kw * 0.87_f64.acos().tan()
-            + pump_kw * 0.84_f64.acos().tan();
+        let expected = compressor_w * 0.96_f64.acos().tan()
+            + fan_w * 0.87_f64.acos().tan()
+            + pump_w * 0.84_f64.acos().tan();
         assert!(
             (q - expected).abs() < 1e-9,
             "per-component Q must be comp·tan(acos(0.96)) + fan·tan(acos(0.87)) \
-             + pump·tan(acos(0.84)): q={q}, expected={expected}, p={p_kw}"
+             + pump·tan(acos(0.84)): q={q}, expected={expected}, p={p_w}"
         );
         // Port, CoreOutput, and telemetry must all carry the combined value.
         let co_q = eq
             .core_output()
             .flows
-            .reactive_power_kvar
+            .reactive_power_var
             .expect("CoreOutput Q Some");
         assert_eq!(
             co_q.to_bits(),
@@ -2299,15 +2380,15 @@ mod tests {
             "telemetry Q must equal port Q"
         );
         // CoreOutput active must also include the pump (folded unit total).
-        let co_kw = match eq.core_output().flows.electric_kw {
-            Some(hares_types::ElectricPower::Consumption(kw)) => kw,
+        let co_w = match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
             other => panic!("expected Consumption, got {other:?}"),
         };
         assert!(
-            (co_kw - p_kw).abs() < 1e-9,
-            "CoreOutput active must equal port active (pump folded in): co={co_kw} port={p_kw}"
+            (co_w - p_w).abs() < 1e-6,
+            "CoreOutput active must equal port active (pump folded in): co={co_w} port={p_w}"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 
@@ -2361,10 +2442,10 @@ mod tests {
                 "step {i} (v={v}): real power diverged between pf and no-pf twins"
             );
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
             env.current_time += ChronoDuration::minutes(1);

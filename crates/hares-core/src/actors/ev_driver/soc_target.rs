@@ -17,7 +17,7 @@ impl ChargingPreference for SocTarget {
         let gap = (self.target_soc - ctx.current_soc).max(0.0);
         PreferenceVote {
             target_soc: Some(self.target_soc),
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -48,9 +48,9 @@ mod tests {
     fn make_ctx(env: &hares_types::EnvironmentState, soc: f64) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: soc,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0, // 60 kWh
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env,
             current_minute: 720,
             next_departure_minute: None,
@@ -66,10 +66,11 @@ mod tests {
             target_soc: 0.9,
             charging_efficiency: 0.9,
         };
-        // Gap 0.4 on a 60 kWh pack = 24 kWh; 24 / (7.2 * 0.9) h, rounded up
-        // to whole 1-minute steps.
+        // Gap 0.4 on a 60 kWh pack = 24 kWh = 8.64e7 J;
+        // 8.64e7 / (7200 * 0.9) s → hours, rounded up to whole 1-minute
+        // steps.
         let ctx = make_ctx(&env, 0.5);
-        let raw: f64 = 24.0 / (7.2 * 0.9);
+        let raw: f64 = 8.64e7 / (7200.0 * 0.9) / 3600.0;
         let step_hours: f64 = 1.0 / 60.0;
         let expected = (raw / step_hours).ceil() * step_hours;
         let hours = pref.needed_charge_hours(&ctx).unwrap();
@@ -119,7 +120,7 @@ mod tests {
 
         // Negative rate, positive gap: unguarded division goes negative.
         let mut ctx = make_ctx(&env, 0.5);
-        ctx.max_charge_kw = -1.0;
+        ctx.max_charge_w = -1.0;
         assert_eq!(
             pref.needed_charge_hours(&ctx).unwrap(),
             f64::INFINITY,
@@ -130,7 +131,7 @@ mod tests {
         // regardless of capability (the pre-guard division was 0/0 = NaN;
         // the guarded order returns a deterministic 0, not the sentinel).
         let mut ctx = make_ctx(&env, 0.9);
-        ctx.max_charge_kw = 0.0;
+        ctx.max_charge_w = 0.0;
         assert_eq!(
             pref.needed_charge_hours(&ctx).unwrap(),
             0.0,
@@ -152,7 +153,7 @@ mod tests {
         let mut ctx = make_ctx(&env, 0.5);
         ctx.time_res_minutes = 0.0;
         let hours = pref.needed_charge_hours(&ctx).unwrap();
-        let raw: f64 = 24.0 / (7.2 * 0.9);
+        let raw: f64 = 8.64e7 / (7200.0 * 0.9) / 3600.0;
         assert!(
             (hours - raw).abs() < 1e-9,
             "zero timestep must return the raw estimate ({raw}), got {hours}"

@@ -246,14 +246,14 @@ class _FakeFleet:
 
         equip_dict = _FakeEquipDict({
             "names": [f"Equip_{dwelling_index}_{ei}" for ei in range(equip_count)],
-            "power_kw": [p_kw / max(equip_count, 1)] * equip_count,
+            "power_w": [p_kw / max(equip_count, 1)] * equip_count,
             "soc": [0.5 + dwelling_index * 0.1] * equip_count,
             "modes": [1.0] * equip_count,
         })
 
         return SimpleNamespace(
-            total_power_kw=p_kw,
-            reactive_power_kvar=q_kvar,
+            total_power_w=p_kw,
+            reactive_power_var=q_kvar,
             zone=lambda: zone_dict,
             equipment=lambda: equip_dict,
             timestep_index=self._step_count,
@@ -275,10 +275,10 @@ class _FakeFleet:
 
 
 def _clear_helics_modules() -> None:
-    sys.modules.pop("ochre_next.helics", None)
-    sys.modules.pop("ochre_next.helics.dwelling", None)
-    sys.modules.pop("ochre_next.helics.federate", None)
-    sys.modules.pop("ochre_next.helics.fleet", None)
+    sys.modules.pop("hares.helics", None)
+    sys.modules.pop("hares.helics.dwelling", None)
+    sys.modules.pop("hares.helics.federate", None)
+    sys.modules.pop("hares.helics.fleet", None)
 
 
 def _import_fleet_module(
@@ -287,7 +287,7 @@ def _import_fleet_module(
     fake_helics = _FakeHelicsModule()
     _clear_helics_modules()
     monkeypatch.setitem(sys.modules, "helics", fake_helics)
-    module = importlib.import_module("ochre_next.helics.fleet")
+    module = importlib.import_module("hares.helics.fleet")
     return module, fake_helics
 
 
@@ -305,7 +305,7 @@ def test_import_guard_without_helics(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(builtins, "__import__", _raising_import)
 
     with pytest.raises(ImportError, match="HELICS not installed"):
-        importlib.import_module("ochre_next.helics.fleet")
+        importlib.import_module("hares.helics.fleet")
 
 
 def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
@@ -336,26 +336,26 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
 
     pubs = orchestrator.register_publications(prefix="grid/")
     assert [p.key for p in pubs] == [
-        "grid/fleet_1/aggregate_power_kw",
-        "grid/fleet_1/aggregate_reactive_kvar",
-        "grid/fleet_1/dwelling_0/total_power_kw",
-        "grid/fleet_1/dwelling_0/reactive_power_kvar",
-        "grid/fleet_1/dwelling_1/total_power_kw",
-        "grid/fleet_1/dwelling_1/reactive_power_kvar",
-        "grid/fleet_1/dwelling_2/total_power_kw",
-        "grid/fleet_1/dwelling_2/reactive_power_kvar",
+        "grid/fleet_1/aggregate_power_w",
+        "grid/fleet_1/aggregate_reactive_var",
+        "grid/fleet_1/dwelling_0/total_power_w",
+        "grid/fleet_1/dwelling_0/reactive_power_var",
+        "grid/fleet_1/dwelling_1/total_power_w",
+        "grid/fleet_1/dwelling_1/reactive_power_var",
+        "grid/fleet_1/dwelling_2/total_power_w",
+        "grid/fleet_1/dwelling_2/reactive_power_var",
         "grid/fleet_1/aggregate_zone_temp_c",
         "grid/fleet_1/aggregate_soc_pct",
         "grid/fleet_1/dwelling_0/zone_0/temp_air_c",
-        "grid/fleet_1/dwelling_0/equipment_0/power_kw",
+        "grid/fleet_1/dwelling_0/equipment_0/power_w",
         "grid/fleet_1/dwelling_0/equipment_0/soc_pct",
         "grid/fleet_1/dwelling_0/equipment_0/operating_mode",
         "grid/fleet_1/dwelling_1/zone_0/temp_air_c",
-        "grid/fleet_1/dwelling_1/equipment_0/power_kw",
+        "grid/fleet_1/dwelling_1/equipment_0/power_w",
         "grid/fleet_1/dwelling_1/equipment_0/soc_pct",
         "grid/fleet_1/dwelling_1/equipment_0/operating_mode",
         "grid/fleet_1/dwelling_2/zone_0/temp_air_c",
-        "grid/fleet_1/dwelling_2/equipment_0/power_kw",
+        "grid/fleet_1/dwelling_2/equipment_0/power_w",
         "grid/fleet_1/dwelling_2/equipment_0/soc_pct",
         "grid/fleet_1/dwelling_2/equipment_0/operating_mode",
     ]
@@ -415,8 +415,8 @@ def test_helics_fleet_run_loop_aggregate_publish_and_routing(monkeypatch: pytest
         json.dumps(
             {
                 "1": {
-                    "Battery": {"type": "PowerSetpoint", "active_power_kw": 2.0},
-                    "Unknown": {"type": "PowerSetpoint", "active_power_kw": 1.0},
+                    "Battery": {"type": "PowerSetpoint", "active_power_w": 2.0},
+                    "Unknown": {"type": "PowerSetpoint", "active_power_w": 1.0},
                 }
             }
         )
@@ -430,29 +430,29 @@ def test_helics_fleet_run_loop_aggregate_publish_and_routing(monkeypatch: pytest
 
     first_request_idx = fake_helics.log.index(("request_time", 60.0))
     first_step_idx = fake_helics.log.index(("step", 1))
-    first_publish_idx = fake_helics.log.index(("publish", "aggregate_power_kw", 6.0))
+    first_publish_idx = fake_helics.log.index(("publish", "aggregate_power_w", 6.0))
     assert first_request_idx < first_step_idx < first_publish_idx
 
     assert fleet.grid_voltage_all_values == [0.98, 0.97]
     assert fleet.grid_voltage_values == [(1, 0.95), (2, 0.96)]
     assert fleet.applied_controls == [
-        (1, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_kw": 2.0}}),
+        (1, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_w": 2.0}}),
     ]
 
-    assert fed.publications["aggregate_power_kw"].published == [6.0, 7.5]
-    assert fed.publications["aggregate_reactive_kvar"].published == pytest.approx(
+    assert fed.publications["aggregate_power_w"].published == [6.0, 7.5]
+    assert fed.publications["aggregate_reactive_var"].published == pytest.approx(
         [0.6, 0.75]
     )
-    assert fed.publications["dwelling_0/total_power_kw"].published == [1.0, 1.5]
-    assert fed.publications["dwelling_0/reactive_power_kvar"].published == pytest.approx(
+    assert fed.publications["dwelling_0/total_power_w"].published == [1.0, 1.5]
+    assert fed.publications["dwelling_0/reactive_power_var"].published == pytest.approx(
         [0.1, 0.15]
     )
-    assert fed.publications["dwelling_1/total_power_kw"].published == [2.0, 2.5]
-    assert fed.publications["dwelling_1/reactive_power_kvar"].published == pytest.approx(
+    assert fed.publications["dwelling_1/total_power_w"].published == [2.0, 2.5]
+    assert fed.publications["dwelling_1/reactive_power_var"].published == pytest.approx(
         [0.2, 0.25]
     )
-    assert fed.publications["dwelling_2/total_power_kw"].published == [3.0, 3.5]
-    assert fed.publications["dwelling_2/reactive_power_kvar"].published == pytest.approx(
+    assert fed.publications["dwelling_2/total_power_w"].published == [3.0, 3.5]
+    assert fed.publications["dwelling_2/reactive_power_var"].published == pytest.approx(
         [0.3, 0.35]
     )
 
@@ -534,15 +534,15 @@ def test_helics_fleet_broadcast_control_applies_to_all_dwellings(
 
     assert orchestrator._sub_control is not None
     orchestrator._sub_control.push_string(
-        json.dumps({"Battery": {"type": "PowerSetpoint", "active_power_kw": 1.5}})
+        json.dumps({"Battery": {"type": "PowerSetpoint", "active_power_w": 1.5}})
     )
 
     orchestrator.run()
 
     assert fleet.applied_controls == [
-        (0, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_kw": 1.5}}),
-        (1, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_kw": 1.5}}),
-        (2, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_kw": 1.5}}),
+        (0, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_w": 1.5}}),
+        (1, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_w": 1.5}}),
+        (2, "Battery", {"parsed": {"type": "PowerSetpoint", "active_power_w": 1.5}}),
     ]
 
 
@@ -559,7 +559,7 @@ def test_helics_fleet_negative_dwelling_index_payload_rejected(
 
     assert orchestrator._sub_control is not None
     orchestrator._sub_control.push_string(
-        json.dumps({"-1": {"Battery": {"type": "PowerSetpoint", "active_power_kw": 1.0}}})
+        json.dumps({"-1": {"Battery": {"type": "PowerSetpoint", "active_power_w": 1.0}}})
     )
 
     with caplog.at_level("WARNING"):
@@ -646,7 +646,7 @@ def test_helics_fleet_multi_rate_grants_only_steps_at_requested_time(
 
     fed = fake_helics.last_fed
     assert fed is not None
-    pub = fed.publications["aggregate_power_kw"]
+    pub = fed.publications["aggregate_power_w"]
     # 5 intermediate publishes (before step 1) + 1 step-1 publish + 1 step-2 publish
     assert len(pub.published) == 7
     # All intermediate publishes carry state from before step 1
@@ -706,7 +706,7 @@ def test_helics_fleet_federation_termination_sentinel_exits_without_stepping(
     # No publishes must have occurred for the terminated step
     fed = fake_helics.last_fed
     assert fed is not None
-    pub = fed.publications["aggregate_power_kw"]
+    pub = fed.publications["aggregate_power_w"]
     assert len(pub.published) == 0
     assert term_fed.disconnected is True
 
@@ -737,7 +737,7 @@ def test_helics_fleet_federation_termination_sentinel_during_multi_rate_grant(
     assert fleet._step_count == 0
     fed = fake_helics.last_fed
     assert fed is not None
-    pub = fed.publications["aggregate_power_kw"]
+    pub = fed.publications["aggregate_power_w"]
     # Only intermediate publishes (before the termination sentinel)
     assert len(pub.published) == 2
     assert pub.published[0] == 6.0  # unchanged state, republished
@@ -816,16 +816,16 @@ def test_set_publication_info_attaches_unit_metadata(
     fed = fake_helics.last_fed
     assert fed is not None
 
-    aggregate_power = fed.publications["aggregate_power_kw"]
-    aggregate_reactive = fed.publications["aggregate_reactive_kvar"]
-    assert aggregate_power._info == "units=kW"
-    assert aggregate_reactive._info == "units=kvar"
+    aggregate_power = fed.publications["aggregate_power_w"]
+    aggregate_reactive = fed.publications["aggregate_reactive_var"]
+    assert aggregate_power._info == "units=W"
+    assert aggregate_reactive._info == "units=VAR"
 
     for dwelling_index in range(3):
-        pub = fed.publications[f"dwelling_{dwelling_index}/total_power_kw"]
-        assert pub._info == "units=kW"
-        pub = fed.publications[f"dwelling_{dwelling_index}/reactive_power_kvar"]
-        assert pub._info == "units=kvar"
+        pub = fed.publications[f"dwelling_{dwelling_index}/total_power_w"]
+        assert pub._info == "units=W"
+        pub = fed.publications[f"dwelling_{dwelling_index}/reactive_power_var"]
+        assert pub._info == "units=VAR"
 
 
 def test_fleet_register_publications_includes_aggregate_zone_temp(
@@ -863,7 +863,7 @@ def test_fleet_register_publications_includes_per_dwelling_zone_temp(
     keys = [p.key for p in pubs]
     for di in range(3):
         assert f"fleet_1/dwelling_{di}/zone_0/temp_air_c" in keys
-        assert f"fleet_1/dwelling_{di}/equipment_0/power_kw" in keys
+        assert f"fleet_1/dwelling_{di}/equipment_0/power_w" in keys
         assert f"fleet_1/dwelling_{di}/equipment_0/soc_pct" in keys
         assert f"fleet_1/dwelling_{di}/equipment_0/operating_mode" in keys
 
@@ -929,34 +929,34 @@ def test_helics_fleet_registers_heterogeneous_per_dwelling_publications(
     # Aggregate publications still present
     assert "fleet_1/aggregate_zone_temp_c" in keys
     assert "fleet_1/aggregate_soc_pct" in keys
-    assert "fleet_1/aggregate_power_kw" in keys
-    assert "fleet_1/aggregate_reactive_kvar" in keys
+    assert "fleet_1/aggregate_power_w" in keys
+    assert "fleet_1/aggregate_reactive_var" in keys
 
     # Dwelling 0: 1 zone, 2 equipment
     assert "fleet_1/dwelling_0/zone_0/temp_air_c" in keys
     assert "fleet_1/dwelling_0/zone_1/temp_air_c" not in keys
     for ei in range(2):
-        assert f"fleet_1/dwelling_0/equipment_{ei}/power_kw" in keys
+        assert f"fleet_1/dwelling_0/equipment_{ei}/power_w" in keys
         assert f"fleet_1/dwelling_0/equipment_{ei}/soc_pct" in keys
         assert f"fleet_1/dwelling_0/equipment_{ei}/operating_mode" in keys
-    assert "fleet_1/dwelling_0/equipment_2/power_kw" not in keys
+    assert "fleet_1/dwelling_0/equipment_2/power_w" not in keys
 
     # Dwelling 1: 2 zones, 1 equipment
     for zi in range(2):
         assert f"fleet_1/dwelling_1/zone_{zi}/temp_air_c" in keys
     assert "fleet_1/dwelling_1/zone_2/temp_air_c" not in keys
-    assert "fleet_1/dwelling_1/equipment_0/power_kw" in keys
-    assert "fleet_1/dwelling_1/equipment_1/power_kw" not in keys
+    assert "fleet_1/dwelling_1/equipment_0/power_w" in keys
+    assert "fleet_1/dwelling_1/equipment_1/power_w" not in keys
 
     # Dwelling 2: 3 zones, 4 equipment
     for zi in range(3):
         assert f"fleet_1/dwelling_2/zone_{zi}/temp_air_c" in keys
     assert "fleet_1/dwelling_2/zone_3/temp_air_c" not in keys
     for ei in range(4):
-        assert f"fleet_1/dwelling_2/equipment_{ei}/power_kw" in keys
+        assert f"fleet_1/dwelling_2/equipment_{ei}/power_w" in keys
         assert f"fleet_1/dwelling_2/equipment_{ei}/soc_pct" in keys
         assert f"fleet_1/dwelling_2/equipment_{ei}/operating_mode" in keys
-    assert "fleet_1/dwelling_2/equipment_4/power_kw" not in keys
+    assert "fleet_1/dwelling_2/equipment_4/power_w" not in keys
 
 
 def test_helics_fleet_publishes_heterogeneous_dwelling_shapes(
@@ -985,8 +985,8 @@ def test_helics_fleet_publishes_heterogeneous_dwelling_shapes(
     assert fed.publications["dwelling_0/zone_0/temp_air_c"].published == [pytest.approx(22.0)]
     assert "dwelling_0/zone_1/temp_air_c" not in fed.publications
 
-    assert "dwelling_0/equipment_0/power_kw" in fed.publications
-    assert "dwelling_0/equipment_2/power_kw" in fed.publications
+    assert "dwelling_0/equipment_0/power_w" in fed.publications
+    assert "dwelling_0/equipment_2/power_w" in fed.publications
 
     # Dwelling 1: 2 zone pubs, 3 equipment pubs (1 power + 1 soc + 1 mode)
     assert "dwelling_1/zone_0/temp_air_c" in fed.publications
@@ -994,8 +994,8 @@ def test_helics_fleet_publishes_heterogeneous_dwelling_shapes(
     assert fed.publications["dwelling_1/zone_0/temp_air_c"].published == [pytest.approx(22.5)]
     assert fed.publications["dwelling_1/zone_1/temp_air_c"].published == [pytest.approx(22.6)]
 
-    assert "dwelling_1/equipment_0/power_kw" in fed.publications
-    assert "dwelling_1/equipment_1/power_kw" not in fed.publications
+    assert "dwelling_1/equipment_0/power_w" in fed.publications
+    assert "dwelling_1/equipment_1/power_w" not in fed.publications
 
 
 def test_fleet_control_signal_thermal_setpoint_out_of_range_warns(
@@ -1054,7 +1054,7 @@ def test_fleet_control_signal_power_setpoint_nan_kw_warns(
             {
                 "0": {
                     "equipment": "Battery",
-                    "signal": {"type": "PowerSetpoint", "active_power_kw": 1e15},
+                    "signal": {"type": "PowerSetpoint", "active_power_w": 1e15},
                 }
             }
         )

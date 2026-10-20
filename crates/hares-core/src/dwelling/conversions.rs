@@ -10,11 +10,11 @@ use hares_envelope::longwave_radiation::{
 };
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
-use hares_io::{Building, DefaultsStore, SimulationConfig};
+use hares_io::{Building, DefaultsStore, EnvelopeScales};
 use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
 
-use super::{DwellingConfig, Result};
+use super::Result;
 
 const DEFAULT_R_M2_K_W: f64 = hares_envelope::boundary_rc::DEFAULT_R_M2_K_W;
 
@@ -84,13 +84,21 @@ pub fn building_to_boundary_inputs(
             // includes film per spec, so subtract computed film R to get material-only.
             // NominalRValue layers are already material-only. Film R is added back in
             // boundary_rc.rs for all three construction paths.
-            let material_r = bd
-                .assembly_r_value_m2_k_w
-                .map(|r| (r - r_film_int - r_film_ext).max(1e-6))
-                .or_else(|| {
+            //
+            // The declared assembly R is the opaque-R precedence's winner
+            // (the numeric-fixes ledger's opaque-R precedence entry): on the
+            // LUT path it sets the
+            // matched row's layer resistances below, and here it feeds the
+            // single-resistor fallback. Its old `.max(1e-6)` clamp is gone:
+            // a declared R that leaves no material resistance is the
+            // film-sum error checked on the LUT path, not a silent near-zero.
+            let material_r = match bd.assembly_r_value_m2_k_w {
+                Some(r) => Some(r - r_film_int - r_film_ext),
+                None => {
                     let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
                     if sum > 0.0 { Some(sum) } else { None }
-                });
+                }
+            };
 
             #[cfg(feature = "observe")]
             let used_default_r = material_r.is_none();
@@ -179,56 +187,126 @@ pub fn building_to_boundary_inputs(
                 // synthetic configs define their own layer stack).
                 Vec::new()
             } else {
-                envelope_lut
-                    .and_then(|lut| {
-                        let boundary_name = bd.lut_boundary_name.as_deref().or_else(|| {
-                            lut.resolve_name(
-                                &bd.boundary_type,
-                                bd.interior_zone.as_ref(),
-                                bd.exterior_zone.as_ref(),
-                            )
-                        })?;
-                        let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
-                            let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
-                            if sum > 0.0 { Some(sum) } else { None }
-                        });
-                        let result = lut.lookup(
-                            boundary_name,
-                            bd.construction_type.as_deref(),
-                            bd.finish_type.as_deref(),
-                            bd.insulation_details.as_deref(),
-                            r_value,
-                        );
-                        if result.is_none() {
-                            tracing::debug!(
-                                boundary = boundary_name,
-                                construction = ?bd.construction_type,
-                                finish = ?bd.finish_type,
-                                insulation = ?bd.insulation_details,
-                                r_value = ?r_value,
-                                "envelope LUT lookup miss"
-                            );
+                // The opaque-R precedence (the numeric-fixes ledger's
+                // opaque-R precedence entry): the row selection is unchanged - by the
+                // construction and finish filters, then the row whose
+                // assembly R plus the convention films is nearest the
+                // declared R - and a declared `AssemblyEffectiveRValue`
+                // then sets the matched row's resistance: every layer
+                // resistance of the row is multiplied by
+                // `k = (declared R - convention films) / sum(row layer
+                // resistances)`, so the layers plus the convention films
+                // equal the declared R in the convention the declaration
+                // and the row selection speak. The row's layer
+                // capacitances are kept (they are mass, not resistance).
+                // The convention films are the LUT's row-selection films,
+                // not the weather's convection-only films: the declared
+                // assembly R includes the standard films per HPXML, and
+                // HARES's convection-only film sums (the radiative part
+                // rides the LWR network) exceed legitimate declared
+                // assembly R values - the corpus's low-R roofs and
+                // floors among them - so the network's films cannot be
+                // the scaling's or the error's measure.
+                match envelope_lut {
+                    Some(lut) => {
+                        let boundary_name = bd
+                            .lut_boundary_name
+                            .clone()
+                            .or_else(|| {
+                                lut.resolve_name(
+                                    &bd.boundary_type,
+                                    bd.interior_zone.as_ref(),
+                                    bd.exterior_zone.as_ref(),
+                                )
+                                .map(str::to_string)
+                            });
+                        match boundary_name {
+                            Some(boundary_name) => {
+                                // A declared R at or below the convention film
+                                // sum leaves no material resistance: a
+                                // construction error naming the boundary, the
+                                // declared R and the film sum, where the old
+                                // clamp scaled the LUT layers to almost no
+                                // resistance without a word.
+                                if let Some(declared) = bd.assembly_r_value_m2_k_w {
+                                    let films = lut.convention_films(&boundary_name);
+                                    if declared <= films {
+                                        return Err(HaresError::Dwelling(format!(
+                                            "boundary '{}': the declared assembly R-value {declared} m²·K/W \
+                                             is at or below the film resistance sum {films} m²·K/W, so the \
+                                             films alone leave no material resistance for the construction",
+                                            bd.id
+                                        )));
+                                    }
+                                }
+                                let r_value = bd.assembly_r_value_m2_k_w.or_else(|| {
+                                    let sum: f64 = bd.r_value_layers_m2_k_w.iter().sum();
+                                    if sum > 0.0 { Some(sum) } else { None }
+                                });
+                                let result = lut.lookup(
+                                    &boundary_name,
+                                    bd.construction_type.as_deref(),
+                                    bd.finish_type.as_deref(),
+                                    bd.insulation_details.as_deref(),
+                                    r_value,
+                                );
+                                match result {
+                                    Some(result) => {
+                                        tracing::debug!(
+                                            boundary = boundary_name,
+                                            layers = result.layers.len(),
+                                            matched_type = %result.matched_boundary_type,
+                                            "envelope LUT match"
+                                        );
+                                        // LUT layers are exterior→interior (OCHRE CSV convention),
+                                        // matching boundary_rc's expected ordering.
+                                        let mut layers: Vec<_> = result
+                                            .layers
+                                            .into_iter()
+                                            .map(|l| PrecomputedRCLayer {
+                                                resistance_m2_k_w: l.resistance_m2_k_w,
+                                                capacitance_kj_m2_k: l.capacitance_kj_m2_k,
+                                            })
+                                            .collect();
+                                        if let Some(declared) = bd.assembly_r_value_m2_k_w {
+                                            let films = lut.convention_films(&boundary_name);
+                                            let row_sum: f64 =
+                                                layers.iter().map(|l| l.resistance_m2_k_w).sum();
+                                            if row_sum > 0.0 {
+                                                let k = (declared - films) / row_sum;
+                                                for layer in &mut layers {
+                                                    layer.resistance_m2_k_w *= k;
+                                                }
+                                                tracing::debug!(
+                                                    boundary = boundary_name,
+                                                    row = %result.matched_boundary_type,
+                                                    declared_r_m2_k_w = declared,
+                                                    k,
+                                                    "opaque-R precedence: the declared assembly R \
+                                                     scales the matched LUT row's layer resistances"
+                                                );
+                                            }
+                                        }
+                                        layers
+                                    }
+                                    None => {
+                                        tracing::debug!(
+                                            boundary = boundary_name,
+                                            construction = ?bd.construction_type,
+                                            finish = ?bd.finish_type,
+                                            insulation = ?bd.insulation_details,
+                                            r_value = ?r_value,
+                                            "envelope LUT lookup miss"
+                                        );
+                                        Vec::new()
+                                    }
+                                }
+                            }
+                            None => Vec::new(),
                         }
-                        let result = result?;
-                        tracing::debug!(
-                            boundary = boundary_name,
-                            layers = result.layers.len(),
-                            matched_type = %result.matched_boundary_type,
-                            "envelope LUT match"
-                        );
-                        // LUT layers are exterior→interior (OCHRE CSV convention),
-                        // matching boundary_rc's expected ordering.
-                        let layers: Vec<_> = result
-                            .layers
-                            .into_iter()
-                            .map(|l| PrecomputedRCLayer {
-                                resistance_m2_k_w: l.resistance_m2_k_w,
-                                capacitance_kj_m2_k: l.capacitance_kj_m2_k,
-                            })
-                            .collect();
-                        Some(layers)
-                    })
-                    .unwrap_or_default()
+                    }
+                    None => Vec::new(),
+                }
             };
 
             // Window / Skylight U-factor decomposition: EnergyPlus Simple Window
@@ -412,26 +490,34 @@ pub(crate) fn zone_type_to_label(
 /// Fallback: type-only matching via `position()`. Used when the boundary ID is
 /// absent or the boundary is not tracked in `attached_wall_ids` (e.g. roofs,
 /// floors, auto-generated interior walls).
+///
+/// An absent zone type is an error naming the boundary: a subsurface's
+/// interior zone derives from its attached surface at parse (the OS-HPXML
+/// subsurface rule), so a boundary reaching here with none names neither its
+/// adjacency nor an attached surface, and no zone may be substituted for it.
 pub(crate) fn find_zone_idx(
     building: &Building,
     boundary_id: Option<&str>,
     zone_type: Option<&hares_io::hpxml::ZoneType>,
     n_zones: usize,
 ) -> Result<usize> {
+    // The zero-zone edge returns zone 0 without consulting the zone type:
+    // every production caller passes at least one zone (the solver build's
+    // `n_zones = env.zones.len().max(1)`, the synthetic builder's 1), so
+    // the edge is unreachable for real input; it exists for the empty-zone
+    // call shape, and zone 0 is the only index an empty zone list can name.
+    // Pinned by find_zone_idx_zero_zones_returns_zero.
     if n_zones == 0 {
         return Ok(0);
     }
-    let target = match zone_type {
-        Some(zt) => zt,
-        None => {
-            let bid = boundary_id.unwrap_or("<unknown>");
-            tracing::warn!(
-                boundary_id = %bid,
-                "Boundary has no interior zone type; falling back to zone index 0"
-            );
-            return Ok(0);
-        }
-    };
+    let target = zone_type.ok_or_else(|| {
+        let bid = boundary_id.unwrap_or("<unknown>");
+        HaresError::Dwelling(format!(
+            "boundary '{bid}': no interior zone; the boundary names neither its \
+             interior adjacency nor a wall to derive it from, and no zone may \
+             be substituted for a location the input does not name"
+        ))
+    })?;
 
     // Adjacent zones are rewritten to the non-Adjacent side's type during
     // HPXML parsing (building.rs:rewrite_adjacent_zone_pair). If an Adjacent
@@ -531,14 +617,6 @@ pub(crate) fn build_output_column_index(
         .enumerate()
         .map(|(idx, field)| (field.name().to_string(), idx))
         .collect()
-}
-
-pub(crate) fn default_output_path(config: &DwellingConfig) -> PathBuf {
-    let ext = match config.sim_config.output_format {
-        hares_io::OutputFormat::Csv => "csv",
-        hares_io::OutputFormat::Parquet => "parquet",
-    };
-    PathBuf::from(format!("dwelling_{}.{}", config.bldg_id, ext))
 }
 
 pub(crate) fn chrono_to_std_duration(duration: Duration) -> Result<StdDuration> {
@@ -764,6 +842,7 @@ fn land_spec_parameters(
         if key.as_str() == hares_equipment::config::KEY_EQUIPMENT_ID {
             continue;
         }
+        reject_shadowed_wh_efficiency(type_name, landed, key, display_name)?;
         let reads =
             hares_equipment::typed_payload_reads(type_name, landed, key, value).map_err(|err| {
                 HaresError::Equipment(format!(
@@ -1012,6 +1091,17 @@ pub(crate) fn merged_equipment_config(
         return Err(non_object_overrides(overrides));
     };
     let layers = hares_io::hpxml::override_layers(root, &spec.name)?;
+    // Every key the override merge receives is checked against the
+    // removed-keys table before anything merges, the wildcard ("all"/"*")
+    // payload included: the raw path accepts any key, so without the walk
+    // an old key would be silently ignored, and a typed payload's own
+    // unknown-key error names no replacement.
+    if let Some((source, layer)) = layers.wildcard {
+        check_layer_removed_keys(&spec.name, source, layer)?;
+    }
+    if let Some(layer) = layers.own {
+        check_layer_removed_keys(&spec.name, "its own override", layer)?;
+    }
     if let Some(typed) = &spec.typed_config
         && matches!(typed.payload, ConfigPayload::Typed { .. })
     {
@@ -1019,6 +1109,7 @@ pub(crate) fn merged_equipment_config(
     }
 
     let mut merged = raw_load_parameters(spec, layers)?;
+    remove_override_shadowed_setpoint_sources(&mut merged, layers, &spec.name);
     // Raw equipment honor the reserved "zip" override object too, for
     // consistency with typed equipment: it is merged field-wise over the
     // spec's zip_params base and folded back into `zip_params`, which
@@ -1042,6 +1133,8 @@ pub(crate) fn merged_equipment_config(
         system_id: spec.system_id.clone(),
         related_hvac_idref: spec.related_hvac_idref.clone(),
         primary_role: spec.primary_role.clone(),
+        heating_setpoint_source: spec.heating_setpoint_source.clone(),
+        cooling_setpoint_source: spec.cooling_setpoint_source.clone(),
     };
     equipment_config_from_spec(&merged_spec)
 }
@@ -1049,6 +1142,191 @@ pub(crate) fn merged_equipment_config(
 /// The reserved override object that carries an equipment's ZIP
 /// coefficients, which every equipment takes.
 const RESERVED_ZIP_OVERRIDE: &str = "zip";
+
+/// The removed-key check one override layer's keys run through: the key
+/// is looked up under the class's config type (the same class-to-config
+/// mapping the registry's factories implement) and an old key fails
+/// naming its replacement. A JSON-string payload field (`bms_mode`,
+/// `charging_strategy`) is parsed and its keys are pathed under the
+/// variant; an array field's element objects are walked under the `[]`
+/// row.
+fn check_override_removed_key(class: &str, source: &str, key: &str, value: &Value) -> Result<()> {
+    let Some(config_type) = hares_equipment::config_type_for_class(class) else {
+        return Ok(());
+    };
+    let reject = |row_key: String| -> Result<()> {
+        if let Some(replacement) =
+            hares_io::removed_key(hares_io::KeyScope::EquipmentConfig, &row_key)
+        {
+            return Err(HaresError::Dwelling(format!(
+                "equipment '{class}' ({source}): configuration key '{row_key}' \
+                 was removed: {replacement}"
+            )));
+        }
+        Ok(())
+    };
+    reject(format!("{config_type}.{key}"))?;
+    // The payload fields: the string's own variant keys are pathed under
+    // the field.
+    if let Some(text) = value.as_str()
+        && (key == "bms_mode" || key == "charging_strategy")
+        && let Ok(serde_json::Value::Object(payload)) = serde_json::from_str::<Value>(text)
+    {
+        for (variant, fields) in &payload {
+            if let serde_json::Value::Object(map) = fields {
+                for field in map.keys() {
+                    reject(format!("{config_type}.{key}.{variant}.{field}"))?;
+                }
+            }
+        }
+    }
+    // The array rows: every element object's keys against the `[]` row.
+    if let Some(items) = value.as_array() {
+        for item in items {
+            if let serde_json::Value::Object(map) = item {
+                for field in map.keys() {
+                    reject(format!("{config_type}.{key}[].{field}"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The layer walk: every key of the layer's payload, the value beside it.
+fn check_layer_removed_keys(class: &str, source: &str, layer: &Map<String, Value>) -> Result<()> {
+    for (key, value) in layer {
+        check_override_removed_key(class, source, key, value)?;
+    }
+    Ok(())
+}
+
+/// The reserved `envelope` override, deserialised and validated: the
+/// scales the boundary construction multiplies its selected layers by.
+/// Absent from the map (the setting `None` or the key absent), the unit
+/// default. A malformed object (a non-object value, a field the struct
+/// does not declare) or an out-of-bounds field is an error naming the key
+/// and the field, at the assembly boundary before any side effect.
+///
+/// # Errors
+///
+/// [`HaresError::Dwelling`] naming the key and the offending field when
+/// the object does not deserialise or its fields are out of bounds.
+pub(crate) fn extract_envelope_scales(overrides: Option<&Value>) -> Result<EnvelopeScales> {
+    let Some(value) = overrides.and_then(|root| root.get(hares_io::ENVELOPE_OVERRIDE_KEY)) else {
+        return Ok(EnvelopeScales::default());
+    };
+    let scales: EnvelopeScales = serde_json::from_value(value.clone()).map_err(|err| {
+        HaresError::Dwelling(format!(
+            "the '{}' override rejected: {err}",
+            hares_io::ENVELOPE_OVERRIDE_KEY
+        ))
+    })?;
+    scales
+        .validate()
+        .map_err(|err| HaresError::Dwelling(err.to_string()))?;
+    Ok(scales)
+}
+
+/// Apply the envelope scales to the boundary inputs, after the row
+/// selection: the resistance scale multiplies every opaque layer's
+/// resistance and the thermal-mass scale every such layer's capacitance,
+/// on the LUT row's layers, the input's own material layers, and the
+/// single-resistor fallback the no-layer path builds from. The films are
+/// unscaled and the F-factor slab and the fenestration are outside both
+/// scales: the slab's resistor is the perimeter method's, and a window's
+/// resistance is its U-factor decomposition's.
+pub(crate) fn apply_envelope_scales(
+    building: &Building,
+    inputs: &mut [hares_envelope::BoundaryInput],
+    scales: &EnvelopeScales,
+) {
+    use hares_io::hpxml::BoundaryType;
+    for (bd, input) in building.boundaries.iter().zip(inputs.iter_mut()) {
+        if matches!(
+            bd.boundary_type,
+            BoundaryType::Slab | BoundaryType::Window | BoundaryType::Skylight
+        ) {
+            continue;
+        }
+        for layer in &mut input.precomputed_rc {
+            layer.resistance_m2_k_w *= scales.opaque_r_scale;
+            layer.capacitance_kj_m2_k *= scales.thermal_mass_scale;
+        }
+        for layer in &mut input.material_layers {
+            // The layer's resistance is its thickness over its conductivity
+            // and its capacitance its density by specific heat by thickness:
+            // scaling the conductivity's inverse scales the resistance alone,
+            // scaling the density the capacitance alone.
+            layer.conductivity_w_m_k /= scales.opaque_r_scale;
+            layer.density_kg_m3 *= scales.thermal_mass_scale;
+        }
+        input.fallback_r_m2_k_w *= scales.opaque_r_scale;
+    }
+}
+
+/// The typed-config type name of the stationary battery.
+const BATTERY_TYPE_NAME: &str = "Battery";
+
+/// Every stationary battery's control must be declared where the dwelling
+/// is assembled: HPXML has no battery-control element, and OCHRE resolves a
+/// battery's control per step from a control signal or its schedule
+/// (Equipment/Generator.py:27, Equipment/Battery.py:205), never from
+/// HPXML. A battery resolved with no `bms_mode` would otherwise take the
+/// `Manual` default silently, seed no management actor, and idle for the
+/// whole run while looking configured. The override map is the one route a
+/// declared control has into assembly (a `BatteryManagement` actor joins a
+/// built dwelling and drives the battery from outside the input), so a
+/// battery whose merged config still carries no `bms_mode` fails here,
+/// named with its input.
+///
+/// Runs before any equipment is constructed so the build fails before side
+/// effects, not partway through the population.
+pub(crate) fn validate_battery_controls(
+    specs: &[hares_io::EquipmentSpec],
+    overrides: &Value,
+    hpxml_display: &str,
+) -> Result<()> {
+    for spec in specs {
+        let Some(typed) = &spec.typed_config else {
+            continue;
+        };
+        let ConfigPayload::Typed { type_name, .. } = &typed.payload else {
+            continue;
+        };
+        if type_name != BATTERY_TYPE_NAME {
+            continue;
+        }
+        let merged = merged_equipment_config(spec, overrides)?;
+        let display = spec
+            .instance_name
+            .as_deref()
+            .unwrap_or(&typed.name)
+            .to_string();
+        let system = spec.system_id.as_deref().unwrap_or("unknown");
+        let battery: hares_equipment::BatteryConfig = merged.typed().map_err(|err| {
+            HaresError::Equipment(format!(
+                "battery '{display}' (SystemIdentifier '{system}', input '{}'): \
+                 its typed config cannot be read: {err}",
+                hpxml_display
+            ))
+        })?;
+        if battery.bms_mode.is_some() {
+            continue;
+        }
+        return Err(HaresError::Equipment(format!(
+            "battery '{display}' (SystemIdentifier '{system}', input '{}'): \
+             no control is declared for it and HPXML has none to resolve; \
+             built as is, the battery takes the `Manual` default, seeds no \
+             management actor and idles for the whole run. Declare \
+             `bms_mode` on the battery's override (\"Manual\" follows \
+             commands) or add a `BatteryManagement` actor targeting \
+             '{display}'",
+            hpxml_display
+        )));
+    }
+    Ok(())
+}
 
 fn non_object_overrides(overrides: &Value) -> HaresError {
     HaresError::Equipment(format!(
@@ -1259,6 +1537,7 @@ fn apply_typed_overrides(
     if let Some((source, wildcard)) = layers.wildcard {
         for (key, value) in wildcard {
             reject_reserved_key(source, key, equipment)?;
+            reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
             if key == RESERVED_ZIP_OVERRIDE
                 || typed_reads(type_name, merged, key, value, equipment)?
             {
@@ -1268,7 +1547,220 @@ fn apply_typed_overrides(
     }
     for (key, value) in layers.own.into_iter().flatten() {
         reject_reserved_key(equipment, key, equipment)?;
+        reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
         nested_insert(merged, key, value);
+    }
+    remove_override_shadowed_setpoint_sources(merged, layers, equipment);
+    Ok(())
+}
+
+/// The `setpoint` block's sides and the config key each side's schedule
+/// source is read from: the thermostat reads the source ahead of the
+/// constant setpoint (`hvac_core.rs` init's "Build setpoint sources: CSV
+/// column > daily profile > constant"), so a constant setpoint an override
+/// layer sets could never apply while the resolution's source stood. The
+/// merge removes the matching source when the override sets the constant,
+/// making the override the tier the engine reads.
+const SETPOINT_SOURCE_SHADOWS: [(&str, &str); 2] = [
+    ("heating", "heating_setpoint_source"),
+    ("cooling", "cooling_setpoint_source"),
+];
+
+/// The constant setpoint, in Celsius, that the override layers set on one
+/// thermostat side, when they set one: the equipment's own entry's
+/// `setpoint` object first, then the wildcard's. A `null` value does not
+/// set a constant (it unsets one), and a non-numeric value fails the
+/// merged payload's schema at the validation that follows the merge.
+pub(crate) fn override_constant_setpoint_value(
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    prefix: &str,
+) -> Option<f64> {
+    let key = format!("{prefix}_setpoint_c");
+    let constant = |layer: &Map<String, Value>| {
+        layer
+            .get("setpoint")
+            .and_then(Value::as_object)
+            .and_then(|sp| sp.get(&key))
+            .and_then(Value::as_f64)
+    };
+    layers
+        .own
+        .and_then(constant)
+        .or_else(|| layers.wildcard.and_then(|(_, wildcard)| constant(wildcard)))
+}
+
+/// Remove the merged config's per-side schedule sources that a constant
+/// setpoint the override layer set shadows, logging each replacement at
+/// debug. Runs after the override layers land, so the constant the layer
+/// set is the tier the engine's setpoint chain reads.
+fn remove_override_shadowed_setpoint_sources(
+    merged: &mut Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    equipment: &str,
+) {
+    let Some(sp_obj) = merged.get_mut("setpoint").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (prefix, source_key) in SETPOINT_SOURCE_SHADOWS {
+        if override_constant_setpoint_value(layers, prefix).is_some()
+            && sp_obj.remove(source_key).is_some()
+        {
+            tracing::debug!(
+                equipment,
+                side = prefix,
+                removed_source = source_key,
+                "a constant setpoint override replaces the schedule source"
+            );
+        }
+    }
+}
+
+/// The coldest and warmest value a surviving schedule source can read,
+/// when its year of values is knowable from the config alone: a
+/// constant's own value; a daily profile's or a solar-aware profile's
+/// extremes over its fractions, monthly multipliers and maximum (the
+/// product `value_at` evaluates). `None` for the kinds whose values the
+/// runtime reads from data the config does not carry (a schedule-file
+/// column and the time windows), which the runtime's cross-tier check
+/// catches instead.
+fn schedule_source_extremes(source: &hares_types::ScheduleSourceConfig) -> Option<(f64, f64)> {
+    use hares_types::ScheduleSourceConfig as S;
+    fn extremes<'a>(
+        fractions: impl Iterator<Item = &'a f64>,
+        multipliers: &'a [f64],
+        max_value: f64,
+    ) -> Option<(f64, f64)> {
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for fraction in fractions {
+            for multiplier in multipliers {
+                let value = fraction * multiplier * max_value;
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+        Some((min, max))
+    }
+    match source {
+        S::Constant(value) => Some((*value, *value)),
+        S::DailyProfile {
+            weekday,
+            weekend,
+            month_multipliers,
+            max_value,
+        } => extremes(
+            weekday.iter().chain(weekend.iter()),
+            month_multipliers,
+            *max_value,
+        ),
+        S::SolarAware {
+            daytime_fraction,
+            evening_fraction,
+            overnight_fraction,
+            month_multipliers,
+            max_value,
+            ..
+        } => extremes(
+            [*daytime_fraction, *evening_fraction, *overnight_fraction].iter(),
+            month_multipliers,
+            *max_value,
+        ),
+        S::ColumnRef { .. } | S::TimeWindows { .. } => None,
+    }
+}
+
+/// The cross-tier deadband warnings a merged config's setpoint block
+/// carries: a constant setpoint (an override layer's among them) named on
+/// one side against the surviving schedule source on the other, whose
+/// knowable coldest or warmest step crosses the constant. The init's
+/// deadband reconciliation reads the static pair alone, so this is the
+/// construction-time check that can see the surviving tier; the run's
+/// cross-tier count is the backstop for the kinds this scan cannot read.
+pub(crate) fn cross_tier_setpoint_warnings(
+    equipment: &str,
+    config: &hares_equipment::EquipmentConfig,
+) -> Vec<hares_types::Warning> {
+    use hares_types::ScheduleSourceConfig;
+
+    let hares_equipment::ConfigPayload::Typed { data, .. } = &config.payload else {
+        return Vec::new();
+    };
+    let Some(sp) = data.get("setpoint").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let named_constant = |side: &str| {
+        sp.get(&format!("{side}_setpoint_c"))
+            .and_then(Value::as_f64)
+    };
+    let surviving_source = |side: &str| {
+        sp.get(&format!("{side}_setpoint_source"))
+            .and_then(|value| serde_json::from_value::<ScheduleSourceConfig>(value.clone()).ok())
+    };
+    let mut warnings = Vec::new();
+    // Heating named against the surviving cooling schedule: the schedule's
+    // coldest step below the constant asks heating and cooling at once.
+    if let (Some(heating_c), (min_c, _)) = (
+        named_constant("heating"),
+        surviving_source("cooling")
+            .and_then(|source| schedule_source_extremes(&source))
+            .unwrap_or((f64::INFINITY, f64::NEG_INFINITY)),
+    ) && min_c < heating_c
+    {
+        warnings.push(hares_types::Warning::new(
+            equipment,
+            format!(
+                "the heating setpoint constant {heating_c} °C crosses the surviving cooling \
+                 schedule's coldest step {min_c} °C: the tiers ask heating and cooling at \
+                 once, the collision the init's static check cannot see; the run counts \
+                 every step both deliver"
+            ),
+        ));
+    }
+    // Cooling named against the surviving heating schedule: the schedule's
+    // warmest step above the constant asks both at once.
+    if let (Some(cooling_c), (_, max_c)) = (
+        named_constant("cooling"),
+        surviving_source("heating")
+            .and_then(|source| schedule_source_extremes(&source))
+            .unwrap_or((f64::INFINITY, f64::NEG_INFINITY)),
+    ) && max_c > cooling_c
+    {
+        warnings.push(hares_types::Warning::new(
+            equipment,
+            format!(
+                "the cooling setpoint constant {cooling_c} °C crosses the surviving heating \
+                 schedule's warmest step {max_c} °C: the tiers ask heating and cooling at \
+                 once, the collision the init's static check cannot see; the run counts \
+                 every step both deliver"
+            ),
+        ));
+    }
+    warnings
+}
+
+/// The gas water heater reads `conversion_efficiency` ahead of the EF/UEF
+/// test-procedure fields, so an override of those could never apply on a
+/// config that carries the conversion efficiency: it is rejected naming the
+/// field that shadows it instead of being accepted and silently ignored.
+fn reject_shadowed_wh_efficiency(
+    type_name: &str,
+    merged: &Map<String, Value>,
+    key: &str,
+    equipment: &str,
+) -> Result<()> {
+    if type_name != "Gas Water Heater" || (key != "energy_factor" && key != "uniform_energy_factor")
+    {
+        return Ok(());
+    }
+    if merged
+        .get("conversion_efficiency")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(HaresError::Equipment(format!(
+            "equipment '{equipment}': an override of '{key}' cannot apply while the \
+             config carries 'conversion_efficiency', which the gas water heater reads \
+             ahead of '{key}'; override 'conversion_efficiency' or remove it from the config"
+        )));
     }
     Ok(())
 }
@@ -1308,6 +1800,12 @@ pub(crate) fn validate_equipment_override_keys(
     };
     for key in root.keys() {
         if hares_io::hpxml::WILDCARD_OVERRIDE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        // The reserved `envelope` key is not an equipment name: the
+        // envelope scales it names are extracted and validated at the
+        // assembly boundary, and the boundary construction applies them.
+        if key == hares_io::ENVELOPE_OVERRIDE_KEY {
             continue;
         }
         if overridable_names.contains(&key.as_str()) {
@@ -1416,21 +1914,6 @@ pub(crate) fn required_duration(kwargs: &HashMap<String, Value>, key: &str) -> R
     )))
 }
 
-pub(crate) fn validate_sim_config(sim_config: &SimulationConfig) -> Result<()> {
-    if sim_config.duration.num_seconds() <= 0 {
-        return Err(HaresError::Io("duration must be > 0".to_string()));
-    }
-    if sim_config.time_res.num_seconds() <= 0 {
-        return Err(HaresError::Io("time_res must be > 0".to_string()));
-    }
-    if sim_config.duration.num_seconds() % sim_config.time_res.num_seconds() != 0 {
-        return Err(HaresError::Io(
-            "duration must be evenly divisible by time_res".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 /// Map HPXML `<SiteType>` to [`TerrainClass`] for the wind on every leakage
 /// path. A file without one is suburban, OS-HPXML v1.12.0's default
 /// (defaults.rb:817-818). The parser rejects a value outside HPXML's rural,
@@ -1518,14 +2001,23 @@ pub(crate) fn envelope_input_warnings(building: &Building) -> Result<Vec<hares_t
         ));
     }
     if building.site.shielding_of_home.is_none() {
-        let shielding = shielding_to_class(None, building.residential_facility_type.as_deref());
-        warnings.push(hares_types::Warning::new(
-            "envelope",
-            format!(
-                "the building gives no ShieldingofHome; the shielding is {shielding:?}, OS-HPXML's \
-                 default for this facility type (defaults.rb:822-830)"
-            ),
-        ));
+        // The warning carries the resolved default's class, so it fires
+        // only where the default resolves: a building with neither
+        // ShieldingofHome nor ResidentialFacilityType is the infiltration
+        // methods' error (they name the facility type when one of them
+        // reads the shielding); a dwelling whose infiltration reads no
+        // shielding needs neither.
+        if let Ok(shielding) =
+            shielding_to_class(None, building.residential_facility_type.as_deref())
+        {
+            warnings.push(hares_types::Warning::new(
+                "envelope",
+                format!(
+                    "the building gives no ShieldingofHome; the shielding is {shielding:?}, \
+                     OS-HPXML's default for this facility type (defaults.rb:822-830)"
+                ),
+            ));
+        }
     }
     Ok(warnings)
 }
@@ -1536,21 +2028,189 @@ pub(crate) fn envelope_input_warnings(building: &Building) -> Result<Vec<hares_t
 /// A file without one takes OS-HPXML v1.12.0's default (defaults.rb:822-830):
 /// well-shielded for an apartment unit or single-family attached home,
 /// normal otherwise; [`envelope_input_warnings`] reports it. The parser
-/// rejects any other value.
+/// rejects any other value. The default reads the residential facility
+/// type; a building with no `ShieldingofHome` and no
+/// `ResidentialFacilityType` either is a `MissingField` naming the
+/// facility type: the element is a required input of the reference
+/// (workflow_inputs.rst:622, "Yes" in the required column), and its
+/// absence leaves the default unevaluable.
+///
+/// # Errors
+///
+/// [`HaresError::Dwelling`] naming `ResidentialFacilityType` when neither
+/// element is present.
 pub(crate) fn shielding_to_class(
     shielding: Option<&hares_io::hpxml::ShieldingOfHome>,
     residential_facility_type: Option<&str>,
-) -> hares_physics::infiltration::ShieldingClass {
+) -> Result<hares_physics::infiltration::ShieldingClass> {
     use hares_io::hpxml::ShieldingOfHome;
     use hares_physics::infiltration::ShieldingClass;
     match shielding {
-        Some(ShieldingOfHome::Exposed) => ShieldingClass::Exposed,
-        Some(ShieldingOfHome::WellShielded) => ShieldingClass::WellShielded,
-        Some(ShieldingOfHome::Normal) => ShieldingClass::Normal,
+        Some(ShieldingOfHome::Exposed) => Ok(ShieldingClass::Exposed),
+        Some(ShieldingOfHome::WellShielded) => Ok(ShieldingClass::WellShielded),
+        Some(ShieldingOfHome::Normal) => Ok(ShieldingClass::Normal),
         None => match residential_facility_type {
-            Some("apartment unit" | "single-family attached") => ShieldingClass::WellShielded,
-            _ => ShieldingClass::Normal,
+            Some("apartment unit" | "single-family attached") => Ok(ShieldingClass::WellShielded),
+            Some(_) => Ok(ShieldingClass::Normal),
+            None => Err(HaresError::Dwelling(
+                "BuildingSummary/BuildingConstruction/ResidentialFacilityType: the building \
+                 declares no ShieldingofHome, whose default reads the residential facility \
+                 type (OS-HPXML v1.12.0 defaults.rb:822-830: well-shielded for an apartment \
+                 unit or single-family attached home, normal otherwise), and declares no \
+                 facility type either; name the facility type or declare the shielding"
+                    .to_string(),
+            )),
         },
+    }
+}
+
+/// The flue-or-chimney flag OpenStudio-HPXML defaults when the HPXML's air
+/// infiltration measurement declares none (v1.12.0
+/// `HPXMLtoOpenStudio/resources/defaults.rb:5096-5132`,
+/// `get_flue_or_chimney_in_conditioned_space`, applied at
+/// defaults.rb:3418-3421): true when a non-electric heating system of the
+/// atmospheric types (furnace, boiler, wall furnace, floor furnace, stove,
+/// space heater; HARES resolves the wall furnace, floor furnace and stove
+/// into its furnace class) sits in conditioned space with an AFUE or
+/// percent efficiency below 0.89; true when a non-electric fireplace sits
+/// in conditioned space (a type HARES does not resolve, so no spec reaches
+/// that arm); true when a non-electric water heater sits in conditioned
+/// space whose energy factor, or the equivalent calculated from its
+/// uniform energy factor (`resources/waterheater.rb:1557-1577`
+/// `calc_ef_from_uef`), is below 0.63; false otherwise. The combi tank
+/// types are excluded: their boiler is the heating system checked above
+/// (defaults.rb:5119-5120), so HARES's indirect tank is not a water heater
+/// arm here either. A non-electric water heater in conditioned space with
+/// no efficiency declared falls to true, the reference's own fall-through.
+///
+/// "In conditioned space" reads the spec's resolved zone: the zone it
+/// serves is the conditioned zone (the merged conditioned foundation is
+/// part of it); a system serving no declared zone is resolved to the
+/// conditioned zone at init and reads conditioned here. The efficiency
+/// each system's arm reads is the POST-merge one: the value an override
+/// layer's own entry, else the wildcard's, sets over the spec's resolved
+/// payload, so the flag follows the efficiency the engine runs (an
+/// `afue` override on a furnace whose resolved AFUE sits below 0.89 can
+/// lift the system out of the flue, and one above 0.89 can drop a
+/// system into it).
+pub(crate) fn flue_or_chimney_in_conditioned_space(
+    env: &EnvironmentState,
+    building: &Building,
+    specs: &[hares_io::EquipmentSpec],
+    overrides: &Value,
+) -> Result<bool> {
+    use hares_types::FuelType;
+
+    let override_root = overrides.as_object();
+    // The spec's zone_id is the environment zone's id (one past the
+    // building zone's index, environment.rs's ZoneId(idx + 1)); the
+    // conditioned-space test reads the building zone it names. A spec
+    // serving no declared zone resolves to the conditioned zone at init
+    // and reads conditioned here.
+    let zone_is_conditioned = |spec: &hares_io::EquipmentSpec| {
+        let Some(zone_id) = spec_zone_id(spec) else {
+            return true;
+        };
+        match env
+            .zones
+            .iter()
+            .position(|zone| zone.id.0 as usize == zone_id)
+        {
+            Some(index) => building
+                .zones
+                .get(index)
+                .is_some_and(|zone| zone.zone_type == hares_io::hpxml::ZoneType::Conditioned),
+            None => true,
+        }
+    };
+    let empty_root = Map::new();
+    for spec in specs {
+        let atmospheric_heating = matches!(spec.name.as_str(), "Gas Furnace" | "Gas Boiler");
+        if !atmospheric_heating
+            && spec.name != "Gas Water Heater"
+            && spec.name != "Tankless Water Heater"
+            && spec.name != "Gas Tankless Water Heater"
+            && spec.name != "Heat Pump Water Heater"
+        {
+            continue;
+        }
+        if spec.fuel_type == FuelType::Electric {
+            continue;
+        }
+        if !zone_is_conditioned(spec) {
+            continue;
+        }
+        // The efficiency the merged config carries: the override layers'
+        // value when one reaches the spec (the merge writes it over the
+        // payload), else the resolved payload's.
+        let layers =
+            hares_io::hpxml::override_layers(override_root.unwrap_or(&empty_root), &spec.name)?;
+        let effective_value = |key: &str| -> Option<f64> {
+            layers
+                .own
+                .and_then(|own| own.get(key))
+                .or_else(|| layers.wildcard.and_then(|(_, wildcard)| wildcard.get(key)))
+                .and_then(Value::as_f64)
+                .or_else(|| spec_payload_f64(spec, key))
+        };
+        if atmospheric_heating {
+            // The AFUE or percent efficiency, typed payload first, then
+            // the raw parameter bag a spec pending autosizing carries
+            // (the units are read beside it and both thresholds are
+            // 0.89, the rule's "AFUE/Percent").
+            let afue = effective_value("afue").or_else(|| effective_value("heating_efficiency"));
+            if afue.is_none_or(|afue| afue < 0.89) {
+                return Ok(true);
+            }
+            continue;
+        }
+        let energy_factor = effective_value("energy_factor");
+        let effective = energy_factor.or_else(|| {
+            effective_value("uniform_energy_factor").map(|uef| calc_ef_from_uef(&spec.name, uef))
+        });
+        if effective.is_none_or(|ef| ef < 0.63) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The `zone_id` a spec's typed payload or raw parameters carry.
+fn spec_zone_id(spec: &hares_io::EquipmentSpec) -> Option<usize> {
+    if let Some(typed) = &spec.typed_config
+        && let ConfigPayload::Typed { data, .. } = &typed.payload
+        && let Some(zone_id) = data.get("zone_id").and_then(Value::as_u64)
+    {
+        return usize::try_from(zone_id).ok();
+    }
+    spec.parameters
+        .get("zone_id")
+        .and_then(Value::as_u64)
+        .map(|zone_id| zone_id as usize)
+}
+
+/// The `f64` a spec's typed payload or raw parameters carry at `key`.
+fn spec_payload_f64(spec: &hares_io::EquipmentSpec, key: &str) -> Option<f64> {
+    if let Some(typed) = &spec.typed_config
+        && let ConfigPayload::Typed { data, .. } = &typed.payload
+        && let Some(value) = data.get(key).and_then(Value::as_f64)
+    {
+        return Some(value);
+    }
+    spec.parameters.get(key).and_then(Value::as_f64)
+}
+
+/// The energy factor equivalent of a uniform energy factor
+/// (`resources/waterheater.rb:1557-1577`, `calc_ef_from_uef`), by the
+/// water heater's class: a fuel storage tank's
+/// `0.9066 * uef + 0.0711`, a tankless water heater's UEF itself. (The
+/// electric and heat-pump forms are unreachable here: an electric water
+/// heater is skipped by fuel before the efficiency reads.)
+fn calc_ef_from_uef(class: &str, uef: f64) -> f64 {
+    if class.contains("Tankless") {
+        uef
+    } else {
+        0.9066 * uef + 0.0711
     }
 }
 
@@ -1586,7 +2246,7 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use hares_equipment::{
-        SetpointReconciliation,
+        ConfigPayload, SetpointReconciliation,
         hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig},
     };
     use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
@@ -1648,7 +2308,9 @@ mod tests {
                 text: String::new(),
                 children: vec![],
             },
+            unavailable_periods: Vec::new(),
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 
@@ -1762,6 +2424,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -1801,6 +2465,125 @@ mod tests {
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
     }
 
+    /// A 24-hour constant daily profile, the shape the resolver stamps.
+    fn constant_profile(value: f64) -> Value {
+        Value::Array(vec![Value::from(value); 24])
+    }
+
+    #[test]
+    fn constant_setpoint_override_removes_the_matching_schedule_source() {
+        // The resolver's shape: the payload's setpoint block carries the
+        // per-side sources the resolution stamped, and the constant
+        // override lands beside them. The merge removes the shadowed
+        // side's source, and only that side's.
+        let mut spec = gas_furnace_spec();
+        if let Some(typed) = spec.typed_config.as_mut()
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            let obj = data.as_object_mut().expect("furnace payload object");
+            obj.insert(
+                "setpoint".to_string(),
+                json!({
+                    "heating_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(20.0),
+                        "weekend": constant_profile(20.0)
+                    },
+                    "cooling_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(25.5556),
+                        "weekend": constant_profile(25.5556)
+                    }
+                }),
+            );
+        }
+        let overrides = json!({
+            "Gas Furnace": {
+                "setpoint": {"heating_setpoint_c": 25.0}
+            }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("the merged config decodes");
+
+        assert_eq!(cfg.setpoint.heating_setpoint_c, Some(25.0));
+        assert!(
+            cfg.setpoint.heating_setpoint_source.is_none(),
+            "the constant shadows the heating source: it must be removed"
+        );
+        assert!(
+            cfg.setpoint.cooling_setpoint_source.is_some(),
+            "the cooling side's source stands: the override named the heating side only"
+        );
+    }
+
+    #[test]
+    fn constant_setpoint_override_from_the_wildcard_layer_shadows_too() {
+        let mut spec = gas_furnace_spec();
+        if let Some(typed) = spec.typed_config.as_mut()
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            let obj = data.as_object_mut().expect("furnace payload object");
+            obj.insert(
+                "setpoint".to_string(),
+                json!({
+                    "heating_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(20.0),
+                        "weekend": constant_profile(20.0)
+                    }
+                }),
+            );
+        }
+        let overrides = json!({
+            "all": {"setpoint": {"cooling_setpoint_c": 26.0}}
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("the merged config decodes");
+
+        assert_eq!(cfg.setpoint.cooling_setpoint_c, Some(26.0));
+        assert!(cfg.setpoint.cooling_setpoint_source.is_none());
+        assert!(cfg.setpoint.heating_setpoint_source.is_some());
+    }
+
+    #[test]
+    fn a_null_constant_does_not_shadow_the_schedule_source() {
+        // An explicit null unsets the constant; it does not set one, so
+        // the resolution's source keeps governing.
+        let mut spec = gas_furnace_spec();
+        if let Some(typed) = spec.typed_config.as_mut()
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            let obj = data.as_object_mut().expect("furnace payload object");
+            obj.insert(
+                "setpoint".to_string(),
+                json!({
+                    "heating_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(20.0),
+                        "weekend": constant_profile(20.0)
+                    }
+                }),
+            );
+        }
+        let overrides = json!({
+            "Gas Furnace": {"setpoint": {"heating_setpoint_c": null}}
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("the merged config decodes");
+
+        assert_eq!(cfg.setpoint.heating_setpoint_c, None);
+        assert!(cfg.setpoint.heating_setpoint_source.is_some());
+    }
+
     // ── the spec's parameter bag as an override layer on typed specs ────
 
     /// A typed spec whose bag mirrors the payload (the shape every
@@ -1810,15 +2593,16 @@ mod tests {
         let typed_cfg = hares_equipment::PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
+            attached_boundary_id: None,
             module_type: None,
             noct_c: None,
             array_type: None,
             system_losses_fraction: None,
             inverter_efficiency: None,
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
@@ -1830,9 +2614,9 @@ mod tests {
             .as_object()
             .cloned()
             .expect("PV config object");
-        parameters.insert("capacity_kw".to_string(), json!(override_kw));
+        parameters.insert("capacity_w".to_string(), json!(override_kw * 1000.0));
         let mut typed_overrides = serde_json::Map::new();
-        typed_overrides.insert("capacity_kw".to_string(), json!(override_kw));
+        typed_overrides.insert("capacity_w".to_string(), json!(override_kw * 1000.0));
         hares_io::EquipmentSpec {
             instance_name: None,
             name: "PV".to_string(),
@@ -1851,6 +2635,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -1867,10 +2653,10 @@ mod tests {
             .expect("the merged payload must deserialize as PvConfig");
 
         assert!(
-            (cfg.capacity_kw - 9.0).abs() < 1e-12,
+            (cfg.capacity_w - 9000.0).abs() < 1e-9,
             "an override the caller set on the spec must reach the typed \
-             config instead of being dropped, got capacity_kw {}",
-            cfg.capacity_kw
+             config instead of being dropped, got capacity_w {}",
+            cfg.capacity_w
         );
     }
 
@@ -1886,7 +2672,7 @@ mod tests {
             .require_typed::<hares_equipment::PvConfig>("PV")
             .expect("the merged payload must deserialize as PvConfig");
 
-        assert!((cfg.capacity_kw - 5.0).abs() < 1e-12);
+        assert!((cfg.capacity_w - 5000.0).abs() < 1e-9);
         assert!((cfg.tilt_deg.unwrap() - 30.0).abs() < 1e-12);
     }
 
@@ -1927,6 +2713,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         apply_spec_bag_to_typed_config(&mut spec).expect("the raw-text fuel must land normalized");
@@ -2012,6 +2800,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         let err = apply_spec_bag_to_typed_config(&mut spec)
@@ -2082,6 +2872,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2159,23 +2951,23 @@ mod tests {
             ),
             ("Indirect Tank", "ua_w_per_k", json!({}), json!(5.0)),
             ("Heat Pump Water Heater", "cop", json!({}), json!(3.0)),
-            ("PV", "noct_c", json!({"capacity_kw": 1.0}), json!(45.0)),
+            ("PV", "noct_c", json!({"capacity_w": 1000.0}), json!(45.0)),
             (
                 "Battery",
                 "self_discharge_pct_per_day",
-                json!({"capacity_kwh": 1.0, "max_charge_kw": 1.0, "max_discharge_kw": 1.0}),
+                json!({"capacity_j": 3600000.0, "max_charge_w": 1000.0, "max_discharge_w": 1000.0}),
                 json!(0.1),
             ),
             (
                 "EV",
                 "charging_level",
-                json!({"capacity_kwh": 1.0, "max_charging_power_kw": 1.0}),
+                json!({"capacity_j": 3600000.0, "max_charging_power_w": 1000.0}),
                 json!("L2"),
             ),
             (
                 "Generator",
                 "zone_id",
-                json!({"rated_power_kw": 1.0}),
+                json!({"rated_power_w": 1000.0}),
                 json!(1),
             ),
             (
@@ -2260,6 +3052,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2288,6 +3082,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2339,6 +3135,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2406,6 +3204,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2446,6 +3246,72 @@ mod tests {
             sr[1].adjusted_cooling_c, [22.5; 24],
             "adjusted cooling setpoints must be preserved"
         );
+    }
+
+    /// The merge-time scan fires on a knowable surviving schedule whose
+    /// coldest step sits below the constant the config names, and stays
+    /// silent on the kinds whose values the config does not carry.
+    #[test]
+    fn cross_tier_scan_names_both_values_and_skips_unreadable_kinds() {
+        use hares_types::ScheduleSourceConfig;
+        use hares_types::schedule::BoundaryPolicy;
+
+        let base_cfg = gas_furnace_spec()
+            .typed_config
+            .expect("the spec carries its typed config")
+            .typed::<GasFurnaceConfig>()
+            .expect("the furnace's typed config reads");
+        let source_config = |cooling_source: ScheduleSourceConfig| {
+            let typed_cfg = GasFurnaceConfig {
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(26.0),
+                    cooling_setpoint_source: Some(cooling_source),
+                    ..HvacSetpointConfig::default()
+                },
+                ..base_cfg.clone()
+            };
+            hares_equipment::EquipmentConfig::from_typed(
+                "Gas Furnace".to_string(),
+                "Gas Furnace".to_string(),
+                typed_cfg,
+            )
+            .unwrap()
+        };
+
+        // A daily profile whose coldest step (18 C) sits below the 26 C
+        // constant: the warning names the equipment and both values.
+        let profile = source_config(ScheduleSourceConfig::DailyProfile {
+            weekday: [18.0; 24],
+            weekend: [18.0; 24],
+            month_multipliers: [1.0; 12],
+            max_value: 1.0,
+        });
+        let warnings = super::cross_tier_setpoint_warnings("Gas Furnace", &profile);
+        assert_eq!(warnings.len(), 1, "the profile's crossing warns");
+        assert_eq!(warnings[0].source.as_ref(), "Gas Furnace");
+        assert!(
+            warnings[0].message.contains("26") && warnings[0].message.contains("18"),
+            "the warning names both values: {}",
+            warnings[0].message
+        );
+
+        // A schedule-file column's values the config does not carry: the
+        // scan is silent, the runtime count is the guard.
+        let column = source_config(ScheduleSourceConfig::ColumnRef {
+            col_idx: 7,
+            boundary: BoundaryPolicy::Clamp,
+        });
+        assert!(super::cross_tier_setpoint_warnings("Gas Furnace", &column).is_empty());
+
+        // A surviving schedule whose every step is above the constant does
+        // not warn.
+        let high = source_config(ScheduleSourceConfig::DailyProfile {
+            weekday: [28.0; 24],
+            weekend: [28.0; 24],
+            month_multipliers: [1.0; 12],
+            max_value: 1.0,
+        });
+        assert!(super::cross_tier_setpoint_warnings("Gas Furnace", &high).is_empty());
     }
 
     #[test]
@@ -2607,6 +3473,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2702,6 +3570,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
@@ -3163,6 +4032,129 @@ mod tests {
         );
     }
 
+    /// A material-layer boundary is unchanged by the opaque-R precedence
+    /// (the numeric-fixes ledger's opaque-R precedence entry): a wall with a declared
+    /// `AssemblyEffectiveRValue` of 23.0 (IP) and two explicit material
+    /// layers takes the material path with the conversion's output the
+    /// parent commit's on bits - no precomputed layers, the stated layers
+    /// verbatim, and the fallback the declared R's material part minus the
+    /// boundary's own films.
+    #[test]
+    fn material_layer_boundary_unchanged_by_the_declared_r() {
+        let plywood = hares_io::hpxml::MaterialLayer {
+            thickness_m: 0.02,
+            conductivity_w_m_k: 0.13,
+            density_kg_m3: 545.0,
+            specific_heat_j_kg_k: 1215.0,
+            area_m2: 20.0,
+        };
+        let batt = hares_io::hpxml::MaterialLayer {
+            thickness_m: 0.14,
+            conductivity_w_m_k: 0.043,
+            density_kg_m3: 12.0,
+            specific_heat_j_kg_k: 840.0,
+            area_m2: 20.0,
+        };
+        let declared = hares_physics::units::r_value_ip_to_si(23.0);
+        let building = hares_io::Building {
+            boundaries: vec![Boundary {
+                id: "mat-wall".to_string(),
+                boundary_type: BoundaryType::Wall,
+                area_m2: 20.0,
+                azimuth_deg: Some(180.0),
+                assembly_r_value_m2_k_w: Some(declared),
+                r_value_layers_m2_k_w: Vec::new(),
+                interior_zone: Some(ZoneType::Conditioned),
+                exterior_zone: Some(ZoneType::Outdoor),
+                material_layers: vec![plywood.clone(), batt.clone()],
+                framing_factor: None,
+                construction_type: None,
+                finish_type: None,
+                insulation_details: None,
+                has_radiant_barrier: false,
+                solar_absorptance: None,
+                emittance: None,
+                tilt_deg: Some(90.0),
+                lut_boundary_name: None,
+                floor_or_ceiling: None,
+                perimeter_m: None,
+                perimeter_insulation_r_m2_k_w: None,
+                foundation_depth_m: None,
+            }],
+            ..minimal_building(
+                vec![Zone {
+                    zone_type: ZoneType::Conditioned,
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    attached_wall_ids: Vec::new(),
+                    duct_systems: Vec::new(),
+                    vented: false,
+                    ventilation_ach: None,
+                    ventilation_sla: None,
+                    height_m: None,
+                    hpxml_location: None,
+                }],
+                Vec::new(),
+            )
+        };
+        let store = load_defaults_store();
+        let inputs = super::building_to_boundary_inputs(&building, 1, &store, 2.0, 10.0, 10.0)
+            .expect("building_to_boundary_inputs");
+        assert_eq!(inputs.len(), 1);
+        let input = &inputs[0];
+        assert!(
+            input.precomputed_rc.is_empty(),
+            "a material-layer boundary takes no LUT layers"
+        );
+        for (stated, carried) in [&plywood, &batt].iter().zip(&input.material_layers) {
+            assert_eq!(carried.thickness_m.to_bits(), stated.thickness_m.to_bits());
+            assert_eq!(
+                carried.conductivity_w_m_k.to_bits(),
+                stated.conductivity_w_m_k.to_bits()
+            );
+            assert_eq!(
+                carried.density_kg_m3.to_bits(),
+                stated.density_kg_m3.to_bits()
+            );
+            assert_eq!(
+                carried.specific_heat_j_kg_k.to_bits(),
+                stated.specific_heat_j_kg_k.to_bits()
+            );
+        }
+        let films = input.r_film_interior_m2_k_w + input.r_film_exterior_m2_k_w;
+        assert_eq!(
+            input.fallback_r_m2_k_w.to_bits(),
+            (declared - films).to_bits(),
+            "the fallback is the declared R's material part, the parent commit's on bits"
+        );
+        // The read-back's material-path derivation, unchanged by the
+        // opaque-R precedence: the
+        // layers' resolved resistances and capacitances, on the parent
+        // commit's bits (no framing factor: the conductivity passes
+        // through; the capacitance is density times specific heat times
+        // thickness).
+        let expected_r: [u64; 2] = [
+            (0.02_f64 / hares_envelope::boundary_rc::parallel_path_conductivity(0.13, None))
+                .to_bits(),
+            (0.14_f64 / hares_envelope::boundary_rc::parallel_path_conductivity(0.043, None))
+                .to_bits(),
+        ];
+        let expected_c: [u64; 2] = [
+            (plywood.density_kg_m3 * plywood.specific_heat_j_kg_k * plywood.thickness_m).to_bits(),
+            (batt.density_kg_m3 * batt.specific_heat_j_kg_k * batt.thickness_m).to_bits(),
+        ];
+        for (index, layer) in input.material_layers.iter().enumerate() {
+            let resolved_r = layer.thickness_m
+                / hares_envelope::boundary_rc::parallel_path_conductivity(
+                    layer.conductivity_w_m_k,
+                    input.framing_factor,
+                );
+            let resolved_c = layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m;
+            assert_eq!(resolved_r.to_bits(), expected_r[index]);
+            assert_eq!(resolved_c.to_bits(), expected_c[index]);
+        }
+    }
+
     /// SteelFrame without framing factor on the LUT-miss path must error.
     /// Regression for ticket 051 Defect 2: ASHRAE HoF 2021 Ch. 27 requires
     /// the zone method for metal framing. When no <StudSpacing>, <StudWidth>,
@@ -3484,13 +4476,13 @@ mod tests {
         );
     }
 
-    /// `find_zone_idx` returns Ok(0) with a warning when zone_type is None.
-    /// Doors and windows in HPXML legitimately lack explicit interior_zone
-    /// elements; they inherit from parent walls. The warning alerts operators
-    /// to boundaries missing zone assignments, but wiring proceeds with zone 0
-    /// as a fallback rather than failing.
+    /// `find_zone_idx` errors when zone_type is None: a boundary that names
+    /// no interior zone (and no attached surface to derive one from) has no
+    /// zone to belong to, and zone 0 must not be substituted for it. Doors
+    /// and windows in HPXML legitimately lack explicit interior adjacency;
+    /// the parser derives theirs from their attached surface.
     #[test]
-    fn find_zone_idx_none_zone_type_returns_zero() {
+    fn find_zone_idx_none_zone_type_errors() {
         let zone = Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(50.0),
@@ -3504,7 +4496,13 @@ mod tests {
             hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
-        assert_eq!(find_zone_idx(&building, Some("Door1"), None, 1).unwrap(), 0);
+        let err = find_zone_idx(&building, Some("Door1"), None, 1)
+            .expect_err("a boundary with no interior zone type must fail the build");
+        let text = err.to_string();
+        assert!(
+            text.contains("Door1") && text.contains("no interior zone"),
+            "the error names the boundary and the missing adjacency: {text}"
+        );
     }
 
     /// `find_zone_idx` returns Err when the zone type exists nowhere in the
@@ -3531,9 +4529,10 @@ mod tests {
         );
     }
 
-    /// `boundary_zone_index` returns Ok(0) with a warning when zone_type is None.
+    /// `boundary_zone_index` (the wrapper the solver wiring calls) errors
+    /// when zone_type is None, the same rule `find_zone_idx` applies.
     #[test]
-    fn boundary_zone_index_none_zone_type_returns_zero() {
+    fn boundary_zone_index_none_zone_type_errors() {
         let zone = Zone {
             zone_type: ZoneType::Conditioned,
             floor_area_m2: Some(50.0),
@@ -3547,9 +4546,12 @@ mod tests {
             hpxml_location: None,
         };
         let building = minimal_building(vec![zone], Vec::new());
-        assert_eq!(
-            super::boundary_zone_index(&building, Some("Door1"), None, 1).unwrap(),
-            0
+        let err = super::boundary_zone_index(&building, Some("Door1"), None, 1)
+            .expect_err("a boundary with no interior zone type must fail the build");
+        let text = err.to_string();
+        assert!(
+            text.contains("Door1") && text.contains("no interior zone"),
+            "the error names the boundary and the missing adjacency: {text}"
         );
     }
 
@@ -3580,8 +4582,8 @@ mod tests {
 
     /// Build a minimal DefaultsStore for tests that need one.
     fn load_defaults_store() -> hares_io::DefaultsStore {
-        let defaults_path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python/hares/defaults");
         hares_io::DefaultsStore::load(&defaults_path)
             .expect("DefaultsStore must be loadable from project defaults/ directory")
     }
@@ -4372,6 +5374,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -4456,7 +5460,7 @@ mod tests {
             others.extend(own.iter().map(|(key, _)| format!("{key}x")));
             others.extend([
                 "month_multiplier_12".to_string(),
-                "phase_4_power_kw".to_string(),
+                "phase_4_power_w".to_string(),
             ]);
             others.push("fuel_type".to_string());
             for key in others
@@ -4484,7 +5488,7 @@ mod tests {
         let message = err.to_string();
         for key in [
             "usage_multiplier",
-            "power_constant_kw",
+            "power_constant_w",
             "month_multiplier_<n>",
         ] {
             assert!(message.contains(key), "{key} missing from: {message}");
@@ -4519,19 +5523,15 @@ mod tests {
     fn a_wildcard_numbered_key_reaches_a_load_within_its_count() {
         let washer = raw_load_spec("Dishwasher");
         let short =
-            merged_equipment_config(&washer, &json!({ "all": { "phase_4_power_kw": 1.0 } }))
+            merged_equipment_config(&washer, &json!({ "all": { "phase_4_power_w": 1000.0 } }))
                 .expect("skipped for a four-phase cycle");
-        assert!(
-            !raw_keys(&short)
-                .iter()
-                .any(|key| *key == "phase_4_power_kw")
-        );
+        assert!(!raw_keys(&short).iter().any(|key| *key == "phase_4_power_w"));
         let long = merged_equipment_config(
             &washer,
-            &json!({ "all": { "phase_len": 5, "phase_4_power_kw": 1.0 } }),
+            &json!({ "all": { "phase_len": 5, "phase_4_power_w": 1000.0 } }),
         )
         .expect("the fifth phase exists");
-        assert_eq!(long.get_f64("phase_4_power_kw"), Some(1.0));
+        assert_eq!(long.get_f64("phase_4_power_w"), Some(1000.0));
     }
 
     /// Both wildcard spellings are an error, never one shadowing the other.
@@ -4568,7 +5568,7 @@ mod tests {
             ("all", "usage_multiplir"),
             ("*", "afuee"),
             ("all", "month_multiplier_12"),
-            ("*", "phase_4_power_kw"),
+            ("*", "phase_4_power_w"),
         ] {
             let err = validate_wildcard_override(&json!({ wildcard: { key: 2.0 } }), &population)
                 .expect_err("read by no equipment");
@@ -4582,7 +5582,7 @@ mod tests {
             .expect_err("no wet appliance reads it here");
         assert!(err.to_string().contains("n_units"), "{err}");
         validate_wildcard_override(
-            &json!({ "all": { "phase_4_power_kw": 1.0 }, "Dishwasher": { "phase_len": 5 } }),
+            &json!({ "all": { "phase_4_power_w": 1000.0 }, "Dishwasher": { "phase_len": 5 } }),
             &population,
         )
         .expect("the dishwasher's own entry gives it a fifth phase");
@@ -4669,6 +5669,122 @@ mod tests {
         }
     }
 
+    /// The gas water heater reads `conversion_efficiency` ahead of the
+    /// EF/UEF test-procedure fields, so an override of those could never
+    /// apply on a config that carries the conversion efficiency: it is
+    /// rejected naming `conversion_efficiency` instead of being accepted and
+    /// silently ignored.
+    #[test]
+    fn shadowed_energy_factor_override_is_rejected() {
+        let spec = typed_gas_water_heater_spec(Some(0.78));
+        for (layer, overrides) in [
+            (
+                "own",
+                json!({ "Gas Water Heater": { "energy_factor": 0.95 } }),
+            ),
+            ("wildcard", json!({ "all": { "energy_factor": 0.95 } })),
+            (
+                "own uef",
+                json!({ "Gas Water Heater": { "uniform_energy_factor": 0.95 } }),
+            ),
+        ] {
+            let err = merged_equipment_config(&spec, &overrides)
+                .expect_err("the shadowed override is rejected");
+            assert!(
+                err.to_string().contains("conversion_efficiency"),
+                "{layer}: the error names the field that shadows it, got: {err}"
+            );
+        }
+
+        // Without the conversion efficiency the same override applies: the
+        // EF field is the config's own then.
+        let spec = typed_gas_water_heater_spec(None);
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Gas Water Heater": { "energy_factor": 0.95 } }),
+        )
+        .expect("an override of a field the config reads without a shadow applies");
+        let merged_data = match &merged.payload {
+            hares_equipment::ConfigPayload::Typed { data, .. } => data.clone(),
+            other => panic!("typed payload expected, got {other:?}"),
+        };
+        assert_eq!(
+            merged_data.get("energy_factor"),
+            Some(&json!(0.95)),
+            "the override landed on the payload"
+        );
+
+        // The spec-level channel (a caller-built spec's typed_overrides)
+        // rejects the same shadow the same way.
+        let mut spec = typed_gas_water_heater_spec(Some(0.78));
+        spec.typed_overrides
+            .insert("energy_factor".to_string(), json!(0.95));
+        let err = apply_spec_bag_to_typed_config(&mut spec)
+            .expect_err("the spec-level shadowed override is rejected");
+        assert!(
+            err.to_string().contains("conversion_efficiency"),
+            "the error names the field that shadows it, got: {err}"
+        );
+    }
+
+    fn typed_gas_water_heater_spec(conversion_efficiency: Option<f64>) -> hares_io::EquipmentSpec {
+        let cfg = hares_equipment::GasWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: None,
+            fuel_type: FuelType::Gas,
+            tank_volume_m3: Some(0.151),
+            tank_height_m: None,
+            energy_factor: Some(0.6),
+            uniform_energy_factor: None,
+            heating_capacity_w: Some(4_500.0),
+            ua_w_per_k: Some(2.5),
+            setpoint_c: Some(52.0),
+            deadband_c: None,
+            max_tank_temp_c: None,
+            initial_tank_temp_c: None,
+            tank_nodes: None,
+            avg_water_draw_l_per_day: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
+            pilot_power_w: None,
+            flue_loss_fraction: None,
+            skin_loss_fraction: None,
+            ignition_type: None,
+            performance_adjustment: None,
+            zone_type: None,
+            first_hour_rating_m3: None,
+            jacket_r_value_m2_k_w: None,
+            conversion_efficiency,
+            fixture_delivery_temp_c: None,
+            hot_draw_temp_c: None,
+            pilot_fraction_to_tank: None,
+            fan_power_w: None,
+        };
+        let typed = hares_equipment::EquipmentConfig::from_typed(
+            "Gas Water Heater".to_string(),
+            "Gas Water Heater".to_string(),
+            cfg,
+        )
+        .expect("the config is well-formed");
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Gas Water Heater".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters: serde_json::Map::new(),
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(typed),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+        }
+    }
+
     /// The HPXML spelling of a fraction in an override replaces the resolved
     /// fraction; both spellings in one layer are an error.
     #[test]
@@ -4689,5 +5805,294 @@ mod tests {
             matches!(&err, HaresError::InvalidEquipmentParameter { key, .. } if key == "frac_sensible"),
             "{err}"
         );
+    }
+
+    /// The spec of one row's class: the typed classes carry the minimal
+    /// typed payload their deserialisation accepts (the removed-key walk
+    /// runs before it and fails first), the raw classes the parameter
+    /// bag.
+    fn override_test_spec(class: &str) -> hares_io::EquipmentSpec {
+        let base = hares_io::EquipmentSpec {
+            instance_name: None,
+            name: class.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: Map::new(),
+            typed_overrides: Map::new(),
+            zip_params: None,
+            typed_config: None,
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+        };
+        let typed_payload = match class {
+            "PV" => json!({"capacity_w": 5000.0, "tilt_deg": 30.0, "azimuth_deg": 180.0}),
+            "Battery" => {
+                json!({"capacity_j": 48600000.0, "max_charge_w": 5000.0, "max_discharge_w": 5000.0})
+            }
+            "EV" => json!({"capacity_j": 270000000.0, "max_charging_power_w": 7200.0}),
+            "Gas Generator" => json!({"rated_power_w": 10000.0, "eta_electric": 0.3}),
+            "Air Conditioner" => json!({"capacity_w": 10000.0, "eir": 0.3}),
+            "Room AC" => json!({"capacity_w": 3500.0, "eir": 0.3}),
+            "ASHP Cooler" => json!({"capacity_w": 10000.0, "eir": 0.3}),
+            _ => {
+                return raw_load_spec(class);
+            }
+        };
+        hares_io::EquipmentSpec {
+            typed_config: Some(hares_equipment::EquipmentConfig::with_payload(
+                "test".to_string(),
+                class.to_string(),
+                hares_equipment::ConfigPayload::Typed {
+                    type_name: class.to_string(),
+                    version: 1,
+                    data: typed_payload,
+                },
+            )),
+            ..base
+        }
+    }
+
+    /// Every removed equipment key the unit move adds to the table: the
+    /// merge with the old key path set fails naming the row's
+    /// replacement, under the class's own override key and under the
+    /// wildcard alike. The pattern rows write a phase number; the array
+    /// row writes inside arrays[1]; the payload rows write inside the
+    /// JSON string.
+    #[test]
+    fn removed_equipment_key_names_its_replacement() {
+        let rows: &[(&str, serde_json::Value, &str)] = &[
+            ("PV", json!({"capacity_kw": 1.0}), "PvConfig.capacity_w (W)"),
+            (
+                "PV",
+                json!({"inverter_capacity_kw": 1.0}),
+                "PvConfig.inverter_capacity_w (W)",
+            ),
+            (
+                "PV",
+                json!({"arrays": [{}, {"capacity_kw": 1.0}]}),
+                "PvConfig.arrays[].capacity_w (W)",
+            ),
+            (
+                "Battery",
+                json!({"capacity_kwh": 1.0}),
+                "BatteryConfig.capacity_j (J)",
+            ),
+            (
+                "Battery",
+                json!({"max_charge_kw": 1.0}),
+                "BatteryConfig.max_charge_w (W)",
+            ),
+            (
+                "Battery",
+                json!({"max_discharge_kw": 1.0}),
+                "BatteryConfig.max_discharge_w (W)",
+            ),
+            (
+                "Battery",
+                json!({"inverter_capacity_kva": 1.0}),
+                "BatteryConfig.inverter_capacity_va (VA)",
+            ),
+            (
+                "Battery",
+                json!({"bms_mode": "{\"SelfConsumption\": {\"min_soc\": 0.1, \"max_soc\": 0.95, \"solar_only_charging\": false, \"surplus_deadband_kw\": 1.0}}"}),
+                "BatteryConfig.bms_mode.SelfConsumption.surplus_deadband_w (W)",
+            ),
+            (
+                "EV",
+                json!({"capacity_kwh": 1.0}),
+                "EvConfig.capacity_j (J)",
+            ),
+            (
+                "EV",
+                json!({"max_charging_kw": 1.0}),
+                "EvConfig.max_charging_power_w (W)",
+            ),
+            (
+                "EV",
+                json!({"max_charging_power_kw": 1.0}),
+                "EvConfig.max_charging_power_w (W)",
+            ),
+            (
+                "EV",
+                json!({"v2l_max_discharge_kw": 1.0}),
+                "EvConfig.v2l_max_discharge_w (W)",
+            ),
+            (
+                "EV",
+                json!({"v2g_max_discharge_kw": 1.0}),
+                "EvConfig.v2g_max_discharge_w (W)",
+            ),
+            (
+                "EV",
+                json!({"power_limit_kw": 1.0}),
+                "EvConfig.power_limit_w (W)",
+            ),
+            (
+                "EV",
+                json!({"fuel_economy_kwh_per_mi": 1.0}),
+                "EvConfig.fuel_economy_j_per_m (J/m)",
+            ),
+            (
+                "EV",
+                json!({"charger_capacity_kva": 1.0}),
+                "EvConfig.charger_capacity_va (VA)",
+            ),
+            (
+                "EV",
+                json!({"charging_strategy": "{\"V2G\": {\"min_soc\": 0.3, \"max_export_kw\": 1.0, \"price_threshold\": 0.25}}"}),
+                "EvConfig.charging_strategy.V2G.max_export_w (W)",
+            ),
+            (
+                "EV",
+                json!({"charging_strategy": "{\"SolarSurplus\": {\"min_charge_rate_kw\": 1.0}}"}),
+                "EvConfig.charging_strategy.SolarSurplus.min_charge_rate_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"rated_power_kw": 1.0}),
+                "GeneratorConfig.rated_power_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"capacity_min_kw": 1.0}),
+                "GeneratorConfig.capacity_min_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"grid_import_limit_kw": 1.0}),
+                "GeneratorConfig.grid_import_limit_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"export_limit_kw": 1.0}),
+                "GeneratorConfig.export_limit_w (W)",
+            ),
+            (
+                "Gas Generator",
+                json!({"delta_kw_per_s": 1.0}),
+                "GeneratorConfig.delta_w_per_s (W/s)",
+            ),
+            (
+                "Air Conditioner",
+                json!({"crankcase_heater_kw": 1.0}),
+                "CentralAirConditionerConfig.crankcase_heater_w (W)",
+            ),
+            (
+                "Room AC",
+                json!({"crankcase_heater_kw": 1.0}),
+                "RoomAcConfig.crankcase_heater_w (W)",
+            ),
+            (
+                "ASHP Cooler",
+                json!({"crankcase_heater_kw": 1.0}),
+                "HeatPumpCoolerConfig.crankcase_heater_w (W)",
+            ),
+            (
+                "EventBasedLoad",
+                json!({"active_power_kw": 1.0}),
+                "EventBasedLoad.active_power_w (W)",
+            ),
+            (
+                "EventBasedLoad",
+                json!({"phase_2_power_kw": 1.0, "phase_len": 4}),
+                "EventBasedLoad.phase_<n>_power_w (W)",
+            ),
+            (
+                "EventBasedLoad",
+                json!({"cycle_phase_2_power_kw": 1.0, "phase_len": 4}),
+                "EventBasedLoad.cycle_phase_<n>_power_w (W)",
+            ),
+            (
+                "EventBasedLoad",
+                json!({"event_power_kw_series": [1.0, 0.0]}),
+                "EventBasedLoad.event_power_w_series (W)",
+            ),
+            (
+                "Clothes Washer",
+                json!({"active_power_kw": 1.0}),
+                "WetAppliance.active_power_w (W)",
+            ),
+            (
+                "Clothes Washer",
+                json!({"phase_2_power_kw": 1.0}),
+                "WetAppliance.phase_<n>_power_w (W)",
+            ),
+            (
+                "Clothes Washer",
+                json!({"cycle_phase_2_power_kw": 1.0}),
+                "WetAppliance.cycle_phase_<n>_power_w (W)",
+            ),
+            (
+                "Lighting",
+                json!({"power_constant_kw": 1.0}),
+                "ScheduledLoad.power_constant_w (W)",
+            ),
+            (
+                "Lighting",
+                json!({"power_profile_max_kw": 1.0}),
+                "ScheduledLoad.power_profile_max_w (W)",
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (class, old_payload, replacement) in rows {
+            let spec = override_test_spec(class);
+            for layer in [
+                json!({ class.to_string(): old_payload.clone() }),
+                json!({ "all": old_payload }),
+            ] {
+                let error = match merged_equipment_config(&spec, &layer) {
+                    Err(error) => error,
+                    Ok(_) => {
+                        failures.push(format!(
+                            "{class} {old_payload}: the old key must fail the merge"
+                        ));
+                        continue;
+                    }
+                };
+                let message = error.to_string();
+                if !message.contains(*replacement) {
+                    failures.push(format!(
+                        "{class}: the error must name the replacement {replacement:?}, got: {message}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "every removed key must name its replacement:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// The unit move's payload spellings survive the walk: the new keys
+    /// (`surplus_deadband_w`, `max_export_w`, `min_charge_rate_w`) merge
+    /// without error.
+    #[test]
+    fn si_payload_keys_merge_cleanly() {
+        let mode = serde_json::to_string(&hares_types::BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_w: 500.0,
+        })
+        .unwrap();
+        merged_equipment_config(
+            &override_test_spec("Battery"),
+            &json!({"Battery": {"bms_mode": mode}}),
+        )
+        .expect("the SI deadband spelling merges");
+
+        let strategy = serde_json::to_string(&hares_types::ChargingStrategy::SolarSurplus {
+            min_charge_rate_w: 1400.0,
+            departure_schedule: Vec::new(),
+        })
+        .unwrap();
+        merged_equipment_config(
+            &override_test_spec("EV"),
+            &json!({"EV": {"charging_strategy": strategy}}),
+        )
+        .expect("the SI strategy spelling merges");
     }
 }

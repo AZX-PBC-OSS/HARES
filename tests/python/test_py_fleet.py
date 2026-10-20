@@ -1,17 +1,66 @@
 """Tests for the Fleet API."""
 
+import datetime
 import tempfile
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from ochre_next import DwellingConfig, SimulationConfig
-from ochre_next import Fleet as PyFleet
+from hares import Destination, DwellingConfig, ReportSpec, Selection, SimulationConfig
+from hares import Fleet as PyFleet
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
+RESSTOCK_FIXTURES = ROOT / "tests" / "fixtures" / "resstock" / "2025.1"
+RESSTOCK_FIXTURE_WEATHER = RESSTOCK_FIXTURES / "weather"
+CZ4A_TYPICAL_EPW = ROOT / "tests" / "fixtures" / "parity" / "cz4a_ashp_hpwh" / "weather.epw"
+
+_RESSTOCK_HPXML = """<?xml version="1.0" encoding="UTF-8"?>
+<HPXML xmlns="http://hpxmlonline.com/2023/09" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site>
+          <Elevation>30.0</Elevation>
+          <Latitude>41.77</Latitude>
+          <Longitude>-72.69</Longitude>
+          <TimeZone>
+            <UTCOffset>-5.0</UTCOffset>
+          </TimeZone>
+        </Site>
+      </BuildingSummary>
+      <ClimateandRiskZones>
+        <WeatherStation>
+          <SystemIdentifier id="WeatherStation"/>
+          <Name>G0900090</Name>
+        </WeatherStation>
+      </ClimateandRiskZones>
+    </BuildingDetails>
+  </Building>
+</HPXML>"""
+
+
+def _write_extracted_building(buildings_dir: Path, bldg_id: int) -> Path:
+    """Write one building in the extracted layout from_resstock requires."""
+    bldg_dir = buildings_dir / f"bldg{bldg_id:07d}"
+    bldg_dir.mkdir(parents=True, exist_ok=True)
+    (bldg_dir / "home.xml").write_text(_RESSTOCK_HPXML)
+    (bldg_dir / "in.schedules.csv").write_text("occupants\n1\n")
+    return buildings_dir
+
+
+def _write_typical_epw_weather(tmp_path: Path) -> Path:
+    """Write the typical-year (TMY3) weather directory the 2024.x
+    constructor resolves: the committed cz4a typical EPW at the synthetic
+    building's own station name."""
+    import shutil
+
+    weather_dir = tmp_path / "weather"
+    weather_dir.mkdir(exist_ok=True)
+    shutil.copyfile(CZ4A_TYPICAL_EPW, weather_dir / "G0900090.epw")
+    return weather_dir
 
 
 def _create_minimal_dwelling_config(tmp_path: Path):
@@ -61,10 +110,13 @@ def _build_simulatable_fleet(output_dir: Path, n: int = 1):
             DwellingConfig(
                 hpxml=hpxml, schedule=schedule, weather=weather,
                 config=SimulationConfig(
-                    duration_s=3600,
-                    time_res_s=60,
-                    write_output=True,
-                    output_path=str(output_dir / f"fleet_{i + 1}.csv"),
+                    start_time="2019-01-01T00:00:00",
+                    duration=3600,
+                    time_res=60,
+                    reports=[
+                        ReportSpec("frame", Selection.verbosity(0), Destination.memory()),
+                        ReportSpec("file", Selection.verbosity(0), Destination.csv(str(output_dir / f"fleet_{i + 1}.csv"))),
+                    ],
                 ),
                 bldg_id=i + 1,
             )
@@ -79,7 +131,7 @@ def test_from_buildings_constructs_fleet(tmp_path: Path) -> None:
 
     config = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
     fleet = PyFleet.from_buildings([config])
 
@@ -92,11 +144,11 @@ def test_from_buildings_with_custom_weights(tmp_path: Path) -> None:
 
     config1 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
     config2 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=2,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
     )
 
     fleet = PyFleet.from_buildings([config1, config2], sample_weights=[2.0, 1.0])
@@ -110,7 +162,7 @@ def test_from_buildings_raises_on_weight_length_mismatch(tmp_path: Path) -> None
 
     config = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
 
     with pytest.raises(ValueError, match="sample_weights length"):
@@ -129,11 +181,11 @@ def test_from_buildings_rejects_invalid_weight(tmp_path: Path, bad_weight: float
 
     config1 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
     config2 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=2,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
     )
 
     with pytest.raises(ValueError, match="invalid sample_weight"):
@@ -152,15 +204,15 @@ def test_len_returns_correct_count(tmp_path: Path) -> None:
 
     config1 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=1,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=1,
     )
     config2 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=2,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=2,
     )
     config3 = DwellingConfig(
         hpxml=hpxml, schedule=schedule, weather=weather,
-        config=SimulationConfig(write_output=False), bldg_id=3,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400), bldg_id=3,
     )
 
     fleet = PyFleet.from_buildings([config1, config2, config3])
@@ -170,27 +222,17 @@ def test_len_returns_correct_count(tmp_path: Path) -> None:
 
 def test_from_resstock_accepts_enum(tmp_path: Path) -> None:
     """Verify from_resstock still works (regression)."""
-    metadata = tmp_path / "metadata.parquet"
-    table = pa.table(
-        {
-            "building_id": pa.array([12345]),
-            "upgrade_id": pa.array([0]),
-            "weight": pa.array([1.0]),
-            "in.state": pa.array(["CO"]),
-        }
-    )
-    pq.write_table(table, metadata)
-
-    from ochre_next import ResStockVersion
+    from hares import ResStockVersion
 
     fleet = PyFleet.from_resstock(
-        str(metadata),
-        str(tmp_path),
-        str(tmp_path),
+        str(RESSTOCK_FIXTURES / "metadata_fleet3.parquet"),
+        str(RESSTOCK_FIXTURES),
+        str(RESSTOCK_FIXTURE_WEATHER),
         resstock_version=ResStockVersion.V2025_1,
     )
 
     assert isinstance(fleet, PyFleet)
+    assert len(fleet) == 3
 
 
 def test_from_resstock_accepts_string(tmp_path: Path) -> None:
@@ -205,12 +247,15 @@ def test_from_resstock_accepts_string(tmp_path: Path) -> None:
         }
     )
     pq.write_table(table, metadata)
+    _write_extracted_building(tmp_path, 12345)
+    weather_dir = _write_typical_epw_weather(tmp_path)
 
     fleet = PyFleet.from_resstock(
         str(metadata),
         str(tmp_path),
-        str(tmp_path),
+        str(weather_dir),
         resstock_version="2024.2",
+        typical_year=2018,
     )
 
     assert isinstance(fleet, PyFleet)
@@ -218,29 +263,31 @@ def test_from_resstock_accepts_string(tmp_path: Path) -> None:
 
 def test_from_resstock_default_version_is_2025_1(tmp_path: Path) -> None:
     """Verify from_resstock defaults to V2025_1 when no version specified."""
-    metadata = tmp_path / "metadata.parquet"
-    table = pa.table(
-        {
-            "building_id": pa.array([12345]),
-            "upgrade_id": pa.array([0]),
-            "weight": pa.array([1.0]),
-            "in.state": pa.array(["CO"]),
-        }
-    )
-    pq.write_table(table, metadata)
-
     fleet = PyFleet.from_resstock(
-        str(metadata),
-        str(tmp_path),
-        str(tmp_path),
+        str(RESSTOCK_FIXTURES / "metadata_fleet3.parquet"),
+        str(RESSTOCK_FIXTURES),
+        str(RESSTOCK_FIXTURE_WEATHER),
     )
 
     assert isinstance(fleet, PyFleet)
-    assert len(fleet) == 1
+    assert len(fleet) == 3
 
 
 def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
     """The binding takes the defaults_path keyword its stub declares."""
+    fleet = PyFleet.from_resstock(
+        str(RESSTOCK_FIXTURES / "metadata_fleet3.parquet"),
+        str(RESSTOCK_FIXTURES),
+        str(RESSTOCK_FIXTURE_WEATHER),
+        defaults_path=str(HARES_DEFAULTS),
+    )
+
+    assert len(fleet) == 3
+
+
+def test_from_resstock_hpxml_dir_names_buildings_dir(tmp_path: Path) -> None:
+    """The parameter is buildings_dir; the old hpxml_dir keyword errors
+    with the removed-keys table's message, which names the replacement."""
     metadata = tmp_path / "metadata.parquet"
     table = pa.table(
         {
@@ -251,15 +298,20 @@ def test_from_resstock_accepts_a_defaults_path(tmp_path: Path) -> None:
         }
     )
     pq.write_table(table, metadata)
+    _write_extracted_building(tmp_path, 12345)
 
-    fleet = PyFleet.from_resstock(
-        str(metadata),
-        str(tmp_path),
-        str(tmp_path),
-        defaults_path=str(HARES_DEFAULTS),
-    )
-
-    assert len(fleet) == 1
+    # The static surface no longer carries the removed keyword, so the call
+    # goes through getattr on purpose. All three required positionals are
+    # passed so Python's own missing-argument TypeError cannot satisfy the
+    # match before the removed-keys machinery runs.
+    legacy_from_resstock = getattr(PyFleet, "from_resstock")
+    with pytest.raises(TypeError, match="pass the unpacked buildings directory"):
+        legacy_from_resstock(
+            str(metadata),
+            str(tmp_path),
+            str(tmp_path),
+            hpxml_dir=str(tmp_path),
+        )
 
 
 def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
@@ -289,48 +341,61 @@ def test_resstock_version_rejects_invalid_string(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.slow
-def test_simulate_resolution_enum_works(tmp_path: Path) -> None:
-    """Verify simulate(resolution=AggregationResolution.Hourly) works."""
-    from ochre_next import AggregationResolution
+def _minutes_15_report():
+    """The fleet report at quarter hours over tier 2 of every home."""
+    from hares import FleetReport, Frequency
 
+    return FleetReport(Selection.verbosity(2), Frequency.minutes(15))
+
+
+def _hourly_fleet_report():
+    """The fleet report at calendar hours over tier 2 of every home,
+    independent of the file-report helper."""
+    from hares import FleetReport, Frequency
+
+    return FleetReport(Selection.verbosity(2), Frequency.hourly())
+
+
+def _hourly_report():
+    """The fleet report at calendar hours over tier 2 of every home."""
+    from hares import FleetReport, Frequency
+
+    return FleetReport(Selection.verbosity(2), Frequency.hourly())
+
+
+@pytest.mark.slow
+def test_simulate_minutes_15_report(tmp_path: Path) -> None:
+    """Verify the quarter-hour report: four rows over the hour, one home."""
     fleet = _build_simulatable_fleet(tmp_path, 1)
-    results = fleet.simulate(resolution=AggregationResolution.Hourly)
+    results = fleet.simulate(_minutes_15_report())
     assert results.n_succeeded == 1
+    # One hour at 60 s reduces onto four quarter hours.
+    assert results.aggregate.table().height == 4
 
 
 @pytest.mark.slow
-def test_simulate_resolution_string_works(tmp_path: Path) -> None:
-    """Verify simulate(resolution="hourly") string convenience works."""
+def test_simulate_hourly_report(tmp_path: Path) -> None:
+    """Verify the hourly report: one row over the hour, one home."""
     fleet = _build_simulatable_fleet(tmp_path, 1)
-    results = fleet.simulate(resolution="hourly")
+    results = fleet.simulate(_hourly_report())
     assert results.n_succeeded == 1
+    assert results.aggregate.table().height == 1
 
 
 @pytest.mark.slow
-def test_simulate_default_resolution(tmp_path: Path) -> None:
-    """Verify simulate() default uses FifteenMin."""
+def test_no_failed_homes_on_success(tmp_path: Path) -> None:
+    """Verify the homes table carries no failed row on an all-success run."""
     fleet = _build_simulatable_fleet(tmp_path, 1)
-    results = fleet.simulate()
-    assert results.n_succeeded == 1
-    # Default is FifteenMin; aggregate_timeseries should have data
-    df = results.aggregate_timeseries
-    assert df.height > 0
-
-
-@pytest.mark.slow
-def test_failures_property_empty_on_success(tmp_path: Path) -> None:
-    """Verify failures property is empty list on all-success runs."""
-    fleet = _build_simulatable_fleet(tmp_path, 1)
-    results = fleet.simulate()
-    assert results.failures == []
+    results = fleet.simulate(_minutes_15_report())
+    assert results.n_failed == 0
+    assert results.homes.table()["status"].to_list() != ["failed"]
 
 
 @pytest.mark.slow
 def test_n_succeeded_and_n_failed_properties(tmp_path: Path) -> None:
     """Verify n_succeeded and n_failed properties."""
     fleet = _build_simulatable_fleet(tmp_path, 2)
-    results = fleet.simulate()
+    results = fleet.simulate(_minutes_15_report())
     assert results.n_succeeded == 2
     assert results.n_failed == 0
 
@@ -344,7 +409,7 @@ def test_progress_callback_invoked(tmp_path: Path) -> None:
     def on_progress(completed: int, total: int) -> None:
         calls.append((completed, total))
 
-    results = fleet.simulate(progress=on_progress)
+    results = fleet.simulate(_minutes_15_report(), progress=on_progress)
     assert results.n_succeeded == 2
     assert len(calls) == 2
     # All calls should have total == 2
@@ -356,30 +421,42 @@ def test_progress_callback_invoked(tmp_path: Path) -> None:
 
 @pytest.mark.slow
 def test_simulate_raise_on_failure_true_raises(tmp_path: Path) -> None:
-    """Verify simulate(raise_on_failure=True) raises on any failure."""
-    # Use invalid paths to force simulation failure
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, write_output=False)
-    config = DwellingConfig(
-        hpxml="/nonexistent/building.xml",
-        schedule="/nonexistent/schedule.csv",
-        weather="/nonexistent/weather.epw",
-        config=sim_config,
-        bldg_id=1,
-    )
-    fleet = PyFleet.from_buildings([config])
+    """Verify simulate(raise_on_failure=True) raises naming every failed home."""
+    from hares._hares import HaresSimulationError
 
-    with pytest.raises(ValueError, match="failed"):
-        fleet.simulate(raise_on_failure=True)
-
-
-@pytest.mark.slow
-def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
-    """Verify default fault-tolerant mode collects failures without raising."""
     hpxml = str(EXAMPLES / "BEopt_example.xml")
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60)
+
+    # One valid home so the fleet's ok weight is not zero, one home whose
+    # inputs do not exist; raise_on_failure names the failed home.
+    good = DwellingConfig(
+        hpxml=hpxml, schedule=schedule, weather=weather,
+        config=sim_config, bldg_id=1,
+    )
+    bad = DwellingConfig(
+        hpxml="/nonexistent/building.xml",
+        schedule="/nonexistent/schedule.csv",
+        weather="/nonexistent/weather.epw",
+        config=sim_config,
+        bldg_id=2,
+    )
+    fleet = PyFleet.from_buildings([good, bad])
+
+    with pytest.raises(HaresSimulationError, match="home 2"):
+        fleet.simulate(_hourly_report(), raise_on_failure=True)
+
+
+@pytest.mark.slow
+def test_simulate_fault_tolerant_lists_failed_homes(tmp_path: Path) -> None:
+    """Verify the default mode lists a failed home as a homes row."""
+    hpxml = str(EXAMPLES / "BEopt_example.xml")
+    schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
+    weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60)
 
     # One valid config, one invalid -- partial failure
     good = DwellingConfig(
@@ -395,70 +472,194 @@ def test_simulate_fault_tolerant_populates_failures(tmp_path: Path) -> None:
     )
     fleet = PyFleet.from_buildings([good, bad])
 
-    results = fleet.simulate(raise_on_failure=False)
+    results = fleet.simulate(_hourly_report())
     assert results.n_succeeded == 1
     assert results.n_failed == 1
-    assert len(results.failures) == 1
-    assert results.failures[0]["bldg_id"] == 2
-    assert isinstance(results.failures[0]["error"], str)
+    homes = results.homes.table()
+    statuses = dict(zip(homes["bldg_id"].to_list(), homes["status"].to_list()))
+    assert statuses[1] != "failed"
+    assert statuses[2] == "failed"
+    reasons = dict(zip(homes["bldg_id"].to_list(), homes["reason"].to_list()))
+    assert reasons[2], "the failed home's reason is its message"
 
 
 @pytest.mark.slow
-def test_heterogeneous_equipment_column_mismatch_emits_warning() -> None:
-    """Verify simulate() emits a warning when heterogeneous equipment causes column mismatch.
+def test_heterogeneous_equipment_aggregates_the_union_of_columns() -> None:
+    """Verify the aggregate is the union when the homes' column sets differ.
 
     Two dwellings with different equipment types produce different output
-    column sets (e.g., a battery-equipped dwelling has extra battery columns).
-    The fleet aggregator detects the mismatch and returns an empty aggregate
-    batch. The Python guard then emits a warning so callers can detect the
-    condition without inspecting the DataFrame shape.
+    column sets (e.g., a battery-equipped dwelling has extra battery
+    columns). The aggregate's columns are the union of the two homes'
+    variables, and a mismatch no longer empties it.
     """
-    import warnings
-
     fixture_dir = ROOT / "tests" / "fixtures" / "hpxml" / "ochre_samples"
     schedule = str(EXAMPLES / "BEopt_example_schedule.csv")
     weather = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, output_verbosity=1, write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60, reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())])
+
+    # The battery dwelling declares the control it tests: `Manual`, the
+    # idle battery the column-mismatch scenario was built on.
+    battery_overrides = {"Battery": {"bms_mode": '"Manual"'}}
 
     config1 = DwellingConfig(
+        config=sim_config,
         hpxml=str(fixture_dir / "base.xml"),
         schedule=schedule,
         weather=weather,
-        config=sim_config,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=1,
     )
     config2 = DwellingConfig(
+        config=sim_config,
         hpxml=str(fixture_dir / "base-battery.xml"),
         schedule=schedule,
         weather=weather,
-        config=sim_config,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
+        overrides=battery_overrides,
         bldg_id=2,
     )
     fleet = PyFleet.from_buildings([config1, config2])
 
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        results = fleet.simulate()
+    results = fleet.simulate(_hourly_report())
 
-    # Both dwellings should complete (the guard emits a warning, not an error).
+    # The canary: both homes are ok, so a warning a fixture carries fails
+    # here, naming it.
     assert results.n_succeeded == 2, (
         f"Expected both dwellings to succeed, got n_succeeded={results.n_succeeded}"
     )
-
-    # The aggregate timeseries is empty because column sets differ across dwellings.
-    assert results.aggregate_timeseries.height == 0
-
-    # The Python guard must emit a warning so callers can detect the condition.
-    assert len(w) >= 1, (
-        f"Expected at least 1 warning for heterogeneous fleet, got {len(w)}"
+    statuses = dict(
+        zip(
+            results.homes.table()["bldg_id"].to_list(),
+            results.homes.table()["status"].to_list(),
+        )
     )
-    assert any(
-        "empty timeseries" in str(warning.message).lower()
-        for warning in w
-    ), (
-        f"No 'empty timeseries' warning found; warnings: "
-        f"{[str(x.message) for x in w]}"
+    assert statuses[1] == "ok", f"home 1 must be ok, got {statuses[1]}"
+    assert statuses[2] == "ok", f"home 2 must be ok, got {statuses[2]}"
+
+    # The aggregate is the union of the homes' columns: non-empty, and
+    # wider than either home's own set. The covered weight behind it is
+    # the two homes' weights in every shared cell.
+    assert results.aggregate.table().height == 1
+    assert results.covered_weight.table().height == 1
+    assert results.aggregate.table().width > 1
+    assert results.covered_weight.table().width == results.aggregate.table().width
+
+
+def _schedule_with_unread_column(dest: Path) -> Path:
+    """The stock schedule with one added column `unread_load` (every value
+    0.0), which no mapping reads: the run carries the unmapped-column
+    `Warning`."""
+    stock = (EXAMPLES / "BEopt_example_schedule.csv").read_text()
+    lines = stock.splitlines()
+    out = [lines[0] + ",unread_load"]
+    out.extend(line + ",0.0" for line in lines[1:])
+    dest.write_text("\n".join(out) + "\n")
+    return dest
+
+
+def _base_home(tmp_path: Path, bldg_id: int, schedule: Path) -> DwellingConfig:
+    """The base fixture at 24 h and 900 s over the given schedule."""
+    fixture = ROOT / "tests" / "fixtures" / "hpxml" / "ochre_samples" / "base.xml"
+    return DwellingConfig(
+        hpxml=str(fixture),
+        schedule=str(schedule),
+        weather=str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400, time_res=900),
+        defaults=str(HARES_DEFAULTS),
+        bldg_id=bldg_id,
+    )
+
+
+@pytest.mark.slow
+def test_zero_ok_weight_raises_with_every_home(tmp_path: Path) -> None:
+    """A fleet whose every home is degraded raises the simulation error:
+    the counts are in the message and the homes table is the exception's
+    `homes` attribute, holding both building ids with status `degraded`
+    and a reason naming the unread column."""
+    from hares._hares import HaresSimulationError
+
+    unread = _schedule_with_unread_column(tmp_path / "unread_load_schedule.csv")
+    fleet = PyFleet.from_buildings([
+        _base_home(tmp_path, 1, unread),
+        _base_home(tmp_path, 2, unread),
+    ])
+
+    with pytest.raises(HaresSimulationError, match="ok weight is zero") as info:
+        fleet.simulate(_hourly_fleet_report())
+    message = str(info.value)
+    assert "0 ok" in message
+    assert "2 degraded" in message
+    assert "0 failed" in message
+    # The attribute is set by the binding on the raised instance, so it
+    # is read dynamically: the class carries no homes.
+    homes = getattr(info.value, "homes")
+    assert homes["bldg_id"].to_list() == [1, 2]
+    assert homes["status"].to_list() == ["degraded", "degraded"]
+    for reason in homes["reason"].to_list():
+        assert "unread_load" in reason
+
+
+def _mixed_offset_configs() -> list[DwellingConfig]:
+    """The mixed-offset golden's homes: UTC-5, UTC-6 and UTC-8."""
+    return [
+        DwellingConfig(
+            hpxml=str(ROOT / "tests/fixtures/resstock/2025.1" / home / "home.xml"),
+            schedule=str(ROOT / "tests/fixtures/resstock/2025.1" / home / "in.schedules.csv"),
+            weather=str(
+                ROOT / "tests/fixtures/resstock/2025.1/weather" / weather
+            ),
+            config=SimulationConfig(
+                start_time="2018-01-01T00:00:00", duration=86400, time_res=3600
+            ),
+            defaults=str(HARES_DEFAULTS),
+            bldg_id=i + 1,
+        )
+        for i, (home, weather) in enumerate(
+            [
+                ("bldg0000002", "G0900090_2018.csv"),
+                ("bldg0000004", "G4803030_2018.csv"),
+                ("bldg0176227", "G0600770_2018.csv"),
+            ]
+        )
+    ]
+
+
+@pytest.mark.slow
+def test_mixed_offset_fleet_requires_a_declared_alignment() -> None:
+    """A fleet whose homes span UTC offsets fails without a declared
+    alignment, naming the distinct offsets, and runs with one declared."""
+    from hares import Alignment
+
+    mixed = PyFleet.from_buildings(_mixed_offset_configs())
+    with pytest.raises(ValueError, match=r"-18000"):
+        mixed.simulate(_hourly_report())
+
+    aligned = PyFleet.from_buildings(
+        _mixed_offset_configs(), alignment=Alignment.instant("+00:00")
+    )
+    results = aligned.simulate(_hourly_report())
+    assert results.n_succeeded == 3
+
+
+@pytest.mark.slow
+def test_local_clock_alignment_runs_the_mixed_offset_fleet() -> None:
+    """The LocalClock alignment runs a fleet whose homes span UTC offsets:
+    every home reduces on its own local calendar and the rows align by the
+    shared naive local period start, labelled with no offset."""
+    from hares import Alignment, FleetReport, Frequency, Selection
+
+    fleet = PyFleet.from_buildings(
+        _mixed_offset_configs(), alignment=Alignment.local_clock()
+    )
+    report = FleetReport(
+        Selection.named(["Total Electric Power (kW)"]), Frequency.hourly()
+    )
+    results = fleet.simulate(report)
+    assert results.n_succeeded == 3
+    assert results.aggregate.table().height == 24
+    first = results.aggregate.table()["Time"][0]
+    assert first == datetime.datetime(2018, 1, 1, 0, 0), (
+        "the first Time is the homes' shared local wall clock, a naive "
+        "datetime (the fleet's Time is a naive Timestamp, B-12)"
     )

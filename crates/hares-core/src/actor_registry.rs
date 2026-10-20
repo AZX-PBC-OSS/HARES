@@ -30,10 +30,7 @@ use std::sync::Arc;
 
 use hares_control::DispatchTarget;
 use hares_equipment::config::ConfigValue;
-use hares_types::{DRLevel, EndUse, HaresError};
-
-use hares_equipment::ev::catalog::{EvArchetypeId, archetype_by_id};
-use hares_types::{BmsMode, ChargingStrategy, GridExportRule, PlugInPolicy, ScheduleSource};
+use hares_types::{BmsMode, DRLevel, EndUse, GridExportRule, HaresError};
 
 use crate::Actor;
 use crate::actors::{
@@ -182,14 +179,20 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
             Ok(DrAction::curtail(val))
         }
         s if s.starts_with("PowerLimit:") => {
-            let val: f64 = s
-                .strip_prefix("PowerLimit:")
-                .unwrap()
-                .parse()
-                .map_err(|_| {
-                    HaresError::Control(format!("invalid max_kw for PowerLimit in '{raw}'"))
+            // The limit is W with an explicit unit suffix: a bare number
+            // cannot be told apart between kW and W, so the bare form is
+            // rejected naming the suffixed form.
+            let val = s.strip_prefix("PowerLimit:").unwrap();
+            let max_w: f64 = val
+                .strip_suffix('W')
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| {
+                    HaresError::Control(format!(
+                        "invalid max power for PowerLimit in '{raw}': the limit takes \
+                         its unit suffix, PowerLimit:<max>W (for example PowerLimit:5000W)"
+                    ))
                 })?;
-            Ok(DrAction::limit_power(val))
+            Ok(DrAction::limit_power(max_w))
         }
         s if s.starts_with("AbsoluteSetpoint:") => {
             let rest = s.strip_prefix("AbsoluteSetpoint:").unwrap();
@@ -210,7 +213,7 @@ fn parse_dr_action(raw: &str) -> Result<DrAction, HaresError> {
         _ => Err(HaresError::Control(format!(
             "unknown DrAction '{raw}': valid actions are TurnOff, \
              SetpointAdjust:<delta_c>[:PreHeat|:PreCool], \
-             LoadCurtailment:<fraction>, PowerLimit:<max_kw>, \
+             LoadCurtailment:<fraction>, PowerLimit:<max>W, \
              AbsoluteSetpoint:<heating_c>:<cooling_c>, \
              DemandResponse:<level>[:<duration_s>], None"
         ))),
@@ -348,95 +351,16 @@ impl ActorRegistry {
                     HaresError::Control("EvDriver requires 'seed' parameter".into())
                 })? as u64;
 
-                // If a preset is specified, load defaults from the archetype
-                // catalog. A present-but-unresolvable id is a config error:
-                // silently falling through to the default strategy would
-                // change simulated charging behavior without any signal. A
-                // present-but-non-string value is an error for the same
-                // reason — the user clearly intended a preset.
-                let preset = match config.parameters.get("preset") {
-                    None => None,
-                    Some(ConfigValue::Text(id)) => Some(archetype_by_id(id).ok_or_else(|| {
-                        let valid = EvArchetypeId::ALL
-                            .iter()
-                            .map(|a| a.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        // NB: no apostrophes around {id} — the core
-                        // source-scan test's sanitizer pairs apostrophes
-                        // naively, and an inserted pair shifts the pairing
-                        // file-wide (see no_string_telemetry_reads_in_core).
-                        HaresError::Control(format!(
-                            "unknown EvDriver preset {id}: valid presets are {valid}"
-                        ))
-                    })?),
-                    Some(other) => {
-                        let actual = match other {
-                            ConfigValue::Float(_) => "float",
-                            ConfigValue::Text(_) => "string",
-                            ConfigValue::Bool(_) => "bool",
-                            ConfigValue::FloatArray(_) => "float array",
-                        };
-                        // NB: no apostrophes around {other} — see the
-                        // source-scan sanitizer note on the preset error above.
-                        return Err(HaresError::Control(format!(
-                            "EvDriver preset must be a string id, got {actual}: {other}"
-                        )));
-                    }
-                };
-
+                let params = EvDriverParams::from_registry_config(&config)?;
                 let seed_bytes = {
                     let mut b = [0u8; 32];
                     b[..8].copy_from_slice(&seed.to_le_bytes());
                     b
                 };
-
-                let strategy = preset
-                    .map(|p| p.strategy.clone())
-                    .unwrap_or(ChargingStrategy::Immediate { target_soc: 0.9 });
-                let policy = preset
-                    .map(|p| p.plug_in_policy.clone())
-                    .unwrap_or(PlugInPolicy::Always);
-                let event_day_ratio = config
-                    .get_f64("event_day_ratio")
-                    .or_else(|| preset.map(|p| p.event_day_ratio))
-                    .unwrap_or(0.8);
-                let miles_schedule = preset
-                    .map(|p| p.build_miles_schedule(seed_bytes))
-                    .unwrap_or_else(|| {
-                        let mean = config.get_f64("daily_drive_miles_mean").unwrap_or(30.0);
-                        ScheduleSource::Constant(mean)
-                    });
-                let departure_schedule = preset
-                    .map(|p| p.build_departure_schedule(seed_bytes))
-                    .unwrap_or(ScheduleSource::Constant(480.0));
-                let duration_schedule = preset
-                    .map(|p| p.build_duration_schedule(seed_bytes))
-                    .unwrap_or(ScheduleSource::Constant(600.0));
-                let arrival_schedule = preset.and_then(|p| p.build_arrival_schedule(seed_bytes));
-                let fuel_economy = config.get_f64("fuel_economy_kwh_per_mi").unwrap_or(0.3);
-                let capacity_kwh = config.get_f64("capacity_kwh").unwrap_or(60.0);
-                let avg_speed = config.get_f64("average_speed_mph").unwrap_or(30.0);
-                let max_charge_kw = config.get_f64("max_charge_kw").unwrap_or(7.2);
                 let actor = EvDriverActor::new(
                     &config.name,
                     &target,
-                    EvDriverParams {
-                        strategy,
-                        plug_in_policy: policy,
-                        daily_drive_miles: miles_schedule,
-                        departure_time: departure_schedule,
-                        trip_duration: duration_schedule,
-                        arrival_time: arrival_schedule,
-                        event_day_ratio,
-                        fuel_economy_kwh_per_mi: fuel_economy,
-                        capacity_kwh,
-                        max_charge_kw,
-                        average_speed_mph: avg_speed,
-                        range_anxiety_miles: config.get_f64("range_anxiety_miles").unwrap_or(20.0),
-                        away_charge_fraction: config.get_f64("away_charge_fraction").unwrap_or(0.0),
-                        away_charge_power_kw: config.get_f64("away_charge_power_kw").unwrap_or(6.6),
-                    },
+                    params,
                     ChaCha8Rng::from_seed(seed_bytes),
                 );
                 Ok(Box::new(actor))
@@ -510,7 +434,9 @@ impl ActorRegistry {
                         solar_only_charging: config
                             .get_bool("solar_only_charging")
                             .unwrap_or(false),
-                        surplus_deadband_kw: config.get_f64("surplus_deadband_kw").unwrap_or(0.0),
+                        // The parameter is W (SI), passed through with no
+                        // conversion.
+                        surplus_deadband_w: config.get_f64("surplus_deadband_w").unwrap_or(0.0),
                     },
                     "tou" | "time_of_use" => BmsMode::TimeOfUseOptimization {
                         reserve_soc: config.get_f64("reserve_soc").unwrap_or(0.2),
@@ -564,8 +490,8 @@ impl ActorRegistry {
                         )));
                     }
                 };
-                let max_charge_kw = config.get_f64("max_charge_kw").unwrap_or(5.0);
-                let max_discharge_kw = config.get_f64("max_discharge_kw").unwrap_or(5.0);
+                let max_charge_w = config.get_f64("max_charge_w").unwrap_or(5000.0);
+                let max_discharge_w = config.get_f64("max_discharge_w").unwrap_or(5000.0);
 
                 // steps_per_day must match the simulation timestep: 86400 / time_res_s.
                 // The caller is expected to provide this; no sensible default exists.
@@ -589,8 +515,8 @@ impl ActorRegistry {
                     BmsParams {
                         bms_mode,
                         grid_export_rule,
-                        max_charge_kw,
-                        max_discharge_kw,
+                        max_charge_w,
+                        max_discharge_w,
                         price_schedule: None,
                         steps_per_day,
                         min_dwell_steps,
@@ -639,6 +565,21 @@ impl ActorRegistry {
     }
 
     pub fn create(&self, config: ActorConfig) -> Result<Box<dyn Actor>, HaresError> {
+        // Every parameter key is checked against the removed-keys table
+        // (scope `ActorParameter`, key `<actor_type>.<parameter>`) before
+        // the factory runs, so a pre-rename parameter name names its
+        // replacement instead of silently taking the default.
+        for key in config.parameters.keys() {
+            if let Some(replacement) = hares_types::removed_keys::removed_key(
+                hares_types::removed_keys::KeyScope::ActorParameter,
+                &format!("{}.{key}", config.actor_type),
+            ) {
+                return Err(HaresError::Control(format!(
+                    "actor parameter '{key}' on {} was removed: {replacement}",
+                    config.actor_type
+                )));
+            }
+        }
         match self.factories.get(&config.actor_type) {
             Some(factory) => factory(config),
             None => Err(HaresError::Control(format!(
@@ -774,6 +715,25 @@ mod tests {
         );
     }
 
+    /// `power_limit_action_requires_a_unit`: the demand-response action
+    /// string takes its limit in W with an explicit unit suffix - a bare
+    /// number cannot be told apart between kW and W, so `PowerLimit:5`
+    /// fails naming the suffixed form, and `PowerLimit:5000W` limits to
+    /// 5000 W.
+    #[test]
+    fn power_limit_action_requires_a_unit() {
+        let err =
+            parse_dr_action("PowerLimit:5").expect_err("the bare PowerLimit number is rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PowerLimit:<max>W"),
+            "the error must name the suffixed form PowerLimit:<max>W: {msg}"
+        );
+
+        let action = parse_dr_action("PowerLimit:5000W").expect("the suffixed form parses");
+        assert_eq!(action, DrAction::limit_power(5000.0));
+    }
+
     #[test]
     fn actor_registry_create_battery_management_inverted_soc_window_errors() {
         // The registry closure is the user-facing boundary: a domain-invalid
@@ -807,8 +767,10 @@ mod tests {
             .err()
             .expect("negative surplus deadband must be rejected");
         let msg = err.to_string();
+        // The offending value reaches the fill's payload field, which is
+        // SI (W): the error names the payload's own field.
         assert!(
-            msg.contains("surplus_deadband_kw"),
+            msg.contains("surplus_deadband_w"),
             "error must name the offending field: {msg}"
         );
     }
@@ -893,7 +855,7 @@ mod tests {
             .with_param(
                 "load_targets",
                 ConfigValue::Text(
-                    "end_use:plug_loads:LoadCurtailment:0.5;name:EV:PowerLimit:5.0".into(),
+                    "end_use:plug_loads:LoadCurtailment:0.5;name:EV:PowerLimit:5000W".into(),
                 ),
             );
 

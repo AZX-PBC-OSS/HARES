@@ -115,6 +115,14 @@ jobs:
         run: git submodule update --init vendors/OCHRE
       - run: bash scripts/check-ochre-commit.sh
 
+  check-version-sync:
+    name: "version sync (workspace crates vs pyproject)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check_version_sync.py
+      - run: python3 scripts/check_version_sync.py --self-test
+
   check-ocv:
     name: "OCV table synchronisation"
     runs-on: ubuntu-latest

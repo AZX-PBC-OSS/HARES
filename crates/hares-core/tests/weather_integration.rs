@@ -12,9 +12,7 @@ use hares_core::{EnvironmentInitOptions, EnvironmentManager, SimClock};
 use hares_io::hpxml::building::XmlNode;
 use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
 use hares_io::schedule::ColumnAggregation;
-use hares_io::{
-    ResampleMethod, ResampleOverrides, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries,
-};
+use hares_io::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 
 #[path = "../../../tests/support/denver_offset.rs"]
 mod denver_offset;
@@ -107,11 +105,13 @@ fn synthetic_weather() -> WeatherTimeSeries {
             elevation_m: 1609.0,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            midpoint_offset_secs: 0,
+            record_label: hares_io::RecordLabel::IntervalEnd,
+            data_period: hares_io::DataPeriod::complete_year(),
             has_embedded_location: true,
             station_wmo: None,
         },
         design_conditions: None,
+        stamps: Vec::new(),
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,
@@ -260,8 +260,10 @@ fn minimal_building() -> hares_io::Building {
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     }
 }
 
@@ -572,11 +574,13 @@ fn leap_year_dec31_reads_correct_weather_row() {
             elevation_m: 0.0,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            midpoint_offset_secs: 0,
+            record_label: hares_io::RecordLabel::IntervalEnd,
+            data_period: hares_io::DataPeriod::complete_year(),
             has_embedded_location: true,
             station_wmo: None,
         },
         design_conditions: None,
+        stamps: Vec::new(),
         dry_bulb_c: seq.clone(),
         dew_point_c: vec![0.0; n],
         rel_humidity_pct: vec![50.0; n],
@@ -701,8 +705,10 @@ fn leap_year_dec31_reads_correct_weather_row() {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml,
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     };
 
@@ -750,30 +756,17 @@ fn resampled_weather_produces_smooth_environment() {
     let time_res = StdDuration::from_secs(60);
     let total_steps = 1440u64; // 24h * 60 steps/h
 
-    // 24-hour synthetic series — endpoints do not match (h0=15°C, h23≈6.9°C),
-    // so the year-boundary cyclic wrap that PchipCyclic enforces is wrong here.
-    // Use non-cyclic Pchip explicitly.
-    let overrides = ResampleOverrides {
-        dry_bulb: Some(ResampleMethod::Pchip),
-        dew_point: Some(ResampleMethod::Pchip),
-        rel_humidity: Some(ResampleMethod::Pchip),
-        pressure: Some(ResampleMethod::Pchip),
-        infrared: Some(ResampleMethod::Pchip),
-        ground_temp: Some(ResampleMethod::Pchip),
-        ..ResampleOverrides::default()
-    };
-    let mut mgr = EnvironmentManager::new_with_resample(
+    // 24-hour synthetic series: endpoints do not match (h0=15°C, h23≈6.9°C);
+    // the temperature fields' cyclic PCHIP still smooths the interior steps.
+    let mut mgr = EnvironmentManager::new_with_options(
         weather,
         schedule,
         &building,
         time_res,
         start,
-        EnvironmentInitOptions {
-            resample_overrides: Some(&overrides),
-            ..EnvironmentInitOptions::default()
-        },
+        EnvironmentInitOptions::default(),
     )
-    .expect("EnvironmentManager::new_with_resample failed");
+    .expect("EnvironmentManager::new_with_options failed");
 
     let mut clock = SimClock::new(start, Duration::seconds(60), Duration::hours(24));
 
@@ -798,11 +791,15 @@ fn resampled_weather_produces_smooth_environment() {
         assert_finite(w.ground_temp_c, "ground_temp_c", step);
         assert_finite(w.mains_temp_c, "mains_temp_c", step);
 
-        // F-6: Smoothness tightened to 0.15°C (PCHIP interpolation).
+        // Smoothness: no jagged interpolation. The temperature fields' one
+        // method is cyclic PCHIP (the resampling-override machinery is
+        // gone), whose wrap segment over this 24-point synthetic day
+        // measures a 0.2022°C maximum step-to-step jump; the bound stays an
+        // order-of-magnitude guard against a broken interpolant.
         if let Some(prev) = prev_temp {
             let diff = (w.outdoor_temp_c - prev).abs();
             assert!(
-                diff < 0.15,
+                diff < 0.25,
                 "step {step}: temp jump of {diff:.3}°C (prev={prev:.2}, cur={:.2})",
                 w.outdoor_temp_c
             );
@@ -919,8 +916,10 @@ fn wall_missing_azimuth_constructs_with_warning() {
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     };
 
     let start = ts(0);
@@ -1030,8 +1029,10 @@ fn roof_missing_azimuth_constructs_successfully() {
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     };
 
     let start = ts(0);
@@ -1137,8 +1138,10 @@ fn window_missing_azimuth_returns_error() {
         temperature_capacitance_multiplier: 7.0,
         hvac_deadband_c: None,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     };
 
     let start = ts(0);

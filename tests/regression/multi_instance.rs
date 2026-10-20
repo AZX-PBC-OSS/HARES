@@ -22,13 +22,14 @@ pub fn run_multi_instance_check() -> Result<(), Vec<String>> {
     };
 
     match dwelling.simulate() {
-        Ok(results) => {
-            if results.steps.is_empty() {
+        Ok(_) => {
+            let stepped = dwelling.clock.current_step();
+            if stepped == 0 {
                 failures.push("multi-instance simulation produced zero steps".to_string());
             } else {
                 eprintln!(
                     "[multi_instance] PASS -- {} steps completed for multi-equipment dwelling",
-                    results.steps.len()
+                    stepped
                 );
             }
         }
@@ -49,10 +50,12 @@ fn write_multi_instance_toml(path: &PathBuf) {
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
-
+time_res = 60
+duration = 3600
+output_chunk_size = 1000
+master_seed = 42
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 120.0
 zone_volume_m3 = 300.0
 
@@ -75,13 +78,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 42
 "#;
     std::fs::write(path, toml).expect("failed to write multi-instance TOML fixture");
 }

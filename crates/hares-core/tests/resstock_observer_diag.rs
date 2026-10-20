@@ -15,13 +15,15 @@ mod denver_offset;
 #[cfg(test)]
 mod tests {
     use super::denver_offset::denver_offset;
+    use hares_core::DwellingSettings;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
 
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-    use hares_io::OutputFormat;
+    use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
+    use hares_io::Destination;
 
     fn project_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -68,45 +70,52 @@ mod tests {
     #[test]
     fn observer_diagnostic_2024_2_winter_24h() {
         let bldg_dir = fixtures_dir().join("2024.2").join("bldg0000002");
-        // The output and its `_diagnostics.csv` sibling go in a directory
-        // removed when the test ends.
+        // The output goes in a directory removed when the test ends.
         let output_dir = tempfile::tempdir().expect("temp dir");
         let output = output_dir.path().join("obs_diag");
 
         let config = DwellingConfig {
-            hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-            weather_path: weather_for(&bldg_dir, "2024.2"),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(24),
-                time_res: Duration::minutes(15),
-                output_verbosity: 4,
-                output_path: Some(output.clone()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            },
-            overrides: None,
-            bldg_id: 300,
-            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+            schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+            weather: WeatherInput::Path(weather_for(&bldg_dir, "2024.2")),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(24),
+                    time_res: Duration::minutes(15),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(4),
+                        frequency: hares_io::Frequency::default(),
+                        destination: Destination::Csv {
+                            path: output.clone(),
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::default(),
+                },
+                None,
+                300,
+                None,
+            ),
         };
 
         let engine = SimulationEngine::new();
-        let result = engine.run(config).expect("run");
-        assert!(!matches!(result.status, SimStatus::Failed(_)));
+        engine.run(config).expect("run");
 
         // Read diagnostic CSV output (verbosity 4)
         if output.exists() {

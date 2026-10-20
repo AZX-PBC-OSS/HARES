@@ -19,6 +19,7 @@ use super::xml_helpers::{
 };
 use hares_physics::units as conv;
 
+use super::elements::*;
 use crate::defaults::DefaultsStore;
 use crate::draw_profile::{DistributionSystem, FixtureEfficiency, combined_daily_hot_water_l};
 
@@ -37,11 +38,28 @@ fn tankless_parasitic_power_w(n_bedrooms: f64) -> f64 {
 /// Resolve a bedroom count, trying multiple sources in priority order:
 /// 1. The provided `n_bedrooms` (from HPXML)
 /// 2. The `data_patches.number_of_bedrooms` field
-/// 3. Default of 2.0 (RESNET 301 implicit)
-fn resolve_bedroom_count(n_bedrooms: Option<f64>, data_patches: Option<&HpxmlDataPatches>) -> f64 {
+///
+/// The field is required input: OCHRE reads it with a direct index and
+/// fails on absence (hpxml.py:263, `construction["NumberofBedrooms"]`; the
+/// OS-HPXML defaults apply no default either, defaults.rb `apply_water_heaters`
+/// reads it directly, :3303), so an unavailable count is a typed error naming
+/// the field, never a substituted count (the same rule
+/// [`extract_bedroom_count`] applies).
+fn resolve_bedroom_count(
+    n_bedrooms: Option<f64>,
+    data_patches: Option<&HpxmlDataPatches>,
+) -> std::result::Result<f64, super::HpxmlError> {
     n_bedrooms
         .or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
-        .unwrap_or(2.0)
+        .ok_or_else(|| super::HpxmlError::MissingField {
+            path: "BuildingSummary/BuildingConstruction/NumberofBedrooms",
+            system_kind: "BuildingConstruction",
+            system_id: "Building".to_string(),
+            reason: "the water heater tank volume, first-hour rating and hot-water \
+                     draw are sized by the bedroom count; OCHRE reads the field \
+                     with a direct index and fails on absence (hpxml.py:263), so \
+                     no count may be substituted for it",
+        })
 }
 
 /// Resolve the numeric `zone_id` (1-indexed) corresponding to an HPXML
@@ -76,29 +94,30 @@ fn hpwh_wall_heat_fraction(location: &str) -> f64 {
     }
 }
 
-/// HPXML enclosure surface elements, the set OS-HPXML's
-/// `HPXML::Building#surfaces` searches in `has_location` (hpxml.rb:1790-1797).
-const ENCLOSURE_SURFACES: [&str; 7] = [
-    "Roof",
-    "RimJoist",
-    "Wall",
-    "FoundationWall",
-    "Floor",
-    "FrameFloor",
-    "Slab",
+/// The same surfaces as declared elements (the descendants_named reads),
+/// the set OS-HPXML's `HPXML::Building#surfaces` searches in
+/// `has_location` (hpxml.rb:1790-1797).
+const ENCLOSURE_SURFACE_ELEMENTS: [&super::elements::HpxmlElement; 7] = [
+    &ROOF,
+    &RIM_JOIST,
+    &WALL,
+    &FOUNDATION_WALL,
+    &FLOOR,
+    &FRAME_FLOOR,
+    &SLAB,
 ];
 
 /// Whether any enclosure surface is adjacent to `location` (OS-HPXML
 /// `has_location`, hpxml.rb:1790-1797).
 fn has_surface_adjacent_to(building: &Building, location: &str) -> bool {
-    let Some(enclosure) = building.details_xml.child("Enclosure") else {
+    let Some(enclosure) = building.details_xml.child(&ENCLOSURE) else {
         return false;
     };
-    ENCLOSURE_SURFACES.iter().any(|surface| {
+    ENCLOSURE_SURFACE_ELEMENTS.iter().any(|surface| {
         descendants_named(enclosure, surface)
             .into_iter()
             .any(|node| {
-                ["InteriorAdjacentTo", "ExteriorAdjacentTo"]
+                [&INTERIOR_ADJACENT_TO, &EXTERIOR_ADJACENT_TO]
                     .iter()
                     .any(|side| child_text(node, side).is_some_and(|text| text.trim() == location))
             })
@@ -109,15 +128,17 @@ fn has_surface_adjacent_to(building: &Building, location: &str) -> bool {
 /// defaults.rb:6104-6132 (`get_water_heater_location`, v1.12.0, after
 /// ANSI/RESNET/ICC 301-2022C), called from defaults.rb:3401-3406 with the
 /// building's first IECC climate zone: the HPXML's, else the one OS-HPXML
-/// derives from the weather station (`Building::climate_zone_iecc`). The
-/// first location of the zone's hierarchy the building has surfaces in
-/// wins. Conditioned space, last in every hierarchy, is present in every
-/// HPXML building (the schema requires conditioned floor area; HARES always
-/// builds the conditioned zone), and older files spell it "living space".
+/// derives from the weather station (the blueprint's effective zone
+/// resolution). The first location of the zone's hierarchy the building
+/// has surfaces in wins. Conditioned space, last in every hierarchy, is
+/// present in every HPXML building (the schema requires conditioned floor
+/// area; HARES always builds the conditioned zone), and older files spell
+/// it "living space".
 fn default_water_heater_location(
     building: &Building,
+    climate_zone_iecc: Option<&str>,
 ) -> std::result::Result<&'static str, super::HpxmlError> {
-    let hierarchy: &[&'static str] = match building.climate_zone_iecc.as_deref() {
+    let hierarchy: &[&'static str] = match climate_zone_iecc {
         Some("1A" | "1B" | "1C" | "2A" | "2B" | "2C" | "3A" | "3B" | "3C") => {
             &["garage", "conditioned space"]
         }
@@ -159,6 +180,7 @@ fn default_water_heater_location(
 
 pub(super) fn resolve_water_heaters(
     building: &Building,
+    climate_zone_iecc: Option<&str>,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
     data_patches: Option<&HpxmlDataPatches>,
@@ -167,17 +189,20 @@ pub(super) fn resolve_water_heaters(
     let details = &building.details_xml;
     let (avg_water_draw_l_per_day, n_bedrooms) =
         parse_avg_water_draw_and_bedrooms(details, data_patches)?;
+    // The systems that declare a FractionDHWLoadServed, in file order, for
+    // the schematron's sum rule after the loop.
+    let mut declared_fractions: Vec<(String, f64)> = Vec::new();
 
-    for wh in descendants_named(details, "WaterHeatingSystem") {
-        let wh_type = child_text(wh, "WaterHeaterType").unwrap_or_default();
+    for wh in descendants_named(details, &WATER_HEATING_SYSTEM) {
+        let wh_type = child_text(wh, &WATER_HEATER_TYPE).unwrap_or_default();
         let fuel = parse_water_heater_fuel(wh, &wh_type)?;
         let name = canonical_water_heater_name(&wh_type, fuel)?;
         let setpoint_c = child_temperature_c(wh);
-        let performance_adjustment = child_f64(wh, "PerformanceAdjustment");
-        let location = match child_text(wh, "Location") {
+        let performance_adjustment = child_f64(wh, &PERFORMANCE_ADJUSTMENT);
+        let location = match child_text(wh, &LOCATION) {
             Some(location) => location,
             None => {
-                let location = default_water_heater_location(building)?;
+                let location = default_water_heater_location(building, climate_zone_iecc)?;
                 warnings.push(Warning::new(
                     "hpxml",
                     format!(
@@ -197,12 +222,12 @@ pub(super) fn resolve_water_heaters(
         let zone_id = zone_id_for_location(building, &location);
         let zone_name = Some(location.clone());
 
-        let energy_factor = child_f64(wh, "EnergyFactor");
-        let uniform_energy_factor = child_f64(wh, "UniformEnergyFactor");
-        let tank_volume_rated_gal = child_f64(wh, "TankVolume");
-        let first_hour_rating_gal = child_f64(wh, "FirstHourRating");
-        let heating_capacity_input = child_f64(wh, "HeatingCapacity");
-        let recovery_efficiency = child_f64(wh, "RecoveryEfficiency");
+        let energy_factor = child_f64(wh, &ENERGY_FACTOR);
+        let uniform_energy_factor = child_f64(wh, &UNIFORM_ENERGY_FACTOR);
+        let tank_volume_rated_gal = child_f64(wh, &TANK_VOLUME);
+        let first_hour_rating_gal = child_f64(wh, &FIRST_HOUR_RATING);
+        let heating_capacity_input = child_f64(wh, &HEATING_CAPACITY);
+        let recovery_efficiency = child_f64(wh, &RECOVERY_EFFICIENCY);
 
         let volume_correction = if fuel == FuelType::Electric {
             0.9
@@ -214,20 +239,20 @@ pub(super) fn resolve_water_heaters(
         // Tank height is optional in HPXML; propagate None so the equipment
         // model falls back to its documented stratified-tank geometry defaults
         // rather than having the IO layer silently substitute 4 ft here.
-        let tank_height_m = child_f64(wh, "TankHeight").map(conv::length_ft_to_m);
+        let tank_height_m = child_f64(wh, &TANK_HEIGHT).map(conv::length_ft_to_m);
         let first_hour_rating_m3 = first_hour_rating_gal.map(conv::volume_gal_to_m3);
         let heating_capacity_btu_hr = heating_capacity_input;
         let heating_capacity_w = heating_capacity_input.map(conv::power_btu_h_to_w);
 
         // HPXML JacketRValue is in hr·ft²·°F/Btu; convert to SI m²·K/W.
         let jacket_r_value_m2_k_w = wh
-            .path(&["WaterHeaterInsulation", "Jacket"])
-            .and_then(|j| child_f64(j, "JacketRValue"))
+            .path(&[&WATER_HEATER_INSULATION, &JACKET])
+            .and_then(|j| child_f64(j, &JACKET_R_VALUE))
             .map(conv::r_value_ip_to_si);
 
         // RelatedHVACSystem cross-reference for combi boiler / indirect tank.
         let related_hvac_idref = wh
-            .child("RelatedHVACSystem")
+            .child(&RELATED_HVAC_SYSTEM)
             .and_then(|n| n.attrs.get("idref").cloned());
 
         let category = wh_category(&wh_type, fuel);
@@ -240,23 +265,32 @@ pub(super) fn resolve_water_heaters(
             heating_capacity_btu_hr,
             first_hour_rating_gal,
         };
-        let ua_result = match ua_from_energy_factor(&ua_inputs) {
-            Ok(result) => result,
-            Err(err) => {
-                tracing::warn!(
-                    water_heater_type = %wh_type,
-                    %err,
-                    "UA calculation failed; equipment model will use default"
-                );
-                None
-            }
+        // A UA calculation failure is a construction error naming the water
+        // heater: the tank's UA is a physical input, and the default the
+        // failure used to fall back to would silently re-rate the tank. An
+        // indirect tank is exempt: its water-side efficiency is the boiler's
+        // (the loop wiring carries it), so no EF→UA derivation applies and
+        // the tank model's own UA default stands.
+        let ua_result = if name == "Indirect Tank" {
+            None
+        } else {
+            ua_from_energy_factor(&ua_inputs).map_err(|err| {
+                super::HpxmlError::Parse(
+                    format!(
+                        "water heater '{}': UA calculation failed: {err}; the tank's UA \
+                         is a physical input and no default may stand in for it",
+                        element_id(wh).unwrap_or_else(|| "unknown".to_string())
+                    )
+                    .into(),
+                )
+            })?
         };
         let ua_w_per_k = ua_result.map(|r| r.ua_w_per_k);
 
         let mut spec = match name.as_str() {
             "Gas Water Heater" => {
                 let conversion_efficiency = ua_result.map(|r| r.conversion_efficiency);
-                let gas_flue_loss_fraction = child_f64(wh, "FlueLossFraction")
+                let gas_flue_loss_fraction = child_f64(wh, &FLUE_LOSS_FRACTION)
                     .or_else(|| conversion_efficiency.map(|_| 0.0));
                 // Draft-inducer / power-vent blower wattage. The HPXML schema
                 // has no standard WaterHeatingSystem element for water-heater
@@ -267,8 +301,8 @@ pub(super) fn resolve_water_heaters(
                 // 0 W (atmospheric vent), leaving existing simulations
                 // unchanged.
                 let fan_power_w = wh
-                    .path(&["extension"])
-                    .and_then(|ext| child_power_w(ext, "FanPowerWatts"));
+                    .path(&[&EXTENSION])
+                    .and_then(|ext| child_power_w(ext, &FAN_POWER_WATTS));
                 let cfg = GasWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -289,10 +323,11 @@ pub(super) fn resolve_water_heaters(
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
+                    appliance_draw_flow_rate_source: None,
                     pilot_power_w: child_pilot_power_w(wh),
                     flue_loss_fraction: gas_flue_loss_fraction,
                     skin_loss_fraction: None,
-                    ignition_type: child_text(wh, "IgnitionType"),
+                    ignition_type: child_text(wh, &IGNITION_TYPE),
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
@@ -325,6 +360,7 @@ pub(super) fn resolve_water_heaters(
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
+                    appliance_draw_flow_rate_source: None,
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
@@ -342,7 +378,7 @@ pub(super) fn resolve_water_heaters(
                 // UEF-only inputs (no EF) use 0.94 default per RESNET 301;
                 // EF-sourced inputs use the legacy 0.92 default.
                 let default_perf_adj = if energy_factor.is_none() { 0.94 } else { 0.92 };
-                let perf_adj = child_f64(wh, "PerformanceAdjustment").unwrap_or(default_perf_adj);
+                let perf_adj = child_f64(wh, &PERFORMANCE_ADJUSTMENT).unwrap_or(default_perf_adj);
                 let cfg = TanklessWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -353,12 +389,13 @@ pub(super) fn resolve_water_heaters(
                     heating_capacity_w,
                     setpoint_c,
                     parasitic_power_w: (fuel == FuelType::Gas)
-                        .then(|| tankless_parasitic_power_w(n_bedrooms.expect("n_bedrooms always Some; parse_avg_water_draw_and_bedrooms resolves via HPXML/data_patches/default"))),
+                        .then(|| tankless_parasitic_power_w(n_bedrooms.expect("n_bedrooms always Some; parse_avg_water_draw_and_bedrooms resolves the count from the HPXML or errors"))),
                     performance_adjustment: Some(perf_adj),
                     inlet_temp_c: None,
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
+                    appliance_draw_flow_rate_source: None,
                     avg_water_draw_l_per_day,
                     zone_type: zone_name.clone(),
                     min_flow_kg_s: None,
@@ -407,6 +444,7 @@ pub(super) fn resolve_water_heaters(
                     tempering_valve_setpoint_c,
                     avg_water_draw_l_per_day,
                     draw_flow_rate_kg_s: None,
+                    appliance_draw_flow_rate_source: None,
                     compressor_power_w: None,
                     backup_enable_offset_c: None,
                     min_ambient_temp_c: None,
@@ -452,6 +490,7 @@ pub(super) fn resolve_water_heaters(
                     avg_water_draw_l_per_day,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
+                    appliance_draw_flow_rate_source: None,
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
@@ -476,6 +515,41 @@ pub(super) fn resolve_water_heaters(
         }
         spec.system_id = element_id(wh);
 
+        // FractionDHWLoadServed apportionment (OpenStudio-HPXML
+        // hotwater_appliances.rb:383 and :474-487): each water heating
+        // system's share of the home's hot-water load scales its fixture
+        // draw and wet-appliance volumes. The schematron requires either
+        // the element on every system summing to 1 or on none at all; a
+        // file without it has a single system serving everything, so the
+        // absent value reads as 1.0. A share of zero draws nothing, the
+        // same skip `if gpd_frac > 0` runs.
+        let fraction_dhw_load_served = match child_f64(wh, &FRACTION_DHW_LOAD_SERVED) {
+            // A negative share is a validation error, not a value the
+            // clamp silently turns into a zero-draw system: the schematron
+            // bounds the element and a mistyped negative would otherwise
+            // hide the mistype behind a max(0.0).
+            Some(raw) if raw < 0.0 || !raw.is_finite() => {
+                return Err(super::HpxmlError::InvalidField {
+                    path: "WaterHeatingSystem/FractionDHWLoadServed",
+                    system_kind: "Water Heating System",
+                    system_id: element_id(wh).unwrap_or_else(|| "unknown".to_string()),
+                    value_received: raw.to_string(),
+                    reason: "the share of the home's hot-water load the system serves \
+                             cannot be negative",
+                });
+            }
+            Some(raw) => {
+                declared_fractions
+                    .push((element_id(wh).unwrap_or_else(|| "unknown".to_string()), raw));
+                raw
+            }
+            None => 1.0,
+        };
+        spec.parameters.insert(
+            "fraction_dhw_load_served".to_string(),
+            json!(fraction_dhw_load_served),
+        );
+
         // Set autosize_water_heater flag when capacity or tank volume is
         // absent for storage-type water heaters. Tankless water heaters
         // are sized by flow rate, not FHR/tank volume, and are excluded.
@@ -494,8 +568,8 @@ pub(super) fn resolve_water_heaters(
                     .insert("autosize_water_heater".to_string(), json!(true));
                 // Parse factor from extension if present.
                 if let Some(factor) = wh
-                    .path(&["extension"])
-                    .and_then(|ext| child_f64(ext, "WaterHeaterAutosizingFactor"))
+                    .path(&[&EXTENSION])
+                    .and_then(|ext| child_f64(ext, &WATER_HEATER_AUTOSIZING_FACTOR))
                 {
                     spec.parameters
                         .insert("autosize_water_heater_factor".to_string(), json!(factor));
@@ -508,7 +582,30 @@ pub(super) fn resolve_water_heaters(
     // Invariant: when multiple WaterHeatingSystem elements are present, each
     // must carry a unique SystemIdentifier/@id so downstream code can
     // cross-reference individual water heaters without ambiguity.
-    let wh_count = descendants_named(details, "WaterHeatingSystem").len();
+    let wh_count = descendants_named(details, &WATER_HEATING_SYSTEM).len();
+    // The schematron's sum rule (EPvalidator.sch:290) on the multi-system
+    // path: the declared FractionDHWLoadServed values sum to 1 (within
+    // [0.99, 1.01]) when any system declares one, or no system declares
+    // one. Shares outside the band apportion the hot-water load wrongly,
+    // so the resolve fails naming the systems and the sum.
+    if wh_count > 1 && !declared_fractions.is_empty() {
+        let sum: f64 = declared_fractions.iter().map(|(_, f)| *f).sum();
+        if !(0.99..=1.01).contains(&sum) {
+            let systems: Vec<String> = declared_fractions
+                .iter()
+                .map(|(id, f)| format!("{id}: {f}"))
+                .collect();
+            return Err(super::HpxmlError::Parse(
+                format!(
+                    "sum(FractionDHWLoadServed) across {wh_count} WaterHeatingSystem elements \
+                     is {sum} (systems: {}): the schematron expects the shares to sum to 1 \
+                     (within [0.99, 1.01]) or the element on no system at all",
+                    systems.join(", "),
+                )
+                .into(),
+            ));
+        }
+    }
     if wh_count > 1 {
         let wh_specs_start = specs.len().saturating_sub(wh_count);
         let ids: Vec<_> = specs[wh_specs_start..]
@@ -545,34 +642,36 @@ pub(super) fn resolve_water_heaters(
 /// `<WaterHeating>/<WaterFixture>/<LowFlow>`, the `<WaterFixturesUsageMultiplier>` extension,
 /// and `<HotWaterDistribution>` to compute the OCHRE/ANSI-RESNET 301 draw estimate.
 ///
-/// A missing bedroom count falls back to [`resolve_bedroom_count`], so both
-/// outputs are always present.
+/// A missing bedroom count is [`super::HpxmlError::MissingField`] naming the
+/// field (via [`resolve_bedroom_count`], the same rule
+/// [`extract_bedroom_count`] applies): the draw and the water-heater sizing
+/// inputs are required, not defaulted.
 fn parse_avg_water_draw_and_bedrooms(
     details: &XmlNode,
     data_patches: Option<&HpxmlDataPatches>,
 ) -> Result<(Option<f64>, Option<f64>), super::HpxmlError> {
     let n_bedrooms_raw = match details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofBedrooms",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_BEDROOMS,
         ])
         .and_then(|n| parse_trimmed_f64(&n.text))
     {
         Some(v) => v,
-        None => resolve_bedroom_count(None, data_patches),
+        None => resolve_bedroom_count(None, data_patches)?,
     };
 
     // Adjust bedroom count by occupancy and house type (OCHRE hpxml.py:789-797),
     // the shared adjustment the appliance energies also apply.
     let n_occupants = details
-        .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
+        .path(&[&BUILDING_SUMMARY, &BUILDING_OCCUPANCY, &NUMBEROF_RESIDENTS])
         .and_then(|n| parse_trimmed_f64(&n.text));
     let house_type = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "ResidentialFacilityType",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &RESIDENTIAL_FACILITY_TYPE,
         ])
         .map(|n| n.text.trim().to_ascii_lowercase());
     let n_bedrooms = super::resolve_loads::adjusted_bedroom_count(
@@ -583,10 +682,10 @@ fn parse_avg_water_draw_and_bedrooms(
 
     // Fixture efficiency: low-flow if any WaterFixture has <LowFlow>true</LowFlow>.
     let mut any_low_flow = false;
-    if let Some(wh_section) = details.path(&["WaterHeating"]) {
-        for fixture in descendants_named(wh_section, "WaterFixture") {
+    if let Some(wh_section) = details.path(&[&WATER_HEATING]) {
+        for fixture in descendants_named(wh_section, &WATER_FIXTURE) {
             any_low_flow |=
-                child_bool(fixture, "LowFlow", "WaterFixture/LowFlow", "Water Fixture")?
+                child_bool(fixture, &LOW_FLOW, "WaterFixture/LowFlow", "Water Fixture")?
                     .unwrap_or(false);
         }
     }
@@ -598,8 +697,8 @@ fn parse_avg_water_draw_and_bedrooms(
 
     // Usage multiplier from the WaterHeating extension (OCHRE: WaterFixturesUsageMultiplier).
     let usage_multiplier = details
-        .path(&["WaterHeating", "extension"])
-        .and_then(|ext| child_f64(ext, "WaterFixturesUsageMultiplier"))
+        .path(&[&WATER_HEATING, &EXTENSION])
+        .and_then(|ext| child_f64(ext, &WATER_FIXTURES_USAGE_MULTIPLIER))
         .unwrap_or(1.0);
 
     // Distribution system.
@@ -618,20 +717,35 @@ fn parse_avg_water_draw_and_bedrooms(
 /// Public entry point: extract the bedroom count from a parsed [`Building`].
 ///
 /// Reads `<BuildingSummary>/<BuildingConstruction>/<NumberofBedrooms>` from
-/// the building's details XML. Falls back to data patches when the HPXML field
-/// is absent; falls back to 2.0 (the RESNET 301 default) when neither source
-/// is available.
-pub fn extract_bedroom_count(building: &Building, data_patches: Option<&HpxmlDataPatches>) -> f64 {
+/// the building's details XML. Falls back to data patches when the HPXML
+/// field is absent. The field is required input: OCHRE reads it with a
+/// direct index and fails on absence (hpxml.py:263,
+/// `construction["NumberofBedrooms"]`; the OS-HPXML defaults apply no
+/// default either, defaults.rb `apply_water_heaters` reads it directly,
+/// :3303), so an unavailable count is an error naming the field, never a
+/// substituted count.
+pub fn extract_bedroom_count(
+    building: &Building,
+    data_patches: Option<&HpxmlDataPatches>,
+) -> Result<f64, super::HpxmlError> {
     let details = &building.details_xml;
     let raw = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofBedrooms",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_BEDROOMS,
         ])
         .and_then(|n| parse_trimmed_f64(&n.text));
     raw.or_else(|| data_patches.and_then(|p| p.number_of_bedrooms))
-        .unwrap_or(2.0)
+        .ok_or_else(|| super::HpxmlError::MissingField {
+            path: "BuildingSummary/BuildingConstruction/NumberofBedrooms",
+            system_kind: "BuildingConstruction",
+            system_id: "Building".to_string(),
+            reason: "the water heater tank volume and first-hour rating are sized by \
+                     the bedroom count; OCHRE reads the field with a direct index \
+                     and fails on absence (hpxml.py:263), so no count may be \
+                     substituted for it",
+        })
 }
 
 fn typed_spec<T>(
@@ -660,6 +774,8 @@ where
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     })
 }
 
@@ -682,7 +798,7 @@ fn parse_water_heater_fuel(
     wh: &XmlNode,
     wh_type: &str,
 ) -> std::result::Result<FuelType, super::HpxmlError> {
-    match child_text(wh, "FuelType") {
+    match child_text(wh, &FUEL_TYPE) {
         Some(raw) => parse_water_heater_fuel_from_str(&raw),
         None => {
             let ty = wh_type.trim();
@@ -705,34 +821,34 @@ fn parse_water_heater_fuel(
 /// is unrecognised.  Default piping length for Standard distribution is derived from
 /// conditioned floor area and number of floors following the OCHRE formula.
 fn parse_distribution_system(details: &XmlNode, n_bedrooms: f64) -> DistributionSystem {
-    let Some(dist_node) = details.path(&["WaterHeating", "HotWaterDistribution"]) else {
+    let Some(dist_node) = details.path(&[&WATER_HEATING, &HOT_WATER_DISTRIBUTION]) else {
         return DistributionSystem::Unknown;
     };
 
     // HPXML PipeRValue is in hr·ft²·°F/Btu (IP R-value). Convert to SI [m²·K/W] at parse time.
     let pipe_r_value = dist_node
-        .path(&["PipeInsulation"])
-        .and_then(|n| child_f64(n, "PipeRValue"))
+        .path(&[&PIPE_INSULATION])
+        .and_then(|n| child_f64(n, &PIPE_R_VALUE))
         .map(conv::r_value_ip_to_si)
         .unwrap_or(0.0);
 
-    let system_type = dist_node.child("SystemType");
+    let system_type = dist_node.child(&SYSTEM_TYPE);
 
-    if let Some(standard) = system_type.and_then(|n| n.child("Standard")) {
+    if let Some(standard) = system_type.and_then(|n| n.child(&STANDARD)) {
         // Default piping length: OCHRE formula using floor area and floors.
         // 2 * sqrt(floor_area_ft2 / floors) + 10 * floors + 5 * has_unfinished_basement
         // We use a bedroom-count proxy when floor area data is not available.
         let default_piping_length_m = derive_default_piping_length_m(details, n_bedrooms);
-        let piping_length_m = child_f64(standard, "PipingLength").map(conv::length_ft_to_m); // HPXML PipingLength is in feet
+        let piping_length_m = child_f64(standard, &PIPING_LENGTH).map(conv::length_ft_to_m); // HPXML PipingLength is in feet
         DistributionSystem::Standard {
             pipe_r_value,
             piping_length_m,
             default_piping_length_m,
         }
-    } else if let Some(recirc) = system_type.and_then(|n| n.child("Recirculation")) {
+    } else if let Some(recirc) = system_type.and_then(|n| n.child(&RECIRCULATION)) {
         // BranchPipingLoopLength is in feet in HPXML.
         let branch_loop_length_m =
-            child_f64(recirc, "BranchPipingLoopLength").map(conv::length_ft_to_m);
+            child_f64(recirc, &BRANCH_PIPING_LOOP_LENGTH).map(conv::length_ft_to_m);
         DistributionSystem::Recirculation {
             pipe_r_value,
             branch_loop_length_m,
@@ -752,9 +868,9 @@ fn parse_distribution_system(details: &XmlNode, n_bedrooms: f64) -> Distribution
 fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
     let floor_area_m2 = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "ConditionedFloorArea",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &CONDITIONED_FLOOR_AREA,
         ])
         .and_then(|n| {
             let val = parse_trimmed_f64(&n.text)?;
@@ -769,15 +885,15 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
 
     let n_floors = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofConditionedFloors",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_CONDITIONED_FLOORS,
         ])
         .or_else(|| {
             details.path(&[
-                "BuildingSummary",
-                "BuildingConstruction",
-                "NumberofConditionedFloorsAboveGrade",
+                &BUILDING_SUMMARY,
+                &BUILDING_CONSTRUCTION,
+                &NUMBEROF_CONDITIONED_FLOORS_ABOVE_GRADE,
             ])
         })
         .and_then(|n| parse_trimmed_f64(&n.text))
@@ -785,7 +901,7 @@ fn derive_default_piping_length_m(details: &XmlNode, n_bedrooms: f64) -> f64 {
         .max(1.0);
 
     let has_unfinished_bsmt = details
-        .path(&["BuildingSummary", "BuildingConstruction", "FoundationType"])
+        .path(&[&BUILDING_SUMMARY, &BUILDING_CONSTRUCTION, &FOUNDATION_TYPE])
         .map(|n| n.text.trim().eq_ignore_ascii_case("UnfinishedBasement"))
         .unwrap_or(false);
 
@@ -807,6 +923,18 @@ fn wh_category(wh_type: &str, fuel: FuelType) -> WhCategory {
         ("heat pump water heater", FuelType::Electric) => WhCategory::HeatPump,
         ("instantaneous water heater", _) => WhCategory::Instantaneous,
         (_, FuelType::Electric) => WhCategory::StorageElectric,
+        // The remaining classes canonical_water_heater_name maps to a
+        // canonical name are storage-tank UA categories, not unrecognized
+        // combinations: a non-electric storage tank (the Gas Water Heater
+        // class) and the two indirect-tank combi types (the Indirect Tank
+        // class). Naming them before the catch-all keeps the catch-all's
+        // warning off every file those canonical names resolve; only an
+        // input no canonical name matches warns.
+        ("storage water heater", _) => WhCategory::StorageGas,
+        (
+            "space-heating boiler with storage tank" | "space-heating boiler with tankless coil",
+            _,
+        ) => WhCategory::StorageGas,
         (other_type, other_fuel) => {
             tracing::warn!(
                 wh_type = other_type,
@@ -867,18 +995,21 @@ fn canonical_water_heater_name(
 /// `*Watts` carry watts by definition, so `W` is the default when no `units`
 /// attribute is present; an explicit `kW` is converted. Unrecognized units
 /// are rejected (with a warning) rather than guessed.
-fn child_power_w(node: &XmlNode, child_name: &str) -> Option<f64> {
-    let el = node.child(child_name)?;
+fn child_power_w(node: &XmlNode, element: &'static super::elements::HpxmlElement) -> Option<f64> {
+    let el = node.child(element)?;
     let value = hares_types::parse_trimmed_f64(&el.text)?;
     let units = el.attrs.get("units").map(String::as_str).unwrap_or("W");
     match units.to_ascii_lowercase().as_str() {
         "w" | "watts" => Some(value),
-        "kw" => Some(conv::power_kw_to_w(value)),
+        "kw" => Some(
+            uom::si::f64::Power::new::<uom::si::power::kilowatt>(value)
+                .get::<uom::si::power::watt>(),
+        ),
         other => {
             tracing::warn!(
                 units = other,
                 value,
-                field = child_name,
+                field = element.name,
                 "unrecognized power unit; accepted: W, kW — ignoring value"
             );
             None
@@ -896,7 +1027,7 @@ fn child_power_w(node: &XmlNode, child_name: &str) -> Option<f64> {
 /// `units` attribute is present. An explicit `W` is accepted as-is.
 /// Unrecognized units are rejected (with a warning) rather than guessed.
 fn child_pilot_power_w(node: &XmlNode) -> Option<f64> {
-    let el = node.child("PilotPower")?;
+    let el = node.child(&PILOT_POWER)?;
     let value = hares_types::parse_trimmed_f64(&el.text)?;
     let units = el.attrs.get("units").map(String::as_str).unwrap_or("Btuh");
     match units.to_ascii_lowercase().as_str() {
@@ -940,7 +1071,15 @@ fn param_fuel(params: &Map<String, Value>) -> FuelType {
         .unwrap_or(FuelType::Gas)
 }
 
-fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+/// Build a `GasWaterHeaterConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
+fn try_build_gas_wh_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = GasWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -961,6 +1100,7 @@ fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<Eq
         draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
         draw_flow_rate_source: None,
         mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
         pilot_power_w: param_f64(params, "pilot_power_w"),
         flue_loss_fraction: param_f64(params, "flue_loss_fraction"),
         skin_loss_fraction: param_f64(params, "skin_loss_fraction"),
@@ -975,13 +1115,22 @@ fn try_build_gas_wh_config(name: &str, params: &Map<String, Value>) -> Option<Eq
         pilot_fraction_to_tank: param_f64(params, "pilot_fraction_to_tank"),
         fan_power_w: param_f64(params, "fan_power_w"),
     };
-    EquipmentConfig::from_typed(name.to_string(), "Gas Water Heater".to_string(), cfg).ok()
+    Ok(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Gas Water Heater".to_string(),
+        cfg,
+    )?)
 }
 
+/// Build an `ElectricResistanceWaterHeaterConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
 fn try_build_elec_res_wh_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = ElectricResistanceWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1001,6 +1150,7 @@ fn try_build_elec_res_wh_config(
         draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
         draw_flow_rate_source: None,
         mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
         performance_adjustment: param_f64(params, "performance_adjustment"),
         zone_type: param_str(params, "zone_type"),
         first_hour_rating_m3: param_f64(params, "first_hour_rating_m3"),
@@ -1013,15 +1163,22 @@ fn try_build_elec_res_wh_config(
         fixture_delivery_temp_c: param_f64(params, "fixture_delivery_temp_c"),
         hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
     };
-    EquipmentConfig::from_typed(
+    Ok(EquipmentConfig::from_typed(
         name.to_string(),
         "Electric Resistance Water Heater".to_string(),
         cfg,
-    )
-    .ok()
+    )?)
 }
 
-fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+/// Build a `HeatPumpWaterHeaterConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
+fn try_build_hpwh_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = HeatPumpWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1041,6 +1198,7 @@ fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<Equi
         avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
         draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
         compressor_power_w: param_f64(params, "compressor_power_w"),
+        appliance_draw_flow_rate_source: None,
         backup_enable_offset_c: param_f64(params, "backup_enable_offset_c"),
         min_ambient_temp_c: param_f64(params, "min_ambient_temp_c"),
         max_ambient_temp_c: param_f64(params, "max_ambient_temp_c"),
@@ -1065,13 +1223,22 @@ fn try_build_hpwh_config(name: &str, params: &Map<String, Value>) -> Option<Equi
         low_power_hpwh: params.get("low_power_hpwh").and_then(Value::as_bool),
         uniform_energy_factor: param_f64(params, "uniform_energy_factor"),
     };
-    EquipmentConfig::from_typed(name.to_string(), "Heat Pump Water Heater".to_string(), cfg).ok()
+    Ok(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Heat Pump Water Heater".to_string(),
+        cfg,
+    )?)
 }
 
+/// Build a `TanklessWaterHeaterConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
 fn try_build_tankless_wh_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = TanklessWaterHeaterConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1087,18 +1254,28 @@ fn try_build_tankless_wh_config(
         draw_flow_rate_kg_s: param_f64(params, "draw_flow_rate_kg_s"),
         draw_flow_rate_source: None,
         mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
         avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
         zone_type: param_str(params, "zone_type"),
         min_flow_kg_s: None,
         min_flow_gpm: None,
     };
-    EquipmentConfig::from_typed(name.to_string(), "Tankless Water Heater".to_string(), cfg).ok()
+    Ok(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Tankless Water Heater".to_string(),
+        cfg,
+    )?)
 }
 
+/// Build an `IndirectTankConfig` typed config.
+///
+/// # Errors
+///
+/// A `from_typed` failure naming the equipment and the config type.
 fn try_build_indirect_tank_config(
     name: &str,
     params: &Map<String, Value>,
-) -> Option<EquipmentConfig> {
+) -> Result<EquipmentConfig, super::HpxmlError> {
     let cfg = IndirectTankConfig {
         equipment_id: None,
         zone_id: param_u16(params, "zone_id"),
@@ -1116,6 +1293,7 @@ fn try_build_indirect_tank_config(
         avg_water_draw_l_per_day: param_f64(params, "avg_water_draw_l_per_day"),
         draw_flow_rate_source: None,
         mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
         performance_adjustment: param_f64(params, "performance_adjustment"),
         zone_type: param_str(params, "zone_type"),
         first_hour_rating_m3: param_f64(params, "first_hour_rating_m3"),
@@ -1124,28 +1302,39 @@ fn try_build_indirect_tank_config(
         hot_draw_temp_c: param_f64(params, "hot_draw_temp_c"),
         boiler_loop_flow_rate_kg_s: param_f64(params, "boiler_loop_flow_rate_kg_s"),
     };
-    EquipmentConfig::from_typed(name.to_string(), "Indirect Tank".to_string(), cfg).ok()
+    Ok(EquipmentConfig::from_typed(
+        name.to_string(),
+        "Indirect Tank".to_string(),
+        cfg,
+    )?)
 }
 
 /// Rebuild a water heater equipment typed config using updated parameters.
 ///
 /// Called after autosizing to replace placeholder capacities and volumes
 /// with computed values. Matches on the canonical equipment name to select
-/// the correct config builder.
-pub fn rebuild_wh_typed_config(name: &str, params: &Map<String, Value>) -> Option<EquipmentConfig> {
+/// the correct config builder. A builder failure is an error naming the
+/// water heater and the failure: a rebuild that silently left the raw spec
+/// (placeholder capacities and volumes) in place would run autosized
+/// numbers through un-autosized equipment.
+///
+/// # Errors
+///
+/// The matched builder's own error, or the unrecognized-name error.
+pub fn rebuild_wh_typed_config(
+    name: &str,
+    params: &Map<String, Value>,
+) -> Result<EquipmentConfig, super::HpxmlError> {
     match name {
         "Gas Water Heater" => try_build_gas_wh_config(name, params),
         "Electric Resistance Water Heater" => try_build_elec_res_wh_config(name, params),
         "Heat Pump Water Heater" => try_build_hpwh_config(name, params),
         "Tankless Water Heater" => try_build_tankless_wh_config(name, params),
         "Indirect Tank" => try_build_indirect_tank_config(name, params),
-        other => {
-            tracing::warn!(
-                canonical_name = other,
-                "rebuild_wh_typed_config called with unrecognized WH name; returning None"
-            );
-            None
-        }
+        other => Err(super::HpxmlError::Parse(
+            format!("rebuild_wh_typed_config called with unrecognized water heater name '{other}'")
+                .into(),
+        )),
     }
 }
 
@@ -1162,6 +1351,50 @@ mod tests {
 
     use super::super::building::{Building, Site, SiteType, Zone, ZoneType};
 
+    use std::io::Write as IoWrite;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// A tracing writer capturing formatted events into a shared buffer,
+    /// so a pin can assert on the warnings the resolver emits.
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for LogBuf {
+        type Writer = LogBufGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogBufGuard(self.0.clone())
+        }
+    }
+
+    struct LogBufGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl IoWrite for LogBufGuard {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer mutex").write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.lock().expect("log buffer mutex").flush()
+        }
+    }
+
+    /// Run `f` under a WARN-level capturing subscriber and return the
+    /// captured log text.
+    fn captured_warnings(f: impl FnOnce()) -> String {
+        let buf = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(buf.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let captured = buf.0.lock().expect("log buffer mutex").clone();
+        String::from_utf8(captured).expect("log buffer is utf8")
+    }
+
     /// Build a minimal [`Building`] wrapping the details node from a parsed HPXML.
     /// Used by tests that only exercise water-heater parsing and do not provide
     /// a complete building envelope. Zones are empty so `zone_id_for_location`
@@ -1169,7 +1402,7 @@ mod tests {
     /// zone topology.
     fn building_for_test(root: &XmlNode) -> Building {
         let details = root
-            .path(&["Building", "BuildingDetails"])
+            .path(&[&BUILDING, &BUILDING_DETAILS])
             .cloned()
             .unwrap_or_else(|| root.clone());
         Building {
@@ -1224,8 +1457,10 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: details,
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 
@@ -1256,7 +1491,7 @@ mod tests {
                 serde_json::Value::Number(serde_json::Number::from(3_u16)),
             );
             let cfg = rebuild_wh_typed_config(name, &params)
-                .unwrap_or_else(|| panic!("{name} rebuilds from params"));
+                .unwrap_or_else(|e| panic!("{name} rebuilds from params: {e}"));
             let loop_id = match name {
                 "Indirect Tank" => {
                     cfg.typed::<IndirectTankConfig>()
@@ -1306,7 +1541,7 @@ mod tests {
         ] {
             let params = serde_json::Map::new();
             let cfg = rebuild_wh_typed_config(name, &params)
-                .unwrap_or_else(|| panic!("{name} rebuilds from params"));
+                .unwrap_or_else(|e| panic!("{name} rebuilds from params: {e}"));
             let loop_id = match name {
                 "Indirect Tank" => {
                     cfg.typed::<IndirectTankConfig>()
@@ -1342,6 +1577,149 @@ mod tests {
         }
     }
 
+    /// A rebuild error is the builder's own named error or the dispatch's
+    /// unrecognized-name error: the dispatch's former `None` (which
+    /// silently downgraded the spec to its raw parameters) is gone, and a
+    /// rebuild that fails construction names the water heater.
+    #[test]
+    fn wh_typed_config_rebuild_error_fails_construction() {
+        // The unknown-name error names the name (the dispatch's own arm).
+        let err = rebuild_wh_typed_config("Not A Water Heater", &Map::new())
+            .expect_err("an unrecognized name is an error naming it");
+        assert!(
+            err.to_string().contains("Not A Water Heater"),
+            "the error names the water heater, got: {err}"
+        );
+    }
+
+    /// Every type/fuel combination `canonical_water_heater_name` accepts
+    /// resolves to its UA category without the unrecognized-combination
+    /// warning: the named arms cover the known classes, so the catch-all's
+    /// warning only fires for genuinely unrecognized input. The indirect
+    /// tank (both combi types) is the class that previously warned on
+    /// every file that resolved it.
+    #[test]
+    fn wh_category_warns_only_on_genuinely_unrecognized_combinations() {
+        let recognized: &[(&str, FuelType, WhCategory)] = &[
+            (
+                "heat pump water heater",
+                FuelType::Electric,
+                WhCategory::HeatPump,
+            ),
+            (
+                "instantaneous water heater",
+                FuelType::Electric,
+                WhCategory::Instantaneous,
+            ),
+            (
+                "instantaneous water heater",
+                FuelType::Propane,
+                WhCategory::Instantaneous,
+            ),
+            (
+                "storage water heater",
+                FuelType::Electric,
+                WhCategory::StorageElectric,
+            ),
+            (
+                "storage water heater",
+                FuelType::Gas,
+                WhCategory::StorageGas,
+            ),
+            (
+                "space-heating boiler with storage tank",
+                FuelType::Gas,
+                WhCategory::StorageGas,
+            ),
+            (
+                "space-heating boiler with tankless coil",
+                FuelType::Gas,
+                WhCategory::StorageGas,
+            ),
+        ];
+        for (wh_type, fuel, expected) in recognized {
+            let category = captured_warnings(|| {
+                let resolved = wh_category(wh_type, *fuel);
+                assert_eq!(
+                    resolved, *expected,
+                    "{wh_type}/{fuel:?} resolves to its named category"
+                );
+            });
+            assert!(
+                !category.contains("Unrecognized water heater type/fuel"),
+                "{wh_type}/{fuel:?} is a recognized combination and must not warn, got: {category}"
+            );
+        }
+
+        let unknown = captured_warnings(|| {
+            let category = wh_category("solar thermal", FuelType::Gas);
+            assert_eq!(
+                category,
+                WhCategory::StorageGas,
+                "genuinely unrecognized combinations keep the StorageGas default"
+            );
+        });
+        assert!(
+            unknown.contains("Unrecognized water heater type/fuel"),
+            "a genuinely unrecognized combination still warns, got: {unknown}"
+        );
+    }
+
+    /// Resolving an indirect-tank file warns nothing about its type/fuel
+    /// combination: the class is a recognized combination, and the
+    /// catch-all's warning never reaches an indirect-tank file.
+    #[test]
+    fn indirect_tank_file_emits_no_unrecognized_combination_warning() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>space-heating boiler with storage tank</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <TankVolume>40</TankVolume>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let building = building_for_test(&root);
+
+        let mut specs = Vec::new();
+        let log = captured_warnings(|| {
+            resolve_water_heaters(
+                &building,
+                building.climate_zone_iecc.as_deref(),
+                &DefaultsStore::empty(),
+                &mut specs,
+                None,
+                &mut Vec::new(),
+            )
+            .expect("combi boiler with storage tank must resolve successfully");
+        });
+        assert!(
+            !log.contains("Unrecognized water heater type/fuel"),
+            "an indirect-tank file must not warn about its type/fuel combination, got: {log}"
+        );
+        assert!(
+            specs.iter().any(|s| s.name == "Indirect Tank"),
+            "the file still resolves to the Indirect Tank spec"
+        );
+    }
+
     #[test]
     fn typed_spec_serializes_canonical_fields() {
         let cfg = GasWaterHeaterConfig {
@@ -1365,6 +1743,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             pilot_power_w: None,
             flue_loss_fraction: None,
             skin_loss_fraction: None,
@@ -1424,6 +1803,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1506,6 +1886,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -1576,6 +1957,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -1645,6 +2027,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             Some(&patches),
@@ -1671,7 +2054,79 @@ mod tests {
     }
 
     #[test]
-    fn gas_tankless_parasitic_power_defaults_to_two_bedrooms() {
+    fn gas_tankless_parasitic_power_uses_the_stated_bedroom_count() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>2</NumberofBedrooms>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <HotWaterDistribution>
+                      <SystemType>
+                        <Standard>
+                          <PipingLength units="ft">30</PipingLength>
+                        </Standard>
+                      </SystemType>
+                    </HotWaterDistribution>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh1"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>instantaneous water heater</WaterHeaterType>
+                      <HotWaterTemperature units="F">120</HotWaterTemperature>
+                      <EnergyFactor>0.91</EnergyFactor>
+                      <HeatingCapacity>45000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let building = building_for_test(&root);
+
+        let mut specs = Vec::new();
+        resolve_water_heaters(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect("water heaters must resolve");
+
+        let cfg: TanklessWaterHeaterConfig = specs
+            .iter()
+            .find(|s| s.name.contains("Tankless"))
+            .expect("tankless spec must be emitted")
+            .typed_config
+            .as_ref()
+            .expect("typed config")
+            .typed()
+            .expect("tankless config");
+
+        let expected_w = 5.0 + 60.0 * 0.0333_f64;
+        assert_eq!(
+            cfg.parasitic_power_w,
+            Some(expected_w),
+            "gas tankless parasitic at the stated 2 bedrooms must be {expected_w} W"
+        );
+    }
+
+    /// A tankless water heater with no stated bedroom count fails the
+    /// resolve naming the field: the RESNET 301 on-time table is indexed
+    /// by the bedroom count and the field is required input (OCHRE reads
+    /// it with a direct index, hpxml.py:263); no count is substituted for
+    /// it.
+    #[test]
+    fn gas_tankless_without_a_bedroom_count_errors_naming_the_field() {
         let xml = r#"
             <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
               <Building>
@@ -1708,30 +2163,18 @@ mod tests {
         let building = building_for_test(&root);
 
         let mut specs = Vec::new();
-        resolve_water_heaters(
+        let err = resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
             &mut Vec::new(),
         )
-        .expect("water heaters must resolve");
-
-        let cfg: TanklessWaterHeaterConfig = specs
-            .iter()
-            .find(|s| s.name.contains("Tankless"))
-            .expect("tankless spec must be emitted")
-            .typed_config
-            .as_ref()
-            .expect("typed config")
-            .typed()
-            .expect("tankless config");
-
-        let expected_w = 5.0 + 60.0 * 0.0333_f64;
-        assert_eq!(
-            cfg.parasitic_power_w,
-            Some(expected_w),
-            "gas tankless parasitic default (2 bedrooms) must be {expected_w} W"
+        .expect_err("an absent NumberofBedrooms must fail the water-heater resolve");
+        assert!(
+            err.to_string().contains("NumberofBedrooms"),
+            "the error names the required field: {err}"
         );
     }
 
@@ -1776,6 +2219,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -1796,6 +2240,47 @@ mod tests {
         assert!(
             cfg.parasitic_power_w.is_none(),
             "electric tankless must not have parasitic_power_w"
+        );
+    }
+
+    /// An HPXML whose construction names no NumberofBedrooms fails the
+    /// extract naming the field: the tank volume and the first-hour rating
+    /// are sized by it and OCHRE reads it with a direct index (hpxml.py:263).
+    #[test]
+    fn a_bedroom_count_without_numberofbedrooms_errors_naming_the_field() {
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <ConditionedFloorArea units="ft2">1800</ConditionedFloorArea>
+                      <ConditionedBuildingVolume units="ft3">14400</ConditionedBuildingVolume>
+                      <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let building = building_for_test(&root);
+
+        let err = extract_bedroom_count(&building, None)
+            .expect_err("an absent NumberofBedrooms must fail the extract");
+        assert!(
+            err.to_string().contains("NumberofBedrooms"),
+            "the error names the required field: {err}"
+        );
+
+        // A data patch satisfies the requirement when the HPXML field is
+        // absent.
+        let patches = HpxmlDataPatches {
+            number_of_bedrooms: Some(4.0),
+        };
+        assert_eq!(
+            extract_bedroom_count(&building, Some(&patches)).expect("the patch supplies the count"),
+            4.0
         );
     }
 
@@ -1844,6 +2329,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             Some(&patches),
@@ -1910,6 +2396,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2012,6 +2499,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2069,6 +2557,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2114,6 +2603,7 @@ mod tests {
                       <WaterHeaterType>storage water heater</WaterHeaterType>
                       <TankVolume>40</TankVolume>
                       <EnergyFactor>0.59</EnergyFactor>
+                      <HeatingCapacity>36000</HeatingCapacity>
 {ignition_elem}
                     </WaterHeatingSystem>
                   </WaterHeating>
@@ -2130,6 +2620,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2194,6 +2685,7 @@ mod tests {
                       <WaterHeaterType>storage water heater</WaterHeaterType>
                       <TankVolume>40</TankVolume>
                       <EnergyFactor>0.59</EnergyFactor>
+                      <HeatingCapacity>36000</HeatingCapacity>
                       {pilot_power_elem}
                     </WaterHeatingSystem>
                   </WaterHeating>
@@ -2282,6 +2774,7 @@ mod tests {
                       <WaterHeaterType>storage water heater</WaterHeaterType>
                       <TankVolume>40</TankVolume>
                       <EnergyFactor>0.59</EnergyFactor>
+                      <HeatingCapacity>36000</HeatingCapacity>
 {extension}
                     </WaterHeatingSystem>
                   </WaterHeating>
@@ -2369,6 +2862,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2430,6 +2924,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2500,6 +2995,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2555,6 +3051,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2633,6 +3130,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2741,6 +3239,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: XmlNode {
                 name: String::new(),
                 attrs: std::collections::HashMap::new(),
@@ -2748,6 +3247,7 @@ mod tests {
                 children: vec![],
             },
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         };
 
         // Conditioned zone is at index 0 → zone_id 1
@@ -2824,6 +3324,7 @@ mod tests {
         let mut specs = Vec::new();
         resolve_water_heaters(
             &building,
+            building.climate_zone_iecc.as_deref(),
             &DefaultsStore::empty(),
             &mut specs,
             None,
@@ -2863,5 +3364,51 @@ mod tests {
             .expect("xml");
             parse_avg_water_draw_and_bedrooms(&details, None).map(|(draw, _)| draw)
         });
+    }
+
+    /// A UA calculation failure fails the water heater's resolution naming
+    /// the water heater: a default UA would silently re-rate the tank.
+    #[test]
+    fn water_heater_ua_failure_is_an_error() {
+        // A gas storage WH whose UA derivation needs an efficiency and is
+        // given none: the derivation's own error names the cause.
+        let xml = r#"
+            <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+              <Building>
+                <BuildingDetails>
+                  <BuildingSummary>
+                    <BuildingConstruction>
+                      <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
+                  </BuildingSummary>
+                  <WaterHeating>
+                    <WaterHeatingSystem>
+                      <SystemIdentifier id="wh_noua"/>
+                      <FuelType>natural gas</FuelType>
+                      <WaterHeaterType>storage water heater</WaterHeaterType>
+                      <TankVolume>40</TankVolume>
+                      <HeatingCapacity>36000</HeatingCapacity>
+                    </WaterHeatingSystem>
+                  </WaterHeating>
+                </BuildingDetails>
+              </Building>
+            </HPXML>
+        "#;
+        let root = parse_xml_document(xml).expect("xml must parse");
+        let building = building_for_test(&root);
+        let mut specs = Vec::new();
+        let err = resolve_water_heaters(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            &DefaultsStore::empty(),
+            &mut specs,
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a UA calculation failure fails the resolution");
+        assert!(
+            err.to_string().contains("wh_noua"),
+            "the error names the water heater, got: {err}"
+        );
     }
 }

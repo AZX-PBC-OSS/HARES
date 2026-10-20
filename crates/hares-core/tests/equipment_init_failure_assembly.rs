@@ -7,12 +7,13 @@
 //! the cause. The census pins that every checked-in HPXML fixture builds
 //! holding one equipment per resolved spec.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, TimeZone};
-use hares_core::dwelling::DwellingBlueprint;
+use hares_core::dwelling::{DwellingBlueprint, DwellingBlueprintBuilder};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::OutputFormat;
 use serde_json::{Map, Value, json};
 
 #[path = "../../../tests/support/denver_offset.rs"]
@@ -34,33 +35,35 @@ fn config(hpxml: &Path) -> DwellingConfig {
         .single()
         .expect("valid start time");
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        // No schedule file: the generated schedule is the test's condition.
-        schedule_path: None,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: hares_io::SimulationConfig {
-            start_time,
-            duration: Duration::hours(24),
-            time_res: Duration::seconds(3600),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: None, // No schedule file: the generated schedule is the test's condition.
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            hares_io::SimulationConfig {
+                start_time,
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(3600),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            1,
+            None,
+        ),
     }
 }
 
@@ -82,10 +85,20 @@ fn gain_fraction_override(equipment_name: &str, sensible_gain_fraction: f64) -> 
 /// parameters the HVAC, water-heating, EV, battery, and PV resolvers do
 /// not inject.
 fn first_scheduled_load_name(hpxml: &Path) -> String {
-    let blueprint =
-        DwellingBlueprint::from_config(config(hpxml)).expect("the fixture's blueprint must build");
-    blueprint
-        .equipment_specs
+    let building = hares_io::parse_hpxml(hpxml).expect("the fixture's HPXML must parse");
+    let defaults = hares_io::DefaultsStore::load(&project_root().join("python/hares/defaults"))
+        .expect("the defaults load");
+    let mut warnings = Vec::new();
+    let specs = hares_io::hpxml::equipment::resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut warnings,
+    )
+    .expect("the fixture's equipment must resolve");
+    specs
         .iter()
         .find(|spec| {
             spec.name != "Occupancy" && spec.parameters.contains_key("sensible_gain_fraction")
@@ -104,7 +117,7 @@ fn equipment_init_failure_fails_assembly() {
     let mut cfg = config(&fixture("base.xml"));
     // sensible 1.5 plus the declared latent fraction exceeds 1.0, which
     // the scheduled load's init rejects.
-    cfg.overrides = Some(gain_fraction_override(&load_name, 1.5));
+    cfg.settings.overrides = Some(gain_fraction_override(&load_name, 1.5));
 
     let err = Dwelling::from_config(cfg).err().unwrap_or_else(|| {
         panic!(
@@ -131,6 +144,18 @@ fn equipment_init_failure_fails_assembly() {
 /// here does not build at all, which no equipment init failure can hide
 /// behind.
 const NOT_BUILDING_FIXTURES: &[&str] = &["base-enclosure-windows-physical-properties.xml"];
+
+/// The battery fixtures declare their control: `Manual`, the idle battery
+/// the fixtures' OCHRE references model. The marker is the HPXML
+/// `<Batteries>` container: vehicle batteries live under `<Vehicles>` and
+/// resolve to EV equipment, which declares no stationary control. The
+/// override names an equipment only when the input carries one, so a
+/// corpus fixture without a battery carries no override.
+fn corpus_overrides(fixture_path: &Path) -> Option<Value> {
+    let xml = std::fs::read_to_string(fixture_path).ok()?;
+    xml.contains("<Batteries>")
+        .then(|| json!({ "Battery": { "bms_mode": "\"Manual\"" } }))
+}
 
 /// Every checked-in HPXML fixture path: the curated `hpxml/` tree (the
 /// ochre samples plus the parser-dev fixture), every resstock `home.xml`,
@@ -199,8 +224,10 @@ fn every_fixture_builds_every_equipment() {
             .display()
             .to_string();
 
-        let blueprint = match DwellingBlueprint::from_config(config(&fixture_path)) {
-            Ok(blueprint) => blueprint,
+        let mut cfg = config(&fixture_path);
+        cfg.settings.overrides = corpus_overrides(&fixture_path);
+        let builder = match DwellingBlueprintBuilder::from_config(cfg) {
+            Ok(builder) => builder,
             Err(err) => {
                 let not_building = fixture_path.file_name().is_some_and(|name| {
                     NOT_BUILDING_FIXTURES.contains(&name.to_string_lossy().as_ref())
@@ -214,14 +241,14 @@ fn every_fixture_builds_every_equipment() {
         };
         // equipment_names() already excludes the occupancy handled outside
         // the registry; every name it resolves must join the dwelling.
-        let mut expected: Vec<String> = blueprint
+        let mut expected: Vec<String> = builder
             .equipment_names()
             .into_iter()
             .map(str::to_string)
             .collect();
         expected.sort();
 
-        match blueprint.build() {
+        match builder.build() {
             Ok(dwelling) => {
                 let mut actual: Vec<String> = dwelling
                     .equipment()
@@ -294,7 +321,16 @@ fn a_wildcard_override_builds_every_corpus_fixture_or_fails_typed() {
             .display()
             .to_string();
         let mut cfg = config(&fixture_path);
-        cfg.overrides = Some(json!({ "all": { "sensible_gain_fraction": 0.5 } }));
+        // The wildcard override plus the battery fixtures' declared
+        // control, in one map.
+        let mut override_map = json!({ "all": { "sensible_gain_fraction": 0.5 } });
+        if let Some(battery) = corpus_overrides(&fixture_path)
+            && let (Some(map), Some(battery_obj)) =
+                (override_map.as_object_mut(), battery.as_object())
+        {
+            map.extend(battery_obj.clone());
+        }
+        cfg.settings.overrides = Some(override_map);
         let outcome = match DwellingBlueprint::from_config(cfg) {
             Ok(blueprint) => blueprint.build().map(|_| ()),
             Err(err) => Err(err),

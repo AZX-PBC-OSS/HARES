@@ -18,7 +18,7 @@ use std::sync::Arc;
 use hares_control::{DispatchRequest, DispatchTarget};
 use hares_types::{
     ControlCapabilities, EnvironmentState, EquipmentDescriptor, EquipmentId, HaresError, Telemetry,
-    ThermostatAxes, ZoneId,
+    TelemetryField, ThermostatAxes, ZoneId,
 };
 
 /// What an actor reads about one equipment when its bindings resolve.
@@ -213,17 +213,25 @@ pub trait Actor: Send + Sync + 'static {
     ///
     /// # Arguments
     ///
-    /// * `pv_kw` - Actual PV generation from current-step Independent equipment
-    ///   ports (kW), positive = producing.
+    /// * `pv_w` - Actual PV generation from current-step Independent equipment
+    ///   ports (W, SI), positive = producing.
     /// * `env` - Current environment state.
     /// * `out` - Pre-allocated output buffer to append revised dispatch requests to.
     fn adjust_for_pv(
         &mut self,
-        _pv_kw: f64,
+        _pv_w: f64,
         _env: &EnvironmentState,
         _out: &mut Vec<DispatchRequest>,
     ) {
     }
+
+    /// Declares every telemetry key the actor publishes, typed: the
+    /// catalogue builds the actor's `actor:{name}:{key}` columns from this,
+    /// the actor's `Telemetry` is built and sealed from it
+    /// (`Telemetry::from_fields`), and registration rejects an actor whose
+    /// telemetry holds a key these declarations omit. Required: an actor
+    /// that publishes nothing declares nothing.
+    fn output_variables(&self) -> &[TelemetryField];
 
     /// Returns a reference to the actor's telemetry, or `None` if the actor
     /// has no observable internal state.
@@ -232,6 +240,27 @@ pub trait Actor: Send + Sync + 'static {
     /// state (presence, setpoint, BMS action, DV compliance, EV SoC/phase)
     /// override this to return `Some(&self.telemetry)`.
     fn telemetry(&self) -> Option<&Telemetry> {
+        None
+    }
+
+    /// Re-derives this actor's random stream from the dwelling's generator
+    /// key `seed`: the stream nonce construction assigned is kept, the
+    /// generator starts at its start (word position zero). The dwelling
+    /// calls it only on the actors it recorded as holding a
+    /// dwelling-derived stream; the default refuses, so a seeded actor
+    /// that does not implement it fails the reseed naming the component
+    /// instead of silently keeping its old stream.
+    fn reseed(&mut self, seed: [u8; 32]) -> Result<(), HaresError> {
+        let _ = seed;
+        Err(HaresError::Control(
+            "this actor holds no reseedable random stream (the default Actor::reseed)".to_string(),
+        ))
+    }
+
+    /// The actor's current random-stream state (the generator key, the
+    /// stream nonce, the word position), read back for the reproducibility
+    /// checks. `None` for an actor the dwelling seeded no stream into.
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
         None
     }
 
@@ -410,6 +439,7 @@ pub mod testing {
                     island_bus_voltage_pu: None,
                 },
                 schedule_row: None,
+                unavailable_periods: hares_types::UnavailablePeriodState::default(),
                 domains: hares_types::DomainSlots::default(),
                 current_time: FixedOffset::east_opt(0)
                     .expect("offset")
@@ -575,6 +605,10 @@ mod tests {
     impl Actor for TestActor {
         fn name(&self) -> &str {
             &self.name
+        }
+
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
         }
 
         fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {

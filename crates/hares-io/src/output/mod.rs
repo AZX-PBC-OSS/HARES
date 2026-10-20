@@ -4,12 +4,23 @@
 //! rows up to a configurable chunk size and flushes to disk, keeping peak
 //! memory proportional to the chunk size rather than simulation length.
 
+pub mod callback;
+pub mod catalogue;
 pub mod columns;
 pub mod metrics;
+pub mod reduce;
+pub mod report;
 pub mod writer;
 
 use std::path::PathBuf;
 
+pub use callback::{BatchCallback, BatchContext, CallbackAttachment, CallbackError};
+pub use catalogue::{
+    Catalogue, CatalogueActor, CatalogueEquipment, CatalogueError, CatalogueInput,
+    DIAGNOSTICS_METADATA_KEY, EquipmentColumnFamilies, VariableDef, VariableSource,
+    build_catalogue, build_schema, build_schema_for_columns, build_schema_for_diagnostics,
+    build_schema_for_specs,
+};
 pub use columns::{
     CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
     DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
@@ -21,29 +32,31 @@ pub use columns::{
     RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL, RUNTIME_FRACTION_SUFFIX,
     RUNTIME_HEATING_SETPOINT_COL, SCHEDULE_SUFFIX, SCHEDULED_COOLING_SETPOINT_COL,
     SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX, SOC_SUFFIX, SPEED_SUFFIX,
-    SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, build_schema, display_name_to_end_use_key,
-    end_use_display_name, end_use_electric_power_column, equipment_name_to_end_use,
-    expected_columns_at_verbosity, extract_unit_from_name, fuel_reports_gas_power_column, has_soc,
-    is_compressor_equipment, is_cooling_equipment, is_ev, is_heat_pump_heater, is_hvac_or_wh,
-    is_pv, is_reserved_output_column_name, parse_end_use_electric_power_column,
+    SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, end_use_electric_power_column,
+    expected_columns_at_verbosity, fuel_reports_gas_power_column, is_reserved_output_column_name,
     parse_end_use_electric_power_column_key,
 };
 pub use metrics::{
-    EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, MetricsCalculator,
-    SimulationMetrics,
+    EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics,
+    MetricsAccumulatorsSnapshot, MetricsCalculator, MetricsDeadbandSnapshot, MetricsInputPlan,
+    MetricsPlanSnapshot, MetricsRollingPeakSnapshot, MetricsSetpointSnapshot, MetricsSnapshot,
+    SimulationMetrics, metrics_from_table,
 };
-pub use writer::{OutputError, StreamingRecorder};
+pub use reduce::{PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule};
+pub use report::{
+    Destination, Frequency, ReportSpec, RowPlan, RowPlanError, RowWriter, SchemaSurface, Selection,
+    VariableSurface, resolve_selection,
+};
+pub use writer::{OutputError, ReportRowsSnapshot, StreamingRecorder};
 
 /// Summary returned by [`StreamingRecorder::finish`].
 #[derive(Debug, Clone)]
 pub struct OutputSummary {
-    /// Total number of rows written across all files.
+    /// Total number of rows written to the report's destination.
     pub row_count: usize,
-    /// Total size of all output files in bytes.
+    /// Size of the published output file in bytes (0 for a `Memory`
+    /// destination or a run that produced zero rows).
     pub byte_size: u64,
-    /// Path to the first (or only) output file.
+    /// The published output file's path.
     pub path: PathBuf,
-    /// Paths to all output files, including rotated successors.
-    /// When `rotation` is `None`, this contains only the primary path.
-    pub rotated_paths: Vec<PathBuf>,
 }

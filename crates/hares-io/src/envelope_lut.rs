@@ -18,6 +18,28 @@ use crate::hpxml::building::{BoundaryType, ZoneType};
 
 // ── Error type ──────────────────────────────────────────────────────────────
 
+/// The CSV reader for one LUT file: the replacement's content when the
+/// path is the swapped one, else the base file.
+fn csv_reader(
+    path: &Path,
+    swap: Option<(&Path, &str)>,
+) -> Result<csv::Reader<Box<dyn std::io::Read>>, EnvelopeLutError> {
+    match swap {
+        Some((swapped, content)) if swapped == path => Ok(csv::Reader::from_reader(Box::new(
+            std::io::Cursor::new(content.to_string()),
+        ))),
+        _ => csv::Reader::from_path(path)
+            .map_err(|e| EnvelopeLutError::CsvParse {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })
+            .map(|rdr| {
+                let inner: Box<dyn std::io::Read> = Box::new(rdr.into_inner());
+                csv::Reader::from_reader(inner)
+            }),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum EnvelopeLutError {
     #[error("CSV parse error in {path}: {reason}")]
@@ -206,32 +228,80 @@ pub struct EnvelopeLookup {
 impl EnvelopeLookup {
     /// Parse the envelope CSV files from `dir`.
     ///
-    /// `Envelope Boundary Types.csv` and `Envelope Materials.csv` are required.
-    /// `Envelope Boundaries.csv` is optional — when absent, boundary name
-    /// resolution falls back to the built-in hardcoded mapping.
+    /// All three files are required: `Envelope Boundary Types.csv`,
+    /// `Envelope Materials.csv` and `Envelope Boundaries.csv`. A missing
+    /// one is an [`EnvelopeLutError::MissingFile`] naming it: the
+    /// hardcoded boundary-name fallback would resolve constructions the
+    /// CSV table resolves differently, so the defaults load fails instead
+    /// of degrading.
     pub fn load(dir: &Path) -> Result<Self, EnvelopeLutError> {
+        Self::load_with_swap_and_log(
+            dir,
+            None,
+            dir,
+            &mut crate::defaults::DefaultsInputLog::new(),
+        )
+    }
+
+    /// [`Self::load`] with one CSV's content substituted: the replacement
+    /// file's content is parsed instead of the base file's bytes, every
+    /// other file loads from the directory as today. The per-file
+    /// replacement path in the defaults store's overrides.
+    pub fn load_with_swap(
+        dir: &Path,
+        swap: Option<(&Path, &str)>,
+    ) -> Result<Self, EnvelopeLutError> {
+        Self::load_with_swap_and_log(
+            dir,
+            swap,
+            dir,
+            &mut crate::defaults::DefaultsInputLog::new(),
+        )
+    }
+
+    /// [`Self::load`], logging every CSV file the load read into `log` as
+    /// (path relative to `base`, bytes), in load order: the defaults
+    /// load's input digest covers the envelope CSVs it read.
+    pub fn load_with_log(
+        dir: &Path,
+        base: &Path,
+        log: &mut crate::defaults::DefaultsInputLog,
+    ) -> Result<Self, EnvelopeLutError> {
+        Self::load_with_swap_and_log(dir, None, base, log)
+    }
+
+    /// [`Self::load_with_swap`], logging every CSV file the load read into
+    /// `log` as (path relative to `base`, bytes), in load order: the
+    /// defaults load's input digest covers the envelope CSVs it read. A
+    /// swapped file's entry is the replacement's content, the bytes the
+    /// load actually used.
+    pub fn load_with_swap_and_log(
+        dir: &Path,
+        swap: Option<(&Path, &str)>,
+        base: &Path,
+        log: &mut crate::defaults::DefaultsInputLog,
+    ) -> Result<Self, EnvelopeLutError> {
         let bt_path = dir.join("Envelope Boundary Types.csv");
         let mat_path = dir.join("Envelope Materials.csv");
         let boundaries_path = dir.join("Envelope Boundaries.csv");
 
-        if !bt_path.exists() {
+        let is_swapped = |path: &Path| swap.is_some_and(|(p, _)| p == path);
+        if !bt_path.exists() && !is_swapped(&bt_path) {
             return Err(EnvelopeLutError::MissingFile(bt_path));
         }
-        if !mat_path.exists() {
+        if !mat_path.exists() && !is_swapped(&mat_path) {
             return Err(EnvelopeLutError::MissingFile(mat_path));
         }
+        if !boundaries_path.exists() && !is_swapped(&boundaries_path) {
+            return Err(EnvelopeLutError::MissingFile(boundaries_path));
+        }
 
-        let boundary_types = Self::load_boundary_types(&bt_path)?;
-        let materials = Self::load_materials(&mat_path)?;
-        let boundary_names = if boundaries_path.exists() {
-            Self::load_boundaries(&boundaries_path)?
-        } else {
-            tracing::warn!(
-                path = %boundaries_path.display(),
-                "Envelope Boundaries.csv not found; falling back to hardcoded boundary name mapping"
-            );
-            HashMap::new()
-        };
+        crate::defaults::log_used(base, log, &bt_path, swap);
+        let boundary_types = Self::load_boundary_types(&bt_path, swap)?;
+        crate::defaults::log_used(base, log, &mat_path, swap);
+        let materials = Self::load_materials(&mat_path, swap)?;
+        crate::defaults::log_used(base, log, &boundaries_path, swap);
+        let boundary_names = Self::load_boundaries(&boundaries_path, swap)?;
 
         Ok(Self {
             boundary_types,
@@ -501,6 +571,23 @@ impl EnvelopeLookup {
         findings
     }
 
+    /// The row-selection convention's film resistance for a boundary
+    /// name: the interior-plus-exterior film sum the LUT's `Assembly R
+    /// Value` column is stated with (OCHRE's frozen films). The declared
+    /// assembly R speaks this same convention - HPXML's assembly R-value
+    /// includes the standard films - so the opaque-R precedence's
+    /// scaling (`k`, the numeric-fixes ledger's opaque-R precedence
+    /// entry) and its film-sum error use it, and `lookup` uses it for
+    /// the nearest-row match.
+    #[must_use]
+    pub fn convention_films(&self, boundary_name: &str) -> f64 {
+        if FLOOR_CEILING_BOUNDARIES.contains(&boundary_name) {
+            FILM_R_FLOOR_CEILING
+        } else {
+            FILM_R_WALL_ROOF
+        }
+    }
+
     /// Implements OCHRE's `get_boundary_rc_values` matching algorithm.
     pub fn lookup(
         &self,
@@ -572,11 +659,7 @@ impl EnvelopeLookup {
                 r_val = 88.0;
             }
 
-            let film_r = if FLOOR_CEILING_BOUNDARIES.contains(&boundary_name) {
-                FILM_R_FLOOR_CEILING
-            } else {
-                FILM_R_WALL_ROOF
-            };
+            let film_r = self.convention_films(boundary_name);
 
             // Find closest adjusted R-value
             filtered
@@ -615,11 +698,9 @@ impl EnvelopeLookup {
 
     fn load_boundary_types(
         path: &Path,
+        swap: Option<(&Path, &str)>,
     ) -> Result<HashMap<String, Vec<BoundaryTypeRow>>, EnvelopeLutError> {
-        let mut rdr = csv::Reader::from_path(path).map_err(|e| EnvelopeLutError::CsvParse {
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        let mut rdr = csv_reader(path, swap)?;
 
         let mut map: HashMap<String, Vec<BoundaryTypeRow>> = HashMap::new();
         for result in rdr.deserialize() {
@@ -634,11 +715,9 @@ impl EnvelopeLookup {
 
     fn load_materials(
         path: &Path,
+        swap: Option<(&Path, &str)>,
     ) -> Result<HashMap<(String, String), Vec<MaterialRow>>, EnvelopeLutError> {
-        let mut rdr = csv::Reader::from_path(path).map_err(|e| EnvelopeLutError::CsvParse {
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        let mut rdr = csv_reader(path, swap)?;
 
         let mut map: HashMap<(String, String), Vec<MaterialRow>> = HashMap::new();
         for result in rdr.deserialize() {
@@ -655,11 +734,9 @@ impl EnvelopeLookup {
     /// Parse `Envelope Boundaries.csv` into a `(BoundaryType, ZoneType, ZoneType) → boundary_name` map.
     fn load_boundaries(
         path: &Path,
+        swap: Option<(&Path, &str)>,
     ) -> Result<HashMap<(BoundaryType, ZoneType, ZoneType), String>, EnvelopeLutError> {
-        let mut rdr = csv::Reader::from_path(path).map_err(|e| EnvelopeLutError::CsvParse {
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
+        let mut rdr = csv_reader(path, swap)?;
 
         let mut map: HashMap<(BoundaryType, ZoneType, ZoneType), String> = HashMap::new();
         for result in rdr.deserialize() {
@@ -949,7 +1026,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults")
+            .join("python/hares/defaults")
             .join("envelope");
         let lut = EnvelopeLookup::load(&dir).expect("shipped envelope LUT loads");
         let findings = lut.check_csv_vs_hardcoded_consistency();
@@ -979,7 +1056,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults")
+            .join("python/hares/defaults")
             .join("envelope");
         let lut = EnvelopeLookup::load(&dir).expect("shipped envelope LUT loads");
         let findings = lut.check_material_invariants(&dir.join("Envelope Materials.csv"));

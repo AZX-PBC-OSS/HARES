@@ -5,7 +5,8 @@
 HARES — High-performance Agent-based Residential Energy Simulation
 
 A Rust workspace for whole-building energy simulation with Python bindings
-via PyO3 / Maturin, published as the `ochre_next` Python package.
+via PyO3 / Maturin, published as the `hares-py` distribution and imported
+as the `hares` Python package.
 
 ## Repository setup
 
@@ -107,9 +108,9 @@ uv pip install -e ".[resstock]"    # installs boto3 + httpx
 ### Fetching buildings
 
 ```python
-from ochre_next.data import fetch_resstock_building
+from hares.data import fetch_resstock_building
 
-# Single building — cached to ~/.cache/ochre_next/resstock/
+# Single building, cached to ~/.cache/hares/resstock/
 bldg = fetch_resstock_building(bldg_id=1, version="2024.2")
 print(bldg.hpxml_path, bldg.weather_path)
 
@@ -136,7 +137,7 @@ crates/
 ├── hares-tariff      Electric and gas tariffs: URDB parsing, evaluation, billing
 ├── hares-core        Simulation engine: dwelling, clock, actor system, checkpoint, invariants
 ├── hares-fleet       Fleet-level parallel simulation with rayon and weighted aggregation
-└── hares-python      PyO3 cdylib — exposes the engine as the ochre_next._hares Python module
+└── hares-python      PyO3 cdylib: exposes the engine as the hares._hares Python module
 ```
 
 Dependency flow (each crate depends on those above it):

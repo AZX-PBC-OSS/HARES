@@ -33,6 +33,7 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 chrono-tz = { workspace = true }
 sha2 = { workspace = true }
+uom.workspace = true
 
 [dev-dependencies]
 parquet = { workspace = true }
@@ -100,6 +101,11 @@ path = "../../benches/single_building.rs"
 harness = false
 
 [[bench]]
+name = "metrics_request"
+path = "../../benches/metrics_request.rs"
+harness = false
+
+[[bench]]
 name = "fleet"
 path = "../../benches/fleet.rs"
 harness = false
@@ -110,12 +116,17 @@ path = "../../benches/rl_step.rs"
 harness = false
 
 [[bench]]
-name = "aggregation"
-path = "../../benches/aggregation.rs"
+name = "rl_episode"
+path = "../../benches/rl_episode.rs"
 harness = false
 
 [[bench]]
-name = "rl_episode"
-path = "../../benches/rl_episode.rs"
+name = "output_row_plan"
+path = "../../benches/output_row_plan.rs"
+harness = false
+
+[[bench]]
+name = "diagnostics_report"
+path = "../../benches/diagnostics_report.rs"
 harness = false
 

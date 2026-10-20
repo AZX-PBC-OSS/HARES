@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ochre_next import DwellingConfig, SimulationConfig, SteppableFleet
+import pytest
+
+from hares._hares import HaresSimulationError
+from hares import DwellingConfig, SimulationConfig, SteppableFleet
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
 
 
 def _build_valid_config(bldg_id: int = 1) -> DwellingConfig:
-    sim_config = SimulationConfig(duration_s=3600, time_res_s=60, write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60)
     return DwellingConfig(
         hpxml=str(EXAMPLES / "BEopt_example.xml"),
         schedule=str(EXAMPLES / "BEopt_example_schedule.csv"),
@@ -27,6 +30,7 @@ def test_steppable_fleet_exposes_build_errors() -> None:
         hpxml=str(EXAMPLES / "missing_building.xml"),
         schedule=str(EXAMPLES / "BEopt_example_schedule.csv"),
         weather=str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60),
         bldg_id=2,
     )
 
@@ -49,5 +53,24 @@ def test_steppable_fleet_step_includes_reactive_power() -> None:
 
     result = entries[0].get("result")
     assert result is not None
-    assert "reactive_power_kvar" in result
-    assert isinstance(result["reactive_power_kvar"], float)
+    assert "reactive_power_var" in result
+    assert isinstance(result["reactive_power_var"], float)
+
+
+def test_steppable_fleet_step_after_finish_raises() -> None:
+    fleet = SteppableFleet.from_configs([_build_valid_config(bldg_id=1)], n_threads=0)
+
+    while not fleet.is_finished():
+        entries = fleet.step()
+        assert all(entry["ok"] for entry in entries)
+
+    with pytest.raises(HaresSimulationError) as exc_info:
+        fleet.step()
+    assert str(fleet.total_steps()) in str(exc_info.value)
+
+
+def test_steppable_fleet_telemetry_out_of_range_raises_index_error() -> None:
+    fleet = SteppableFleet.from_configs([_build_valid_config(bldg_id=1)], n_threads=0)
+
+    with pytest.raises(IndexError):
+        fleet.telemetry(len(fleet))

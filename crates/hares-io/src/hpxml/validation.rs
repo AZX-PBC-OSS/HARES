@@ -5,6 +5,7 @@ use std::fmt;
 use chrono::{DateTime, Duration, FixedOffset};
 
 use super::building::{Building, ZoneType, parse_xml_document};
+use super::elements::*;
 use crate::schedule::{ScheduleTimeSeries, normalize_column_name};
 use crate::weather::{WeatherMeta, WeatherTimeSeries};
 
@@ -116,7 +117,9 @@ pub fn validate_hpxml_schema_node(
 ) -> Result<Vec<ValidationWarning>, ValidationError> {
     let mut warnings = Vec::new();
 
-    if root.name != "HPXML" {
+    #[cfg(test)]
+    super::elements::read_recorder::record(HPXML.name);
+    if root.name != HPXML.name {
         return Err(ValidationError::new(
             "schema",
             format!("root element must be HPXML, found `{}`", root.name),
@@ -214,12 +217,12 @@ pub fn validate_hpxml_schema_node(
     // HPXML §2.4 / BuildingSync audit data: a document that declares
     // non-HPXML namespaces MUST still carry the core HPXML structure.
     if !non_hpxml_namespaces.is_empty() {
-        let has_building = root.path(&["Building"]).is_some()
-            || root.path(&["Building", "BuildingDetails"]).is_some();
+        let has_building = root.path(&[&BUILDING]).is_some()
+            || root.path(&[&BUILDING, &BUILDING_DETAILS]).is_some();
         let has_systems = root
-            .path(&["Building", "BuildingDetails", "Systems"])
+            .path(&[&BUILDING, &BUILDING_DETAILS, &SYSTEMS])
             .is_some()
-            || root.path(&["Building", "Systems"]).is_some();
+            || root.path(&[&BUILDING, &SYSTEMS]).is_some();
         if !has_building || !has_systems {
             let missing: Vec<&str> = {
                 let mut parts = Vec::new();
@@ -256,27 +259,27 @@ pub fn validate_hpxml_schema_node(
     }
 
     // Required structural elements (present in both 3.x and 4.x)
-    let required_paths: &[(&[&str], &str)] = &[
+    let required_paths: &[(&[&super::elements::HpxmlElement], &str)] = &[
         (
-            &["Building", "BuildingDetails", "BuildingSummary"],
+            &[&BUILDING, &BUILDING_DETAILS, &BUILDING_SUMMARY],
             "Building/BuildingDetails/BuildingSummary",
         ),
         (
-            &["Building", "BuildingDetails", "BuildingSummary", "Site"],
+            &[&BUILDING, &BUILDING_DETAILS, &BUILDING_SUMMARY, &SITE],
             "Building/BuildingDetails/BuildingSummary/Site",
         ),
         (
             &[
-                "Building",
-                "BuildingDetails",
-                "BuildingSummary",
-                "BuildingConstruction",
-                "ConditionedFloorArea",
+                &BUILDING,
+                &BUILDING_DETAILS,
+                &BUILDING_SUMMARY,
+                &BUILDING_CONSTRUCTION,
+                &CONDITIONED_FLOOR_AREA,
             ],
             "Building/BuildingDetails/BuildingSummary/BuildingConstruction/ConditionedFloorArea",
         ),
         (
-            &["Building", "BuildingDetails", "Enclosure"],
+            &[&BUILDING, &BUILDING_DETAILS, &ENCLOSURE],
             "Building/BuildingDetails/Enclosure",
         ),
     ];
@@ -291,9 +294,9 @@ pub fn validate_hpxml_schema_node(
     }
 
     // Building/Site is required
-    if root.path(&["Building", "Site"]).is_none()
+    if root.path(&[&BUILDING, &SITE]).is_none()
         && root
-            .path(&["Building", "BuildingDetails", "BuildingSummary", "Site"])
+            .path(&[&BUILDING, &BUILDING_DETAILS, &BUILDING_SUMMARY, &SITE])
             .is_none()
     {
         return Err(ValidationError::new(

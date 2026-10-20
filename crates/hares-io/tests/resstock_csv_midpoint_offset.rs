@@ -102,7 +102,7 @@ fn build_tmy3_csv() -> String {
 }
 
 #[test]
-fn both_parsers_agree_on_midpoint_offset_1800() {
+fn both_parsers_agree_on_the_interval_end_record_label() {
     let resstock_csv = build_resstock_csv();
     let tmy3_csv = build_tmy3_csv();
 
@@ -117,12 +117,14 @@ fn both_parsers_agree_on_midpoint_offset_1800() {
     let tmy = parse_tmy3_str(&tmy3_csv).expect("should parse TMY3 CSV");
 
     assert_eq!(
-        rs.meta.midpoint_offset_secs, 1800,
-        "ResStock CSV midpoint_offset_secs must be 1800"
+        rs.meta.record_label,
+        hares_io::RecordLabel::IntervalEnd,
+        "ResStock CSV stamps each record at its interval's end"
     );
     assert_eq!(
-        tmy.meta.midpoint_offset_secs, 1800,
-        "TMY3 midpoint_offset_secs must be 1800"
+        tmy.meta.record_label,
+        hares_io::RecordLabel::IntervalEnd,
+        "TMY3 stamps each record at its interval's end"
     );
 }
 
@@ -141,11 +143,11 @@ fn solar_zenith_at_noon_midpoint_matches_between_resstock_and_tmy3() {
     .expect("should parse ResStock CSV");
     let tmy = parse_tmy3_str(&tmy3_csv).expect("should parse TMY3 CSV");
 
-    // Both use 3600 s step and end-of-interval offset = 1800 s.
+    // Both use 3600 s steps and the interval-end record label.
     assert_eq!(rs.meta.source_step_secs, 3600);
     assert_eq!(tmy.meta.source_step_secs, 3600);
-    assert_eq!(rs.meta.midpoint_offset_secs, 1800);
-    assert_eq!(tmy.meta.midpoint_offset_secs, 1800);
+    assert_eq!(rs.meta.record_label, hares_io::RecordLabel::IntervalEnd);
+    assert_eq!(tmy.meta.record_label, hares_io::RecordLabel::IntervalEnd);
 
     // Pick the 12:00 record (noon timestamp). Index 11 = hour 12 on Jan 1
     // (first timestamp is 01:00, index 0 → hour 1; index 11 → hour 12).

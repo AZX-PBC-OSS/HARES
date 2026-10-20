@@ -1,0 +1,24 @@
+engine_version: 2
+description: "One review area examined in depth by a specialist reviewer — the child flow the review fan-out runs per area"
+recipe_summary: "review"
+steps:
+  - id: review
+    label: Review area
+    description: "Examine this area's concern domain in depth and record honest findings"
+    required: true
+    type: agent
+    agent_role: review-area
+    charter: review-findings
+    challenge: review-area
+    includes: [reflection-scaffold, prove-with-test, severity-ladder]
+    output:
+      file: findings.md
+      schema:
+        type: object
+        additionalProperties: false
+        required: [review_outcome]
+        properties:
+          review_outcome:
+            type: string
+            enum: [clean, findings, halt, clean_with_nits_applied]
+    default_next: done

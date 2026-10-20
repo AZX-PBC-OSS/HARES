@@ -12,11 +12,12 @@
 //! on most delivering steps, observe-gated) and the zone holds the comfort
 //! envelope at every resolution with tolerances stated per resolution.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -29,44 +30,51 @@ fn base_xml_config(month: u32, time_res_s: i64) -> DwellingConfig {
         _ => panic!("test months are January and July"),
     };
     DwellingConfig {
-        hpxml_path: project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
-        schedule_path: Some(project_root().join("data/examples/BEopt_example_schedule.csv")),
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::east_opt(offset_hours * 3600)
-                .unwrap()
-                .with_ymd_and_hms(2018, start_month_day.0, start_month_day.1, 0, 0, 0)
-                .unwrap(),
-            duration: Duration::days(5),
-            time_res: Duration::seconds(time_res_s),
-            output_verbosity: 2,
-            output_path: None,
-            write_output: false,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(
+            project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+        ),
+        schedule: Some(InputSource::Path(
+            project_root().join("data/examples/BEopt_example_schedule.csv"),
+        )),
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::east_opt(offset_hours * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2018, start_month_day.0, start_month_day.1, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::days(5),
+                time_res: Duration::seconds(time_res_s),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::default(),
+            },
+            None,
+            1,
+            None,
+        ),
     }
 }
 
 /// The conditioned zone's min and max over the run.
 fn conditioned_zone_range(dwelling: &mut Dwelling) -> (f64, f64) {
-    let results = dwelling.simulate().expect("simulate");
     let mut zone_min_c = f64::INFINITY;
     let mut zone_max_c = f64::NEG_INFINITY;
-    for step in &results.steps {
+    for _ in 0..dwelling.clock.total_steps() {
+        let step = dwelling.step().expect("step");
         // The conditioned zone only: the unconditioned attic's excursions
         // are not the HVAC's holding band.
         for (zone, temp_c) in &step.zone_temperatures_c {
@@ -121,9 +129,9 @@ fn cycling_path_energy_matches_the_ideal_paths_integral_over_a_week() {
     let mut energy_by_res = [0.0_f64; 2];
     for (i, time_res_s) in [60_i64, 900].into_iter().enumerate() {
         let mut dwelling = Dwelling::from_config(base_xml_config(7, time_res_s)).expect("build");
-        let results = dwelling.simulate().expect("simulate");
         let dt_hours = time_res_s as f64 / 3600.0;
-        for step in &results.steps {
+        for _ in 0..dwelling.clock.total_steps() {
+            let step = dwelling.step().expect("step");
             energy_by_res[i] += step.hvac_cooling_w / 1000.0 * dt_hours;
         }
     }

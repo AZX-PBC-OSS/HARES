@@ -7,28 +7,6 @@
 
 use crate::equipment::{CoreOutput, EquipmentDescriptor, OperatingMode};
 
-#[cfg(feature = "observe")]
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Counter of mode/flow inconsistency rejections.
-/// Incremented on every physical-implausibility rejection.
-#[cfg(feature = "observe")]
-static MODE_FLOW_INCONSISTENCY_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Returns the total number of mode/flow inconsistency rejections in this process.
-#[cfg(feature = "observe")]
-pub fn mode_flow_inconsistency_counter() -> u64 {
-    MODE_FLOW_INCONSISTENCY_COUNT.load(Ordering::Relaxed)
-}
-
-#[cfg(feature = "observe")]
-fn record_rejection() {
-    MODE_FLOW_INCONSISTENCY_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-#[cfg(not(feature = "observe"))]
-fn record_rejection() {}
-
 /// Reasons a mode/flow combination is physically inconsistent.
 ///
 /// Returned by [`check_mode_flow_consistency`] as the first-found violation.
@@ -64,16 +42,15 @@ pub(crate) fn check_mode_flow_consistency(
         // did not, so equipment reporting an active mode backed only by
         // vars could never satisfy Rule 1.
         if mode.is_active() {
-            let has_flow = co.flows.electric_kw.as_ref().is_some_and(|p| !p.is_zero())
+            let has_flow = co.flows.electric_w.as_ref().is_some_and(|p| !p.is_zero())
                 || co.flows.thermal_output_w.is_some_and(|v| v != 0.0)
                 || co
                     .flows
                     .fuel_w
                     .as_ref()
                     .is_some_and(|f| f.consumption_w > 0.0)
-                || co.flows.reactive_power_kvar.is_some_and(|v| v != 0.0);
+                || co.flows.reactive_power_var.is_some_and(|v| v != 0.0);
             if !has_flow {
-                record_rejection();
                 return Err(ModeFlowViolation {
                     message: format!(
                         "core_output contract violation for '{}' ({:?}): \
@@ -81,7 +58,7 @@ pub(crate) fn check_mode_flow_consistency(
                          (electric={:?}, thermal={:?}, fuel={:?})",
                         desc.name,
                         caps,
-                        co.flows.electric_kw,
+                        co.flows.electric_w,
                         co.flows.thermal_output_w,
                         co.flows.fuel_w,
                     ),
@@ -91,16 +68,15 @@ pub(crate) fn check_mode_flow_consistency(
 
         // Rule 2: Off-mode zero-flow guard
         if mode == OperatingMode::Off {
-            let non_zero = co.flows.electric_kw.as_ref().is_some_and(|p| !p.is_zero())
+            let non_zero = co.flows.electric_w.as_ref().is_some_and(|p| !p.is_zero())
                 || co.flows.thermal_output_w.is_some_and(|v| v != 0.0)
                 || co
                     .flows
                     .fuel_w
                     .as_ref()
                     .is_some_and(|f| f.consumption_w > 0.0)
-                || co.flows.reactive_power_kvar.is_some_and(|v| v != 0.0);
+                || co.flows.reactive_power_var.is_some_and(|v| v != 0.0);
             if non_zero {
-                record_rejection();
                 return Err(ModeFlowViolation {
                     message: format!(
                         "core_output contract violation for '{}' ({:?}): \
@@ -108,10 +84,10 @@ pub(crate) fn check_mode_flow_consistency(
                          (electric={:?}, thermal={:?}, fuel={:?}, reactive={:?})",
                         desc.name,
                         caps,
-                        co.flows.electric_kw,
+                        co.flows.electric_w,
                         co.flows.thermal_output_w,
                         co.flows.fuel_w,
-                        co.flows.reactive_power_kvar,
+                        co.flows.reactive_power_var,
                     ),
                 });
             }
@@ -124,7 +100,6 @@ pub(crate) fn check_mode_flow_consistency(
             && !mode.is_heating_variant()
             && !matches!(mode, OperatingMode::On | OperatingMode::Defrost)
         {
-            record_rejection();
             return Err(ModeFlowViolation {
                 message: format!(
                     "core_output contract violation for '{}' ({:?}): \
@@ -138,7 +113,6 @@ pub(crate) fn check_mode_flow_consistency(
             && !mode.is_cooling_variant()
             && !matches!(mode, OperatingMode::On | OperatingMode::Defrost)
         {
-            record_rejection();
             return Err(ModeFlowViolation {
                 message: format!(
                     "core_output contract violation for '{}' ({:?}): \
@@ -153,7 +127,7 @@ pub(crate) fn check_mode_flow_consistency(
     // Rule 4: charging/discharging direction.
     // Only applies to unidirectional Consumption/Generation — Bidirectional
     // can flow either way at any moment (e.g., battery with standby load).
-    if let (Some(mode), Some(electric)) = (co.state.operating_mode, &co.flows.electric_kw) {
+    if let (Some(mode), Some(electric)) = (co.state.operating_mode, &co.flows.electric_w) {
         use crate::equipment::ElectricPower;
         let violation = match (mode, electric) {
             (OperatingMode::Charging, ElectricPower::Generation(kw)) if *kw > 0.0 => {
@@ -165,7 +139,6 @@ pub(crate) fn check_mode_flow_consistency(
             _ => None,
         };
         if let Some(reason) = violation {
-            record_rejection();
             return Err(ModeFlowViolation {
                 message: format!(
                     "core_output contract violation for '{}' ({:?}): \

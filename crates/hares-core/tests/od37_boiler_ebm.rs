@@ -16,12 +16,13 @@
 //!    heating setpoint profile instead of riding the gains' bias above it
 //!    and crossing the AC's cooling turn-on. (`boiler_ebm_publishes_and_the_ac_never_cools_in_january`.)
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -56,35 +57,36 @@ fn parse_fips(xml: &str) -> String {
 fn bldg2_january_config() -> DwellingConfig {
     let bldg_dir = project_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
     DwellingConfig {
-        hpxml_path: bldg_dir.join("home.xml"),
-        schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-        weather_path: weather_for(&bldg_dir),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(5 * 3600)
-                .unwrap()
-                .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
-                .unwrap(),
-            duration: Duration::days(7),
-            time_res: Duration::hours(1),
-            output_verbosity: 2,
-            output_path: None,
-            write_output: false,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id: 2,
-        initialization_duration: Some(std::time::Duration::from_secs(7 * 24 * 3600)),
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+        schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&bldg_dir)),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::west_opt(5 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .unwrap(),
+                duration: Duration::days(7),
+                time_res: Duration::hours(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::default(),
+            },
+            None,
+            2,
+            None,
+        ),
     }
 }
 
@@ -94,13 +96,19 @@ fn bldg2_january_config() -> DwellingConfig {
 #[test]
 fn the_ac_never_cools_bldg2_in_january_and_the_zone_holds_the_heating_band() {
     let mut dwelling = Dwelling::from_config(bldg2_january_config()).expect("build dwelling");
-    let results = dwelling.simulate().expect("simulate");
-    assert!(results.steps.len() >= 168, "a week at 1 h");
+    // The step history is gone: the horizon's step results are what the
+    // stepping loop itself collects.
+    let total = dwelling.clock.total_steps();
+    assert!(total >= 168, "a week at 1 h");
+    let mut steps = Vec::new();
+    for _ in 0..total {
+        steps.push(dwelling.step().expect("step"));
+    }
 
     let mut zone_min_c = f64::INFINITY;
     let mut zone_max_c = f64::NEG_INFINITY;
     let mut cooling_kwh = 0.0;
-    for step in &results.steps {
+    for step in &steps {
         for (_, temp_c) in &step.zone_temperatures_c {
             zone_min_c = zone_min_c.min(*temp_c);
             zone_max_c = zone_max_c.max(*temp_c);

@@ -97,7 +97,7 @@ impl ModuleType {
 pub struct PvArray {
     pub tilt_deg: f64,
     pub azimuth_deg: f64,
-    pub capacity_kw: f64,
+    pub capacity_w: f64,
     pub noct_c: f64,
     pub module_type: ModuleType,
     pub array_type: ArrayType,
@@ -113,7 +113,7 @@ impl PvArray {
     /// Enforces:
     /// - `tilt_deg ∈ [0, 180]`, finite, not NaN
     /// - `azimuth_deg ∈ [0, 360)`, finite, not NaN
-    /// - `capacity_kw > 0`, finite, not NaN
+    /// - `capacity_w > 0`, finite, not NaN
     /// - `noct_c` finite and positive (> 0)
     pub fn validate(&self) -> Result<(), HaresError> {
         if !self.tilt_deg.is_finite() || !(0.0..=180.0).contains(&self.tilt_deg) {
@@ -128,10 +128,10 @@ impl PvArray {
                 self.azimuth_deg
             )));
         }
-        if !self.capacity_kw.is_finite() || self.capacity_kw <= 0.0 {
+        if !self.capacity_w.is_finite() || self.capacity_w <= 0.0 {
             return Err(HaresError::Equipment(format!(
-                "PvArray capacity_kw must be finite and > 0, got {}",
-                self.capacity_kw
+                "PvArray capacity_w must be finite and > 0, got {}",
+                self.capacity_w
             )));
         }
         if !self.noct_c.is_finite() || self.noct_c <= 0.0 {
@@ -152,7 +152,7 @@ impl PvArray {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PvArraySpec {
-    pub capacity_kw: f64,
+    pub capacity_w: f64,
     #[serde(default)]
     pub tilt_deg: Option<f64>,
     #[serde(default)]
@@ -173,9 +173,9 @@ impl PvArraySpec {
     /// Validate per-array fields for physical plausibility.
     pub fn validate(&self) -> crate::Result<()> {
         use hares_types::HaresError;
-        if !self.capacity_kw.is_finite() || self.capacity_kw <= 0.0 {
+        if !self.capacity_w.is_finite() || self.capacity_w <= 0.0 {
             return Err(HaresError::Equipment(
-                "PvArraySpec capacity_kw must be finite and > 0".to_string(),
+                "PvArraySpec capacity_w must be finite and > 0".to_string(),
             ));
         }
         if let Some(tilt) = self.tilt_deg {
@@ -313,7 +313,7 @@ mod tests {
 
     fn minimal_array_spec() -> PvArraySpec {
         PvArraySpec {
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
             module_type: None,
@@ -332,14 +332,14 @@ mod tests {
     #[test]
     fn array_spec_validate_rejects_zero_capacity() {
         let mut spec = minimal_array_spec();
-        spec.capacity_kw = 0.0;
+        spec.capacity_w = 0.0;
         assert!(spec.validate().is_err());
     }
 
     #[test]
     fn array_spec_validate_rejects_negative_capacity() {
         let mut spec = minimal_array_spec();
-        spec.capacity_kw = -1.0;
+        spec.capacity_w = -1000.0;
         assert!(spec.validate().is_err());
     }
 
@@ -383,16 +383,16 @@ mod tests {
         let spec = minimal_array_spec();
         let json = serde_json::to_string(&spec).unwrap();
         let recovered: PvArraySpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(recovered.capacity_kw, spec.capacity_kw);
+        assert_eq!(recovered.capacity_w, spec.capacity_w);
         assert_eq!(recovered.tilt_deg, spec.tilt_deg);
         assert_eq!(recovered.azimuth_deg, spec.azimuth_deg);
     }
 
     #[test]
     fn array_spec_defaults_absent_fields_to_none() {
-        let json = serde_json::json!({"capacity_kw": 3.0});
+        let json = serde_json::json!({"capacity_w": 3000.0});
         let spec: PvArraySpec = serde_json::from_value(json).unwrap();
-        assert_eq!(spec.capacity_kw, 3.0);
+        assert_eq!(spec.capacity_w, 3000.0);
         assert_eq!(spec.tilt_deg, None);
         assert_eq!(spec.azimuth_deg, None);
         assert_eq!(spec.module_type, None);
@@ -406,7 +406,7 @@ mod tests {
         PvArray {
             tilt_deg: 30.0,
             azimuth_deg: 180.0,
-            capacity_kw: 5.0,
+            capacity_w: 5.0,
             noct_c: 47.0,
             module_type: ModuleType::Standard,
             array_type: ArrayType::OpenRack,
@@ -455,14 +455,14 @@ mod tests {
     #[test]
     fn pv_array_validate_rejects_zero_capacity() {
         let mut array = valid_array();
-        array.capacity_kw = 0.0;
+        array.capacity_w = 0.0;
         assert!(array.validate().is_err());
     }
 
     #[test]
     fn pv_array_validate_rejects_negative_capacity() {
         let mut array = valid_array();
-        array.capacity_kw = -5.0;
+        array.capacity_w = -5.0;
         assert!(array.validate().is_err());
     }
 
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn pv_array_validate_rejects_capacity_nan() {
         let mut array = valid_array();
-        array.capacity_kw = f64::NAN;
+        array.capacity_w = f64::NAN;
         assert!(array.validate().is_err());
     }
 

@@ -6,7 +6,6 @@ use std::time::Duration;
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::biquadratic::cubic;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
-use hares_physics::units::power_w_to_kw;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -163,7 +162,7 @@ pub struct Dehumidifier {
     max_operating_temp_c: Option<f64>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// compressor pf 0.96 on the total electric draw. Real power stays
-    /// bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    /// bit-identical; Q comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
 }
 
@@ -369,7 +368,7 @@ impl Dehumidifier {
         self.telemetry
             .set(tk::ELECTRIC_POWER_W, snapshot.electric_power_w);
         self.telemetry
-            .set(tk::ELECTRIC_KW, power_w_to_kw(snapshot.electric_power_w));
+            .set(tk::ELECTRIC_KW, snapshot.electric_power_w);
         self.telemetry
             .set(tk::LATENT_REMOVAL_W, snapshot.latent_removal_w);
         self.telemetry
@@ -512,6 +511,26 @@ impl Equipment for Dehumidifier {
         &self.descriptor
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_water_removal_l_day",
+                self.rated_water_removal_l_day,
+                hares_types::Unit::LitrePerDay,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_energy_factor_l_kwh",
+                self.rated_energy_factor_l_kwh,
+                hares_types::Unit::Dimensionless,
+            ),
+            hares_types::ResolvedParameter::new(
+                "fraction_load_served",
+                self.fraction_load_served,
+                hares_types::Unit::Fraction,
+            ),
+        ]
+    }
+
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
     }
@@ -568,6 +587,24 @@ impl Equipment for Dehumidifier {
         // hysteresis resumes once power returns. Islanded homes keep an
         // energized bus and are not affected. See docs/outage-behavior.md.
         if !env.grid.bus_energized() {
+            self.is_on = false;
+            self.operating_mode = OperatingMode::Off;
+            return OperatingMode::Off;
+        }
+        // Unavailable period: an HPXML period whose table row zeroes the
+        // dehumidifier (a `Power Outage`, row `dehumidifier` of
+        // `unavailable_periods.csv`) stops the unit for the flagged step,
+        // beside the outage gate: OpenStudio-HPXML zeroes the
+        // dehumidifier's availability schedule through the period
+        // (`resources/schedules.rb` `set_unavailable_periods`). The
+        // humidistat setpoints are untouched and its control resumes once
+        // the step passes.
+        if env.unavailable_periods.zeroes_dehumidifier() {
+            tracing::debug!(
+                dehumidifier = %self.descriptor.name,
+                "the step's unavailable periods zero the dehumidifier row: \
+                 the unit is off for the step"
+            );
             self.is_on = false;
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
@@ -654,7 +691,12 @@ impl Equipment for Dehumidifier {
         // update_control already forces is_on=false when the bus is
         // de-energized; this guard zeroes the parasitic contribution that
         // performance_snapshot would otherwise return for the off-cycle case.
-        let snapshot = if !env.grid.bus_energized() {
+        // A step whose unavailable periods zero the dehumidifier's table row
+        // (a `Power Outage`) is forced off the same way by update_control,
+        // and the guard here zeroes the parasitic with it: the unit draws
+        // nothing on a flagged step.
+        let snapshot = if !env.grid.bus_energized() || env.unavailable_periods.zeroes_dehumidifier()
+        {
             PerformanceSnapshot {
                 electric_power_w: 0.0,
                 sensible_gain_w: 0.0,
@@ -700,14 +742,13 @@ impl Equipment for Dehumidifier {
         // never splits the small internal fan from the compressor, so the
         // single-component whole-unit pf is deliberate (unlike ducted HVAC,
         // which computes Q per component — see `hvac::reactive`).
-        let reactive_power_kvar = self.zip.reactive_kvar(
-            power_w_to_kw(snapshot.electric_power_w),
-            env.grid.bus_voltage_pu(),
-        );
-        if snapshot.electric_power_w > 0.0 || reactive_power_kvar != 0.0 {
+        let reactive_power_var = self
+            .zip
+            .reactive_var(snapshot.electric_power_w, env.grid.bus_voltage_pu());
+        if snapshot.electric_power_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: snapshot.electric_power_w,
-                reactive_power_kvar,
+                reactive_power_var,
             })?;
         }
         if snapshot.sensible_gain_w != 0.0 || snapshot.latent_removal_w != 0.0 {
@@ -731,10 +772,10 @@ impl Equipment for Dehumidifier {
 
         let water_removed_l = snapshot.water_removal_l_day * dt.as_secs_f64() / SECONDS_PER_DAY;
         self.accumulated_water_removal_l += water_removed_l.max(0.0);
-        let electric_kw = power_w_to_kw(snapshot.electric_power_w).max(0.0);
+        let electric_w = snapshot.electric_power_w.max(0.0);
         self.write_step_telemetry(snapshot);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         let temp_locked_out = match (self.min_operating_temp_c, self.max_operating_temp_c) {
             (Some(min), _) if zone.temperature_c < min => true,
             (_, Some(max)) if zone.temperature_c > max => true,
@@ -747,8 +788,8 @@ impl Equipment for Dehumidifier {
         self.telemetry.set(tk::INLET_AIR_TEMP_C, zone.temperature_c);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw)),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_w)),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -844,8 +885,8 @@ impl Equipment for Dehumidifier {
             // contract is that a checkpoint restores a state
             // `validate_core_contract` accepts.
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -886,6 +927,9 @@ impl Equipment for Dehumidifier {
             }
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
+            }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
             }
             _ => {}
         }
@@ -983,93 +1027,55 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::WATER_REMOVAL_L_DAY.to_string(),
-            unit: "L/day".to_string(),
-            description: "Water removed from air at current conditions".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Compressor + fan electric power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electric draw (kW, for dwelling power aggregation)".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging), compressor pf 0.96"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_REMOVAL_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent cooling removed from zone air".to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Sensible heat gain dumped back to zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::MOISTURE_MASS_FLOW_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Moisture mass removal rate (negative = dehumidification)".to_string(),
-        },
-        TelemetryField {
-            name: tk::TARGET_RH.to_string(),
-            unit: "fraction".to_string(),
-            description: "Active RH setpoint target".to_string(),
-        },
-        TelemetryField {
-            name: tk::MIN_RH.to_string(),
-            unit: "fraction".to_string(),
-            description: "Deadband lower bound".to_string(),
-        },
-        TelemetryField {
-            name: tk::MAX_RH.to_string(),
-            unit: "fraction".to_string(),
-            description: "Deadband upper bound".to_string(),
-        },
-        TelemetryField {
-            name: tk::IS_ON.to_string(),
-            unit: "bool".to_string(),
-            description: "1 when compressor/fan are on, else 0".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "fraction".to_string(),
-            description: "Part-load ratio: fraction of rated capacity needed".to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_FACTOR.to_string(),
-            unit: "fraction".to_string(),
-            description: "Part-load factor: cycling efficiency correction (PLF_MIN ≤ PLF ≤ 1.0)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "fraction".to_string(),
-            description: "Runtime fraction: PLR / PLF".to_string(),
-        },
-        TelemetryField {
-            name: tk::PARASITIC_ELECTRIC_W.to_string(),
-            unit: "W".to_string(),
-            description: "Actual off-cycle parasitic electric draw (standby electronics, controls, crankcase heater); scaled by the off-cycle fraction and zero during grid outage".to_string(),
-        },
-        TelemetryField {
-            name: tk::TEMPERATURE_LOCKOUT.to_string(),
-            unit: "bool".to_string(),
-            description: "1.0 when the dehumidifier is locked out by inlet air temperature limits; 0.0 otherwise".to_string(),
-        },
-        TelemetryField {
-            name: tk::INLET_AIR_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Inlet air dry-bulb temperature at the dehumidifier inlet".to_string(),
-        },
+        TelemetryField::flow_mean(
+            tk::WATER_REMOVAL_L_DAY,
+            hares_types::Unit::LitrePerDay,
+            "Water removed from air at current conditions",
+        ),
+        TelemetryField::power_w(tk::ELECTRIC_POWER_W, "Compressor + fan electric power draw"),
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Total electric draw (kW, for dwelling power aggregation)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging), compressor pf 0.96",
+        ),
+        TelemetryField::power_w(tk::LATENT_REMOVAL_W, "Latent cooling removed from zone air"),
+        TelemetryField::power_w(
+            tk::SENSIBLE_GAIN_W,
+            "Sensible heat gain dumped back to zone",
+        ),
+        TelemetryField::flow_mean(
+            tk::MOISTURE_MASS_FLOW_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Moisture mass removal rate (negative = dehumidification)",
+        ),
+        TelemetryField::ratio_fraction(tk::TARGET_RH, "Active RH setpoint target"),
+        TelemetryField::ratio_fraction(tk::MIN_RH, "Deadband lower bound"),
+        TelemetryField::ratio_fraction(tk::MAX_RH, "Deadband upper bound"),
+        TelemetryField::boolean(tk::IS_ON, "1 when compressor/fan are on, else 0"),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Part-load ratio: fraction of rated capacity needed",
+        ),
+        TelemetryField::ratio(
+            tk::PART_LOAD_FACTOR,
+            "Part-load factor: cycling efficiency correction (PLF_MIN ≤ PLF ≤ 1.0)",
+        ),
+        TelemetryField::ratio(tk::RUNTIME_FRACTION, "Runtime fraction: PLR / PLF").not_nullable(),
+        TelemetryField::power_w(
+            tk::PARASITIC_ELECTRIC_W,
+            "Actual off-cycle parasitic electric draw (standby electronics, controls, crankcase heater); scaled by the off-cycle fraction and zero during grid outage",
+        ),
+        TelemetryField::boolean(
+            tk::TEMPERATURE_LOCKOUT,
+            "1.0 when the dehumidifier is locked out by inlet air temperature limits; 0.0 otherwise",
+        ),
+        TelemetryField::temp_c(
+            tk::INLET_AIR_TEMP_C,
+            "Inlet air dry-bulb temperature at the dehumidifier inlet",
+        ),
     ]
 }
 
@@ -1142,6 +1148,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1366,8 +1373,12 @@ mod tests {
         restored.init(&config(), &env(0.62)).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a dehumidifier checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a dehumidifier checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -2048,18 +2059,18 @@ mod tests {
         eq.step(&environment, Duration::from_secs(60), &mut slots)
             .unwrap();
 
-        let p_kw = slots.electrical.load_power_w / 1000.0;
-        assert!(p_kw > 0.0, "dehumidifier must draw real power when running");
-        let q = slots.electrical.reactive_power_kvar;
-        let expected = p_kw * 0.96_f64.acos().tan();
+        let p_w = slots.electrical.load_power_w;
+        assert!(p_w > 0.0, "dehumidifier must draw real power when running");
+        let q = slots.electrical.reactive_power_var;
+        let expected = p_w * 0.96_f64.acos().tan();
         assert!(
-            (q - expected).abs() < 1e-9,
+            (q - expected).abs() < 1e-6,
             "Q/P must equal tan(acos(0.96)): q={q}, expected={expected}"
         );
         assert_eq!(
             eq.core_output()
                 .flows
-                .reactive_power_kvar
+                .reactive_power_var
                 .expect("Some")
                 .to_bits(),
             q.to_bits(),
@@ -2073,7 +2084,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must equal port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
 
         // Off case: RH below target ⇒ dehumidifier off ⇒ Q == 0.
@@ -2082,12 +2093,9 @@ mod tests {
         let mut off_ports = ports();
         eq.step(&off_env, Duration::from_secs(60), &mut off_ports)
             .unwrap();
+        assert_eq!(off_ports.electrical.reactive_power_var, 0.0, "off ⇒ Q == 0");
         assert_eq!(
-            off_ports.electrical.reactive_power_kvar, 0.0,
-            "off ⇒ Q == 0"
-        );
-        assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "off ⇒ CoreOutput Q == Some(0.0)"
         );
@@ -2128,10 +2136,10 @@ mod tests {
                 "step {i} (v={v}): real power diverged between pf and no-pf twins"
             );
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
             environment.current_time += ChronoDuration::minutes(1);

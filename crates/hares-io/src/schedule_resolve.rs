@@ -2,7 +2,7 @@
 //!
 //! Mirrors OCHRE's `SCHEDULE_NAMES` mapping and `convert_power_column` logic:
 //! normalized schedule fractions are scaled to kW using
-//! `max_kw = annual_kwh / 8760 / mean(fraction)`.
+//! `max_w = annual_kwh / 8760 / mean(fraction)`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use chrono::{Datelike, Timelike};
 use hares_equipment::{
     ConfigPayload, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
-    HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+    HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_physics::constants::HOURS_PER_YEAR;
+use hares_physics::constants::SECONDS_PER_YEAR;
+use hares_physics::water_density_kg_m3;
 use hares_types::{
     BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, Warning, normalize_ascii,
     parse_trimmed_f64,
@@ -22,12 +23,13 @@ use tracing::warn;
 
 use crate::EquipmentSpec;
 use crate::defaults::DefaultsStore;
-use crate::draw_profile::normalize_draw_profile;
+use crate::draw_profile::normalize_draw_profile_at_mean;
 use crate::hpxml::{MICROWAVE_DEFAULT_ANNUAL_KWH, build_spec};
 use crate::schedule::{
     ColumnAggregation, ScheduleFormatFamily, ScheduleTimeSeries, resolve_occupancy_column,
     schedule_format_family,
 };
+use crate::setpoint_source::SetpointSource;
 
 // OS-HPXML's manual-thermostat default setpoints
 // (defaults.rb:2827-2848, 6746-6785).
@@ -278,7 +280,9 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
         csv_column: "vacancy",
         equipment_name: "",
         category: ScheduleCategory::NotUsed {
-            reason: "unavailable periods are not modelled",
+            reason: "the HPXML unavailable periods zero the schedule columns \
+                     their table rows apply to; the schedule file's own flag \
+                     column is not read",
         },
     },
     ColumnMapping {
@@ -292,21 +296,27 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
         csv_column: "power_outage",
         equipment_name: "",
         category: ScheduleCategory::NotUsed {
-            reason: "unavailable periods are not modelled",
+            reason: "the HPXML unavailable periods zero the schedule columns \
+                     their table rows apply to; the schedule file's own flag \
+                     column is not read",
         },
     },
     ColumnMapping {
         csv_column: "no_space_heating",
         equipment_name: "",
         category: ScheduleCategory::NotUsed {
-            reason: "unavailable periods are not modelled",
+            reason: "the HPXML unavailable periods zero the schedule columns \
+                     their table rows apply to; the schedule file's own flag \
+                     column is not read",
         },
     },
     ColumnMapping {
         csv_column: "no_space_cooling",
         equipment_name: "",
         category: ScheduleCategory::NotUsed {
-            reason: "unavailable periods are not modelled",
+            reason: "the HPXML unavailable periods zero the schedule columns \
+                     their table rows apply to; the schedule file's own flag \
+                     column is not read",
         },
     },
     // Water heater: read by inject_water_heater_schedule_columns, which no
@@ -321,29 +331,22 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
         equipment_name: "Water Heating",
         category: ScheduleCategory::WaterHeater,
     },
-    // Wet appliances draw their own hot water on the DHW demand loop during
-    // the water-draw phases of the cycles the dishwasher and clothes_washer
-    // event-window columns schedule; consuming the hot-water column as well
-    // would count the draw twice.
+    // The wet appliances' untempered hot-water draw: read by
+    // inject_water_heater_schedule_columns beside `hot_water_fixtures`, each
+    // column normalized to the appliance's daily hot-water volume
+    // (`daily_hot_water_m3` on the appliance's spec, the OpenStudio-HPXML
+    // `calc_clothes_washer_energy_gpd` / `calc_dishwasher_energy_gpd`
+    // result) with the peak flow the column's daily equivalent full-load
+    // hours give.
     ColumnMapping {
         csv_column: "hot_water_dishwasher",
         equipment_name: "",
-        category: ScheduleCategory::NotUsed {
-            reason: "the dishwasher draws its own hot water on the DHW demand \
-                     loop during the draw phases of the `dishwasher` column's \
-                     cycles; consuming this column as well would count the \
-                     draw twice",
-        },
+        category: ScheduleCategory::WaterHeater,
     },
     ColumnMapping {
         csv_column: "hot_water_clothes_washer",
         equipment_name: "",
-        category: ScheduleCategory::NotUsed {
-            reason: "the clothes washer draws its own hot water on the DHW \
-                     demand loop during the draw phases of the \
-                     `clothes_washer` column's cycles; consuming this column \
-                     as well would count the draw twice",
-        },
+        category: ScheduleCategory::WaterHeater,
     },
     // Charging and driving times come from the ev_driver actor's trip model,
     // not an OpenStudio-HPXML schedule.
@@ -464,6 +467,7 @@ impl ProfileRow<'_> {
 /// `weekday_fractions` / `weekend_fractions` / `month_multipliers` rows are
 /// all errors naming the file, the line, the profile and the element.
 pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, HaresError> {
+    crate::parse_counts::bump_profiles();
     let csv_path = defaults_dir.join(DEFAULT_SCHEDULES_CSV);
     let content = std::fs::read_to_string(&csv_path).map_err(|e| {
         HaresError::Io(format!(
@@ -471,7 +475,21 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
             csv_path.display()
         ))
     })?;
+    parse_default_profiles_str(&content, &csv_path)
+}
 
+/// The default schedule profiles parsed from the file's content: the
+/// content twin of [`load_default_profiles`] for a defaults source whose
+/// profiles file is a replacement. The same strictness, the file named the
+/// same way.
+pub fn parse_default_profiles_str(
+    content: &str,
+    csv_path: &Path,
+) -> Result<DefaultProfiles, HaresError> {
+    parse_profiles_csv(content, csv_path)
+}
+
+fn parse_profiles_csv(content: &str, csv_path: &Path) -> Result<DefaultProfiles, HaresError> {
     // Intermediate: the values and source line per (ochre_name, element_kind)
     let mut weekday_map: HashMap<String, (usize, [f64; 24])> = HashMap::new();
     let mut weekend_map: HashMap<String, (usize, [f64; 24])> = HashMap::new();
@@ -519,7 +537,7 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
             ))
         };
         let row = ProfileRow {
-            csv_path: &csv_path,
+            csv_path,
             profile: profile_name,
             element,
             line_no,
@@ -602,7 +620,7 @@ pub fn load_default_profiles(defaults_dir: &Path) -> Result<DefaultProfiles, Har
     // test `shipped_default_occupancy_has_distinct_weekend`.
     Ok(DefaultProfiles {
         profiles,
-        csv_path: Some(csv_path),
+        csv_path: Some(csv_path.to_path_buf()),
     })
 }
 
@@ -629,7 +647,7 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 /// Compute the annual mean of a schedule profile analytically.
 ///
 /// This must be used instead of averaging the (potentially short) simulation
-/// window, because `max_kw = annual_mean_kw / annual_mean_fraction` requires
+/// window, because `max_w = annual_mean_kw / annual_mean_fraction` requires
 /// the full-year mean regardless of simulation duration.
 ///
 /// Monthly multipliers are weighted by days-per-month (non-leap year) to
@@ -653,10 +671,34 @@ fn annual_mean_fraction(profile: &DefaultScheduleProfile) -> f64 {
 }
 
 /// Inject resolved power/event schedule metadata into equipment specs.
+///
+/// `profiles` are the default schedule profiles, parsed once by the
+/// caller's defaults handle: the injection reads the shared handle's
+/// table, never the file again. `None` runs with no default profiles (the
+/// config's no-defaults-directory rule).
 pub fn inject_schedule_into_specs(
     specs: &mut Vec<EquipmentSpec>,
     schedule: &mut ScheduleTimeSeries,
-    defaults_path: Option<&Path>,
+    profiles: Option<&DefaultProfiles>,
+    defaults: &DefaultsStore,
+    warnings: &mut Vec<Warning>,
+) -> Result<(), HaresError> {
+    inject_schedule_into_specs_with_pre_period(specs, schedule, None, profiles, defaults, warnings)
+}
+
+/// [`inject_schedule_into_specs`] with the schedule's pre-period columns:
+/// the columns as loaded, before [`apply_unavailable_periods`] zeroed the
+/// periods' steps (`apply_unavailable_periods` returns them). The draw and
+/// power normalizations take their mean from the pre-period column and
+/// their shape from the zeroed one, OpenStudio-HPXML's shape: the peak
+/// comes from the pre-period schedule (`schedules.rb:1051-1052`) and the
+/// zeroing removes the period's volume instead of spreading it over the
+/// remaining days. `None` when no period ran.
+pub fn inject_schedule_into_specs_with_pre_period(
+    specs: &mut Vec<EquipmentSpec>,
+    schedule: &mut ScheduleTimeSeries,
+    pre_period_columns: Option<&[Vec<f64>]>,
+    profiles: Option<&DefaultProfiles>,
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
@@ -715,9 +757,13 @@ pub fn inject_schedule_into_specs(
 
     ensure_specs_for_csv_columns(specs, &csv_col_map, defaults, warnings);
 
-    let profiles = match defaults_path {
-        Some(dir) => load_default_profiles(dir)?,
-        None => DefaultProfiles::default(),
+    let loaded_profiles;
+    let profiles = match profiles {
+        Some(shared) => shared,
+        None => {
+            loaded_profiles = DefaultProfiles::default();
+            &loaded_profiles
+        }
     };
 
     let schedule_family = schedule_format_family(&csv_col_map);
@@ -754,13 +800,20 @@ pub fn inject_schedule_into_specs(
 
         match mapping.category {
             ScheduleCategory::Power => {
-                inject_power_schedule(spec, mapping, &csv_col_map, schedule, &profiles)?;
+                inject_power_schedule(
+                    spec,
+                    mapping,
+                    &csv_col_map,
+                    schedule,
+                    profiles,
+                    pre_period_columns,
+                )?;
             }
             ScheduleCategory::EventWindow => {
-                inject_event_schedule(spec, mapping, &csv_col_map, schedule);
+                inject_event_schedule(spec, mapping, &csv_col_map, schedule)?;
             }
             ScheduleCategory::Occupancy => {
-                inject_occupancy_schedule(spec, schedule, &profiles);
+                inject_occupancy_schedule(spec, schedule, profiles);
             }
             ScheduleCategory::Setpoint | ScheduleCategory::WaterHeater => {}
             ScheduleCategory::NotUsed { .. } => {}
@@ -773,7 +826,7 @@ pub fn inject_schedule_into_specs(
     // When neither a schedule CSV column nor HPXML-derived setpoints are
     // present, the unit takes OS-HPXML's manual-thermostat default
     // (68 °F heating, 78 °F cooling), recorded as a warning naming it.
-    inject_setpoint_schedules(specs, &csv_col_map, schedule, warnings)?;
+    inject_setpoint_schedules(specs, &csv_col_map, schedule, pre_period_columns, warnings)?;
     Ok(())
 }
 
@@ -883,67 +936,276 @@ fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Valu
     }
 }
 
+/// Resolve each HVAC side's thermostat setpoints by the OpenStudio-HPXML
+/// rule and record the active source on the spec.
+///
+/// The rule (OpenStudio-HPXML `HPXMLtoOpenStudio/resources/hvac.rb`
+/// `apply_setpoints`, master `57bd1b88`, lines 1641-1741): per side, a
+/// schedule-file column when present ("permit mixing detailed schedules
+/// with simple schedules", hvac.rb:1665), else the HPXML setpoints
+/// (`get_hvac_setpoints`, hvac.rb:1768-1829: the hourly weekday and
+/// weekend extension arrays when both are declared, else the constant
+/// `SetpointTemp*Season` element with its setback, hvac.rb:1785-1798),
+/// else the default profile: OS-HPXML's manual-thermostat defaults, 68 F
+/// heating and 78 F cooling (`defaults.rb:2827-2848`
+/// `apply_hvac_control`). When a column and HPXML setpoints are both
+/// given, OS-HPXML warns "Both 'heating_setpoint' schedule file and
+/// heating setpoint temperature provided; the latter will be ignored."
+/// (hvac.rb:1669-1675); HARES warns for every ignored input, so no choice
+/// is silent. The schedule-file setpoint columns are degrees Fahrenheit in
+/// OS-HPXML's detailed-schedule convention ("Detailed Schedule Inputs",
+/// converted in `schedules.rb:1465-1484`): the parser reads them in
+/// Fahrenheit and converts every value to Celsius at the parse, the rule
+/// and its citations stated in `docs/PHYSICS_DECISIONS.md`'s setpoint
+/// section.
+///
+/// The resolution is recorded per side in the spec's
+/// `heating_setpoint_source` / `cooling_setpoint_source`, and the source
+/// the engine reads its setpoints from (the config's
+/// `{prefix}_setpoint_source`) always carries the same tier the record
+/// names.
 fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    pre_period_columns: Option<&[Vec<f64>]>,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
+    // The mapping table accepts the column, and no code applies it: a
+    // schedule input that is accepted is applied, so the column stops the
+    // construction naming it. Applying it would be a new water-heater
+    // setpoint schedule, which no decision calls for.
+    if csv_col_map.contains_key("water_heater_setpoint") {
+        return Err(HaresError::Equipment(
+            "schedule CSV column 'water_heater_setpoint': HARES does not apply a \
+             water-heater setpoint column (the tank setpoint comes from the HPXML); \
+             remove the column from the schedule file"
+                .to_string(),
+        ));
+    }
+
     // Store only the column index -- the equipment resolves the value each
     // timestep from the environment's schedule domain payload. No materialization.
     let heating_col = csv_col_map.get("heating_setpoint").copied();
     let cooling_col = csv_col_map.get("cooling_setpoint").copied();
 
-    inject_water_heater_schedule_columns(specs, csv_col_map, schedule)?;
+    // One warning per side when the column and the HPXML setpoints are
+    // both given: the overlap is an input property, not a per-unit one.
+    // OS-HPXML warns the same way for the simple SetpointTemp*Season
+    // element (hvac.rb:1669-1675); HARES warns for every ignored HPXML
+    // input, so no choice is silent.
+    let heating_overlap = heating_col.is_some()
+        && specs.iter().any(|spec| {
+            HEATING_EQUIPMENT.contains(&spec.name.as_str())
+                && spec_has_setpoint_source(spec, "heating")
+        });
+    let cooling_overlap = cooling_col.is_some()
+        && specs.iter().any(|spec| {
+            COOLING_EQUIPMENT.contains(&spec.name.as_str())
+                && spec_has_setpoint_source(spec, "cooling")
+        });
+    if heating_overlap {
+        warnings.push(Warning::new(
+            "schedule",
+            "both the 'heating_setpoint' schedule column and the HPXML heating setpoints \
+             (the HVACControl's SetpointTempHeatingSeason element or its \
+             WeekdaySetpointTempsHeatingSeason and WeekendSetpointTempsHeatingSeason \
+             arrays) are provided; the HPXML heating setpoints are ignored",
+        ));
+    }
+    if cooling_overlap {
+        warnings.push(Warning::new(
+            "schedule",
+            "both the 'cooling_setpoint' schedule column and the HPXML cooling setpoints \
+             (the HVACControl's SetpointTempCoolingSeason element or its \
+             WeekdaySetpointTempsCoolingSeason and WeekendSetpointTempsCoolingSeason \
+             arrays) are provided; the HPXML cooling setpoints are ignored",
+        ));
+    }
+
+    inject_water_heater_schedule_columns(specs, csv_col_map, schedule, pre_period_columns)?;
 
     for spec in specs.iter_mut() {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {
-            if let Some(col_idx) = heating_col {
+            match heating_col {
                 // Schedule CSV provides a per-timestep heating column.
-                set_typed_setpoint_source(spec, "heating", col_idx);
-            } else if !spec_has_setpoint_source(spec, "heating") {
-                inject_default_setpoint(
-                    spec,
-                    "heating",
-                    OS_HPXML_DEFAULT_HEATING_SETPOINT_F,
-                    warnings,
-                )?;
+                Some(col_idx) => {
+                    set_typed_setpoint_source(spec, "heating", col_idx)?;
+                    let source = SetpointSource::ScheduleColumn {
+                        column: "heating_setpoint".to_string(),
+                    };
+                    tracing::debug!(
+                        equipment = %spec.name,
+                        side = "heating",
+                        source = %source.label(),
+                        "setpoint source chosen",
+                    );
+                    spec.heating_setpoint_source = Some(source);
+                }
+                None => match hpxml_setpoint_profile(spec, "heating") {
+                    Some((weekday_c, weekend_c)) => {
+                        let source = SetpointSource::Hpxml {
+                            weekday_c,
+                            weekend_c,
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "heating",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.heating_setpoint_source = Some(source);
+                    }
+                    None => {
+                        inject_default_setpoint(
+                            spec,
+                            "heating",
+                            OS_HPXML_DEFAULT_HEATING_SETPOINT_F,
+                            warnings,
+                        )?;
+                        let source = SetpointSource::DefaultProfile {
+                            profile: SetpointSource::MANUAL_THERMOSTAT.to_string(),
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "heating",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.heating_setpoint_source = Some(source);
+                    }
+                },
             }
         }
         if COOLING_EQUIPMENT.contains(&spec.name.as_str()) {
-            if let Some(col_idx) = cooling_col {
-                set_typed_setpoint_source(spec, "cooling", col_idx);
-            } else if !spec_has_setpoint_source(spec, "cooling") {
-                inject_default_setpoint(
-                    spec,
-                    "cooling",
-                    OS_HPXML_DEFAULT_COOLING_SETPOINT_F,
-                    warnings,
-                )?;
+            match cooling_col {
+                // Schedule CSV provides a per-timestep cooling column.
+                Some(col_idx) => {
+                    set_typed_setpoint_source(spec, "cooling", col_idx)?;
+                    let source = SetpointSource::ScheduleColumn {
+                        column: "cooling_setpoint".to_string(),
+                    };
+                    tracing::debug!(
+                        equipment = %spec.name,
+                        side = "cooling",
+                        source = %source.label(),
+                        "setpoint source chosen",
+                    );
+                    spec.cooling_setpoint_source = Some(source);
+                }
+                None => match hpxml_setpoint_profile(spec, "cooling") {
+                    Some((weekday_c, weekend_c)) => {
+                        let source = SetpointSource::Hpxml {
+                            weekday_c,
+                            weekend_c,
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "cooling",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.cooling_setpoint_source = Some(source);
+                    }
+                    None => {
+                        inject_default_setpoint(
+                            spec,
+                            "cooling",
+                            OS_HPXML_DEFAULT_COOLING_SETPOINT_F,
+                            warnings,
+                        )?;
+                        let source = SetpointSource::DefaultProfile {
+                            profile: SetpointSource::MANUAL_THERMOSTAT.to_string(),
+                        };
+                        tracing::debug!(
+                            equipment = %spec.name,
+                            side = "cooling",
+                            source = %source.label(),
+                            "setpoint source chosen",
+                        );
+                        spec.cooling_setpoint_source = Some(source);
+                    }
+                },
             }
         }
     }
     Ok(())
 }
 
-fn set_typed_setpoint_source(spec: &mut EquipmentSpec, prefix: &str, col_idx: usize) {
+/// The HPXML setpoints the spec's typed config carries for one side: the
+/// DailyProfile's 24 weekday and weekend hourly values in Celsius, the
+/// values the engine reads when no schedule column overrides them.
+fn hpxml_setpoint_profile(spec: &EquipmentSpec, prefix: &str) -> Option<(Vec<f64>, Vec<f64>)> {
+    let key = format!("{prefix}_setpoint_source");
+    let typed = spec.typed_config.as_ref()?;
+    let ConfigPayload::Typed { data, .. } = &typed.payload else {
+        return None;
+    };
+    let value = find_setpoint_source(data, &key)?;
+    let ScheduleSourceConfig::DailyProfile {
+        weekday, weekend, ..
+    } = serde_json::from_value(value.clone()).ok()?
+    else {
+        return None;
+    };
+    Some((weekday.to_vec(), weekend.to_vec()))
+}
+
+/// Set the config's `{prefix}_setpoint_source` to the schedule column.
+///
+/// Every spec the resolution reaches must be able to carry the source the
+/// column resolves to: a spec whose config cannot hold it (no typed
+/// config, a raw payload, a non-object payload, no `setpoint` block, a
+/// source that does not serialize) would run the column in silence while
+/// nothing recorded it as the active tier, so each case is an error naming
+/// the equipment and the case.
+fn set_typed_setpoint_source(
+    spec: &mut EquipmentSpec,
+    prefix: &str,
+    col_idx: usize,
+) -> Result<(), HaresError> {
+    let cannot_apply = |detail: String| {
+        HaresError::Equipment(format!(
+            "equipment '{}': the schedule's '{prefix}_setpoint' column cannot apply: {detail}",
+            spec.name,
+            prefix = prefix,
+        ))
+    };
     let Some(typed) = spec.typed_config.as_mut() else {
-        return;
+        return Err(cannot_apply(format!(
+            "the spec carries no typed config to hold the '{prefix}_setpoint_source' \
+             the column resolves to",
+            prefix = prefix,
+        )));
     };
     let ConfigPayload::Typed { data, .. } = &mut typed.payload else {
-        return;
+        return Err(cannot_apply(format!(
+            "the spec's config payload is not a typed config and cannot hold the \
+             '{prefix}_setpoint_source' the column resolves to",
+            prefix = prefix,
+        )));
     };
     let Some(obj) = data.as_object_mut() else {
-        return;
+        return Err(cannot_apply(format!(
+            "the spec's typed payload is not a JSON object and cannot hold the \
+             '{prefix}_setpoint_source' the column resolves to",
+            prefix = prefix,
+        )));
     };
 
     let source = ScheduleSourceConfig::ColumnRef {
         col_idx,
         boundary: BoundaryPolicy::Clamp,
     };
-    if let Ok(json) = serde_json::to_value(source) {
-        insert_setpoint_into_obj(obj, &format!("{prefix}_setpoint_source"), json);
+    let json = serde_json::to_value(source)
+        .map_err(|err| cannot_apply(format!("the column source does not serialize: {err}")))?;
+    let key = format!("{prefix}_setpoint_source");
+    if !insert_setpoint_into_obj(obj, &key, json) {
+        return Err(cannot_apply(format!(
+            "the spec's typed config has no 'setpoint' block to hold the '{key}'",
+        )));
     }
+    Ok(())
 }
 
 fn set_typed_schedule_source(spec: &mut EquipmentSpec, field: &str, col_idx: usize) {
@@ -966,36 +1228,100 @@ fn set_typed_schedule_source(spec: &mut EquipmentSpec, field: &str, col_idx: usi
     }
 }
 
-/// Storage water heater equipment names that consume draw and mains schedule sources.
-const STORAGE_WATER_HEATER_EQUIPMENT: &[&str] = &[
+/// Water heater equipment names that consume draw and mains schedule sources.
+const WATER_HEATER_EQUIPMENT: &[&str] = &[
     "Electric Resistance Water Heater",
     "Gas Water Heater",
     "Heat Pump Water Heater",
     "Tankless Water Heater",
     "Gas Tankless Water Heater",
+    "Indirect Tank",
 ];
 
 fn inject_water_heater_schedule_columns(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    pre_period_columns: Option<&[Vec<f64>]>,
 ) -> Result<(), HaresError> {
     let draw_col = first_present_column(csv_col_map, &["hot_water_fixtures"]);
     let mains_col = first_present_column(csv_col_map, &["hot_water_mains_temperature"]);
+    let appliance_col = first_present_column(
+        csv_col_map,
+        &["hot_water_clothes_washer", "hot_water_dishwasher"],
+    );
 
-    if draw_col.is_none() && mains_col.is_none() {
+    // The wet appliances' daily hot-water volumes and their columns. An
+    // appliance with a positive daily volume needs its column: the volume is
+    // drawn through the column's shape, so a file without it has no way to
+    // express the draw.
+    let washer = WetApplianceDraw::new(specs, "Clothes Washer");
+    let dishwasher = WetApplianceDraw::new(specs, "Dishwasher");
+    let washer_col = if washer.daily_l > 0.0 {
+        Some(
+            csv_col_map
+                .get("hot_water_clothes_washer")
+                .copied()
+                .ok_or_else(|| {
+                    missing_schedule_column_error("Clothes Washer", "hot_water_clothes_washer")
+                })?,
+        )
+    } else {
+        None
+    };
+    let dishwasher_col = if dishwasher.daily_l > 0.0 {
+        Some(
+            csv_col_map
+                .get("hot_water_dishwasher")
+                .copied()
+                .ok_or_else(|| {
+                    missing_schedule_column_error("Dishwasher", "hot_water_dishwasher")
+                })?,
+        )
+    } else {
+        None
+    };
+
+    if draw_col.is_none() && mains_col.is_none() && appliance_col.is_none() {
         return Ok(());
     }
 
+    let wh_count = specs
+        .iter()
+        .filter(|s| WATER_HEATER_EQUIPMENT.contains(&s.name.as_str()))
+        .count();
+
     for (i, spec) in specs.iter_mut().enumerate() {
-        if !STORAGE_WATER_HEATER_EQUIPMENT.contains(&spec.name.as_str()) {
+        if !WATER_HEATER_EQUIPMENT.contains(&spec.name.as_str()) {
             continue;
         }
-        let has_typed_sources = !matches!(spec.name.as_str(), "Heat Pump Water Heater");
-        if let Some(col_idx) = draw_col {
+        // The heat pump water heater's typed config carries no fixture-draw
+        // or mains source field: its tempered fixture draw is not wired (a
+        // separate gap), so only the appliance draw reaches it here.
+        let supports_fixture_draw = spec.name.as_str() != "Heat Pump Water Heater";
+        // The system's share of the home's hot-water load
+        // (hotwater_appliances.rb:383): its fixture draw scales by
+        // FractionDHWLoadServed, and a system serving none of the load
+        // draws nothing.
+        let fixture_share = spec
+            .parameters
+            .get("fraction_dhw_load_served")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        let draws_dhw = fixture_share > 0.0;
+        // One density convention for every L to kg conversion on the draw
+        // paths: the drawn water's temperature, the water heater's hot
+        // supply temperature.
+        let rho_kg_per_l = water_density_kg_m3(water_heater_hot_supply_temp_c(spec)) / 1000.0;
+        if let (Some(col_idx), true) = (draw_col, draws_dhw) {
             let raw_values = schedule.columns[col_idx].clone();
-            let avg_daily_l = water_heater_avg_daily_draw_l(spec)?;
-            let kg_s_series: Vec<f64> = normalize_draw_profile(&raw_values, avg_daily_l);
+            let avg_daily_l = water_heater_avg_daily_draw_l(spec)? * fixture_share;
+            // The normalization's mean comes from the pre-period column
+            // (the peak OpenStudio-HPXML computes), the shape from the
+            // zeroed one: the period removes volume.
+            let mean = column_mean(pre_period_columns, col_idx, &raw_values);
+            let kg_s_series: Vec<f64> =
+                normalize_draw_profile_at_mean(&raw_values, mean, avg_daily_l, rho_kg_per_l);
 
             let col_name = format!(
                 "hot_water_draw_kg_s_{}_{}",
@@ -1012,18 +1338,216 @@ fn inject_water_heater_schedule_columns(
                     tracing::error!(equipment = %spec.name, error = %err, "{msg}");
                     HaresError::Io(msg)
                 })?;
-            if has_typed_sources {
+            if supports_fixture_draw {
                 set_typed_schedule_source(spec, "draw_flow_rate_source", derived_col_idx);
             }
         }
+        // The wet appliances' untempered draw beside the tempered fixture
+        // draw: each appliance's column normalized to this system's share
+        // of the appliance's daily volume (hotwater_appliances.rb:474-487),
+        // in mass at the drawn water's density (the water heater's hot
+        // supply temperature), the same conversion the fixture draw runs.
+        let washer_share = washer.share_for(spec, wh_count);
+        let dishwasher_share = dishwasher.share_for(spec, wh_count);
+        if washer_share.is_some() || dishwasher_share.is_some() {
+            let mut appliance_draw: Option<Vec<f64>> = None;
+            if let (Some(col_idx), Some(volume_l)) =
+                (washer_col, washer_share.map(|share| washer.daily_l * share))
+            {
+                let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
+                let series = normalize_draw_profile_at_mean(
+                    &schedule.columns[col_idx],
+                    mean,
+                    volume_l,
+                    rho_kg_per_l,
+                );
+                appliance_draw = Some(series);
+            }
+            if let (Some(col_idx), Some(volume_l)) = (
+                dishwasher_col,
+                dishwasher_share.map(|share| dishwasher.daily_l * share),
+            ) {
+                let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
+                let series = normalize_draw_profile_at_mean(
+                    &schedule.columns[col_idx],
+                    mean,
+                    volume_l,
+                    rho_kg_per_l,
+                );
+                appliance_draw = match appliance_draw {
+                    Some(mut combined) => {
+                        for (sum, value) in combined.iter_mut().zip(series) {
+                            *sum += value;
+                        }
+                        Some(combined)
+                    }
+                    None => Some(series),
+                };
+            }
+            if let Some(series) = appliance_draw {
+                let col_name = format!(
+                    "appliance_hot_water_draw_kg_s_{}_{}",
+                    normalize_schedule_col_name(&spec.name),
+                    i
+                );
+                let appliance_col_idx = schedule
+                    .append_derived_column(&col_name, series, ColumnAggregation::Mean)
+                    .map_err(|err| {
+                        let msg = format!(
+                            "failed to append the appliance draw column for {}: {err}",
+                            spec.name
+                        );
+                        tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                        HaresError::Io(msg)
+                    })?;
+                set_typed_schedule_source(
+                    spec,
+                    "appliance_draw_flow_rate_source",
+                    appliance_col_idx,
+                );
+            }
+        }
         if let Some(col_idx) = mains_col
-            && has_typed_sources
+            && supports_fixture_draw
         {
             set_typed_schedule_source(spec, "mains_temp_c_source", col_idx);
         }
     }
     Ok(())
 }
+
+/// The daily hot-water volume [L/day] a wet appliance's spec resolves to
+/// (`daily_hot_water_m3`), 0.0 when the home has no such appliance.
+fn wet_appliance_daily_volume_l(specs: &[EquipmentSpec], name: &str) -> f64 {
+    specs
+        .iter()
+        .find(|s| s.name == name)
+        .and_then(|s| s.parameters.get("daily_hot_water_m3"))
+        .and_then(serde_json::Value::as_f64)
+        .map(hares_physics::units::volume_m3_to_l)
+        .unwrap_or(0.0)
+}
+
+/// A wet appliance's daily volume with the attachment inputs its
+/// apportionment across the water heating systems reads
+/// (`resolve_loads::insert_wet_appliance_apportionment` stored them on the
+/// spec).
+struct WetApplianceDraw {
+    daily_l: f64,
+    is_shared: bool,
+    attached_water_heating_system_id: Option<String>,
+    attached_hot_water_distribution: bool,
+}
+
+impl WetApplianceDraw {
+    fn new(specs: &[EquipmentSpec], name: &str) -> Self {
+        let spec = specs.iter().find(|s| s.name == name);
+        let param = |key: &str| {
+            spec.and_then(|s| s.parameters.get(key))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        Self {
+            daily_l: wet_appliance_daily_volume_l(specs, name),
+            is_shared: param("is_shared_appliance"),
+            attached_water_heating_system_id: spec
+                .and_then(|s| s.parameters.get("attached_water_heating_system_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            attached_hot_water_distribution: param("attached_hot_water_distribution"),
+        }
+    }
+
+    /// This water heating system's share of the appliance's daily volume
+    /// (OpenStudio-HPXML hotwater_appliances.rb:474-487): a shared appliance
+    /// with its own hot-water distribution splits evenly across the
+    /// building's water heating systems; a shared appliance without one
+    /// rides its attached system alone (`None` for the others); an in-unit
+    /// appliance follows the system's FractionDHWLoadServed. `None`: this
+    /// system draws none of the appliance's volume.
+    fn share_for(&self, wh: &EquipmentSpec, wh_count: usize) -> Option<f64> {
+        if self.daily_l <= 0.0 {
+            return None;
+        }
+        if self.is_shared {
+            if self.attached_hot_water_distribution {
+                return Some(1.0 / wh_count as f64);
+            }
+            let attached = self.attached_water_heating_system_id.as_deref();
+            if attached
+                .zip(wh.system_id.as_deref())
+                .is_some_and(|(a, b)| a == b)
+            {
+                return Some(1.0);
+            }
+            return None;
+        }
+        let fraction = wh
+            .parameters
+            .get("fraction_dhw_load_served")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        (fraction > 0.0).then_some(fraction)
+    }
+}
+
+/// The construction error for a schedule file without a column an appliance's
+/// draw or cycles need: names the equipment and the column.
+fn missing_schedule_column_error(equipment: &str, column: &str) -> HaresError {
+    let msg = format!(
+        "equipment '{equipment}' has a daily hot-water volume but the schedule \
+         file has no '{column}' column: the volume is drawn through the \
+         column's shape, and the constant-window fallback that used to paper \
+         over a missing column is gone"
+    );
+    tracing::error!(equipment, column, "{msg}");
+    HaresError::Equipment(msg)
+}
+
+/// The water heater's untempered hot supply temperature [°C], the temperature
+/// the drawn water leaves at: the config's hot draw temperature when set,
+/// else its setpoint, else OS-HPXML's water heater default setpoint of
+/// 125 F.
+fn water_heater_hot_supply_temp_c(spec: &EquipmentSpec) -> f64 {
+    use hares_equipment::{
+        ElectricResistanceWaterHeaterConfig, HeatPumpWaterHeaterConfig, TanklessWaterHeaterConfig,
+    };
+
+    let typed = spec.typed_config.as_ref();
+    let supply = |hot_draw: Option<Option<f64>>, setpoint: Option<Option<f64>>| {
+        hot_draw
+            .flatten()
+            .or_else(|| setpoint.flatten())
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C)
+    };
+    match spec.name.as_str() {
+        "Electric Resistance Water Heater" => typed
+            .and_then(|t| t.typed::<ElectricResistanceWaterHeaterConfig>().ok())
+            .map(|c| supply(Some(c.hot_draw_temp_c), Some(c.setpoint_c)))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        "Gas Water Heater" => typed
+            .and_then(|t| t.typed::<GasWaterHeaterConfig>().ok())
+            .map(|c| supply(Some(c.hot_draw_temp_c), Some(c.setpoint_c)))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        "Indirect Tank" => typed
+            .and_then(|t| t.typed::<IndirectTankConfig>().ok())
+            .map(|c| supply(Some(c.hot_draw_temp_c), Some(c.setpoint_c)))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => typed
+            .and_then(|t| t.typed::<TanklessWaterHeaterConfig>().ok())
+            .map(|c| supply(None, Some(c.setpoint_c)))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        "Heat Pump Water Heater" => typed
+            .and_then(|t| t.typed::<HeatPumpWaterHeaterConfig>().ok())
+            .map(|c| supply(None, Some(c.tempering_valve_setpoint_c.or(c.setpoint_c))))
+            .unwrap_or(DEFAULT_SUPPLY_TEMP_C),
+        _ => DEFAULT_SUPPLY_TEMP_C,
+    }
+}
+
+/// OS-HPXML's water heater default setpoint: 125 F in °C (the same default
+/// the water heater's `DEFAULT_SETPOINT_C` carries).
+const DEFAULT_SUPPLY_TEMP_C: f64 = 51.666_666_7;
 
 fn tankless_avg_daily_draw_l(spec: &EquipmentSpec) -> Result<f64, HaresError> {
     let typed = spec.typed_config.as_ref().ok_or_else(|| {
@@ -1132,6 +1656,29 @@ fn water_heater_avg_daily_draw_l(spec: &EquipmentSpec) -> Result<f64, HaresError
                 HaresError::Equipment(msg)
             })
         }
+        "Indirect Tank" => {
+            let typed = spec.typed_config.as_ref().ok_or_else(|| {
+                let msg = format!("indirect tank '{}' requires typed config", spec.name);
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
+            let cfg = typed.typed::<IndirectTankConfig>().map_err(|err| {
+                let msg = format!(
+                    "indirect tank '{}' typed config failed to decode: {err}",
+                    spec.name
+                );
+                tracing::error!(equipment = %spec.name, error = %err, "{msg}");
+                HaresError::Equipment(msg)
+            })?;
+            cfg.avg_water_draw_l_per_day.ok_or_else(|| {
+                let msg = format!(
+                    "indirect tank '{}' requires typed avg_water_draw_l_per_day",
+                    spec.name
+                );
+                tracing::error!(equipment = %spec.name, "{msg}");
+                HaresError::Equipment(msg)
+            })
+        }
         other => Err({
             let msg = format!("unsupported water heater type for draw normalization: {other}");
             tracing::error!(equipment = %other, "{msg}");
@@ -1146,18 +1693,37 @@ fn first_present_column(csv_col_map: &HashMap<String, usize>, names: &[&str]) ->
         .find_map(|name| csv_col_map.get(*name).copied())
 }
 
+/// The mean a normalization scales against: the pre-period column's mean
+/// when the snapshot covers the column (the peak OpenStudio-HPXML
+/// computes), else the live column's own mean (no period ran, or the
+/// column was never zeroed and the two agree).
+fn column_mean(
+    pre_period_columns: Option<&[Vec<f64>]>,
+    col_idx: usize,
+    live_column: &[f64],
+) -> f64 {
+    let column: &[f64] = pre_period_columns
+        .and_then(|pre| pre.get(col_idx))
+        .map_or(live_column, |pre: &Vec<f64>| pre.as_slice());
+    if column.is_empty() {
+        return 0.0;
+    }
+    column.iter().sum::<f64>() / column.len() as f64
+}
+
 fn inject_power_schedule(
     spec: &mut EquipmentSpec,
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
     profiles: &DefaultProfiles,
+    pre_period_columns: Option<&[Vec<f64>]>,
 ) -> Result<(), HaresError> {
     // Skip if equipment already has power schedule source keys.
     if spec.parameters.keys().any(|k| {
         k.starts_with("power_schedule_")
             || k.starts_with("power_profile_")
-            || k == "power_constant_kw"
+            || k == "power_constant_w"
     }) {
         return Ok(());
     }
@@ -1172,28 +1738,30 @@ fn inject_power_schedule(
             return Ok(());
         }
 
-        let mean_fraction: f64 =
-            fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
+        // The design level's mean comes from the pre-period column
+        // (OpenStudio-HPXML's calc_design_level_from_daily_kwh reads the
+        // pre-period schedules), the column's shape from the zeroed one.
+        let mean_fraction: f64 = column_mean(pre_period_columns, col_idx, &fraction_series);
 
-        let max_kw = resolve_max_kw(
+        let max_w = resolve_max_w(
             spec,
             mean_fraction,
             &format!("the schedule column '{col_name}'"),
         )?;
 
-        let kw_series: Vec<f64> = fraction_series.iter().map(|f| f * max_kw).collect();
+        let w_series: Vec<f64> = fraction_series.iter().map(|f| f * max_w).collect();
         let derived_col_idx = schedule
             .append_derived_column(
                 &format!(
-                    "power_schedule_kw_{}",
+                    "power_schedule_w_{}",
                     normalize_schedule_col_name(spec.name.as_str())
                 ),
-                kw_series,
+                w_series,
                 ColumnAggregation::Mean,
             )
             .map_err(|err| {
                 let msg = format!(
-                    "failed to append derived kW column for {}: {err}",
+                    "failed to append derived power column for {}: {err}",
                     spec.name
                 );
                 tracing::error!(equipment = %spec.name, error = %err, "{msg}");
@@ -1207,18 +1775,18 @@ fn inject_power_schedule(
                 "schedule_resolve: no CSV column '{}' for '{}'; using HPXML profile fractions",
                 col_name, mapping.equipment_name
             );
-            let max_kw = resolve_max_kw(
+            let max_w = resolve_max_w(
                 spec,
                 annual_mean_fraction(&profile),
                 "the HPXML schedule fractions on the spec",
             )?;
-            inject_compact_profile_power(spec, &profile, max_kw);
+            inject_compact_profile_power(spec, &profile, max_w);
         } else if let Some(profile) = profiles.find(mapping.equipment_name) {
             warn!(
                 "schedule_resolve: no CSV column '{}' for '{}'; using default profile",
                 col_name, mapping.equipment_name
             );
-            let max_kw = resolve_max_kw(
+            let max_w = resolve_max_w(
                 spec,
                 annual_mean_fraction(profile),
                 &format!(
@@ -1226,7 +1794,7 @@ fn inject_power_schedule(
                     mapping.equipment_name
                 ),
             )?;
-            inject_compact_profile_power(spec, profile, max_kw);
+            inject_compact_profile_power(spec, profile, max_w);
         } else {
             return Err(HaresError::Io(format!(
                 "equipment '{}' has no schedule source: no '{}' column in the \
@@ -1427,36 +1995,38 @@ fn resolve_hpxml_profile(spec: &EquipmentSpec) -> Option<DefaultScheduleProfile>
 
 /// Derive peak power from annual energy. For gas appliances, the total includes
 /// both electric parasitic and gas combustion energy (EA-004 F1 fix).
-fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
+fn determine_max_w(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
     if let Some(max_w) = spec
         .parameters
         .get("max_electric_power_w")
         .and_then(|v| v.as_f64())
     {
-        return Some(max_w / 1000.0);
+        return Some(max_w);
     }
 
-    let annual_electric_kwh = spec
+    // The raw keys are J (and J for the gas path, the HARES therm's own
+    // conversion); the derived mean power is W: the annual energy over the
+    // year's seconds, divided once.
+    let annual_electric_j = spec
         .parameters
-        .get("annual_electric_kwh")
+        .get("annual_electric_j")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
 
     // Gas appliances (dryers, cooking ranges) have combustion energy in addition
     // to electric parasitic.
-    let annual_gas_kwh = hares_physics::units::energy_therms_to_kwh(
-        spec.parameters
-            .get("annual_gas_therms")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-    );
+    let annual_gas_j = spec
+        .parameters
+        .get("annual_gas_j")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
 
-    let annual_kwh = annual_electric_kwh + annual_gas_kwh;
-    if annual_kwh <= 0.0 || mean_fraction <= 0.0 {
+    let annual_j = annual_electric_j + annual_gas_j;
+    if annual_j <= 0.0 || mean_fraction <= 0.0 {
         return None;
     }
 
-    Some((annual_kwh / HOURS_PER_YEAR) / mean_fraction)
+    Some((annual_j / SECONDS_PER_YEAR) / mean_fraction)
 }
 
 /// Determine an equipment's peak power from its schedule source, or fail
@@ -1467,16 +2037,16 @@ fn determine_max_kw(spec: &EquipmentSpec, mean_fraction: f64) -> Option<f64> {
 /// energy is never drawn), and a spec that declares its annual energy as
 /// zero (there is no energy to scale). An equipment whose schedule does
 /// run it and which declares neither a rated power (`max_electric_power_w`)
-/// nor annual energy (`annual_electric_kwh`, `annual_gas_therms`) has no
+/// nor annual energy (`annual_electric_j`, `annual_gas_j`) has no
 /// determinable power: the returned error names the equipment and the
 /// missing field.
-fn resolve_max_kw(
+fn resolve_max_w(
     spec: &EquipmentSpec,
     mean_fraction: f64,
     source: &str,
 ) -> Result<f64, HaresError> {
-    match determine_max_kw(spec, mean_fraction) {
-        Some(max_kw) => Ok(max_kw),
+    match determine_max_w(spec, mean_fraction) {
+        Some(max_w) => Ok(max_w),
         None if mean_fraction <= 0.0 || spec_declares_a_power_field(spec) => Ok(0.0),
         None => Err(undeterminable_schedule_power_error(spec, source)),
     }
@@ -1486,19 +2056,19 @@ fn resolve_max_kw(
 /// declared zero is a determined power, an absent one is not.
 fn spec_declares_a_power_field(spec: &EquipmentSpec) -> bool {
     spec.parameters.contains_key("max_electric_power_w")
-        || spec.parameters.contains_key("annual_electric_kwh")
-        || spec.parameters.contains_key("annual_gas_therms")
+        || spec.parameters.contains_key("annual_electric_j")
+        || spec.parameters.contains_key("annual_gas_j")
 }
 
 /// Build the resolve error for an equipment whose schedule power cannot be
 /// determined: the spec carries neither a rated power (`max_electric_power_w`)
-/// nor annual energy (`annual_electric_kwh`, `annual_gas_therms`). Names the
+/// nor annual energy (`annual_electric_j`, `annual_gas_j`). Names the
 /// equipment and the missing field.
 fn undeterminable_schedule_power_error(spec: &EquipmentSpec, source: &str) -> HaresError {
     let msg = format!(
         "equipment '{}' has a schedule source ({source}) but no \
          determinable power: the spec carries no 'max_electric_power_w', \
-         no 'annual_electric_kwh' and no 'annual_gas_therms'",
+         no 'annual_electric_j' and no 'annual_gas_j'",
         spec.name
     );
     tracing::error!(equipment = %spec.name, "{msg}");
@@ -1510,14 +2080,14 @@ fn inject_event_schedule(
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &ScheduleTimeSeries,
-) {
+) -> Result<(), HaresError> {
     // Skip if equipment already has event source keys.
     if spec.parameters.keys().any(|k| {
         k == "event_window_schedule_col"
             || k == "event_window_source"
-            || k == "event_power_kw_series"
+            || k == "event_power_w_series"
     }) {
-        return;
+        return Ok(());
     }
 
     let col_name = normalize_schedule_col_name(mapping.csv_column);
@@ -1526,7 +2096,7 @@ fn inject_event_schedule(
     if let Some(&col_idx) = csv_col_map.get(col_name.as_str()) {
         let fraction_series = &schedule.columns[col_idx];
         if fraction_series.is_empty() {
-            return;
+            return Ok(());
         }
 
         // Always inject the column index for the stochastic path.
@@ -1535,20 +2105,33 @@ fn inject_event_schedule(
             Value::from(col_idx as u64),
         );
 
-        // Compute kW time series from fractions × max_kw for deterministic event extraction.
+        // Compute kW time series from fractions × max_w for deterministic event extraction.
         let mean_fraction: f64 =
             fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
-        if let Some(max_kw) = determine_max_kw(spec, mean_fraction) {
-            let kw_series: Vec<Value> = fraction_series
+        if let Some(max_w) = determine_max_w(spec, mean_fraction) {
+            // The series values are fractions x the W maximum: W (SI).
+            let w_series: Vec<Value> = fraction_series
                 .iter()
-                .map(|f| Value::from(f * max_kw))
+                .map(|f| Value::from(f * max_w))
                 .collect();
             spec.parameters
-                .insert("event_power_kw_series".to_string(), Value::Array(kw_series));
+                .insert("event_power_w_series".to_string(), Value::Array(w_series));
         }
+        Ok(())
     } else if schedule_len > 0 {
-        spec.parameters
-            .insert("event_window_source".to_string(), Value::from("constant"));
+        // A schedule file without the appliance's power column is a
+        // construction error naming the column: the constant-window fallback
+        // that used to fill in here ran the cycles back to back, a silent
+        // default no input named.
+        Err(HaresError::Equipment(format!(
+            "equipment '{}' runs on the '{}' schedule column, which the \
+             schedule has no column for; the constant-window fallback is \
+             gone: a schedule file must carry the power column every event \
+             equipment runs on",
+            spec.name, mapping.csv_column
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -1557,7 +2140,7 @@ fn inject_event_schedule(
 ///
 /// The power is the spec's declared `power_w`; a Ventilation Fan's rated
 /// power is its declared fan power (`fan_power_w`, or the supply/exhaust
-/// pair); a spec that declares neither resolves through [`resolve_max_kw`],
+/// pair); a spec that declares neither resolves through [`resolve_max_w`],
 /// so a spec with no determinable power is a resolve error naming the
 /// equipment and the missing field, never a silent 0 kW constant.
 fn inject_constant_power_schedule(
@@ -1570,7 +2153,7 @@ fn inject_constant_power_schedule(
     if spec.parameters.keys().any(|k| {
         k.starts_with("power_schedule_")
             || k.starts_with("power_profile_")
-            || k == "power_constant_kw"
+            || k == "power_constant_w"
     }) {
         return Ok(());
     }
@@ -1580,12 +2163,12 @@ fn inject_constant_power_schedule(
         .get("power_w")
         .and_then(|v| v.as_f64())
         .or_else(|| fan_rated_power_w(spec));
-    let power_kw = match power_w {
-        Some(power_w) => power_w / 1000.0,
-        None => resolve_max_kw(spec, 1.0, "the constant-power schedule source")?,
+    let power_w = match power_w {
+        Some(power_w) => power_w,
+        None => resolve_max_w(spec, 1.0, "the constant-power schedule source")?,
     };
 
-    inject_compact_constant_power(spec, power_kw);
+    inject_compact_constant_power(spec, power_w);
     Ok(())
 }
 
@@ -1619,14 +2202,15 @@ fn inject_compact_column_power(spec: &mut EquipmentSpec, col_idx: usize) {
 fn inject_compact_profile_power(
     spec: &mut EquipmentSpec,
     profile: &DefaultScheduleProfile,
-    max_kw: f64,
+    max_w: f64,
 ) {
     spec.parameters.insert(
         "power_schedule_source".to_string(),
         Value::from("daily_profile"),
     );
+    // The derived max is W (SI) already.
     spec.parameters
-        .insert("power_profile_max_kw".to_string(), Value::from(max_kw));
+        .insert("power_profile_max_w".to_string(), Value::from(max_w));
     spec.parameters.insert(
         "power_profile_weekday".to_string(),
         Value::Array(
@@ -1659,11 +2243,12 @@ fn inject_compact_profile_power(
     );
 }
 
-fn inject_compact_constant_power(spec: &mut EquipmentSpec, constant_kw: f64) {
+fn inject_compact_constant_power(spec: &mut EquipmentSpec, constant_w: f64) {
     spec.parameters
         .insert("power_schedule_source".to_string(), Value::from("constant"));
+    // The raw key is W (SI).
     spec.parameters
-        .insert("power_constant_kw".to_string(), Value::from(constant_kw));
+        .insert("power_constant_w".to_string(), Value::from(constant_w));
 }
 
 fn normalize_schedule_col_name(name: &str) -> String {
@@ -1724,7 +2309,10 @@ fn ensure_specs_for_csv_columns(
             continue;
         };
         let mut params = Map::new();
-        params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        params.insert(
+            "annual_electric_j".to_string(),
+            Value::from(annual_kwh * 3.6e6),
+        );
         specs.push(build_spec(
             mapping.equipment_name.to_string(),
             FuelType::Electric,
@@ -1803,11 +2391,74 @@ pub fn check_hvac_setpoint_invariants(specs: &[EquipmentSpec]) {
     }
 }
 
+/// Whether a schedule column's values are degrees Fahrenheit, converted to
+/// Celsius at the parse, once per value: the two thermostat setpoint
+/// columns. OpenStudio-HPXML's detailed-schedule convention states them in
+/// Fahrenheit and converts them ("Detailed Schedule Inputs",
+/// `HPXMLtoOpenStudio/resources/schedules.rb:1465-1484` `convert_setpoints`);
+/// OCHRE converts the same columns from Fahrenheit at its own schedule load
+/// (`vendors/OCHRE/ochre/utils/schedule.py:408-427`). The
+/// `water_heater_setpoint` column is a construction error when present, so
+/// no unit ever applies to it.
+pub(crate) fn column_read_in_fahrenheit(name: &str) -> bool {
+    matches!(name, "heating_setpoint" | "cooling_setpoint")
+}
+
+/// The schedule columns the engine reads and the columns it accepts
+/// without reading, derived from the mapping table (the input schema's
+/// `schedule_columns` and `unused_schedule_columns`). The setpoint columns
+/// carry the unit the parser reads them in (degrees Fahrenheit, converted
+/// to Celsius at the parse), and the `water_heater_setpoint` column is in
+/// neither list: the mapping table's entry is the construction error's,
+/// because a column the engine accepts is a column it applies, and HARES
+/// does not apply it.
+pub(crate) fn schedule_column_schemas() -> (
+    Vec<crate::input_schema::ScheduleColumnSchema>,
+    Vec<crate::input_schema::UnusedScheduleColumnSchema>,
+) {
+    use crate::input_schema::{ScheduleColumnSchema, UnusedScheduleColumnSchema};
+
+    let mut used = Vec::new();
+    let mut unused = Vec::new();
+    for mapping in COLUMN_MAPPINGS {
+        match mapping.category {
+            ScheduleCategory::Power
+            | ScheduleCategory::EventWindow
+            | ScheduleCategory::Occupancy
+            | ScheduleCategory::WaterHeater => used.push(ScheduleColumnSchema {
+                name: mapping.csv_column.to_string(),
+                unit: None,
+                description: format!("mapped to the '{}' equipment", mapping.equipment_name),
+            }),
+            ScheduleCategory::Setpoint => {
+                if mapping.csv_column == "water_heater_setpoint" {
+                    // Not listed: a schedule carrying it is a construction
+                    // error (the mapping entry is the error's), so the
+                    // engine accepts nothing for it.
+                    continue;
+                }
+                used.push(ScheduleColumnSchema {
+                    name: mapping.csv_column.to_string(),
+                    unit: Some("F".to_string()),
+                    description: "the thermostat setpoint column, read in degrees Fahrenheit \
+                                  and converted to degrees Celsius at the parse"
+                        .to_string(),
+                });
+            }
+            ScheduleCategory::NotUsed { reason } => unused.push(UnusedScheduleColumnSchema {
+                name: mapping.csv_column.to_string(),
+                reason: reason.to_string(),
+            }),
+        }
+    }
+    (used, unused)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
-    use super::{determine_max_kw, inject_schedule_into_specs};
+    use super::{determine_max_w, inject_schedule_into_specs};
     use crate::defaults::DefaultsStore;
     use crate::{EquipmentSpec, ScheduleTimeSeries};
     use chrono::{DateTime, Duration};
@@ -1967,7 +2618,10 @@ mod tests {
 
     fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         let mut parameters = Map::new();
-        parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        parameters.insert(
+            "annual_electric_j".to_string(),
+            Value::from(annual_kwh * 3.6e6),
+        );
         EquipmentSpec {
             instance_name: None,
             name: name.to_string(),
@@ -1979,6 +2633,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -1989,7 +2645,7 @@ mod tests {
     ) -> EquipmentSpec {
         let mut parameters = Map::new();
         if let Some(kwh) = annual_kwh {
-            parameters.insert("annual_electric_kwh".to_string(), Value::from(kwh));
+            parameters.insert("annual_electric_j".to_string(), Value::from(kwh * 3.6e6));
         }
         if let Some(max_w) = max_power_w {
             parameters.insert("max_electric_power_w".to_string(), Value::from(max_w));
@@ -2005,6 +2661,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2046,7 +2704,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2084,7 +2742,7 @@ mod tests {
         let err = inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2119,7 +2777,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2127,14 +2785,14 @@ mod tests {
 
         let max_a = specs[0]
             .parameters
-            .get("power_profile_max_kw")
+            .get("power_profile_max_w")
             .and_then(Value::as_f64)
-            .expect("power_profile_max_kw should be set");
+            .expect("power_profile_max_w should be set");
         let max_b = specs[1]
             .parameters
-            .get("power_profile_max_kw")
+            .get("power_profile_max_w")
             .and_then(Value::as_f64)
-            .expect("power_profile_max_kw should be set");
+            .expect("power_profile_max_w should be set");
         assert!((max_b - 2.0 * max_a).abs() < 1e-12);
     }
 
@@ -2154,8 +2812,8 @@ mod tests {
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!(
-            (peak - 0.5).abs() < 1e-9,
-            "expected peak 0.5 kW, got {peak}"
+            (peak - 500.0).abs() < 1e-9,
+            "expected peak 500 W, got {peak}"
         );
 
         assert_eq!(
@@ -2195,7 +2853,10 @@ mod tests {
 
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        assert!((peak - 0.5).abs() < 1e-9, "max power should win precedence");
+        assert!(
+            (peak - 500.0).abs() < 1e-9,
+            "max power should win precedence"
+        );
     }
 
     /// A Ventilation Fan spec with no power input fails the resolve with the
@@ -2205,7 +2866,7 @@ mod tests {
     fn constant_power_schedule_without_a_power_is_a_resolve_error() {
         let mut schedule = make_schedule(24);
         let mut spec = make_spec("Ventilation Fan", 0.0);
-        spec.parameters.remove("annual_electric_kwh");
+        spec.parameters.remove("annual_electric_j");
         let mut specs = vec![spec];
         let err = inject_schedule_into_specs(
             &mut specs,
@@ -2228,7 +2889,7 @@ mod tests {
 
     /// A Ventilation Fan spec's rated fan power is a determinable constant
     /// power: `fan_power_w` (or the supply/exhaust pair) sets
-    /// `power_constant_kw` without `power_w` being present.
+    /// `power_constant_w` without `power_w` being present.
     #[test]
     fn constant_power_schedule_reads_the_fan_rated_power() {
         let mut schedule = make_schedule(24);
@@ -2244,12 +2905,12 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("the fan's rated fan power is a determinable power");
-        let kw = specs[0]
+        let w = specs[0]
             .parameters
-            .get("power_constant_kw")
+            .get("power_constant_w")
             .and_then(Value::as_f64)
-            .expect("power_constant_kw injected");
-        assert!((kw - 0.876).abs() < 1e-9, "expected 0.876 kW, got {kw}");
+            .expect("power_constant_w injected");
+        assert!((w - 876.0).abs() < 1e-9, "expected 876 W, got {w}");
     }
 
     #[test]
@@ -2267,7 +2928,7 @@ mod tests {
         let kw = extract_compact_column_schedule(&specs[0], &schedule);
 
         let mean_fraction = (0.2 + 1.0 + 0.4) / 3.0;
-        let expected_peak = (1200.0 / 8760.0) / mean_fraction;
+        let expected_peak = (1200.0 / 8760.0) / mean_fraction * 1000.0;
         let peak = kw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!(
             (peak - expected_peak).abs() < 1e-9,
@@ -2285,7 +2946,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2293,9 +2954,9 @@ mod tests {
 
         let peak = specs[0]
             .parameters
-            .get("power_profile_max_kw")
+            .get("power_profile_max_w")
             .and_then(Value::as_f64)
-            .expect("power_profile_max_kw should be present");
+            .expect("power_profile_max_w should be present");
         assert!(
             peak > 0.0,
             "default-profile branch should not produce dead schedule"
@@ -2308,7 +2969,7 @@ mod tests {
             Some("daily_profile")
         );
         assert!(
-            specs[0].parameters.contains_key("power_profile_max_kw"),
+            specs[0].parameters.contains_key("power_profile_max_w"),
             "profile max should be injected"
         );
         assert_eq!(
@@ -2347,7 +3008,7 @@ mod tests {
             "the error must name the equipment, got: {message}"
         );
         assert!(
-            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            message.contains("max_electric_power_w") && message.contains("annual_electric_j"),
             "the error must name the missing fields, got: {message}"
         );
         assert!(
@@ -2386,7 +3047,7 @@ mod tests {
             "the error must name the equipment, got: {message}"
         );
         assert!(
-            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            message.contains("max_electric_power_w") && message.contains("annual_electric_j"),
             "the error must name the missing fields, got: {message}"
         );
         assert!(
@@ -2403,7 +3064,7 @@ mod tests {
         let err = inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -2414,7 +3075,7 @@ mod tests {
             "the error must name the equipment, got: {message}"
         );
         assert!(
-            message.contains("max_electric_power_w") && message.contains("annual_electric_kwh"),
+            message.contains("max_electric_power_w") && message.contains("annual_electric_j"),
             "the error must name the missing fields, got: {message}"
         );
         assert!(
@@ -2466,12 +3127,12 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("an all-zero HPXML profile resolves to a determined 0 kW");
-        let max_kw = specs[0]
+        let max_w = specs[0]
             .parameters
-            .get("power_profile_max_kw")
+            .get("power_profile_max_w")
             .and_then(Value::as_f64)
-            .expect("power_profile_max_kw must be present");
-        assert_eq!(max_kw, 0.0);
+            .expect("power_profile_max_w must be present");
+        assert_eq!(max_w, 0.0);
     }
 
     #[test]
@@ -2482,7 +3143,7 @@ mod tests {
         let mut schedule = make_schedule_with_lighting_column(&[0.2, 1.0, 0.4]);
         let mut spec = make_spec_with_power("Indoor Lighting", None, None);
         spec.parameters
-            .insert("annual_electric_kwh".to_string(), Value::from(0.0));
+            .insert("annual_electric_j".to_string(), Value::from(0.0));
         let mut specs = vec![spec];
         inject_schedule_into_specs(
             &mut specs,
@@ -2529,27 +3190,29 @@ mod tests {
     }
 
     #[test]
-    fn event_missing_csv_injects_constant_source() {
+    fn event_missing_csv_column_is_an_error() {
         let mut schedule = make_schedule(4);
         let mut specs = vec![make_spec("Dishwasher", 0.0)];
 
-        inject_schedule_into_specs(
+        let err = inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
             None,
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
-        .expect("inject_schedule_into_specs should succeed with valid config");
+        .expect_err("a schedule without the dishwasher column must fail");
 
-        assert_eq!(
-            specs[0]
-                .parameters
-                .get("event_window_source")
-                .and_then(Value::as_str),
-            Some("constant")
+        let message = err.to_string();
+        assert!(
+            message.contains("Dishwasher"),
+            "the error must name the equipment, got: {message}"
         );
-        assert!(!specs[0].parameters.contains_key("event_window_len"));
+        assert!(
+            message.contains("dishwasher"),
+            "the error must name the missing column, got: {message}"
+        );
+        assert!(!specs[0].parameters.contains_key("event_window_source"));
     }
 
     fn make_typed_spec<T: hares_equipment::EquipmentTypedConfig>(
@@ -2575,6 +3238,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2635,14 +3300,14 @@ mod tests {
                         ff_max: None,
                         plf_min: None,
                         plf_max: None,
-                        min_compressor_fraction: 0.25,
+                        min_compressor_fraction: None,
                         eir_part_load_benefit: None,
                         er_stages: 1,
                         charge_defect_ratio: None,
                         ..Default::default()
                     },
                     stage_shrs: None,
-                    crankcase_heater_kw: None,
+                    crankcase_heater_w: None,
                     crankcase_heater_threshold_c: None,
                     min_oat_cooling_c: 10.0,
                 },
@@ -2703,6 +3368,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn setpoint_column_without_typed_config_is_an_error() {
+        let mut spec = make_spec("Gas Furnace", 100.0);
+        let err = super::set_typed_setpoint_source(&mut spec, "heating", 0)
+            .expect_err("a spec with no typed config cannot hold the source");
+        assert!(
+            err.to_string().contains("Gas Furnace") && err.to_string().contains("no typed config"),
+            "the error names the equipment and the case: {err}"
+        );
+    }
+
+    #[test]
+    fn setpoint_column_with_raw_payload_is_an_error() {
+        let mut spec = make_spec("Gas Furnace", 100.0);
+        spec.typed_config = Some(hares_equipment::EquipmentConfig::with_payload(
+            "Gas Furnace".to_string(),
+            "Gas Furnace".to_string(),
+            hares_equipment::ConfigPayload::Raw {
+                data: std::collections::HashMap::new(),
+            },
+        ));
+        let err = super::set_typed_setpoint_source(&mut spec, "heating", 0)
+            .expect_err("a raw payload cannot hold the source");
+        assert!(
+            err.to_string().contains("Gas Furnace")
+                && err.to_string().contains("not a typed config"),
+            "the error names the equipment and the case: {err}"
+        );
+    }
+
+    #[test]
+    fn setpoint_column_with_non_object_payload_data_is_an_error() {
+        let mut spec = make_spec("Gas Furnace", 100.0);
+        let mut typed = hares_equipment::EquipmentConfig::with_payload(
+            "Gas Furnace".to_string(),
+            "Gas Furnace".to_string(),
+            hares_equipment::ConfigPayload::Raw {
+                data: std::collections::HashMap::new(),
+            },
+        );
+        typed.payload = hares_equipment::ConfigPayload::Typed {
+            type_name: "Gas Furnace".to_string(),
+            version: 1,
+            data: serde_json::Value::Bool(false),
+        };
+        spec.typed_config = Some(typed);
+        let err = super::set_typed_setpoint_source(&mut spec, "heating", 0)
+            .expect_err("a non-object payload cannot hold the source");
+        assert!(
+            err.to_string().contains("Gas Furnace")
+                && err.to_string().contains("not a JSON object"),
+            "the error names the equipment and the case: {err}"
+        );
+    }
+
     fn make_water_heater_spec(name: &str, avg_water_draw_l_per_day: f64) -> EquipmentSpec {
         let typed_config = match name {
             "Electric Resistance Water Heater" => EquipmentConfig::from_typed(
@@ -2727,6 +3447,7 @@ mod tests {
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
+                    appliance_draw_flow_rate_source: None,
                     performance_adjustment: Some(0.95),
                     zone_type: Some("conditioned".to_string()),
                     first_hour_rating_m3: Some(0.20),
@@ -2763,6 +3484,7 @@ mod tests {
                     draw_flow_rate_kg_s: None,
                     draw_flow_rate_source: None,
                     mains_temp_c_source: None,
+                    appliance_draw_flow_rate_source: None,
                     pilot_power_w: Some(5.0),
                     flue_loss_fraction: Some(0.12),
                     skin_loss_fraction: None,
@@ -2797,6 +3519,7 @@ mod tests {
                     tempering_valve_setpoint_c: Some(51.67),
                     avg_water_draw_l_per_day: Some(avg_water_draw_l_per_day),
                     draw_flow_rate_kg_s: None,
+                    appliance_draw_flow_rate_source: None,
                     compressor_power_w: None,
                     backup_enable_offset_c: None,
                     min_ambient_temp_c: None,
@@ -2841,6 +3564,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2863,6 +3588,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.10),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 avg_water_draw_l_per_day,
                 zone_type: None,
                 min_flow_kg_s: None,
@@ -2881,6 +3607,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -2970,15 +3698,20 @@ mod tests {
 
     #[test]
     fn water_heater_draw_fractions_normalized_to_kg_s() {
-        // Known fractions and avg_water_draw_l_per_day = 200.
+        // Known fractions and avg_water_draw_l_per_day = 200, converted to
+        // mass at the drawn water's density (the hot supply temperature,
+        // the helper spec's 51.67 C setpoint with no hot draw temperature).
         // normalize_draw_profile formula returns kg/s:
         //   mean_fraction = mean(fractions)
-        //   scale = (avg_daily_l / 1440) / mean_fraction
+        //   scale = (avg_daily_l * rho / 1440) / mean_fraction
         //   result_kg_s = fraction * scale / 60
+        use hares_physics::water_density_kg_m3;
+
         let fractions = vec![0.04, 0.08, 0.02, 0.06];
         let avg_daily_l = 200.0;
         let mean_frac: f64 = fractions.iter().sum::<f64>() / fractions.len() as f64; // 0.05
-        let scale = (avg_daily_l / 1440.0) / mean_frac;
+        let rho_kg_per_l = water_density_kg_m3(51.67) / 1000.0;
+        let scale = (avg_daily_l * rho_kg_per_l / 1440.0) / mean_frac;
 
         let mains = vec![12.0; 4];
         let mut schedule =
@@ -3026,6 +3759,113 @@ mod tests {
             expected_for_004 > 0.0,
             "expected meaningful SI mass flow, got {expected_for_004:.6e} kg/s"
         );
+    }
+
+    #[test]
+    fn fixture_draw_converts_to_mass_at_the_hot_supply_temperature() {
+        // One density convention for every L to kg conversion on the draw
+        // paths: the drawn water's temperature, the water heater's hot
+        // supply (its hot draw temperature here, 60 C), the same density
+        // the wet-appliance columns convert at. 200 L/day at 60 C is
+        // 200 x rho(60 C) kg/day, not 200 kg.
+        use hares_physics::water_density_kg_m3;
+
+        let fractions = vec![0.04, 0.08, 0.02, 0.06];
+        let avg_daily_l = 200.0;
+        let mains = vec![12.0; 4];
+        let mut schedule =
+            make_schedule_with_water_heater_columns("hot_water_fixtures", &fractions, &mains);
+        let mut specs = vec![make_water_heater_spec(
+            "Electric Resistance Water Heater",
+            avg_daily_l,
+        )];
+        {
+            let cfg = specs[0]
+                .typed_config
+                .as_ref()
+                .expect("typed config")
+                .typed::<ElectricResistanceWaterHeaterConfig>()
+                .expect("resistance config decodes");
+            let mut typed = cfg.clone();
+            typed.hot_draw_temp_c = Some(60.0);
+            specs[0].typed_config = Some(
+                EquipmentConfig::from_typed(
+                    "electric".to_string(),
+                    "Electric Resistance Water Heater".to_string(),
+                    typed,
+                )
+                .expect("typed config builds"),
+            );
+        }
+
+        inject_schedule_into_specs(
+            &mut specs,
+            &mut schedule,
+            None,
+            &DefaultsStore::empty(),
+            &mut Vec::new(),
+        )
+        .expect("injection succeeds");
+
+        let draw_col_idx = specs[0]
+            .typed_config
+            .as_ref()
+            .and_then(|typed| typed.typed::<ElectricResistanceWaterHeaterConfig>().ok())
+            .and_then(|cfg| cfg.draw_flow_rate_source)
+            .and_then(|source| match source {
+                ScheduleSourceConfig::ColumnRef { col_idx, .. } => Some(col_idx),
+                _ => None,
+            })
+            .expect("typed draw_flow_rate_source must be present");
+
+        let mean_frac: f64 = fractions.iter().sum::<f64>() / fractions.len() as f64;
+        let rho_kg_per_l = water_density_kg_m3(60.0) / 1000.0;
+        let scale = (avg_daily_l * rho_kg_per_l / 1440.0) / mean_frac;
+        let resolved = &schedule.columns[draw_col_idx];
+        for (i, &frac) in fractions.iter().enumerate() {
+            let expected_kg_s = frac * scale / 60.0;
+            assert!(
+                (resolved[i] - expected_kg_s).abs() < 1e-10,
+                "timestep {i}: expected {expected_kg_s:.8e} kg/s at the hot supply density, got {:.8e}",
+                resolved[i]
+            );
+        }
+    }
+
+    #[test]
+    fn hot_supply_temperature_honors_the_gas_water_heater_config() {
+        // The gas water heater's typed config carries the hot draw
+        // temperature and the setpoint like the electric resistance one:
+        // the drawn water's temperature is the hot draw temperature when
+        // set, else the setpoint, else the reference default setpoint.
+        let gas_config_at = |hot_draw_temp_c: Option<f64>, setpoint_c: Option<f64>| {
+            let spec = make_water_heater_spec("Gas Water Heater", 200.0);
+            let cfg = spec
+                .typed_config
+                .as_ref()
+                .expect("typed config")
+                .typed::<GasWaterHeaterConfig>()
+                .expect("gas config decodes")
+                .clone();
+            let mut typed = cfg;
+            typed.hot_draw_temp_c = hot_draw_temp_c;
+            typed.setpoint_c = setpoint_c;
+            let spec = EquipmentSpec {
+                typed_config: Some(
+                    EquipmentConfig::from_typed(
+                        "gas".to_string(),
+                        "Gas Water Heater".to_string(),
+                        typed,
+                    )
+                    .expect("typed config builds"),
+                ),
+                ..spec
+            };
+            super::water_heater_hot_supply_temp_c(&spec)
+        };
+        assert_eq!(gas_config_at(Some(60.0), Some(49.0)), 60.0);
+        assert_eq!(gas_config_at(None, Some(49.0)), 49.0);
+        assert_eq!(gas_config_at(None, None), super::DEFAULT_SUPPLY_TEMP_C);
     }
 
     #[test]
@@ -3079,6 +3919,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -3107,6 +3948,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         let mut schedule = make_schedule_with_water_heater_columns(
@@ -3134,7 +3977,7 @@ mod tests {
 
     #[test]
     fn unsupported_water_heater_type_returns_err() {
-        // An equipment spec whose name is in STORAGE_WATER_HEATER_EQUIPMENT but is
+        // An equipment spec whose name is in WATER_HEATER_EQUIPMENT but is
         // not handled by water_heater_avg_daily_draw_l triggers the 'other' arm.
         // Since all current entries are handled, test the defensive arm directly.
         let spec = EquipmentSpec {
@@ -3148,6 +3991,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
         let result = super::water_heater_avg_daily_draw_l(&spec);
@@ -3205,11 +4050,11 @@ mod tests {
     }
 
     // =======================================================================
-    // Quantitative: determine_max_kw with both electric and gas annual energy
+    // Quantitative: determine_max_w with both electric and gas annual energy
     // =======================================================================
 
     #[test]
-    fn determine_max_kw_electric_plus_gas_therms() {
+    fn determine_max_w_electric_plus_gas_therms() {
         let annual_electric_kwh = 44.0;
         let annual_gas_therms = 153.0;
         let fractions = [0.2, 1.0, 0.4];
@@ -3217,12 +4062,17 @@ mod tests {
 
         let mut parameters = Map::new();
         parameters.insert(
-            "annual_electric_kwh".to_string(),
-            Value::from(annual_electric_kwh),
+            "annual_electric_j".to_string(),
+            Value::from(annual_electric_kwh * 3.6e6),
         );
         parameters.insert(
-            "annual_gas_therms".to_string(),
-            Value::from(annual_gas_therms),
+            "annual_gas_j".to_string(),
+            Value::from(
+                uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(
+                    annual_gas_therms,
+                )
+                .get::<uom::si::energy::joule>(),
+            ),
         );
         let spec = EquipmentSpec {
             instance_name: None,
@@ -3235,18 +4085,24 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
 
-        let result = determine_max_kw(&spec, mean_fraction);
-        assert!(result.is_some(), "determine_max_kw must return Some");
+        let result = determine_max_w(&spec, mean_fraction);
+        assert!(result.is_some(), "determine_max_w must return Some");
 
-        let annual_gas_kwh = hares_physics::units::energy_therms_to_kwh(annual_gas_therms);
-        let expected = (annual_electric_kwh + annual_gas_kwh) / 8760.0 / mean_fraction;
+        let annual_gas_j = annual_gas_therms
+            * uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(1.0)
+                .get::<uom::si::energy::joule>();
+        let expected_w = (annual_electric_kwh * 3.6e6 + annual_gas_j)
+            / hares_physics::constants::SECONDS_PER_YEAR
+            / mean_fraction;
         let actual = result.unwrap();
 
         assert!(
-            (actual - expected).abs() < 1e-9,
-            "expected {expected:.6}, got {actual:.6}"
+            (actual - expected_w).abs() < 1e-6,
+            "expected {expected_w:.6}, got {actual:.6}"
         );
     }
 
@@ -3399,14 +4255,14 @@ mod tests {
                         ff_max: None,
                         plf_min: None,
                         plf_max: None,
-                        min_compressor_fraction: 0.25,
+                        min_compressor_fraction: None,
                         eir_part_load_benefit: None,
                         er_stages: 1,
                         charge_defect_ratio: None,
                         ..Default::default()
                     },
                     stage_shrs: None,
-                    crankcase_heater_kw: None,
+                    crankcase_heater_w: None,
                     crankcase_heater_threshold_c: None,
                     min_oat_cooling_c: 10.0,
                 },
@@ -3416,7 +4272,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut warnings,
         )
@@ -3565,14 +4421,14 @@ mod tests {
                         ff_max: None,
                         plf_min: None,
                         plf_max: None,
-                        min_compressor_fraction: 0.25,
+                        min_compressor_fraction: None,
                         eir_part_load_benefit: None,
                         er_stages: 1,
                         charge_defect_ratio: None,
                         ..Default::default()
                     },
                     stage_shrs: None,
-                    crankcase_heater_kw: None,
+                    crankcase_heater_w: None,
                     crankcase_heater_threshold_c: None,
                     min_oat_cooling_c: 10.0,
                 },
@@ -3582,7 +4438,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -3642,7 +4498,8 @@ mod tests {
     #[test]
     fn load_default_profiles_occupants_has_distinct_weekend_fractions() {
         use std::path::Path;
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
 
@@ -3659,7 +4516,8 @@ mod tests {
     #[test]
     fn load_default_profiles_all_priority_schedules_have_distinct_weekend_fractions() {
         use std::path::Path;
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
 
@@ -3692,7 +4550,8 @@ mod tests {
     #[test]
     fn fixed_operation_schedules_keep_identical_fractions() {
         use std::path::Path;
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
 
@@ -3722,7 +4581,8 @@ mod tests {
     #[test]
     fn spa_heater_month_multipliers_match_spa_pump() {
         use std::path::Path;
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
 
@@ -3773,6 +4633,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -3809,7 +4671,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -3871,7 +4733,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -3930,7 +4792,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -3969,13 +4831,15 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
         let mut specs = vec![spec];
 
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4009,7 +4873,7 @@ mod tests {
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4064,13 +4928,15 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         };
         let mut specs = vec![spec];
 
         inject_schedule_into_specs(
             &mut specs,
             &mut schedule,
-            Some(dir.path()),
+            Some(&super::load_default_profiles(dir.path()).expect("the profiles load")),
             &DefaultsStore::empty(),
             &mut Vec::new(),
         )
@@ -4168,7 +5034,10 @@ mod tests {
     /// fixtures carry.
     fn melts_spec_with_residual_energy(annual_kwh: f64) -> EquipmentSpec {
         let mut params = Map::new();
-        params.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+        params.insert(
+            "annual_electric_j".to_string(),
+            Value::from(annual_kwh * 3.6e6),
+        );
         params.insert("sensible_gain_fraction".to_string(), Value::from(0.855));
         params.insert("latent_gain_fraction".to_string(), Value::from(0.045));
         EquipmentSpec {
@@ -4182,6 +5051,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }
     }
 
@@ -4207,14 +5078,14 @@ mod tests {
         assert_eq!(specs[0].name, "Microwave");
         assert_eq!(specs[0].fuel_type, FuelType::Electric);
 
-        let annual_kwh = specs[0]
+        let annual_j = specs[0]
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(Value::as_f64)
-            .expect("annual_electric_kwh must be set");
+            .expect("annual_electric_j must be set");
         assert!(
-            (annual_kwh - 100.0).abs() < 1e-12,
-            "default annual kWh should be 100"
+            (annual_j - 100.0 * 3.6e6).abs() < 1e-6,
+            "default annual energy should be 100 kWh in joules"
         );
 
         let schedule_col = specs[0]
@@ -4225,14 +5096,14 @@ mod tests {
         assert_eq!(schedule_col, 0);
 
         assert!(
-            specs[0].parameters.contains_key("event_power_kw_series"),
-            "non-zero annual energy should produce event_power_kw_series"
+            specs[0].parameters.contains_key("event_power_w_series"),
+            "non-zero annual energy should produce event_power_w_series"
         );
         let kw_series = specs[0]
             .parameters
-            .get("event_power_kw_series")
+            .get("event_power_w_series")
             .and_then(Value::as_array)
-            .expect("event_power_kw_series must be an array");
+            .expect("event_power_w_series must be an array");
         assert_eq!(kw_series.len(), 4);
         let peak_kw: f64 = kw_series
             .iter()
@@ -4307,14 +5178,14 @@ mod tests {
             .iter()
             .find(|s| s.name == "MELs")
             .expect("the residual MELs spec stays");
-        let annual_kwh = mels
+        let annual_j = mels
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(Value::as_f64)
-            .expect("annual_electric_kwh must be set");
+            .expect("annual_electric_j must be set");
         assert!(
-            (annual_kwh - 1119.0 * 2.42).abs() < 1e-9,
-            "the residual's declared energy is untouched: {annual_kwh}"
+            (annual_j - 1119.0 * 2.42 * 3.6e6).abs() < 1e-3,
+            "the residual's declared energy is untouched: {annual_j}"
         );
         assert!(
             warnings.iter().any(|w| w.source.as_ref() == "schedule"
@@ -4424,6 +5295,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: HashMap::new(),
@@ -4523,6 +5395,8 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }];
 
         inject_schedule_into_specs(
@@ -4911,7 +5785,8 @@ mod tests {
             xml_paths.len()
         );
 
-        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+        let defaults_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
         let profiles = super::load_default_profiles(&defaults_dir)
             .expect("the shipped defaults CSV must load");
         let defaults = DefaultsStore::load(&defaults_dir).expect("the shipped defaults load");
@@ -4935,7 +5810,14 @@ mod tests {
             // the weather site or patches its own test supplies) has no
             // census here: it is counted in `unresolved`, pinned below, so a
             // resolve failure is never silently eaten.
-            let specs = match crate::resolve_equipment(&building, &defaults, None, &mut warnings) {
+            let specs = match crate::resolve_equipment(
+                &building,
+                building.climate_zone_iecc.as_deref(),
+                None,
+                &defaults,
+                None,
+                &mut warnings,
+            ) {
                 Ok(specs) => specs,
                 Err(_) => {
                     unresolved.push(

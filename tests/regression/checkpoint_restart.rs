@@ -15,6 +15,18 @@ use super::helpers;
 const CHECKPOINT_AT_STEP: u64 = 30;
 const TOTAL_STEPS: i64 = 60;
 
+/// Steps the dwelling to its horizon, collecting the per-step results (the
+/// step history is gone; the caller's loop is the accumulator).
+fn run_collecting_steps(
+    dwelling: &mut Dwelling,
+) -> std::result::Result<Vec<hares_core::StepResult>, hares_types::HaresError> {
+    let mut steps = Vec::new();
+    for _ in 0..dwelling.clock.total_steps() {
+        steps.push(dwelling.step()?);
+    }
+    Ok(steps)
+}
+
 pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     let scratch = tempfile::tempdir().expect("create scratch directory");
     let schedule_path = scratch.path().join("schedule.csv");
@@ -22,7 +34,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
-    let config = helpers::build_dwelling_config(
+    let mut config = helpers::build_dwelling_config(
         scratch.path(),
         1,
         schedule_path.clone(),
@@ -30,6 +42,14 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
         Duration::minutes(TOTAL_STEPS),
         42,
     );
+    // A file-destination report refuses a checkpoint restore (no file
+    // state travels in a checkpoint), so the resume scenarios run on the
+    // memory report; the step digests below are what they compare.
+    config
+        .settings
+        .sim_config
+        .reports
+        .retain(|report| report.name != "file");
 
     let mut failures = Vec::new();
 
@@ -43,7 +63,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
         }
     };
 
-    let ref_results = match dwelling_ref.simulate() {
+    let ref_results = match run_collecting_steps(&mut dwelling_ref) {
         Ok(r) => r,
         Err(err) => {
             return Err(vec![format!("reference simulation failed: {err}")]);
@@ -102,7 +122,7 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
     }
 
     // Compare the tail of the reference run with the restarted run.
-    let ref_tail = &ref_results.steps[CHECKPOINT_AT_STEP as usize..];
+    let ref_tail = &ref_results[CHECKPOINT_AT_STEP as usize..];
     let compare_len = ref_tail.len().min(restarted_steps.len());
 
     if compare_len == 0 {
@@ -112,14 +132,13 @@ pub fn run_checkpoint_restart_check() -> Result<(), Vec<String>> {
             let ref_step = &ref_tail[i];
             let rst_step = &restarted_steps[i];
 
-            let power_diff =
-                (ref_step.net_electric_power_kw - rst_step.net_electric_power_kw).abs();
+            let power_diff = (ref_step.net_electric_power_w - rst_step.net_electric_power_w).abs();
             if power_diff > 1e-9 {
                 failures.push(format!(
                     "step[{}] power divergence after checkpoint: ref={:.9} restart={:.9} diff={:.2e}",
                     CHECKPOINT_AT_STEP as usize + i,
-                    ref_step.net_electric_power_kw,
-                    rst_step.net_electric_power_kw,
+                    ref_step.net_electric_power_w,
+                    rst_step.net_electric_power_w,
                     power_diff,
                 ));
                 break;
@@ -363,7 +382,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
     helpers::write_schedule_csv(&schedule_path);
     helpers::write_weather_epw(&weather_path);
 
-    let config = helpers::build_dwelling_config(
+    let mut config = helpers::build_dwelling_config(
         scratch.path(),
         1,
         schedule_path.clone(),
@@ -371,6 +390,14 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         chrono::Duration::minutes(10),
         42,
     );
+    // A file-destination report refuses a checkpoint restore (no file
+    // state travels in a checkpoint), so the resume scenario runs on the
+    // memory report.
+    config
+        .settings
+        .sim_config
+        .reports
+        .retain(|report| report.name != "file");
 
     let mut failures = Vec::new();
 
@@ -404,18 +431,18 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
             hares_core::actors::EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(48_280.32),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(600.0),
                 arrival_time: None,
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 30.0,
+                fuel_economy_j_per_m: 671.0808876163206,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7200.0,
+                average_speed_m_per_s: 13.4112,
+                range_anxiety_distance_m: 48_280.32,
                 away_charge_fraction: 0.8,
-                away_charge_power_kw: 7.2,
+                away_charge_power_w: 7200.0,
             },
             hares_core::ChaCha8Rng::from_seed([42u8; 32]),
         )))
@@ -428,11 +455,11 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
                     min_soc: 0.1,
                     max_soc: 0.9,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 price_schedule: None,
                 steps_per_day: 1440,
                 min_dwell_steps: 0,
@@ -440,7 +467,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         )))
         .unwrap();
 
-    let ref_results = match dwelling_ref.simulate() {
+    let ref_results = match run_collecting_steps(&mut dwelling_ref) {
         Ok(r) => r,
         Err(err) => {
             return Err(vec![format!("reference simulation failed: {err}")]);
@@ -477,18 +504,18 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
             hares_core::actors::EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(48_280.32),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(600.0),
                 arrival_time: None,
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 30.0,
+                fuel_economy_j_per_m: 671.0808876163206,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7200.0,
+                average_speed_m_per_s: 13.4112,
+                range_anxiety_distance_m: 48_280.32,
                 away_charge_fraction: 0.8,
-                away_charge_power_kw: 7.2,
+                away_charge_power_w: 7200.0,
             },
             hares_core::ChaCha8Rng::from_seed([42u8; 32]),
         )))
@@ -501,11 +528,11 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
                     min_soc: 0.1,
                     max_soc: 0.9,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 price_schedule: None,
                 steps_per_day: 1440,
                 min_dwell_steps: 0,
@@ -580,18 +607,18 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
             hares_core::actors::EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 0.9 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(48_280.32),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(600.0),
                 arrival_time: None,
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 30.0,
+                fuel_economy_j_per_m: 671.0808876163206,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7200.0,
+                average_speed_m_per_s: 13.4112,
+                range_anxiety_distance_m: 48_280.32,
                 away_charge_fraction: 0.8,
-                away_charge_power_kw: 7.2,
+                away_charge_power_w: 7200.0,
             },
             hares_core::ChaCha8Rng::from_seed([42u8; 32]),
         )))
@@ -604,11 +631,11 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
                     min_soc: 0.1,
                     max_soc: 0.9,
                     solar_only_charging: false,
-                    surplus_deadband_kw: 0.0,
+                    surplus_deadband_w: 0.0,
                 },
                 grid_export_rule: GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 price_schedule: None,
                 steps_per_day: 1440,
                 min_dwell_steps: 0,
@@ -625,7 +652,7 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         restarted_steps.push(step);
     }
 
-    let ref_tail = &ref_results.steps[CHECKPOINT_AT_STEP as usize..];
+    let ref_tail = &ref_results[CHECKPOINT_AT_STEP as usize..];
     let compare_len = ref_tail.len().min(restarted_steps.len());
     if compare_len == 0 {
         failures.push("no steps to compare after checkpoint restart".to_string());
@@ -633,14 +660,13 @@ pub fn run_actor_state_checkpoint_roundtrip() -> Result<(), Vec<String>> {
         for i in 0..compare_len {
             let ref_step = &ref_tail[i];
             let rst_step = &restarted_steps[i];
-            let power_diff =
-                (ref_step.net_electric_power_kw - rst_step.net_electric_power_kw).abs();
+            let power_diff = (ref_step.net_electric_power_w - rst_step.net_electric_power_w).abs();
             if power_diff > 1e-9 {
                 failures.push(format!(
                     "step[{}] power divergence after checkpoint: ref={:.9} restart={:.9} diff={:.2e}",
                     CHECKPOINT_AT_STEP as usize + i,
-                    ref_step.net_electric_power_kw,
-                    rst_step.net_electric_power_kw,
+                    ref_step.net_electric_power_w,
+                    rst_step.net_electric_power_w,
                     power_diff,
                 ));
                 break;

@@ -9,15 +9,13 @@ use hares_types::rng::RngStream;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
-    EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError,
-    HeatTransferDirection, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    ScheduleSource, Telemetry, TelemetryField, ZoneId, telemetry_keys as tk,
+    EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
+    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
+    telemetry_keys as tk,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
-
-use hares_physics::units::power_kw_to_w;
 
 use crate::config::constructor_equipment_id;
 use crate::gain_fractions::{GainFractions, accumulate_zone_gain};
@@ -32,12 +30,12 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 use hares_types::zip::{ResolvedZip, ZipLoad};
 
 /// Format version of `EventBasedLoadState` and `WetApplianceState`.
-const EVENT_LOAD_CHECKPOINT_VERSION: u32 = 3;
+const EVENT_LOAD_CHECKPOINT_VERSION: u32 = 4;
 /// ChaCha8 words consumed by one `f64` start draw.
 const WORDS_PER_DRAW: u128 = 2;
 
 const KEY_N_UNITS: &str = "n_units";
-const KEY_ACTIVE_POWER_KW: &str = "active_power_kw";
+const KEY_ACTIVE_POWER_W: &str = "active_power_w";
 const KEY_ACTIVE_DURATION_S: &str = "active_duration_s";
 const KEY_COOLDOWN_DURATION_S: &str = "cooldown_duration_s";
 const KEY_PHASE_LEN: &str = "phase_len";
@@ -47,37 +45,36 @@ const KEY_EVENT_PROBABILITY_SOURCE: &str = "event_probability_source";
 const KEY_EVENT_PROBABILITY_SCHEDULE_COL: &str = "event_probability_schedule_col";
 const KEY_EVENT_PROBABILITY_CONSTANT: &str = "event_probability_constant";
 
-const KEY_HOT_WATER_DRAW_VOLUME_L: &str = "hot_water_draw_volume_l";
-const KEY_EVENT_POWER_KW_SERIES: &str = "event_power_kw_series";
+const KEY_EVENT_POWER_W_SERIES: &str = "event_power_w_series";
 const KEY_FUEL_TYPE: &str = "fuel_type";
 
 #[derive(Clone, Debug, PartialEq)]
 struct ExtractedEvent {
     start_step: usize,
     end_step: usize,
-    power_kw: f64,
+    power_w: f64,
 }
 
-/// Extract deterministic events from a kW time series.
+/// Extract deterministic events from a watt time series.
 /// Contiguous non-zero regions become events with averaged power.
 /// Mirrors OCHRE's `EventBasedLoad.extract_events()`.
-fn extract_events_from_kw_series(kw_series: &[f64]) -> Vec<ExtractedEvent> {
+fn extract_events_from_w_series(w_series: &[f64]) -> Vec<ExtractedEvent> {
     let mut events = Vec::new();
     let mut i = 0;
-    while i < kw_series.len() {
-        if kw_series[i] > 0.0 {
+    while i < w_series.len() {
+        if w_series[i] > 0.0 {
             let start = i;
             let mut sum = 0.0;
             let mut count = 0usize;
-            while i < kw_series.len() && kw_series[i] > 0.0 {
-                sum += kw_series[i];
+            while i < w_series.len() && w_series[i] > 0.0 {
+                sum += w_series[i];
                 count += 1;
                 i += 1;
             }
             events.push(ExtractedEvent {
                 start_step: start,
                 end_step: i,
-                power_kw: sum / count as f64,
+                power_w: sum / count as f64,
             });
         } else {
             i += 1;
@@ -101,10 +98,11 @@ struct EventReplay {
 impl EventReplay {
     fn from_config(config: &EquipmentConfig) -> Self {
         config
-            .get_f64_array(KEY_EVENT_POWER_KW_SERIES)
-            .map(|kw_series| Self {
-                events: extract_events_from_kw_series(kw_series),
-                schedule_len: kw_series.len(),
+            .get_f64_array(KEY_EVENT_POWER_W_SERIES)
+            // The series enters in W (SI); the replay holds W (SI).
+            .map(|w_series| Self {
+                events: extract_events_from_w_series(w_series),
+                schedule_len: w_series.len(),
                 current: None,
             })
             .unwrap_or_default()
@@ -138,15 +136,15 @@ impl EventReplay {
     }
 
     /// The power of the event under way, if one is.
-    fn power_kw(&self) -> Option<f64> {
-        self.current.map(|idx| self.events[idx].power_kw)
+    fn power_w(&self) -> Option<f64> {
+        self.current.map(|idx| self.events[idx].power_w)
     }
 
-    fn expected_mean_power_kw(
+    fn expected_mean_power_w(
         &self,
         month_multipliers: Option<[f64; 12]>,
     ) -> Option<crate::ExpectedMeanPower> {
-        expected_event_mean_power_kw(&self.events, self.schedule_len, month_multipliers)
+        expected_event_mean_power_w(&self.events, self.schedule_len, month_multipliers)
     }
 }
 
@@ -163,7 +161,7 @@ impl EventReplay {
 /// series alone — so the expectation is `None` ("not computable without
 /// simulation") rather than the unscaled mean the premise aggregation
 /// would use as this equipment's weight.
-fn expected_event_mean_power_kw(
+fn expected_event_mean_power_w(
     events: &[ExtractedEvent],
     schedule_len: usize,
     month_multipliers: Option<[f64; 12]>,
@@ -173,7 +171,7 @@ fn expected_event_mean_power_kw(
     }
     let energy_over_schedule = events
         .iter()
-        .map(|e| e.power_kw * (e.end_step - e.start_step) as f64)
+        .map(|e| e.power_w * (e.end_step - e.start_step) as f64)
         .sum::<f64>();
     let unscaled = energy_over_schedule / schedule_len as f64;
     let scaled = match month_multipliers {
@@ -196,16 +194,15 @@ fn expected_event_mean_power_kw(
         }
     };
     if scaled.is_finite() {
-        Some(crate::ExpectedMeanPower::Kw(scaled))
+        Some(crate::ExpectedMeanPower::W(scaled))
     } else {
         None
     }
 }
 
 const PHASE_PREFIX: &str = "phase_";
-const PHASE_POWER_SUFFIX: &str = "_power_kw";
+const PHASE_POWER_SUFFIX: &str = "_power_w";
 const PHASE_DURATION_SUFFIX: &str = "_duration_s";
-const PHASE_WATER_DRAW_SUFFIX: &str = "_has_water_draw";
 
 /// The parameters both event-driven kinds read beside the ones every
 /// raw-parameter load reads: when events may start, the fuel and the
@@ -217,7 +214,7 @@ pub(crate) const EVENT_PARAMS: &[RawParam] = &[
     RawParam::key(KEY_EVENT_PROBABILITY_SCHEDULE_COL, ParamKind::Number),
     RawParam::key(KEY_EVENT_PROBABILITY_CONSTANT, ParamKind::Number),
     RawParam::key(KEY_FUEL_TYPE, ParamKind::Text),
-    RawParam::key(KEY_EVENT_POWER_KW_SERIES, ParamKind::NumberList),
+    RawParam::key(KEY_EVENT_POWER_W_SERIES, ParamKind::NumberList),
 ];
 
 const fn phase_param(suffix: &'static str, kind: ParamKind) -> RawParam {
@@ -226,7 +223,7 @@ const fn phase_param(suffix: &'static str, kind: ParamKind) -> RawParam {
 
 /// What an [`EventBasedLoad`] alone reads.
 pub(crate) const EVENT_LOAD_PARAMS: &[RawParam] = &[
-    RawParam::key(KEY_ACTIVE_POWER_KW, ParamKind::Number),
+    RawParam::key(KEY_ACTIVE_POWER_W, ParamKind::Number),
     RawParam::key(KEY_ACTIVE_DURATION_S, ParamKind::Number),
     RawParam::key(KEY_COOLDOWN_DURATION_S, ParamKind::Number),
 ];
@@ -235,13 +232,11 @@ pub(crate) const EVENT_LOAD_PARAMS: &[RawParam] = &[
 /// its cycle when `phase_len` is absent or 0.
 pub(crate) const WET_APPLIANCE_PARAMS: &[RawParam] = &[
     RawParam::key(KEY_N_UNITS, ParamKind::Number),
-    RawParam::key(KEY_HOT_WATER_DRAW_VOLUME_L, ParamKind::Number),
-    RawParam::key(KEY_ACTIVE_POWER_KW, ParamKind::Number),
+    RawParam::key(KEY_ACTIVE_POWER_W, ParamKind::Number),
     RawParam::key(KEY_ACTIVE_DURATION_S, ParamKind::Number),
     RawParam::key(KEY_PHASE_LEN, ParamKind::Number),
     phase_param(PHASE_POWER_SUFFIX, ParamKind::Number),
     phase_param(PHASE_DURATION_SUFFIX, ParamKind::Number),
-    phase_param(PHASE_WATER_DRAW_SUFFIX, ParamKind::Bool),
 ];
 
 /// The classes registered as [`EventBasedLoad`]s.
@@ -284,7 +279,6 @@ struct WetApplianceState {
     elapsed_in_phase_s: f64,
     load_fraction: f64,
     forced_mode: Option<ForcedMode>,
-    hot_water_draw_rate_kg_s: f64,
     rng_stream: RngStream,
     rng_draws: u64,
     event_window_source_state: ScheduleSourceState,
@@ -294,9 +288,8 @@ struct WetApplianceState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CyclePhase {
-    power_kw: f64,
+    power_w: f64,
     duration_s: f64,
-    has_water_draw: bool,
 }
 
 /// Event-based stochastic load with an Idle -> Active -> Cooldown cycle.
@@ -310,7 +303,10 @@ pub struct EventBasedLoad {
     event_window_source: ScheduleSource,
     event_probability_source: ScheduleSource,
 
-    active_power_kw: f64,
+    active_power_w: f64,
+    /// The config's active power as it entered, in W (SI): the read-back
+    /// reports it directly.
+    configured_active_power_w: f64,
     active_duration_s: f64,
     cooldown_duration_s: f64,
     gains: GainFractions,
@@ -360,8 +356,6 @@ pub struct WetAppliance {
     forced_mode: Option<ForcedMode>,
     delay_remaining_s: f64,
 
-    hot_water_draw_rate_kg_s: f64,
-
     /// `None` until `init` (or a checkpoint restore) supplies the stream.
     start_draws: Option<StartDraws>,
 
@@ -404,7 +398,8 @@ impl EventBasedLoad {
             fuel_type: FuelType::Electric,
             event_window_source: ScheduleSource::Constant(1.0),
             event_probability_source: ScheduleSource::Constant(1.0),
-            active_power_kw: 0.0,
+            active_power_w: 0.0,
+            configured_active_power_w: 0.0,
             active_duration_s: 0.0,
             cooldown_duration_s: 0.0,
             gains: GainFractions::default(),
@@ -502,29 +497,25 @@ impl EventBasedLoad {
         bus_energized: bool,
     ) -> std::result::Result<(), HaresError> {
         let active_now = self.phase == EventPhase::Active && bus_energized;
-        // PowerSetpoint overrides the configured active_power_kw for this step,
+        // PowerSetpoint overrides the configured active_power_w for this step,
         // but only when the equipment is actually in an active event phase.
         // OCHRE gates p_setpoint on self.mode == "On".
-        let active_power_kw = if active_now {
-            let base_kw = self.replay.power_kw().unwrap_or(self.active_power_kw);
+        let active_power_w = if active_now {
+            let base_w = self.replay.power_w().unwrap_or(self.active_power_w);
             self.power_setpoint_override
                 .take()
-                .unwrap_or(base_kw * self.load_fraction.max(0.0) * month_scale)
+                .unwrap_or(base_w * self.load_fraction.max(0.0) * month_scale)
         } else {
             self.power_setpoint_override = None;
             0.0
         };
 
         let is_fuel = self.fuel_type != FuelType::Electric;
-        let fuel_consumption_w = if is_fuel {
-            power_kw_to_w(active_power_kw)
-        } else {
-            0.0
-        };
-        let raw_electric_kw = if is_fuel { 0.0 } else { active_power_kw };
+        let fuel_consumption_w = if is_fuel { active_power_w } else { 0.0 };
+        let raw_electric_w = if is_fuel { 0.0 } else { active_power_w };
 
-        let (electric_power_kw, reactive_power_kvar) = if raw_electric_kw > 0.0 {
-            self.zip.apply(raw_electric_kw, voltage_pu)
+        let (electric_power_w, reactive_power_var) = if raw_electric_w > 0.0 {
+            self.zip.apply(raw_electric_w, voltage_pu)
         } else {
             (0.0, 0.0)
         };
@@ -532,14 +523,14 @@ impl EventBasedLoad {
         // Thermal gains come from all input energy regardless of fuel type.
         // Use the same W value sent to the electrical port to avoid a redundant
         // kW→W conversion at the electrical↔thermal boundary.
-        let active_power_w = power_kw_to_w(electric_power_kw);
+        let active_power_w = electric_power_w;
         let gain_source_w = active_power_w + fuel_consumption_w;
         let gain = self.gains.of(gain_source_w);
 
-        if electric_power_kw != 0.0 {
+        if electric_power_w != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w,
-                reactive_power_kvar,
+                reactive_power_var,
             })?;
         }
 
@@ -552,9 +543,9 @@ impl EventBasedLoad {
 
         accumulate_zone_gain(ports, self.descriptor.zone, gain)?;
 
-        self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
+        self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry
             .set(tk::SENSIBLE_GAIN_W, gain_source_w * self.gains.sensible);
         self.telemetry.set(tk::LATENT_GAIN_W, gain.latent_w);
@@ -562,12 +553,12 @@ impl EventBasedLoad {
         self.telemetry.set(tk::STATE, phase_ordinal(self.phase));
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
-                reactive_power_kvar: self
+                electric_w: Some(ElectricPower::Consumption(electric_power_w.max(0.0))),
+                reactive_power_var: self
                     .descriptor
                     .core_capabilities
                     .contains(CoreCapabilities::REACTIVE)
-                    .then_some(reactive_power_kvar),
+                    .then_some(reactive_power_var),
                 fuel_w: self
                     .descriptor
                     .core_capabilities
@@ -597,8 +588,66 @@ impl Equipment for EventBasedLoad {
         EVENT_LOAD_CHECKPOINT_VERSION
     }
 
+    fn reset_stochastic_state(&mut self) {
+        // The construction position: idle, no delay, the start stream at
+        // its first draw, the schedule sources at their seeds.
+        self.phase = EventPhase::Idle;
+        self.remaining_phase_s = 0.0;
+        self.delay_remaining_s = 0.0;
+        self.replay.current = None;
+        self.event_window_source.reset();
+        self.event_probability_source.reset();
+        if let Some(draws) = self.start_draws.as_mut() {
+            draws.draws = 0;
+            draws.rng = draws.stream.rng_at(0);
+        }
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "active_power_w",
+                self.configured_active_power_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "active_duration_s",
+                self.active_duration_s,
+                hares_types::Unit::Second,
+            ),
+        ]
+    }
+
     fn uses_rng_stream(&self) -> bool {
         true
+    }
+
+    fn reseed(&mut self, seed: [u8; 32]) -> crate::Result<()> {
+        match self.start_draws.as_mut() {
+            Some(draws) => {
+                // The identity nonce construction assigned is kept; the
+                // dwelling's generator key is replaced and the stream
+                // starts over at word position zero.
+                draws.stream = RngStream {
+                    seed,
+                    stream: draws.stream.stream,
+                };
+                draws.rng = draws.stream.rng_at(0);
+                draws.draws = 0;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
+        self.start_draws
+            .as_ref()
+            .map(|draws| hares_types::rng::RngStreamState {
+                seed: draws.stream.seed,
+                stream: draws.stream.stream,
+                word_pos: draws.rng.get_word_pos(),
+            })
     }
 
     fn descriptor(&self) -> &EquipmentDescriptor {
@@ -622,7 +671,10 @@ impl Equipment for EventBasedLoad {
         self.event_window_source = window_source;
         self.event_probability_source = probability_source;
 
-        self.active_power_kw = parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0);
+        // The raw key enters in W (SI); the load holds W (SI).
+        self.configured_active_power_w =
+            parse_non_negative(config, KEY_ACTIVE_POWER_W)?.unwrap_or(1000.0);
+        self.active_power_w = self.configured_active_power_w;
         self.active_duration_s = parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0);
         self.cooldown_duration_s =
             parse_non_negative(config, KEY_COOLDOWN_DURATION_S)?.unwrap_or(0.0);
@@ -727,7 +779,26 @@ impl Equipment for EventBasedLoad {
         // row, delay_remaining_s decrements and phase timers run. Cycles that
         // fall during the outage are missed, not deferred. Islanded homes keep
         // an energized bus and are not affected. See docs/outage-behavior.md.
-        let bus_energized = env.grid.bus_energized();
+        // An unavailable period zeroing the load's table row (a Vacancy for
+        // the occupant-driven rows, a Power Outage for the rest) zeroes the
+        // step's outputs the same way, beside the column zeroing the
+        // resolution applies.
+        let period_zeroed =
+            crate::unavailable_period_rows_for_equipment(self.descriptor.name.as_str())
+                .iter()
+                .any(|row| {
+                    row.zeroed_by
+                        .iter()
+                        .any(|kind| kind.zeroed(env.unavailable_periods))
+                });
+        if period_zeroed {
+            tracing::debug!(
+                load = %self.descriptor.name,
+                "the step's unavailable periods zero the event load's table \
+                 row: the load's outputs are zero for the step"
+            );
+        }
+        let bus_energized = env.grid.bus_energized() && !period_zeroed;
 
         let dt_s = dt.as_secs_f64();
         if self.delay_remaining_s > 0.0 {
@@ -772,8 +843,8 @@ impl Equipment for EventBasedLoad {
         Some(self.zip)
     }
 
-    fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
-        self.replay.expected_mean_power_kw(self.month_multipliers)
+    fn expected_mean_power_w(&self) -> Option<crate::ExpectedMeanPower> {
+        self.replay.expected_mean_power_w(self.month_multipliers)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -836,8 +907,8 @@ impl Equipment for EventBasedLoad {
         let caps = self.descriptor.core_capabilities;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: caps.contains(CoreCapabilities::REACTIVE).then_some(0.0),
+                electric_w: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_var: caps.contains(CoreCapabilities::REACTIVE).then_some(0.0),
                 fuel_w: caps.contains(CoreCapabilities::FUEL).then_some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: 0.0,
@@ -873,15 +944,17 @@ impl Equipment for EventBasedLoad {
             ControlSignal::ModeOverride { mode } => {
                 self.forced_mode = Some(mode_to_forced(*mode));
             }
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                if !active_power_kw.is_finite() {
+            ControlSignal::ModeOverrideRelease => {
+                self.forced_mode = None;
+            }
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                if !active_power_w.is_finite() {
                     return Err(HaresError::Control(
-                        "EventBasedLoad PowerSetpoint active_power_kw must be finite".to_string(),
+                        "EventBasedLoad PowerSetpoint active_power_w must be finite".to_string(),
                     ));
                 }
-                self.power_setpoint_override = Some(active_power_kw.max(0.0));
+                let setpoint_w = *active_power_w;
+                self.power_setpoint_override = Some(setpoint_w.max(0.0));
             }
             ControlSignal::EventDelay { delay_s } => {
                 if self.phase == EventPhase::Active {
@@ -935,9 +1008,8 @@ impl WetAppliance {
             event_window_source: ScheduleSource::Constant(1.0),
             event_probability_source: ScheduleSource::Constant(1.0),
             phases: vec![CyclePhase {
-                power_kw: 1.0,
+                power_w: 1.0,
                 duration_s: 900.0,
-                has_water_draw: false,
             }],
             n_units: 1.0,
             gains: GainFractions::default(),
@@ -948,7 +1020,6 @@ impl WetAppliance {
             load_fraction: 1.0,
             forced_mode: None,
             delay_remaining_s: 0.0,
-            hot_water_draw_rate_kg_s: 0.0,
             start_draws: config.rng_stream.map(|stream| StartDraws::at(stream, 0)),
             replay: EventReplay::default(),
             zip: ResolvedZip::governing(ZipLoad::constant_power()),
@@ -1026,40 +1097,36 @@ impl WetAppliance {
         voltage_pu: f64,
         bus_energized: bool,
     ) -> std::result::Result<(), HaresError> {
-        let active_power_kw = if self.active && bus_energized {
+        let active_power_w = if self.active && bus_energized {
             // A replayed event draws its own power; a stochastic cycle draws
             // the configured phase power times n_units.
-            let base_kw = self
+            let base_w = self
                 .replay
-                .power_kw()
-                .unwrap_or(self.phases[self.phase_index].power_kw * self.n_units);
-            base_kw * self.load_fraction.max(0.0) * month_scale
+                .power_w()
+                .unwrap_or(self.phases[self.phase_index].power_w * self.n_units);
+            base_w * self.load_fraction.max(0.0) * month_scale
         } else {
             0.0
         };
 
         let is_fuel = self.fuel_type != FuelType::Electric;
-        let fuel_consumption_w = if is_fuel {
-            power_kw_to_w(active_power_kw)
-        } else {
-            0.0
-        };
-        let raw_electric_kw = if is_fuel { 0.0 } else { active_power_kw };
+        let fuel_consumption_w = if is_fuel { active_power_w } else { 0.0 };
+        let raw_electric_w = if is_fuel { 0.0 } else { active_power_w };
 
-        let (electric_power_kw, reactive_power_kvar) = if raw_electric_kw > 0.0 {
-            self.zip.apply(raw_electric_kw, voltage_pu)
+        let (electric_power_w, reactive_power_var) = if raw_electric_w > 0.0 {
+            self.zip.apply(raw_electric_w, voltage_pu)
         } else {
             (0.0, 0.0)
         };
 
-        let active_power_w = power_kw_to_w(electric_power_kw);
+        let active_power_w = electric_power_w;
         let gain_source_w = active_power_w + fuel_consumption_w;
         let gain = self.gains.of(gain_source_w);
 
-        if electric_power_kw != 0.0 {
+        if electric_power_w != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w,
-                reactive_power_kvar,
+                reactive_power_var,
             })?;
         }
 
@@ -1072,52 +1139,9 @@ impl WetAppliance {
 
         accumulate_zone_gain(ports, self.descriptor.zone, gain)?;
 
-        let current_phase_has_water = self
-            .phases
-            .get(self.phase_index)
-            .is_some_and(|p| p.has_water_draw);
-
-        if bus_energized
-            && self.active
-            && current_phase_has_water
-            && self.hot_water_draw_rate_kg_s > 0.0
-        {
-            let flow_rate_kg_s = self.hot_water_draw_rate_kg_s * self.load_fraction.max(0.0);
-            #[cfg(feature = "observe")]
-            tracing::info!(
-                water_draw_flow_kg_s = flow_rate_kg_s,
-                phase_has_water_draw = true,
-                equipment = %self.descriptor.name,
-                "wet appliance water draw active"
-            );
-            ports.accumulate(&PortContribution::Fluid {
-                loop_id: crate::water_heater::DHW_DEMAND_LOOP,
-                flow_rate_kg_s,
-                supply_temp_c: 0.0,
-                return_temp_c: 0.0,
-                fluid_type: FluidType::Water,
-                thermal_power_w: None,
-                node_id: FluidNodeId(0),
-                direction: HeatTransferDirection::Source,
-            })?;
-        }
-
-        // Report zero flow when phase lacks water draw or appliance is inactive.
-        #[cfg(feature = "observe")]
-        {
-            if !current_phase_has_water || !self.active {
-                tracing::info!(
-                    water_draw_flow_kg_s = 0.0,
-                    phase_has_water_draw = current_phase_has_water,
-                    equipment = %self.descriptor.name,
-                    "wet appliance water draw idle"
-                );
-            }
-        }
-
-        self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_kw);
+        self.telemetry.set(tk::ACTIVE_POWER_KW, electric_power_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry
             .set(tk::SENSIBLE_GAIN_W, gain_source_w * self.gains.sensible);
         self.telemetry.set(tk::LATENT_GAIN_W, gain.latent_w);
@@ -1128,12 +1152,12 @@ impl WetAppliance {
         );
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
-                reactive_power_kvar: self
+                electric_w: Some(ElectricPower::Consumption(electric_power_w.max(0.0))),
+                reactive_power_var: self
                     .descriptor
                     .core_capabilities
                     .contains(CoreCapabilities::REACTIVE)
-                    .then_some(reactive_power_kvar),
+                    .then_some(reactive_power_var),
                 fuel_w: self
                     .descriptor
                     .core_capabilities
@@ -1163,8 +1187,58 @@ impl Equipment for WetAppliance {
         EVENT_LOAD_CHECKPOINT_VERSION
     }
 
+    fn reset_stochastic_state(&mut self) {
+        // The construction position: idle mid-cycle nowhere, no delay, the
+        // start stream at its first draw, the schedule sources at their
+        // seeds.
+        self.active = false;
+        self.phase_index = 0;
+        self.elapsed_in_phase_s = 0.0;
+        self.delay_remaining_s = 0.0;
+        self.replay.current = None;
+        self.event_window_source.reset();
+        self.event_probability_source.reset();
+        if let Some(draws) = self.start_draws.as_mut() {
+            draws.draws = 0;
+            draws.rng = draws.stream.rng_at(0);
+        }
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![hares_types::ResolvedParameter::new(
+            "n_units",
+            self.n_units,
+            hares_types::Unit::Count,
+        )]
+    }
+
     fn uses_rng_stream(&self) -> bool {
         true
+    }
+
+    fn reseed(&mut self, seed: [u8; 32]) -> crate::Result<()> {
+        match self.start_draws.as_mut() {
+            Some(draws) => {
+                draws.stream = RngStream {
+                    seed,
+                    stream: draws.stream.stream,
+                };
+                draws.rng = draws.stream.rng_at(0);
+                draws.draws = 0;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
+        self.start_draws
+            .as_ref()
+            .map(|draws| hares_types::rng::RngStreamState {
+                seed: draws.stream.seed,
+                stream: draws.stream.stream,
+                word_pos: draws.rng.get_word_pos(),
+            })
     }
 
     fn descriptor(&self) -> &EquipmentDescriptor {
@@ -1246,29 +1320,7 @@ impl Equipment for WetAppliance {
                 CoreCapabilities::empty()
             };
 
-        let water_draw_phases_duration_s: f64 = self
-            .phases
-            .iter()
-            .filter(|p| p.has_water_draw)
-            .map(|p| p.duration_s)
-            .sum();
-        self.hot_water_draw_rate_kg_s = if water_draw_phases_duration_s > 0.0 {
-            config
-                .get_f64(KEY_HOT_WATER_DRAW_VOLUME_L)
-                .unwrap_or(0.0)
-                .max(0.0)
-                / water_draw_phases_duration_s
-        } else {
-            0.0
-        };
-
         self.ports = ports_for_zone(self.descriptor.zone);
-        if self.hot_water_draw_rate_kg_s > 0.0 {
-            self.ports.push(PortDeclaration::fluid(
-                crate::water_heater::DHW_DEMAND_LOOP,
-                FluidType::Water,
-            ));
-        }
         if self.fuel_type != FuelType::Electric {
             self.ports.push(PortDeclaration::fuel());
         }
@@ -1355,8 +1407,8 @@ impl Equipment for WetAppliance {
         Some(self.zip)
     }
 
-    fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
-        self.replay.expected_mean_power_kw(self.month_multipliers)
+    fn expected_mean_power_w(&self) -> Option<crate::ExpectedMeanPower> {
+        self.replay.expected_mean_power_w(self.month_multipliers)
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1368,7 +1420,6 @@ impl Equipment for WetAppliance {
                 elapsed_in_phase_s: self.elapsed_in_phase_s,
                 load_fraction: self.load_fraction,
                 forced_mode: self.forced_mode,
-                hot_water_draw_rate_kg_s: self.hot_water_draw_rate_kg_s,
                 rng_stream: start_draws.stream,
                 rng_draws: start_draws.draws,
                 event_window_source_state: capture_schedule_source_state(&self.event_window_source),
@@ -1402,15 +1453,8 @@ impl Equipment for WetAppliance {
         self.load_fraction = decoded.load_fraction;
         self.forced_mode = decoded.forced_mode;
         self.delay_remaining_s = decoded.delay_remaining_s;
-        self.hot_water_draw_rate_kg_s = decoded.hot_water_draw_rate_kg_s;
 
         self.ports = ports_for_zone(self.descriptor.zone);
-        if self.hot_water_draw_rate_kg_s > 0.0 {
-            self.ports.push(PortDeclaration::fluid(
-                crate::water_heater::DHW_DEMAND_LOOP,
-                FluidType::Water,
-            ));
-        }
         if self.fuel_type != FuelType::Electric {
             self.ports.push(PortDeclaration::fuel());
         }
@@ -1434,8 +1478,8 @@ impl Equipment for WetAppliance {
         // committed power.
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: None,
+                electric_w: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_var: None,
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1466,6 +1510,9 @@ impl Equipment for WetAppliance {
             }
             ControlSignal::ModeOverride { mode } => {
                 self.forced_mode = Some(mode_to_forced(*mode));
+            }
+            ControlSignal::ModeOverrideRelease => {
+                self.forced_mode = None;
             }
             ControlSignal::EventDelay { delay_s } => {
                 if self.active {
@@ -1631,10 +1678,11 @@ fn parse_event_probability_source(
 fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>> {
     let count = parse_usize(config, KEY_PHASE_LEN)?.unwrap_or(0);
     if count == 0 {
+        // The raw key enters in W (SI); the phase holds W (SI).
+        let power_w = parse_non_negative(config, KEY_ACTIVE_POWER_W)?.unwrap_or(1000.0);
         return Ok(vec![CyclePhase {
-            power_kw: parse_non_negative(config, KEY_ACTIVE_POWER_KW)?.unwrap_or(1.0),
+            power_w,
             duration_s: parse_positive(config, KEY_ACTIVE_DURATION_S)?.unwrap_or(900.0),
-            has_water_draw: false,
         }]);
     }
 
@@ -1642,9 +1690,9 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
     for idx in 0..count {
         let power_key = format!("{PHASE_PREFIX}{idx}{PHASE_POWER_SUFFIX}");
         let duration_key = format!("{PHASE_PREFIX}{idx}{PHASE_DURATION_SUFFIX}");
-        let water_draw_key = format!("{PHASE_PREFIX}{idx}{PHASE_WATER_DRAW_SUFFIX}");
 
-        let power_kw = config.get_f64(&power_key).ok_or_else(|| {
+        // The raw key enters in W (SI); the phase holds W (SI).
+        let power_w = config.get_f64(&power_key).ok_or_else(|| {
             HaresError::Equipment(format!(
                 "missing wet appliance phase power at index {idx} (key '{power_key}')"
             ))
@@ -1655,7 +1703,7 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
             ))
         })?;
 
-        if !power_kw.is_finite() || power_kw < 0.0 {
+        if !power_w.is_finite() || power_w < 0.0 {
             return Err(HaresError::Equipment(format!(
                 "wet appliance phase power at index {idx} must be finite and >= 0"
             )));
@@ -1666,12 +1714,9 @@ fn parse_cycle_phases(config: &EquipmentConfig) -> crate::Result<Vec<CyclePhase>
             )));
         }
 
-        let has_water_draw = config.get_bool(&water_draw_key).unwrap_or(false);
-
         phases.push(CyclePhase {
-            power_kw,
+            power_w,
             duration_s,
-            has_water_draw,
         });
     }
 
@@ -1804,71 +1849,43 @@ fn default_wet_appliance_telemetry() -> Telemetry {
 
 fn event_load_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ACTIVE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Active electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Sensible thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas fuel consumption rate converted to watts".to_string(),
-        },
-        TelemetryField {
-            name: tk::STATE.to_string(),
-            unit: "-".to_string(),
-            description: "State machine phase (0=Idle,1=Active,2=Cooldown)".to_string(),
-        },
+        TelemetryField::power_kw(tk::ACTIVE_POWER_KW, "Active electrical power draw"),
+        TelemetryField::power_kvar(tk::REACTIVE_POWER_KVAR, "Reactive power draw"),
+        TelemetryField::power_w(
+            tk::SENSIBLE_GAIN_W,
+            "Sensible thermal gain to assigned zone",
+        ),
+        TelemetryField::power_w(tk::LATENT_GAIN_W, "Latent thermal gain to assigned zone"),
+        TelemetryField::power_w(
+            tk::FUEL_INPUT_W,
+            "Gas fuel consumption rate converted to watts",
+        ),
+        TelemetryField::code_code(
+            tk::STATE,
+            &["Idle", "Active", "Cooldown"],
+            "State machine phase (0=Idle,1=Active,2=Cooldown)",
+        ),
     ]
 }
 
 fn wet_appliance_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ACTIVE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Active electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Sensible thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas fuel consumption rate converted to watts".to_string(),
-        },
-        TelemetryField {
-            name: tk::CYCLE_PHASE.to_string(),
-            unit: "-".to_string(),
-            description: "Cycle phase (0=Idle,1..N=phase index + 1)".to_string(),
-        },
+        TelemetryField::power_kw(tk::ACTIVE_POWER_KW, "Active electrical power draw"),
+        TelemetryField::power_kvar(tk::REACTIVE_POWER_KVAR, "Reactive power draw"),
+        TelemetryField::power_w(
+            tk::SENSIBLE_GAIN_W,
+            "Sensible thermal gain to assigned zone",
+        ),
+        TelemetryField::power_w(tk::LATENT_GAIN_W, "Latent thermal gain to assigned zone"),
+        TelemetryField::power_w(
+            tk::FUEL_INPUT_W,
+            "Gas fuel consumption rate converted to watts",
+        ),
+        TelemetryField::code_code(
+            tk::CYCLE_PHASE,
+            &["Idle"],
+            "Cycle phase (0=Idle,1..N=phase index + 1)",
+        ),
     ]
 }
 
@@ -1922,6 +1939,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1957,7 +1975,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.5.into());
+        raw.insert("active_power_w".to_string(), 1500.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 60.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.4.into());
@@ -1971,9 +1989,9 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 2.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
-        raw.insert("phase_1_power_kw".to_string(), 1.2.into());
+        raw.insert("phase_1_power_w".to_string(), 1200.0.into());
         raw.insert("phase_1_duration_s".to_string(), 120.0.into());
         raw.insert("n_units".to_string(), n_units.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
@@ -2206,6 +2224,36 @@ mod tests {
         assert!((ports.electrical.load_power_w - 750.0).abs() < 1e-6);
     }
 
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the event load back to its own event schedule.
+    #[test]
+    fn mode_release_returns_the_event_to_its_own_schedule() {
+        let mut env = base_env();
+        let config = event_config("event", "EventBasedLoad");
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Off,
+        })
+        .unwrap();
+        set_schedule_payload(&mut env, vec![1.0, 1.0]);
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.load_power_w, 0.0,
+            "the forced-off event load must not run its event"
+        );
+
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            (ports.electrical.load_power_w - 1500.0).abs() < 1e-6,
+            "the released event load must start its event from its own schedule"
+        );
+    }
+
     #[test]
     fn map_ochre_pdf_to_cycle_schedule_aggregates_probabilities() {
         let mut pdf = vec![0.0; 1_440];
@@ -2318,7 +2366,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 2.0.into()); // wraps to 0 for payload len=2
         raw.insert("event_probability_schedule_col".to_string(), 3.0.into()); // wraps to 1 for payload len=2
-        raw.insert("active_power_kw".to_string(), 2.0.into());
+        raw.insert("active_power_w".to_string(), 2000.0.into());
         raw.insert("active_duration_s".to_string(), 30.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -2340,7 +2388,7 @@ mod tests {
         // Create a config with no schedule entries at all
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         // No compact event schedule keys
@@ -2485,7 +2533,6 @@ mod tests {
             elapsed_in_phase_s: 0.0,
             load_fraction: 1.0,
             forced_mode: None,
-            hot_water_draw_rate_kg_s: 0.0,
             rng_stream: eq.start_draws.as_ref().expect("initialized").stream,
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
@@ -2512,7 +2559,7 @@ mod tests {
     }
 
     /// PowerSetpoint overrides active power for the current step only; the next
-    /// step without a new signal reverts to the configured active_power_kw.
+    /// step without a new signal reverts to the configured active_power_w.
     #[test]
     fn power_setpoint_overrides_active_power_for_one_step() {
         // Use a schedule where index 0 is open with probability 1.0 so the
@@ -2522,7 +2569,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         // Long duration so the Active phase persists across multiple steps.
-        raw.insert("active_power_kw".to_string(), 3.0.into());
+        raw.insert("active_power_w".to_string(), 3000.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -2549,8 +2596,8 @@ mod tests {
 
         // Apply a PowerSetpoint override for the next step only.
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 0.5,
-            reactive_power_kvar: None,
+            active_power_w: 500.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -2595,7 +2642,6 @@ mod tests {
             elapsed_in_phase_s: 10.0,
             load_fraction: 1.0,
             forced_mode: None,
-            hot_water_draw_rate_kg_s: 0.0,
             rng_stream: eq.start_draws.as_ref().expect("initialized").stream,
             rng_draws: 0,
             event_window_source_state: super::ScheduleSourceState::Stateless,
@@ -2726,15 +2772,12 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
         let gas_w = eq.telemetry().get(tk::FUEL_INPUT_W).unwrap();
-        let elec_kw = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        let elec_w = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
         assert!(
             gas_w > 0.0,
             "fuel_input_w must be positive for gas equipment"
         );
-        assert_eq!(
-            elec_kw, 0.0,
-            "active_power_kw must be zero for gas equipment"
-        );
+        assert_eq!(elec_w, 0.0, "active_power_w must be zero for gas equipment");
     }
 
     // --- Month multiplier tests ---
@@ -2786,8 +2829,8 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
         let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
-        // active_power_kw=1.5 * load_fraction=1.0 * month_scale=0.5 = 0.75
-        assert!((power - 0.75).abs() < 1e-9, "expected 0.75, got {power}");
+        // active_power_w=1500 W * load_fraction=1.0 * month_scale=0.5 = 750 W
+        assert!((power - 750.0).abs() < 1e-9, "expected 750 W, got {power}");
     }
 
     #[test]
@@ -2807,7 +2850,10 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
         let power = eq.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
-        assert!((power - 1.5).abs() < 1e-9, "expected 1.5, got {power}");
+        assert!(
+            (power - 1500.0).abs() < 1e-9,
+            "expected 1500 W, got {power}"
+        );
     }
 
     #[test]
@@ -2840,7 +2886,7 @@ mod tests {
     fn expected_mean_power_is_zero_when_every_month_is_zeroed() {
         // Deterministic replay of a kW series plus month multipliers that
         // zero every month: the equipment's step-time draw is
-        // `base_kw * load_fraction * month_scale` with month_scale = 0 in
+        // `base_w * load_fraction * month_scale` with month_scale = 0 in
         // all twelve months, so it draws nothing year-round (the step-side
         // zeroing is pinned by month_multiplier_zero_suppresses_event_output
         // and wet_appliance_month_multiplier_zero_suppresses_output above).
@@ -2855,8 +2901,8 @@ mod tests {
         let mut config = event_config("Zeroed Season Load", "EventBasedLoad");
         let extras = config.test_extras_mut();
         extras.insert(
-            "event_power_kw_series".to_string(),
-            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+            "event_power_w_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2000.0, 4000.0, 0.0]),
         );
         for month in 0..12 {
             extras.insert(format!("month_multiplier_{month}"), 0.0.into());
@@ -2865,9 +2911,9 @@ mod tests {
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
-        match eq.expected_mean_power_kw() {
+        match eq.expected_mean_power_w() {
             None => {}
-            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+            Some(crate::ExpectedMeanPower::W(kw)) => assert!(
                 kw.abs() < 1e-12,
                 "a load zeroed in every month has zero expected draw, got {kw}"
             ),
@@ -2878,15 +2924,15 @@ mod tests {
     #[test]
     fn uniform_month_multipliers_scale_the_published_expectation_exactly() {
         // A uniform multiplier applies to every replay step equally, so the
-        // expected mean scales exactly: series [0, 2, 4, 0] kW has mean 1.5
+        // expected mean scales exactly: series [0, 2000, 4000, 0] W has mean 1500 W
         // kW, and a uniform 0.5 month scale halves every step's draw, so
         // the honest expectation is 0.75 kW — not the unscaled 1.5 kW the
         // premise aggregate would otherwise use as this equipment's weight.
         let mut config = event_config("Half Year Load", "EventBasedLoad");
         let extras = config.test_extras_mut();
         extras.insert(
-            "event_power_kw_series".to_string(),
-            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+            "event_power_w_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2000.0, 4000.0, 0.0]),
         );
         for month in 0..12 {
             extras.insert(format!("month_multiplier_{month}"), 0.5.into());
@@ -2895,10 +2941,10 @@ mod tests {
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
-        match eq.expected_mean_power_kw() {
-            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
-                (kw - 0.75).abs() < 1e-12,
-                "uniform 0.5 month scale must halve the expected mean, got {kw}"
+        match eq.expected_mean_power_w() {
+            Some(crate::ExpectedMeanPower::W(w)) => assert!(
+                (w - 750.0).abs() < 1e-9,
+                "uniform 0.5 month scale must halve the expected mean, got {w}"
             ),
             other => panic!("a uniformly scaled load has a computable expectation, got {other:?}"),
         }
@@ -2913,8 +2959,8 @@ mod tests {
         let mut config = event_config("Shoulder Season Load", "EventBasedLoad");
         let extras = config.test_extras_mut();
         extras.insert(
-            "event_power_kw_series".to_string(),
-            crate::config::ConfigValue::FloatArray(vec![0.0, 2.0, 4.0, 0.0]),
+            "event_power_w_series".to_string(),
+            crate::config::ConfigValue::FloatArray(vec![0.0, 2000.0, 4000.0, 0.0]),
         );
         for month in 0..12 {
             let multiplier = if month == 11 { 1.0 } else { 0.0 };
@@ -2925,7 +2971,7 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         assert_eq!(
-            eq.expected_mean_power_kw(),
+            eq.expected_mean_power_w(),
             None,
             "partial month multipliers make the expectation unknowable \
              without simulation; it must be None, not a guessed weight"
@@ -3150,94 +3196,94 @@ mod tests {
 
     #[test]
     fn extract_events_empty_series() {
-        let events = super::extract_events_from_kw_series(&[]);
+        let events = super::extract_events_from_w_series(&[]);
         assert!(events.is_empty());
     }
 
     #[test]
     fn extract_events_all_zeros() {
-        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 0.0]);
+        let events = super::extract_events_from_w_series(&[0.0, 0.0, 0.0]);
         assert!(events.is_empty());
     }
 
     #[test]
     fn extract_events_single_step_event() {
-        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 5.0, 0.0, 0.0]);
+        let events = super::extract_events_from_w_series(&[0.0, 0.0, 5.0, 0.0, 0.0]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].start_step, 2);
         assert_eq!(events[0].end_step, 3);
-        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+        assert!((events[0].power_w - 5.0).abs() < 1e-12);
     }
 
     #[test]
     fn extract_events_multi_step_event_averages_power() {
-        let events = super::extract_events_from_kw_series(&[0.0, 2.0, 4.0, 6.0, 0.0]);
+        let events = super::extract_events_from_w_series(&[0.0, 2.0, 4.0, 6.0, 0.0]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].start_step, 1);
         assert_eq!(events[0].end_step, 4);
         // avg(2, 4, 6) = 4.0
-        assert!((events[0].power_kw - 4.0).abs() < 1e-12);
+        assert!((events[0].power_w - 4.0).abs() < 1e-12);
     }
 
     #[test]
     fn extract_events_two_separate_events() {
-        let events = super::extract_events_from_kw_series(&[1.0, 0.0, 0.0, 3.0, 3.0, 0.0]);
+        let events = super::extract_events_from_w_series(&[1.0, 0.0, 0.0, 3.0, 3.0, 0.0]);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].start_step, 0);
         assert_eq!(events[0].end_step, 1);
-        assert!((events[0].power_kw - 1.0).abs() < 1e-12);
+        assert!((events[0].power_w - 1.0).abs() < 1e-12);
         assert_eq!(events[1].start_step, 3);
         assert_eq!(events[1].end_step, 5);
-        assert!((events[1].power_kw - 3.0).abs() < 1e-12);
+        assert!((events[1].power_w - 3.0).abs() < 1e-12);
     }
 
     #[test]
     fn extract_events_adjacent_events_separated_by_zero() {
-        let events = super::extract_events_from_kw_series(&[1.0, 1.0, 0.0, 2.0, 2.0]);
+        let events = super::extract_events_from_w_series(&[1.0, 1.0, 0.0, 2.0, 2.0]);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].start_step, 0);
         assert_eq!(events[0].end_step, 2);
-        assert!((events[0].power_kw - 1.0).abs() < 1e-12);
+        assert!((events[0].power_w - 1.0).abs() < 1e-12);
         assert_eq!(events[1].start_step, 3);
         assert_eq!(events[1].end_step, 5);
-        assert!((events[1].power_kw - 2.0).abs() < 1e-12);
+        assert!((events[1].power_w - 2.0).abs() < 1e-12);
     }
 
     #[test]
     fn extract_events_event_at_start() {
-        let events = super::extract_events_from_kw_series(&[5.0, 5.0, 0.0, 0.0]);
+        let events = super::extract_events_from_w_series(&[5.0, 5.0, 0.0, 0.0]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].start_step, 0);
         assert_eq!(events[0].end_step, 2);
-        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+        assert!((events[0].power_w - 5.0).abs() < 1e-12);
     }
 
     #[test]
     fn extract_events_event_at_end() {
-        let events = super::extract_events_from_kw_series(&[0.0, 0.0, 5.0, 5.0]);
+        let events = super::extract_events_from_w_series(&[0.0, 0.0, 5.0, 5.0]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].start_step, 2);
         assert_eq!(events[0].end_step, 4);
-        assert!((events[0].power_kw - 5.0).abs() < 1e-12);
+        assert!((events[0].power_w - 5.0).abs() < 1e-12);
     }
 
     #[test]
     fn extract_events_entire_series_is_one_event() {
-        let events = super::extract_events_from_kw_series(&[3.0, 3.0, 3.0]);
+        let events = super::extract_events_from_w_series(&[3.0, 3.0, 3.0]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].start_step, 0);
         assert_eq!(events[0].end_step, 3);
-        assert!((events[0].power_kw - 3.0).abs() < 1e-12);
+        assert!((events[0].power_w - 3.0).abs() < 1e-12);
     }
 
     #[test]
     fn extract_events_varying_power_averages_correctly() {
-        let events = super::extract_events_from_kw_series(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let events = super::extract_events_from_w_series(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].start_step, 0);
         assert_eq!(events[0].end_step, 5);
         // avg(1, 2, 3, 4, 5) = 3.0
-        assert!((events[0].power_kw - 3.0).abs() < 1e-12);
+        assert!((events[0].power_w - 3.0).abs() < 1e-12);
     }
 
     /// Deterministic replay: EventBasedLoad driven by event_power_kw_series emits
@@ -3252,7 +3298,9 @@ mod tests {
     fn deterministic_replay_matches_schedule() {
         use super::super::config::ConfigValue;
 
-        let kw_series = vec![0.0_f64, 2.0, 4.0, 0.0, 0.0, 6.0, 6.0, 0.0];
+        // The series enters in W (SI): the kW series' own values times
+        // 1000, the replay's event power unchanged.
+        let w_series = vec![0.0_f64, 2000.0, 4000.0, 0.0, 0.0, 6000.0, 6000.0, 0.0];
         let expected_w: &[f64] = &[0.0, 3000.0, 3000.0, 0.0, 0.0, 6000.0, 6000.0, 0.0];
 
         let mut raw: std::collections::HashMap<String, ConfigValue> =
@@ -3260,15 +3308,15 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        // active_power_kw is irrelevant in deterministic mode; the series power wins.
-        raw.insert("active_power_kw".to_string(), 99.0.into());
+        // active_power_w is irrelevant in deterministic mode; the series power wins.
+        raw.insert("active_power_w".to_string(), 99000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert("latent_gain_fraction".to_string(), 0.0.into());
         raw.insert(
-            "event_power_kw_series".to_string(),
-            ConfigValue::FloatArray(kw_series),
+            "event_power_w_series".to_string(),
+            ConfigValue::FloatArray(w_series),
         );
         let config = raw_config("replay_test".to_string(), "EventBasedLoad".to_string(), raw);
 
@@ -3328,8 +3376,12 @@ mod tests {
             .unwrap();
         restored.load_state(&checkpoint).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("an event load checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("an event load checkpoint must restore a contract-valid output");
     }
 
     /// save_state captures delay_remaining_s; load_state restores it so the event
@@ -3383,7 +3435,7 @@ mod tests {
     }
 
     // =======================================================================
-    // T3: PowerSetpoint on idle EventBasedLoad → electric_kw == 0.0
+    // T3: PowerSetpoint on idle EventBasedLoad → electric_w == 0.0
     // =======================================================================
 
     #[test]
@@ -3394,8 +3446,8 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3421,7 +3473,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 3.0.into());
+        raw.insert("active_power_w".to_string(), 3000.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -3444,8 +3496,8 @@ mod tests {
         );
 
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 0.75,
-            reactive_power_kvar: None,
+            active_power_w: 750.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -3464,26 +3516,27 @@ mod tests {
     }
 
     // =======================================================================
-    // T5: Deterministic event does not mutate active_power_kw field
+    // T5: Deterministic event does not mutate active_power_w field
     // =======================================================================
 
     #[test]
-    fn deterministic_event_does_not_mutate_active_power_kw_field() {
+    fn deterministic_event_does_not_mutate_active_power_w_field() {
         use super::super::config::ConfigValue;
 
-        let kw_series = vec![0.0_f64, 5.0, 5.0, 0.0];
+        // The series enters in W (SI).
+        let w_series = vec![0.0_f64, 5000.0, 5000.0, 0.0];
         let mut raw: std::collections::HashMap<String, ConfigValue> =
             std::collections::HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 99.0.into());
+        raw.insert("active_power_w".to_string(), 99000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
         raw.insert(
-            "event_power_kw_series".to_string(),
-            ConfigValue::FloatArray(kw_series),
+            "event_power_w_series".to_string(),
+            ConfigValue::FloatArray(w_series),
         );
         let config = raw_config(
             "field_unchanged".to_string(),
@@ -3495,7 +3548,7 @@ mod tests {
         let mut eq = EventBasedLoad::new(config.clone());
         eq.init(&config, &env).unwrap();
 
-        let original_active_power_kw = eq.active_power_kw;
+        let original_active_power_w = eq.active_power_w;
 
         for row in 0..4 {
             let mut slots = hares_types::PortSlots::from_declarations(eq.ports());
@@ -3504,10 +3557,10 @@ mod tests {
         }
 
         assert_eq!(
-            eq.active_power_kw, original_active_power_kw,
-            "deterministic replay must not mutate active_power_kw field; \
-             expected {original_active_power_kw}, got {}",
-            eq.active_power_kw
+            eq.active_power_w, original_active_power_w,
+            "deterministic replay must not mutate the active power working value; \
+             expected {original_active_power_w}, got {}",
+            eq.active_power_w
         );
     }
 
@@ -3522,7 +3575,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 3600.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
@@ -3558,7 +3611,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
@@ -3577,7 +3630,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
@@ -3596,7 +3649,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
@@ -3615,7 +3668,7 @@ mod tests {
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("active_power_kw".to_string(), 1.0.into());
+        raw.insert("active_power_w".to_string(), 1000.0.into());
         raw.insert("active_duration_s".to_string(), 60.0.into());
         raw.insert("cooldown_duration_s".to_string(), 0.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
@@ -3636,7 +3689,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
@@ -3656,7 +3709,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), (-0.1_f64).into());
@@ -3676,7 +3729,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 1.5_f64.into());
@@ -3696,7 +3749,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("phase_0_power_w".to_string(), 500.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.7_f64.into());
@@ -3727,20 +3780,20 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let real_kw = slots.electrical.load_power_w / 1000.0;
-        let reactive_kvar = slots.electrical.reactive_power_kvar;
-        assert!(real_kw > 0.0, "expected non-zero real power");
+        let real_w = slots.electrical.load_power_w;
+        let reactive_var = slots.electrical.reactive_power_var;
+        assert!(real_w > 0.0, "expected non-zero real power");
         assert!(
-            reactive_kvar > 0.0,
-            "expected non-zero reactive power at nominal voltage, got {reactive_kvar}"
+            reactive_var > 0.0,
+            "expected non-zero reactive power at nominal voltage, got {reactive_var}"
         );
         // Clothes Washer has pf=0.65, so tan(acos(0.65)) ≈ 1.169
         // (at v=1.0, multiplier=1.0 and base=1.0, so reactive = real * 1.169 * 1.0).
         let tan_phi = 0.65_f64.clamp(-1.0, 1.0).acos().tan();
-        let expected_reactive = real_kw * tan_phi;
+        let expected_reactive = real_w * tan_phi;
         assert!(
-            (reactive_kvar - expected_reactive).abs() < 1e-9,
-            "expected reactive {expected_reactive} ≈ real × {tan_phi}, got {reactive_kvar}"
+            (reactive_var - expected_reactive).abs() < 1e-9,
+            "expected reactive {expected_reactive} ≈ real × {tan_phi}, got {reactive_var}"
         );
 
         // Test at sag voltage (0.95 pu) with a fresh instance.
@@ -3752,14 +3805,14 @@ mod tests {
         set_schedule_payload(&mut env2, vec![1.0, 1.0]);
         eq2.step(&env2, Duration::from_secs(60), &mut slots2)
             .unwrap();
-        let reactive_sag = slots2.electrical.reactive_power_kvar;
+        let reactive_sag = slots2.electrical.reactive_power_var;
         assert!(
             reactive_sag > 0.0,
             "expected non-zero reactive power at sag voltage, got {reactive_sag}"
         );
         assert!(
-            (reactive_sag - reactive_kvar).abs() > 1e-9,
-            "reactive power should differ between nominal ({reactive_kvar}) and sag ({reactive_sag})"
+            (reactive_sag - reactive_var).abs() > 1e-9,
+            "reactive power should differ between nominal ({reactive_var}) and sag ({reactive_sag})"
         );
     }
 
@@ -3779,7 +3832,7 @@ mod tests {
         let mut slots = PortSlots::from_declarations(eq.ports());
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let reactive_at_nominal = slots.electrical.reactive_power_kvar;
+        let reactive_at_nominal = slots.electrical.reactive_power_var;
         assert!(
             reactive_at_nominal > 0.0,
             "expected non-zero reactive power at nominal voltage, got {reactive_at_nominal}"
@@ -3791,7 +3844,7 @@ mod tests {
         env.grid.voltage_pu = 0.95;
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let reactive_at_sag = slots.electrical.reactive_power_kvar;
+        let reactive_at_sag = slots.electrical.reactive_power_var;
         assert!(
             reactive_at_sag > 0.0,
             "expected non-zero reactive power at sag voltage, got {reactive_at_sag}"
@@ -3819,9 +3872,9 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert!(
-            slots.electrical.reactive_power_kvar.abs() < 1e-12,
+            slots.electrical.reactive_power_var.abs() < 1e-12,
             "expected zero reactive power without ZIP, got {}",
-            slots.electrical.reactive_power_kvar
+            slots.electrical.reactive_power_var
         );
     }
 
@@ -3850,7 +3903,7 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert_eq!(slots.electrical.load_power_w, 0.0);
-        assert_eq!(slots.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(slots.electrical.reactive_power_var, 0.0);
 
         // Islanded: bus at nominal → appliance runs at nominal power.
         env.current_time += ChronoDuration::minutes(1);
@@ -3878,7 +3931,7 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         let power_nominal = slots.electrical.load_power_w;
-        let reactive_nominal = slots.electrical.reactive_power_kvar;
+        let reactive_nominal = slots.electrical.reactive_power_var;
 
         // Sag voltage.
         env.current_time += ChronoDuration::minutes(1);
@@ -3887,7 +3940,7 @@ mod tests {
         set_schedule_payload(&mut env, vec![1.0, 1.0]);
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         let power_sag = slots.electrical.load_power_w;
-        let reactive_sag = slots.electrical.reactive_power_kvar;
+        let reactive_sag = slots.electrical.reactive_power_var;
 
         assert!(power_nominal > 0.0, "expected non-zero real power");
         assert!(
@@ -4013,160 +4066,18 @@ mod tests {
         );
     }
 
-    /// Configure a 3-phase cycle where only phase 0 has water draw.
-    fn wet_config_with_water_draw(only_phase_0_draws: bool) -> (EquipmentConfig, f64) {
-        let volume = 12.0;
-        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
-        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("phase_len".to_string(), 3.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.4.into());
-        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
-        raw.insert("phase_0_has_water_draw".to_string(), true.into());
-        raw.insert("phase_1_power_kw".to_string(), 0.8.into());
-        raw.insert("phase_1_duration_s".to_string(), 60.0.into());
-        raw.insert(
-            "phase_1_has_water_draw".to_string(),
-            (!only_phase_0_draws).into(),
-        );
-        raw.insert("phase_2_power_kw".to_string(), 1.0.into());
-        raw.insert("phase_2_duration_s".to_string(), 60.0.into());
-        raw.insert(
-            "phase_2_has_water_draw".to_string(),
-            (!only_phase_0_draws).into(),
-        );
-        raw.insert("n_units".to_string(), 1.0.into());
-        raw.insert("sensible_gain_fraction".to_string(), 0.2.into());
-        raw.insert("latent_gain_fraction".to_string(), 0.05.into());
-        raw.insert("hot_water_draw_volume_l".to_string(), volume.into());
-        (
-            raw_config(
-                "test_water_draw".to_string(),
-                "Clothes Washer".to_string(),
-                raw,
-            ),
-            volume,
-        )
-    }
-
-    #[test]
-    fn wet_appliance_hot_water_only_during_fill_phases() {
-        let mut env = base_env();
-        let (config, _volume) = wet_config_with_water_draw(true);
-        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
-        eq.init(&config, &env).unwrap();
-
-        let mut slots = PortSlots::from_declarations(eq.ports());
-
-        set_schedule_payload(&mut env, vec![1.0, 1.0]);
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert!(
-            slots.fluid.iter().any(|f| f.total_flow_kg_s > 0.0),
-            "Phase 0 (fill with water draw) should emit fluid flow"
-        );
-
-        env.current_time += ChronoDuration::minutes(1);
-        set_schedule_payload(&mut env, vec![0.0, 0.0]);
-        slots.zero();
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert!(
-            slots.fluid.is_empty() || slots.fluid.iter().all(|f| f.total_flow_kg_s == 0.0),
-            "Phase 1 (no water draw) should emit zero fluid flow"
-        );
-
-        env.current_time += ChronoDuration::minutes(1);
-        set_schedule_payload(&mut env, vec![0.0, 0.0]);
-        slots.zero();
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        assert!(
-            slots.fluid.is_empty() || slots.fluid.iter().all(|f| f.total_flow_kg_s == 0.0),
-            "Phase 2 (no water draw) should emit zero fluid flow"
-        );
-    }
-
-    #[test]
-    fn wet_appliance_no_phantom_draw_during_spin() {
-        let mut env = base_env();
-        let (config, _volume) = wet_config_with_water_draw(true);
-        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
-        eq.init(&config, &env).unwrap();
-
-        let mut slots = PortSlots::from_declarations(eq.ports());
-
-        set_schedule_payload(&mut env, vec![1.0, 1.0]);
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let flow_phase_0: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
-        assert!(flow_phase_0 > 0.0, "Fill/wash phase should draw hot water");
-
-        env.current_time += ChronoDuration::minutes(1);
-        set_schedule_payload(&mut env, vec![0.0, 0.0]);
-        slots.zero();
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-
-        env.current_time += ChronoDuration::minutes(1);
-        set_schedule_payload(&mut env, vec![0.0, 0.0]);
-        slots.zero();
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let flow_phase_2: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
-        assert_eq!(
-            flow_phase_2, 0.0,
-            "Spin/drain phase must not draw hot water"
-        );
-    }
-
-    #[test]
-    fn parse_cycle_phases_respects_water_draw_flag() {
-        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
-        raw.insert("phase_len".to_string(), 2.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
-        raw.insert("phase_0_duration_s".to_string(), 60.0.into());
-        raw.insert("phase_0_has_water_draw".to_string(), true.into());
-        raw.insert("phase_1_power_kw".to_string(), 1.0.into());
-        raw.insert("phase_1_duration_s".to_string(), 120.0.into());
-        // phase_1_has_water_draw intentionally absent
-
-        let config = raw_config(
-            "test_parse_water_draw".to_string(),
-            "Clothes Washer".to_string(),
-            raw,
-        );
-        let phases = super::parse_cycle_phases(&config).unwrap();
-        assert_eq!(phases.len(), 2);
-        assert!(phases[0].has_water_draw);
-        assert!(!phases[1].has_water_draw);
-    }
-
     /// A phase has one spelling, `phase_<n>_*`; a phase given only under
     /// another is missing, not read from it.
     #[test]
     fn parse_cycle_phases_reads_one_spelling() {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("cycle_phase_0_power_kw".to_string(), 0.5.into());
+        raw.insert("cycle_phase_0_power_w".to_string(), 0.5.into());
         raw.insert("cycle_phase_0_duration_s".to_string(), 60.0.into());
 
         let config = raw_config("test_alt_key".to_string(), "Dishwasher".to_string(), raw);
         let err = super::parse_cycle_phases(&config).unwrap_err();
-        assert!(err.to_string().contains("phase_0_power_kw"), "{err}");
-    }
-
-    #[test]
-    fn hot_water_draw_rate_uses_water_phase_duration_only() {
-        let mut env = base_env();
-        let (config, volume) = wet_config_with_water_draw(true);
-        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
-        eq.init(&config, &env).unwrap();
-
-        let mut slots = PortSlots::from_declarations(eq.ports());
-        set_schedule_payload(&mut env, vec![1.0, 1.0]);
-        eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
-        let flow_kg_s: f64 = slots.fluid.iter().map(|f| f.total_flow_kg_s).sum();
-        let expected_rate = volume / 60.0;
-        assert!(
-            (flow_kg_s - expected_rate).abs() < 1e-9,
-            "Draw rate should be volume/water_phase_duration = {volume}/60 = {expected_rate}, got {flow_kg_s}"
-        );
+        assert!(err.to_string().contains("phase_0_power_w"), "{err}");
     }
 
     #[test]
@@ -4203,7 +4114,7 @@ mod tests {
         raw.insert("event_window_schedule_col".to_string(), 0.0.into());
         raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
         raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 2.0.into());
+        raw.insert("phase_0_power_w".to_string(), 2.0.into());
         raw.insert("phase_0_duration_s".to_string(), 60.0.into());
         raw.insert("n_units".to_string(), 1.0.into());
         raw.insert("sensible_gain_fraction".to_string(), 0.5.into());

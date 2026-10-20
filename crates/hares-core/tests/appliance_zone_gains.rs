@@ -12,13 +12,14 @@
 //! the sensible fraction where each appliance is added, lines 80, 121, 172
 //! and 309).
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_equipment::Equipment;
-use hares_io::OutputFormat;
 use hares_io::hpxml::building::{ZoneType, parse_building};
 use hares_types::{FuelType, PortSlots, ZoneId};
 
@@ -79,33 +80,34 @@ fn project_root() -> PathBuf {
 
 fn dwelling_config(run: &Run) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: run.fixture.join(run.hpxml),
-        schedule_path: Some(run.fixture.join(run.schedule)),
-        weather_path: run.weather.clone(),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: DateTime::<FixedOffset>::parse_from_rfc3339(run.start)
-                .expect("start time parses"),
-            duration: Duration::days(run.days),
-            time_res: Duration::seconds(TIME_RES_S),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: run.overrides.clone(),
-        bldg_id: run.bldg_id,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(run.fixture.join(run.hpxml)),
+        schedule: Some(InputSource::Path(run.fixture.join(run.schedule))),
+        weather: WeatherInput::Path(run.weather.clone()),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: DateTime::<FixedOffset>::parse_from_rfc3339(run.start)
+                    .expect("start time parses"),
+                duration: Duration::days(run.days),
+                time_res: Duration::seconds(TIME_RES_S),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            run.overrides.clone(),
+            run.bldg_id,
+            None,
+        ),
     }
 }
 
@@ -538,7 +540,7 @@ fn a_scheduled_load_takes_the_parameters_the_resolver_left_out() {
     let base = inputs_wh(&cz2a_day(None), &["Indoor Lighting"])[0];
     let doubled = inputs_wh(
         &cz2a_day(Some(serde_json::json!({
-            "Indoor Lighting": { "month_multiplier_0": 2.0, "gas_schedule_is_w": false },
+            "Indoor Lighting": { "month_multiplier_0": 2.0 },
         }))),
         &["Indoor Lighting"],
     )[0];
@@ -633,32 +635,35 @@ fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
         .single()
         .expect("valid start time");
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: None,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time,
-            duration: Duration::hours(6),
-            time_res: Duration::seconds(TIME_RES_S),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: None,
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time,
+                duration: Duration::hours(6),
+                time_res: Duration::seconds(TIME_RES_S),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            1,
+            None,
+        ),
     }
 }
 

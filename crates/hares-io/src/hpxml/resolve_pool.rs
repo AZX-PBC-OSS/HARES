@@ -15,10 +15,11 @@ use super::HpxmlError;
 use super::building::XmlNode;
 use super::equipment::{EquipmentSpec, build_spec};
 use super::xml_helpers::{
-    child_f64, child_load_kwh, child_load_therms, child_text, element_id,
+    child_annual_energy_j, child_annual_fuel_energy_j, child_f64, child_text, element_id,
     parse_schedule_extension_params, resolve_local_ref,
 };
 
+use super::elements::*;
 use crate::defaults::DefaultsStore;
 
 /// HPXML PoolType enumeration values (also used for HotTub/Type).
@@ -77,12 +78,12 @@ fn resolve_pools(
     specs: &mut Vec<EquipmentSpec>,
 ) -> HashMap<String, PoolEquipmentLoads> {
     let mut lookup: HashMap<String, PoolEquipmentLoads> = HashMap::new();
-    let Some(pools) = details.child("Pools") else {
+    let Some(pools) = details.child(&POOLS) else {
         return lookup;
     };
-    for pool in pools.children_named("Pool") {
+    for pool in pools.children_named(&POOL) {
         let pool_id = element_id(pool).unwrap_or_default();
-        let pool_type = validate_pool_type(child_text(pool, "Type"), "Pool");
+        let pool_type = validate_pool_type(child_text(pool, &TYPE), "Pool");
         tracing::info!(
             pool_type = %pool_type,
             pool_id = %if pool_id.is_empty() { "none" } else { pool_id.as_str() },
@@ -105,15 +106,15 @@ fn resolve_pool_pumps(
     specs: &mut Vec<EquipmentSpec>,
     loads: &mut PoolEquipmentLoads,
 ) {
-    let Some(pumps) = pool.child("PoolPumps") else {
+    let Some(pumps) = pool.child(&POOL_PUMPS) else {
         return;
     };
-    for pump in pumps.children_named("PoolPump") {
-        let Some(kwh) = child_load_kwh(pump) else {
+    for pump in pumps.children_named(&POOL_PUMP) {
+        let Some(kwh) = child_annual_energy_j(pump) else {
             continue;
         };
         let mut params = Map::new();
-        params.insert("annual_electric_kwh".to_string(), json!(kwh));
+        params.insert("annual_electric_j".to_string(), json!(kwh));
         for (k, v) in parse_schedule_extension_params(pump, "") {
             params.insert(k, v);
         }
@@ -139,12 +140,12 @@ fn resolve_pool_heater(
     specs: &mut Vec<EquipmentSpec>,
     loads: &mut PoolEquipmentLoads,
 ) {
-    let Some(heater) = pool.child("Heater") else {
+    let Some(heater) = pool.child(&HEATER) else {
         return;
     };
     let mut params = Map::new();
-    if let Some(kwh) = child_load_kwh(heater) {
-        params.insert("annual_electric_kwh".to_string(), json!(kwh));
+    if let Some(kwh) = child_annual_energy_j(heater) {
+        params.insert("annual_electric_j".to_string(), json!(kwh));
         for (k, v) in parse_schedule_extension_params(heater, "") {
             params.insert(k, v);
         }
@@ -161,8 +162,8 @@ fn resolve_pool_heater(
             pool_type = %pool_type,
             "Pool heater load (electric) from HPXML <Pools>/<Pool> (annual_electric_kWh)"
         );
-    } else if let Some(therms) = child_load_therms(heater) {
-        params.insert("annual_gas_therms".to_string(), json!(therms));
+    } else if let Some(therms) = child_annual_fuel_energy_j(heater) {
+        params.insert("annual_gas_j".to_string(), json!(therms));
         for (k, v) in parse_schedule_extension_params(heater, "") {
             params.insert(k, v);
         }
@@ -187,11 +188,11 @@ fn resolve_pool_heater(
 // ---------------------------------------------------------------------------
 
 fn resolve_hot_tubs(details: &XmlNode, defaults: &DefaultsStore, specs: &mut Vec<EquipmentSpec>) {
-    let Some(tubs) = details.child("HotTubs") else {
+    let Some(tubs) = details.child(&HOT_TUBS) else {
         return;
     };
-    for tub in tubs.children_named("HotTub") {
-        let tub_type = validate_pool_type(child_text(tub, "Type"), "HotTub");
+    for tub in tubs.children_named(&HOT_TUB) {
+        let tub_type = validate_pool_type(child_text(tub, &TYPE), "HotTub");
         tracing::info!(
             tub_type = %tub_type,
             "Parsing hot tub equipment from HPXML <HotTubs>/<HotTub>"
@@ -207,15 +208,15 @@ fn resolve_hot_tub_pumps(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) {
-    let Some(pumps) = tub.child("HotTubPumps") else {
+    let Some(pumps) = tub.child(&HOT_TUB_PUMPS) else {
         return;
     };
-    for pump in pumps.children_named("HotTubPump") {
-        let Some(kwh) = child_load_kwh(pump) else {
+    for pump in pumps.children_named(&HOT_TUB_PUMP) {
+        let Some(kwh) = child_annual_energy_j(pump) else {
             continue;
         };
         let mut params = Map::new();
-        params.insert("annual_electric_kwh".to_string(), json!(kwh));
+        params.insert("annual_electric_j".to_string(), json!(kwh));
         for (k, v) in parse_schedule_extension_params(pump, "") {
             params.insert(k, v);
         }
@@ -239,12 +240,12 @@ fn resolve_hot_tub_heater(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) {
-    let Some(heater) = tub.child("Heater") else {
+    let Some(heater) = tub.child(&HEATER) else {
         return;
     };
     let mut params = Map::new();
-    if let Some(kwh) = child_load_kwh(heater) {
-        params.insert("annual_electric_kwh".to_string(), json!(kwh));
+    if let Some(kwh) = child_annual_energy_j(heater) {
+        params.insert("annual_electric_j".to_string(), json!(kwh));
         for (k, v) in parse_schedule_extension_params(heater, "") {
             params.insert(k, v);
         }
@@ -259,8 +260,8 @@ fn resolve_hot_tub_heater(
             tub_type = %tub_type,
             "Spa heater load (electric) from HPXML <HotTubs>/<HotTub> (annual_electric_kWh)"
         );
-    } else if let Some(therms) = child_load_therms(heater) {
-        params.insert("annual_gas_therms".to_string(), json!(therms));
+    } else if let Some(therms) = child_annual_fuel_energy_j(heater) {
+        params.insert("annual_gas_j".to_string(), json!(therms));
         for (k, v) in parse_schedule_extension_params(heater, "") {
             params.insert(k, v);
         }
@@ -288,7 +289,7 @@ fn resolve_spas(
     specs: &mut Vec<EquipmentSpec>,
     pool_equipment: &HashMap<String, PoolEquipmentLoads>,
 ) -> Result<(), HpxmlError> {
-    let Some(spas) = details.child("Spas") else {
+    let Some(spas) = details.child(&SPAS) else {
         return Ok(());
     };
     resolve_permanent_spas(spas, defaults, specs, pool_equipment)?;
@@ -302,10 +303,10 @@ fn resolve_permanent_spas(
     specs: &mut Vec<EquipmentSpec>,
     pool_equipment: &HashMap<String, PoolEquipmentLoads>,
 ) -> Result<(), HpxmlError> {
-    for spa in spas.children_named("PermanentSpa") {
-        let Some(loads) = resolve_local_ref(spa, "AttachedToPool", pool_equipment) else {
+    for spa in spas.children_named(&PERMANENT_SPA) {
+        let Some(loads) = resolve_local_ref(spa, &ATTACHED_TO_POOL, pool_equipment) else {
             let idref = spa
-                .child("AttachedToPool")
+                .child(&ATTACHED_TO_POOL)
                 .and_then(|a| a.attrs.get("idref"))
                 .map(|s| s.as_str())
                 .unwrap_or("<absent>")
@@ -346,26 +347,30 @@ fn resolve_portable_electric_spas(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) {
-    for spa in spas.children_named("PortableElectricSpa") {
+    for spa in spas.children_named(&PORTABLE_ELECTRIC_SPA) {
         let mut params = Map::new();
-        if let Some(kwh) = child_f64(spa, "TotalAnnualPowerConsumptionInStandbyMode") {
-            params.insert("annual_electric_kwh".to_string(), json!(kwh));
+        if let Some(kwh) = child_f64(spa, &TOTAL_ANNUAL_POWER_CONSUMPTION_IN_STANDBY_MODE) {
+            // The HPXML element's annual consumption is kWh; the raw key is
+            // J: one conversion at the write.
+            let j = kwh * 3.6e6;
+            params.insert("annual_electric_j".to_string(), json!(j));
             tracing::info!(
                 load_kwh = kwh,
                 "PortableElectricSpa standby load from \
-                 TotalAnnualPowerConsumptionInStandbyMode (annual_electric_kWh)"
+                 TotalAnnualPowerConsumptionInStandbyMode (annual_electric_kWh), \
+                 written to annual_electric_j"
             );
-        } else if let Some(watts) = child_f64(spa, "StandbyPower") {
-            let kwh = conv::power_watt_to_kwh_per_year(watts);
-            params.insert("annual_electric_kwh".to_string(), json!(kwh));
+        } else if let Some(watts) = child_f64(spa, &STANDBY_POWER) {
+            let j = conv::power_watt_to_j_per_year(watts);
+            params.insert("annual_electric_j".to_string(), json!(j));
             tracing::info!(
                 standby_power_w = watts,
-                load_kwh = kwh,
+                load_j = j,
                 "PortableElectricSpa standby load from StandbyPower \
-                 converted to annual_electric_kWh (W * 8760 / 1000)"
+                 converted to annual_electric_j (W * 8760 h * 3600 s)"
             );
         }
-        if params.contains_key("annual_electric_kwh") {
+        if params.contains_key("annual_electric_j") {
             specs.push(build_spec(
                 "Spa Pump".to_string(),
                 FuelType::Electric,
@@ -469,9 +474,9 @@ mod tests {
         assert_eq!(pump.fuel_type, FuelType::Electric);
         assert_eq!(
             pump.parameters
-                .get("annual_electric_kwh")
+                .get("annual_electric_j")
                 .and_then(|v| v.as_f64()),
-            Some(2700.0)
+            Some(2700.0 * 3.6e6)
         );
         assert_eq!(
             pump.parameters
@@ -489,9 +494,9 @@ mod tests {
         assert_eq!(
             heater
                 .parameters
-                .get("annual_gas_therms")
+                .get("annual_gas_j")
                 .and_then(|v| v.as_f64()),
-            Some(500.0)
+            Some(500.0 * 105505600.0)
         );
         assert_eq!(
             heater
@@ -552,9 +557,9 @@ mod tests {
         assert_eq!(pump.fuel_type, FuelType::Electric);
         assert_eq!(
             pump.parameters
-                .get("annual_electric_kwh")
+                .get("annual_electric_j")
                 .and_then(|v| v.as_f64()),
-            Some(1000.0)
+            Some(1000.0 * 3.6e6)
         );
 
         let heater = specs
@@ -565,9 +570,9 @@ mod tests {
         assert_eq!(
             heater
                 .parameters
-                .get("annual_electric_kwh")
+                .get("annual_electric_j")
                 .and_then(|v| v.as_f64()),
-            Some(1300.0)
+            Some(1300.0 * 3.6e6)
         );
     }
 
@@ -636,12 +641,12 @@ mod tests {
             .find(|s| s.name == "Spa Pump")
             .expect("Spa Pump spec should exist (from PortableElectricSpa)");
         assert_eq!(pump.fuel_type, FuelType::Electric);
-        let kwh = pump
+        let annual_j = pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64())
-            .expect("annual_electric_kwh should be present");
-        assert!((kwh - 4380.0).abs() < 0.01);
+            .expect("annual_electric_j should be present");
+        assert!((annual_j - 4380.0 * 3.6e6).abs() < 0.01);
     }
 
     #[test]
@@ -677,12 +682,12 @@ mod tests {
             .iter()
             .find(|s| s.name == "Spa Pump")
             .expect("Spa Pump spec should exist");
-        let kwh = pump
+        let annual_j = pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64())
-            .expect("annual_electric_kwh should be present");
-        assert!((kwh - 8760.0).abs() < 0.01);
+            .expect("annual_electric_j should be present");
+        assert!((annual_j - 8760.0 * 3.6e6).abs() < 0.01);
     }
 
     #[test]
@@ -737,44 +742,44 @@ mod tests {
             .iter()
             .find(|s| s.name == "Pool Pump")
             .expect("Pool Pump spec should exist");
-        let pool_pump_kwh = pool_pump
+        let pool_pump_j = pool_pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64());
-        assert_eq!(pool_pump_kwh, Some(3000.0));
+        assert_eq!(pool_pump_j, Some(3000.0 * 3.6e6));
 
         let pool_heater = specs
             .iter()
             .find(|s| s.name == "Pool Heater")
             .expect("Pool Heater spec should exist");
         assert_eq!(pool_heater.fuel_type, FuelType::Gas);
-        let pool_heater_therms = pool_heater
+        let pool_heater_j = pool_heater
             .parameters
-            .get("annual_gas_therms")
+            .get("annual_gas_j")
             .and_then(|v| v.as_f64());
-        assert_eq!(pool_heater_therms, Some(400.0));
+        assert_eq!(pool_heater_j, Some(400.0 * 105505600.0));
 
         let spa_pump = specs
             .iter()
             .find(|s| s.name == "Spa Pump")
             .expect("Spa Pump spec should exist (resolved from Pool via idref)");
         assert_eq!(spa_pump.fuel_type, FuelType::Electric);
-        let spa_pump_kwh = spa_pump
+        let spa_pump_j = spa_pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64());
-        assert_eq!(spa_pump_kwh, Some(3000.0));
+        assert_eq!(spa_pump_j, Some(3000.0 * 3.6e6));
 
         let spa_heater = specs
             .iter()
             .find(|s| s.name == "Spa Heater")
             .expect("Spa Heater spec should exist (resolved from Pool via idref)");
         assert_eq!(spa_heater.fuel_type, FuelType::Gas);
-        let spa_heater_therms = spa_heater
+        let spa_heater_j = spa_heater
             .parameters
-            .get("annual_gas_therms")
+            .get("annual_gas_j")
             .and_then(|v| v.as_f64());
-        assert_eq!(spa_heater_therms, Some(400.0));
+        assert_eq!(spa_heater_j, Some(400.0 * 105505600.0));
     }
 
     #[test]
@@ -973,13 +978,13 @@ mod tests {
             .iter()
             .find(|s| s.name == "Pool Pump")
             .expect("Pool Pump spec should exist");
-        let kwh = pump
+        let annual_j = pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64())
-            .expect("annual_electric_kwh should be present");
-        // 1000 W * 8760 / 1000 = 8760 kWh/year
-        assert!((kwh - 8760.0).abs() < 0.01);
+            .expect("annual_electric_j should be present");
+        // 1000 W * 8760 / 1000 = 8760 kWh/year, held in joules
+        assert!((annual_j - 8760.0 * 3.6e6).abs() < 0.01);
     }
 
     #[test]
@@ -1021,12 +1026,15 @@ mod tests {
             .find(|s| s.name == "Pool Heater")
             .expect("Pool Heater spec should exist");
         assert_eq!(heater.fuel_type, FuelType::Gas);
-        let therms = heater
+        let annual_gas_j = heater
             .parameters
-            .get("annual_gas_therms")
+            .get("annual_gas_j")
             .and_then(|v| v.as_f64())
-            .expect("annual_gas_therms should be present");
-        // 100000 Btuh * 8760 / 100000 = 8760 therms/year
+            .expect("annual_gas_j should be present");
+        // 100000 Btuh * 8760 / 100000 = 8760 therms/year, held in joules
+        // through the HARES therm.
+        let therms = uom::si::f64::Energy::new::<uom::si::energy::joule>(annual_gas_j)
+            .get::<hares_types::si_units::energy::therm>();
         assert!((therms - 8760.0).abs() < 0.01);
     }
 }

@@ -6,13 +6,12 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
-use hares_physics::units::power_kw_to_w;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, IdealCapacityMode, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, ThermalCategory,
-    ThermostatBandClass, ZoneId,
+    CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentHealthCounts,
+    EquipmentId, ExecutionStage, FuelType, HaresError, IdealCapacityMode, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
+    ThermalCategory, ThermostatBandClass, Warning, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +98,10 @@ pub struct IdealHvac {
     /// The zone the unit conditions; `None` until `init` resolves it.
     zone_id: Option<ZoneId>,
     thermostat_fsm: ThermostatFsm,
+    /// Run warnings the unit raised (the cross-tier deadband collision's
+    /// warning among them), drained into the run's log through
+    /// `drain_warnings`.
+    warnings: Vec<Warning>,
     ideal_capacity_w: f64,
     ideal_capacity_degraded: bool,
     current_target_c: f64,
@@ -194,6 +197,7 @@ impl IdealHvac {
                 heating_c: 20.0,
                 cooling_c: 24.0,
             }),
+            warnings: Vec::new(),
             ideal_capacity_w: 0.0,
             ideal_capacity_degraded: false,
             current_target_c: 20.0,
@@ -300,6 +304,36 @@ impl IdealHvac {
         })
     }
 
+    /// Raises the thermostat FSM's parked cross-tier deadband collision as
+    /// a run warning naming this unit and both resolved tiers: the step
+    /// itself the dwelling stamps when it drains the warning. Warn once
+    /// per run (the FSM parks the first collision only); the count of
+    /// every collision flows separately through the health counts.
+    fn record_cross_tier_warning(&mut self) {
+        let Some((heating_c, cooling_c, required_gap_c)) =
+            self.thermostat_fsm.take_cross_tier_warning()
+        else {
+            return;
+        };
+        let message = format!(
+            "{}: the resolved heating setpoint {heating_c} °C and cooling setpoint \
+             {cooling_c} °C sit {gap} °C apart, below the required deadband \
+             {required_gap_c} °C: the constant override and the surviving schedule \
+             tier cross, and the run can deliver heating and cooling on the same step",
+            self.descriptor.name,
+            gap = cooling_c - heating_c
+        );
+        tracing::warn!(
+            equipment = %self.descriptor.name,
+            heating_c,
+            cooling_c,
+            required_gap_c,
+            "{message}"
+        );
+        self.warnings
+            .push(Warning::new(self.descriptor.name.clone(), message));
+    }
+
     /// The zone temperature is read once: the FSM's transition and the ideal
     /// solver's target in the deadband both use it.
     fn update_mode(&mut self, env: &EnvironmentState) -> crate::Result<ThermostatMode> {
@@ -308,6 +342,7 @@ impl IdealHvac {
             .thermostat_fsm
             .update_mode_at(env, zone_temp)
             .map_err(|err| HaresError::Equipment(format!("{}: {err}", self.descriptor.name)))?;
+        self.record_cross_tier_warning();
 
         let setpoints = self.thermostat_fsm.effective_setpoints();
         match self.thermostat_fsm.mode {
@@ -337,6 +372,13 @@ impl IdealHvac {
 }
 
 impl Equipment for IdealHvac {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.thermostat_fsm.reset_schedule_sources();
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -511,9 +553,19 @@ impl Equipment for IdealHvac {
 
         self.thermostat_fsm.thermostat.band_class = ThermostatBandClass::Ideal;
         self.thermostat_fsm.validate_configuration(env)?;
+        // The constant setpoints the config names are named axes and are
+        // never moved: the deadband reconciliation opens on the unnamed
+        // axis alone (the same rule the cycling units' init applies), and
+        // a both-named violation is the error the control tier raises.
+        let heating_named = typed.setpoint.heating_setpoint_c.is_some();
+        let cooling_named = typed.setpoint.cooling_setpoint_c.is_some();
         self.thermostat_fsm.static_setpoints = self
             .effective_setpoints()
-            .reconcile_for_deadband(self.thermostat_fsm.thermostat.hysteresis_c);
+            .reconcile_for_deadband_keeping_named(
+                self.thermostat_fsm.thermostat.hysteresis_c,
+                heating_named,
+                cooling_named,
+            )?;
         // End-use routing reads the descriptor before the first step: label
         // the unit by the comfort bound its zone starts beyond.
         if let Ok(zone_temp_c) = lookup_zone_temp(env, zone) {
@@ -540,7 +592,20 @@ impl Equipment for IdealHvac {
         // the FSM mode) and clear any solver-driven ideal target so no
         // capacity is delivered (WH precedent). Islanded homes keep an
         // energized bus and are not affected. See docs/outage-behavior.md.
-        if !env.grid.bus_energized() {
+        // An unavailable period zeroing the unit's rows forces off the
+        // same way with the setpoints unchanged (the ideal unit is one
+        // dispatch for both axes, so either row's flag closes the gate).
+        let flags = env.unavailable_periods;
+        let period_off = flags.zeroes_space_heating() || flags.zeroes_space_cooling();
+        if !env.grid.bus_energized() || period_off {
+            if period_off && env.grid.bus_energized() {
+                tracing::debug!(
+                    heating_zeroed = flags.zeroes_space_heating(),
+                    cooling_zeroed = flags.zeroes_space_cooling(),
+                    "the ideal HVAC unit's step is flagged unavailable: duty \
+                     forced to 0 with the setpoints unchanged"
+                );
+            }
             self.cached_ideal_target = None;
             self.ideal_capacity_w = 0.0;
             self.ideal_capacity_degraded = false;
@@ -676,7 +741,7 @@ impl Equipment for IdealHvac {
             }
         };
 
-        // R3: Minimum capacity.
+        // Minimum capacity.
         // OCHRE: clamps to capacity_min in ideal mode (never delivers less than
         // minimum compressor speed). Non-ideal mode forces Deadband (Off).
         // E+ IdealLoadsAirSystem: no min capacity concept; but OCHRE's clamp
@@ -753,16 +818,16 @@ impl Equipment for IdealHvac {
             }
         }
 
-        // Emit electrical port contribution for fan power.
-        let fan_kw = fan_power_w / 1000.0;
+        // Emit electrical port contribution for fan power (W, SI).
+        let fan_w = fan_power_w;
         // Rule R1: Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly
         // zero. Wired uniformly so the cross-equipment consistency check
         // (port/CoreOutput/telemetry) stays uniform across the fleet.
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
-        if fan_power_w > 0.0 || reactive_power_kvar != 0.0 {
+        let reactive_power_var = self.zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
+        if fan_power_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(fan_kw),
-                reactive_power_kvar,
+                active_power_w: (fan_w),
+                reactive_power_var,
             })?;
         }
 
@@ -802,9 +867,9 @@ impl Equipment for IdealHvac {
         );
         self.telemetry
             .set(tk::CURRENT_TARGET_C, self.current_target_c);
-        self.telemetry.set(tk::FAN_KW, fan_kw);
+        self.telemetry.set(tk::FAN_KW, fan_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         let sp = self.thermostat_fsm.effective_setpoints();
         self.telemetry.set(tk::HEATING_SETPOINT_C, sp.heating_c);
         self.telemetry.set(tk::COOLING_SETPOINT_C, sp.cooling_c);
@@ -833,8 +898,8 @@ impl Equipment for IdealHvac {
         let active_setpoint_c = self.current_target_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(fan_kw)),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(fan_w)),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: Some(capacity_w),
                 sensible_cooling_w: if capacity_w < 0.0 {
@@ -888,6 +953,17 @@ impl Equipment for IdealHvac {
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            cross_tier_deadband_events: self.thermostat_fsm.take_cross_tier_deadband_count(),
+            ..Default::default()
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -956,8 +1032,8 @@ impl Equipment for IdealHvac {
         };
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: Some(decoded.ideal_capacity_w),
                 sensible_cooling_w: None,
@@ -1018,6 +1094,21 @@ impl Equipment for IdealHvac {
     fn ideal_target(&self) -> Option<(ZoneId, f64)> {
         self.cached_ideal_target
     }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "cooling_capacity_w",
+                self.cooling_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+        ]
+    }
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
@@ -1053,135 +1144,86 @@ fn ideal_hvac_default_telemetry() -> Telemetry {
 
 fn ideal_hvac_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Thermal power delivered to zone (positive=heating, negative=cooling)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode: 0=Off, 1=Heating, 2=Cooling".to_string(),
-        },
-        TelemetryField {
-            name: tk::IDEAL_CAPACITY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Ideal capacity from solver (positive=heating, negative=cooling)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::IDEAL_CAPACITY_DEGRADED.to_string(),
-            unit: "bool".to_string(),
-            description: "1.0 if capacity is degraded (fallback after consecutive solver failures)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::CURRENT_TARGET_C.to_string(),
-            unit: "C".to_string(),
-            description: "Current setpoint target temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Fan electrical consumption".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging); Ideal HVAC is unity pf"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::COIL_SENSIBLE_COOLING_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gross sensible cooling at the coil (positive magnitude, non-zero only during cooling); distinguishes coil output from fan waste heat".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_HEAT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream".to_string(),
-        },
-        TelemetryField {
-            name: tk::HVAC_HEATING_CAPACITY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Rated heating capacity".to_string(),
-        },
-        TelemetryField {
-            name: tk::HVAC_COOLING_CAPACITY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Rated cooling capacity".to_string(),
-        },
-        TelemetryField {
-            name: tk::CAP_RATIO.to_string(),
-            unit: "ratio".to_string(),
-            description: "Biquadratic capacity correction factor (1.0 = rated)".to_string(),
-        },
-        TelemetryField {
-            name: tk::EIR_RATIO.to_string(),
-            unit: "ratio".to_string(),
-            description: "Biquadratic EIR correction factor (1.0 = rated)".to_string(),
-        },
-        TelemetryField {
-            name: tk::HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active heating setpoint temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active cooling setpoint temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage heating setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::SCHEDULE_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Schedule-stage cooling setpoint (before runtime override)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override heating setpoint (0.0 when no override active)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Runtime override cooling setpoint (0.0 when no override active)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Thermal power delivered to zone (positive=heating, negative=cooling)",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode: 0=Off, 1=Heating, 2=Cooling",
+        ),
+        TelemetryField::power_w(
+            tk::IDEAL_CAPACITY_W,
+            "Ideal capacity from solver (positive=heating, negative=cooling)",
+        ),
+        TelemetryField::boolean(
+            tk::IDEAL_CAPACITY_DEGRADED,
+            "1.0 if capacity is degraded (fallback after consecutive solver failures)",
+        ),
+        TelemetryField::temp_c(tk::CURRENT_TARGET_C, "Current setpoint target temperature"),
+        TelemetryField::power_kw(tk::FAN_KW, "Fan electrical consumption").not_nullable(),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging); Ideal HVAC is unity pf",
+        ),
+        TelemetryField::power_w(
+            tk::COIL_SENSIBLE_COOLING_W,
+            "Gross sensible cooling at the coil (positive magnitude, non-zero only during cooling); distinguishes coil output from fan waste heat",
+        ),
+        TelemetryField::power_w(
+            tk::FAN_HEAT_W,
+            "Supply fan waste heat added to the zone (positive); per E+ I/O Ref: fan motor heat in the supply air stream",
+        ),
+        TelemetryField::power_w(tk::HVAC_HEATING_CAPACITY_W, "Rated heating capacity"),
+        TelemetryField::power_w(tk::HVAC_COOLING_CAPACITY_W, "Rated cooling capacity"),
+        TelemetryField::ratio(
+            tk::CAP_RATIO,
+            "Biquadratic capacity correction factor (1.0 = rated)",
+        ),
+        TelemetryField::ratio(
+            tk::EIR_RATIO,
+            "Biquadratic EIR correction factor (1.0 = rated)",
+        ),
+        TelemetryField::temp_c(
+            tk::HEATING_SETPOINT_C,
+            "Active heating setpoint temperature",
+        ),
+        TelemetryField::temp_c(
+            tk::COOLING_SETPOINT_C,
+            "Active cooling setpoint temperature",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_HEATING_SETPOINT_C,
+            "Schedule-stage heating setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::SCHEDULE_COOLING_SETPOINT_C,
+            "Schedule-stage cooling setpoint (before runtime override)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_HEATING_SETPOINT_C,
+            "Runtime override heating setpoint (0.0 when no override active)",
+        ),
+        TelemetryField::temp_c(
+            tk::RUNTIME_COOLING_SETPOINT_C,
+            "Runtime override cooling setpoint (0.0 when no override active)",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ]
 }
 
@@ -1236,6 +1278,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1585,8 +1628,12 @@ mod tests {
         restored.init(&config("IH"), &env).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("an ideal HVAC checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("an ideal HVAC checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -2546,7 +2593,6 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         let expected_fan_w = 5_000.0 * 1.0 * (200.0 / (10_000.0 * 1.0));
-        let expected_fan_kw = expected_fan_w / 1000.0;
 
         // Electrical port should have fan power.
         assert!(
@@ -2557,11 +2603,11 @@ mod tests {
 
         // core_output should reflect fan consumption.
         let core = eq.core_output();
-        match core.flows.electric_kw {
+        match core.flows.electric_w {
             Some(ElectricPower::Consumption(kw)) => {
                 assert!(
-                    (kw - expected_fan_kw).abs() < 1e-9,
-                    "core electric_kw should be {expected_fan_kw}, got {kw}"
+                    (kw - expected_fan_w).abs() < 1e-9,
+                    "core electric_w should be {expected_fan_w}, got {kw}"
                 );
             }
             other => panic!("expected Consumption, got {other:?}"),
@@ -2579,8 +2625,8 @@ mod tests {
         let fan_kw_telem = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
         assert!(fan_kw_telem.is_some(), "telemetry must contain FAN_KW");
         assert!(
-            (fan_kw_telem.unwrap() - expected_fan_kw).abs() < 1e-9,
-            "FAN_KW telemetry should be {expected_fan_kw}, got {:?}",
+            (fan_kw_telem.unwrap() - expected_fan_w).abs() < 1e-9,
+            "FAN_KW telemetry should be {expected_fan_w}, got {:?}",
             fan_kw_telem
         );
     }
@@ -2670,7 +2716,7 @@ mod tests {
 
     #[test]
     fn r3_forced_deadband_in_non_ideal_mode() {
-        // R3 minimum capacity check forces Deadband in non-ideal mode.
+        // The minimum-capacity rule forces Deadband in non-ideal mode.
         // (Ideal mode clamps to min; non-ideal forces off.)
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
@@ -2691,8 +2737,9 @@ mod tests {
         assert_eq!(eq.thermostat_fsm.mode, ThermostatMode::Heating);
         let _heating_start = eq.thermostat_fsm.mode_start_at;
 
-        // Rated capacity delivers 10kW, above the 1kW min → no R3 trigger.
-        // To trigger R3 we'd need cap_ratio < 0.1; just test Deadband path below.
+        // Rated capacity delivers 10kW, above the 1kW min, so the
+        // minimum-capacity rule never triggers. To trigger it we'd need
+        // cap_ratio < 0.1; just test Deadband path below.
         let env60 = env(18.0, 60, 60);
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2710,7 +2757,7 @@ mod tests {
 
     #[test]
     fn r3_forced_deadband_respects_min_off_time_lockout_in_non_ideal() {
-        // R3 min capacity forces Deadband with correct mode_start_at timestamp
+        // The minimum-capacity rule forces Deadband with correct mode_start_at timestamp
         // in non-ideal mode. (Ideal mode clamps to min instead.)
         let cfg = typed_config(crate::IdealHvacConfig {
             zone_id: Some(1),
@@ -2908,15 +2955,15 @@ mod tests {
             ports.thermal[0].sensible_gain_w
         );
 
-        let fan_kw = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
+        let fan_w = eq.telemetry().get(hares_types::telemetry_keys::FAN_KW);
         assert!(
-            fan_kw.is_some(),
-            "fan_kw telemetry must be present in cooling mode"
+            fan_w.is_some(),
+            "fan_w telemetry must be present in cooling mode"
         );
         assert!(
-            fan_kw.unwrap() > 0.0,
+            fan_w.unwrap() > 0.0,
             "fan electrical consumption must be > 0 in cooling mode, got {:?}",
-            fan_kw
+            fan_w
         );
 
         assert!(
@@ -3854,11 +3901,11 @@ mod tests {
             "fan must draw real power"
         );
         assert_eq!(
-            ports.electrical.reactive_power_kvar, 0.0,
+            ports.electrical.reactive_power_var, 0.0,
             "unity pf ⇒ port Q == 0"
         );
         assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "unity pf ⇒ CoreOutput Q == Some(0.0)"
         );
@@ -3868,7 +3915,7 @@ mod tests {
             Some(0.0),
             "unity pf ⇒ telemetry Q == 0.0"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 
@@ -3933,11 +3980,11 @@ mod tests {
                 "step {i} (v={v}): real power diverged between pf and no-pf twins"
             );
             assert_eq!(
-                ports_pf.electrical.reactive_power_kvar, 0.0,
+                ports_pf.electrical.reactive_power_var, 0.0,
                 "unity pf twin must produce zero reactive power"
             );
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
             );
             env.current_time += ChronoDuration::minutes(1);

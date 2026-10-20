@@ -574,6 +574,20 @@ fn print_compare_report(report: &CompareReport) {
             } => {
                 println!("  metrics: {field}: expected {expected}, actual {actual}");
             }
+            Difference::ResolvedHomes { expected, actual } => {
+                println!("  resolved: home count {actual}, expected {expected}");
+            }
+            Difference::ResolvedParameter {
+                home,
+                detail,
+                expected,
+                actual,
+            } => {
+                println!(
+                    "  resolved home {}: {detail}: expected {expected}, actual {actual}",
+                    home + 1
+                );
+            }
             Difference::Health { expected, actual } => {
                 println!("  health: expected {expected}, actual {actual}");
             }
@@ -607,7 +621,10 @@ fn print_compare_report(report: &CompareReport) {
 
 fn print_delta_report(report: &DeltaReport) {
     println!("products compared: {:?}", report.products_compared);
-    if report.columns.is_empty() && report.metrics_changes.is_empty() {
+    if report.columns.is_empty()
+        && report.metrics_changes.is_empty()
+        && report.resolved_changes.is_empty()
+    {
         println!("no differences");
     }
     for column in &report.columns {
@@ -622,6 +639,9 @@ fn print_delta_report(report: &DeltaReport) {
     }
     for (field, expected, actual) in &report.metrics_changes {
         println!("  metrics {field}: {expected} -> {actual}");
+    }
+    for (parameter, expected, actual) in &report.resolved_changes {
+        println!("  resolved {parameter}: {expected} -> {actual}");
     }
     for note in &report.notes {
         println!("  note: {note}");
@@ -685,8 +705,12 @@ fn print_run_repetition(
                 Some(count) => count.to_string(),
                 None => "unavailable".to_string(),
             };
+            let finish_s = match summary.finish {
+                Some(d) => format!("{:.3} s", d.as_secs_f64()),
+                None => "unavailable".to_string(),
+            };
             println!(
-                "rep {repetition} profiling: step_total {:.3} s, environment {:.0}%, control {:.0}%, ideal_capacity {:.0}%, actors {:.0}%, dispatch {:.0}%, equipment {:.0}%, envelope {:.0}%, invariants {:.0}%, state_snapshot {:.0}%, output {:.0}%, accounting {:.0}%, memory_high_water_kb {hwm_kb}, hot_path_allocations {allocs}, hot_path_alloc_violations {violations}",
+                "rep {repetition} profiling: step_total {:.3} s, finish {finish_s}, environment {:.0}%, control {:.0}%, ideal_capacity {:.0}%, actors {:.0}%, dispatch {:.0}%, equipment {:.0}%, envelope {:.0}%, invariants {:.0}%, state_snapshot {:.0}%, output {:.0}%, accounting {:.0}%, memory_high_water_kb {hwm_kb}, hot_path_allocations {allocs}, hot_path_alloc_violations {violations}",
                 total_secs,
                 pct(summary.environment),
                 pct(summary.control),

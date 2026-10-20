@@ -17,7 +17,6 @@ use hares_physics::air_properties::dry_air_density_kg_m3;
 use hares_physics::constants::{
     CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG, SEA_LEVEL_PRESSURE_PA,
 };
-use hares_physics::units::power_w_to_kw;
 use hares_types::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
@@ -318,7 +317,7 @@ pub struct Ventilation {
     telemetry: Telemetry,
     core_output: CoreOutput,
     /// Rule R1 reactive-only ZIP: real power stays bit-identical;
-    /// Q comes from ZipLoad::reactive_kvar. Ventilation fan pf 0.87.
+    /// Q comes from ZipLoad::reactive_var. Ventilation fan pf 0.87.
     zip: ResolvedZip,
 
     ventilation_type: VentilationType,
@@ -551,6 +550,33 @@ impl Ventilation {
 }
 
 impl Equipment for Ventilation {
+    fn reset_stochastic_state(&mut self) {
+        // The schedule source at its seed and cursor: the production phase
+        // reads it from the construction position, whatever the warm-up
+        // drew.
+        self.schedule_source.reset();
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "supply_fan_power_w",
+                self.supply_fan_power_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "exhaust_fan_power_w",
+                self.exhaust_fan_power_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "flow_rate_m3_s",
+                self.flow_rate_m3_s,
+                hares_types::Unit::CubicMeterPerSecond,
+            ),
+        ]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -604,9 +630,27 @@ impl Equipment for Ventilation {
         // cannot run (no airflow, no recovery, no draw) — gated at the root
         // of the on/off decision (WH precedent). Islanded homes keep an
         // energized bus and are not affected. See docs/outage-behavior.md.
+        // An unavailable period zeroing the `house_fan` row (a Power
+        // Outage) stops the unit the same way for the step.
+        let period_zeroed =
+            crate::unavailable_period_rows_for_equipment(self.descriptor.name.as_str())
+                .iter()
+                .any(|row| {
+                    row.zeroed_by
+                        .iter()
+                        .any(|kind| kind.zeroed(env.unavailable_periods))
+                });
+        if period_zeroed {
+            tracing::debug!(
+                unit = %self.descriptor.name,
+                "the step's unavailable periods zero the house_fan row: the \
+                 mechanical ventilation is off for the step"
+            );
+        }
         let is_running = self.mode != OperatingMode::Off
             && self.dr_level != DRLevel::GridEmergency
-            && env.grid.bus_energized();
+            && env.grid.bus_energized()
+            && !period_zeroed;
 
         if !is_running {
             // Clear stored effective effectiveness so that the thermal solver
@@ -632,8 +676,8 @@ impl Equipment for Ventilation {
             self.mode = self.mode.resolve_idle(false, None);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_var: Some(0.0),
                     fuel_w: None,
                     thermal_output_w: None,
                     sensible_cooling_w: None,
@@ -699,8 +743,8 @@ impl Equipment for Ventilation {
             self.mode = self.mode.resolve_idle(false, None);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: Some(0.0),
+                    electric_w: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_var: Some(0.0),
                     fuel_w: None,
                     thermal_output_w: None,
                     sensible_cooling_w: None,
@@ -789,13 +833,13 @@ impl Equipment for Ventilation {
             m_dot_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG * eff_l * (w_indoor - w_outdoor);
 
         // Fan electrical power [kW]
-        let fan_kw = power_w_to_kw(effective_fan_power_w);
-        let reactive_power_kvar = self.zip.reactive_kvar(fan_kw, env.grid.bus_voltage_pu());
+        let fan_w = effective_fan_power_w;
+        let reactive_power_var = self.zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
 
         // Write ports
         ports.accumulate(&PortContribution::Electrical {
             active_power_w: effective_fan_power_w,
-            reactive_power_kvar,
+            reactive_power_var,
         })?;
 
         // Ventilation thermal load is handled by the envelope solver's
@@ -803,9 +847,9 @@ impl Equipment for Ventilation {
         // double-counting. Equipment reports fan power and telemetry only.
 
         // Telemetry
-        self.telemetry.set(tk::ELECTRIC_KW, fan_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, fan_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::FAN_POWER_W, effective_fan_power_w);
         self.telemetry
             .set(tk::VENT_SUPPLY_FAN_POWER_W, effective_supply_fan_power_w);
@@ -861,8 +905,8 @@ impl Equipment for Ventilation {
         self.mode = self.mode.resolve_idle(true, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(fan_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(fan_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -925,7 +969,7 @@ impl Equipment for Ventilation {
         restore_schedule_source_state(&mut self.schedule_source, &cp.schedule_source_state)?;
         // Reconstruct core_output structure: the per-step fan power depends
         // conditions (outdoor/indoor temp, humidity, schedule fraction) not
-        // stored in the checkpoint, so electric_kw is
+        // stored in the checkpoint, so electric_w is
         // set to Consumption(0.0) — the next step() recalculates the correct
         // value. The mode must be consistent with those zero flows: an `On`
         // checkpoint (running fan, nonzero flow at save) restored verbatim
@@ -940,8 +984,8 @@ impl Equipment for Ventilation {
         self.mode = self.mode.resolve_idle(false, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(0.0)),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(0.0)),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -962,6 +1006,11 @@ impl Equipment for Ventilation {
         match signal {
             ControlSignal::ModeOverride { mode } => {
                 self.mode = *mode;
+            }
+            ControlSignal::ModeOverrideRelease => {
+                // The unit's own control is its schedule-driven state: the
+                // mode init establishes when no external command holds it.
+                self.mode = OperatingMode::Standby;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.dr_level = *level;
@@ -1010,59 +1059,160 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Total fan electrical power consumption".to_string(),
-        },
-        TelemetryField {
-            name: tk::VENT_SUPPLY_FAN_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Supply-side fan electrical power".to_string(),
-        },
-        TelemetryField {
-            name: tk::VENT_EXHAUST_FAN_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Exhaust-side fan electrical power".to_string(),
-        },
-        TelemetryField {
-            name: tk::SENSIBLE_RECOVERY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Sensible heat recovered by HRV/ERV".to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_RECOVERY_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent heat recovered by ERV".to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Supply air temperature after recovery".to_string(),
-        },
-        TelemetryField {
-            name: tk::BYPASS_ACTIVE.to_string(),
-            unit: "-".to_string(),
-            description: "Bypass mode active (1 = bypassing recovery)".to_string(),
-        },
-        TelemetryField {
-            name: tk::VENT_DEFROST_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Continuous defrost fraction for HRV/ERV recovery derating".to_string(),
-        },
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "Total electrical power draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(tk::FAN_POWER_W, "Total fan electrical power consumption"),
+        TelemetryField::power_w(
+            tk::VENT_SUPPLY_FAN_POWER_W,
+            "Supply-side fan electrical power",
+        ),
+        TelemetryField::power_w(
+            tk::VENT_EXHAUST_FAN_POWER_W,
+            "Exhaust-side fan electrical power",
+        ),
+        TelemetryField::power_w(
+            tk::SENSIBLE_RECOVERY_W,
+            "Sensible heat recovered by HRV/ERV",
+        ),
+        TelemetryField::power_w(tk::LATENT_RECOVERY_W, "Latent heat recovered by ERV"),
+        TelemetryField::temp_c(tk::SUPPLY_TEMP_C, "Supply air temperature after recovery"),
+        TelemetryField::state_flag(
+            tk::BYPASS_ACTIVE,
+            "Bypass mode active (1 = bypassing recovery)",
+        ),
+        TelemetryField::ratio(
+            tk::VENT_DEFROST_FRACTION,
+            "Continuous defrost fraction for HRV/ERV recovery derating",
+        ),
     ]
 }
 
+/// The the ventilation unit's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for VentilationConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "flow_rate_m3_s",
+                hares_types::FieldMeta {
+                    description: Some("the ventilation's flow rate, m3/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "supply_fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the supply fan's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "exhaust_fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the exhaust fan's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "sensible_effectiveness",
+                hares_types::FieldMeta {
+                    description: Some("the heat exchanger's sensible effectiveness"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "latent_effectiveness",
+                hares_types::FieldMeta {
+                    description: Some("the heat exchanger's latent effectiveness"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "bypass_temp_min_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the economiser bypass's minimum outdoor temperature, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "bypass_temp_max_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the economiser bypass's maximum outdoor temperature, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the defrost's outdoor threshold, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_initial_time_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the defrost's initial time fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_time_increase_rate_per_k",
+                hares_types::FieldMeta {
+                    description: Some("the defrost time's increase per kelvin below the threshold"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ventilation_type",
+                hares_types::FieldMeta {
+                    description: Some("the ventilation's type"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "balanced",
+                hares_types::FieldMeta {
+                    description: Some("whether the unit is balanced"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hours_in_operation",
+                hares_types::FieldMeta {
+                    description: Some("the operating hours per day"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1093,6 +1243,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -2103,7 +2254,7 @@ mod tests {
         // Normal operation: supply + exhaust both at rated
         hrv.step(&e_normal, Duration::from_secs(300), &mut ports)
             .expect("step normal");
-        let normal_total_kw = ports.electrical.net_active_w();
+        let normal_total_w = ports.electrical.net_active_w();
 
         // Bypass: supply fan power scaled down
         let mut ports_bypass = PortSlots {
@@ -2112,11 +2263,11 @@ mod tests {
         };
         hrv.step(&e_bypass, Duration::from_secs(300), &mut ports_bypass)
             .expect("step bypass");
-        let bypass_total_kw = ports_bypass.electrical.net_active_w();
+        let bypass_total_w = ports_bypass.electrical.net_active_w();
 
         assert!(
-            bypass_total_kw < normal_total_kw,
-            "bypass total power ({bypass_total_kw:.6} kW) should be less than normal ({normal_total_kw:.6} kW)"
+            bypass_total_w < normal_total_w,
+            "bypass total power ({bypass_total_w:.6} kW) should be less than normal ({normal_total_w:.6} kW)"
         );
 
         let bypass_supply_w = hrv
@@ -2202,11 +2353,11 @@ mod tests {
             .step(&e, Duration::from_secs(300), &mut ports_split)
             .expect("step split");
 
-        let combined_kw = ports_combined.electrical.net_active_w();
-        let split_kw = ports_split.electrical.net_active_w();
+        let combined_w = ports_combined.electrical.net_active_w();
+        let split_w = ports_split.electrical.net_active_w();
         assert!(
-            (combined_kw - split_kw).abs() < 0.001,
-            "combined model ({combined_kw:.6} kW) and split model ({split_kw:.6} kW) should match when supply+exhaust sum equals old total"
+            (combined_w - split_w).abs() < 0.001,
+            "combined model ({combined_w:.6} kW) and split model ({split_w:.6} kW) should match when supply+exhaust sum equals old total"
         );
     }
 
@@ -2300,15 +2451,15 @@ mod tests {
         eq.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
 
-        let p_kw = ports.electrical.net_active_w() / 1000.0;
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = p_kw * pf.acos().tan();
+        let p_w = ports.electrical.net_active_w();
+        let q = ports.electrical.reactive_power_var;
+        let expected = p_w * pf.acos().tan();
         assert!(
-            (q - expected).abs() < 1e-9,
+            (q - expected).abs() < 1e-6,
             "Q/P must equal tan(acos({pf})): {q} vs {expected}"
         );
 
-        let co_q = eq.core_output().flows.reactive_power_kvar.expect("Some");
+        let co_q = eq.core_output().flows.reactive_power_var.expect("Some");
         assert_eq!(
             co_q.to_bits(),
             q.to_bits(),
@@ -2322,7 +2473,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must match port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2340,11 +2491,50 @@ mod tests {
         let mut ports = PortSlots::default();
         eq.step(&e, Duration::from_secs(300), &mut ports)
             .expect("step");
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
         assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "off equipment must report Some(0.0)"
+        );
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// returns the fan to its own schedule-driven control (the Standby
+    /// state init establishes when no external command holds it).
+    #[test]
+    fn mode_release_returns_the_fan_to_its_own_schedule_control() {
+        let cfg = hrv_config();
+        let mut v = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        v.init(&cfg, &e).expect("init");
+
+        v.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .expect("mode override off");
+        let mut ports = PortSlots::default();
+        v.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        assert_eq!(
+            ports.electrical.net_active_w(),
+            0.0,
+            "the forced-off fan must not run"
+        );
+
+        v.apply_control_unchecked(&ControlSignal::ModeOverrideRelease)
+            .expect("mode release");
+        v.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step after release");
+        let electric_w = ports.electrical.net_active_w();
+        assert!(
+            (electric_w - 50.0).abs() < 1.0,
+            "the released fan must run per its schedule again (50 W), got {electric_w} W"
+        );
+        assert_eq!(
+            v.core_output().state.operating_mode,
+            Some(OperatingMode::Standby),
+            "the released fan must be in its own-control standby state"
         );
     }
 
@@ -2384,11 +2574,11 @@ mod tests {
                 ports_nopf.electrical.load_power_w.to_bits(),
                 "step {i} (v={v}): real power diverged between pf and no-pf twins"
             );
-            if ports_pf.electrical.reactive_power_kvar != 0.0 {
+            if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }
             assert_eq!(
-                ports_nopf.electrical.reactive_power_kvar, 0.0,
+                ports_nopf.electrical.reactive_power_var, 0.0,
                 "no-pf twin must produce zero Q"
             );
         }
@@ -2416,6 +2606,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -2437,13 +2628,13 @@ mod tests {
         vent.step(&e, Duration::from_secs(300), &mut ports_vent)
             .expect("step vent");
 
-        let p_vent = ports_vent.electrical.net_active_w() / 1000.0;
-        let q_vent = ports_vent.electrical.reactive_power_kvar;
+        let p_vent = ports_vent.electrical.net_active_w();
+        let q_vent = ports_vent.electrical.reactive_power_var;
 
         let pf = 0.87_f64;
         let expected_q = p_vent * pf.acos().tan();
         assert!(
-            (q_vent - expected_q).abs() < 1e-9,
+            (q_vent - expected_q).abs() < 1e-6,
             "ventilation Q/P must equal tan(acos({pf}))"
         );
     }
@@ -2476,7 +2667,7 @@ mod tests {
             Some(OperatingMode::Standby),
             "active On mode with zero flow (grid outage) must reconcile to Standby"
         );
-        hares_types::validate_core_contract(v.descriptor(), v.core_output())
+        hares_types::validate_core_contract(v.descriptor(), v.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2528,7 +2719,7 @@ mod tests {
             Some(OperatingMode::Standby),
             "active On mode with zero schedule fraction must reconcile to Standby"
         );
-        hares_types::validate_core_contract(v.descriptor(), v.core_output())
+        hares_types::validate_core_contract(v.descriptor(), v.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2865,7 +3056,7 @@ mod tests {
         // Core output must report off
         let co = hrv.core_output();
         assert_eq!(
-            co.flows.electric_kw,
+            co.flows.electric_w,
             Some(ElectricPower::Consumption(0.0)),
             "core output must report zero consumption when off"
         );
@@ -2963,7 +3154,7 @@ mod tests {
         assert!(
             hrv.core_output()
                 .flows
-                .electric_kw
+                .electric_w
                 .is_some_and(|p| !p.is_zero()),
             "precondition: the saved state carries nonzero fan flow"
         );
@@ -2978,6 +3169,7 @@ mod tests {
         hares_types::equipment::validate_core_contract(
             restored.descriptor(),
             restored.core_output(),
+            &mut Vec::new(),
         )
         .expect(
             "a running fan's checkpoint must restore to a state the mode/flow guard \

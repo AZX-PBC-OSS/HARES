@@ -27,6 +27,8 @@ fn spec_with_raw_equipment_id(id: Value) -> EquipmentSpec {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 
@@ -78,6 +80,8 @@ fn malformed_equipment_id_in_the_typed_payload_is_left_untouched() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     assign_equipment_ids(std::slice::from_mut(&mut spec));
     let ConfigPayload::Typed { data, .. } = &spec.typed_config.expect("typed config").payload
@@ -130,6 +134,8 @@ fn null_equipment_id_is_classified_absent_and_gets_an_assigned_id() {
                 system_id: None,
                 related_hvac_idref: None,
                 primary_role: None,
+                heating_setpoint_source: None,
+                cooling_setpoint_source: None,
             }
         }),
     ] {

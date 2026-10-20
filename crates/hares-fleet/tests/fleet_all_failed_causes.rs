@@ -12,13 +12,14 @@
 //! path that cannot be read is a construction error naming the path, so the
 //! per-dwelling cause can be pinned to it.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, TimeZone};
 use hares_core::{DwellingConfig, SimulationConfig};
 use hares_fleet::SteppableFleet;
 use hares_fleet::fleet::FleetError;
-use hares_io::OutputFormat;
 
 #[path = "../../../tests/support/denver_offset.rs"]
 mod denver_offset;
@@ -38,32 +39,37 @@ fn config_with_schedule_source(bldg_id: i64, schedule_path: Option<PathBuf>) -> 
         .single()
         .expect("valid start time");
     DwellingConfig {
-        hpxml_path: project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
-        schedule_path,
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time,
-            duration: Duration::hours(24),
-            time_res: Duration::seconds(900),
-            output_verbosity: 0,
-            output_path: None,
-            write_output: false,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(
+            project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+        ),
+        schedule: schedule_path.map(InputSource::Path),
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time,
+                duration: Duration::hours(24),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            bldg_id,
+            None,
+        ),
     }
 }
 

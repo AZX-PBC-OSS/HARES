@@ -38,6 +38,7 @@ fn build_doc(
         kind: match products.kind {
             crate::manifest::ManifestKind::Dwelling => "dwelling".to_string(),
             crate::manifest::ManifestKind::Fleet => "fleet".to_string(),
+            crate::manifest::ManifestKind::ResstockFleet => "resstock_fleet".to_string(),
         },
         features: manifest.feature_names(),
         defaults_dir: products.defaults_dir.clone(),
@@ -46,6 +47,7 @@ fn build_doc(
         git_dirty,
         metrics: products.metrics_rows.clone(),
         products: products_digests,
+        resolved: products.resolved.clone(),
         health: products.health.clone(),
     })
 }
@@ -142,6 +144,7 @@ pub fn materialize(
     }
     if doc.products != committed.products
         || doc.metrics != committed.metrics
+        || doc.resolved != committed.resolved
         || doc.health != committed.health
     {
         return Err(FrameGoldenError::MaterializedFrames(format!(

@@ -70,7 +70,7 @@ fn assert_clone_from_copies_latches(dst: &mut Telemetry, src: &Telemetry) {
 
 #[test]
 fn telemetry_clone_from_same_keys_allocates_nothing() {
-    let keys = ["power_kw", "soc", "reactive_power_kvar"];
+    let keys = ["power_kw", "soc", "reactive_power_var"];
 
     // Same keys, no latch: the in-place path overwrites the f64 slots and
     // allocates nothing. The values equal the source afterwards.

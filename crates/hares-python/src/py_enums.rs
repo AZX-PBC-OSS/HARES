@@ -5,13 +5,11 @@
 
 use std::hash::{Hash, Hasher};
 
-use hares_core::engine::SimStatus as CoreSimStatus;
 use hares_equipment::battery::catalog::BatteryProductId as RustBatteryProductId;
 use hares_equipment::ev::catalog::{
     EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId,
 };
 use hares_equipment::ndinterp::ExtrapolationStrategy as RustExtrapolationStrategy;
-use hares_fleet::fleet::SimStatus as FleetSimStatus;
 use hares_io::ResStockVersion as IoResStockVersion;
 use hares_types::{
     BatteryChemistry as RustBatteryChemistry, BmsAction as RustBmsAction, BmsMode as RustBmsMode,
@@ -26,6 +24,7 @@ use hares_types::{
     StormWatchTrigger as RustStormWatchTrigger, VehicleType as RustVehicleType,
 };
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pyo3::types::PyList;
 
 #[pyclass(name = "EndUse", from_py_object)]
@@ -806,69 +805,6 @@ impl PySimStatus {
             }
         }
         hasher.finish()
-    }
-}
-
-impl From<CoreSimStatus> for PySimStatus {
-    fn from(status: CoreSimStatus) -> Self {
-        match status {
-            CoreSimStatus::Ok => PySimStatus::Success(None),
-            CoreSimStatus::Flagged(msg) => PySimStatus::Flagged(Some(msg)),
-            CoreSimStatus::Failed(msg) => PySimStatus::Failed(Some(msg)),
-        }
-    }
-}
-
-impl From<FleetSimStatus> for PySimStatus {
-    fn from(status: FleetSimStatus) -> Self {
-        match status {
-            FleetSimStatus::Ok => PySimStatus::Success(None),
-            FleetSimStatus::Flagged(msg) => PySimStatus::Flagged(Some(msg)),
-            FleetSimStatus::Failed(msg) => PySimStatus::Failed(Some(msg)),
-        }
-    }
-}
-
-#[pyclass(name = "AggregationResolution", from_py_object)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PyAggregationResolution {
-    FifteenMin,
-    Hourly,
-}
-
-#[pymethods]
-impl PyAggregationResolution {
-    #[staticmethod]
-    fn fifteen_min() -> Self {
-        PyAggregationResolution::FifteenMin
-    }
-
-    #[staticmethod]
-    fn hourly() -> Self {
-        PyAggregationResolution::Hourly
-    }
-
-    #[staticmethod]
-    pub fn from_str(name: &str) -> PyResult<Self> {
-        match name.to_lowercase().as_str() {
-            "15min" | "fifteenmin" | "fifteen_min" => Ok(PyAggregationResolution::FifteenMin),
-            "hourly" => Ok(PyAggregationResolution::Hourly),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "invalid AggregationResolution variant: {}",
-                name
-            ))),
-        }
-    }
-
-    fn __repr__(&self) -> String {
-        format!("AggregationResolution.{:?}", self)
-    }
-
-    fn __str__(&self) -> String {
-        match self {
-            PyAggregationResolution::FifteenMin => "FifteenMin".to_string(),
-            PyAggregationResolution::Hourly => "Hourly".to_string(),
-        }
     }
 }
 
@@ -1696,11 +1632,22 @@ impl PyChargingStrategy {
     }
 
     #[staticmethod]
-    fn v2g(min_soc: f64, max_export_kw: f64, price_threshold: f64) -> PyResult<Self> {
+    #[pyo3(signature = (*, min_soc, max_export_w, price_threshold, **unexpected))]
+    fn v2g(
+        min_soc: f64,
+        max_export_w: f64,
+        price_threshold: f64,
+        unexpected: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::utils::check_equipment_unexpected_kwargs(
+            "ChargingStrategy.v2g",
+            "EvConfig.charging_strategy.V2G",
+            unexpected,
+        )?;
         validate_soc("min_soc", min_soc)?;
-        if !max_export_kw.is_finite() || max_export_kw < 0.0 {
+        if !max_export_w.is_finite() || max_export_w < 0.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "max_export_kw must be finite and >= 0, got {max_export_kw}"
+                "max_export_w must be finite and >= 0, got {max_export_w}"
             )));
         }
         if !price_threshold.is_finite() {
@@ -1711,26 +1658,32 @@ impl PyChargingStrategy {
         Ok(Self {
             inner: RustChargingStrategy::V2G {
                 min_soc,
-                max_export_kw,
+                max_export_w,
                 price_threshold,
             },
         })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (min_charge_rate_kw, departure_schedule = None))]
+    #[pyo3(signature = (*, min_charge_rate_w, departure_schedule = None, **unexpected))]
     fn solar_surplus(
-        min_charge_rate_kw: f64,
+        min_charge_rate_w: f64,
         departure_schedule: Option<Vec<PyDepartureConstraint>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        if !min_charge_rate_kw.is_finite() || min_charge_rate_kw < 0.0 {
+        crate::utils::check_equipment_unexpected_kwargs(
+            "ChargingStrategy.solar_surplus",
+            "EvConfig.charging_strategy.SolarSurplus",
+            unexpected,
+        )?;
+        if !min_charge_rate_w.is_finite() || min_charge_rate_w < 0.0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "min_charge_rate_kw must be finite and >= 0, got {min_charge_rate_kw}"
+                "min_charge_rate_w must be finite and >= 0, got {min_charge_rate_w}"
             )));
         }
         Ok(Self {
             inner: RustChargingStrategy::SolarSurplus {
-                min_charge_rate_kw,
+                min_charge_rate_w,
                 departure_schedule: departure_schedule
                     .unwrap_or_default()
                     .into_iter()
@@ -1778,9 +1731,9 @@ impl PyChargingStrategy {
                 format!("TouAware(target_soc={target_soc}, buffer_hours={charge_buffer_hours})")
             }
             RustChargingStrategy::SolarSurplus {
-                min_charge_rate_kw, ..
+                min_charge_rate_w, ..
             } => {
-                format!("SolarSurplus(min_charge_rate_kw={min_charge_rate_kw})")
+                format!("SolarSurplus(min_charge_rate_w={min_charge_rate_w})")
             }
             RustChargingStrategy::V2H {
                 discharge_threshold_soc,
@@ -1790,11 +1743,11 @@ impl PyChargingStrategy {
             }
             RustChargingStrategy::V2G {
                 min_soc,
-                max_export_kw,
+                max_export_w,
                 price_threshold,
             } => {
                 format!(
-                    "V2G(min_soc={min_soc}, max_export_kw={max_export_kw}, price_threshold={price_threshold})"
+                    "V2G(min_soc={min_soc}, max_export_w={max_export_w}, price_threshold={price_threshold})"
                 )
             }
         }
@@ -2582,13 +2535,19 @@ pub struct PyBmsMode {
 #[pymethods]
 impl PyBmsMode {
     #[staticmethod]
-    #[pyo3(signature = (min_soc = 0.1, max_soc = 1.0, solar_only_charging = false, surplus_deadband_kw = 0.0))]
+    #[pyo3(signature = (*, min_soc = 0.1, max_soc = 1.0, solar_only_charging = false, surplus_deadband_w = 0.0, **unexpected))]
     fn self_consumption(
         min_soc: f64,
         max_soc: f64,
         solar_only_charging: bool,
-        surplus_deadband_kw: f64,
+        surplus_deadband_w: f64,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::utils::check_equipment_unexpected_kwargs(
+            "BmsMode.self_consumption",
+            "BatteryConfig.bms_mode.SelfConsumption",
+            unexpected,
+        )?;
         validate_soc("min_soc", min_soc)?;
         validate_soc("max_soc", max_soc)?;
         if min_soc > max_soc {
@@ -2601,7 +2560,7 @@ impl PyBmsMode {
                 min_soc,
                 max_soc,
                 solar_only_charging,
-                surplus_deadband_kw,
+                surplus_deadband_w,
             },
         })
     }
@@ -2755,7 +2714,7 @@ impl PyBmsMode {
                 min_soc,
                 max_soc,
                 solar_only_charging,
-                surplus_deadband_kw,
+                surplus_deadband_w,
             } => {
                 let sc = if *solar_only_charging {
                     "True"
@@ -2763,7 +2722,7 @@ impl PyBmsMode {
                     "False"
                 };
                 format!(
-                    "BmsMode.self_consumption(min_soc={min_soc}, max_soc={max_soc}, solar_only_charging={sc}, surplus_deadband_kw={surplus_deadband_kw})"
+                    "BmsMode.self_consumption(min_soc={min_soc}, max_soc={max_soc}, solar_only_charging={sc}, surplus_deadband_w={surplus_deadband_w})"
                 )
             }
             RustBmsMode::TimeOfUseOptimization {

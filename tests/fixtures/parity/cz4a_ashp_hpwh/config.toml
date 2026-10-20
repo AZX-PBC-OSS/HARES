@@ -1,12 +1,21 @@
+bldg_id = 1
+
 [simulation]
 start_time = "2023-01-01T00:00:00-07:00"
 duration = 3600
 time_res = 60
-output_verbosity = 3
 output_chunk_size = 1000
 master_seed = 0
+# The reference this fixture carries was generated with both sides cold
+# (OCHRE's initialization_time is None; the engine's warm-up disabled):
+# the comparison's initial condition is part of the premise. See
+# tests/python/generate_parity_reference.py.
+warmup = "disabled"
 
-bldg_id = 1
+[[simulation.reports]]
+name = "frame"
+selection = { verbosity = 3 }
+destination = "memory"
 
 # The indoor temperature HARES starts this window from (its seeded draw
 # within half the deadband, master_seed 0), to which the reference

@@ -108,6 +108,21 @@ pub fn loop_id_from_config(config: &EquipmentConfig, keys: &[&str]) -> Option<Lo
     Some(LoopId(raw as u16))
 }
 
+/// The typed config's loop id, or the init error naming the equipment.
+///
+/// Every resolved loop-side equipment carries the loop id its wiring or loop
+/// allocation assigned; an equipment whose config names none cannot declare
+/// its hydronic loop, and loop 0 is the unassigned sentinel, not a loop.
+pub fn require_loop_id(loop_id: Option<u16>, kind: &str, name: &str) -> crate::Result<LoopId> {
+    loop_id.map(LoopId).ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "{kind} '{name}': its config carries no fluid loop id. Every resolved \
+             loop-side equipment carries the loop id its wiring or loop allocation \
+             assigned, and an equipment without one cannot declare its hydronic loop"
+        ))
+    })
+}
+
 pub fn lookup_zone(
     env: &EnvironmentState,
     zone_id: ZoneId,
@@ -164,6 +179,34 @@ pub fn parse_fuel_type(raw: Option<&str>) -> Option<FuelType> {
 /// off (mirroring the heat-pump water heater's outage behaviour).
 pub fn outage_forces_off(hvac: &mut HvacEquipment, env: &EnvironmentState) -> bool {
     if env.grid.bus_energized() {
+        return false;
+    }
+    hvac.runtime.duty_cycle = 0.0;
+    true
+}
+
+/// The unavailable-period gate shared by all HVAC `update_control`
+/// implementations, beside the outage gate: a step whose
+/// [`UnavailablePeriodState`] zeroes the unit's axis's row (`space_heating`
+/// under a `Power Outage` or a `No Space Heating` period, `space_cooling`
+/// likewise) forces the duty cycle to 0 with the setpoint unchanged.
+/// OpenStudio-HPXML zeroes every system's heating (cooling) load fraction
+/// during the period and leaves the thermostat setpoints alone
+/// (`resources/hvac.rb:42-71`, `resources/schedules.rb:1438-1441, 1455`,
+/// v1.12.0). `heating_axis` and `cooling_axis` state the axes this unit
+/// serves.
+///
+/// Returns `true` and zeroes the duty cycle when the gate closes.
+pub fn unavailable_period_forces_off(
+    hvac: &mut HvacEquipment,
+    env: &EnvironmentState,
+    heating_axis: bool,
+    cooling_axis: bool,
+) -> bool {
+    let flags = env.unavailable_periods;
+    let period_off = (heating_axis && flags.zeroes_space_heating())
+        || (cooling_axis && flags.zeroes_space_cooling());
+    if !period_off {
         return false;
     }
     hvac.runtime.duty_cycle = 0.0;
@@ -322,6 +365,7 @@ pub fn update_heating_control(
         }
         Err(err) => Err(HaresError::Equipment(format!("{equipment_name}: {err}"))),
     };
+    hvac.record_cross_tier_warning(equipment_name);
 
     hvac.thermostat_fsm.runtime_setpoints = saved_runtime_setpoints;
     result
@@ -364,6 +408,11 @@ pub fn apply_simple_mode_override_and_dr(
                 mode = ?mode,
                 "ModeOverride applied"
             );
+            Ok(true)
+        }
+        ControlSignal::ModeOverrideRelease => {
+            *mode_override = None;
+            tracing::debug!(equipment = equipment_name, "ModeOverrideRelease applied");
             Ok(true)
         }
         ControlSignal::DemandResponse {
@@ -573,7 +622,7 @@ fn parse_ashrae152_zone_type(s: &str) -> Option<hares_physics::ashrae152::Ashrae
 ///
 /// Call once during equipment init. Pre-registers all six EBM keys with 0.0
 /// so the telemetry output schema is stable regardless of whether the EBM
-/// gate (`zone_capacitance_kwh_per_k > 0`) is open at runtime.
+/// gate (`zone_capacitance_j_per_k > 0`) is open at runtime.
 pub fn register_ebm_telemetry_keys(telemetry: &mut Telemetry) {
     telemetry.insert(hares_types::telemetry_keys::EBM_EFFICIENCY, 0.0);
     telemetry.insert(hares_types::telemetry_keys::EBM_BASELINE_POWER_KW, 0.0);
@@ -584,7 +633,7 @@ pub fn register_ebm_telemetry_keys(telemetry: &mut Telemetry) {
 }
 
 /// The step's equivalent battery window, or `None` when the zone capacitance
-/// (`hvac.config.zone_capacitance_kwh_per_k`, set by the dwelling from the
+/// (`hvac.config.zone_capacitance_j_per_k`, set by the dwelling from the
 /// envelope solver) is zero and the model is disabled.
 ///
 /// A step computes it first, before it commits any state, so a failure here
@@ -599,12 +648,12 @@ pub(crate) fn step_equivalent_battery(
     hvac: &HvacEquipment,
     env: &EnvironmentState,
 ) -> crate::Result<Option<EquivalentBatteryWindow>> {
-    let cap_kwh = hvac.config.zone_capacitance_kwh_per_k;
-    if cap_kwh <= 0.0 {
+    let cap_j = hvac.config.zone_capacitance_j_per_k;
+    if cap_j <= 0.0 {
         return Ok(None);
     }
     let zone_temp_c = lookup_zone_temp(env, hvac.config.served_zone()?)?;
-    hvac.equivalent_battery_window(zone_temp_c, cap_kwh, hvac.eir_at_stage(0))
+    hvac.equivalent_battery_window(zone_temp_c, cap_j, hvac.eir_at_stage(0))
         .map(Some)
 }
 
@@ -615,7 +664,7 @@ pub(crate) fn step_equivalent_battery(
 /// `capacity_ideal_w` is the thermal output the step delivers [W] (sensible
 /// plus latent cooling for an AC, heating for a heater), the EBM's
 /// `capacity_ideal` input (OCHRE HVAC.py:640), giving
-/// `baseline_power_kw = capacity_ideal_w * rated_eir / 1000`. OCHRE solves
+/// `baseline_power_w = capacity_ideal_w * rated_eir / 1000`. OCHRE solves
 /// the steady-state hold load every step (`solve_ideal_capacity()`,
 /// HVAC.py:434-435); the delivered output equals it while the thermostat
 /// holds the setpoint and is zero while the unit is off.
@@ -635,11 +684,11 @@ pub(crate) fn write_ebm_telemetry(
     };
     let ebm = window.with_load(capacity_ideal_w)?;
     telemetry.set(tk::EBM_EFFICIENCY, ebm.efficiency);
-    telemetry.set(tk::EBM_BASELINE_POWER_KW, ebm.baseline_power_kw);
-    telemetry.set(tk::EBM_ENERGY_KWH, ebm.energy_kwh.unwrap_or(0.0));
-    telemetry.set(tk::EBM_MIN_ENERGY_KWH, ebm.min_energy_kwh);
-    telemetry.set(tk::EBM_MAX_ENERGY_KWH, ebm.max_energy_kwh.unwrap_or(0.0));
-    telemetry.set(tk::EBM_MAX_POWER_KW, ebm.max_power_kw.unwrap_or(0.0));
+    telemetry.set(tk::EBM_BASELINE_POWER_KW, ebm.baseline_power_w);
+    telemetry.set(tk::EBM_ENERGY_KWH, ebm.energy_j.unwrap_or(0.0));
+    telemetry.set(tk::EBM_MIN_ENERGY_KWH, ebm.min_energy_j);
+    telemetry.set(tk::EBM_MAX_ENERGY_KWH, ebm.max_energy_j.unwrap_or(0.0));
+    telemetry.set(tk::EBM_MAX_POWER_KW, ebm.max_power_w.unwrap_or(0.0));
     Ok(())
 }
 
@@ -655,10 +704,12 @@ mod tests {
     use crate::config::{ConfigPayload, ConfigValue};
 
     use super::{
-        DuctDseContext, cycling_load_fraction, loop_id_from_config, netted_cycling_duty,
-        parse_fuel_type, parse_zone_id_key, register_ebm_telemetry_keys, resolve_duct_dse,
-        step_equivalent_battery, write_ebm_telemetry, zone_id_from_config,
+        DuctDseContext, apply_simple_mode_override_and_dr, cycling_load_fraction,
+        loop_id_from_config, netted_cycling_duty, parse_fuel_type, parse_zone_id_key,
+        register_ebm_telemetry_keys, resolve_duct_dse, step_equivalent_battery,
+        write_ebm_telemetry, zone_id_from_config,
     };
+    use hares_types::{ControlSignal, OperatingMode};
 
     /// The fraction runs 0 at the release edge, 1 at the call edge, and
     /// clamps outside; one formula covers both axes (the heating band's
@@ -1012,7 +1063,7 @@ mod tests {
         hvac.thermostat_fsm.mode = ThermostatMode::Heating;
         hvac.config.heating_capacities_w = vec![10_000.0];
         hvac.config.eir_by_stage = vec![0.25];
-        hvac.config.zone_capacitance_kwh_per_k = 2.0;
+        hvac.config.zone_capacitance_j_per_k = 7200000.0;
 
         let mut telemetry = Telemetry::new();
         register_ebm_telemetry_keys(&mut telemetry);
@@ -1029,12 +1080,12 @@ mod tests {
         );
         assert!(
             baseline > 0.0,
-            "EBM baseline_power_kw should be > 0 when capacity_ideal_w > 0, got {baseline}"
+            "EBM baseline_power_w should be > 0 when capacity_ideal_w > 0, got {baseline}"
         );
-        let expected_baseline = 3000.0 * 0.25 / 1000.0;
+        let expected_baseline = 3000.0 * 0.25;
         assert!(
-            (baseline - expected_baseline).abs() < 1e-9,
-            "EBM baseline_power_kw should be capacity_ideal_w * eir / 1000 = {expected_baseline}, got {baseline}"
+            (baseline - expected_baseline).abs() < 1e-6,
+            "EBM baseline_power_w should be capacity_ideal_w * eir = {expected_baseline} W, got {baseline}"
         );
     }
 
@@ -1056,7 +1107,28 @@ mod tests {
         let baseline = telemetry.get(tk::EBM_BASELINE_POWER_KW).unwrap();
         assert_eq!(
             baseline, 0.0,
-            "EBM baseline should stay at 0.0 when zone_capacitance_kwh_per_k is 0 (disabled)"
+            "EBM baseline should stay at 0.0 when zone_capacitance_j_per_k is 0 (disabled)"
+        );
+    }
+
+    #[test]
+    fn simple_mode_override_release_clears_a_stored_override() {
+        let mut mode_override = Some(OperatingMode::Off);
+        let mut dr_level = hares_types::DRLevel::Normal;
+        let released = apply_simple_mode_override_and_dr(
+            &mut mode_override,
+            &mut dr_level,
+            &ControlSignal::ModeOverrideRelease,
+            "Test Heater",
+        )
+        .expect("the release must be consumed by the mode-override arm");
+        assert!(
+            released,
+            "the release must land on the override arm, not the catch-all"
+        );
+        assert_eq!(
+            mode_override, None,
+            "the release must clear the stored override"
         );
     }
 }

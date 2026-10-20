@@ -1,21 +1,11 @@
-//! `port_radiant_w` exposure in `EnvelopeDiag` and observer path.
+//! `port_radiant_w` exposure in the diagnostics report and observer path.
 //!
-//! `EnvelopeComponentGains` carries `port_radiant_w`; `EnvelopeDiag` must
-//! expose it so diagnostic surfaces can distinguish convective port
-//! contributions from radiant ones. The observer path must forward
-//! `port_radiant_w` from solver output into observable snapshots.
+//! `EnvelopeComponentGains` carries `port_radiant_w`; the diagnostics
+//! report must record it so diagnostic surfaces can distinguish
+//! convective port contributions from radiant ones. The observer path must
+//! forward `port_radiant_w` from solver output into observable snapshots.
 
-use hares_core::diagnostics::EnvelopeDiag;
 use hares_envelope::EnvelopeComponentGains;
-
-#[test]
-fn envelope_diag_exposes_port_radiant_w() {
-    let diag = EnvelopeDiag {
-        port_radiant_w: 300.0,
-        ..EnvelopeDiag::default()
-    };
-    assert_eq!(diag.port_radiant_w, 300.0);
-}
 
 #[test]
 fn envelope_component_gains_has_port_radiant_w() {
@@ -47,10 +37,12 @@ fn observer_post_solvers_forwards_port_radiant_w() {
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 300
-
+time_res = 60
+duration = 300
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -71,13 +63,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#;
     fs::write(&path, content).expect("failed to write synthetic TOML");
 
@@ -115,31 +100,38 @@ master_seed = 0
 }
 
 // ---------------------------------------------------------------------------
-// Integration test: verifies the diagnostic CSV ({stem}_diagnostics.csv) is
-// written end-to-end when output_verbosity >= 4, and that all seven scalar
-// EnvelopeDiag columns are emitted with finite values.
+// Integration test: verifies the diagnostics report records the envelope
+// component gains end-to-end when the run requests the diagnostics, and
+// that all scalar EnvelopeComponentGains columns are emitted with finite
+// values.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn diagnostic_csv_contains_all_envelope_diag_columns() {
+fn diagnostics_report_records_all_envelope_gain_columns() {
     use std::fs;
 
-    // The output and its `_diagnostics.csv` sibling go in a directory removed
-    // when the test ends.
+    // The output goes in a directory removed when the test ends.
     let dir = tempfile::tempdir().expect("temp dir");
     let toml_path = dir.path().join("diag-csv.toml");
-    let csv_path = dir.path().join("diag-csv.csv");
 
-    // output_verbosity = 4 triggers diagnostic CSV creation in from_preparsed.
-    let content = format!(
-        r#"building_id = 4242
+    // The run requests the diagnostics report; the envelope columns ride
+    // the run's memory report's frames.
+    let content = r#"building_id = 4242
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
+time_res = 60
+duration = 600
+diagnostics = true
+output_chunk_size = 1000
+master_seed = 0
 
+[[simulation.reports]]
+name = "frame"
+selection = { verbosity = 4 }
+destination = "memory"
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -160,40 +152,19 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 4
-output_format = "csv"
-output_chunk_size = 1000
-write_output = true
-output_path = "{}"
-master_seed = 0
-"#,
-        csv_path.display()
-    );
+"#;
     fs::write(&toml_path, content).expect("failed to write synthetic TOML");
 
     let mut dwelling =
         hares_core::Dwelling::from_toml_config(&toml_path).expect("synthetic TOML must load");
 
-    // Reconstruct the diagnostic CSV path the same way from_preparsed does.
-    let stem = csv_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .expect("csv_path must have a file stem");
-    let diag_path = csv_path.with_file_name(format!("{stem}_diagnostics.csv"));
-
     dwelling
         .simulate()
         .expect("simulation must complete without errors");
 
-    let diag_content = fs::read_to_string(&diag_path).expect("diagnostic CSV must exist");
-
-    // Header must contain all six scalar EnvelopeDiag columns.
-    let header = diag_content
-        .lines()
-        .next()
-        .expect("diagnostic CSV must have a header row");
+    let columns = dwelling
+        .output_column_names()
+        .expect("the recorded output schema");
 
     let env_cols = [
         "port_radiant_w",
@@ -203,53 +174,36 @@ master_seed = 0
         "opaque_solar_lwr_w",
         "interior_lwr_w",
         "internal_gain_w",
+        "air_density_kg_m3",
         "ghi_w_m2",
     ];
-    for &col in &env_cols {
+    for col in env_cols {
         assert!(
-            header.contains(col),
-            "diagnostic CSV header must contain '{col}'; header was: {header}"
+            columns.iter().any(|c| c == col),
+            "the requested diagnostics report must record '{col}'"
         );
     }
 
-    // At least one data row must have finite values for all six columns.
-    let headers: Vec<&str> = header.split(',').collect();
-    let col_indices: Vec<usize> = env_cols
+    // At least one recorded row carries finite values for all the envelope
+    // gain columns.
+    let batches = dwelling.flushed_batches();
+    assert!(!batches.is_empty(), "the run records batches");
+    let arrays: Vec<_> = env_cols
         .iter()
         .map(|col| {
-            headers
-                .iter()
-                .position(|h| *h == *col)
-                .unwrap_or_else(|| panic!("{col} column must exist in header"))
+            batches[0]
+                .column_by_name(col)
+                .unwrap_or_else(|| panic!("column '{col}' missing"))
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .expect("diagnostics columns are Float64")
+                .clone()
         })
         .collect();
-
-    let data_rows: Vec<&str> = diag_content
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.is_empty())
-        .skip(1)
-        .collect();
+    let any_finite = (0..batches[0].num_rows())
+        .any(|r| arrays.iter().all(|a| r < a.len() && a.value(r).is_finite()));
     assert!(
-        !data_rows.is_empty(),
-        "diagnostic CSV must contain at least one data row"
-    );
-
-    let mut found_finite = false;
-    for row in &data_rows {
-        let cols: Vec<&str> = row.split(',').collect();
-        let all_finite = col_indices.iter().all(|&idx| {
-            cols[idx]
-                .parse::<f64>()
-                .map(|v| v.is_finite())
-                .unwrap_or(false)
-        });
-        if all_finite {
-            found_finite = true;
-            break;
-        }
-    }
-    assert!(
-        found_finite,
-        "at least one data row must have finite values for all seven EnvelopeDiag columns"
+        any_finite,
+        "at least one recorded row must have finite values for all the envelope gain columns"
     );
 }

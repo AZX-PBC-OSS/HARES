@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import timedelta
+
+from hares import Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride
 import math
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -13,30 +15,38 @@ import pytest
 pytest.importorskip("gymnasium")
 
 import numpy as np
-from conftest import output_in_test_dir
 from gymnasium import spaces
 
-from ochre_next._hares import Dwelling as PyDwelling
-from ochre_next.rl.gym_env import DwellingGymEnv, observation_field_bounds, sorted_action_layout, telemetry_to_observation
-from ochre_next.rl.vec_env import VecDwellingGymEnv
+from hares._hares import Dwelling as PyDwelling
+from hares._hares import SimulationConfig
+from hares.rl.gym_env import (
+    DwellingGymEnv,
+    GymDwellingConfig,
+    RewardContext,
+    field_bounds,
+    observation_field_bounds,
+    sorted_action_layout,
+    telemetry_to_observation,
+)
+from hares.rl.vec_env import VecDwellingGymEnv
 
 ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
-_DWELLING_CONFIG = {
-    "hpxml": HPXML,
-    "schedule": SCHEDULE,
-    "weather": WEATHER,
-    "defaults_path": str(HARES_DEFAULTS),
-    "start_time": "2019-01-01T00:00:00",
-    "duration_s": 600,
-    "time_res_s": 60,
-}
-# The gym env's dict path cannot disable write_output.
-_output_in_test_dir = output_in_test_dir(_DWELLING_CONFIG, "dwelling_0.csv")
+_DWELLING_CONFIG = GymDwellingConfig(
+    hpxml=HPXML,
+    schedule=SCHEDULE,
+    weather=WEATHER,
+    defaults=str(HARES_DEFAULTS),
+    sim_config=SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=600,
+        time_res=60,
+    ),
+)
 
 
 def _obs_box(env: DwellingGymEnv | VecDwellingGymEnv) -> spaces.Box:
@@ -47,7 +57,7 @@ def _obs_box(env: DwellingGymEnv | VecDwellingGymEnv) -> spaces.Box:
 
 # Gas Furnace is present in the base HPXML; heat_c resolves to ThermalSetpoint.
 _ACTION_CONFIG: dict[str, list[str]] = {"Gas Furnace": ["heat_c"]}
-_OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
+_OBS_FIELDS = ["total_power_w", "outdoor_temp"]
 
 
 def _make_env(episode_length: timedelta = timedelta(minutes=5)) -> DwellingGymEnv:
@@ -55,22 +65,73 @@ def _make_env(episode_length: timedelta = timedelta(minutes=5)) -> DwellingGymEn
         config=_DWELLING_CONFIG,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=episode_length,
     )
 
 
-def _make_dwelling(seed: int = 0) -> PyDwelling:
-    return PyDwelling.from_hpxml(
-        hpxml=HPXML,
-        schedule=SCHEDULE,
-        weather=WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        start_time="2019-01-01T00:00:00",
-        duration_s=600,
-        time_res_s=60,
-        master_seed=seed,
-        write_output=False,
+def _make_dwelling(seed: int = 0, duration_s: int = 600) -> PyDwelling:
+    return PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=duration_s, time_res=60, master_seed=seed))
+
+
+def test_gym_reset_restores_snapshot_and_reseeds():
+    """The gym's reset restores the warmed-up state and reseeds the streams
+    without rebuilding: two reset(seed=7) calls, each followed by the same
+    96 actions, give bitwise-equal observations and rewards, and the
+    restored first observation is the same whatever the episode's seed."""
+    fixture = ROOT / "tests/fixtures/parity/cz5a_ev_charging"
+    dwelling = PyDwelling.from_hpxml(
+        hpxml=str(fixture / "building.xml"),
+        schedule=str(fixture / "schedule.csv"),
+        weather=str(fixture / "weather.epw"),
+        defaults=str(HARES_DEFAULTS),
+        config=SimulationConfig(
+            start_time="2023-01-01T00:00:00-07:00",
+            duration=2 * 86_400,
+            time_res=900,
+            master_seed=42,
+        ),
+    )
+    env = VecDwellingGymEnv(
+        dwellings=[dwelling],
+        observation_fields=[
+            "total_power_w",
+            "outdoor_temp",
+            "zone_temp[Indoor]",
+            "time_sin",
+            "time_cos",
+        ],
+        action_space_config={"ASHP Heater": ["heat_c"]},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(days=2),
+    )
+
+    def run_episode(seed: int):
+        obs0, _info = env.reset(seed=seed)
+        observations = [obs0.copy()]
+        rewards = []
+        action = np.full((1, env._action_dim), 21.0, dtype=np.float64)
+        for _ in range(96):
+            obs, reward, _terminated, _truncated, _info = env.step(action)
+            observations.append(obs.copy())
+            rewards.append(reward.copy())
+        return observations, rewards
+
+    first_obs, first_rewards = run_episode(7)
+    second_obs, second_rewards = run_episode(7)
+    assert len(first_obs) == 97
+    for left, right in zip(first_obs, second_obs, strict=True):
+        assert left.tobytes() == right.tobytes(), "bitwise-equal observations"
+    for left, right in zip(first_rewards, second_rewards, strict=True):
+        assert left.tobytes() == right.tobytes(), "bitwise-equal rewards"
+
+    # The restored state is the observation's source: the first
+    # observation is the same whatever the episode's seed.
+    obs7, _info7 = env.reset(seed=7)
+    obs8, _info8 = env.reset(seed=8)
+    assert obs7.tobytes() == obs8.tobytes(), (
+        "the reset restores the warmed-up state, the same first "
+        "observation under any seed"
     )
 
 
@@ -110,7 +171,7 @@ def _water_heater_name(dwelling: PyDwelling) -> str:
 
 
 def test_deadband_action_bounds_follow_the_target_thermostat_class():
-    from ochre_next._hares import (
+    from hares._hares import (
         MAX_HVAC_THERMOSTAT_BAND_C,
         MAX_TANK_THERMOSTAT_BAND_C,
         MIN_THERMOSTAT_BAND_C,
@@ -124,7 +185,7 @@ def test_deadband_action_bounds_follow_the_target_thermostat_class():
             "Gas Furnace": ["heat_c", "deadband_c"],
             water_heater: ["setpoint_c", "deadband_c"],
         },
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     space = env.action_space
@@ -144,7 +205,7 @@ def test_deadband_action_bounds_follow_the_target_thermostat_class():
 
 
 def test_thermostat_band_range_is_the_target_class():
-    from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+    from hares._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
 
     dwelling = _make_dwelling()
     assert dwelling.thermostat_band_range("Gas Furnace") == (
@@ -166,7 +227,7 @@ def test_a_deadband_action_on_equipment_without_a_band_is_rejected():
             config=_DWELLING_CONFIG,
             observation_fields=_OBS_FIELDS,
             action_space_config={"Gas Furnace": ["heat_c"], no_band: ["setpoint_c", "deadband_c"]},
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
 
@@ -181,7 +242,7 @@ def test_band_range_and_zip_each_carry_their_own_doc():
 
 
 def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
-    from ochre_next._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+    from hares._hares import MAX_HVAC_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
 
     dwellings = [_make_dwelling(seed=i) for i in range(2)]
     # The fixture's construction notices (base.xml gives no ShieldingofHome,
@@ -192,7 +253,7 @@ def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     column = env._action_layout.index(("Gas Furnace", "deadband_c"))
@@ -217,7 +278,7 @@ class _DwellingWithBand:
 
 
 def test_vec_env_refuses_a_fleet_whose_deadband_bounds_differ():
-    from ochre_next._hares import MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
+    from hares._hares import MAX_TANK_THERMOSTAT_BAND_C, MIN_THERMOSTAT_BAND_C
 
     other_class = _DwellingWithBand(
         _make_dwelling(seed=1), (MIN_THERMOSTAT_BAND_C, MAX_TANK_THERMOSTAT_BAND_C)
@@ -227,7 +288,7 @@ def test_vec_env_refuses_a_fleet_whose_deadband_bounds_differ():
             dwellings=[_make_dwelling(seed=0), cast(PyDwelling, other_class)],
             observation_fields=_OBS_FIELDS,
             action_space_config={"Gas Furnace": ["heat_c", "deadband_c"]},
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
         )
 
@@ -241,7 +302,7 @@ def test_deadband_action_without_a_setpoint_field_is_rejected():
 
 def test_sorted_action_layout_preserves_equipment_sort_order():
     layout, type_by_equip = sorted_action_layout(
-        {"B": ["reactive_power_kvar", "active_power_kw"], "A": ["active_power_kw"]}
+        {"B": ["reactive_power_var", "active_power_w"], "A": ["active_power_w"]}
     )
 
     equipment_names = [eq for eq, _ in layout]
@@ -250,10 +311,10 @@ def test_sorted_action_layout_preserves_equipment_sort_order():
     assert equipment_names[2] == "B"
 
     a_fields = [f for eq, f in layout if eq == "A"]
-    assert a_fields == ["active_power_kw"]
+    assert a_fields == ["active_power_w"]
 
     b_fields = [f for eq, f in layout if eq == "B"]
-    assert b_fields == sorted(["reactive_power_kvar", "active_power_kw"])
+    assert b_fields == sorted(["reactive_power_var", "active_power_w"])
 
     assert type_by_equip["A"] == "PowerSetpoint"
     assert type_by_equip["B"] == "PowerSetpoint"
@@ -265,7 +326,7 @@ def test_vec_gym_step_batch_shape():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
@@ -282,12 +343,12 @@ def test_vec_gym_step_batch_shape():
     assert truncs.shape == (4,)
     assert len(infos) == 4
     for info in infos:
-        assert "obs_total_power_kw_low" in info
-        assert "obs_total_power_kw_high" in info
+        assert "obs_total_power_w_low" in info
+        assert "obs_total_power_w_high" in info
         assert "obs_outdoor_temp_low" in info
         assert "obs_outdoor_temp_high" in info
-        assert np.isfinite(info["obs_total_power_kw_low"])
-        assert np.isfinite(info["obs_total_power_kw_high"])
+        assert np.isfinite(info["obs_total_power_w_low"])
+        assert np.isfinite(info["obs_total_power_w_high"])
 
 
 def test_vec_gym_reset_seed_batch_shape():
@@ -296,7 +357,7 @@ def test_vec_gym_reset_seed_batch_shape():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
@@ -322,43 +383,33 @@ def test_vec_gym_rejects_fork_start_method(monkeypatch: pytest.MonkeyPatch):
 
 def test_vec_gym_random_policy_100_steps():
     """100-step random-policy integration test exercises Rust batch_step with >=2 signal types."""
-    from ochre_next import Battery
-    from ochre_next._hares import Dwelling as PyDwelling
+    from hares import Battery
+    from hares._hares import Dwelling as PyDwelling
 
     n_dwel = 2
-    obs_fields = ["total_power_kw", "outdoor_temp"]
+    obs_fields = ["total_power_w", "outdoor_temp"]
     dwellings = [
-        PyDwelling.from_hpxml(
-            hpxml=HPXML,
-            schedule=SCHEDULE,
-            weather=WEATHER,
-            defaults_path=str(HARES_DEFAULTS),
-            start_time="2019-01-01T00:00:00",
-            duration_s=6000,
-            time_res_s=60,
-            master_seed=i,
-            write_output=False,
-        )
+        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
         for i in range(n_dwel)
     ]
     for dw in dwellings:
-        dw.add_battery(Battery("Batt", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0))
+        dw.add_battery(Battery("Batt", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000))
 
     action_config = {
         "Gas Furnace": ["heat_c"],
-        "Batt": ["active_power_kw"],
+        "Batt": ["active_power_w"],
     }
 
     env = VecDwellingGymEnv(
         dwellings=dwellings,
         observation_fields=obs_fields,
         action_space_config=action_config,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(seconds=6000),
     )
 
     rng = np.random.default_rng(42)
-    obs_fields = ["total_power_kw", "outdoor_temp"]
+    obs_fields = ["total_power_w", "outdoor_temp"]
     for step_idx in range(100):
         actions = rng.uniform(-1.0, 1.0, size=(n_dwel, 2)).astype(np.float64)
         step_obs, rewards, dones, truncs, infos = env.step(actions)
@@ -383,7 +434,7 @@ def test_apply_action_clips_at_bounds():
     low = action_space.low[0]
     high = action_space.high[0]
 
-    from ochre_next.rl import gym_env
+    from hares.rl import gym_env
     original = gym_env.build_control_signal
     captured = []
 
@@ -415,6 +466,153 @@ def test_apply_action_clips_at_bounds():
         gym_env.build_control_signal = original
 
 
+def test_gym_step_refuses_a_non_finite_action():
+    """A non-finite action is a refused call on the single-dwelling path
+    too: the clip binding rejects it the way the batch path does, instead
+    of counting it as one clamped value."""
+    env = _make_env()
+    with pytest.raises(ValueError, match="not finite"):
+        env.step(np.array([float("nan")], dtype=np.float64))
+
+
+def test_rust_and_python_paths_give_identical_rewards(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """One reward contract: over a fixed action sequence, the same two
+    dwellings stepped by the extension's batch_step and stepped from Python
+    (batch_step forced off) give equal rewards per environment and step,
+    exactly, for a reward_fn that reads the zone telemetry and
+    total_power_w."""
+    import hares.rl.vec_env as vec_env_module
+
+    def zone_power_reward(ctx: RewardContext) -> float:
+        zone_temps = ctx["telemetry_zone"]["temperature_c"]
+        return ctx["total_power_w"] - 0.01 * float(zone_temps[0])
+
+    envs: list[VecDwellingGymEnv] = []
+    for _ in range(2):
+        # 1800 s of sim time: the 20 fixed steps all land inside the run.
+        dwellings = [_make_dwelling(seed=i, duration_s=1800) for i in range(2)]
+        env = VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=zone_power_reward,
+            episode_length=timedelta(minutes=20),
+        )
+        env.reset(seed=7)
+        envs.append(env)
+    batch_env, python_env = envs
+
+    rng = np.random.default_rng(3)
+    # The heat_c bounds are (-50, 80): the range reaches past them, so the
+    # pin exercises the clip path, not just in-bounds actions.
+    action_sequence = [np.asarray(a) for a in rng.uniform(-90.0, 130.0, size=(20, 2, 1))]
+    low, high = batch_env._action_bounds[0]
+    clipped_actions = [
+        actions for actions in action_sequence if np.any(actions < low) or np.any(actions > high)
+    ]
+    assert clipped_actions, "the pin must exercise actions that clip to the declared bounds"
+    batch_rewards = [batch_env.step(actions)[1] for actions in action_sequence]
+
+    monkeypatch.setattr(vec_env_module, "rust_batch_step", None)
+    python_rewards = [python_env.step(actions)[1] for actions in action_sequence]
+
+    for step_idx, (batch, python) in enumerate(zip(batch_rewards, python_rewards, strict=True)):
+        assert batch.tobytes() == python.tobytes(), (
+            f"the batch and Python paths disagree on the reward_fn's rewards "
+            f"at step {step_idx}: {batch} vs {python}"
+        )
+
+
+def test_vec_env_rejects_a_non_callable_reward_fn_at_construction():
+    """A reward_fn that is not callable fails at construction, naming the
+    field, before any dwelling is initialized or advanced."""
+    with pytest.raises(TypeError, match="reward_fn"):
+        VecDwellingGymEnv(
+            dwellings=[_make_dwelling()],
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=cast(Any, None),
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_both_step_paths_build_the_same_info_shape(monkeypatch: pytest.MonkeyPatch):
+    """One info shape: on a clean step, both paths carry "step" (the step
+    dict the reward reads) and the same keys, so an RL caller reads one
+    surface whichever path stepped the fleet."""
+    import hares.rl.vec_env as vec_env_module
+
+    envs: list[VecDwellingGymEnv] = []
+    for _ in range(2):
+        dwellings = [_make_dwelling(seed=i) for i in range(2)]
+        # The fixture's construction notices are not a step's warnings.
+        for dwelling in dwellings:
+            dwelling.take_warnings()
+        env = VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        )
+        env.reset(seed=7)
+        envs.append(env)
+    batch_env, python_env = envs
+
+    actions = np.full((2, 1), 21.0, dtype=np.float64)
+    _, _, _, _, batch_infos = batch_env.step(actions)
+    monkeypatch.setattr(vec_env_module, "rust_batch_step", None)
+    _, _, _, _, python_infos = python_env.step(actions)
+
+    for batch_info, python_info in zip(batch_infos, python_infos, strict=True):
+        assert set(batch_info) == set(python_info), (
+            f"the batch and Python paths must build the same info shape: "
+            f"{sorted(batch_info)} vs {sorted(python_info)}"
+        )
+        assert "step" in batch_info
+        assert "net_electric_power_w" in batch_info["step"]
+        assert "warning_count" in batch_info
+
+
+def test_a_failed_env_keeps_the_batch_rectangular():
+    """One env failing mid-run returns the batch: the failed env's row
+    carries its last observation, reward 0.0 and terminated, next to the
+    living env's step, instead of a ragged obs list that never assembles."""
+    dwellings = [
+        _make_dwelling(seed=0, duration_s=600),
+        _make_dwelling(seed=1, duration_s=120),
+    ]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=20),
+    )
+    env.reset(seed=7)
+    actions = np.zeros((2, 1), dtype=np.float64)
+
+    # The short home's sim holds two steps of 60 s; both homes step them.
+    env.step(actions)
+    prev_obs, _, _, _, _ = env.step(actions)
+
+    # The third step fails the short home (past its end) while the living
+    # home steps on.
+    obs, rewards, dones, _truncs, infos = env.step(actions)
+
+    assert obs.shape == (2, len(_OBS_FIELDS))
+    assert obs[1].tobytes() == prev_obs[1].tobytes(), (
+        "the failed env's row must carry its last observation: the failed "
+        "step changed nothing"
+    )
+    assert rewards[1] == 0.0
+    assert dones[1]
+    assert not dones[0]
+    assert infos[1]["error"] == 1.0
+
+
 def test_vec_gym_out_of_bounds_actions_no_nan():
     """100-step random-policy test with actions 10x the declared range.
 
@@ -422,42 +620,32 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
     the declared action-space bounds before applying it, so the
     observations and rewards stay finite.
     """
-    import ochre_next.rl.vec_env as ve
+    import hares.rl.vec_env as ve
 
     assert ve.rust_batch_step is not None, (
         "the extension registers batch_step; without it the vec env does not import"
     )
 
     n_dwel = 2
-    obs_fields = ["total_power_kw", "outdoor_temp"]
+    obs_fields = ["total_power_w", "outdoor_temp"]
     dwellings = [
-        PyDwelling.from_hpxml(
-            hpxml=HPXML,
-            schedule=SCHEDULE,
-            weather=WEATHER,
-            defaults_path=str(HARES_DEFAULTS),
-            start_time="2019-01-01T00:00:00",
-            duration_s=6000,
-            time_res_s=60,
-            master_seed=i,
-            write_output=False,
-        )
+        PyDwelling.from_hpxml(hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=6000, time_res=60, master_seed=i))
         for i in range(n_dwel)
     ]
-    from ochre_next import Battery
+    from hares import Battery
     for dw in dwellings:
-        dw.add_battery(Battery("Batt", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0))
+        dw.add_battery(Battery("Batt", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000))
 
     action_config = {
         "Gas Furnace": ["heat_c"],
-        "Batt": ["active_power_kw"],
+        "Batt": ["active_power_w"],
     }
 
     env = VecDwellingGymEnv(
         dwellings=dwellings,
         observation_fields=obs_fields,
         action_space_config=action_config,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(seconds=6000),
     )
 
@@ -487,15 +675,14 @@ def test_vec_gym_out_of_bounds_actions_no_nan():
 
 def test_observation_field_bounds_all_finite():
     """Every known observation key (and the fallback) returns finite bounds."""
-    from ochre_next.rl.gym_env import observation_field_bounds
+    from hares.rl.gym_env import observation_field_bounds
 
     fields = [
         "outdoor_temp",
         "outdoor_temp_c",
         "outdoor_rh",
         "outdoor_humidity_ratio",
-        "total_power_kw",
-        "total_electric_kw",
+        "total_power_w",
         "zone_temp[Living Room]",
         "zone_temp[Building]",
         "setpoint_heat[Main]",
@@ -575,13 +762,13 @@ def test_field_bounds_overrides_apply():
         config=_DWELLING_CONFIG,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
-        field_bounds_overrides={"total_power_kw": (-200.0, 200.0)},
+        field_bounds_overrides={"total_power_w": (-200.0, 200.0)},
     )
     low = _obs_box(env).low
     high = _obs_box(env).high
-    total_power_idx = _OBS_FIELDS.index("total_power_kw")
+    total_power_idx = _OBS_FIELDS.index("total_power_w")
     assert np.isclose(float(low[total_power_idx]), -200.0), f"override low not applied: {low}"
     assert np.isclose(float(high[total_power_idx]), 200.0), f"override high not applied: {high}"
 
@@ -597,7 +784,7 @@ def test_observation_field_bounds_case_insensitive():
         (" setpoint_cool[Upstairs]", (0.0, 50.0)),
         ("equipment_soc[Battery]", (0.0, 1.0)),
         ("Equipment_Soc[Battery]", (0.0, 1.0)),
-        (" equipment_power[Gas Furnace]", (0.0, 100.0)),
+        (" equipment_power[Gas Furnace]", (0.0, 100000.0)),
     ]
     for field, expected in tests:
         low, high = observation_field_bounds(field)
@@ -622,7 +809,7 @@ def test_vec_gym_observation_space_bounds_finite():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     low = np.asarray(_obs_box(env).low, dtype=np.float64)
@@ -639,19 +826,19 @@ def test_vec_gym_field_bounds_overrides_in_info():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
-        field_bounds_overrides={"total_power_kw": (-200.0, 200.0)},
+        field_bounds_overrides={"total_power_w": (-200.0, 200.0)},
     )
     _, _, _, _, infos = env.step(
         np.full((2, 1), 21.0, dtype=np.float64)
     )
     for info in infos:
         assert np.isclose(
-            float(info["obs_total_power_kw_low"]), -200.0
+            float(info["obs_total_power_w_low"]), -200.0
         ), f"override low not in info: {info}"
         assert np.isclose(
-            float(info["obs_total_power_kw_high"]), 200.0
+            float(info["obs_total_power_w_high"]), 200.0
         ), f"override high not in info: {info}"
 
 
@@ -674,7 +861,7 @@ def test_time_sin_cos_fields_in_observation():
         config=_DWELLING_CONFIG,
         observation_fields=["time_sin", "time_cos"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     env.reset(seed=42)
@@ -689,9 +876,9 @@ def test_time_sin_cos_observation_space_finite():
     """Observation space with time_sin/time_cos has only finite bounds."""
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["time_sin", "time_cos", "total_power_kw"],
+        observation_fields=["time_sin", "time_cos", "total_power_w"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     low = np.asarray(_obs_box(env).low, dtype=np.float64)
@@ -741,10 +928,10 @@ def test_telemetry_to_observation_builtin_wins_over_actor_fallback():
     dwelling.step()
     tel = dwelling.telemetry()
 
-    # total_power_kw is a built-in field; actor_telemetry must not override it.
-    obs = telemetry_to_observation(tel, ["total_power_kw"])
+    # total_power_w is a built-in field; actor_telemetry must not override it.
+    obs = telemetry_to_observation(tel, ["total_power_w"])
     assert obs.shape == (1,)
-    assert obs[0] != 0.0, "built-in total_power_kw should not fall through to actor_telemetry"
+    assert obs[0] != 0.0, "built-in total_power_w should not fall through to actor_telemetry"
 
 
 def test_actor_telemetry_fields_in_dwelling_gym_observation():
@@ -773,10 +960,10 @@ def test_actor_telemetry_fields_in_dwelling_gym_observation():
     assert obs[0] == 0.0, f"dr_active should be 0.0 when no DR event, got {obs[0]}"
 
     # Combined: built-in + actor_telemetry fields in the same observation vector
-    obs = telemetry_to_observation(tel, ["total_power_kw", "DRAgent.dr_level", "DRAgent.dr_active"])
+    obs = telemetry_to_observation(tel, ["total_power_w", "DRAgent.dr_level", "DRAgent.dr_active"])
     assert obs.shape == (3,)
     assert np.all(np.isfinite(obs)), f"non-finite observation: {obs}"
-    assert obs[0] != 0.0, "built-in total_power_kw should be non-zero after step"
+    assert obs[0] != 0.0, "built-in total_power_w should be non-zero after step"
     assert obs[1] == 0.0
     assert obs[2] == 0.0
 
@@ -797,7 +984,7 @@ class _MockTelemetryMissingOutdoor:
         return True
 
     @property
-    def total_power_kw(self):
+    def total_power_w(self):
         return 0.0
 
     @property
@@ -809,7 +996,7 @@ class _MockTelemetryMissingOutdoor:
         return {"names": [], "temperature_c": [], "setpoint_heat_c": [], "setpoint_cool_c": []}
 
     def equipment(self):
-        return {"names": [], "modes": [], "soc": [], "power_kw": []}
+        return {"names": [], "modes": [], "soc": [], "power_w": []}
 
     def actors(self):
         return {}
@@ -835,9 +1022,9 @@ def test_reset_observation_contains_nan_for_uninitialized():
     """After reset(), pre-first-step observation contains NaN for uninitialized fields."""
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
+        observation_fields=["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     obs, info = env.reset(seed=42)
@@ -857,9 +1044,9 @@ def test_step_observation_all_finite_after_first_step():
     """After the first step(), all observation dimensions must be finite (no lingering NaN)."""
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
+        observation_fields=["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin", "time_cos", "equipment_soc[Gas Furnace]"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     env.reset(seed=42)
@@ -882,7 +1069,7 @@ def test_telemetry_to_observation_all_nan_when_uninitialized():
     assert tel.initialized is False, "telemetry should be uninitialized before first step"
 
     obs = telemetry_to_observation(
-        tel, ["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
+        tel, ["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
     )
     assert obs.shape == (4,)
     assert np.all(np.isnan(obs)), f"expected all NaN when uninitialized, got {obs}"
@@ -897,7 +1084,7 @@ def test_telemetry_to_observation_finite_after_step():
     assert tel.initialized is True, "telemetry should be initialized after step()"
 
     obs = telemetry_to_observation(
-        tel, ["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
+        tel, ["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
     )
     assert obs.shape == (4,)
     assert np.all(np.isfinite(obs)), f"expected all finite after step(), got {obs}"
@@ -923,14 +1110,14 @@ def test_initial_observation_warning_emitted_once():
 
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
-        observation_fields=["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio", "reactive_power_kvar"],
+        observation_fields=["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "reactive_power_var"],
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
     # Reset the module-level flag so we get a clean test
-    import ochre_next.rl.gym_env as gym_env_mod
+    import hares.rl.gym_env as gym_env_mod
     gym_env_mod._warned_initial_nan = False
 
     with warnings.catch_warnings(record=True) as w:
@@ -950,14 +1137,14 @@ def test_initial_observation_warning_emitted_once():
 def test_vec_gym_reset_observation_nan_and_mask():
     """VecDwellingGymEnv.reset() returns NaN obs with per-env mask and one-time warning."""
     import warnings
-    import ochre_next.rl.vec_env as ve
+    import hares.rl.vec_env as ve
 
     dwellings = [_make_dwelling(seed=i) for i in range(4)]
     env = VecDwellingGymEnv(
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
@@ -1002,8 +1189,8 @@ class _FakeTelemetry:
     """
 
     initialized = True
-    total_power_kw = 5.0
-    reactive_power_kvar = 1.5
+    total_power_w = 5.0
+    reactive_power_var = 1.5
 
     def __init__(self):
         import datetime
@@ -1024,26 +1211,26 @@ class _FakeTelemetry:
         return {
             "names": ["Battery", "Gas Furnace", "electric vehicle"],
             "soc": [0.5, 0.0, 0.8],
-            "power_kw": [1.0, 2.0, 0.0],
+            "power_w": [1.0, 2.0, 0.0],
         }
 
     def actors(self):
         return {}
 
 
-def test_telemetry_to_observation_reactive_power_kvar_no_keyerror():
-    """telemetry_to_observation handles reactive_power_kvar without raising KeyError."""
-    obs = telemetry_to_observation(_FakeTelemetry(), ["reactive_power_kvar"])
+def test_telemetry_to_observation_reactive_power_var_no_keyerror():
+    """telemetry_to_observation handles reactive_power_var without raising KeyError."""
+    obs = telemetry_to_observation(_FakeTelemetry(), ["reactive_power_var"])
     assert obs.shape == (1,)
     assert np.isfinite(obs[0])
     assert obs[0] == 1.5
 
 
-def test_telemetry_to_observation_reactive_power_kvar_in_mixed_fields():
-    """reactive_power_kvar coexists with other fields in a single observation vector."""
+def test_telemetry_to_observation_reactive_power_var_in_mixed_fields():
+    """reactive_power_var coexists with other fields in a single observation vector."""
     obs = telemetry_to_observation(
         _FakeTelemetry(),
-        ["total_power_kw", "reactive_power_kvar", "outdoor_temp"],
+        ["total_power_w", "reactive_power_var", "outdoor_temp"],
     )
     assert obs.shape == (3,)
     assert np.all(np.isfinite(obs))
@@ -1070,9 +1257,8 @@ def test_telemetry_to_observation_all_known_scalar_keys_no_keyerror():
         "outdoor_temp",
         "outdoor_temp_c",
         "outdoor_humidity_ratio",
-        "total_power_kw",
-        "total_electric_kw",
-        "reactive_power_kvar",
+        "total_power_w",
+        "reactive_power_var",
         "battery_soc",
         "ev_soc",
         "time_sin",
@@ -1101,114 +1287,367 @@ def test_telemetry_to_observation_bracket_keys_no_keyerror():
 
 
 # ---------------------------------------------------------------------------
-# Dual-path observation equivalence verification (T-0342)
+# The frozen observation plan: the batch's observations are read into the
+# environment's own buffer through the plan, in place.
 # ---------------------------------------------------------------------------
 
 
-def test_vec_gym_verify_observation_equivalence_no_crash():
-    """VecDwellingGymEnv with verify_observation_equivalence=True steps without crashing.
+def test_unknown_observation_field_fails_at_reset():
+    """An unknown observation field fails the plan's build at reset,
+    naming the field, on both gym environments: the field list is frozen
+    per episode, so a name the dwelling cannot answer never reaches a
+    step."""
+    dwellings = [_make_dwelling(seed=0)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=["total_power_w", "bogus_field"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    with pytest.raises(Exception, match="bogus_field"):
+        env.reset(seed=0)
 
-    When Rust batch_step and Python telemetry_to_observation produce equivalent
-    observations, the comparison should emit no false-positive warnings.
+    single = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=["total_power_w", "bogus_field"],
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    with pytest.raises(Exception, match="bogus_field"):
+        single.reset(seed=0)
+
+
+def test_batch_step_returns_a_fresh_observation_by_default():
+    """The default step returns a fresh array per step: two consecutive
+    steps give different objects, the first is unchanged by the second
+    step, and each equals the pure-Python path's observation on bits."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+
+    action = np.full((2, 1), 21.0, dtype=np.float64)
+    first, _reward1, _done1, _trunc1, _info1 = env.step(action)
+    plans = env._env_plans()
+    direct1 = np.empty((2, len(_OBS_FIELDS)), dtype=np.float64)
+    for idx, dwelling in enumerate(dwellings):
+        dwelling.observe_into(plans[idx], direct1[idx])
+    assert first is not direct1
+    assert first.tobytes() == direct1.tobytes(), (
+        "the returned observation must equal the pure-Python path's "
+        "observation on bits"
+    )
+    first_snapshot = first.copy()
+
+    second, _reward2, _done2, _trunc2, _info2 = env.step(action)
+    assert second is not first, "two consecutive steps give different objects"
+    assert first.tobytes() == first_snapshot.tobytes(), (
+        "an observation a caller keeps is never overwritten by the next step"
+    )
+    direct2 = np.empty((2, len(_OBS_FIELDS)), dtype=np.float64)
+    for idx, dwelling in enumerate(dwellings):
+        dwelling.observe_into(plans[idx], direct2[idx])
+    assert second.tobytes() == direct2.tobytes()
+
+
+def test_batch_step_copy_false_returns_the_shared_buffer():
+    """With copy=False two consecutive steps return the same object: the
+    environment's own buffer, overwritten by the next step or reset."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+        copy=False,
+    )
+    env.reset(seed=0)
+
+    action = np.full((2, 1), 21.0, dtype=np.float64)
+    first, _r1, _d1, _t1, _i1 = env.step(action)
+    second, _r2, _d2, _t2, _i2 = env.step(action)
+    assert first is second, "copy=False returns the environment's own buffer"
+    assert first is env._obs_buffer
+
+
+# ---------------------------------------------------------------------------
+# Configuration strictness: the gym rejects bad values with typed errors
+# instead of coercing them, and forwards the whole typed config.
+# ---------------------------------------------------------------------------
+
+
+def _gym_config(sim_config: SimulationConfig | None = None) -> GymDwellingConfig:
+    return GymDwellingConfig(
+        hpxml=HPXML,
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        defaults=str(HARES_DEFAULTS),
+        sim_config=sim_config,
+    )
+
+
+def test_gym_rejects_mapping_config():
+    """A mapping config is a TypeError: the gym accepts only its typed config."""
+    mapping = cast(GymDwellingConfig, {"hpxml": HPXML, "schedule": SCHEDULE, "weather": WEATHER})
+    with pytest.raises(TypeError, match="GymDwellingConfig"):
+        DwellingGymEnv(
+            config=mapping,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_gym_rejects_non_numeric_time_res():
+    """A time_res that is not a number is a TypeError, never a silent
+    60 s default."""
+    mapping = cast(
+        GymDwellingConfig,
+        {
+            "hpxml": HPXML,
+            "schedule": SCHEDULE,
+            "weather": WEATHER,
+            "defaults": str(HARES_DEFAULTS),
+            "time_res_s": "600",
+        },
+    )
+    with pytest.raises(TypeError, match="GymDwellingConfig"):
+        DwellingGymEnv(
+            config=mapping,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_gym_zero_time_res_reaches_validation():
+    """A zero resolution raises the engine's resolution error instead of
+    being replaced by the default."""
+    with pytest.raises(ValueError, match="time_res must be positive"):
+        DwellingGymEnv(
+            config=_gym_config(SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=0)),
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_gym_default_writes_no_file(tmp_path: Path):
+    """A DwellingGymEnv built with a default-valued SimulationConfig (only
+    its required fields set) over the conftest inputs, run for one episode
+    of 20 steps, leaves the working directory empty: nothing is recorded
+    that no report requests, and a default config requests no report. (At
+    the old booleans' defaults the episode wrote a csv into the working
+    directory.)"""
+    import os
+
+    from hares.rl.gym_env import DwellingGymEnv as Env
+
+    env = Env(
+        config=GymDwellingConfig(
+            hpxml=HPXML,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            defaults=str(HARES_DEFAULTS),
+            sim_config=SimulationConfig(
+                start_time="2019-01-01T00:00:00",
+                duration=1200,
+                time_res=60,
+            ),
+        ),
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=20),
+    )
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        observation, _ = env.reset()
+        assert observation is not None
+        action = np.zeros(len(_ACTION_CONFIG["Gas Furnace"]), dtype=np.float64)
+        for _ in range(20):
+            observation, *_ = env.step(action)
+    finally:
+        os.chdir(cwd)
+    assert list(tmp_path.iterdir()) == [], (
+        "a default gym episode writes no file into the working directory"
+    )
+
+
+def test_gym_zero_master_seed_reaches_the_dwelling():
+    """A master_seed of 0 is the seed the built dwelling's config reports,
+    not a value the wrapper drops for its default."""
+    env = DwellingGymEnv(
+        config=_gym_config(
+            SimulationConfig(
+                start_time="2019-01-01T00:00:00",
+                duration=600,
+                time_res=60,
+                master_seed=0,
+            )
+        ),
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    assert env._dwelling.config().master_seed == 0
+
+
+def test_gym_rejects_non_positive_episode_length():
+    """A non-positive episode_length is a ValueError naming the field and
+    the value at construction, never a silent one-step episode."""
+    for length in (timedelta(0), timedelta(minutes=-5)):
+        with pytest.raises(ValueError, match="episode_length") as caught:
+            _make_env(episode_length=length)
+        assert str(length) in str(caught.value)
+
+
+def test_gym_rejects_non_timedelta_episode_length():
+    """An episode_length that is not a timedelta is a TypeError naming the
+    field and the type, not an attribute error from deep inside."""
+    with pytest.raises(TypeError, match="episode_length.*got int"):
+        _make_env(episode_length=cast(Any, 300))
+
+
+def test_gym_rejects_uncallable_reward_fn():
+    """A reward_fn that is not callable is a TypeError at construction
+    naming the field and the type, not a crash at the first step."""
+    with pytest.raises(TypeError, match="reward_fn.*got str"):
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=cast(Any, "not callable"),
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_gym_accepts_a_none_reward_fn_with_the_batch_default():
+    """A None reward_fn is accepted and steps with the batch path's default
+    reward: the negative net electric power of the step."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=None,
+        episode_length=timedelta(minutes=5),
+    )
+    _obs, reward, _terminated, _truncated, info = env.step(
+        np.array([21.0], dtype=np.float64)
+    )
+    assert reward == -info["step"]["net_electric_power_w"] / 1000.0
+
+
+def test_gym_rejects_bare_string_observation_fields():
+    """A bare string observation_fields would iterate per character: it is
+    a TypeError naming the field and the value."""
+    with pytest.raises(TypeError, match="observation_fields.*got str") as caught:
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=cast(Any, "total_power_w"),
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        )
+    assert "total_power_w" in str(caught.value)
+
+
+def test_gym_rejects_a_non_string_observation_field():
+    """An observation_fields element that is not a string is a TypeError
+    naming the field and the element."""
+    with pytest.raises(TypeError, match="observation_fields") as caught:
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=cast(Any, ["total_power_w", 3]),
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        )
+    assert "got element 3 of type int" in str(caught.value)
+
+
+def test_gym_forwards_every_sim_config_field(tmp_path: Path):
+    """A gym built with a SimulationConfig whose every field differs from its
+    default among them, records only what its reports request, and the config
+    read back from the built dwelling equals the one passed on every field
+    the class exposes.
+
+    civil_timezone stays at its default here: the engine honours it only in
+    a dst build, and the gate's extension is a plain build. Its getter is
+    pinned at the config surface in test_py_config.py.
     """
-    import warnings
-
-    dwellings = [_make_dwelling(seed=i) for i in range(2)]
-    env = VecDwellingGymEnv(
-        dwellings=dwellings,
+    sim_config = SimulationConfig(
+        start_time="2019-03-04T05:06:07",
+        duration=7200,
+        time_res=900,
+        reports=[
+            ReportSpec("frame", Selection.verbosity(2), Destination.memory()),
+            ReportSpec(
+                "file",
+                Selection.verbosity(2),
+                Destination.parquet(str(tmp_path / "gym_output.parquet"), overwrite=True),
+            ),
+        ],
+        output_chunk_size=1234,
+        master_seed=7,
+        setpoint_deadband_c=1.5,
+        site_location=SiteLocationOverride(
+            latitude_deg=40.0,
+            longitude_deg=-105.0,
+            elevation_m=1600.0,
+            utc_offset_h=-7.0,
+        ),
+        max_consecutive_step_failures=3,
+    )
+    env = DwellingGymEnv(
+        config=_gym_config(sim_config),
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
-        episode_length=timedelta(minutes=5),
-        verify_observation_equivalence=True,
-    )
-
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        for _step_index in range(3):
-            env.step(np.full((2, 1), 21.0, dtype=np.float64))
-        equivalence_warnings = [
-            _w for _w in w
-            if "Rust-Python observation mismatch" in str(_w.message)
-        ]
-        assert len(equivalence_warnings) == 0, (
-            f"unexpected mismatch warnings: {[str(_w.message) for _w in equivalence_warnings]}"
-        )
-
-
-def test_vec_gym_verify_observation_equivalence_flag_defaults_off():
-    """VecDwellingGymEnv does not run the verification when flag is not set."""
-    import warnings
-
-    dwellings = [_make_dwelling(seed=i) for i in range(2)]
-    env = VecDwellingGymEnv(
-        dwellings=dwellings,
-        observation_fields=_OBS_FIELDS,
-        action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
-
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        for _step_index in range(3):
-            env.step(np.full((2, 1), 21.0, dtype=np.float64))
-        equivalence_warnings = [
-            _w for _w in w
-            if "Rust-Python observation mismatch" in str(_w.message)
-        ]
-        assert len(equivalence_warnings) == 0, (
-            f"verification warnings emitted with flag off: "
-            f"{[str(_w.message) for _w in equivalence_warnings]}"
+    built = env._dwelling.config()
+    for field in (
+        "start_time",
+        "duration",
+        "time_res",
+        "output_chunk_size",
+        "master_seed",
+        "civil_timezone",
+        "setpoint_deadband_c",
+        "max_consecutive_step_failures",
+    ):
+        passed = getattr(sim_config, field)
+        reported = getattr(built, field)
+        assert reported == passed, (
+            f"{field}: passed {passed!r}, the dwelling reports {reported!r}"
         )
-
-
-def test_vec_gym_verify_observation_equivalence_reports_nan_mismatch():
-    """NaN mismatch diagnostic names the divergent field, not a non-divergent one."""
-    import warnings
-    from unittest.mock import patch
-
-    import ochre_next.rl.vec_env as vec_env_module
-
-    dwellings = [_make_dwelling(seed=0) for _ in range(1)]
-    env = VecDwellingGymEnv(
-        dwellings=dwellings,
-        observation_fields=_OBS_FIELDS,
-        action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
-        episode_length=timedelta(minutes=5),
-        verify_observation_equivalence=True,
-    )
-
-    # Inject a one-sided NaN at index 0 ("total_power_kw") in the Python path.
-    def divergent_telemetry(telemetry, fields):
-        result = np.asarray(
-            telemetry_to_observation(telemetry, fields), dtype=np.float64
+    # The reports ride the config whole: repr is the one equality the
+    # pyclasses carry across the boundary.
+    assert [repr(r) for r in built.reports] == [repr(r) for r in sim_config.reports]
+    # The site override rides as the one field, every component reported.
+    for field in ("latitude_deg", "longitude_deg", "elevation_m", "utc_offset_h"):
+        passed = getattr(sim_config.site_location, field)
+        reported = getattr(built.site_location, field)
+        assert reported == passed, (
+            f"site_location.{field}: passed {passed!r}, the dwelling reports {reported!r}"
         )
-        result[0] = np.nan
-        return result
-
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        with patch.object(
-            vec_env_module, "telemetry_to_observation",
-            new=divergent_telemetry,
-        ):
-            env.step(np.full((1, 1), 21.0, dtype=np.float64))
-        mismatch_warnings = [
-            _w for _w in w
-            if "Rust-Python observation mismatch" in str(_w.message)
-        ]
-    assert len(mismatch_warnings) == 1, (
-        f"expected exactly one mismatch warning, got {len(mismatch_warnings)}: "
-        f"{[str(_w.message) for _w in mismatch_warnings]}"
-    )
-    warning_text = str(mismatch_warnings[0].message)
-    assert "total_power_kw" in warning_text, (
-        f"warning should name 'total_power_kw', got: {warning_text}"
-    )
-    assert "NaN mismatch" in warning_text, (
-        f"warning should report 'NaN mismatch', got: {warning_text}"
+    assert len(built.reports) == 2, "the reports ride the config whole"
+    assert not (tmp_path / "gym_output.parquet").exists(), (
+        "the gym's stepped episode publishes no file (publishing happens at simulate's end)"
     )
 
 
@@ -1225,7 +1664,7 @@ def test_vec_gym_time_res_s_explicit_30():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=episode_len,
         time_res_s=30.0,
     )
@@ -1244,7 +1683,7 @@ def test_vec_gym_time_res_s_explicit_60_regression():
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=_ACTION_CONFIG,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=episode_len,
         time_res_s=60.0,
     )
@@ -1266,7 +1705,7 @@ def test_vec_gym_time_res_s_none_uses_dwelling_config():
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=episode_len,
             time_res_s=None,
         )
@@ -1305,7 +1744,7 @@ def test_vec_gym_time_res_s_none_fallback_warning():
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=episode_len,
             time_res_s=None,
         )
@@ -1331,7 +1770,7 @@ def test_vec_gym_time_res_s_zero_raises():
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
             time_res_s=0.0,
         )
@@ -1345,7 +1784,222 @@ def test_vec_gym_time_res_s_negative_raises():
             dwellings=dwellings,
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=lambda ctx: -ctx["total_power_kw"],
+            reward_fn=lambda ctx: -ctx["total_power_w"],
             episode_length=timedelta(minutes=5),
             time_res_s=-30.0,
         )
+
+
+def test_vec_gym_rejects_non_positive_episode_length():
+    """A non-positive episode_length is a ValueError naming the field and
+    the value at construction, never a silent one-step episode."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    for length in (timedelta(0), timedelta(minutes=-5)):
+        with pytest.raises(ValueError, match="episode_length") as caught:
+            VecDwellingGymEnv(
+                dwellings=dwellings,
+                observation_fields=_OBS_FIELDS,
+                action_space_config=_ACTION_CONFIG,
+                reward_fn=lambda ctx: -ctx["total_power_w"],
+                episode_length=length,
+            )
+        assert str(length) in str(caught.value)
+
+
+def test_vec_gym_rejects_uncallable_reward_fn():
+    """A reward_fn that is not callable is a TypeError at construction
+    naming the field and the type."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    with pytest.raises(TypeError, match="reward_fn.*got str"):
+        VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=cast(Any, "not callable"),
+            episode_length=timedelta(minutes=5),
+        )
+
+
+def test_vec_gym_rejects_bare_string_observation_fields():
+    """A bare string observation_fields would iterate per character: it is
+    a TypeError naming the field and the value."""
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    with pytest.raises(TypeError, match="observation_fields.*got str") as caught:
+        VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=cast(Any, "total_power_w"),
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        )
+    assert "total_power_w" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# Action bounds: the engine's table is the canonical one, the Python-side
+# table pins it, and clamped actions are counted in every build.
+# ---------------------------------------------------------------------------
+
+
+def test_python_action_bounds_match_the_engine():
+    """The engine's exposed bounds table and the Python-side table name the
+    same fields with the same bounds in both directions, so growth on
+    either side fails the pin, and both fall through to the same broad
+    bounds for a field neither names, case-insensitively."""
+    from hares._hares import field_bounds as rust_field_bounds
+    from hares._hares import field_bounds_table as rust_field_bounds_table
+    from hares.rl.gym_env import _ACTION_FIELD_BOUNDS
+
+    engine_table = rust_field_bounds_table()
+    assert engine_table, "the engine's table must not be empty"
+    for field, engine in engine_table.items():
+        python = field_bounds(field)
+        assert python == engine, f"{field}: python {python}, engine {engine}"
+    for field, python in _ACTION_FIELD_BOUNDS.items():
+        engine = rust_field_bounds(field)
+        assert engine == python, f"{field}: engine {engine}, python {python}"
+    for name in ("HEAT_C", "Mystery_Field"):
+        assert field_bounds(name) == rust_field_bounds(name), name
+
+
+_REPORTED_CONFIG = GymDwellingConfig(
+    hpxml=HPXML,
+    schedule=SCHEDULE,
+    weather=WEATHER,
+    defaults=str(HARES_DEFAULTS),
+    sim_config=SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=600,
+        time_res=60,
+        reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())],
+    ),
+)
+
+
+def test_gym_env_exposes_the_finished_run_result():
+    """The truncating step finalises the run and ``run_result`` reads the
+    finished ``RunResult``: ``None`` before it, the report surface after,
+    cleared on ``reset()``."""
+    env = DwellingGymEnv(
+        config=_REPORTED_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    before = env.run_result
+    assert before is None, "no result before the truncating step"
+
+    for _ in range(4):
+        env.step(np.array([21.0], dtype=np.float64))
+    running = env.run_result
+    assert running is None, "no result while the episode runs"
+
+    obs, reward, terminated, truncated, info = env.step(
+        np.array([21.0], dtype=np.float64)
+    )
+    assert truncated is True, "the fifth step truncates the episode"
+    result = env.run_result
+    assert result is not None, "the truncating step finalises the run"
+    reports: list[Any] = list(result.reports)
+    assert [report.name for report in reports] == ["frame"]
+    assert reports[0].rows == 5, "the report holds the episode's five steps"
+    assert result.health.clamped_actions == 0
+
+    env.reset(seed=0)
+    cleared = env.run_result
+    assert cleared is None, "reset() clears the finished result"
+
+
+def test_vec_gym_exposes_each_dwelling_run_result():
+    """``run_results`` reads each dwelling's finished ``RunResult`` off the
+    vectorised wrapper: ``None`` per env before truncation, the report
+    surface after, cleared on ``reset()``."""
+    env = VecDwellingGymEnv(
+        dwellings=[_make_dwelling_for_reports(seed=i) for i in range(2)],
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    assert all(result is None for result in env.run_results)
+
+    for _ in range(4):
+        env.step(np.full((2, 1), 21.0, dtype=np.float64))
+    assert all(result is None for result in env.run_results)
+
+    obs, rewards, dones, truncs, infos = env.step(
+        np.full((2, 1), 21.0, dtype=np.float64)
+    )
+    assert truncs.tolist() == [True, True], "the fifth step truncates both"
+    for result in env.run_results:
+        assert result is not None, "the truncating step finalises each run"
+        assert [report.name for report in result.reports] == ["frame"]
+        assert result.reports[0].rows == 5
+
+    env.reset(seed=0)
+    assert all(result is None for result in env.run_results), "reset() clears"
+
+
+def _make_dwelling_for_reports(seed: int = 0) -> PyDwelling:
+    config = SimulationConfig(
+        start_time="2019-01-01T00:00:00",
+        duration=600,
+        time_res=60,
+        master_seed=seed,
+        reports=[ReportSpec("frame", Selection.verbosity(1), Destination.memory())],
+    )
+    return PyDwelling.from_hpxml(
+        hpxml=HPXML,
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        defaults=str(HARES_DEFAULTS),
+        config=config,
+    )
+
+
+def test_gym_observation_bounds_are_in_watts():
+    """The default observation space's `total_power_w` bounds are
+    (-100 000, 100 000), `reactive_power_var`'s the same and each
+    equipment `power_w` (0, 100 000); one episode keeps every observation
+    inside its Box; the built-in reward is minus the step's net power in
+    kW. The home is the der_pv_battery_900s inputs' PV home without the
+    battery: the gym config carries no override surface, and the bounds
+    and the reward need no battery."""
+    from hares import SimulationConfig
+
+    config = GymDwellingConfig(
+        hpxml=str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml"),
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        defaults=str(HARES_DEFAULTS),
+        sim_config=SimulationConfig(
+            start_time="2023-06-01T00:00:00-07:00",
+            duration=14400,
+            time_res=900,
+            master_seed=0,
+        ),
+    )
+    fields = ["total_power_w", "outdoor_temp"]
+    env = DwellingGymEnv(
+        config=config,
+        observation_fields=cast(Any, fields),
+        action_space_config={},
+        reward_fn=None,
+        episode_length=timedelta(hours=4),
+    )
+    obs, _ = env.reset(seed=0)
+    for _ in range(10):
+        obs, reward, _term, _trunc, info = env.step(np.zeros(0, dtype=np.float64))
+        for i, field in enumerate(fields):
+            low, high = observation_field_bounds(field)
+            assert low <= obs[i] <= high, f"{field} = {obs[i]} outside ({low}, {high})"
+        # The built-in reward: minus the step's net power in kW, converted
+        # once from the step's watts.
+        assert reward == -info["step"]["net_electric_power_w"] / 1000.0
+    # The bounds are the W-scale ones.
+    assert observation_field_bounds("total_power_w") == (-100_000.0, 100_000.0)
+    assert observation_field_bounds("reactive_power_var") == (-100_000.0, 100_000.0)
+    assert observation_field_bounds("equipment_power[Gas Furnace]") == (0.0, 100_000.0)

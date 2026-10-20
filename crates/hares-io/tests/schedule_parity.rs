@@ -51,7 +51,10 @@ fn make_hourly_schedule(columns: &[(&str, &[f64])]) -> ScheduleTimeSeries {
 
 fn make_spec_annual_kwh(name: &str, annual_kwh: f64) -> EquipmentSpec {
     let mut parameters = Map::new();
-    parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+    parameters.insert(
+        "annual_electric_j".to_string(),
+        Value::from(annual_kwh * 3.6e6),
+    );
     EquipmentSpec {
         instance_name: None,
         name: name.to_string(),
@@ -63,12 +66,17 @@ fn make_spec_annual_kwh(name: &str, annual_kwh: f64) -> EquipmentSpec {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 
 fn make_spec_with_duty_cycle(name: &str, annual_kwh: f64, duty_cycle: f64) -> EquipmentSpec {
     let mut parameters = Map::new();
-    parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+    parameters.insert(
+        "annual_electric_j".to_string(),
+        Value::from(annual_kwh * 3.6e6),
+    );
     parameters.insert("duty_cycle_fraction".to_string(), Value::from(duty_cycle));
     EquipmentSpec {
         instance_name: None,
@@ -81,10 +89,12 @@ fn make_spec_with_duty_cycle(name: &str, annual_kwh: f64, duty_cycle: f64) -> Eq
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 
-fn resolved_kw_series(spec: &EquipmentSpec, schedule: &ScheduleTimeSeries) -> Vec<f64> {
+fn resolved_w_series(spec: &EquipmentSpec, schedule: &ScheduleTimeSeries) -> Vec<f64> {
     let source = spec
         .parameters
         .get("power_schedule_source")
@@ -101,12 +111,12 @@ fn resolved_kw_series(spec: &EquipmentSpec, schedule: &ScheduleTimeSeries) -> Ve
             schedule.columns[col_idx].clone()
         }
         "constant" => {
-            let kw = spec
+            let w = spec
                 .parameters
-                .get("power_constant_kw")
+                .get("power_constant_w")
                 .and_then(Value::as_f64)
-                .expect("power_constant_kw should be present");
-            vec![kw; schedule.len()]
+                .expect("power_constant_w should be present");
+            vec![w; schedule.len()]
         }
         other => panic!("unexpected power_schedule_source: {other}"),
     }
@@ -142,28 +152,29 @@ fn time_varying_lighting_schedule_is_not_constant() {
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
-    let kw_series = resolved_kw_series(&specs[0], &schedule);
+    let w_series = resolved_w_series(&specs[0], &schedule);
 
     assert_eq!(
-        kw_series.len(),
+        w_series.len(),
         8760,
         "resolved series should cover all 8760 hours"
     );
 
     // Must NOT be constant -- at least two distinct values must exist.
-    let min_kw = kw_series.iter().copied().fold(f64::INFINITY, f64::min);
-    let max_kw = kw_series.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min_w = w_series.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_w = w_series.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     assert!(
-        (max_kw - min_kw) > 0.01,
-        "lighting schedule must vary: min={min_kw:.4} max={max_kw:.4}"
+        (max_w - min_w) > 0.01,
+        "lighting schedule must vary: min={min_w:.4} max={max_w:.4}"
     );
 
-    // Mean kW must be roughly annual_kwh / 8760 = 1200 / 8760 ≈ 0.1370 kW.
-    let mean_kw = kw_series.iter().sum::<f64>() / kw_series.len() as f64;
-    let expected_mean_kw = 1_200.0_f64 / 8760.0;
+    // Mean W must be roughly annual_kwh x 1000 / 8760 (the annual energy's
+    // average power).
+    let mean_w = w_series.iter().sum::<f64>() / w_series.len() as f64;
+    let expected_mean_w = 1_200.0_f64 * 1000.0 / 8760.0;
     assert!(
-        (mean_kw - expected_mean_kw).abs() < expected_mean_kw * 0.01,
-        "mean kW should be ~{expected_mean_kw:.5} (annual_kwh/8760), got {mean_kw:.5}"
+        (mean_w - expected_mean_w).abs() < expected_mean_w * 0.01,
+        "mean W should be ~{expected_mean_w:.5} (annual_j/8760), got {mean_w:.5}"
     );
 }
 
@@ -197,10 +208,13 @@ fn annual_energy_round_trip_matches_configured_kwh() {
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
-    let kw_series = resolved_kw_series(&specs[0], &schedule);
+    let w_series = resolved_w_series(&specs[0], &schedule);
 
-    // Each step is 1 hour → integrate kW over dt = 1h to get kWh per step.
-    let total_kwh: f64 = kw_series.iter().sum::<f64>() * 1.0;
+    // Each step is 1 hour → integrate W over dt = 1 h to get joules per
+    // step, then convert once to kWh.
+    let total_j: f64 = w_series.iter().sum::<f64>() * 3600.0;
+    let total_kwh = uom::si::f64::Energy::new::<uom::si::energy::joule>(total_j)
+        .get::<uom::si::energy::kilowatt_hour>();
 
     let rel_err = (total_kwh - annual_kwh).abs() / annual_kwh;
     assert!(
@@ -323,13 +337,14 @@ fn ochre_parity_24h_lighting_schedule_reference_values() {
     ];
     let annual_kwh = 876.0_f64;
 
-    // OCHRE formula: max_kw = (annual_kwh / 8760) / mean_fraction
+    // OCHRE formula: max_kw = (annual_kwh / 8760) / mean_fraction; the
+    // resolved series holds W.
     let mean_fraction: f64 = fractions_24h.iter().sum::<f64>() / 24.0;
     let max_kw = (annual_kwh / 8760.0) / mean_fraction;
 
     // Reference values for hours 0..24 (computed from OCHRE formula, not Python output).
     // Replace with actual OCHRE Python output once OCHRE is running.
-    let expected_kw: Vec<f64> = fractions_24h.iter().map(|f| f * max_kw).collect();
+    let expected_w: Vec<f64> = fractions_24h.iter().map(|f| f * max_kw * 1000.0).collect();
 
     // Build a schedule with the fractions repeated for 8760 hours.
     let fractions_8760: Vec<f64> = fractions_24h.iter().cycle().take(8760).copied().collect();
@@ -344,15 +359,10 @@ fn ochre_parity_24h_lighting_schedule_reference_values() {
     )
     .expect("inject_schedule_into_specs should succeed with valid config");
 
-    let kw_series = resolved_kw_series(&specs[0], &schedule);
+    let w_series = resolved_w_series(&specs[0], &schedule);
 
     // Check the first 24 hours against reference values within 0.1%.
-    for (h, (&actual, &expected)) in kw_series
-        .iter()
-        .zip(expected_kw.iter())
-        .enumerate()
-        .take(24)
-    {
+    for (h, (&actual, &expected)) in w_series.iter().zip(expected_w.iter()).enumerate().take(24) {
         let rel_err = (actual - expected).abs() / expected.max(1e-9);
         assert!(
             rel_err < 0.001,

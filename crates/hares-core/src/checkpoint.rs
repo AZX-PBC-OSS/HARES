@@ -56,7 +56,54 @@ use serde::{Deserialize, Serialize};
 /// schema version is unchanged at 1 because v1 was never released in a
 /// build without the field).
 /// Checkpoints written by v13 builds are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 14;
+///
+/// v15: the checkpoint carries everything else the run needs to continue
+/// seamlessly — the closed billing periods' summaries, the run metrics'
+/// accumulator (present exactly when the run requested metrics), every
+/// `Memory` report's row stream with its counters, the run health totals
+/// and the warning record (both bounded buffers and their dropped
+/// counts) — so a run checkpointed mid-year and resumed finishes bitwise
+/// to the continuous run in every output surface. Checkpoints written by
+/// v14 builds are rejected by the version gate.
+///
+/// v16: each report's row-stream section carries the chunk size the
+/// writing run's recorder flushed at, and a restoring recorder built at
+/// another chunk size is a typed refusal (the same rows would rebuild
+/// into batches of different shapes, so the resumed frames would not be
+/// the writing run's bitwise). Checkpoints written by v15 builds are
+/// rejected by the version gate.
+///
+/// v17: the metrics section carries the time resolution it was written
+/// at, and a restoring run at another is a typed refusal (the input plan
+/// is resolution-free, and two distinct resolutions can size the rolling
+/// peak's ring identically). Checkpoints written by v16 builds are
+/// rejected by the version gate.
+///
+/// v19: the run health totals carry the cross-tier deadband event count
+/// (the runtime collision the init's static deadband check cannot see),
+/// the count's equipment-side counter in `EquipmentHealthCounts` beside
+/// it. Checkpoints written by v18 builds are rejected by the version gate.
+///
+/// v20: the run state is SI (B-14's run-state commit): the billing
+/// state's cumulative energies and peaks, the metrics calculator's
+/// accumulators, the equipment run states and the electrical summary
+/// hold J, W and VAR, and the checkpoint sections carrying them carry
+/// the SI names. Checkpoints written by v19 builds are rejected by the
+/// version gate.
+///
+/// v21: every stochastic schedule source rides in the checkpoint - the
+/// water heaters' draw, mains and appliance sources, and the EV driver's
+/// four driving sources (miles, departure, trip duration, arrival) - so
+/// a restore continues every draw where the saved run left it and a
+/// reseed re-derives every source from the new key. Checkpoints written
+/// by v20 builds are rejected by the version gate.
+///
+/// v22: `RunHealth` carries `discarded_state_energy_wh`, the kept state
+/// energy a tolerated equipment-step failure's rollback cannot account
+/// for. The counter is run bookkeeping, not physics state, but the type
+/// rides the checkpoint's schema, so the fingerprint moves. Checkpoints
+/// written by v21 builds are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 22;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -114,6 +161,19 @@ pub struct DwellingCheckpoint {
     pub format_version: u32,
     pub bldg_id: i64,
     pub timestep_index: u64,
+    /// The environment's actor-facing equipment snapshots, carried
+    /// exactly: the previous step's telemetry and typed core outputs the
+    /// actors read. Rebuilding them from the restored equipment would
+    /// hand the actors the equipment's committed state where the saved
+    /// run's actors read the freshest committed snapshot at save time -
+    /// a different thing whenever an equipment's telemetry and its
+    /// committed state diverge (an init-time default never stepped) - so
+    /// the restore overwrites the maps with these.
+    #[serde(default)]
+    pub env_equipment_telemetry: std::collections::HashMap<String, hares_types::Telemetry>,
+    #[serde(default)]
+    pub env_equipment_core:
+        std::collections::HashMap<hares_types::EquipmentId, hares_types::CoreOutput>,
     /// Per-equipment state, identity-keyed. Each entry carries the
     /// equipment's name and id alongside its opaque state blob; restore
     /// matches by name and validates the id before handing the blob to
@@ -144,8 +204,8 @@ pub struct DwellingCheckpoint {
     /// stream of a restored driver.
     pub next_ev_driver_stream: u64,
     /// The tariff evaluator's complete mutable state, when a tariff is
-    /// attached: the tariff, the horizon, the price-index position, the open
-    /// billing period and its accruals and demand-window history, as a
+    /// attached: the tariff, the horizon, the price-index position, the
+    /// open billing period and its accruals and demand-window history, as a
     /// versioned JSON payload ([`hares_tariff::TariffSnapshot`]). `None`
     /// when the run has no tariff, and a dwelling restored from such a
     /// checkpoint has none either. The payload carries its own schema
@@ -153,6 +213,38 @@ pub struct DwellingCheckpoint {
     /// on restore, independently of this constant (the [`ThermalSnapshot`]
     /// pattern).
     pub tariff_state: Option<Vec<u8>>,
+    /// Every closed billing period's summary, in close order: a restored
+    /// run's billing summaries continue the written run's. A section
+    /// present without a tariff section is a typed restore error (the
+    /// summaries' bounds resolve in the tariff's zone).
+    pub billing_summaries: Vec<hares_tariff::BillingPeriodSummarySnapshot>,
+    /// The run metrics' accumulator, exact at the checkpoint step, present
+    /// exactly when the run requested metrics (`SimulationConfig::metrics`):
+    /// a section without the request, or the request without a section, is
+    /// a typed restore error naming the section.
+    pub metrics: Option<hares_io::MetricsSnapshot>,
+    /// One section per configured report, in `reports` order: the report's
+    /// name and its recorder's row stream. A `Memory` report's rows restore
+    /// so the resumed run's frame continues the written run's; rows the
+    /// restoring dwelling recorded past the checkpoint step are discarded.
+    pub reports: Vec<ReportSection>,
+    /// The run's health totals: the counters continue across the restore.
+    pub health: crate::health::RunHealth,
+    /// The warning record: both bounded buffers and their dropped counts,
+    /// so the restored run's `RunResult.warnings` and its caller's next
+    /// drain continue the written run's.
+    pub warnings: crate::dwelling::WarningLogSnapshot,
+}
+
+/// One report's checkpoint section: its name and its recorder's row
+/// stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReportSection {
+    /// The report's name, matched against the restoring dwelling's
+    /// configured reports.
+    pub name: String,
+    /// The recorder's row stream.
+    pub rows: hares_io::ReportRowsSnapshot,
 }
 
 impl DwellingCheckpoint {
@@ -259,8 +351,11 @@ fn temp_checkpoint_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
+        ReportSection,
     };
     use hares_envelope::{THERMAL_SNAPSHOT_SCHEMA_VERSION, ThermalSnapshot};
     use hares_types::{ElectricalSummary, ZoneId};
@@ -292,6 +387,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 7,
             timestep_index: 12,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![EquipmentStateCheckpoint {
                 name: "EV".into(),
                 equipment_id: 3,
@@ -325,6 +422,121 @@ mod tests {
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
             tariff_state: None,
+            billing_summaries: vec![hares_tariff::BillingPeriodSummarySnapshot {
+                zone: "America/Denver".into(),
+                period_start: hares_tariff::LocalInstant {
+                    wall_clock: "2023-01-25T00:00:00".into(),
+                    offset_seconds: -25200,
+                },
+                period_end: hares_tariff::LocalInstant {
+                    wall_clock: "2023-02-01T00:00:00".into(),
+                    offset_seconds: -25200,
+                },
+                energy_charge_usd: 12.345_678_9,
+                demand_charge_usd: 3.5,
+                fixed_charge_usd: 10.0,
+                export_credit_usd: 1.25,
+                net_bill_usd: 24.595_678_9,
+                peak_demand_kw: 4.75,
+                total_import_kwh: 103.25,
+                total_export_kwh: 21.5,
+            }],
+            metrics: Some(hares_io::MetricsSnapshot {
+                time_res_secs: 900,
+                plan: hares_io::MetricsPlanSnapshot {
+                    total_electric_power_slot: 0,
+                    total_gas_power_slot: Some(1),
+                    grid_power_slot: 0,
+                    pv_power_slot: None,
+                    end_use_columns: vec![("HVAC".to_string(), 2)],
+                    setpoints: None,
+                    hvac_capacity_pairs: vec![(3, 4)],
+                    window_solar_w_slot: None,
+                    infiltration_w_slot: None,
+                    interior_lwr_w_slot: None,
+                    internal_gains_w_slot: None,
+                    opaque_conduction_w_slot: None,
+                    window_conduction_w_slot: None,
+                    internal_mass_w_slot: None,
+                    forced_ventilation_w_slot: None,
+                    natural_ventilation_w_slot: None,
+                    duct_loss_w_slot: None,
+                    hvac_heating_delivered_w_slot: None,
+                    hvac_cooling_delivered_w_slot: None,
+                    hvac_heating_kw_slot: Some(2),
+                    hvac_cooling_kw_slot: None,
+                    battery_kw_slot: None,
+                },
+                accumulators: hares_io::MetricsAccumulatorsSnapshot {
+                    total_electric_energy_j: 14.829_037_328_432_975,
+                    total_gas_energy_j: 3.25,
+                    total_consumption_j: 15.1,
+                    total_pv_generation_j_abs: 2.5,
+                    peak_import_w: 4.25,
+                    peak_export_w: 1.75,
+                    energy_by_end_use: BTreeMap::from([("HVAC".to_string(), 9.875)]),
+                    peak_by_end_use: BTreeMap::from([
+                        ("HVAC".to_string(), Some(4.25)),
+                        ("Idle".to_string(), None),
+                    ]),
+                    comfort_step_count: 10.0,
+                    unmet_step_count: 2.0,
+                    rolling_peak: hares_io::MetricsRollingPeakSnapshot {
+                        buffer: vec![1.0, 2.0, 3.0, 4.0],
+                        head: 2,
+                        count: 4,
+                        peak_15min_w: 3.5,
+                        peak_30min_w: 3.75,
+                        peak_60min_w: 4.0,
+                    },
+                    envelope_window_solar_j: 1.5,
+                    envelope_opaque_conduction_j: 2.5,
+                    envelope_window_conduction_j: 3.5,
+                    envelope_internal_mass_j: 4.5,
+                    envelope_interior_lwr_j: 5.5,
+                    envelope_infiltration_j: 6.5,
+                    envelope_ventilation_j: 7.5,
+                    envelope_hvac_heating_j: 8.5,
+                    envelope_hvac_cooling_j: 9.5,
+                    envelope_internal_gains_j: 10.5,
+                    envelope_duct_loss_j: 11.5,
+                    hvac_heating_electric_j: 12.5,
+                    hvac_cooling_electric_j: 13.5,
+                    battery_energy_in_j: 14.5,
+                    battery_energy_out_j: 15.5,
+                    total_row_count: 96,
+                    setpoint_missing_row_count: 3,
+                    nan_step_count: 1,
+                },
+            }),
+            reports: vec![ReportSection {
+                name: "frame".into(),
+                rows: hares_io::ReportRowsSnapshot {
+                    timestamps: vec![1_000, 2_000, 3_000, 4_000],
+                    values: vec![1.5, -0.25, 2.5, -0.5, 3.5, 0.75, 4.5, -1.0],
+                    valid: vec![true, true, true, true, true, false, true, false],
+                    buffered_rows: 1,
+                    batches_built: 3,
+                    chunk_size: 4,
+                },
+            }],
+            health: crate::health::RunHealth {
+                port_rollbacks: 1,
+                rejected_control_signals: 2,
+                clamped_actions: 3,
+                curve_index_clamps: 4,
+                fluid_payload_absences: 5,
+                evicted_actors: 6,
+                cross_tier_deadband_events: 7,
+                discarded_state_energy_wh: 0.0,
+                warmup: crate::health::WarmupOutcome::Disabled,
+            },
+            warnings: crate::dwelling::WarningLogSnapshot {
+                run_record: vec![hares_types::Warning::new("test", "recorded warning")],
+                run_record_dropped: 7,
+                pending: vec![hares_types::Warning::new("test", "pending warning")],
+                pending_dropped: 8,
+            },
         }
     }
 
@@ -359,10 +571,11 @@ mod tests {
     }
 
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
-    /// [`type_schema`]`::<DwellingCheckpoint>()`.
-    const PINNED_VERSION: u32 = 14;
+    /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
+    /// traced before the root so every variant is recorded.
+    const PINNED_VERSION: u32 = 22;
     const PINNED_SCHEMA_SHA256: &str =
-        "5a7267067360d5101e69165bdfd7afa08847c8a96057d0f67af6a545ac1683a3";
+        "6f2934f8aece278e6ddc72aee52e4bdc031a525ff6d4e19cfc0f368e52f8aca6";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the
@@ -372,7 +585,29 @@ mod tests {
     /// `CHECKPOINT_VERSION` and re-pin both constants together.
     #[test]
     fn checkpoint_shape_is_pinned_to_its_version() {
-        let schema = type_schema::<DwellingCheckpoint>();
+        let schema = type_schema_with(|tracer| {
+            tracer
+                .trace_simple_type::<crate::health::WarmupOutcome>()
+                .map(|_| ())?;
+            tracer
+                .trace_simple_type::<hares_io::MetricsDeadbandSnapshot>()
+                .map(|_| ())?;
+            // The actor-facing environment maps' nested enums: the
+            // equipment telemetry's and core outputs' power, fuel and
+            // operating-mode records.
+            tracer
+                .trace_simple_type::<hares_types::ElectricPower>()
+                .map(|_| ())?;
+            tracer
+                .trace_simple_type::<hares_types::FuelType>()
+                .map(|_| ())?;
+            tracer
+                .trace_simple_type::<hares_types::OperatingMode>()
+                .map(|_| ())?;
+            tracer
+                .trace_simple_type::<DwellingCheckpoint>()
+                .map(|(format, _)| format)
+        });
         let fingerprint = sha256_hex(&schema);
         assert_eq!(
             fingerprint, PINNED_SCHEMA_SHA256,
@@ -457,6 +692,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 42,
             timestep_index: 100,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -468,6 +705,11 @@ mod tests {
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
             tariff_state: None,
+            billing_summaries: Vec::new(),
+            metrics: None,
+            reports: Vec::new(),
+            health: crate::health::RunHealth::default(),
+            warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
         let (_dir, path) = checkpoint_path();
@@ -485,6 +727,8 @@ mod tests {
             format_version: 1, // intentionally wrong — older than CHECKPOINT_VERSION
             bldg_id: 1,
             timestep_index: 0,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -496,6 +740,11 @@ mod tests {
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
             tariff_state: None,
+            billing_summaries: Vec::new(),
+            metrics: None,
+            reports: Vec::new(),
+            health: crate::health::RunHealth::default(),
+            warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
         let (_dir, path) = checkpoint_path();
@@ -505,6 +754,27 @@ mod tests {
         assert!(
             err.to_string().contains("version mismatch"),
             "expected version mismatch error, got: {err}"
+        );
+    }
+
+    /// A checkpoint written by the build one version behind is rejected by
+    /// the version gate in `deserialize_gated`, naming both versions: the
+    /// previous schema's sections cannot parse into this build's.
+    #[test]
+    fn previous_version_checkpoint_is_rejected() {
+        let mut body: serde_json::Value =
+            serde_json::to_value(populated_checkpoint()).expect("serialize the checkpoint");
+        body["format_version"] = serde_json::json!(CHECKPOINT_VERSION - 1);
+        let json_bytes = serde_json::to_vec(&body).expect("serialize the v-1 blob");
+
+        let err = DwellingCheckpoint::deserialize_gated(&json_bytes).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("checkpoint version mismatch")
+                && msg.contains(&format!("file={}", CHECKPOINT_VERSION - 1))
+                && msg.contains(&format!("expected={CHECKPOINT_VERSION}")),
+            "a one-version-behind checkpoint must be rejected by the gate with both \
+             versions named; got: {msg}"
         );
     }
 
@@ -534,12 +804,12 @@ mod tests {
             // Pre-v7 shape: (name, blob) tuples, no schema_version.
             "actor_states": [["OldActor", [1, 2, 3]]],
             "prior_electrical_summary": {
-                "pv_generation_kw": 0.0,
-                "base_load_kw": 0.0,
-                "net_grid_kw": 0.0,
-                "battery_power_kw": 0.0,
-                "ev_power_kw": 0.0,
-                "actual_pv_kw": 0.0,
+                "pv_generation_w": 0.0,
+                "base_load_w": 0.0,
+                "net_grid_w": 0.0,
+                "battery_power_w": 0.0,
+                "ev_power_w": 0.0,
+                "actual_pv_w": 0.0,
             },
         });
         let json_bytes = serde_json::to_vec(&body).expect("serialize test fixture");
@@ -655,6 +925,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 1,
             timestep_index: 0,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -666,6 +938,11 @@ mod tests {
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
             tariff_state: None,
+            billing_summaries: Vec::new(),
+            metrics: None,
+            reports: Vec::new(),
+            health: crate::health::RunHealth::default(),
+            warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
         let (_dir, path) = checkpoint_path();
@@ -691,17 +968,19 @@ mod tests {
     #[test]
     fn prior_electrical_summary_round_trip() {
         let summary = ElectricalSummary {
-            pv_generation_kw: 5.0,
-            base_load_kw: 2.5,
-            net_grid_kw: 1.0,
-            battery_power_kw: 1.5,
-            ev_power_kw: 3.0,
-            actual_pv_kw: 4.5,
+            pv_generation_w: 5000.0,
+            base_load_w: 2500.0,
+            net_grid_w: 1000.0,
+            battery_power_w: 1500.0,
+            ev_power_w: 3000.0,
+            actual_pv_w: 4500.0,
         };
         let cp = DwellingCheckpoint {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 7,
             timestep_index: 12,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -713,6 +992,11 @@ mod tests {
             prior_electrical_summary: summary.clone(),
             next_ev_driver_stream: 0,
             tariff_state: None,
+            billing_summaries: Vec::new(),
+            metrics: None,
+            reports: Vec::new(),
+            health: crate::health::RunHealth::default(),
+            warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
         let (_dir, path) = checkpoint_path();
@@ -734,6 +1018,27 @@ mod tests {
         cp.save(&path).unwrap();
         let loaded = DwellingCheckpoint::load(&path).unwrap();
         assert_eq!(loaded.thermal.x[0].to_bits(), state.to_bits());
+    }
+
+    /// A checkpoint written, read and written again is byte-identical:
+    /// every section's floats read back with the bits they were written
+    /// with (float_roundtrip parsing), so a resumed run holds the written
+    /// run's state exactly.
+    #[test]
+    fn restore_round_trips_every_float_bitwise() {
+        let cp = populated_checkpoint();
+
+        let (_dir, path) = checkpoint_path();
+        cp.save(&path).expect("save the checkpoint");
+        let first = std::fs::read(&path).expect("read the checkpoint file");
+        let loaded = DwellingCheckpoint::load(&path).expect("load the checkpoint");
+        loaded.save(&path).expect("save the loaded checkpoint");
+        let second = std::fs::read(&path).expect("read the rewritten file");
+        assert_eq!(
+            first, second,
+            "the checkpoint file is byte-identical through a read and a rewrite"
+        );
+        assert_eq!(loaded, cp);
     }
 
     /// A checkpoint file's tariff state returns every float bit for bit:
@@ -768,6 +1073,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 1,
             timestep_index: 30,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -779,6 +1086,11 @@ mod tests {
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
             tariff_state: Some(blob),
+            billing_summaries: Vec::new(),
+            metrics: None,
+            reports: Vec::new(),
+            health: crate::health::RunHealth::default(),
+            warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
         let (_dir, path) = checkpoint_path();
@@ -802,6 +1114,8 @@ mod tests {
             format_version: CHECKPOINT_VERSION,
             bldg_id: 1,
             timestep_index: 0,
+            env_equipment_telemetry: std::collections::HashMap::new(),
+            env_equipment_core: std::collections::HashMap::new(),
             equipment_states: vec![],
             rng_state: [0; 32],
             thermal: empty_thermal(),
@@ -813,6 +1127,11 @@ mod tests {
             prior_electrical_summary: ElectricalSummary::default(),
             next_ev_driver_stream: 0,
             tariff_state: None,
+            billing_summaries: Vec::new(),
+            metrics: None,
+            reports: Vec::new(),
+            health: crate::health::RunHealth::default(),
+            warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
         let path = std::path::PathBuf::from("/nonexistent-dir-xyz/cp.json");

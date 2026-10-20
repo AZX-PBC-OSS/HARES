@@ -7,12 +7,14 @@ GIL safety stress tests for batch_step.
 
 import math
 import threading
+from array import array
 from datetime import datetime
 
 import polars as pl
 import pytest
 
 from conftest import make_dwelling
+from hares import SimulationConfig
 
 
 def _num(value: object) -> float:
@@ -42,8 +44,8 @@ class TestConstructionRoundTrip:
     def test_from_hpxml_returns_config(self, initialized_dwelling):
         dw = initialized_dwelling
         cfg = dw.config()
-        assert cfg.duration_s == 300
-        assert cfg.time_res_s == 60
+        assert cfg.duration == 300
+        assert cfg.time_res == 60
         assert cfg.master_seed == 0
 
     def test_overrides_none_builds_and_non_object_overrides_raise(self):
@@ -52,7 +54,7 @@ class TestConstructionRoundTrip:
         Python None as a misconfigured payload), and a non-object payload
         (a bare string) must fail loudly at the assembly boundary rather
         than silently no-op every override."""
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         # None → no overrides → builds.
         dw = make_dwelling(overrides=None)
@@ -108,7 +110,7 @@ class TestFullSimulation:
         duration_s = 300
         time_res_s = 60
         dw = _init_dwelling(duration_s=duration_s, time_res_s=time_res_s)
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         assert isinstance(df, pl.DataFrame)
         expected_rows = duration_s // time_res_s
         assert df.height == expected_rows, (
@@ -122,8 +124,8 @@ class TestFullSimulation:
         )
 
     def test_simulate_expected_columns(self, tmp_path):
-        dw = _init_dwelling(output_verbosity=3, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
-        df = dw.simulate()
+        dw = _init_dwelling(verbosity=3)
+        df = dw.simulate().reports[0].table()
         cols = df.columns
         assert "Total Electric Power (kW)" in cols
         first_power = df["Total Electric Power (kW)"].to_list()[0]
@@ -142,8 +144,8 @@ class TestFullSimulation:
         assert len(mode_cols) > 0
 
     def test_verbosity_2_includes_outdoor_temp(self, tmp_path):
-        dw = _init_dwelling(output_verbosity=2, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
-        df = dw.simulate()
+        dw = _init_dwelling(verbosity=2)
+        df = dw.simulate().reports[0].table()
         assert "Outdoor Dry Bulb (C)" in df.columns
         col = df["Outdoor Dry Bulb (C)"]
         assert col.null_count() == 0
@@ -152,8 +154,8 @@ class TestFullSimulation:
 
     def test_verbosity_1_includes_outdoor_temp(self, tmp_path):
         # Outdoor Dry Bulb (C) is a context column present at every verbosity level.
-        dw = _init_dwelling(output_verbosity=1, write_output=True, output_path=str(tmp_path / "dwelling_42.csv"))
-        df = dw.simulate()
+        dw = _init_dwelling(verbosity=1)
+        df = dw.simulate().reports[0].table()
         assert "Outdoor Dry Bulb (C)" in df.columns
 
 
@@ -181,7 +183,7 @@ class TestStepByStep:
 
 
 def _find_thermal_equipment(dw) -> str:
-    from ochre_next import ControlCapabilities
+    from hares import ControlCapabilities
 
     descs = dw.equipment_descriptors()
     for d in descs:
@@ -192,7 +194,7 @@ def _find_thermal_equipment(dw) -> str:
 
 class TestControlInjection:
     def test_thermal_setpoint_applied(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         # Run baseline (default setpoints) and capture final zone temperature
         dw_base = _init_dwelling(duration_s=600, time_res_s=60)
@@ -228,12 +230,12 @@ class TestControlInjection:
         Uses a July start so the battery cell temperature is above the
         0°C charge lockout threshold (Li-ion safety: no charging below 0°C).
         """
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = _init_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
         )
-        bat = Battery("Bat", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.3)
+        bat = Battery("Bat", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.3)
         dw.add_battery(bat)
         dw.apply_control("Bat", ControlSignal.soc_target(target=0.9))
         for _ in range(5):
@@ -245,11 +247,11 @@ class TestControlInjection:
             f"Battery SOC should increase toward target 0.9, got {soc}. "
             f"If stuck at 0.3, check cell_temp vs min_charge_temp_c lockout."
         )
-        power = tel["power_kw"][idx]
+        power = tel["power_w"][idx]
         assert power > 0, f"Battery should be drawing power to charge, got {power}"
 
     def test_control_reflected_in_telemetry(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         heat_c = 21.0
 
@@ -263,7 +265,7 @@ class TestControlInjection:
         equip = t.equipment()
         assert name in equip["names"]
         idx = equip["names"].index(name)
-        assert math.isfinite(equip["power_kw"][idx])
+        assert math.isfinite(equip["power_w"][idx])
 
         zone = t.zone()
         # The furnace (heating-only) writes sp.heating_c into CoreOutput.setpoint_c
@@ -274,7 +276,7 @@ class TestControlInjection:
         ), f"Expected heating setpoint {heat_c} in zone telemetry, got {zone['setpoint_heat_c']}"
 
     def test_validate_control(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = _init_dwelling()
         name = _find_thermal_equipment(dw)
@@ -287,7 +289,7 @@ class TestControlInjection:
         assert dw.validate_control("Nonexistent Equipment", valid) is False
 
     def test_all_control_signal_variants_construct(self):
-        from ochre_next import (
+        from hares import (
             ControlSignal,
             DRLevel,
             DutyCycleComponent,
@@ -297,19 +299,20 @@ class TestControlInjection:
         )
 
         signals = [
-            ControlSignal.power_setpoint(1.5),
-            ControlSignal.power_setpoint(1.5, 0.5),
+            ControlSignal.power_setpoint(active_power_w=1500.0),
+            ControlSignal.power_setpoint(active_power_w=1500.0, reactive_power_var=0.5),
             ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0),
             ControlSignal.thermal_setpoint_delta(heating_delta_c=1.0),
             ControlSignal.ideal_capacity(5000.0),
             ControlSignal.load_fraction(0.75),
             ControlSignal.mode_override(OperatingMode.Heating),
             ControlSignal.mode_override_str("Cooling"),
+            ControlSignal.mode_override_release(),
             ControlSignal.demand_response(DRLevel.High),
             ControlSignal.demand_response_str("Normal"),
             ControlSignal.soc_target(target=0.8, min=0.2, max=1.0),
             ControlSignal.humidity_setpoint(target_rh=50.0),
-            ControlSignal.power_limit(max_power_kw=5.0),
+            ControlSignal.power_limit(max_power_w=5000.0),
             ControlSignal.duty_cycle(on_fraction=0.5, period_s=300.0),
             ControlSignal.duty_cycle(
                 on_fraction=0.5, component=DutyCycleComponent.Compressor
@@ -317,7 +320,7 @@ class TestControlInjection:
             ControlSignal.grid_connect(connected=True),
             ControlSignal.self_consumption(enabled=True, solar_only_charging=False),
             ControlSignal.curtailment_percent(50.0),
-            ControlSignal.reactive_setpoint(kvar=1.0),
+            ControlSignal.reactive_setpoint(var=1.0),
             ControlSignal.power_factor_setpoint(0.95),
             ControlSignal.inverter_priority_mode(InverterPriority.Watt),
             ControlSignal.protocol_native(42, b"\x01\x02"),
@@ -368,10 +371,10 @@ class TestTelemetry:
 
         equip = t.equipment()
         assert isinstance(equip, dict)
-        for key in ("names", "modes", "soc", "power_kw"):
+        for key in ("names", "modes", "soc", "power_w"):
             assert key in equip, f"Missing equipment key: {key}"
 
-        power = t.total_power_kw
+        power = t.total_power_w
         assert isinstance(power, float)
         assert math.isfinite(power)
 
@@ -407,13 +410,12 @@ class TestMetrics:
         dw = _init_dwelling(
             duration_s=7200,
             time_res_s=60,
-            output_verbosity=1,
+            verbosity=1,
             start_time="2019-01-01T05:00:00",
-            write_output=True,
-            output_path=str(tmp_path / "dwelling_42.csv"),
         )
-        dw.simulate()
-        m = dw.metrics()
+        result = dw.simulate()
+        m = result.metrics
+        assert m is not None
         assert m.total_energy_kwh is not None
         assert isinstance(m.total_energy_kwh.net_energy_kwh, float)
         assert m.total_energy_kwh.net_energy_kwh > 0, (
@@ -500,22 +502,23 @@ class TestTimesteps:
 
 class TestBatchStep:
     def test_batch_step_basic(self):
-        from ochre_next import batch_step
+        from hares import batch_step
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        results = batch_step([dw], [[]], ["total_power_kw"], [], {}, [])
+        plan = dw.observation_plan(["total_power_w"])
+        buf = array("d", bytes(8))
+        results = batch_step([dw], [[]], [plan], [], {}, [], buf)
         assert isinstance(results, list)
         assert len(results) == 1
         r = results[0]
-        assert "obs" in r
-        assert "reward" in r
+        assert "step" in r
         assert "terminated" in r
         assert "truncated" in r
         assert "info" in r
 
     def test_batch_step_concurrent_stress(self):
         """Verify no segfault or deadlock under concurrent batch_step calls."""
-        from ochre_next import batch_step
+        from hares import batch_step
 
         n_dwellings = 4
         dwellings = [
@@ -527,18 +530,20 @@ class TestBatchStep:
 
         def worker(dw_list):
             try:
+                plans = [d.observation_plan(["total_power_w"]) for d in dw_list]
+                buf = array("d", bytes(8 * len(dw_list)))
                 for _ in range(5):
                     results = batch_step(
                         dw_list,
                         [[]] * len(dw_list),
-                        ["total_power_kw"],
+                        plans,
                         [],
                         {},
                         [],
+                        buf,
                     )
                     for r in results:
                         assert isinstance(r, dict)
-                        assert "obs" in r
             except Exception as e:
                 errors.append(e)
 
@@ -557,15 +562,15 @@ class TestBatchStep:
 
     def test_batch_step_empty_dwellings(self):
         """batch_step with empty dwellings list returns empty results."""
-        from ochre_next import batch_step
+        from hares import batch_step
 
-        results = batch_step([], [], ["total_power_kw"], [], {}, [])
+        results = batch_step([], [], [], [], {}, [], array("d"))
         assert isinstance(results, list)
         assert len(results) == 0
 
     def test_batch_step_8_dwellings_4_threads(self):
         """Stress test with 8 dwellings across 4 threads."""
-        from ochre_next import batch_step
+        from hares import batch_step
 
         dwellings = [
             _init_dwelling(duration_s=600, time_res_s=60, seed=i)
@@ -576,19 +581,21 @@ class TestBatchStep:
 
         def worker(dw_list):
             try:
+                plans = [d.observation_plan(["total_power_w"]) for d in dw_list]
+                buf = array("d", bytes(8 * len(dw_list)))
                 for _ in range(3):
                     results = batch_step(
                         dw_list,
                         [[]] * len(dw_list),
-                        ["total_power_kw"],
+                        plans,
                         [],
                         {},
                         [],
+                        buf,
                     )
                     assert len(results) == len(dw_list)
                     for r in results:
                         assert isinstance(r, dict)
-                        assert "obs" in r
             except Exception as e:
                 errors.append(e)
 
@@ -610,10 +617,10 @@ class TestBatchStep:
 
 class TestSolarOverride:
     def test_solar_override_lifecycle(self):
-        from ochre_next import PV
+        from hares import PV
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        dw.add_pv(PV("TestPV", 5.0, 30.0, 180.0))
+        dw.add_pv(PV("TestPV", capacity_w=5000, tilt=30.0, azimuth=180.0))
 
         surface_ids = dw.surface_ids()
         assert isinstance(surface_ids, list)
@@ -652,10 +659,10 @@ class TestSolarOverride:
 
 class TestBatteryLutInjection:
     def test_add_battery_with_ocv_table(self):
-        from ochre_next import Battery
+        from hares import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        bat = Battery("B1", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
+        bat = Battery("B1", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000)
         dw.add_battery(bat)
 
         # Set an OCV table (simpler than 4D charging curve LUT)
@@ -678,10 +685,10 @@ class TestBatteryLutInjection:
 
 class TestEvLifecycle:
     def test_add_ev_and_step(self):
-        from ochre_next import EV
+        from hares import EV
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68)
+        ev = EV("EV1", capacity_j=270000000, max_charging_power_w=7680)
         dw.add_ev(ev)
         assert "EV1" in dw.equipment_names()
 
@@ -692,7 +699,7 @@ class TestEvLifecycle:
     def test_add_ev_with_charging_curve_lut(self):
         import numpy as np
 
-        from ochre_next import EV, LutType
+        from hares import EV, LutType
 
         # Build a minimal 4D LUT: soc × temp × c_rate × soh → power_fraction
         soc_grid = np.array([0.0, 0.5, 1.0])
@@ -713,7 +720,7 @@ class TestEvLifecycle:
         }
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68, charging_curve_lut=cc_cv_lut)
+        ev = EV("EV1", capacity_j=270000000, max_charging_power_w=7680, charging_curve_lut=cc_cv_lut)
         dw.add_ev(ev)
         assert "EV1" in dw.equipment_names()
         assert dw.has_equipment_lut("EV1", LutType.charging_curve())
@@ -730,19 +737,19 @@ class TestEvLifecycle:
 
 class TestEvControlSignals:
     def test_ev_plug_in_disconnected_zero_power(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=60.0, max_charging_kw=7.2, initial_soc=0.3)
+        ev = EV("EV1", capacity_j=216000000, max_charging_power_w=7200, initial_soc=0.3)
         dw.add_ev(ev)
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
         dw.step()
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("EV1")
-        assert tel["power_kw"][idx] == 0.0
+        assert tel["power_w"][idx] == 0.0
 
     def test_ev_drive_deducts_soc(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         # Pack temperature pinned (see test_ev_away_charge_no_residential_power):
@@ -750,11 +757,11 @@ class TestEvControlSignals:
         # initializes at the (Denver, January, -18 C) outdoor ambient and
         # the usable capacity carries the reversible cold-temperature
         # contraction, shifting the debit.
-        ev = EV("EV1", capacity_kwh=75.0, initial_soc=0.5, battery_temp_c=20.0)
+        ev = EV("EV1", capacity_j=270000000, initial_soc=0.5, battery_temp_c=20.0)
         dw.add_ev(ev)
         # Disconnect then drive
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
-        dw.apply_control("EV1", ControlSignal.ev_drive(10.0))
+        dw.apply_control("EV1", ControlSignal.ev_drive(energy_j=3.6e7))
         dw.step()
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("EV1")
@@ -765,36 +772,36 @@ class TestEvControlSignals:
         assert abs(soc - (0.5 - 10.0 / 72.7)) < 0.02
 
     def test_ev_away_charge_no_residential_power(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         # Pack temperature pinned: the subject is away charging's
         # residential-power and SOC behavior. Unpinned, the pack now
         # initializes at the (Denver, January) outdoor ambient and the
         # first steps are preconditioning, not charging.
-        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.3, battery_temp_c=20.0)
+        ev = EV("EV1", capacity_j=216000000, initial_soc=0.3, battery_temp_c=20.0)
         dw.add_ev(ev)
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.Disconnected))
         dw.step()
         dw.apply_control("EV1", ControlSignal.ev_plug_in(EvConnectionState.AwayPluggedIn))
-        dw.apply_control("EV1", ControlSignal.ev_away_charge(11.5))
+        dw.apply_control("EV1", ControlSignal.ev_away_charge(power_w=11_500.0))
         dw.step()
         tel = dw.telemetry().equipment()
         idx = tel["names"].index("EV1")
         # Residential power should be 0 (away charging)
-        assert tel["power_kw"][idx] == 0.0
+        assert tel["power_w"][idx] == 0.0
         # SOC should increase
         assert tel["soc"][idx] > 0.3
 
     def test_ev_home_plugged_in_charges_by_default(self):
         """EV defaults to HomePluggedIn and charges to soc_max without any actor."""
-        from ochre_next import EV
+        from hares import EV
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         # Pack temperature pinned (see test_ev_away_charge_no_residential_power):
         # the subject is default home charging, not ambient-aware thermal init.
         ev = EV(
-            "EV1", capacity_kwh=60.0, max_charging_kw=7.2, initial_soc=0.3, battery_temp_c=20.0
+            "EV1", capacity_j=216000000, max_charging_power_w=7200, initial_soc=0.3, battery_temp_c=20.0
         )
         dw.add_ev(ev)
         for _ in range(5):
@@ -805,33 +812,33 @@ class TestEvControlSignals:
 
     def test_ev_drive_while_home_plugged_in_raises(self):
         """EvDrive must be rejected when not Disconnected."""
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=300, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.5,
+        ev = EV("EV1", capacity_j=216000000, initial_soc=0.5,
                 initial_connection_state=EvConnectionState.HomePluggedIn)
         dw.add_ev(ev)
         with pytest.raises((ValueError, RuntimeError)):
-            dw.apply_control("EV1", ControlSignal.ev_drive(5.0))
+            dw.apply_control("EV1", ControlSignal.ev_drive(energy_j=1.8e7))
 
     def test_ev_away_charge_while_home_raises(self):
         """EvAwayCharge must be rejected when not AwayPluggedIn."""
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = _init_dwelling(duration_s=300, time_res_s=60)
-        ev = EV("EV1", capacity_kwh=60.0, initial_soc=0.3,
+        ev = EV("EV1", capacity_j=216000000, initial_soc=0.3,
                 initial_connection_state=EvConnectionState.HomePluggedIn)
         dw.add_ev(ev)
         with pytest.raises((ValueError, RuntimeError)):
-            dw.apply_control("EV1", ControlSignal.ev_away_charge(7.2))
+            dw.apply_control("EV1", ControlSignal.ev_away_charge(power_w=7200.0))
 
 
 class TestEquipmentMutationRoundTrip:
     def test_add_battery_set_lut_save_load_remove(self):
-        from ochre_next import Battery
+        from hares import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        bat = Battery("B1", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0)
+        bat = Battery("B1", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000)
         dw.add_battery(bat)
         assert "B1" in dw.equipment_names()
 
@@ -850,10 +857,10 @@ class TestEquipmentMutationRoundTrip:
         assert "timestamp" in result
 
     def test_lut_persists_through_checkpoint(self):
-        from ochre_next import Battery
+        from hares import Battery
 
         dw = _init_dwelling(duration_s=600, time_res_s=60)
-        bat = Battery("B1", 10.0)
+        bat = Battery("B1", capacity_j=36000000)
         dw.add_battery(bat)
         dw.update_equipment("B1", ocv_table=[(0.0, 3.0), (1.0, 4.2)])
 
@@ -870,7 +877,7 @@ class TestEquipmentMutationRoundTrip:
 
 class TestActorSystem:
     def test_python_actor_subclass(self):
-        from ochre_next import Actor, DispatchRequest
+        from hares import Actor, DispatchRequest
 
         dw = _init_dwelling(duration_s=300, time_res_s=60)
         thermal_target = _find_thermal_equipment(dw)
@@ -915,26 +922,23 @@ class TestDerSimulationExplorer:
     @pytest.mark.slow
     def test_pv_battery_ev_end_to_end(self, tmp_path):
         """End-to-end DER simulation matching the simulation_explorer.py workflow."""
-        from ochre_next import ControlSignal
-        from ochre_next import EV, PV, Battery
+        from hares import ControlSignal
+        from hares import EV, PV, Battery
 
         # 2-week simulation at 15-min resolution
         two_weeks_s = 14 * 24 * 3600
         dw = make_dwelling(
             duration_s=two_weeks_s,
             time_res_s=900,  # 15 minutes
-            seed=0,
-            output_verbosity=3,
-            write_output=True,
-            output_path=str(tmp_path / "dwelling_42.csv"),
+            seed=0,    verbosity=3,
         )
         dw.initialize()
 
         # Add PV
-        dw.add_pv(PV("PV", 6.0, 26.0, 180.0))
+        dw.add_pv(PV("PV", capacity_w=6000, tilt=26.0, azimuth=180.0))
 
         # Add Battery
-        bat = Battery("Battery", 13.5, max_charge_kw=5.0, max_discharge_kw=5.0)
+        bat = Battery("Battery", capacity_j=48600000, max_charge_w=5000, max_discharge_w=5000)
         dw.add_battery(bat)
 
         # Self-consumption control
@@ -944,11 +948,13 @@ class TestDerSimulationExplorer:
         )
 
         # Add EV
-        ev = EV("EV", capacity_kwh=75.0, max_charging_kw=7.68)
+        ev = EV("EV", capacity_j=270000000, max_charging_power_w=7680)
         dw.add_ev(ev)
 
-        # Run simulation
-        df = dw.simulate()
+        # Run simulation: the return value is the run's RunResult; the
+        # frame comes from the memory report's delivered batches.
+        result = dw.simulate()
+        df = result.reports[0].table()
         assert isinstance(df, pl.DataFrame)
 
         cols = df.columns
@@ -1004,7 +1010,7 @@ class TestApplyControlPriority:
     def test_apply_control_backward_compatible_without_priority(self):
         """Omitting `priority` parameter preserves backwards-compatible behaviour
         and the signal is dispatched at its default (signal-derived) tier."""
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = _init_dwelling()
         name = _find_thermal_equipment(dw)
@@ -1023,7 +1029,7 @@ class TestApplyControlPriority:
         then a Safety ThermalSetpoint (tier 3) forces heating at 50 C.
         The Safety signal must win — hvac_heating_w is non-zero.
         """
-        from ochre_next import ControlSignal, Priority
+        from hares import ControlSignal, Priority
 
         dw = _init_dwelling(duration_s=900, time_res_s=60)
         name = _find_thermal_equipment(dw)

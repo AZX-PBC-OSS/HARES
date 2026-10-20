@@ -93,6 +93,7 @@ fn compare_rejects_schema_mismatch_unless_columns_selected() {
         &common::frame_map(drifted.clone()),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &None,
         None,
     )
@@ -116,6 +117,7 @@ fn compare_rejects_schema_mismatch_unless_columns_selected() {
         &common::frame_map(drifted),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &Some(vec!["A (kW)".to_string()]),
         None,
     )
@@ -155,6 +157,7 @@ fn compare_reports_first_mismatch_row_from_materialized_frames() {
         &common::frame_map(fresh),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &None,
         Some(dir.path()),
     )
@@ -202,6 +205,7 @@ fn delta_reports_per_column_max_abs_difference() {
         dir.path(),
         &common::frame_map(fresh),
         &common::fresh_metrics(),
+        &[],
         &None,
     )
     .unwrap();
@@ -241,6 +245,7 @@ fn delta_without_materialized_frames_names_materialize() {
         &missing,
         &common::frame_map(reference_frame),
         &common::fresh_metrics(),
+        &[],
         &None,
     )
     .expect_err("delta without materialized frames must fail");
@@ -293,6 +298,7 @@ fn row_level_report_covers_int64_and_boolean_columns() {
         &fresh_map_of(fresh_batches),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &None,
         Some(dir.path()),
     )
@@ -316,6 +322,7 @@ fn row_level_report_covers_int64_and_boolean_columns() {
         &fresh_map_of(fresh_batches),
         &common::fresh_metrics(),
         Some(&common::fresh_health()),
+        &[],
         &None,
         Some(dir.path()),
     )
@@ -372,6 +379,7 @@ fn metrics_extra_nested_key_is_rejected() {
         &common::frame_map(frame),
         &[fresh_row],
         Some(&common::fresh_health()),
+        &[],
         &None,
         None,
     )
@@ -405,7 +413,7 @@ fn one_day_defaults_replacement_manifest(replacement: &std::path::Path) -> Strin
         r#"
 kind = "dwelling"
 features = [{features}]
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [defaults_files]
 "zip_parameters.toml" = "{}"
@@ -414,15 +422,19 @@ defaults = "defaults"
 start_time = "2023-01-01T00:00:00-07:00"
 duration = 86400
 time_res = 3600
-output_verbosity = 2
 master_seed = 0
+warmup = "disabled"
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = "memory"
 
 [[home]]
 bldg_id = 1
 hpxml = "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"
 schedule = "tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv"
 weather = "tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"
-initialization_duration_s = 0
 overrides = {{}}
 "#,
         replacement.display()
@@ -446,7 +458,8 @@ fn captured_defaults_replacement(
     let root = frame_golden::manifest::repo_root(&manifest_path);
     let replacement = replacement_dir.path().join("zip_parameters.toml");
     std::fs::copy(
-        root.join("defaults").join("zip_parameters.toml"),
+        root.join("python/hares/defaults")
+            .join("zip_parameters.toml"),
         &replacement,
     )
     .unwrap();
@@ -539,7 +552,7 @@ fn compare_fails_on_defaults_digest_mismatch() {
             _ => None,
         })
         .expect("the report must carry the defaults-digest difference");
-    assert_eq!(defaults_dir, "defaults");
+    assert_eq!(defaults_dir, "python/hares/defaults");
     assert_eq!(expected, &doc.defaults_digest);
     assert_eq!(actual, &products.defaults_digest);
     assert_ne!(expected, actual, "the two digests must differ");

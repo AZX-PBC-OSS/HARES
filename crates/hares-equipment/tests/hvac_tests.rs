@@ -58,6 +58,7 @@ fn env_with_zone_temp(temp_c: f64) -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
@@ -208,6 +209,7 @@ fn gas_boiler_config(name: &str) -> EquipmentConfig {
             number_of_speeds: 1,
             setpoint: HvacSetpointConfig::default(),
             condensing: false,
+            ..Default::default()
         },
     )
     .unwrap()
@@ -289,7 +291,7 @@ fn zone_id_0_equipment_fails_init_naming_the_unit() {
 // When the FSM is in Defrosting and an external signal forces the compressor
 // off (e.g. ctrl_mode_override = Off mid-cycle), the capacity/power override
 // must not apply. Without the hp_on guard, the equipment reports non-zero
-// electric_kw while commanded off — a phantom draw of ~1.5–2 kW for a
+// electric_w while commanded off — a phantom draw of ~1.5–2 kW for a
 // 10 kW unit. The FSM continues advancing (defrost completes on elapsed
 // time), but the compute_step override is gated on hp_on.
 // ---------------------------------------------------------------------------
@@ -333,7 +335,7 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -389,11 +391,11 @@ fn discrete_defrost_no_phantom_draw_when_compressor_off() {
     eq.update_control(&env);
     eq.step(&env, dt, &mut ports).unwrap();
 
-    let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(-1.0);
+    let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(-1.0);
     assert_eq!(
-        electric_kw, 0.0,
-        "electric_kw must be zero when compressor is off even if FSM is Defrosting; \
-         got {electric_kw:.6} kW — phantom draw bug"
+        electric_w, 0.0,
+        "electric_w must be zero when compressor is off even if FSM is Defrosting; \
+         got {electric_w:.6} kW — phantom draw bug"
     );
 
     // Verify FSM is still advancing (defrost_elapsed_s increases)
@@ -541,7 +543,7 @@ fn ashp_heating_cop_above_unity() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -644,7 +646,7 @@ fn hvac_port_contributions_are_correct_sign() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1167,7 +1169,7 @@ fn ashp_sub_consumption_telemetry() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -1197,7 +1199,7 @@ fn ashp_sub_consumption_telemetry() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let tel = eq.telemetry();
-    let electric_kw = tel
+    let electric_w = tel
         .get(tk::ELECTRIC_KW)
         .expect("ELECTRIC_KW must be present");
     let compressor_kw = tel
@@ -1218,8 +1220,8 @@ fn ashp_sub_consumption_telemetry() {
         .expect("ER_CAPACITY_W must be present");
 
     assert!(
-        electric_kw > 1e-6,
-        "ASHP must draw power when heating; got {electric_kw:.4} kW"
+        electric_w > 1e-6,
+        "ASHP must draw power when heating; got {electric_w:.4} kW"
     );
     assert!(compressor_kw >= 0.0, "compressor_kw must be non-negative");
     assert!(fan_kw >= 0.0, "fan_kw must be non-negative");
@@ -1249,11 +1251,11 @@ fn ashp_sub_consumption_telemetry() {
     );
 
     // Sub-consumptions must sum to total within floating-point tolerance.
-    // electric_kw = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw
+    // electric_w = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw
     let sub_sum = compressor_kw + fan_kw + backup_er_kw + pan_heater_kw;
     assert!(
-        (sub_sum - electric_kw).abs() < electric_kw * 0.001,
-        "sub-consumption sum ({sub_sum:.6} kW) must equal ELECTRIC_KW ({electric_kw:.6} kW) within 0.1%"
+        (sub_sum - electric_w).abs() < electric_w * 0.001,
+        "sub-consumption sum ({sub_sum:.6} kW) must equal ELECTRIC_KW ({electric_w:.6} kW) within 0.1%"
     );
 }
 
@@ -1320,7 +1322,7 @@ fn ashp_defaults_match_reference() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -1416,7 +1418,7 @@ fn ashp_defaults_match_reference() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -1517,7 +1519,7 @@ fn mshp_defaults_match_reference() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -1646,7 +1648,7 @@ fn bang_bang_single_speed_cycles_within_deadband() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2076,7 +2078,7 @@ fn defrost_discrete_cycle_starts_in_accumulating() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2180,7 +2182,7 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2225,10 +2227,10 @@ fn defrost_discrete_cycle_transitions_to_defrosting() {
                 "ReverseCycle Defrosting must produce hp_capacity_w = 0; got {hp_cap:.1} W"
             );
             // Verify: electric power is non-zero (compressor running in reverse)
-            let electric_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+            let electric_w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
             assert!(
-                electric_kw > 0.0,
-                "ReverseCycle Defrosting must draw non-zero electric power; got {electric_kw:.3} kW"
+                electric_w > 0.0,
+                "ReverseCycle Defrosting must draw non-zero electric power; got {electric_w:.3} kW"
             );
             break;
         }
@@ -2282,7 +2284,7 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2336,111 +2338,136 @@ fn defrost_discrete_cycle_returns_to_accumulating() {
 }
 
 #[test]
-fn defrost_discrete_peak_power_exceeds_continuous_average() {
-    // During ReverseCycle defrost, the compressor draws power at a different EIR.
-    // The discrete model produces peak instantaneous power that exceeds what the
-    // continuous model would produce as an averaged value for the same timestep.
-    // We verify by comparing the Defrosting-step electric_kw against the
-    // continuous model's defrost_time_fraction-weighted average.
-    let cfg = EquipmentConfig::from_typed(
-        "ashp_defrost_peak_power".to_string(),
+fn defrost_event_draw_exceeds_the_continuous_average_defrost_power() {
+    // The discrete event concentrates the continuous model's average defrost
+    // power into the event window (the draw is that average divided by the
+    // duty it was averaged over): the event draw must exceed the continuous
+    // model's per-step average.
+    let typed = HeatPumpHeaterConfig {
+        reject_unknown_keys: RejectUnknownKeys,
+        common: HeatPumpCommonConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            heating_eir: Some(0.35),
+            stage_heating_capacities_w: None,
+            stage_heating_eirs: None,
+            backup_fuel: None,
+            backup_capacity_w: Some(0.0),
+            backup_eir: None,
+            fraction_heating_load_served: Some(1.0),
+            cooling_capacity_w: Some(8_000.0),
+            cooling_eir: Some(0.35),
+            stage_cooling_capacities_w: None,
+            stage_cooling_eirs: None,
+            fraction_cooling_load_served: Some(1.0),
+            number_of_speeds: 1,
+            is_mini_split: false,
+            shr: Some(0.75),
+            fan_power_w: Some(0.0),
+            fan_power_w_per_cfm: None,
+            airflow_m3_s_per_w: None,
+            setpoint: HvacSetpointConfig::default(),
+            hysteresis_c: None,
+            duct: DuctConfig::default(),
+            biquadratic_x1_min: None,
+            biquadratic_x1_max: None,
+            biquadratic_x2_min: None,
+            biquadratic_x2_max: None,
+            ff_min: None,
+            ff_max: None,
+            plf_min: None,
+            plf_max: None,
+            min_compressor_fraction: None,
+            eir_part_load_benefit: None,
+            er_stages: 1,
+            charge_defect_ratio: None,
+            ..Default::default()
+        },
+        hp_lockout_temp_c: None,
+        er_lockout_temp_c: None,
+        max_oat_supplemental_c: None,
+        er_setpoint_offset_c: None,
+        er_hard_lockout_time_s: None,
+        heating_shr: None,
+        capacity_ratio_at_17f: None,
+        defrost: DefrostConfig::default(),
+    };
+
+    let registry = EquipmentRegistry::new();
+
+    // Continuous-alone run: the per-step average defrost power.
+    let continuous_cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_peak_power_continuous".to_string(),
         "ASHP Heater".to_string(),
         HeatPumpHeaterConfig {
-            reject_unknown_keys: RejectUnknownKeys,
-            common: HeatPumpCommonConfig {
-                equipment_id: None,
-                zone_id: Some(1),
-                heating_capacity_w: Some(10_000.0),
-                heating_eir: Some(0.35),
-                stage_heating_capacities_w: None,
-                stage_heating_eirs: None,
-                backup_fuel: None,
-                backup_capacity_w: Some(0.0),
-                backup_eir: None,
-                fraction_heating_load_served: Some(1.0),
-                cooling_capacity_w: Some(8_000.0),
-                cooling_eir: Some(0.35),
-                stage_cooling_capacities_w: None,
-                stage_cooling_eirs: None,
-                fraction_cooling_load_served: Some(1.0),
-                number_of_speeds: 1,
-                is_mini_split: false,
-                shr: Some(0.75),
-                fan_power_w: Some(0.0),
-                fan_power_w_per_cfm: None,
-                airflow_m3_s_per_w: None,
-                setpoint: HvacSetpointConfig::default(),
-                hysteresis_c: None,
-                duct: DuctConfig::default(),
-                biquadratic_x1_min: None,
-                biquadratic_x1_max: None,
-                biquadratic_x2_min: None,
-                biquadratic_x2_max: None,
-                ff_min: None,
-                ff_max: None,
-                plf_min: None,
-                plf_max: None,
-                min_compressor_fraction: 0.25,
-                eir_part_load_benefit: None,
-                er_stages: 1,
-                charge_defect_ratio: None,
-                ..Default::default()
+            defrost: DefrostConfig {
+                defrost_discrete_cycle: false,
+                ..DefrostConfig::default()
             },
-            hp_lockout_temp_c: None,
-            er_lockout_temp_c: None,
-            max_oat_supplemental_c: None,
-            er_setpoint_offset_c: None,
-            er_hard_lockout_time_s: None,
-            heating_shr: None,
-            capacity_ratio_at_17f: None,
-            defrost: DefrostConfig::default(),
+            ..typed.clone()
         },
     )
     .unwrap();
-
-    let registry = EquipmentRegistry::new();
-    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    let cfg = EquipmentConfig::from_typed(
+        "ashp_defrost_peak_power".to_string(),
+        "ASHP Heater".to_string(),
+        typed,
+    )
+    .unwrap();
 
     let mut env = env_with_zone_temp(18.0);
     env.weather.outdoor_temp_c = -5.0;
     env.weather.outdoor_humidity_ratio = 0.005;
     env.weather.outdoor_wet_bulb_c = -6.0;
-    eq.init(&cfg, &env).unwrap();
-
-    let mut ports = ports_for_zone1();
     let dt = Duration::from_secs(60);
 
-    // Collect first-step (continuous model) power as baseline for comparison.
-    // The Accumulating step uses the continuous defrost multiplier.
-    eq.update_control(&env);
-    eq.step(&env, dt, &mut ports).unwrap();
-    let accumulating_kw = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-    let defrost_time_frac = eq.telemetry().get(tk::DEFROST_TIME_FRACTION).unwrap_or(0.0);
+    let mut continuous_eq = registry
+        .create("ASHP Heater", continuous_cfg.clone())
+        .unwrap();
+    continuous_eq.init(&continuous_cfg, &env).unwrap();
+    let mut ports_c = ports_for_zone1();
+    continuous_eq.update_control(&env);
+    continuous_eq.step(&env, dt, &mut ports_c).unwrap();
+    let continuous_extra_w = continuous_eq
+        .telemetry()
+        .get(tk::DEFROST_EXTRA_POWER_W)
+        .unwrap_or(0.0);
+    assert!(
+        continuous_extra_w > 0.0,
+        "the continuous model must meter defrost power at -5°C"
+    );
 
-    // The continuous model's average power for a timestep with defrost is
-    // lower than the discrete model's peak during Defrosting because the
-    // continuous model spreads the penalty. We verify this by running until
-    // Defrosting and checking that peak power exceeds the continuous average.
-    let mut defrosting_kw = None;
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    eq.init(&cfg, &env).unwrap();
+
+    // Run until Defrosting and read the event draw.
+    let mut defrosting_extra_w = None;
     for _ in 0..200 {
+        let mut ports = ports_for_zone1();
         eq.update_control(&env);
         eq.step(&env, dt, &mut ports).unwrap();
         let cycle_state = eq.telemetry().get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
         if cycle_state == 1.0 {
-            defrosting_kw = Some(eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0));
+            defrosting_extra_w = Some(eq.telemetry().get(tk::DEFROST_EXTRA_POWER_W).unwrap_or(0.0));
             break;
         }
     }
 
-    let peak_kw = defrosting_kw.expect("must reach Defrosting state within 200 steps");
-    // The continuous model estimates average power = base_power * power_multiplier + extra.
-    // The discrete model applies this at full intensity. Peak must exceed the
-    // continuous average by a meaningful margin.
-    // A conservative check: peak > accumulating_step_power (which has the continuous penalty applied).
+    let event_extra_w = defrosting_extra_w.expect("must reach Defrosting state within 200 steps");
+    // The event draw is the continuous average concentrated into the event
+    // window: it must exceed the per-step average (the concentration is
+    // 1/duty, about 5x here) while staying in the same order of magnitude.
     assert!(
-        peak_kw > accumulating_kw,
-        "discrete defrost peak power ({peak_kw:.3} kW) must exceed continuous-averaged \
-         power ({accumulating_kw:.3} kW) at defrost_time_fraction={defrost_time_frac:.4}"
+        event_extra_w > continuous_extra_w * 2.0,
+        "the discrete event draw ({event_extra_w:.1} W) must exceed the continuous \
+         model's per-step average defrost power ({continuous_extra_w:.1} W): the event \
+         concentrates the average by 1/duty"
+    );
+    assert!(
+        event_extra_w < continuous_extra_w * 50.0,
+        "the discrete event draw ({event_extra_w:.1} W) must stay within one order \
+         of magnitude plus the duty of the continuous average ({continuous_extra_w:.1} W)"
     );
 }
 
@@ -2487,7 +2514,7 @@ fn defrost_no_spurious_defrost_after_warm_hiatus() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2625,7 +2652,7 @@ fn heating_latent_always_zero_during_normal_heating() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2717,7 +2744,7 @@ fn heating_latent_nonzero_during_defrost_with_sub1_shr() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2811,7 +2838,7 @@ fn heating_latent_zero_with_default_shr_during_defrost() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2889,7 +2916,7 @@ fn heating_latent_telemetry_key_present() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2968,7 +2995,7 @@ fn heating_sensible_plus_latent_equals_total_thermal_output() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -3076,7 +3103,7 @@ fn defrost_accumulating_applies_continuous_multiplier() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -3208,7 +3235,7 @@ fn mshp_load_above_stage1_runs_continuously() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -3262,9 +3289,10 @@ fn min_compressor_fraction_deserializes_from_json() {
         Some(10000.0),
         "known fields must deserialize correctly"
     );
-    assert!(
-        (cfg.common.min_compressor_fraction - 0.30).abs() < 1e-9,
-        "min_compressor_fraction must deserialize from JSON; got {}",
+    assert_eq!(
+        cfg.common.min_compressor_fraction,
+        Some(0.30),
+        "min_compressor_fraction must deserialize from JSON; got {:?}",
         cfg.common.min_compressor_fraction,
     );
 }
@@ -3390,7 +3418,7 @@ fn defrost_typed_config_propagates_to_heater_init() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -3412,6 +3440,8 @@ fn defrost_typed_config_propagates_to_heater_init() {
                 defrost_power_w: 0.0,
                 defrost_eir_coeffs: None,
                 resistive_defrost_capacity_w: 0.0,
+                resistive_defrost_zone_fraction: 0.0,
+                defrost_discrete_cycle: true,
             },
         },
     )
@@ -3525,6 +3555,8 @@ fn defrost_config_serde_round_trip() {
             defrost_power_w: 150.0,
             defrost_eir_coeffs: Some([1.0, 0.02, -0.001, 0.005, -0.0003, 0.0001]),
             resistive_defrost_capacity_w: 0.0,
+            resistive_defrost_zone_fraction: 0.0,
+            defrost_discrete_cycle: true,
         },
         ..Default::default()
     };
@@ -3632,7 +3664,7 @@ fn update_mode_cooling_transition() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -3704,8 +3736,8 @@ fn furnace_core_output_carries_thermal_field() {
 
     // Electric power and mode ARE present (existing fields).
     assert!(
-        co.flows.electric_kw.is_some(),
-        "furnace CoreOutput must carry electric_kw"
+        co.flows.electric_w.is_some(),
+        "furnace CoreOutput must carry electric_w"
     );
     assert_eq!(
         co.state.operating_mode,
@@ -3751,7 +3783,7 @@ fn ac_core_output_carries_cop() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -3871,7 +3903,7 @@ fn speed_staging_keys_present_in_telemetry() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -3959,7 +3991,7 @@ fn single_speed_duty_cycle_equals_part_load_ratio() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -4039,7 +4071,7 @@ fn schedule_setpoint_keys_reflect_static_when_no_schedule_source() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -4429,7 +4461,7 @@ fn ac_sensible_thermal_port_strongly_negative_at_sf1() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -4497,7 +4529,7 @@ fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
                 hysteresis_c: None,
                 airflow_m3_s_per_w: None,
                 fraction_load_served: Some(sf),
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 duct: DuctConfig::default(),
@@ -4651,7 +4683,7 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -4752,10 +4784,10 @@ fn mshp_binary_er_low_load_overshoot_stays_within_hysteresis() {
 // ---------------------------------------------------------------------------
 #[test]
 fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
-    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    const ZONE_CAPACITANCE_J_PER_K: f64 = 2.0 * 3.6e6;
 
     let mut cfg = electric_furnace_config("furnace_release");
-    cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+    cfg.zone_capacitance_j_per_k = ZONE_CAPACITANCE_J_PER_K;
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
     // Zone above the heating setpoint: the thermostat idles in Deadband,
@@ -4789,19 +4821,19 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
     let core = eq.core_output();
     let core_kw = core
         .flows
-        .electric_kw
+        .electric_w
         .expect("a heating furnace step must report its electric power")
-        .net_consumption_kw();
+        .net_consumption_w();
     assert!(
         core_kw > 0.0,
         "the furnace must draw positive power in heating mode, got {core_kw}"
     );
     assert!(
-        (ports.electrical.load_power_w - core_kw * 1000.0).abs() < 1e-6,
+        (ports.electrical.load_power_w - core_kw).abs() < 1e-6,
         "core_output electric power must equal the port contribution exactly once: \
          port {} W vs core {} W",
         ports.electrical.load_power_w,
-        core_kw * 1000.0
+        core_kw
     );
 
     // The EBM window must still span capacitance * hysteresis: the release
@@ -4810,10 +4842,10 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
     let ebm_min = t.get(tk::EBM_MIN_ENERGY_KWH).unwrap_or(f64::NAN);
     let ebm_max = t.get(tk::EBM_MAX_ENERGY_KWH).unwrap_or(f64::NAN);
     let range = ebm_max - ebm_min;
-    let expected = ZONE_CAPACITANCE_KWH_PER_K * ThermostatConfig::default().hysteresis_c;
+    let expected = ZONE_CAPACITANCE_J_PER_K * ThermostatConfig::default().hysteresis_c;
     assert!(
-        (range - expected).abs() < 1e-9,
-        "the EBM energy window must stay capacitance * hysteresis ({expected} kWh), got {range}"
+        (range - expected).abs() < expected * 1e-9,
+        "the EBM energy window must stay capacitance * hysteresis ({expected} J), got {range}"
     );
 }
 
@@ -4821,9 +4853,9 @@ fn actuate_release_keeps_hysteresis_and_the_ebm_window_open() {
 /// rejected at application; the unit then still heats with an open window.
 #[test]
 fn sub_band_deadbands_are_rejected_and_the_unit_keeps_heating() {
-    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    const ZONE_CAPACITANCE_J_PER_K: f64 = 2.0 * 3.6e6;
     let mut cfg = electric_furnace_config("furnace_subband");
-    cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+    cfg.zone_capacitance_j_per_k = ZONE_CAPACITANCE_J_PER_K;
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Furnace", cfg.clone()).unwrap();
     eq.init(&cfg, &env_with_zone_temp(22.0)).unwrap();
@@ -4866,10 +4898,10 @@ fn sub_band_deadbands_are_rejected_and_the_unit_keeps_heating() {
         .telemetry()
         .get(tk::EBM_MAX_ENERGY_KWH)
         .unwrap_or(f64::NAN);
-    let expected = ZONE_CAPACITANCE_KWH_PER_K * ThermostatConfig::default().hysteresis_c;
+    let expected = ZONE_CAPACITANCE_J_PER_K * ThermostatConfig::default().hysteresis_c;
     assert!(
-        (ebm_max - ebm_min - expected).abs() < 1e-9,
-        "the EBM window must equal capacitance * default hysteresis ({expected} kWh), got {}",
+        (ebm_max - ebm_min - expected).abs() < expected * 1e-9,
+        "the EBM window must equal capacitance * default hysteresis ({expected} J), got {}",
         ebm_max - ebm_min
     );
 }
@@ -4893,7 +4925,7 @@ fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
             },
         )
         .and_then(|mut cfg| {
-            cfg.zone_capacitance_kwh_per_k = 2.0;
+            cfg.zone_capacitance_j_per_k = 7200000.0 * 3.6e6;
             let registry = EquipmentRegistry::new();
             let mut eq = registry.create("ASHP Heater", cfg.clone())?;
             eq.init(&cfg, &env_with_zone_temp(15.0))
@@ -4911,7 +4943,7 @@ fn configured_hysteresis_below_a_thermostat_band_is_rejected() {
 /// one.
 #[test]
 fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
-    const ZONE_CAPACITANCE_KWH_PER_K: f64 = 2.0;
+    const ZONE_CAPACITANCE_J_PER_K: f64 = 2.0 * 3.6e6;
     const BAND_C: f64 = 0.25;
     let cases = [
         ("Electric Furnace", electric_furnace_config("ef_band")),
@@ -4924,7 +4956,7 @@ fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
     let env_warm = env_with_zone_temp(22.0);
     let env_cold = env_with_zone_temp(18.0);
     for (kind, mut cfg) in cases {
-        cfg.zone_capacitance_kwh_per_k = ZONE_CAPACITANCE_KWH_PER_K;
+        cfg.zone_capacitance_j_per_k = ZONE_CAPACITANCE_J_PER_K;
         let mut continuous = registry.create(kind, cfg.clone()).unwrap();
         continuous.init(&cfg, &env_warm).unwrap();
         continuous
@@ -4962,10 +4994,10 @@ fn signalled_band_survives_a_checkpoint_on_every_simple_heater() {
             *window =
                 t.get(tk::EBM_MAX_ENERGY_KWH).unwrap() - t.get(tk::EBM_MIN_ENERGY_KWH).unwrap();
         }
-        let expected = ZONE_CAPACITANCE_KWH_PER_K * BAND_C;
+        let expected = ZONE_CAPACITANCE_J_PER_K * BAND_C;
         assert!(
-            (windows[0] - expected).abs() < 1e-9 && windows[1] == windows[0],
-            "{kind}: continuous window {} kWh, restored {} kWh, expected {expected}",
+            (windows[0] - expected).abs() < expected * 1e-9 && windows[1] == windows[0],
+            "{kind}: continuous window {} J, restored {} J, expected {expected}",
             windows[0],
             windows[1]
         );
@@ -4982,7 +5014,7 @@ const STEP_TELEMETRY: [&str; 5] = [
 ];
 
 /// A step whose equivalent battery model fails (a 0.1 C band on a
-/// 1e-15 kWh/K zone puts the window below f64 resolution) leaves no state
+/// 1e-15 J/K zone puts the window below f64 resolution) leaves no state
 /// behind: the checkpoint, the core output and the step telemetry are what
 /// they were before it.
 #[test]
@@ -5021,7 +5053,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -5091,7 +5123,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
     ];
     let registry = EquipmentRegistry::new();
     for (kind, mut cfg, signal, env) in cases {
-        cfg.zone_capacitance_kwh_per_k = 1e-15;
+        cfg.zone_capacitance_j_per_k = 1e-15;
         let mut eq = registry.create(kind, cfg.clone()).unwrap();
         eq.init(&cfg, &env).unwrap();
         eq.apply_control(signal).unwrap();
@@ -5126,7 +5158,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
 #[test]
 fn a_step_without_its_zone_errors_instead_of_assuming_a_temperature() {
     let mut cfg = electric_baseboard_config("bb_no_zone");
-    cfg.zone_capacitance_kwh_per_k = 2.0;
+    cfg.zone_capacitance_j_per_k = 7200000.0 * 3.6e6;
     let registry = EquipmentRegistry::new();
     let mut eq = registry.create("Electric Baseboard", cfg.clone()).unwrap();
     eq.init(&cfg, &env_with_zone_temp(18.0)).unwrap();

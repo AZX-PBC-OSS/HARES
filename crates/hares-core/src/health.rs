@@ -9,6 +9,69 @@ use serde::{Deserialize, Serialize};
 
 use hares_types::ZoneId;
 
+/// The first policy crossing one counter's change sites recorded: the
+/// pieces a `HealthPolicyViolation` carries, with the step index the
+/// dwelling stamps on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HealthCrossing {
+    /// The equipment or actor the crossing's event came from.
+    pub source: String,
+    /// The run-total count at the crossing.
+    pub count: u64,
+    /// The limit the count crossed.
+    pub limit: u64,
+}
+
+/// One dispatch pass's rejected-control-signal counting under the run's
+/// health policy. Every rejection site records through [`Self::record`],
+/// which counts and, when the run-total count (the baseline the gate was
+/// built with plus the pass's rejections) crosses the policy's limit for
+/// rejected signals, remembers the first crossing with its source. The
+/// dwelling lands the pass's count on the run total and turns a recorded
+/// crossing into the latched `HealthPolicyViolation` that ends the run.
+#[derive(Debug)]
+pub(crate) struct RejectionGate {
+    baseline: u64,
+    limit: Option<u64>,
+    count: u64,
+    crossing: Option<HealthCrossing>,
+}
+
+impl RejectionGate {
+    /// A gate over the run total `baseline`, with the policy limit for
+    /// rejected control signals (`None` when the policy sets none).
+    pub(crate) fn new(baseline: u64, limit: Option<u64>) -> Self {
+        Self {
+            baseline,
+            limit,
+            count: 0,
+            crossing: None,
+        }
+    }
+
+    /// Counts one rejection from `source` and evaluates the policy on the
+    /// new run-total count: only the first crossing is remembered, so the
+    /// violation names the rejection that crossed.
+    pub fn record(&mut self, source: &str) {
+        self.count = self.count.saturating_add(1);
+        if let Some(limit) = self.limit {
+            let count = self.baseline + self.count;
+            if count > limit && self.crossing.is_none() {
+                self.crossing = Some(HealthCrossing {
+                    source: source.to_owned(),
+                    count,
+                    limit,
+                });
+            }
+        }
+    }
+
+    /// The pass's rejections and the first crossing it recorded, if any.
+    pub(crate) fn into_parts(self) -> (u64, Option<HealthCrossing>) {
+        (self.count, self.crossing)
+    }
+}
+
 /// Run-total health counters for one dwelling, recorded unconditionally in
 /// every build profile and never reset per step: a finished run always
 /// reports the degradation it hit without requiring a special build or log
@@ -29,9 +92,28 @@ pub struct RunHealth {
     /// the run: an out-of-bounds curve index was evaluated and clamped to
     /// the last same-type curve.
     pub curve_index_clamps: u64,
+    /// Fluid-payload absences after the fluid domain's first publish: a
+    /// boiler stepped on its configured return temperature because the
+    /// fluid domain published no payload that step. The first step's
+    /// absence (before any publish) stays silent and is not counted.
+    pub fluid_payload_absences: u64,
     /// Actors evicted because a roster change left one of their targets
     /// with no equipment to act on; each is also a dwelling warning.
     pub evicted_actors: u64,
+    /// Runtime steps whose resolved thermostat setpoints sat below the
+    /// required deadband: a constant override against the surviving
+    /// schedule tier, the collision the init's static check cannot see.
+    /// The run's first collision also raises a run warning.
+    pub cross_tier_deadband_events: u64,
+    /// Energy the failed equipment's committed internal state kept from a
+    /// rolled-back step [Wh, signed]: the state's energy delta across the
+    /// failed step (the reading of `Equipment::stored_energy_j` before
+    /// the step and after the rollback). The rollback restores the port
+    /// contributions but keeps the committed internal state, so this is
+    /// energy the step's accounts no longer explain; the run's first
+    /// nonzero event also raises a run warning naming the equipment and
+    /// the energy.
+    pub discarded_state_energy_wh: f64,
     /// Outcome of the warm-up convergence loop (Disabled until warm-up runs).
     pub warmup: WarmupOutcome,
 }
@@ -43,7 +125,10 @@ impl Default for RunHealth {
             rejected_control_signals: 0,
             clamped_actions: 0,
             curve_index_clamps: 0,
+            fluid_payload_absences: 0,
             evicted_actors: 0,
+            cross_tier_deadband_events: 0,
+            discarded_state_energy_wh: 0.0,
             warmup: WarmupOutcome::Disabled,
         }
     }
@@ -120,15 +205,17 @@ impl ActorTimings {
 /// How the warm-up convergence loop ended.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WarmupOutcome {
-    /// Warm-up never ran (no initialization duration configured, or a
+    /// Warm-up never ran (the run's warm-up is `Warmup::Disabled`, or a
     /// degenerate zero-step day).
     Disabled,
     /// Warm-up ran to a stop.
     Ran {
         /// Warm-up days simulated (iterations of the 24-hour replay).
         days_run: u32,
-        /// Whether the per-day temperature change fell below the
-        /// convergence threshold before the iteration cap.
+        /// Whether every zone's four EnergyPlus checks (daily maximum and
+        /// minimum temperature, daily peak heating and cooling delivery)
+        /// passed on a day at or after the minimum day count, before the
+        /// maximum day count was reached.
         converged: bool,
         /// Day-over-day residuals of the final warm-up day against the day
         /// before it; `None` when only one warm-up day ran (no
@@ -137,27 +224,34 @@ pub enum WarmupOutcome {
     },
 }
 
-/// Day-over-day residuals of the final warm-up day.
+/// Day-over-day residuals of the final warm-up day, by the EnergyPlus
+/// warm-up convergence criteria
+/// (`vendors/EnergyPlus/src/EnergyPlus/HeatBalanceManager.cc:3309-3430`).
 ///
-/// The load residuals describe the run's warm-up quality, not a per-zone
-/// load audit: HVAC delivery is only measured in aggregate, so the
-/// aggregate daily-peak heating/cooling relative changes are attributed to
-/// the worst-temperature-residual zone's row. The zone scope is ALL zones
-/// (unconditioned included) even though the convergence criterion is
-/// conditioned zones only: a converged run can still carry an
-/// unconditioned-zone residual.
+/// The recorded row is the worst zone's: the zone with the largest
+/// day-over-day daily-maximum temperature residual, with its own daily-min
+/// temperature residual and its own daily-peak HVAC heating and cooling
+/// relative changes beside it. The comparison checks every zone's four
+/// residuals (all zones, unconditioned included, as EnergyPlus does); a
+/// converged run's recorded row can still name a zone whose own residuals
+/// were not the binding ones, and the non-convergence warning names every
+/// zone failing a check.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WarmupResiduals {
-    /// Zone with the largest day-over-day temperature residual
-    /// (max of |Δ daily max|, |Δ daily min|).
+    /// Zone with the largest day-over-day daily-maximum temperature
+    /// residual; the row's other residuals are this zone's own.
     pub worst_zone: ZoneId,
     /// |Δ daily max temperature| of [`Self::worst_zone`] [°C].
     pub max_temperature_c: f64,
     /// |Δ daily min temperature| of [`Self::worst_zone`] [°C].
     pub min_temperature_c: f64,
-    /// Relative change of the aggregate daily peak heating (fraction).
+    /// Relative change of [`Self::worst_zone`]'s own daily peak heating
+    /// delivered (fraction, EnergyPlus's 100 W floor and 1e-4 W
+    /// pass-through applied).
     pub heating_load: f64,
-    /// Relative change of the aggregate daily peak cooling (fraction).
+    /// Relative change of [`Self::worst_zone`]'s own daily peak cooling
+    /// delivered (fraction, EnergyPlus's 100 W floor and 1e-4 W
+    /// pass-through applied).
     pub cooling_load: f64,
 }
 
@@ -173,7 +267,10 @@ mod tests {
         assert_eq!(health.rejected_control_signals, 0);
         assert_eq!(health.clamped_actions, 0);
         assert_eq!(health.curve_index_clamps, 0);
+        assert_eq!(health.fluid_payload_absences, 0);
         assert_eq!(health.evicted_actors, 0);
+        assert_eq!(health.cross_tier_deadband_events, 0);
+        assert_eq!(health.discarded_state_energy_wh, 0.0);
         assert_eq!(health.warmup, WarmupOutcome::Disabled);
     }
 
@@ -184,7 +281,10 @@ mod tests {
             rejected_control_signals: 2,
             clamped_actions: 3,
             curve_index_clamps: 4,
+            fluid_payload_absences: 6,
             evicted_actors: 5,
+            cross_tier_deadband_events: 7,
+            discarded_state_energy_wh: 8.5,
             warmup: WarmupOutcome::Ran {
                 days_run: 3,
                 converged: false,

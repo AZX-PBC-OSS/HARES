@@ -2,7 +2,8 @@
 
 import pytest
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
-from ochre_next import (
+from hares import (
+    SimulationConfig,
     AirConditioner,
     ASHPCooler,
     ASHPHeater,
@@ -22,16 +23,7 @@ from ochre_next import (
 
 
 def _make_blueprint():
-    return DwellingBlueprint.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42,
-        duration_s=300,
-        time_res_s=60,
-        write_output=False,
-    )
+    return DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, start_time="2019-01-01T00:00:00"))
 
 
 def test_missing_capacity_raises():
@@ -100,7 +92,7 @@ def test_explicit_capacity_heating():
     for _ in range(5):
         result = dw.step()
         assert result is not None
-        power = result["net_electric_power_kw"]
+        power = result["net_electric_power_w"]
         assert abs(power) < 1e9
 
 
@@ -116,7 +108,7 @@ def test_autosize_heating():
     for _ in range(5):
         result = dw.step()
         assert result is not None
-        power = result["net_electric_power_kw"]
+        power = result["net_electric_power_w"]
         assert abs(power) < 1e9
 
 

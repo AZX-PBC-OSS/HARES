@@ -16,39 +16,28 @@
 //! - `ochre/defaults/Water Heating/*` -> `defaults/water_heating/*.toml` and `defaults/water_heating/default_paramters.csv`
 //! - appliance and event schedule defaults -> `defaults/loads/*.toml`
 //!
-//! ## Optional vs mandatory defaults files
+//! ## Required defaults files
 //!
-//! Only `zip_parameters.toml` is mandatory — loading fails with
-//! [`DefaultsError::MissingFile`] if it is absent. All other defaults files are
-//! optional, allowing simulations to proceed with reduced functionality (e.g.
-//! single-speed equipment when multispeed CSV is unavailable) rather than
-//! failing hard on incomplete data.
-//!
-//! Two CSV-based defaults files warn on missing file
-//! (`HVAC Multispeed Parameters.csv` and
-//! `water_heating/default_paramters.csv`). All other optional defaults files
-//! (TOML directories, generator efficiency curve, PV panel defaults) return an
-//! empty collection or `None` silently.
-//!
-//! `ev/vehicle_mapping.csv` is the exception: a missing, unopenable or
-//! malformed mapping fails the defaults load with a `HaresError` naming the
-//! path, the row number and the field.
-//!
-//! Set the environment variable `HARES_STRICT_DEFAULTS=1` to elevate a missing
-//! `HVAC Multispeed Parameters.csv` from a warning to a hard error
-//! ([`DefaultsError::MissingFile`]) — useful for CI and test environments that
-//! must validate complete data sets. The water heating CSV loader warns but is
-//! not escalated by `HARES_STRICT_DEFAULTS`; the EV vehicle mapping load
-//! errors regardless of the flag. All other optional loaders are unaffected.
+//! Every file the loader reads is required: a missing, unreadable or
+//! malformed file is a [`DefaultsError`] naming the path, never a warning
+//! plus a degraded store. The equipment's resolved defaults (ZIP
+//! sidecars, HVAC curve sets, the multispeed table, the water-heating
+//! parameters, the envelope LUT) would silently fall to class tables or
+//! lumped fallbacks and the run would report success on different
+//! numbers, so the loader has one behaviour, the strict one: there is no
+//! environment variable and no relaxed mode.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hares_types::HaresError;
 
+use crate::inputs::InputSource;
+use crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
+
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::BTU_PER_HR_PER_W;
-use hares_physics::units::power_kw_to_w;
 use hares_types::parse_trimmed_f64;
 /// ZIP load model parameters for voltage-dependent power modelling.
 ///
@@ -203,13 +192,14 @@ const KNOWN_WATER_HEATING_UNITS: &[&str] = &[
 /// without conversion — the invariant checker flags them at startup.
 ///
 /// Conversion factors:
-/// - kW → W: via [`power_kw_to_w`] (1 kW = 1000 W, NIST SP 330 §7.3)
+/// - kW → W: the uom kilowatt-to-watt conversion (1 kW = 1000 W, NIST SP 330 §7.3)
 fn convert_water_heating_value_to_si(value: f64, unit: &str) -> f64 {
     match unit {
         // Power: kW → W conversion. HARES stores electric element power in W
         // (see wh_config.rs validation ranges). If a CSV row declares kW, the
         // value must be multiplied by 1000 to match the SI internal convention.
-        "kW" => power_kw_to_w(value),
+        "kW" => uom::si::f64::Power::new::<uom::si::power::kilowatt>(value)
+            .get::<uom::si::power::watt>(),
         // All other known units are already in SI or are dimensionless — no conversion needed.
         "W" | "degC" | "deltaC" | "K" | "C" | "m3" | "L" | "m" | "W_per_K" | "m2_K_per_W"
         | "L_per_day" | "kg_per_s" | "dimensionless" | "" => value,
@@ -250,10 +240,12 @@ pub struct VehicleMappingEntry {
     pub vehicle_type: String,
     /// Per-vehicle driving profile archetype (e.g. `pdf_Veh1`).
     pub profile_file: String,
-    /// Battery capacity (kWh).
-    pub capacity_kwh: f64,
-    /// Maximum onboard charger power (kW).
-    pub charger_power_kw: f64,
+    /// Battery capacity (J): the CSV's kWh column converted once, with
+    /// uom, where the loader reads it.
+    pub capacity_j: f64,
+    /// Maximum onboard charger power (W): the CSV's kW column converted
+    /// once, with uom, where the loader reads it.
+    pub charger_power_w: f64,
     /// Grid-to-battery charging efficiency (0.0–1.0).
     pub efficiency: f64,
 }
@@ -401,21 +393,25 @@ impl WaterHeatingDefaults {
 }
 
 /// Central store for all default parameters loaded from the `defaults/` tree.
+///
+/// The tables are `Arc`-shared: a store cloned from a loaded handle (the
+/// per-file replacement's `ParsedDefaults::with_file`) shares every table
+/// with the handle and re-parses only the replaced file's group.
 #[derive(Debug, Clone, Default)]
 pub struct DefaultsStore {
-    zip_by_equipment: HashMap<String, ZipLoad>,
-    hvac_cooling: HashMap<String, HvacCurveSet>,
-    hvac_heating: HashMap<String, HvacCurveSet>,
-    hvac_multispeed: Vec<HvacMultispeedParameters>,
-    battery: HashMap<String, EquipmentDefaults>,
-    envelope: HashMap<String, EquipmentDefaults>,
-    ev: HashMap<String, EquipmentDefaults>,
-    generator: HashMap<String, EquipmentDefaults>,
-    loads: HashMap<String, EquipmentDefaults>,
-    pv: HashMap<String, EquipmentDefaults>,
+    zip_by_equipment: Arc<HashMap<String, ZipLoad>>,
+    hvac_cooling: Arc<HashMap<String, HvacCurveSet>>,
+    hvac_heating: Arc<HashMap<String, HvacCurveSet>>,
+    hvac_multispeed: Arc<Vec<HvacMultispeedParameters>>,
+    battery: Arc<HashMap<String, EquipmentDefaults>>,
+    envelope: Arc<HashMap<String, EquipmentDefaults>>,
+    ev: Arc<HashMap<String, EquipmentDefaults>>,
+    generator: Arc<HashMap<String, EquipmentDefaults>>,
+    loads: Arc<HashMap<String, EquipmentDefaults>>,
+    pv: Arc<HashMap<String, EquipmentDefaults>>,
     /// Typed PV panel specifications loaded from `defaults/pv/*.toml`.
-    pv_panel: HashMap<String, PvPanelDefaults>,
-    water_heating: HashMap<String, EquipmentDefaults>,
+    pv_panel: Arc<HashMap<String, PvPanelDefaults>>,
+    water_heating: Arc<HashMap<String, EquipmentDefaults>>,
     /// Typed water heater defaults loaded from `defaults/water_heating/default_paramters.csv`.
     water_heating_csv: Option<WaterHeatingDefaults>,
     /// EV vehicle-to-type mapping loaded from `defaults/ev/vehicle_mapping.csv`.
@@ -424,6 +420,9 @@ pub struct DefaultsStore {
     /// Typed generator efficiency curve loaded from
     /// `defaults/generator/efficiency_curve.toml`.
     pub generator_curve: Option<GeneratorEfficiencyCurve>,
+    /// The bytes of every file the load read, in load order: the input
+    /// digest's material.
+    input_log: DefaultsInputLog,
 }
 
 #[derive(Debug, Error)]
@@ -444,6 +443,79 @@ pub enum DefaultsError {
     /// number and the field.
     #[error(transparent)]
     VehicleMapping(#[from] HaresError),
+    /// An envelope LUT load failure from `EnvelopeLookup::load`: the
+    /// message names the CSV the LUT could not read.
+    #[error(transparent)]
+    EnvelopeLut(#[from] crate::envelope_lut::EnvelopeLutError),
+    /// A per-file replacement naming a file the defaults tree does not
+    /// carry: the message names the path and every known file.
+    #[error("'{path}' is not a file the defaults tree carries; the known files are: {known}")]
+    UnknownDefaultsFile { path: String, known: String },
+}
+
+/// The bytes every defaults file a load read contributed, in load order:
+/// (path relative to the defaults directory, bytes). The input digest's
+/// material.
+pub(crate) type DefaultsInputLog = Vec<(String, Vec<u8>)>;
+
+/// Log one defaults file's bytes for the load's input log: the path
+/// relative to the base, and the bytes of this read. The guarantee is
+/// about this read, not the parse's: the digest records the bytes read
+/// at the log's read, and a file changing between the two reads records
+/// a digest over bytes the parse never saw. That window is disclosed
+/// here; the read-once-and-hash-the-consumed-bytes improvement belongs
+/// to the shared-inputs row. A file this re-read cannot fetch is a file
+/// the parse read fails on next, so the load never succeeds with a
+/// silently incomplete log.
+pub(crate) fn log_read(base: &Path, log: &mut DefaultsInputLog, path: &Path) {
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let relative = path
+        .strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+    log.push((relative, bytes));
+}
+
+/// [`Self::log_read`] for the swap: a swapped path's log entry is the
+/// replacement's content (the bytes the load actually used), the base
+/// file's bytes otherwise, through [`log_read`].
+pub(crate) fn log_used(base: &Path, log: &mut DefaultsInputLog, path: &Path, swap: Swap<'_>) {
+    if let Some((swapped, content)) = swap
+        && swapped == path
+    {
+        let relative = path
+            .strip_prefix(base)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        log.push((relative, content.as_bytes().to_vec()));
+        return;
+    }
+    log_read(base, log, path);
+}
+
+/// The directory's entries sorted by file name: the load order inside one
+/// directory is part of the input digest, so it must not follow the
+/// operating system's read order.
+fn sorted_entries(dir: &Path) -> Result<Vec<std::path::PathBuf>, DefaultsError> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| DefaultsError::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| DefaultsError::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    Ok(paths)
 }
 
 impl DefaultsStore {
@@ -469,62 +541,330 @@ impl DefaultsStore {
     ///   pv/
     ///   water_heating/
     /// ```
+    /// Load all default parameters from the given directory tree.
+    ///
+    /// Every file the loader reads is required: a missing, unreadable or
+    /// malformed file is a [`DefaultsError`] naming the path, never a
+    /// warning plus a degraded store (the loader has one behaviour, the
+    /// strict one).
+    ///
+    /// Expected layout:
+    /// ```text
+    /// defaults/
+    ///   zip_parameters.toml
+    ///   HVAC Multispeed Parameters.csv
+    ///   hvac_cooling/
+    ///   hvac_heating/
+    ///   battery/
+    ///   envelope/
+    ///   ev/
+    ///   generator/
+    ///   loads/
+    ///   pv/
+    ///   water_heating/
+    /// ```
     pub fn load(defaults_dir: &Path) -> Result<Self, DefaultsError> {
-        let strict_defaults = std::env::var("HARES_STRICT_DEFAULTS").is_ok();
-        Self::load_with_strict_defaults(defaults_dir, strict_defaults)
-    }
-
-    /// [`DefaultsStore::load`] with the `HARES_STRICT_DEFAULTS` escalation
-    /// decided by the caller instead of the process environment. Tests use
-    /// this directly: mutating the env var from one test is process-global
-    /// state under `cargo test`'s shared-process runner, poisoning concurrent
-    /// `load` calls in other tests (a missing-multispeed-CSV dir would hard
-    /// fail there while the mutating test holds the var set).
-    fn load_with_strict_defaults(
-        defaults_dir: &Path,
-        strict_defaults: bool,
-    ) -> Result<Self, DefaultsError> {
+        crate::parse_counts::bump_defaults();
+        tracing::debug!(
+            path = %defaults_dir.display(),
+            "defaults directory resolved"
+        );
         let mut store = Self::default();
+        let mut log = DefaultsInputLog::new();
 
         let zip_path = defaults_dir.join("zip_parameters.toml");
         if !zip_path.exists() {
             return Err(DefaultsError::MissingFile(zip_path));
         }
-        store.zip_by_equipment = load_zip_parameters(&zip_path)?;
+        store.zip_by_equipment = Arc::new(load_zip_parameters(
+            defaults_dir,
+            &mut log,
+            &zip_path,
+            None,
+        )?);
 
-        store.hvac_cooling = load_hvac_curves_dir(&defaults_dir.join("hvac_cooling"))?;
-        store.hvac_heating = load_hvac_curves_dir(&defaults_dir.join("hvac_heating"))?;
-        store.hvac_multispeed = load_hvac_multispeed_csv(
+        store.hvac_cooling = Arc::new(load_hvac_curves_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("hvac_cooling"),
+            None,
+        )?);
+        store.hvac_heating = Arc::new(load_hvac_curves_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("hvac_heating"),
+            None,
+        )?);
+        store.hvac_multispeed = Arc::new(load_hvac_multispeed_csv(
+            defaults_dir,
+            &mut log,
             &defaults_dir.join("HVAC Multispeed Parameters.csv"),
-            strict_defaults,
-        )?;
+            None,
+        )?);
 
-        // Load envelope LUT from CSV files (non-fatal if missing).
-        let envelope_dir = defaults_dir.join("envelope");
-        match crate::envelope_lut::EnvelopeLookup::load(&envelope_dir) {
-            Ok(lut) => store.envelope_lut = Some(lut),
-            Err(err) => {
-                tracing::warn!(%err, "envelope LUT load failed, falling back to material layers");
-            }
-        }
+        // The envelope LUT: a load failure is an error naming the CSV,
+        // never a warning plus the lumped fallback-R path.
+        store.envelope_lut = Some(crate::envelope_lut::EnvelopeLookup::load_with_log(
+            &defaults_dir.join("envelope"),
+            defaults_dir,
+            &mut log,
+        )?);
 
-        store.battery = load_toml_dir(&defaults_dir.join("battery"))?;
-        store.envelope = load_toml_dir(&defaults_dir.join("envelope"))?;
-        store.ev = load_toml_dir(&defaults_dir.join("ev"))?;
-        store.generator = load_toml_dir(&defaults_dir.join("generator"))?;
-        store.generator_curve = Some(load_generator_curve(&defaults_dir.join("generator"))?);
-        store.loads = load_toml_dir(&defaults_dir.join("loads"))?;
-        store.pv = load_toml_dir(&defaults_dir.join("pv"))?;
-        store.pv_panel = load_pv_panel_defaults(&defaults_dir.join("pv"))?;
-        store.water_heating = load_toml_dir(&defaults_dir.join("water_heating"))?;
-        store.water_heating_csv = load_water_heating_csv(
+        store.battery = Arc::new(load_toml_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("battery"),
+            None,
+        )?);
+        store.envelope = Arc::new(load_toml_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("envelope"),
+            None,
+        )?);
+        store.ev = Arc::new(load_toml_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("ev"),
+            None,
+        )?);
+        store.generator = Arc::new(load_toml_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("generator"),
+            None,
+        )?);
+        store.generator_curve = Some(load_generator_curve(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("generator"),
+            None,
+        )?);
+        store.loads = Arc::new(load_toml_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("loads"),
+            None,
+        )?);
+        store.pv = Arc::new(load_toml_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("pv"),
+            None,
+        )?);
+        store.pv_panel = Arc::new(load_pv_panel_defaults(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("pv"),
+            None,
+        )?);
+        store.water_heating = Arc::new(load_toml_dir(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("water_heating"),
+            None,
+        )?);
+        store.water_heating_csv = Some(load_water_heating_csv(
+            defaults_dir,
+            &mut log,
             &defaults_dir
                 .join("water_heating")
                 .join("default_paramters.csv"),
-        );
-        store.ev_mapping = Some(load_vehicle_mapping_csv(&defaults_dir.join("ev"))?);
+            None,
+        )?);
+        store.ev_mapping = Some(load_vehicle_mapping_csv(
+            defaults_dir,
+            &mut log,
+            &defaults_dir.join("ev"),
+            None,
+        )?);
 
+        store.input_log = log;
         Ok(store)
+    }
+
+    /// Every defaults file the load read, in load order: (path relative to
+    /// the defaults directory, bytes). The digest over these, computed by
+    /// [`crate::input::defaults_files_digest`], is the load's input digest.
+    #[must_use]
+    pub fn input_log(&self) -> &[(String, Vec<u8>)] {
+        &self.input_log
+    }
+
+    /// Load the defaults tree with per-file replacements: every file the
+    /// tree carries loads from `base` except the ones `files` names, which
+    /// load from the replacement's content. An override naming a file the
+    /// tree does not carry is an error naming the known files.
+    pub fn load_with_overrides(
+        base: &Path,
+        files: &BTreeMap<String, InputSource>,
+    ) -> Result<Self, DefaultsError> {
+        let mut store = Self::load(base)?;
+        for (relative, source) in files {
+            let content = source.read_text().map_err(|err| DefaultsError::Io {
+                path: base.join(relative),
+                source: std::io::Error::other(err.to_string()),
+            })?;
+            store.apply_override(base, relative, &content)?;
+        }
+        Ok(store)
+    }
+
+    /// The store with one file's group re-parsed over the shared tables:
+    /// the receiver's tables are `Arc`-shared with the result, the
+    /// replaced file's group re-parsed from the replacement's content over
+    /// the base's rest. The per-file replacement's
+    /// `ParsedDefaults::with_file` path; the parse counter reads one
+    /// group.
+    pub(crate) fn with_replaced_group(
+        &self,
+        base: &Path,
+        relative: &str,
+        content: &str,
+    ) -> Result<Self, DefaultsError> {
+        crate::parse_counts::bump_defaults();
+        let mut store = self.clone();
+        store.apply_override(base, relative, content)?;
+        Ok(store)
+    }
+
+    /// Re-parse the one defaults group the replaced file belongs to, from
+    /// the replacement's content, leaving every other table as loaded. The
+    /// display path in every error is the file's place in the base tree,
+    /// where the replacement would live.
+    fn apply_override(
+        &mut self,
+        base: &Path,
+        relative: &str,
+        content: &str,
+    ) -> Result<(), DefaultsError> {
+        let display = base.join(relative);
+        let swap = Some((display.as_path(), content));
+        // The re-parse's log is the throwaway here: the base load logged
+        // every tree file's bytes already, and the replacement's bytes are
+        // what this re-parse actually used, so the store's own log entry
+        // for the path becomes them.
+        let mut log = DefaultsInputLog::new();
+        match relative {
+            "zip_parameters.toml" => {
+                self.zip_by_equipment =
+                    Arc::new(load_zip_parameters(base, &mut log, &display, swap)?);
+            }
+            "HVAC Multispeed Parameters.csv" => {
+                self.hvac_multispeed =
+                    Arc::new(load_hvac_multispeed_csv(base, &mut log, &display, swap)?);
+            }
+            "water_heating/default_paramters.csv" => {
+                self.water_heating_csv =
+                    Some(load_water_heating_csv(base, &mut log, &display, swap)?);
+            }
+            "ev/vehicle_mapping.csv" => {
+                self.ev_mapping = Some(load_vehicle_mapping_csv(base, &mut log, &display, swap)?);
+            }
+            DEFAULT_SCHEDULES_CSV => {
+                // The default schedule profiles are the schedule side's
+                // table: the store carries none, the handle re-parses its
+                // own profiles for this file.
+            }
+            _ => {
+                let parent = Path::new(relative)
+                    .parent()
+                    .and_then(|parent| parent.to_str())
+                    .unwrap_or_default();
+                let file_name = Path::new(relative)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                match (parent, file_name) {
+                    (
+                        "envelope",
+                        "Envelope Materials.csv"
+                        | "Envelope Boundaries.csv"
+                        | "Envelope Boundary Types.csv",
+                    ) => {
+                        self.envelope_lut = Some(self.reload_envelope_lut(&display, swap)?);
+                    }
+                    ("hvac_cooling" | "hvac_heating", _) => {
+                        let dir = display
+                            .parent()
+                            .expect("the file has a parent")
+                            .to_path_buf();
+                        let map = load_hvac_curves_dir(base, &mut log, &dir, swap)?;
+                        if parent == "hvac_cooling" {
+                            self.hvac_cooling = Arc::new(map);
+                        } else {
+                            self.hvac_heating = Arc::new(map);
+                        }
+                    }
+                    (
+                        dir @ ("battery" | "envelope" | "ev" | "generator" | "loads" | "pv"
+                        | "water_heating"),
+                        _,
+                    ) if relative.ends_with(".toml") => {
+                        let toml_dir = display
+                            .parent()
+                            .expect("the file has a parent")
+                            .to_path_buf();
+                        let map = load_toml_dir(base, &mut log, &toml_dir, swap)?;
+                        match dir {
+                            "battery" => self.battery = Arc::new(map),
+                            "envelope" => self.envelope = Arc::new(map),
+                            "ev" => self.ev = Arc::new(map),
+                            "generator" => self.generator = Arc::new(map),
+                            "loads" => self.loads = Arc::new(map),
+                            "pv" => {
+                                // Two loaders walk the pv directory: the
+                                // equipment defaults' tomls and the panel
+                                // specifications'. Both re-parse with the
+                                // swap, each skipping what it does not read.
+                                self.pv = Arc::new(map);
+                                self.pv_panel = Arc::new(load_pv_panel_defaults(
+                                    base, &mut log, &toml_dir, swap,
+                                )?);
+                            }
+                            "water_heating" => self.water_heating = Arc::new(map),
+                            _ => unreachable!("the outer match guards the directory set"),
+                        }
+                    }
+                    ("generator", "efficiency_curve.toml") => {
+                        let dir = display
+                            .parent()
+                            .expect("the file has a parent")
+                            .to_path_buf();
+                        self.generator_curve =
+                            Some(load_generator_curve(base, &mut log, &dir, swap)?);
+                    }
+                    _ => {
+                        return Err(unknown_defaults_file(base, relative));
+                    }
+                }
+            }
+        }
+        // The replacement's bytes are this store's log entry for the path
+        // now: the digest over the log is the digest over the content the
+        // store's tables actually came from.
+        let entry = (relative.to_string(), content.as_bytes().to_vec());
+        match self.input_log.iter().position(|(path, _)| path == relative) {
+            Some(pos) => self.input_log[pos] = entry,
+            None => self.input_log.push(entry),
+        }
+        Ok(())
+    }
+
+    /// The envelope LUT re-parsed with one replaced CSV: a load failure is
+    /// the base load's own error, never a warning plus a degraded store.
+    fn reload_envelope_lut(
+        &mut self,
+        display: &Path,
+        swap: crate::defaults::Swap<'_>,
+    ) -> Result<crate::envelope_lut::EnvelopeLookup, DefaultsError> {
+        let dir = display
+            .parent()
+            .expect("the file has a parent")
+            .to_path_buf();
+        Ok(crate::envelope_lut::EnvelopeLookup::load_with_swap(
+            &dir, swap,
+        )?)
     }
 
     /// Look up ZIP parameters by equipment type name.
@@ -634,12 +974,12 @@ impl DefaultsStore {
         self.pv_panel.len()
     }
 
-    /// Take ownership of the loaded PV panel defaults map, leaving an empty
-    /// map in its place. Called by `Dwelling::from_preparsed` to transfer
-    /// panel defaults to the Dwelling struct so they are accessible at PV
-    /// sizing call sites.
-    pub fn take_pv_panel_map(&mut self) -> HashMap<String, PvPanelDefaults> {
-        std::mem::take(&mut self.pv_panel)
+    /// The loaded PV panel defaults map, shared by reference: the dwelling
+    /// build reads the map by reference and clones the `Arc`, so builds
+    /// from one parsed defaults tree share the map.
+    #[must_use]
+    pub fn pv_panel_map(&self) -> Arc<HashMap<String, PvPanelDefaults>> {
+        Arc::clone(&self.pv_panel)
     }
 
     /// Number of ZIP parameter entries loaded.
@@ -726,11 +1066,90 @@ pub enum DefaultsCategory {
 // Internal loaders
 // ---------------------------------------------------------------------------
 
-fn load_zip_parameters(path: &Path) -> Result<HashMap<String, ZipLoad>, DefaultsError> {
-    let content = std::fs::read_to_string(path).map_err(|e| DefaultsError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+/// One file's substituted content: the path the loader would read (the
+/// file's place in the base tree) and the replacement's text. A loader
+/// whose read site matches the path uses the text; every other file loads
+/// from the base as today.
+pub(crate) type Swap<'a> = Option<(&'a Path, &'a str)>;
+
+/// A defaults file's text through the swap: the replacement's content when
+/// the path is the swapped one, else the base file's bytes.
+fn read_defaults_file(path: &Path, swap: Swap<'_>) -> Result<String, DefaultsError> {
+    match swap {
+        Some((swapped, content)) if swapped == path => Ok(content.to_string()),
+        _ => std::fs::read_to_string(path).map_err(|e| DefaultsError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        }),
+    }
+}
+
+/// The CSV reader for one defaults file: the replacement's content when
+/// the path is the swapped one, else the base file.
+fn csv_reader(
+    path: &Path,
+    swap: Swap<'_>,
+) -> Result<csv::Reader<Box<dyn std::io::Read>>, DefaultsError> {
+    match swap {
+        Some((swapped, content)) if swapped == path => Ok(csv::Reader::from_reader(Box::new(
+            std::io::Cursor::new(content.to_string()),
+        ))),
+        _ => {
+            let file = std::fs::File::open(path).map_err(|e| DefaultsError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            Ok(csv::Reader::from_reader(Box::new(file)))
+        }
+    }
+}
+
+/// The unknown-relative-path error: the path named, and every file the
+/// tree carries (the tree's own files plus the replacements), sorted.
+pub(crate) fn unknown_defaults_file(base: &Path, relative: &str) -> DefaultsError {
+    let mut known = Vec::new();
+    collect_tree_files(base, "", &mut known);
+    let known = if known.is_empty() {
+        "(the defaults tree carries no files)".to_string()
+    } else {
+        known.sort();
+        known.join(", ")
+    };
+    DefaultsError::UnknownDefaultsFile {
+        path: relative.to_string(),
+        known,
+    }
+}
+
+/// Every file under `dir`, relative to it, recursive.
+fn collect_tree_files(dir: &Path, relative: &str, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if relative.is_empty() {
+            name
+        } else {
+            format!("{relative}/{name}")
+        };
+        if path.is_dir() {
+            collect_tree_files(&path, &rel, out);
+        } else {
+            out.push(rel);
+        }
+    }
+}
+
+fn load_zip_parameters(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    path: &Path,
+    swap: Swap<'_>,
+) -> Result<HashMap<String, ZipLoad>, DefaultsError> {
+    log_used(base, log, path, swap);
+    let content = read_defaults_file(path, swap)?;
     let table: HashMap<String, ZipLoad> =
         toml::from_str(&content).map_err(|e| DefaultsError::MalformedToml {
             path: path.to_path_buf(),
@@ -772,28 +1191,22 @@ fn load_zip_parameters(path: &Path) -> Result<HashMap<String, ZipLoad>, Defaults
         .collect())
 }
 
-fn load_toml_dir(dir: &Path) -> Result<HashMap<String, EquipmentDefaults>, DefaultsError> {
+fn load_toml_dir(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    dir: &Path,
+    swap: Swap<'_>,
+) -> Result<HashMap<String, EquipmentDefaults>, DefaultsError> {
     let mut map = HashMap::new();
     if !dir.exists() {
         return Ok(map);
     }
-    let entries = std::fs::read_dir(dir).map_err(|e| DefaultsError::Io {
-        path: dir.to_path_buf(),
-        source: e,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|e| DefaultsError::Io {
-            path: dir.to_path_buf(),
-            source: e,
-        })?;
-        let path = entry.path();
+    for path in sorted_entries(dir)? {
         if path.extension().is_some_and(|ext| ext == "toml") {
             let stem =
                 normalize_equipment_key(&path.file_stem().unwrap_or_default().to_string_lossy());
-            let content = std::fs::read_to_string(&path).map_err(|e| DefaultsError::Io {
-                path: path.clone(),
-                source: e,
-            })?;
+            log_used(base, log, &path, swap);
+            let content = read_defaults_file(&path, swap)?;
             let defaults: EquipmentDefaults =
                 toml::from_str(&content).map_err(|e| DefaultsError::MalformedToml {
                     path: path.clone(),
@@ -811,28 +1224,22 @@ fn load_toml_dir(dir: &Path) -> Result<HashMap<String, EquipmentDefaults>, Defau
 /// normalized file stem name. Errors on missing files silently produce an
 /// empty map — the caller is responsible for falling back to compile-time
 /// constants.
-fn load_pv_panel_defaults(dir: &Path) -> Result<HashMap<String, PvPanelDefaults>, DefaultsError> {
+fn load_pv_panel_defaults(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    dir: &Path,
+    swap: Swap<'_>,
+) -> Result<HashMap<String, PvPanelDefaults>, DefaultsError> {
     let mut map = HashMap::new();
     if !dir.exists() {
         return Ok(map);
     }
-    let entries = std::fs::read_dir(dir).map_err(|e| DefaultsError::Io {
-        path: dir.to_path_buf(),
-        source: e,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|e| DefaultsError::Io {
-            path: dir.to_path_buf(),
-            source: e,
-        })?;
-        let path = entry.path();
+    for path in sorted_entries(dir)? {
         if path.extension().is_some_and(|ext| ext == "toml") {
             let stem =
                 normalize_equipment_key(&path.file_stem().unwrap_or_default().to_string_lossy());
-            let content = std::fs::read_to_string(&path).map_err(|e| DefaultsError::Io {
-                path: path.clone(),
-                source: e,
-            })?;
+            log_used(base, log, &path, swap);
+            let content = read_defaults_file(&path, swap)?;
             let defaults: PvPanelDefaults = match toml::from_str(&content) {
                 Ok(d) => d,
                 Err(e) => {
@@ -850,31 +1257,27 @@ fn load_pv_panel_defaults(dir: &Path) -> Result<HashMap<String, PvPanelDefaults>
     Ok(map)
 }
 
-fn load_hvac_curves_dir(dir: &Path) -> Result<HashMap<String, HvacCurveSet>, DefaultsError> {
+fn load_hvac_curves_dir(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    dir: &Path,
+    swap: Swap<'_>,
+) -> Result<HashMap<String, HvacCurveSet>, DefaultsError> {
     let mut map = HashMap::new();
     if !dir.exists() {
         return Ok(map);
     }
-    let entries = std::fs::read_dir(dir).map_err(|e| DefaultsError::Io {
-        path: dir.to_path_buf(),
-        source: e,
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|e| DefaultsError::Io {
-            path: dir.to_path_buf(),
-            source: e,
-        })?;
-        let path = entry.path();
+    for path in sorted_entries(dir)? {
         let ext = path.extension().map(|e| e.to_string_lossy().to_string());
         let stem = normalize_equipment_key(&path.file_stem().unwrap_or_default().to_string_lossy());
 
         match ext.as_deref() {
             Some("toml") => {
-                let curve_set = load_hvac_curve_file(&path)?;
+                let curve_set = load_hvac_curve_file(base, log, &path, swap)?;
                 map.insert(stem, curve_set);
             }
             Some("csv") => {
-                let curve_set = load_hvac_csv_file(&path)?;
+                let curve_set = load_hvac_csv_file(base, log, &path, swap)?;
                 map.insert(stem, curve_set);
             }
             _ => {}
@@ -1021,11 +1424,14 @@ struct RawHvacFile {
     variant: Vec<RawHvacVariant>,
 }
 
-fn load_hvac_curve_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
-    let content = std::fs::read_to_string(path).map_err(|e| DefaultsError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+fn load_hvac_curve_file(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    path: &Path,
+    swap: Swap<'_>,
+) -> Result<HvacCurveSet, DefaultsError> {
+    log_used(base, log, path, swap);
+    let content = read_defaults_file(path, swap)?;
     let raw: RawHvacFile = toml::from_str(&content).map_err(|e| DefaultsError::MalformedToml {
         path: path.to_path_buf(),
         reason: e.to_string(),
@@ -1082,11 +1488,14 @@ fn load_hvac_curve_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
 /// OCHRE CSV format: rows are coefficient names, columns are speed variants (transposed).
 /// Row names: a_eir_t..f_eir_t, a_eir_ff..c_eir_ff, a_eir_plr..c_eir_plr,
 ///            a_cap_t..f_cap_t, a_cap_ff..c_cap_ff, min_Twb, max_Twb, min_Tdb, max_Tdb
-fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
-    let mut rdr = csv::Reader::from_path(path).map_err(|e| DefaultsError::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-    })?;
+fn load_hvac_csv_file(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    path: &Path,
+    swap: Swap<'_>,
+) -> Result<HvacCurveSet, DefaultsError> {
+    log_used(base, log, path, swap);
+    let mut rdr = csv_reader(path, swap)?;
 
     let headers = rdr
         .headers()
@@ -1282,51 +1691,25 @@ fn load_hvac_csv_file(path: &Path) -> Result<HvacCurveSet, DefaultsError> {
 
 /// Load multispeed HVAC parameters from `defaults/HVAC Multispeed Parameters.csv`.
 ///
-/// ## Optional vs mandatory defaults files
-///
-/// | File | Status | Behaviour when missing |
-/// |---|---|---|
-/// | `zip_parameters.toml` | **Mandatory** | Returns [`DefaultsError::MissingFile`] |
-/// | `HVAC Multispeed Parameters.csv` | Optional | Warns; multispeed lookup returns `None` |
-/// | `water_heating/default_paramters.csv` | Optional | Warns; lookup returns `None` |
-/// | `ev/vehicle_mapping.csv` | Optional | Warns; lookup returns `None` |
-/// | `envelope/` LUT CSVs | Optional | Warns; falls back to material layers |
-/// | `hvac_cooling/*.toml`, `hvac_heating/*.toml` | Optional | Empty directory produces empty lookup (non-fatal) |
-///
-/// When the environment variable `HARES_STRICT_DEFAULTS` is set, a missing
-/// `HVAC Multispeed Parameters.csv` (which would normally warn) becomes a
-/// [`DefaultsError::MissingFile`] — useful for CI and test environments that
-/// must validate complete data sets.
+/// The file is required: a missing or unreadable file is a
+/// [`DefaultsError::MissingFile`] naming the path: the multispeed
+/// lookup returning `None` would silently run single-speed curves for
+/// a multispeed system.
 fn load_hvac_multispeed_csv(
+    base: &Path,
+    log: &mut DefaultsInputLog,
     path: &Path,
-    strict: bool,
+    swap: Swap<'_>,
 ) -> Result<Vec<HvacMultispeedParameters>, DefaultsError> {
     const MAX_HVAC_STAGES: usize = 4;
 
     if !path.exists() {
-        if strict {
-            return Err(DefaultsError::MissingFile(path.to_path_buf()));
-        }
-        tracing::warn!(
-            path = %path.display(),
-            "HVAC multispeed parameters file not found; \
-             multispeed parameter lookup unavailable",
-        );
-        #[cfg(feature = "observe")]
-        tracing::info!(
-            target: "observe",
-            column = "multispeed_csv_missing",
-            path = %path.display(),
-            multispeed_csv_missing = true,
-            "multispeed CSV file missing",
-        );
-        return Ok(Vec::new());
+        return Err(DefaultsError::MissingFile(path.to_path_buf()));
     }
 
-    let mut rdr = csv::Reader::from_path(path).map_err(|e| DefaultsError::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
-    })?;
+    log_used(base, log, path, swap);
+
+    let mut rdr = csv_reader(path, swap)?;
 
     let mut rows = Vec::new();
     for (row_idx, rec) in rdr.deserialize::<HashMap<String, String>>().enumerate() {
@@ -1563,28 +1946,31 @@ fn normalize_equipment_key(raw: &str) -> String {
 /// The CSV has columns: Description, Name, Value, Units.
 /// Rows whose Value field is empty or unparseable are skipped with a warning.
 /// Values declared in non-SI units (e.g. kW) are converted to SI at load time.
-/// Returns `None` if the file does not exist (non-fatal — callers fall back).
-fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
+/// The file is required: a missing or unopenable file is a
+/// [`DefaultsError`] naming the path: the water heater defaults
+/// returning `None` would silently run generic tank parameters.
+fn load_water_heating_csv(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    path: &Path,
+    swap: Swap<'_>,
+) -> Result<WaterHeatingDefaults, DefaultsError> {
     if !path.exists() {
-        tracing::warn!(
-            path = %path.display(),
-            "water heating defaults CSV not found; \
-             water heater default parameters unavailable",
-        );
-        return None;
+        return Err(DefaultsError::MissingFile(path.to_path_buf()));
     }
-    let mut rdr = match csv::ReaderBuilder::new()
-        .comment(Some(b'#'))
-        .from_path(path)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "failed to open water heating defaults CSV"
-            );
-            return None;
+    log_used(base, log, path, swap);
+    let mut rdr: csv::Reader<Box<dyn std::io::Read>> = match swap {
+        Some((swapped, content)) if swapped == path => csv::ReaderBuilder::new()
+            .comment(Some(b'#'))
+            .from_reader(Box::new(std::io::Cursor::new(content.to_string()))),
+        _ => {
+            let file = std::fs::File::open(path).map_err(|e| DefaultsError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+            csv::ReaderBuilder::new()
+                .comment(Some(b'#'))
+                .from_reader(Box::new(file))
         }
     };
     let mut rows = Vec::new();
@@ -1647,7 +2033,7 @@ fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
             }
         }
     }
-    Some(WaterHeatingDefaults { rows })
+    Ok(WaterHeatingDefaults { rows })
 }
 
 /// Load EV vehicle-to-type mapping from `defaults/ev/vehicle_mapping.csv`.
@@ -1661,7 +2047,12 @@ fn load_water_heating_csv(path: &Path) -> Option<WaterHeatingDefaults> {
 /// an `efficiency` outside `(0.0, 1.0]` or unparseable. Fewer than 50
 /// entries (one per Vehicle 1-50 in EV Profiles.csv) is the same error
 /// class.
-fn load_vehicle_mapping_csv(ev_dir: &Path) -> Result<VehicleMapping, HaresError> {
+fn load_vehicle_mapping_csv(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    ev_dir: &Path,
+    swap: Swap<'_>,
+) -> Result<VehicleMapping, HaresError> {
     let path = ev_dir.join("vehicle_mapping.csv");
     if !path.exists() {
         return Err(HaresError::Io(format!(
@@ -1670,15 +2061,23 @@ fn load_vehicle_mapping_csv(ev_dir: &Path) -> Result<VehicleMapping, HaresError>
             path.display()
         )));
     }
-    let mut rdr = csv::ReaderBuilder::new()
-        .comment(Some(b'#'))
-        .from_path(&path)
-        .map_err(|err| {
-            HaresError::Io(format!(
-                "failed to open EV vehicle mapping CSV '{}': {err}",
-                path.display()
-            ))
-        })?;
+    log_used(base, log, &path, swap);
+    let mut rdr: csv::Reader<Box<dyn std::io::Read>> = match swap {
+        Some((swapped, content)) if swapped == path => csv::ReaderBuilder::new()
+            .comment(Some(b'#'))
+            .from_reader(Box::new(std::io::Cursor::new(content.to_string()))),
+        _ => {
+            let file = std::fs::File::open(&path).map_err(|err| {
+                HaresError::Io(format!(
+                    "failed to open EV vehicle mapping CSV '{}': {err}",
+                    path.display()
+                ))
+            })?;
+            csv::ReaderBuilder::new()
+                .comment(Some(b'#'))
+                .from_reader(Box::new(file))
+        }
+    };
     let mut entries: Vec<VehicleMappingEntry> = Vec::new();
     for result in rdr.records() {
         let record = result.map_err(|err| {
@@ -1715,23 +2114,30 @@ fn load_vehicle_mapping_csv(ev_dir: &Path) -> Result<VehicleMapping, HaresError>
             )));
         }
 
-        let capacity_kwh = vehicle_mapping_numeric_field(
-            &path,
-            &row,
-            "capacity_kwh",
-            capacity_str,
-            "a positive finite number",
-            |v| v > 0.0,
-        )?;
+        // The CSV keeps its own unit columns (kWh, kW); the loader
+        // converts once, with uom, into the entry's SI fields.
+        let capacity_j = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+            vehicle_mapping_numeric_field(
+                &path,
+                &row,
+                "capacity_kwh",
+                capacity_str,
+                "a positive finite number",
+                |v| v > 0.0,
+            )?,
+        )
+        .get::<uom::si::energy::joule>();
 
-        let charger_power_kw = vehicle_mapping_numeric_field(
-            &path,
-            &row,
-            "charger_power_kw",
-            charger_str,
-            "a positive finite number",
-            |v| v > 0.0,
-        )?;
+        let charger_power_w =
+            uom::si::f64::Power::new::<uom::si::power::kilowatt>(vehicle_mapping_numeric_field(
+                &path,
+                &row,
+                "charger_power_kw",
+                charger_str,
+                "a positive finite number",
+                |v| v > 0.0,
+            )?)
+            .get::<uom::si::power::watt>();
 
         let efficiency = vehicle_mapping_numeric_field(
             &path,
@@ -1746,8 +2152,8 @@ fn load_vehicle_mapping_csv(ev_dir: &Path) -> Result<VehicleMapping, HaresError>
             profile_column,
             vehicle_type,
             profile_file,
-            capacity_kwh,
-            charger_power_kw,
+            capacity_j,
+            charger_power_w,
             efficiency,
         });
     }
@@ -1889,10 +2295,13 @@ fn check_ev_mapping_invariants(entries: &[VehicleMappingEntry]) -> Vec<String> {
             "MY2030_PHEV_SUV" => 14.8,
             _ => continue, // unrecognized types flagged above
         };
-        if (entry.capacity_kwh - expected_capacity).abs() > 0.01 {
+        if (entry.capacity_j - expected_capacity * 3.6e6).abs() > 0.01 {
             findings.push(format!(
                 "capacity_kwh {} deviates from expected {} for vehicle_type {} ({})",
-                entry.capacity_kwh, expected_capacity, entry.vehicle_type, entry.profile_column
+                entry.capacity_j,
+                expected_capacity * 3.6e6,
+                entry.vehicle_type,
+                entry.profile_column
             ));
         }
     }
@@ -2225,15 +2634,18 @@ fn check_dir_for_foreign_csv_params(dir: &Path, foreign_params: &[&str]) -> Vec<
 /// The file is shipped with the defaults tree, so a missing, malformed or
 /// invalid curve is a typed error naming the file, not a silent fallback to
 /// a hardcoded curve.
-fn load_generator_curve(dir: &Path) -> Result<GeneratorEfficiencyCurve, DefaultsError> {
+fn load_generator_curve(
+    base: &Path,
+    log: &mut DefaultsInputLog,
+    dir: &Path,
+    swap: Swap<'_>,
+) -> Result<GeneratorEfficiencyCurve, DefaultsError> {
     let path = dir.join("efficiency_curve.toml");
     if !path.exists() {
         return Err(DefaultsError::MissingFile(path));
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| DefaultsError::Io {
-        path: path.clone(),
-        source: e,
-    })?;
+    log_used(base, log, &path, swap);
+    let content = read_defaults_file(&path, swap)?;
     let curve: GeneratorEfficiencyCurve =
         toml::from_str(&content).map_err(|e| DefaultsError::MalformedToml {
             path: path.clone(),
@@ -2290,6 +2702,61 @@ mod tests {
         }
     }
 
+    fn write_minimal_generator_curve(gen_dir: &Path) {
+        std::fs::write(
+            gen_dir.join("efficiency_curve.toml"),
+            "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
+             [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
+        )
+        .unwrap();
+    }
+
+    /// The required sub-table files a loadable minimal tree carries: the
+    /// multispeed CSV and the water-heating CSV with their header rows
+    /// only, the envelope LUT's three CSVs the same. A test that needs a
+    /// row writes its own over these.
+    fn write_minimal_multispeed_csv(dir: &Path) {
+        std::fs::write(
+            dir.join("HVAC Multispeed Parameters.csv"),
+            "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,SHR 1\n",
+        )
+        .unwrap();
+    }
+
+    fn write_minimal_water_heating_csv(dir: &Path) {
+        let wh_dir = dir.join("water_heating");
+        std::fs::create_dir_all(&wh_dir).unwrap();
+        std::fs::write(
+            wh_dir.join("default_paramters.csv"),
+            "Description,Name,Value,Units\n",
+        )
+        .unwrap();
+    }
+
+    fn write_minimal_envelope_csvs(dir: &Path) {
+        let env_dir = dir.join("envelope");
+        std::fs::create_dir_all(&env_dir).unwrap();
+        std::fs::write(
+            env_dir.join("Envelope Boundary Types.csv"),
+            "Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Assembly R Value\n",
+        )
+        .unwrap();
+        std::fs::write(
+            env_dir.join("Envelope Materials.csv"),
+            "Boundary Name,Boundary Type,Resistance (m^2-K/W),Capacitance (kJ/m^2-K)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            env_dir.join("Envelope Boundaries.csv"),
+            "Boundary Name,Exterior Zone Label,Interior Zone Label\n",
+        )
+        .unwrap();
+    }
+
+    /// The required files one loadable minimal tree carries: the zip
+    /// parameters, the generator curve, the multispeed CSV, the
+    /// water-heating CSV and the envelope LUT's three CSVs, every
+    /// sub-table a header-only file a test needing real rows writes over.
     fn write_minimal_zip(path: &Path) {
         std::fs::write(
             path.join("zip_parameters.toml"),
@@ -2307,21 +2774,28 @@ pf = 1.0
         .unwrap();
         // The generator efficiency curve is mandatory at load (a missing
         // file is a typed error, there is no hardcoded fallback), so every
-        // fixture loading a store ships a minimal valid one. `create_subdirs`
-        // writes the same file for fixtures that use it; the two are
-        // idempotent.
+        // fixture loading a full store ships a minimal valid one.
         let gen_dir = path.join("generator");
         std::fs::create_dir_all(&gen_dir).unwrap();
         write_minimal_generator_curve(&gen_dir);
     }
 
-    fn write_minimal_generator_curve(gen_dir: &Path) {
-        std::fs::write(
-            gen_dir.join("efficiency_curve.toml"),
-            "[[points]]\ncapacity_ratio = 0.0\nefficiency_ratio = 0.0\n\
-             [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
-        )
-        .unwrap();
+    /// The required sub-table files a loadable minimal tree carries: the
+    /// multispeed CSV and the water-heating CSV with their header rows
+    /// only, the envelope LUT's three CSVs the same. A test that needs a
+    /// row writes its own over these.
+    fn write_required_tables(path: &Path) {
+        write_minimal_multispeed_csv(path);
+        write_minimal_water_heating_csv(path);
+        write_minimal_envelope_csvs(path);
+    }
+
+    /// The minimal tree that loads: every required file, every sub-table
+    /// header-only. The base fixture of every test whose load must
+    /// succeed; a test probing one file's absence removes it.
+    fn write_loadable_tree(path: &Path) {
+        write_minimal_zip(path);
+        write_required_tables(path);
     }
 
     #[test]
@@ -2331,7 +2805,7 @@ pf = 1.0
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
         assert!(store.zip_count() > 0, "should load at least one ZIP entry");
 
@@ -2366,9 +2840,11 @@ pf = 1.0
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults")
+            .join("python/hares/defaults")
             .join("zip_parameters.toml");
-        let table = load_zip_parameters(&toml_path).expect("load zip_parameters.toml");
+        let mut log = DefaultsInputLog::new();
+        let table = load_zip_parameters(&toml_path, &mut log, &toml_path, None)
+            .expect("load zip_parameters.toml");
 
         let mut covered_keys = std::collections::HashSet::new();
         for &name in ZIP_CLASS_NAMES {
@@ -2427,7 +2903,7 @@ pf = 1.0
     #[test]
     fn loads_hvac_curve_set_from_toml() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
 
         let hvac_dir = dir.path().join("hvac_cooling");
@@ -2478,7 +2954,7 @@ tdb_bounds = [18.33, 51.66]
     #[test]
     fn loads_equipment_defaults_from_toml_subdir() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
 
         let battery_dir = dir.path().join("battery");
@@ -2518,7 +2994,7 @@ round_trip_efficiency = 0.9
     #[test]
     fn multispeed_lookup_loads_capacity_cop_and_shr_arrays() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         std::fs::write(
             dir.path().join("HVAC Multispeed Parameters.csv"),
@@ -2537,71 +3013,52 @@ ASHP Cooler,16.0 SEER,2,0.72,0.86,4.33748,1.0,1.0,3.99889,0.71597,0.72878\n",
     }
 
     #[test]
-    fn missing_multispeed_csv_lookup_returns_none() {
+    fn missing_multispeed_csv_is_a_load_error() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
-        // No "HVAC Multispeed Parameters.csv" file — simulate missing file.
-        // Strictness pinned to false so an ambient HARES_STRICT_DEFAULTS
-        // (e.g. a CI environment) cannot flip this warning-path test.
-        let store =
-            DefaultsStore::load_with_strict_defaults(dir.path(), false).expect("load defaults");
+        // The multispeed CSV removed: the sub-table the loader reads is
+        // required, so the load fails naming the file. There is no relaxed
+        // mode: the loader has one behaviour, the strict one.
+        std::fs::remove_file(dir.path().join("HVAC Multispeed Parameters.csv")).unwrap();
+        let err = DefaultsStore::load(dir.path()).unwrap_err();
+        let message = err.to_string();
         assert!(
-            store.hvac_multispeed.is_empty(),
-            "multispeed vec should be empty when CSV is missing"
-        );
-        assert_eq!(
-            store.hvac_multispeed_parameters("ASHP Cooler", "SEER", 2, 16.0),
-            None,
-            "multispeed lookup should return None when CSV is missing"
+            message.contains("HVAC Multispeed Parameters.csv"),
+            "the error must name the missing multispeed file, got: {message}"
         );
     }
 
-    /// Strict-mode behavior of the multispeed loader, tested by calling the
-    /// loader directly with `strict: true`.
-    ///
-    /// This test must NOT set the `HARES_STRICT_DEFAULTS` env var: under the
-    /// default parallel harness (not nextest's process-per-test) the mutation
-    /// races every other test that loads a tempdir defaults store — the
-    /// observed flake class where `missing_generator_efficiency_curve_returns_none`
-    /// / `loads_hvac_curve_set_from_toml` failed with `MissingFile("…/HVAC
-    /// Multispeed Parameters.csv")` only under parallel load. The env-var
-    /// path in `DefaultsStore::load` is
-    /// exercised by the workspace-level integration runs, which run with the
-    /// variable set in the environment.
+    /// The `HARES_STRICT_DEFAULTS` environment variable is gone: the load
+    /// is strict with the variable set and unset alike, and the
+    /// variable's presence changes nothing.
     #[test]
-    fn strict_missing_multispeed_csv_returns_missing_file_error() {
+    fn hares_strict_defaults_env_var_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
-        // No CSV file created — with strict defaults, this must error. The
-        // strictness is injected via the internal seam, not the process env:
-        // `set_var` is process-global state under `cargo test`'s shared-process
-        // runner and would poison concurrent `load` calls in other tests.
-        let result = DefaultsStore::load_with_strict_defaults(dir.path(), true);
-        assert!(
-            matches!(result, Err(DefaultsError::MissingFile(_))),
-            "expected MissingFile error with strict defaults, got: {result:?}"
-        );
-        // The loader itself: strict must error, non-strict must degrade to
-        // empty with a warning.
-        let missing = dir.path().join("HVAC Multispeed Parameters.csv");
-        let result = load_hvac_multispeed_csv(&missing, true);
-        assert!(
-            matches!(result, Err(DefaultsError::MissingFile(_))),
-            "strict mode must error on a missing multispeed CSV, got: {result:?}"
-        );
-        let relaxed = load_hvac_multispeed_csv(&missing, false);
-        assert!(
-            matches!(relaxed, Ok(ref v) if v.is_empty()),
-            "non-strict mode must return an empty vec on a missing CSV, got: {relaxed:?}"
+        std::fs::remove_file(dir.path().join("HVAC Multispeed Parameters.csv")).unwrap();
+        // The tree missing the multispeed CSV errors with the variable set.
+        // Safety: nextest runs one test per process and the variable has
+        // no reader in the engine; no concurrent load in this process can
+        // observe the mutation.
+        unsafe { std::env::set_var("HARES_STRICT_DEFAULTS", "1") };
+        let strict = DefaultsStore::load(dir.path()).unwrap_err();
+        // Safety: as above, the variable has no reader; the removal
+        // restores the ambient environment for any later reader.
+        unsafe { std::env::remove_var("HARES_STRICT_DEFAULTS") };
+        let relaxed = DefaultsStore::load(dir.path()).unwrap_err();
+        assert_eq!(
+            strict.to_string(),
+            relaxed.to_string(),
+            "the environment variable must not change the load's behaviour"
         );
     }
 
     #[test]
     fn multispeed_csv_header_only_produces_empty_result() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         // Header row only — no data rows, so all rows are skipped.
         std::fs::write(
@@ -2654,7 +3111,8 @@ max_plf,1.0\n",
         )
         .unwrap();
 
-        let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
+        let set = load_hvac_csv_file(&csv_path, &mut DefaultsInputLog::new(), &csv_path, None)
+            .expect("csv should parse");
         let v = &set.variants[0];
         assert_eq!(v.cap_t.x1_bounds, FALLBACK_TWB_BOUNDS);
         assert_eq!(v.cap_t.x2_bounds, FALLBACK_TDB_BOUNDS);
@@ -2707,7 +3165,8 @@ max_Tdb,{tdb_max}\n",
         let csv_path = dir.path().join("ashp_heater.csv");
         write_minimal_hvac_csv(&csv_path, (-100.0, 100.0), (-100.0, 100.0));
 
-        let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
+        let set = load_hvac_csv_file(&csv_path, &mut DefaultsInputLog::new(), &csv_path, None)
+            .expect("csv should parse");
         let v = &set.variants[0];
 
         assert_eq!(
@@ -2728,7 +3187,8 @@ max_Tdb,{tdb_max}\n",
         let csv_path = dir.path().join("ashp_cooler.csv");
         write_minimal_hvac_csv(&csv_path, (13.88, 23.88), (18.33, 51.66));
 
-        let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
+        let set = load_hvac_csv_file(&csv_path, &mut DefaultsInputLog::new(), &csv_path, None)
+            .expect("csv should parse");
         let v = &set.variants[0];
 
         assert_eq!(
@@ -2751,7 +3211,8 @@ max_Tdb,{tdb_max}\n",
         let csv_path = dir.path().join("cold_climate_heater.csv");
         write_minimal_hvac_csv(&csv_path, (-20.0, 30.0), (-20.0, 50.0));
 
-        let set = load_hvac_csv_file(&csv_path).expect("csv should parse");
+        let set = load_hvac_csv_file(&csv_path, &mut DefaultsInputLog::new(), &csv_path, None)
+            .expect("csv should parse");
         let v = &set.variants[0];
 
         assert_eq!(
@@ -2821,7 +3282,7 @@ max_Tdb,{tdb_max}\n",
             .join("\n");
         std::fs::write(&csv_path, modified).unwrap();
 
-        let result = load_hvac_csv_file(&csv_path);
+        let result = load_hvac_csv_file(&csv_path, &mut DefaultsInputLog::new(), &csv_path, None);
         assert!(
             matches!(
                 &result,
@@ -2847,7 +3308,7 @@ max_Tdb,{tdb_max}\n",
             .join("\n");
         std::fs::write(&csv_path, modified).unwrap();
 
-        let result = load_hvac_curves_dir(&hvac_dir);
+        let result = load_hvac_curves_dir(&hvac_dir, &mut DefaultsInputLog::new(), &hvac_dir, None);
         assert!(
             matches!(
                 &result,
@@ -2877,7 +3338,8 @@ max_Tdb,{tdb_max}\n",
             .join("\n");
         std::fs::write(&csv_path, modified).unwrap();
 
-        let set = load_hvac_csv_file(&csv_path).expect("non-critical rows missing must still load");
+        let set = load_hvac_csv_file(&csv_path, &mut DefaultsInputLog::new(), &csv_path, None)
+            .expect("non-critical rows missing must still load");
         let v = &set.variants[0];
 
         // Fallback bounds must be applied when temperature rows are absent.
@@ -2898,7 +3360,8 @@ max_Tdb,{tdb_max}\n",
         let modified = content.replace("a_eir_t,-0.30428", "a_eir_t,abc");
         std::fs::write(&csv_path, modified).unwrap();
 
-        let set = load_hvac_csv_file(&csv_path).expect("unparseable value must not fail the load");
+        let set = load_hvac_csv_file(&csv_path, &mut DefaultsInputLog::new(), &csv_path, None)
+            .expect("unparseable value must not fail the load");
         let v = &set.variants[0];
 
         // The unparseable cell must fall back to 0.0 while the rest of the
@@ -2921,7 +3384,8 @@ max_Tdb,{tdb_max}\n",
         let csv_path = dir.path().join("good.csv");
         write_complete_hvac_csv(&csv_path);
 
-        let set = load_hvac_csv_file(&csv_path).expect("well-formed CSV must load");
+        let set = load_hvac_csv_file(&csv_path, &mut DefaultsInputLog::new(), &csv_path, None)
+            .expect("well-formed CSV must load");
         let v = &set.variants[0];
 
         // Every coefficient must match the CSV exactly — if any zero-fallback
@@ -2953,7 +3417,7 @@ max_Tdb,{tdb_max}\n",
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
 
         let csv_dirs = [
             defaults_dir.join("hvac_cooling"),
@@ -2969,12 +3433,13 @@ max_Tdb,{tdb_max}\n",
                     continue;
                 }
 
-                let set = load_hvac_csv_file(&path).unwrap_or_else(|e| {
-                    panic!(
-                        "shipped HVAC CSV {} must load successfully: {e}",
-                        path.display()
-                    )
-                });
+                let set = load_hvac_csv_file(&path, &mut DefaultsInputLog::new(), &path, None)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "shipped HVAC CSV {} must load successfully: {e}",
+                            path.display()
+                        )
+                    });
 
                 // Each variant must have non-zero leading coefficients for
                 // both the EIR and capacity biquadratic curves. A zero value
@@ -3005,7 +3470,7 @@ max_Tdb,{tdb_max}\n",
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults")
+            .join("python/hares/defaults")
     }
 
     /// COP at every speed must increase with the efficiency rating across
@@ -3017,13 +3482,19 @@ max_Tdb,{tdb_max}\n",
     /// so they legitimately deviate from proportional scaling (the reason
     /// the runtime check only warned. The deviating (family, speed) set is
     /// pinned: a data edit that introduces a deviation outside it fails
-    /// here.
+    /// here. OCHRE's `ASHP Heater` 11.0 HSPF row ("Manual") joins the
+    /// mini-split families in the deviation set: the reference's data is
+    /// the reference's data (D-020).
     #[test]
     fn hspf_cop_monotone_in_shipped_csv() {
         let defaults_dir = shipped_defaults_dir();
-        let rows =
-            load_hvac_multispeed_csv(&defaults_dir.join("HVAC Multispeed Parameters.csv"), true)
-                .expect("shipped multispeed CSV loads");
+        let rows = load_hvac_multispeed_csv(
+            &defaults_dir,
+            &mut DefaultsInputLog::new(),
+            &defaults_dir.join("HVAC Multispeed Parameters.csv"),
+            None,
+        )
+        .expect("shipped multispeed CSV loads");
         let findings = check_hspf_cop_monotonicity(&rows);
 
         let mut by_family: std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> =
@@ -3032,6 +3503,7 @@ max_Tdb,{tdb_max}\n",
             by_family.entry(name).or_default().insert(stage);
         }
         let expected: std::collections::BTreeMap<String, std::collections::BTreeSet<usize>> = [
+            ("ASHP Heater", [1, 2, 3, 4].into_iter().collect()),
             ("MSHP Heater", [1, 2, 3, 4].into_iter().collect()),
             ("MSHP Cooler", [1, 2, 3, 4].into_iter().collect()),
             ("Air Conditioner", [1].into_iter().collect()),
@@ -3052,8 +3524,13 @@ max_Tdb,{tdb_max}\n",
     #[test]
     fn shipped_ev_mapping_complete_and_consistent() {
         let defaults_dir = shipped_defaults_dir();
-        let mapping = load_vehicle_mapping_csv(&defaults_dir.join("ev"))
-            .expect("shipped vehicle mapping loads");
+        let mapping = load_vehicle_mapping_csv(
+            &defaults_dir,
+            &mut DefaultsInputLog::new(),
+            &defaults_dir.join("ev"),
+            None,
+        )
+        .expect("shipped vehicle mapping loads");
         let findings = check_ev_mapping_invariants(&mapping.entries);
         assert!(
             findings.is_empty(),
@@ -3066,8 +3543,13 @@ max_Tdb,{tdb_max}\n",
     #[test]
     fn vehicle_mapping_loads_the_shipped_csv() {
         let defaults_dir = shipped_defaults_dir();
-        let mapping = load_vehicle_mapping_csv(&defaults_dir.join("ev"))
-            .expect("the shipped vehicle mapping loads");
+        let mapping = load_vehicle_mapping_csv(
+            &defaults_dir,
+            &mut DefaultsInputLog::new(),
+            &defaults_dir.join("ev"),
+            None,
+        )
+        .expect("the shipped vehicle mapping loads");
         assert_eq!(mapping.count(), 50);
     }
 
@@ -3077,9 +3559,12 @@ max_Tdb,{tdb_max}\n",
     fn shipped_water_heating_defaults_satisfy_invariants() {
         let defaults_dir = shipped_defaults_dir();
         let wh = load_water_heating_csv(
+            &defaults_dir,
+            &mut DefaultsInputLog::new(),
             &defaults_dir
                 .join("water_heating")
                 .join("default_paramters.csv"),
+            None,
         )
         .expect("shipped water-heating defaults load");
         let findings = check_water_heating_invariants(&wh);
@@ -3138,9 +3623,13 @@ max_Tdb,{tdb_max}\n",
     fn top_speed_cop_not_far_below_seer_derivation() {
         const BTU_PER_HR_PER_W: f64 = 3.412141633;
         let defaults_dir = shipped_defaults_dir();
-        let rows =
-            load_hvac_multispeed_csv(&defaults_dir.join("HVAC Multispeed Parameters.csv"), true)
-                .expect("shipped multispeed CSV loads");
+        let rows = load_hvac_multispeed_csv(
+            &defaults_dir,
+            &mut DefaultsInputLog::new(),
+            &defaults_dir.join("HVAC Multispeed Parameters.csv"),
+            None,
+        )
+        .expect("shipped multispeed CSV loads");
         let mut violations = Vec::new();
         for row in &rows {
             let kind = row.efficiency_kind.to_ascii_uppercase();
@@ -3171,7 +3660,7 @@ max_Tdb,{tdb_max}\n",
     #[test]
     fn can_load_one_entry_in_each_equipment_subdir() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
 
         create_subdirs(
@@ -3234,15 +3723,55 @@ max_Tdb,{tdb_max}\n",
             ],
         );
         write_complete_ev_mapping(dir.path());
+        // The required sub-table files exist (their tables read empty);
+        // the TOML directories being empty is fine, the load succeeds.
+        write_required_tables(dir.path());
 
         let store = DefaultsStore::load(dir.path()).expect("load empty defaults");
         assert_eq!(store.zip_count(), 0);
     }
 
+    /// The envelope LUT's own files are required: an envelope directory
+    /// without them fails the load instead of warning and degrading every
+    /// boundary to the lumped fallback-R path.
+    #[test]
+    fn envelope_lut_missing_files_are_a_load_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_loadable_tree(dir.path());
+        write_complete_ev_mapping(dir.path());
+        create_subdirs(
+            dir.path(),
+            &[
+                "hvac_cooling",
+                "hvac_heating",
+                "battery",
+                "envelope",
+                "ev",
+                "generator",
+                "loads",
+                "pv",
+                "water_heating",
+            ],
+        );
+
+        std::fs::remove_file(
+            dir.path()
+                .join("envelope")
+                .join("Envelope Boundary Types.csv"),
+        )
+        .unwrap();
+        let err = DefaultsStore::load(dir.path()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("Envelope Boundary Types.csv"),
+            "the error must name the missing envelope file, got: {message}"
+        );
+    }
+
     #[test]
     fn load_pv_panel_defaults_deserializes_complete_toml() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
 
         let pv_dir = dir.path().join("pv");
@@ -3291,7 +3820,7 @@ system_losses_fraction = 0.14
     #[test]
     fn load_pv_panel_defaults_falls_back_when_dir_empty() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
 
         create_subdirs(
@@ -3317,13 +3846,13 @@ system_losses_fraction = 0.14
     }
 
     #[test]
-    fn ashp_heater_4speed_cops_monotonically_increase_with_hspf() {
+    fn ashp_heater_4speed_cops_decline_with_speed() {
         let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
 
         // Collect all ASHP Heater 4-speed HSPF rows sorted by efficiency.
@@ -3348,23 +3877,23 @@ system_losses_fraction = 0.14
             ashp_heater_4sp.len()
         );
 
-        let n_stages = ashp_heater_4sp[0].cops.len();
-        for stage in 0..n_stages {
-            for i in 1..ashp_heater_4sp.len() {
-                let cop_prev = ashp_heater_4sp[i - 1].cops[stage];
-                let cop_curr = ashp_heater_4sp[i].cops[stage];
-                let eff_prev = ashp_heater_4sp[i - 1].efficiency_value;
-                let eff_curr = ashp_heater_4sp[i].efficiency_value;
-                let expected_cop = cop_prev * (eff_curr / eff_prev);
+        // Within each row the per-stage COPs decline with speed: OCHRE's
+        // rows carry this property (per-stage COPs drop as the stage rises).
+        // The cross-tier proportionality a previous state of this test
+        // pinned does not hold in the reference's data: its 11.0 HSPF row
+        // ("Manual", COPs [4.55, 4.36, 4.17, 3.98]) sits below its 10.47
+        // HSPF row, and the reference's data is the reference's data
+        // (D-020).
+        for row in &ashp_heater_4sp {
+            for stage in 1..row.cops.len() {
+                let cop_low = row.cops[stage - 1];
+                let cop_curr = row.cops[stage];
                 assert!(
-                    cop_curr > expected_cop * 0.99,
-                    "ASHP Heater COP at speed {} not monotonic: {} HSPF COP={:.3} < {} HSPF COP={:.3} (expected ~{:.3} proportional)",
-                    stage + 1,
-                    eff_curr,
-                    cop_curr,
-                    eff_prev,
-                    cop_prev,
-                    expected_cop
+                    cop_curr < cop_low,
+                    "ASHP Heater {} HSPF COP at speed {} not below the previous speed: \
+                     {cop_curr:.3} >= {cop_low:.3}",
+                    row.efficiency_value,
+                    stage + 1
                 );
             }
         }
@@ -3377,35 +3906,24 @@ system_losses_fraction = 0.14
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
 
         let row = store
             .hvac_multispeed_parameters("ASHP Heater", "HSPF", 4, 11.0)
             .expect("11.0 HSPF ASHP Heater 4-speed row should exist");
 
-        // Scaled from 10.47 HSPF BEopt row COPs [6.0975, 5.2085, 4.4020, 4.2058]
-        // with scale factor 11.0/10.47 ≈ 1.0506 → [6.41, 5.47, 4.62, 4.42]
-        assert!(
-            (row.cops[0] - 6.41).abs() < 0.02,
-            "COP₁ expected ~6.41, got {}",
-            row.cops[0]
-        );
-        assert!(
-            (row.cops[1] - 5.47).abs() < 0.02,
-            "COP₂ expected ~5.47, got {}",
-            row.cops[1]
-        );
-        assert!(
-            (row.cops[2] - 4.62).abs() < 0.02,
-            "COP₃ expected ~4.62, got {}",
-            row.cops[2]
-        );
-        assert!(
-            (row.cops[3] - 4.42).abs() < 0.02,
-            "COP₄ expected ~4.42, got {}",
-            row.cops[3]
-        );
+        // OCHRE's row ("Manual"): COPs [4.55, 4.36, 4.17, 3.98]. A previous
+        // state of the CSV scaled the 10.47 HSPF BEopt row by 11.0/10.47;
+        // the reference's data is the reference's data (D-020).
+        let expected_cops = [4.55, 4.36, 4.17, 3.98];
+        for (i, (&actual, &expected)) in row.cops.iter().zip(expected_cops.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 0.02,
+                "COP{} expected ~{expected}, got {actual}",
+                i + 1
+            );
+        }
     }
 
     // ── Water heater defaults CSV tests ──────────────────────────────────
@@ -3439,7 +3957,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     #[test]
     fn water_heating_csv_parses_successfully() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3468,7 +3986,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     #[test]
     fn water_heating_csv_lookup_returns_correct_values() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3532,7 +4050,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     #[test]
     fn ua_increases_monotonically_with_tank_volume() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3566,7 +4084,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     #[test]
     fn uef_values_are_within_valid_ranges() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3612,7 +4130,7 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     #[test]
     fn water_heating_csv_regression_does_not_panic() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3653,9 +4171,9 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
     }
 
     #[test]
-    fn water_heating_csv_missing_file_is_non_fatal() {
+    fn water_heating_csv_missing_file_is_a_load_error() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         create_subdirs(
             dir.path(),
@@ -3672,19 +4190,26 @@ Draw_Flow_Rate_kg_s,Draw_Flow,0.1262,kg_per_s
             ],
         );
 
-        // No default_paramters.csv in water_heating dir — should load fine.
-        let store = DefaultsStore::load(dir.path()).expect("load defaults");
+        // The water-heating CSV removed: the sub-table the loader reads is
+        // required, so the load fails naming the file.
+        std::fs::remove_file(
+            dir.path()
+                .join("water_heating")
+                .join("default_paramters.csv"),
+        )
+        .unwrap();
+        let err = DefaultsStore::load(dir.path()).unwrap_err();
+        let message = err.to_string();
         assert!(
-            !store.has_water_heating_defaults(),
-            "no CSV → no water heating defaults"
+            message.contains("default_paramters.csv"),
+            "the error must name the missing water-heating CSV, got: {message}"
         );
-        assert!(store.water_heating_defaults().is_none());
     }
 
     #[test]
     fn water_heating_csv_malformed_rows_are_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3739,7 +4264,7 @@ Another_Good,Key2,3.14,m
         // convert to 4500 W internally. Without the ×1000 conversion, a parser
         // that silently assumes W would produce a 1000× error in power values.
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3788,7 +4313,7 @@ Element_Power_Upper_Tank,P_hw2,4.5,kW
         // time (they are still parsed, value stored as-is). The invariant
         // checker is responsible for flagging empty-units rows at startup.
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3870,7 +4395,7 @@ Some_Parameter,P_test,42.0,
         // fields without panicking. A CSV with only a few rows exercises the
         // partial-load path.
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -3917,7 +4442,7 @@ Setpoint,T_set,60.0,degC
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
 
         assert!(
@@ -4042,7 +4567,7 @@ Setpoint,T_set,60.0,degC
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let csv_path = defaults_dir
             .join("water_heating")
             .join("WH Medium Residential Schedule.csv");
@@ -4084,7 +4609,7 @@ Setpoint,T_set,60.0,degC
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let csv_path = defaults_dir
             .join("water_heating")
             .join("WH Medium Residential Schedule.csv");
@@ -4138,7 +4663,7 @@ Setpoint,T_set,60.0,degC
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let csv_path = defaults_dir
             .join("water_heating")
             .join("WH Medium Residential Schedule.csv");
@@ -4173,7 +4698,7 @@ Setpoint,T_set,60.0,degC
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let csv_path = defaults_dir
             .join("water_heating")
             .join("WH UEF Test Medium Draw Profile.csv");
@@ -4216,7 +4741,7 @@ Setpoint,T_set,60.0,degC
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let ev_dir = defaults_dir.join("ev");
         assert!(ev_dir.exists(), "defaults/ev/ directory must exist");
 
@@ -4263,7 +4788,7 @@ Setpoint,T_set,60.0,degC
     #[test]
     fn vehicle_mapping_csv_parses_successfully() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
@@ -4291,21 +4816,21 @@ Setpoint,T_set,60.0,degC
         // Verify a BEV entry.
         let veh1 = mapping.get("Vehicle 1").expect("Vehicle 1 should exist");
         assert_eq!(veh1.vehicle_type, "MY2030_BEV_SUV");
-        assert!((veh1.capacity_kwh - 117.6).abs() < 1e-6);
-        assert!((veh1.charger_power_kw - 10.26).abs() < 1e-6);
+        assert!((veh1.capacity_j - 117.6 * 3.6e6).abs() < 1e-4);
+        assert!((veh1.charger_power_w - 10260.0).abs() < 1e-6);
         assert!((veh1.efficiency - 0.9).abs() < 1e-6);
 
         // Verify a PHEV entry.
         let veh50 = mapping.get("Vehicle 50").expect("Vehicle 50 should exist");
         assert_eq!(veh50.vehicle_type, "MY2030_PHEV_SUV");
-        assert!((veh50.capacity_kwh - 14.8).abs() < 1e-6);
-        assert!((veh50.charger_power_kw - 7.2).abs() < 1e-6);
+        assert!((veh50.capacity_j - 14.8 * 3.6e6).abs() < 1e-4);
+        assert!((veh50.charger_power_w - 7200.0).abs() < 1e-6);
     }
 
     #[test]
     fn vehicle_mapping_returns_none_for_missing_vehicle() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
@@ -4340,7 +4865,7 @@ Setpoint,T_set,60.0,degC
     #[test]
     fn vehicle_mapping_missing_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         create_subdirs(
             dir.path(),
             &[
@@ -4369,7 +4894,7 @@ Setpoint,T_set,60.0,degC
     #[test]
     fn vehicle_mapping_with_fewer_than_50_entries_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
@@ -4410,7 +4935,7 @@ Setpoint,T_set,60.0,degC
     #[test]
     fn vehicle_mapping_malformed_row_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
@@ -4478,7 +5003,7 @@ Setpoint,T_set,60.0,degC
         // every downstream comparison. It must be skipped like any other
         // malformed row.
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let wh_dir = dir.path().join("water_heating");
         std::fs::create_dir_all(&wh_dir).unwrap();
@@ -4518,7 +5043,7 @@ Inf_Row,InfKey,inf,units
         // parses as f64, so a corrupt capacity must fail the load like any
         // other out-of-range value.
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         let ev_dir = dir.path().join("ev");
         std::fs::create_dir_all(&ev_dir).unwrap();
@@ -4578,7 +5103,7 @@ Inf_Row,InfKey,inf,units
             .unwrap()
             .parent()
             .unwrap()
-            .join("defaults");
+            .join("python/hares/defaults");
         let store = DefaultsStore::load(&defaults_dir).expect("load defaults");
 
         assert!(
@@ -4611,11 +5136,11 @@ Inf_Row,InfKey,inf,units
                 "Vehicle {i} profile_file must not be empty"
             );
             assert!(
-                e.capacity_kwh > 0.0,
+                e.capacity_j > 0.0,
                 "Vehicle {i} capacity_kwh must be positive"
             );
             assert!(
-                e.charger_power_kw > 0.0,
+                e.charger_power_w > 0.0,
                 "Vehicle {i} charger_power_kw must be positive"
             );
             assert!(
@@ -4641,25 +5166,25 @@ Inf_Row,InfKey,inf,units
         for entry in mapping.iter() {
             if entry.vehicle_type == "MY2030_BEV_SUV" {
                 assert!(
-                    (entry.capacity_kwh - 117.6).abs() < 0.01,
+                    (entry.capacity_j - 117.6 * 3.6e6).abs() < 0.01,
                     "All BEV entries must have capacity 117.6 kWh, got {}",
-                    entry.capacity_kwh
+                    entry.capacity_j
                 );
                 assert!(
-                    (entry.charger_power_kw - 10.26).abs() < 0.01,
+                    (entry.charger_power_w - 10260.0).abs() < 0.01,
                     "All BEV entries must have charger_power_kw 10.26, got {}",
-                    entry.charger_power_kw
+                    entry.charger_power_w
                 );
             } else if entry.vehicle_type == "MY2030_PHEV_SUV" {
                 assert!(
-                    (entry.capacity_kwh - 14.8).abs() < 0.01,
+                    (entry.capacity_j - 14.8 * 3.6e6).abs() < 0.01,
                     "All PHEV entries must have capacity 14.8 kWh, got {}",
-                    entry.capacity_kwh
+                    entry.capacity_j
                 );
                 assert!(
-                    (entry.charger_power_kw - 7.2).abs() < 0.01,
+                    (entry.charger_power_w - 7200.0).abs() < 0.01,
                     "All PHEV entries must have charger_power_kw 7.2, got {}",
-                    entry.charger_power_kw
+                    entry.charger_power_w
                 );
             }
         }
@@ -4682,7 +5207,7 @@ Inf_Row,InfKey,inf,units
                 "water_heating",
             ],
         );
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
 
         // Write the 6-point efficiency curve TOML.
@@ -4748,7 +5273,7 @@ efficiency_ratio = 1.0
                 "water_heating",
             ],
         );
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         // No efficiency_curve.toml in generator/ — simulate missing file.
         std::fs::remove_file(dir.path().join("generator").join("efficiency_curve.toml"))
@@ -4778,7 +5303,7 @@ efficiency_ratio = 1.0
                 "water_heating",
             ],
         );
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
 
         // Write a malformed TOML (reversed capacity_ratio order — not strictly increasing).
@@ -4814,7 +5339,7 @@ efficiency_ratio = 0.0
         // battery-specific fields for a generator equipment type when
         // the generator directory is clean.
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         create_subdirs(
             dir.path(),
@@ -4852,7 +5377,7 @@ efficiency_ratio = 0.0
         // succeed gracefully (CSV is ignored by load_toml_dir), and the
         // invariant check must detect the misplaced parameters.
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         create_subdirs(
             dir.path(),
@@ -4915,7 +5440,7 @@ efficiency_ratio = 0.0
         // (no Description/Name/Value/Units structure). Battery-specific
         // header columns in a generator CSV should be detected.
         let dir = tempfile::tempdir().unwrap();
-        write_minimal_zip(dir.path());
+        write_loadable_tree(dir.path());
         write_complete_ev_mapping(dir.path());
         create_subdirs(
             dir.path(),
@@ -4990,4 +5515,88 @@ efficiency_ratio = 0.0
         "thermal_r",
         "thermal_c",
     ];
+
+    /// The per-file replacement shares the untouched tables: `with_file`
+    /// re-parses only the replaced file's group over the source handle's
+    /// `Arc`s, the parse counter reads one group, and the replacement
+    /// takes effect.
+    #[test]
+    fn with_file_shares_the_untouched_tables() {
+        use crate::inputs::{DefaultsSource, InputSource, ParsedDefaults};
+        use std::sync::Arc;
+
+        let defaults_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("python/hares/defaults");
+        let source = ParsedDefaults::parse(&DefaultsSource::directory(&defaults_dir))
+            .expect("the repo defaults load");
+
+        let edited = "[probe_equipment]\nzp = 3.0\nip = 0.0\npp = 0.0\nzq = 1.0\niq = 0.0\npq = 0.0\npf = 1.0\n";
+        let before = crate::parse_counts::parse_counts();
+        let replaced = source
+            .with_file(
+                "zip_parameters.toml",
+                InputSource::Text(edited.to_string().into()),
+            )
+            .expect("the replacement loads");
+        let after = crate::parse_counts::parse_counts();
+
+        assert_eq!(
+            after.defaults - before.defaults,
+            1,
+            "one group re-parsed, not a tree load per replaced file"
+        );
+        assert_eq!(
+            after.profiles - before.profiles,
+            0,
+            "the profiles are not the replaced file's group: no profile re-parse"
+        );
+
+        let a = source.store();
+        let b = replaced.store();
+        for (name, shared) in [
+            (
+                "hvac_cooling",
+                Arc::ptr_eq(&a.hvac_cooling, &b.hvac_cooling),
+            ),
+            (
+                "hvac_heating",
+                Arc::ptr_eq(&a.hvac_heating, &b.hvac_heating),
+            ),
+            (
+                "hvac_multispeed",
+                Arc::ptr_eq(&a.hvac_multispeed, &b.hvac_multispeed),
+            ),
+            ("battery", Arc::ptr_eq(&a.battery, &b.battery)),
+            ("envelope", Arc::ptr_eq(&a.envelope, &b.envelope)),
+            ("ev", Arc::ptr_eq(&a.ev, &b.ev)),
+            ("generator", Arc::ptr_eq(&a.generator, &b.generator)),
+            ("loads", Arc::ptr_eq(&a.loads, &b.loads)),
+            ("pv", Arc::ptr_eq(&a.pv, &b.pv)),
+            ("pv_panel", Arc::ptr_eq(&a.pv_panel, &b.pv_panel)),
+            (
+                "water_heating",
+                Arc::ptr_eq(&a.water_heating, &b.water_heating),
+            ),
+        ] {
+            assert!(
+                shared,
+                "the '{name}' table must be the source handle's own Arc"
+            );
+        }
+        assert!(
+            Arc::ptr_eq(&source.profiles(), &replaced.profiles()),
+            "the profiles are not the replaced file's group: shared with the source"
+        );
+
+        // The replacement takes effect, the source's own table unchanged.
+        assert!(a.zip_params("probe equipment").is_none());
+        let probe = b
+            .zip_params("probe equipment")
+            .expect("the replacement's row is in the replaced store");
+        assert!((probe.zp - 3.0).abs() < f64::EPSILON);
+    }
 }

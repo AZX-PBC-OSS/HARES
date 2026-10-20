@@ -1,133 +1,266 @@
-//! Pre-build dwelling state. Equipment can be mutated before calling build().
+//! Pre-build dwelling state: the builder resolves equipment once and the
+//! frozen blueprint builds dwellings that share its parsed inputs.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::{DateTime, Datelike, Duration, FixedOffset};
 use hares_io::{
-    EquipmentSpec, ScheduleTimeSeries, SiteLocation, WeatherTimeSeries, defaults::DefaultsStore,
+    Catalogue, EquipmentSpec, InputRecords, InputSource, ParsedInputs, SiteLocation, WeatherInput,
     epw::DesignConditions, hpxml::resolve_equipment, site_location::resolve_site_location,
 };
-use hares_types::{EndUse, HaresError};
+use hares_types::{EndUse, HaresError, Warning};
 
 use super::solver_builder::{WeatherAverages, compute_weather_averages};
 use crate::derive_dwelling_rng;
-use crate::dwelling::DwellingConfig;
+use crate::dwelling::{DwellingConfig, DwellingSettings, WarningLog};
+use crate::resolved::ResolvedModel;
 
-/// Pre-build dwelling state. Equipment can be mutated before calling build().
+/// The dwelling's pre-build state, immutable and shared as
+/// `Arc<DwellingBlueprint>`: the parsed-input handles (one parse per
+/// unique input, shared with every other blueprint built from them), the
+/// resolved site, the resampled weather and schedule, the resolved
+/// equipment, and the derived run constants. Every
+/// [`build`](DwellingBlueprint::build) clones the rng and the equipment
+/// specs and shares the rest.
 pub struct DwellingBlueprint {
-    pub config: DwellingConfig,
-    pub(super) building: hares_io::Building,
-    pub(super) weather: WeatherTimeSeries,
-    pub schedule: ScheduleTimeSeries,
+    pub(super) inputs: ParsedInputs,
+    pub(super) settings: DwellingSettings,
+    pub(super) building: Arc<hares_io::Building>,
+    pub(super) resampled_weather: Arc<hares_io::WeatherTimeSeries>,
+    pub(super) resampled_schedule: Arc<hares_io::ScheduleTimeSeries>,
     pub(super) weather_avgs: WeatherAverages,
     pub(super) design_conditions: Option<DesignConditions>,
     pub(super) site_location: SiteLocation,
-    pub(super) defaults: DefaultsStore,
-    pub defaults_path: Option<PathBuf>,
-    pub equipment_specs: Vec<EquipmentSpec>,
+    pub(super) equipment_specs: Vec<EquipmentSpec>,
     /// Warnings raised while building the blueprint, in the order they are
-    /// reported: the HPXML parse warnings first, then the equipment
-    /// resolution warnings. The dwelling build moves these into its warning
-    /// log before the schedule-injection warnings and each equipment's
-    /// `init` warnings.
-    pub(super) equipment_warnings: Vec<hares_types::Warning>,
+    /// reported: the HPXML parse warnings first, then the climate zone
+    /// resolution's, then the equipment resolution warnings. The dwelling
+    /// build moves these into its warning log before the
+    /// schedule-injection warnings and each equipment's `init` warnings.
+    pub(super) equipment_warnings: Vec<Warning>,
     pub(super) local_start: DateTime<FixedOffset>,
     pub(super) init_chrono: Duration,
     pub(super) time_res: std::time::Duration,
     #[cfg(feature = "dst")]
     pub(super) parsed_civil_tz: Option<chrono_tz::Tz>,
     pub(super) rng: rand_chacha::ChaCha8Rng,
+    /// Whether a `DwellingBlueprintBuilder` mutator changed the parsed
+    /// equipment before this blueprint froze: a run built from it is not
+    /// the inputs' resolution a replay would rebuild, so the dwelling
+    /// records `ReplayBlocker::BlueprintEdited` for it.
+    pub(super) blueprint_edited: bool,
+    /// The input records of the files the config's parse read: the HPXML,
+    /// the schedule when it is a file, the weather with its resolved
+    /// format, and the defaults digest. `None` for the synthetic TOML
+    /// dwellings: that path reads the TOML, recorded nowhere in the
+    /// records, and the absence discloses that.
+    pub(super) input_records: Option<InputRecords>,
 }
 
 impl DwellingBlueprint {
-    /// Build blueprint from a DwellingConfig by parsing HPXML, weather, and schedule files.
-    pub fn from_config(config: DwellingConfig) -> Result<Self, HaresError> {
-        let mut building = hares_io::parse_hpxml(&config.hpxml_path)
-            .map_err(|err| HaresError::Io(format!("HPXML parse failed: {err}")))?;
-
-        let weather = hares_io::parse_weather(&config.weather_path)
-            .map_err(|err| HaresError::Io(format!("weather parse failed: {err}")))?;
-        hares_io::hpxml::climate_zone::apply_climate_zone_default(
-            &mut building,
-            weather.meta.station_wmo.as_deref(),
-        );
-
-        let schedule_raw = config.load_schedule(&weather.meta)?;
-
-        let target_step_secs =
-            super::conversions::duration_to_u32_secs(config.sim_config.time_res)?;
-        let schedule = schedule_raw
-            .resample(target_step_secs)
-            .map_err(|err| HaresError::Io(format!("schedule resample failed: {err}")))?;
-
-        Self::from_parts(config, building, weather, schedule)
+    /// Build the blueprint from a config by parsing every input once: the
+    /// one construction path through
+    /// [`DwellingBlueprintBuilder::from_config`] and [`freeze`]
+    /// (DwellingBlueprintBuilder::freeze).
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the config is invalid or any input fails to
+    /// parse.
+    pub fn from_config(config: DwellingConfig) -> Result<Arc<Self>, HaresError> {
+        DwellingBlueprintBuilder::from_config(config)?.freeze()
     }
 
-    /// Build blueprint from already-parsed building, weather, and schedule data.
-    pub(super) fn from_parts(
-        config: DwellingConfig,
-        building: hares_io::Building,
-        weather: WeatherTimeSeries,
-        schedule: ScheduleTimeSeries,
-    ) -> Result<Self, HaresError> {
-        let resolved_defaults_dir = config
-            .defaults_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("defaults"));
-        let defaults = DefaultsStore::load(&resolved_defaults_dir).map_err(|err| {
-            HaresError::Io(format!(
-                "defaults load failed for '{}': {err}",
-                resolved_defaults_dir.display()
-            ))
-        })?;
-        Self::from_parts_with_defaults(config, building, weather, schedule, defaults)
+    /// The blueprint's parsed-input handles: the shared parses.
+    #[must_use]
+    pub fn inputs(&self) -> &ParsedInputs {
+        &self.inputs
     }
 
-    /// Build blueprint from already-parsed data and an explicit defaults
-    /// store: the typed constructor for a caller that has already loaded (or
-    /// deliberately declined) defaults. A synthetic dwelling, whose inputs
-    /// are fully explicit, passes [`DefaultsStore::empty`]; no caller reaches
-    /// an empty store through a missing file (one policy: the store's load
-    /// failure is an error naming the path).
-    pub(super) fn from_parts_with_defaults(
-        config: DwellingConfig,
-        mut building: hares_io::Building,
-        mut weather: WeatherTimeSeries,
-        schedule: ScheduleTimeSeries,
-        defaults: DefaultsStore,
-    ) -> Result<Self, HaresError> {
+    /// The input records of the files the config's parse read: the HPXML,
+    /// the schedule when it is a file, the weather with its resolved
+    /// format, and the defaults digest. `None` when the parse read no
+    /// file (the synthetic assemblies).
+    #[must_use]
+    pub fn input_records(&self) -> Option<&InputRecords> {
+        self.input_records.as_ref()
+    }
+
+    /// The blueprint's settings: the sim config, the overrides, the
+    /// building id, the warm-up duration and the HPXML patches.
+    #[must_use]
+    pub fn settings(&self) -> &DwellingSettings {
+        &self.settings
+    }
+
+    /// The weather series resampled to the blueprint's step, shared with
+    /// every blueprint at the same resolution over the same weather file.
+    #[must_use]
+    pub fn resampled_weather(&self) -> Arc<hares_io::WeatherTimeSeries> {
+        Arc::clone(&self.resampled_weather)
+    }
+
+    /// The schedule resampled to the blueprint's step.
+    #[must_use]
+    pub fn resampled_schedule(&self) -> Arc<hares_io::ScheduleTimeSeries> {
+        Arc::clone(&self.resampled_schedule)
+    }
+
+    /// Build the dwelling from this blueprint: the rng is cloned, the
+    /// equipment specs are cloned, the parsed inputs are shared.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the assembly or the warm-up fails.
+    pub fn build(self: &Arc<Self>) -> Result<super::Dwelling, HaresError> {
+        super::build_from_blueprint(self)
+    }
+
+    /// Run the assembly alone and read the resolved model back: every
+    /// construction-time check `build` runs, through the same code, with
+    /// no warm-up and no step. The returned `ResolvedModel` is the one the
+    /// built dwelling's `resolved_model()` carries. An infeasible input
+    /// fails here with the same error the build fails with, in a fraction
+    /// of its cost (the warm-up's simulated days are the build's cost the
+    /// caller does not pay to learn the input is infeasible).
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the assembly fails, naming the cause the build
+    /// names.
+    pub fn validate(self: &Arc<Self>) -> Result<ResolvedModel, HaresError> {
+        let dwelling = self.assemble_for_readback()?;
+        Ok(dwelling.into_resolved_model())
+    }
+
+    /// Run the assembly alone and return the output variable catalogue:
+    /// the equipment and the auto-registered actors the assembly
+    /// instantiates, with no warm-up and no step. The catalogue equals the
+    /// built dwelling's `catalogue()`; variables of actors a caller
+    /// registers or `set_tariff` adds after build are not in it.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the assembly fails, naming the cause the build
+    /// names.
+    pub fn catalogue(self: &Arc<Self>) -> Result<Arc<Catalogue>, HaresError> {
+        let dwelling = self.assemble_for_readback()?;
+        Ok(dwelling.catalogue())
+    }
+
+    /// The assembly phase alone, with the blueprint's own settings: the
+    /// construction-time warnings seeded the build seeds them, and a
+    /// failure emits them the way the build's failure path emits them.
+    fn assemble_for_readback(self: &Arc<Self>) -> Result<super::Dwelling, HaresError> {
+        let mut warnings = WarningLog::new();
+        for warning in &self.equipment_warnings {
+            warnings.push_warning(warning.clone());
+        }
+        super::assemble_from_blueprint_with_seed(
+            self,
+            &self.settings,
+            self.settings.sim_config.master_seed,
+            &mut warnings,
+        )
+        .map_err(|err| {
+            for entry in warnings.iter() {
+                tracing::warn!("{entry}");
+            }
+            if warnings.dropped() > 0 {
+                tracing::warn!(
+                    "warning log capacity ({}) reached; {} additional warning(s) were dropped",
+                    WarningLog::CAPACITY,
+                    warnings.dropped()
+                );
+            }
+            tracing::warn!("dwelling construction failed: {err}");
+            err
+        })
+    }
+
+    /// Build the dwelling from this blueprint with the master seed given,
+    /// the rng derived from the seed instead of the blueprint's own.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the assembly or the warm-up fails.
+    pub fn build_with_seed(
+        self: &Arc<Self>,
+        master_seed: u64,
+    ) -> Result<super::Dwelling, HaresError> {
+        let mut settings = self.settings.clone();
+        settings.sim_config.master_seed = master_seed;
+        super::build_from_blueprint_with_seed(self, &settings, master_seed)
+    }
+}
+
+/// Pre-build dwelling state under construction: the parsed inputs (which
+/// [`new`](DwellingBlueprintBuilder::new) never parses) and the settings,
+/// with the equipment resolved once and mutable until
+/// [`freeze`](DwellingBlueprintBuilder::freeze). The mutators are the
+/// blueprint's former ones: equipment inspection and swap before the
+/// immutable blueprint is frozen. A read-only call that runs the assembly
+/// without consuming the builder (`validate`, `catalogue` on the Python
+/// surface) clones it: every field is a shared handle or a small vector.
+#[derive(Clone)]
+pub struct DwellingBlueprintBuilder {
+    pub(super) inputs: ParsedInputs,
+    pub(super) settings: DwellingSettings,
+    pub(super) building: Arc<hares_io::Building>,
+    pub(super) site_location: SiteLocation,
+    pub(super) equipment_specs: Vec<EquipmentSpec>,
+    pub(super) equipment_warnings: Vec<Warning>,
+    pub(super) local_start: DateTime<FixedOffset>,
+    pub(super) init_chrono: Duration,
+    pub(super) time_res: std::time::Duration,
+    #[cfg(feature = "dst")]
+    pub(super) parsed_civil_tz: Option<chrono_tz::Tz>,
+    pub(super) input_records: Option<InputRecords>,
+    /// Whether a mutator changed the parsed equipment: frozen into the
+    /// blueprint as the blueprint-edited replay blocker's record.
+    pub(super) blueprint_edited: bool,
+}
+
+impl DwellingBlueprintBuilder {
+    /// Assemble the builder over handles parsed once and shared across
+    /// blueprints: parses nothing, resolves the site and the equipment
+    /// from the handles once.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the site cannot be resolved or the equipment
+    /// resolution fails.
+    pub fn new(inputs: ParsedInputs, settings: DwellingSettings) -> Result<Self, HaresError> {
+        let building = inputs.hpxml.building();
         let site_location = resolve_site_location(
             &building.site,
-            &weather.meta,
-            &config.sim_config.site_location,
+            inputs.weather.meta(),
+            &settings.sim_config.site_location,
         );
-        weather.meta.latitude = site_location.latitude_deg;
-        weather.meta.longitude = site_location.longitude_deg;
-        weather.meta.elevation_m = site_location.elevation_m;
-        weather.meta.timezone_offset_h = site_location.utc_offset_h;
-        weather.meta.has_embedded_location = true;
-        building.site.latitude_deg = Some(site_location.latitude_deg);
-        building.site.longitude_deg = Some(site_location.longitude_deg);
-        building.site.elevation_m = Some(site_location.elevation_m);
-        building.site.utc_offset_h = Some(site_location.utc_offset_h);
 
-        let tz_offset = FixedOffset::east_opt((site_location.utc_offset_h * 3600.0).round() as i32)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).expect("UTC offset"));
-        let local_start = config
-            .sim_config
-            .start_time
-            .naive_local()
-            .and_local_timezone(tz_offset)
-            .single()
-            .unwrap_or_else(|| config.sim_config.start_time.with_timezone(&tz_offset));
+        // The blueprint's construction-time warnings, in report order: the
+        // HPXML parse warnings first, then the climate zone resolution's,
+        // then the equipment resolution warnings. The parsed building's
+        // own warnings are the shared parse's; the zone warning is this
+        // blueprint's (it names the weather file's station).
+        let mut equipment_warnings: Vec<Warning> = building.parse_warnings.clone();
+        if let Some(warning) = &inputs.climate_zone_warning {
+            equipment_warnings.push(warning.clone());
+        }
+        let effective_zone = inputs.effective_climate_zone.clone();
 
-        let init_chrono = config
-            .initialization_duration
-            .map(|d| Duration::seconds(d.as_secs() as i64))
-            .unwrap_or(Duration::zero());
+        let time_res = super::conversions::chrono_to_std_duration(settings.sim_config.time_res)?;
+        // The warm-up's extra clock span: a converging warm-up replays one
+        // 24-hour day (the run's first day), so the clock needs a day's
+        // span beyond the run; disabled, none.
+        let init_chrono = if settings.sim_config.warmup.config().is_some() {
+            Duration::hours(24)
+        } else {
+            Duration::zero()
+        };
 
         #[cfg(feature = "dst")]
-        let parsed_civil_tz: Option<chrono_tz::Tz> = config
+        let parsed_civil_tz: Option<chrono_tz::Tz> = settings
             .sim_config
             .civil_timezone
             .as_deref()
@@ -137,38 +270,51 @@ impl DwellingBlueprint {
             })
             .transpose()?;
 
-        let time_res = super::conversions::chrono_to_std_duration(config.sim_config.time_res)?;
-        let weather_avgs = compute_weather_averages(&weather, &building)?;
-        let design_conditions = weather.design_conditions;
-        let rng = derive_dwelling_rng(config.sim_config.master_seed, config.bldg_id);
+        // A FixedOffset has no gaps or repeated hours, so a naive local
+        // wall time converts to exactly one instant at that offset: the
+        // infallible construction (naive UTC + offset). The offset is a
+        // physical site input, so an unrepresentable or non-finite one is
+        // a construction error naming the value (the checked conversion
+        // the fleet's alignment pre-pass shares).
+        let tz_offset = checked_offset(site_location.utc_offset_h)?;
+        let naive_utc = settings.sim_config.start_time.naive_local() - tz_offset;
+        let local_start = DateTime::<FixedOffset>::from_naive_utc_and_offset(naive_utc, tz_offset);
 
-        // The blueprint's construction-time warnings, in report order: the
-        // HPXML parse warnings first, then the equipment resolution warnings.
-        let mut equipment_warnings = building.parse_warnings.clone();
+        // A start_time on a skipped Feb 29 is an error naming the date:
+        // the day is not simulated (the weather-year rule's Feb 29 skip
+        // depends on the weather file, which SimulationConfig::validate
+        // does not see), so the run cannot start there.
+        if settings
+            .sim_config
+            .weather_year
+            .skips_feb29(&inputs.weather.series())
+        {
+            let start_date = settings.sim_config.start_time.naive_local().date();
+            if start_date.month() == 2 && start_date.day() == 29 {
+                return Err(HaresError::Io(format!(
+                    "the simulation starts on {start_date}, a Feb 29 the weather file has no \
+                     records for: a typical-year run over a file without Feb 29 does not \
+                     simulate that day, so the run cannot start on it"
+                )));
+            }
+        }
+
         let equipment_specs = resolve_equipment(
             &building,
-            &defaults,
-            config.patches.as_ref(),
+            effective_zone.as_deref(),
+            Some(&site_location),
+            &inputs.defaults.store(),
+            settings.patches.as_ref(),
             &mut equipment_warnings,
         )
         .map_err(|e| HaresError::Io(e.to_string()))?;
 
-        // The config's own defaults directory, verbatim: the schedule
-        // profiles load from what the config named, and a config with
-        // no directory runs with no default profiles rather than on a
-        // working-directory guess. The store above keeps the resolved
-        // directory until the defaults path becomes required.
-        let config_defaults_path = config.defaults_path.clone();
         Ok(Self {
-            config,
+            input_records: inputs.records().cloned(),
+            inputs,
+            settings,
             building,
-            weather,
-            schedule,
-            weather_avgs,
-            design_conditions,
             site_location,
-            defaults,
-            defaults_path: config_defaults_path,
             equipment_specs,
             equipment_warnings,
             local_start,
@@ -176,8 +322,47 @@ impl DwellingBlueprint {
             time_res,
             #[cfg(feature = "dst")]
             parsed_civil_tz,
-            rng,
+            blueprint_edited: false,
         })
+    }
+
+    /// Build the builder from a config by parsing every input once: the
+    /// config's validation, [`ParsedInputs::parse`] and [`new`]
+    /// (DwellingBlueprintBuilder::new), the one construction path.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the config is invalid or any input fails to
+    /// parse.
+    pub fn from_config(config: DwellingConfig) -> Result<Self, HaresError> {
+        // The same validation the TOML path runs: a config built in Rust
+        // code is checked exactly like one parsed from a file.
+        config
+            .settings
+            .sim_config
+            .validate()
+            .map_err(|err| HaresError::Io(err.to_string()))?;
+
+        let DwellingConfig {
+            hpxml,
+            schedule,
+            weather,
+            defaults,
+            settings,
+        } = config;
+        let generation = hares_io::ScheduleGeneration {
+            start: settings.sim_config.start_time,
+            duration: settings.sim_config.duration,
+            interval: super::conversions::chrono_to_std_duration(settings.sim_config.time_res)?,
+        };
+        let inputs = ParsedInputs::parse(
+            &hpxml,
+            schedule.as_ref(),
+            &weather,
+            &defaults,
+            Some(generation),
+        )?;
+        Self::new(inputs, settings)
     }
 
     /// Return display names (instance_name if set, otherwise canonical name) of all
@@ -190,27 +375,37 @@ impl DwellingBlueprint {
             .collect()
     }
 
-    /// Remove equipment by name. Returns error if not found.
-    pub fn remove_equipment(&mut self, name: &str) -> Result<(), HaresError> {
+    /// Remove equipment by name, returning the removed spec: the caller
+    /// that re-adds it (the reorder probe) needs the whole spec.
+    /// Returns an error naming the name when not found.
+    pub fn remove_equipment(&mut self, name: &str) -> Result<EquipmentSpec, HaresError> {
         let pos = self
             .equipment_specs
             .iter()
             .position(|s| s.name == name || s.instance_name.as_deref() == Some(name))
             .ok_or_else(|| {
-                HaresError::Dwelling(format!("equipment '{}' not found in blueprint", name))
+                HaresError::Dwelling(format!("equipment '{name}' not found in blueprint"))
             })?;
-        self.equipment_specs.remove(pos);
-        Ok(())
+        self.blueprint_edited = true;
+        Ok(self.equipment_specs.remove(pos))
     }
 
-    /// Remove equipment whose end use matches any of the given end uses.
-    /// Returns the count of removed equipment specs.
+    /// Remove equipment whose declared end use matches any of the given
+    /// end uses. The match reads the class's typed declaration
+    /// (`hares_equipment::class_declared_surface`), never the name
+    /// string: a spec whose name is not a registered class declares no
+    /// end use and no end-use removal addresses it. Returns the count of
+    /// removed equipment specs.
     pub fn remove_equipment_by_end_use(&mut self, end_uses: &[EndUse]) -> usize {
         let before = self.equipment_specs.len();
         self.equipment_specs.retain(|s| {
             s.name == "Occupancy"
-                || !end_uses.contains(&hares_io::equipment_name_to_end_use(&s.name))
+                || !hares_equipment::class_declared_surface(&s.name)
+                    .is_some_and(|surface| end_uses.contains(&surface.end_use))
         });
+        if self.equipment_specs.len() != before {
+            self.blueprint_edited = true;
+        }
         before - self.equipment_specs.len()
     }
 
@@ -233,12 +428,160 @@ impl DwellingBlueprint {
                 "duplicate equipment name '{name}' — each equipment must have a unique name"
             )));
         }
+        self.blueprint_edited = true;
         self.equipment_specs.push(spec);
         Ok(())
     }
 
-    /// Build the dwelling from this blueprint.
+    /// Freeze the builder and build the dwelling: the mutator tests' sugar
+    /// for `freeze()` followed by `DwellingBlueprint::build`.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the freeze or the build fails.
     pub fn build(self) -> Result<super::Dwelling, HaresError> {
-        super::build_from_blueprint(self)
+        self.freeze()?.build()
     }
+
+    /// Freeze the builder into the immutable, shared blueprint: the
+    /// resampled weather and schedule, the weather averages and the rng
+    /// are derived once, and every build of the blueprint shares them.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the resample or the weather averages fail.
+    pub fn freeze(self) -> Result<Arc<DwellingBlueprint>, HaresError> {
+        let DwellingBlueprintBuilder {
+            inputs,
+            settings,
+            building,
+            site_location,
+            equipment_specs,
+            equipment_warnings,
+            local_start,
+            init_chrono,
+            time_res,
+            #[cfg(feature = "dst")]
+            parsed_civil_tz,
+            input_records,
+            blueprint_edited,
+        } = self;
+
+        let step_secs = super::conversions::duration_to_u32_secs(settings.sim_config.time_res)?;
+        // The schedule file's four unavailable-period flag columns must
+        // match the HPXML periods on the file's own resolution, before
+        // any resample: HARES reads the columns and ignores nothing.
+        hares_io::check_schedule_flag_columns(
+            &inputs.schedule.schedule(),
+            &building.unavailable_periods,
+        )?;
+        let resampled_weather = inputs.weather.resampled(
+            step_secs,
+            settings.sim_config.first_hour_interpolation,
+            settings.sim_config.start_time.naive_local(),
+            settings.sim_config.weather_year,
+        )?;
+        let resampled_schedule = Arc::new(
+            inputs
+                .schedule
+                .schedule()
+                .resample(step_secs)
+                .map_err(|err| HaresError::Io(format!("schedule resample failed: {err}")))?,
+        );
+        // The averages over the file's own step, the same series the
+        // single-dwelling parse averaged.
+        let weather_avgs = compute_weather_averages(&inputs.weather.series(), &building)?;
+        let design_conditions = inputs.weather.series().design_conditions;
+        let rng = derive_dwelling_rng(settings.sim_config.master_seed, settings.bldg_id);
+
+        Ok(Arc::new(DwellingBlueprint {
+            inputs,
+            settings,
+            building,
+            resampled_weather,
+            resampled_schedule,
+            weather_avgs,
+            design_conditions,
+            site_location,
+            equipment_specs,
+            equipment_warnings,
+            local_start,
+            init_chrono,
+            time_res,
+            #[cfg(feature = "dst")]
+            parsed_civil_tz,
+            rng,
+            blueprint_edited,
+            input_records,
+        }))
+    }
+}
+
+/// The site's UTC offset hours as a `FixedOffset`, the checked conversion
+/// the blueprint reinterprets the naive start at: the offset is a physical
+/// site input, so an offset the fixed-offset type cannot represent, or a
+/// non-finite one (whose float→int cast would round to zero and silently
+/// become UTC), is an error naming the value. The representability check
+/// reads the rounded whole seconds, the value `FixedOffset::east_opt`
+/// consumes: a pre-rounding guard would let an offset inside ±24 h whose
+/// seconds round to exactly ±86 400 through to the type's own rejection.
+/// The fleet's alignment pre-pass runs the same conversion, so the pre-pass
+/// and the built dwelling cannot disagree except through their inputs.
+pub(crate) fn checked_offset(offset_hours: f64) -> Result<FixedOffset, HaresError> {
+    let offset_secs = offset_hours * 3600.0;
+    let secs = offset_secs.round() as i32;
+    if !offset_secs.is_finite() || secs.abs() >= 86_400 {
+        return Err(HaresError::Dwelling(format!(
+            "site UTC offset {offset_hours} h is not a finite offset within \
+             ±24 h; the site's offset is a physical input and no UTC \
+             fallback may stand in for it"
+        )));
+    }
+    // A FixedOffset has no gaps or repeated hours; the value was checked
+    // finite and within ±24 h after rounding.
+    Ok(FixedOffset::east_opt(secs).expect("valid site offset"))
+}
+
+/// Reads a home's site UTC offset from its inputs the way the built
+/// dwelling resolves it: the HPXML document's `Site` and the weather
+/// file's header (the same read-only-header functions the full parsers
+/// call, with no schedule, no defaults tree and no weather row read) and
+/// the config's site-location override through `resolve_site_location`,
+/// the offset hours converted with the blueprint's checked conversion.
+/// The fleet's alignment pre-pass reads every home's offset through this
+/// before the first home runs.
+///
+/// # Errors
+///
+/// [`HaresError`] when the site or the weather header cannot be read, or
+/// the resolved offset is not a finite offset within ±24 h.
+pub fn site_offset(config: &DwellingConfig) -> Result<FixedOffset, HaresError> {
+    site_offset_from_inputs(
+        &config.hpxml,
+        &config.weather,
+        &config.settings.sim_config.site_location,
+    )
+}
+
+/// The site-offset resolution over one home's inputs directly: the same
+/// read `site_offset` runs on a config's fields, for a caller that
+/// resolves the offset before it has built the config (the ResStock
+/// fleet's constructor, which sets every home's start from the offset
+/// the config will then carry).
+///
+/// # Errors
+///
+/// [`HaresError`] when the site or the weather header cannot be read, or
+/// the resolved offset is not a finite offset within ±24 h.
+pub fn site_offset_from_inputs(
+    hpxml: &InputSource,
+    weather: &WeatherInput,
+    override_location: &hares_io::SiteLocationOverride,
+) -> Result<FixedOffset, HaresError> {
+    let site = hares_io::read_site_input(hpxml)
+        .map_err(|err| HaresError::Io(format!("HPXML site read failed: {err}")))?;
+    let weather_meta = hares_io::read_weather_meta_input(weather)
+        .map_err(|err| HaresError::Io(format!("weather header read failed: {err}")))?;
+    let location = resolve_site_location(&site, &weather_meta, override_location);
+    checked_offset(location.utc_offset_h)
 }

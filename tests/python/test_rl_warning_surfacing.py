@@ -21,10 +21,10 @@ import numpy as np
 import pytest
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER, make_dwelling
 
-import ochre_next.rl.vec_env as vec_env_module
-from ochre_next.rl.vec_env import VecDwellingGymEnv
+import hares.rl.vec_env as vec_env_module
+from hares.rl.vec_env import VecDwellingGymEnv
 
-_OBS_FIELDS = ["total_power_kw", "outdoor_temp"]
+_OBS_FIELDS = ["total_power_w", "outdoor_temp"]
 
 # heat_c = 21 degC is a valid setpoint: the clean-step baseline.
 _CLEAN_ACTION_CONFIG = {"Gas Furnace": ["heat_c"]}
@@ -50,7 +50,7 @@ def _make_vec_env(action_config: dict[str, list[str]]) -> tuple[VecDwellingGymEn
         dwellings=dwellings,
         observation_fields=_OBS_FIELDS,
         action_space_config=action_config,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
     return env, dwellings
@@ -82,24 +82,24 @@ def test_vec_env_refuses_to_import_without_the_extension_entrypoint(
     import sys
     import types
 
-    from ochre_next import _hares as real_extension
+    from hares import _hares as real_extension
 
-    stub = types.ModuleType("ochre_next._hares")
+    stub = types.ModuleType("hares._hares")
     for name in dir(real_extension):
         if name != "batch_step" and not name.startswith("__"):
             setattr(stub, name, getattr(real_extension, name))
 
-    real_module = importlib.import_module("ochre_next.rl.vec_env")
+    real_module = importlib.import_module("hares.rl.vec_env")
     module_file = real_module.__file__
     assert module_file is not None, "the vec env module is loaded from a file"
     spec = importlib.util.spec_from_file_location(
-        "ochre_next.rl.vec_env_without_entrypoint",
+        "hares.rl.vec_env_without_entrypoint",
         Path(module_file),
     )
     assert spec is not None and spec.loader is not None
     probe = importlib.util.module_from_spec(spec)
 
-    monkeypatch.setitem(sys.modules, "ochre_next._hares", stub)
+    monkeypatch.setitem(sys.modules, "hares._hares", stub)
     with pytest.raises(ImportError, match="batch_step"):
         spec.loader.exec_module(probe)
 
@@ -109,33 +109,33 @@ def test_vec_env_refuses_to_import_without_the_extension_entrypoint(
 # ---------------------------------------------------------------------------
 
 
-def _make_gym_env(action_config: dict[str, list[str]], output_dir: Path):
+def _make_gym_env(action_config: dict[str, list[str]]):
     pytest.importorskip("gymnasium")
-    from ochre_next.rl.gym_env import DwellingGymEnv
+    from hares._hares import SimulationConfig
+    from hares.rl.gym_env import DwellingGymEnv, GymDwellingConfig
 
     return DwellingGymEnv(
-        config={
-            "hpxml": HPXML,
-            "schedule": SCHEDULE,
-            "weather": WEATHER,
-            "defaults_path": str(HARES_DEFAULTS),
-            "start_time": "2019-01-01T00:00:00",
-            "duration_s": 600,
-            "time_res_s": 60,
-            # The gym env's dict path cannot disable write_output; the recorder
-            # lands in the test's own directory.
-            "output_path": str(output_dir / "dwelling_0.csv"),
-        },
+        config=GymDwellingConfig(
+            hpxml=HPXML,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            defaults=str(HARES_DEFAULTS),
+            sim_config=SimulationConfig(
+                start_time="2019-01-01T00:00:00",
+                duration=600,
+                time_res=60,
+            ),
+        ),
         observation_fields=_OBS_FIELDS,
         action_space_config=action_config,
-        reward_fn=lambda ctx: -ctx["total_power_kw"],
+        reward_fn=lambda ctx: -ctx["total_power_w"],
         episode_length=timedelta(minutes=5),
     )
 
 
-def test_gym_env_clean_step_reports_zero_warnings(tmp_path: Path):
+def test_gym_env_clean_step_reports_zero_warnings():
     """A clean DwellingGymEnv step surfaces warning_count == 0.0, no list."""
-    env = _make_gym_env(_CLEAN_ACTION_CONFIG, tmp_path)
+    env = _make_gym_env(_CLEAN_ACTION_CONFIG)
     env.reset(seed=42)
     # The first step's info carries the fixture's construction notices
     # (base.xml gives no ShieldingofHome); the next clean step has none.
@@ -148,10 +148,10 @@ def test_gym_env_clean_step_reports_zero_warnings(tmp_path: Path):
     assert "warnings" not in info
 
 
-def test_gym_env_surfaces_rejected_control_signal(tmp_path: Path):
+def test_gym_env_surfaces_rejected_control_signal():
     """A dispatch-time control rejection shows up in DwellingGymEnv step info,
     and the messages are drained exactly once."""
-    env = _make_gym_env(_REJECTED_ACTION_CONFIG, tmp_path)
+    env = _make_gym_env(_REJECTED_ACTION_CONFIG)
     env.reset(seed=42)
 
     _, _, _, _, info = env.step(np.array([70.0], dtype=np.float64))

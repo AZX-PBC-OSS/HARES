@@ -82,6 +82,7 @@ fn sample_gas_boiler_config() -> GasBoilerConfig {
         number_of_speeds: 1,
         setpoint: HvacSetpointConfig::default(),
         condensing: false,
+        flue_loss_fraction: 0.9,
     }
 }
 
@@ -163,7 +164,7 @@ fn sample_central_ac_config() -> CentralAirConditionerConfig {
         duct,
         system_type: Some("split".to_string()),
         startup_cd: Some(0.15),
-        crankcase_heater_kw: None,
+        crankcase_heater_w: None,
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
         biquadratic_x1_min: Some(12.0),
@@ -202,7 +203,7 @@ fn sample_room_ac_config() -> RoomAcConfig {
         plf_max: Some(1.0),
         shr: None,
         startup_cd: None,
-        crankcase_heater_kw: None,
+        crankcase_heater_w: None,
         crankcase_heater_threshold_c: None,
         crankcase_capacity_curve_coeffs: None,
         min_oat_compressor_cooling_c: None,
@@ -250,7 +251,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
             ff_max: Some(1.2),
             plf_min: Some(0.7),
             plf_max: Some(1.0),
-            min_compressor_fraction: 0.25,
+            min_compressor_fraction: None,
             eir_part_load_benefit: None,
             er_stages: 1,
             charge_defect_ratio: None,
@@ -313,6 +314,7 @@ fn sample_gas_water_heater_config() -> GasWaterHeaterConfig {
             col_idx: 2,
             boundary: BoundaryPolicy::Clamp,
         }),
+        appliance_draw_flow_rate_source: None,
         pilot_power_w: Some(5.0),
         flue_loss_fraction: Some(0.12),
         skin_loss_fraction: None,
@@ -354,6 +356,7 @@ fn sample_electric_resistance_water_heater_config() -> ElectricResistanceWaterHe
             col_idx: 2,
             boundary: BoundaryPolicy::Clamp,
         }),
+        appliance_draw_flow_rate_source: None,
         performance_adjustment: Some(0.95),
         zone_type: Some("conditioned".to_string()),
         first_hour_rating_m3: Some(0.20),
@@ -389,6 +392,7 @@ fn sample_tankless_water_heater_config() -> TanklessWaterHeaterConfig {
             col_idx: 2,
             boundary: BoundaryPolicy::Clamp,
         }),
+        appliance_draw_flow_rate_source: None,
         avg_water_draw_l_per_day: Some(220.0),
         zone_type: None,
         min_flow_kg_s: None,
@@ -414,6 +418,7 @@ fn sample_heat_pump_water_heater_config() -> HeatPumpWaterHeaterConfig {
         tempering_valve_setpoint_c: Some(51.67),
         avg_water_draw_l_per_day: Some(220.0),
         draw_flow_rate_kg_s: None,
+        appliance_draw_flow_rate_source: None,
         compressor_power_w: None,
         backup_enable_offset_c: None,
         min_ambient_temp_c: None,
@@ -445,9 +450,9 @@ fn sample_battery_config() -> BatteryConfig {
     BatteryConfig {
         equipment_id: Some(15),
         zone_id: Some(1),
-        capacity_kwh: 13.5,
-        max_charge_kw: 5.0,
-        max_discharge_kw: 5.0,
+        capacity_j: 48600000.0,
+        max_charge_w: 5000.0,
+        max_discharge_w: 5000.0,
         n_series: Some(96),
         n_parallel: Some(1),
         ah_cell: Some(50.0),
@@ -476,7 +481,7 @@ fn sample_battery_config() -> BatteryConfig {
         bms_mode: None,
         grid_export_rule: None,
         power_factor: None,
-        inverter_capacity_kva: None,
+        inverter_capacity_va: None,
         grid_forming: Some(true),
         min_dwell_steps: 0,
     }
@@ -485,9 +490,9 @@ fn sample_battery_config() -> BatteryConfig {
 fn sample_ev_config() -> EvConfig {
     EvConfig {
         equipment_id: Some(16),
-        capacity_kwh: 75.0,
+        capacity_j: 270000000.0,
         charging_level: Some("L2".to_string()),
-        max_charging_power_kw: 11.5,
+        max_charging_power_w: 11500.0,
         charging_efficiency: Some(0.9),
         l1_current_a: Some(12.0),
         l1_voltage_v: Some(120.0),
@@ -505,19 +510,19 @@ fn sample_ev_config() -> EvConfig {
         cell_resistance_ohm: Some(0.005),
         v2l_enabled: Some(false),
         v2l_soc_reserve: Some(0.2),
-        v2l_max_discharge_kw: Some(3.0),
+        v2l_max_discharge_w: Some(3000.0),
         v2g_enabled: Some(false),
         v2g_soc_reserve: Some(0.3),
-        v2g_max_discharge_kw: Some(5.0),
+        v2g_max_discharge_w: Some(5000.0),
         chemistry: Some("NMC".to_string()),
-        fuel_economy_kwh_per_mi: Some(0.325),
+        fuel_economy_j_per_m: Some(0.325 * 3.6e6 / 1609.344),
         ready_soc: Some(0.8),
         charging_strategy: None,
         plug_in_policy: None,
-        power_limit_kw: Some(11.5),
+        power_limit_w: Some(11500.0),
         initial_connection_state: None,
         power_factor: None,
-        charger_capacity_kva: None,
+        charger_capacity_va: None,
         cc_cv_transition_soc: None,
         charging_priority: None,
         discharge_respects_deadline: true,
@@ -528,15 +533,16 @@ fn sample_pv_config() -> PvConfig {
     PvConfig {
         equipment_id: Some(17),
         zone_id: Some(1),
-        capacity_kw: 5.0,
+        capacity_w: 5000.0,
         tilt_deg: Some(30.0),
         azimuth_deg: Some(180.0),
+        attached_boundary_id: None,
         module_type: Some("standard".to_string()),
         noct_c: Some(45.0),
         array_type: None,
         system_losses_fraction: Some(0.14),
         inverter_efficiency: Some(0.96),
-        inverter_capacity_kw: Some(5.5),
+        inverter_capacity_w: Some(5500.0),
         power_factor: Some(1.0),
         surface_resolution_deg: Some(5.0),
         sam_lut_path: None,
@@ -550,7 +556,7 @@ fn sample_generator_config() -> GeneratorConfig {
         equipment_id: Some(18),
         zone_id: Some(1),
         fuel_type: Some(FuelType::Gas),
-        rated_power_kw: 10.0,
+        rated_power_w: 10000.0,
         eta_electric: Some(0.32),
         eta_thermal: Some(0.45),
         eta_jacket_water: None,
@@ -569,10 +575,10 @@ fn sample_generator_config() -> GeneratorConfig {
             },
         ]),
         efficiency_type: None,
-        delta_kw_per_s: Some(1.0),
-        capacity_min_kw: Some(2.0),
-        grid_import_limit_kw: Some(0.0),
-        export_limit_kw: Some(10.0),
+        delta_w_per_s: Some(1000.0),
+        capacity_min_w: Some(2000.0),
+        grid_import_limit_w: Some(0.0),
+        export_limit_w: Some(10000.0),
         loop_id: Some(1),
         flow_rate_kg_s: Some(0.5),
         supply_temp_c: Some(60.0),
@@ -614,7 +620,7 @@ fn sample_ventilation_config() -> VentilationConfig {
 }
 
 fn sample_env() -> EnvironmentState {
-    EnvironmentState {
+    let mut env = EnvironmentState {
         ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
         zones: vec![ZoneState {
             id: ZoneId(1),
@@ -658,6 +664,7 @@ fn sample_env() -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: HashMap::new(),
         equipment_core: HashMap::new(),
@@ -669,9 +676,16 @@ fn sample_env() -> EnvironmentState {
         time_res: chrono::Duration::minutes(1),
         price_signal: Default::default(),
         electrical: Default::default(),
-    }
+    };
+    // A schedule payload the sources' column reads resolve against: a
+    // configured source's read failure is corrupt input, not the absence of
+    // a source, so the smoke env carries the payload the samples' configs
+    // declare columns into.
+    let mut schedule_update = hares_types::DomainUpdate::empty(hares_types::SCHEDULE_DOMAIN_ID);
+    schedule_update.custom_payload = Some(vec![0.5; 8]);
+    env.domains.schedule.set_from(&schedule_update);
+    env
 }
-
 fn assert_round_trip<T>(cfg: T)
 where
     T: EquipmentTypedConfig + PartialEq + Clone + std::fmt::Debug,

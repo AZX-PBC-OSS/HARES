@@ -1,6 +1,8 @@
 //! Regression tests for checkpoint fidelity: the restored dwelling resumes
 //! with the state the checkpointed one held.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +16,6 @@ use hares_equipment::config::ConfigValue;
 use hares_equipment::ev::Ev;
 use hares_equipment::scheduled_load::ScheduledLoad;
 use hares_equipment::{Equipment, EquipmentConfig};
-use hares_io::OutputFormat;
 use hares_types::EndUse;
 
 /// Write a minimal synthetic-TOML dwelling (no equipment, just envelope).
@@ -23,10 +24,12 @@ fn write_minimal_toml(path: &Path) {
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -47,13 +50,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#;
     fs::write(path, content).expect("failed to write synthetic TOML");
 }
@@ -71,7 +67,7 @@ fn build_dwelling_with_base_load(dir: &Path) -> (PathBuf, Dwelling) {
     let env = dwelling.latest_env().clone();
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -104,9 +100,9 @@ fn prior_electrical_summary_survives_checkpoint_restart() {
 
     // The dwelling had a 1.5 kW base load for 3 steps — summary must be non-zero.
     assert!(
-        checkpoint.prior_electrical_summary.base_load_kw > 0.0,
-        "after 3 steps with 1.5 kW base load, base_load_kw must be >0; got {}",
-        checkpoint.prior_electrical_summary.base_load_kw,
+        checkpoint.prior_electrical_summary.base_load_w > 0.0,
+        "after 3 steps with 1.5 kW base load, base_load_w must be >0; got {}",
+        checkpoint.prior_electrical_summary.base_load_w,
     );
 
     // Restore into a fresh dwelling.
@@ -116,7 +112,7 @@ fn prior_electrical_summary_survives_checkpoint_restart() {
     // Re-add the same equipment so the equipment count matches.
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -160,7 +156,7 @@ fn equipment_core_populated_after_checkpoint_restore() {
     let mut dwelling_b = dwelling_b_raw;
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -187,8 +183,8 @@ fn equipment_core_populated_after_checkpoint_restore() {
     // before the next step() repopulates it.
     for (id, co) in &env.equipment_core {
         assert!(
-            co.flows.electric_kw.is_some(),
-            "equipment_core entry for {:?} must have non-default electric_kw after checkpoint restore; got flows={:?}",
+            co.flows.electric_w.is_some(),
+            "equipment_core entry for {:?} must have non-default electric_w after checkpoint restore; got flows={:?}",
             id,
             co.flows,
         );
@@ -222,7 +218,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     let env_a = dwelling_a.latest_env().clone();
     let mut raw2: HashMap<String, ConfigValue> = HashMap::new();
     raw2.insert("power_schedule_source".to_string(), "constant".into());
-    raw2.insert("power_constant_kw".to_string(), 0.5.into());
+    raw2.insert("power_constant_w".to_string(), 500.0.into());
     raw2.insert("sensible_gain_fraction".to_string(), 0.3.into());
     raw2.insert("zone_id".to_string(), 1.0.into());
     let config2 = EquipmentConfig::raw("Plug".to_string(), "ScheduledLoad".to_string(), raw2);
@@ -254,7 +250,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
     // Re-add both equipment pieces.
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -266,7 +262,7 @@ fn equipment_core_keys_match_after_checkpoint_restore() {
 
     let mut raw2_b: HashMap<String, ConfigValue> = HashMap::new();
     raw2_b.insert("power_schedule_source".to_string(), "constant".into());
-    raw2_b.insert("power_constant_kw".to_string(), 0.5.into());
+    raw2_b.insert("power_constant_w".to_string(), 500.0.into());
     raw2_b.insert("sensible_gain_fraction".to_string(), 0.3.into());
     raw2_b.insert("zone_id".to_string(), 1.0.into());
     let config2_b = EquipmentConfig::raw("Plug".to_string(), "ScheduledLoad".to_string(), raw2_b);
@@ -313,7 +309,7 @@ fn first_post_restore_step_produces_valid_equipment_output() {
     let mut dwelling_b = dwelling_b_raw;
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -338,8 +334,8 @@ fn first_post_restore_step_produces_valid_equipment_output() {
     let env = dwelling_b.latest_env();
     let has_power = env.equipment_core.iter().any(|(_, co)| {
         co.flows
-            .electric_kw
-            .is_some_and(|e| e.net_consumption_kw().abs() > 0.0)
+            .electric_w
+            .is_some_and(|e| e.net_consumption_w().abs() > 0.0)
     });
     assert!(
         has_power,
@@ -354,9 +350,9 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
         "EV".to_string(),
         EvConfig {
             equipment_id: None,
-            capacity_kwh: 60.0,
+            capacity_j: 216000000.0,
             charging_level: Some("L2".to_string()),
-            max_charging_power_kw: 7.2,
+            max_charging_power_w: 7200.0,
             charging_efficiency: None,
             l1_current_a: None,
             l1_voltage_v: None,
@@ -374,19 +370,19 @@ fn add_ev_to_dwelling(dwelling: &mut Dwelling) {
             cell_resistance_ohm: None,
             v2l_enabled: None,
             v2l_soc_reserve: None,
-            v2l_max_discharge_kw: None,
+            v2l_max_discharge_w: None,
             v2g_enabled: None,
             v2g_soc_reserve: None,
-            v2g_max_discharge_kw: None,
+            v2g_max_discharge_w: None,
             chemistry: None,
-            fuel_economy_kwh_per_mi: None,
+            fuel_economy_j_per_m: None,
             ready_soc: None,
             charging_strategy: None,
             plug_in_policy: None,
-            power_limit_kw: None,
+            power_limit_w: None,
             initial_connection_state: None,
             power_factor: None,
-            charger_capacity_kva: None,
+            charger_capacity_va: None,
             cc_cv_transition_soc: None,
             charging_priority: None,
             discharge_respects_deadline: true,
@@ -442,7 +438,7 @@ fn equipment_core_restores_ev_soc_after_checkpoint() {
     // Re-add BaseLoad (same as build_dwelling_with_base_load).
     let mut raw: HashMap<String, ConfigValue> = HashMap::new();
     raw.insert("power_schedule_source".to_string(), "constant".into());
-    raw.insert("power_constant_kw".to_string(), 1.5.into());
+    raw.insert("power_constant_w".to_string(), 1500.0.into());
     raw.insert("sensible_gain_fraction".to_string(), 0.5.into());
     raw.insert("zone_id".to_string(), 1.0.into());
     let config_b = EquipmentConfig::raw("BaseLoad".to_string(), "ScheduledLoad".to_string(), raw);
@@ -511,41 +507,50 @@ fn resume_home_dir() -> PathBuf {
     repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227")
 }
 
-fn resumable_dwelling_config(case: &ResumeCase, output_dir: &Path, run: &str) -> DwellingConfig {
+fn resumable_dwelling_config(case: &ResumeCase) -> DwellingConfig {
     let root = repo_root();
     DwellingConfig {
-        hpxml_path: case.hpxml_path.clone(),
-        schedule_path: Some(resume_home_dir().join("in.schedules.csv")),
-        weather_path: root
-            .join("tests/fixtures/resstock/2025.1/weather")
-            .join(case.weather_file),
-        defaults_path: Some(root.join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::west_opt(case.utc_offset_west_h * 3600)
-                .expect("valid offset")
-                .with_ymd_and_hms(2018, case.month, case.day, 0, 0, 0)
-                .single()
-                .expect("valid start time"),
-            duration: Duration::minutes(15 * RESUME_TOTAL_STEPS as i64),
-            time_res: Duration::minutes(15),
-            output_verbosity: 8,
-            output_path: Some(output_dir.join(format!("{run}.parquet"))),
-            write_output: true,
-            output_format: OutputFormat::Parquet,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: true,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id: 176_227,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(case.hpxml_path.clone()),
+        schedule: Some(InputSource::Path(
+            resume_home_dir().join("in.schedules.csv"),
+        )),
+        weather: WeatherInput::Path(
+            root.join("tests/fixtures/resstock/2025.1/weather")
+                .join(case.weather_file),
+        ),
+        defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::west_opt(case.utc_offset_west_h * 3600)
+                    .expect("valid offset")
+                    .with_ymd_and_hms(2018, case.month, case.day, 0, 0, 0)
+                    .single()
+                    .expect("valid start time"),
+                duration: Duration::minutes(15 * RESUME_TOTAL_STEPS as i64),
+                time_res: Duration::minutes(15),
+                reports: vec![hares_io::ReportSpec {
+                    name: "frame".to_string(),
+                    selection: hares_io::Selection::Verbosity(8),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Memory,
+                }],
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            176_227,
+            None,
+        ),
     }
 }
 
@@ -616,8 +621,7 @@ fn resumed_run_equals_continuous_run() {
         day: 15,
         checkpoint_step: 37,
     };
-    let output_dir = tempfile::tempdir().expect("temp dir");
-    assert_resume_equals_continuous(&case, output_dir.path(), |dwelling, checkpoint| {
+    assert_resume_equals_continuous(&case, |dwelling, checkpoint| {
         assert!(
             dwelling.latest_env().zones.len() > 1,
             "the fixture must model more than one zone"
@@ -646,7 +650,7 @@ fn resumed_hrv_run_equals_continuous_run() {
         day: 2,
         checkpoint_step: 36,
     };
-    assert_resume_equals_continuous(&case, output_dir.path(), |dwelling, _| {
+    assert_resume_equals_continuous(&case, |dwelling, _| {
         let recovery = dwelling
             .thermal_solver()
             .config()
@@ -676,9 +680,8 @@ fn rejected_checkpoint_leaves_the_dwelling_unchanged() {
         day: 15,
         checkpoint_step: 5,
     };
-    let output_dir = tempfile::tempdir().expect("temp dir");
-    let mut donor = Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "d"))
-        .expect("build donor dwelling");
+    let mut donor =
+        Dwelling::from_config(resumable_dwelling_config(&case)).expect("build donor dwelling");
     for _ in 0..case.checkpoint_step {
         donor.step().expect("donor step");
     }
@@ -686,11 +689,9 @@ fn rejected_checkpoint_leaves_the_dwelling_unchanged() {
     bad.thermal.x[0] = f64::NAN;
 
     let mut offered =
-        Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "o"))
-            .expect("build offered dwelling");
+        Dwelling::from_config(resumable_dwelling_config(&case)).expect("build offered dwelling");
     let mut untouched =
-        Dwelling::from_config(resumable_dwelling_config(&case, output_dir.path(), "u"))
-            .expect("build untouched dwelling");
+        Dwelling::from_config(resumable_dwelling_config(&case)).expect("build untouched dwelling");
     offered.step().expect("offered step");
     untouched.step().expect("untouched step");
 
@@ -746,13 +747,19 @@ fn write_hrv_variant(dir: &Path) -> PathBuf {
 /// dwelling and its checkpoint.
 fn assert_resume_equals_continuous(
     case: &ResumeCase,
-    output_dir: &Path,
     at_checkpoint: impl FnOnce(&Dwelling, &DwellingCheckpoint),
 ) {
     let k = case.checkpoint_step;
-    let mut continuous = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "a"))
-        .expect("build continuous dwelling");
-    let continuous_steps = continuous.simulate().expect("continuous run").steps;
+    let mut continuous =
+        Dwelling::from_config(resumable_dwelling_config(case)).expect("build continuous dwelling");
+    // The step history is gone: the horizon's step results are what the
+    // stepping loop itself collects, and finish() is the finalisation the
+    // flush (the tail batch) rides.
+    let mut continuous_steps = Vec::new();
+    for _ in 0..continuous.clock.total_steps() {
+        continuous_steps.push(continuous.step().expect("continuous run"));
+    }
+    continuous.finish().expect("continuous run finishes");
     assert!(
         continuous_steps[k..]
             .iter()
@@ -762,22 +769,130 @@ fn assert_resume_equals_continuous(
     let continuous_frame = recorded_frame(&continuous);
     assert_eq!(continuous_frame.num_rows(), RESUME_TOTAL_STEPS);
 
-    let mut interrupted = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "b"))
-        .expect("build interrupted dwelling");
+    let mut interrupted =
+        Dwelling::from_config(resumable_dwelling_config(case)).expect("build interrupted dwelling");
     for _ in 0..k {
         interrupted.step().expect("step before checkpoint");
     }
     let checkpoint = interrupted.save_checkpoint().expect("save checkpoint");
     at_checkpoint(&interrupted, &checkpoint);
 
-    let mut resumed = Dwelling::from_config(resumable_dwelling_config(case, output_dir, "c"))
-        .expect("build resumed dwelling");
+    let mut resumed =
+        Dwelling::from_config(resumable_dwelling_config(case)).expect("build resumed dwelling");
     resumed
         .load_checkpoint(checkpoint)
         .expect("load checkpoint");
     resumed.simulate().expect("resumed run");
     let resumed_frame = recorded_frame(&resumed);
 
-    let tail = continuous_frame.slice(k, RESUME_TOTAL_STEPS - k);
-    assert_frames_bitwise_equal(&tail, &resumed_frame);
+    // The checkpoint carries the memory rows, so the resumed run's frame
+    // is the continuous run's whole frame: the pre-checkpoint rows
+    // continue, and the bitwise comparison runs over all of them.
+    assert_frames_bitwise_equal(&continuous_frame, &resumed_frame);
+}
+
+/// The gas boiler's fluid-domain first-publish marker survives a checkpoint
+/// restore, so the absent-payload escape stays bounded after a resume.
+///
+/// The scenario: a boiler home runs past the fluid domain's first publish
+/// (the boiler reads the published payload from the next step on), then
+/// checkpoints. A freshly built dwelling's fluid slot has published nothing,
+/// so the resumed run's first step reads an absent payload: the restored
+/// marker must make that absence a warned, counted degradation, not a silent
+/// one. Restoring `false` in place of the decoded marker fails this test:
+/// the resumed run would treat every absence as a pre-publish one and stay
+/// silent forever.
+#[test]
+fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
+    let bldg_dir = repo_root().join("tests/fixtures/resstock/2025.1/bldg0000002");
+    let config = DwellingConfig {
+        hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+        schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            repo_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::west_opt(5 * 3600)
+                    .expect("valid offset")
+                    .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
+                    .single()
+                    .expect("valid start time"),
+                duration: Duration::hours(6),
+                time_res: Duration::hours(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            2,
+            None,
+        ),
+    };
+
+    // Run past the fluid domain's first publish: the solver publishes at the
+    // end of step 0 and the boiler reads that payload from step 1 on, so by
+    // the checkpoint the marker is true.
+    let mut dwelling_a = Dwelling::from_config(config.clone()).expect("build dwelling A");
+    for _ in 0..3 {
+        dwelling_a.step().expect("step in dwelling A");
+    }
+    assert!(
+        dwelling_a.take_warnings().is_empty(),
+        "the pre-publish first step stays silent and the published payload \
+         follows, so the interrupted run raises no absence warning"
+    );
+    assert_eq!(
+        dwelling_a.health().fluid_payload_absences,
+        0,
+        "no absence is counted while the payload is present at every read"
+    );
+    assert!(
+        dwelling_a
+            .latest_env()
+            .domains
+            .fluid
+            .get()
+            .and_then(|update| update.custom_payload.as_ref())
+            .is_some(),
+        "the fluid domain must have published by the checkpoint; if this \
+         fails the publish/read ordering changed and the marker below may \
+         no longer be true"
+    );
+    let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
+
+    let mut resumed = Dwelling::from_config(config).expect("build resumed dwelling");
+    resumed
+        .load_checkpoint(checkpoint)
+        .expect("load checkpoint");
+
+    // The first post-restore step: the fresh environment's fluid slot has
+    // published nothing, the restored marker is true, so the absence warns
+    // and counts.
+    resumed.step().expect("first post-restore step");
+
+    let warnings = resumed.take_warnings();
+    assert!(
+        warnings.len() == 1
+            && warnings[0]
+                .message
+                .contains("the fluid domain published no payload"),
+        "the resumed run must warn on the starved payload exactly once: {warnings:?}"
+    );
+    assert_eq!(
+        resumed.health().fluid_payload_absences,
+        1,
+        "the resumed run must count the starved payload in the run's health"
+    );
 }

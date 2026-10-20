@@ -77,6 +77,7 @@ fn base_env() -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
@@ -91,16 +92,16 @@ fn base_env() -> EnvironmentState {
     }
 }
 
-fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> EquipmentConfig {
+fn battery_cfg(capacity_energy_j: f64, initial_soc: f64, inverter_eta: f64) -> EquipmentConfig {
     EquipmentConfig::from_typed(
         "Battery".to_string(),
         "Battery".to_string(),
         BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: capacity_energy_j,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -129,7 +130,7 @@ fn battery_cfg(capacity_kwh: f64, initial_soc: f64, inverter_eta: f64) -> Equipm
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         },
@@ -154,13 +155,13 @@ fn make_battery(cfg: &EquipmentConfig) -> Battery {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_charge_cycle_soc_accounting() {
-    let cfg = battery_cfg(10.0, 0.2, 0.97);
+    let cfg = battery_cfg(3.6e7, 0.2, 0.97);
     let mut bat = make_battery(&cfg);
     let env = base_env();
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
-        reactive_power_kvar: None,
+        active_power_w: 3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -182,7 +183,7 @@ fn battery_charge_cycle_soc_accounting() {
     );
 
     // OCHRE accounting: ΔSOC = P_ac × eta_inv × hours / capacity
-    let expected_delta = 3.0 * 1.0 * 0.97 / 10.0;
+    let expected_delta = 3000.0 * 3600.0 * 0.97 / 3.6e7;
     // Ohmic losses at 0.3C rate are small; allow 10% tolerance
     assert!(
         (delta_soc - expected_delta).abs() < expected_delta * 0.10,
@@ -205,13 +206,13 @@ fn battery_charge_cycle_soc_accounting() {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_discharge_cycle_soc_accounting() {
-    let cfg = battery_cfg(10.0, 0.8, 0.97);
+    let cfg = battery_cfg(3.6e7, 0.8, 0.97);
     let mut bat = make_battery(&cfg);
     let env = base_env();
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -2.0,
-        reactive_power_kvar: None,
+        active_power_w: -2000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -232,7 +233,7 @@ fn battery_discharge_cycle_soc_accounting() {
         "discharging must decrease SOC; before={soc_before:.4} after={soc_after:.4}"
     );
 
-    let expected_delta = 2.0 * 1.0 / (0.97 * 10.0);
+    let expected_delta = 2000.0 * 3600.0 / (0.97 * 3.6e7);
     assert!(
         (delta_soc - expected_delta).abs() < expected_delta * 0.10,
         "SOC loss {delta_soc:.4} must be within 10% of P/(eta×cap)={expected_delta:.4}"
@@ -257,12 +258,12 @@ fn battery_soc_limits_enforced() {
 
     // Charge from near-max
     {
-        let cfg = battery_cfg(10.0, 0.94, 0.97);
+        let cfg = battery_cfg(3.6e7, 0.94, 0.97);
         let mut bat = make_battery(&cfg);
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -282,12 +283,12 @@ fn battery_soc_limits_enforced() {
 
     // Discharge from near-min
     {
-        let cfg = battery_cfg(10.0, 0.06, 0.97);
+        let cfg = battery_cfg(3.6e7, 0.06, 0.97);
         let mut bat = make_battery(&cfg);
 
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -318,7 +319,7 @@ fn battery_soc_limits_enforced() {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_degradation_model_documented() {
-    let cfg = battery_cfg(10.0, 0.5, 0.97);
+    let cfg = battery_cfg(3.6e7, 0.5, 0.97);
     let mut bat = make_battery(&cfg);
     let env = base_env();
     let dt = Duration::from_secs(3600); // 1-hour steps for fast cycling
@@ -328,8 +329,8 @@ fn battery_degradation_model_documented() {
     for i in 0..200 {
         let power_kw = if i % 10 < 5 { 1.0 } else { -1.0 };
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: power_kw,
-            reactive_power_kvar: None,
+            active_power_w: power_kw,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -384,15 +385,16 @@ fn pv_cell_temperature_noct_model() {
         PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt_deg: Some(20.0),
             azimuth_deg: Some(180.0),
+            attached_boundary_id: None,
             module_type: None,
             noct_c: Some(47.0),
             array_type: None,
             system_losses_fraction: Some(0.0),
             inverter_efficiency: Some(0.96),
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
@@ -487,7 +489,7 @@ fn pv_cell_temperature_noct_model() {
 fn pv_peak_generation_in_good_conditions() {
     let tilt = 20.0;
     let azimuth = 180.0;
-    let capacity_kw = 10.0;
+    let capacity_kw = 10.0; // kW, converted to the config's W below
 
     let cfg = EquipmentConfig::from_typed(
         "PV".to_string(),
@@ -495,9 +497,11 @@ fn pv_peak_generation_in_good_conditions() {
         PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw,
+            capacity_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+                .get::<uom::si::power::watt>(),
             tilt_deg: Some(tilt),
             azimuth_deg: Some(azimuth),
+            attached_boundary_id: None,
             module_type: None,
             // Open-rack default NOCT (PVWatts v8).
             noct_c: Some(45.0),
@@ -506,7 +510,7 @@ fn pv_peak_generation_in_good_conditions() {
             // residential configuration whose output the bug suppressed.
             system_losses_fraction: Some(0.14),
             inverter_efficiency: Some(0.96),
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: Some(5.0),
             sam_lut_path: None,
@@ -544,11 +548,13 @@ fn pv_peak_generation_in_good_conditions() {
     let ac_power_kw = eq
         .telemetry()
         .get("ac_power_kw")
-        .expect("ac_power_kw must exist");
+        .expect("ac_power_kw must exist")
+        / 1000.0;
     let dc_power_kw = eq
         .telemetry()
         .get("dc_power_kw")
-        .expect("dc_power_kw must exist");
+        .expect("dc_power_kw must exist")
+        / 1000.0;
 
     let dc_ac_ratio = capacity_kw / ac_power_kw;
     eprintln!(
@@ -600,15 +606,16 @@ fn pv_power_temperature_derating() {
             PvConfig {
                 equipment_id: None,
                 zone_id: None,
-                capacity_kw: 5.0,
+                capacity_w: 5000.0,
                 tilt_deg: Some(0.0),
                 azimuth_deg: Some(180.0),
+                attached_boundary_id: None,
                 module_type: None,
                 noct_c: Some(47.0),
                 array_type: None,
                 system_losses_fraction: Some(0.0),
                 inverter_efficiency: Some(1.0),
-                inverter_capacity_kw: None,
+                inverter_capacity_w: None,
                 power_factor: None,
                 surface_resolution_deg: Some(5.0),
                 sam_lut_path: None,
@@ -695,7 +702,7 @@ fn generator_fuel_efficiency_at_half_load() {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: 10.0,
+            rated_power_w: 10000.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
             eta_jacket_water: None,
@@ -724,10 +731,10 @@ fn generator_fuel_efficiency_at_half_load() {
                 },
             ]),
             efficiency_type: None,
-            delta_kw_per_s: Some(100.0),
-            capacity_min_kw: None,
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: Some(100000.0),
+            capacity_min_w: None,
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -755,8 +762,8 @@ fn generator_fuel_efficiency_at_half_load() {
 
     // Command 5 kW (50% load); HARES generator convention: positive = generation output
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 5.0,
-        reactive_power_kvar: None,
+        active_power_w: 5000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -766,24 +773,24 @@ fn generator_fuel_efficiency_at_half_load() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let tel = eq.telemetry();
-    let electric_kw = tel
+    let electric_w = tel
         .get("electric_output_kw")
         .expect("electric_output_kw must exist");
     let fuel_w = tel.get("fuel_input_w").expect("fuel_input_w must exist");
     let eta = tel.get("eta_electric").expect("eta_electric must exist");
 
     eprintln!(
-        "[der_parity] generator: electric={electric_kw:.3} kW, fuel={fuel_w:.1} W, eta={eta:.4}"
+        "[der_parity] generator: electric={electric_w:.3} W, fuel={fuel_w:.1} W, eta={eta:.4}"
     );
 
     // Generator was commanded to 5 kW with fast ramp -- must produce output
     assert!(
-        electric_kw > 0.1,
-        "generator must produce output when commanded to 5 kW; got {electric_kw:.3} kW"
+        electric_w > 100.0,
+        "generator must produce output when commanded to 5 kW; got {electric_w:.3} W"
     );
 
     // Fuel = electric / eta
-    let expected_fuel_w = electric_kw * 1000.0 / eta;
+    let expected_fuel_w = electric_w / eta;
     assert!(
         (fuel_w - expected_fuel_w).abs() < expected_fuel_w * 0.01,
         "fuel_input must equal electric/eta ({expected_fuel_w:.1} W ±1%); got {fuel_w:.1} W"
@@ -820,7 +827,7 @@ fn generator_ramp_rate_is_kw_per_second() {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: 10.0,
+            rated_power_w: 10000.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
             eta_jacket_water: None,
@@ -849,10 +856,10 @@ fn generator_ramp_rate_is_kw_per_second() {
                 },
             ]),
             efficiency_type: None,
-            delta_kw_per_s: Some(delta_kw_per_s),
-            capacity_min_kw: None,
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: Some(delta_kw_per_s * 1000.0),
+            capacity_min_w: None,
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -880,8 +887,8 @@ fn generator_ramp_rate_is_kw_per_second() {
 
     // Command full load; HARES generator convention: positive = generation output
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 10.0,
-        reactive_power_kvar: None,
+        active_power_w: 10.0000,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -892,21 +899,21 @@ fn generator_ramp_rate_is_kw_per_second() {
     let mut ports = PortSlots::default();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    let electric_kw = eq
+    let electric_w = eq
         .telemetry()
         .get("electric_output_kw")
         .expect("electric_output_kw must exist");
 
     eprintln!(
-        "[der_parity] ramp_rate: after 60s with ramp=1.0 kW/s → electric_kw={electric_kw:.3} kW \
+        "[der_parity] ramp_rate: after 60s with ramp=1.0 kW/s → electric_w={electric_w:.3} kW \
          (HARES: kW/s; OCHRE: kW/min -- at OCHRE rate 1.0 kW/min, 60s gives only 1 kW)"
     );
 
     // At 1.0 kW/s, a 60-second step allows 60 kW ramp → should reach rated 10 kW
     assert!(
-        electric_kw > 5.0,
+        electric_w > 5.0,
         "generator should reach substantial fraction of rated power (10 kW) in one 60s step \
-         with ramp=1.0 kW/s; got {electric_kw:.3} kW \
+         with ramp=1.0 kW/s; got {electric_w:.3} kW \
          (OCHRE at 1.0 kW/min would produce only ~1 kW in 60s)"
     );
 }
@@ -927,7 +934,7 @@ fn generator_capacity_min_enforced() {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: 10.0,
+            rated_power_w: 10000.0,
             eta_electric: Some(0.30),
             eta_thermal: None,
             eta_jacket_water: None,
@@ -956,10 +963,10 @@ fn generator_capacity_min_enforced() {
                 },
             ]),
             efficiency_type: None,
-            delta_kw_per_s: Some(100.0),
-            capacity_min_kw: Some(2.0),
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
+            delta_w_per_s: Some(100000.0),
+            capacity_min_w: Some(2000.0),
+            grid_import_limit_w: None,
+            export_limit_w: None,
             loop_id: None,
             flow_rate_kg_s: None,
             supply_temp_c: None,
@@ -989,8 +996,8 @@ fn generator_capacity_min_enforced() {
     // Per OCHRE semantics: minimum operating power clamped UP to capacity_min when on.
     // HARES: values between 0 and capacity_min are clamped up; exact 0 keeps generator off.
     eq.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 1.0, // positive = generation in HARES convention
-        reactive_power_kvar: None,
+        active_power_w: 1.0000, // positive = generation in HARES convention
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -999,16 +1006,16 @@ fn generator_capacity_min_enforced() {
     let mut ports = PortSlots::default();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-    let electric_kw = eq.telemetry().get("electric_output_kw").unwrap_or(-99.0);
+    let electric_w = eq.telemetry().get("electric_output_kw").unwrap_or(-99.0);
     eprintln!(
-        "[der_parity] capacity_min: setpoint=1.0 kW < min=2.0 kW → electric={electric_kw:.3} kW"
+        "[der_parity] capacity_min: setpoint=1.0 kW < min=2.0 kW → electric={electric_w:.3} kW"
     );
 
     // Generator must either be off (0 kW) or at/above capacity_min (2.0 kW)
     // It must NOT produce exactly 1.0 kW (the forbidden zone)
     assert!(
-        !(0.1..1.9).contains(&electric_kw),
-        "generator must be off or at/above capacity_min=2.0 kW; got {electric_kw:.3} kW"
+        !(0.1..1.9).contains(&electric_w),
+        "generator must be off or at/above capacity_min=2.0 kW; got {electric_w:.3} kW"
     );
 }
 
@@ -1020,7 +1027,7 @@ fn generator_capacity_min_enforced() {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_control_signal_not_a_stub() {
-    let cfg = battery_cfg(13.5, 0.5, 0.97);
+    let cfg = battery_cfg(4.86e7, 0.5, 0.97);
     let env = base_env();
     let dt = Duration::from_secs(60);
 
@@ -1036,15 +1043,15 @@ fn battery_control_signal_not_a_stub() {
         bat.step(&env, dt, &mut ports).unwrap();
         bat.telemetry()
             .get("active_power_kw")
-            .expect("active_power_kw must exist")
+            .expect("active_power_w must exist")
     };
 
     // Step with charge setpoint → expect positive power draw
     let power_charge = {
         let mut bat = make_battery(&cfg);
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
-            reactive_power_kvar: None,
+            active_power_w: 3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -1053,15 +1060,15 @@ fn battery_control_signal_not_a_stub() {
         bat.step(&env, dt, &mut ports).unwrap();
         bat.telemetry()
             .get("active_power_kw")
-            .expect("active_power_kw must exist")
+            .expect("active_power_w must exist")
     };
 
     // Step with discharge setpoint → expect negative power
     let power_discharge = {
         let mut bat = make_battery(&cfg);
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -3.0,
-            reactive_power_kvar: None,
+            active_power_w: -3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -1070,7 +1077,7 @@ fn battery_control_signal_not_a_stub() {
         bat.step(&env, dt, &mut ports).unwrap();
         bat.telemetry()
             .get("active_power_kw")
-            .expect("active_power_kw must exist")
+            .expect("active_power_w must exist")
     };
 
     eprintln!(
@@ -1108,17 +1115,17 @@ fn battery_control_signal_not_a_stub() {
 // ---------------------------------------------------------------------------
 #[test]
 fn battery_round_trip_efficiency_below_unity() {
-    let cfg = battery_cfg(13.5, 0.4, 0.97);
+    let cfg = battery_cfg(4.86e7, 0.4, 0.97);
     let mut bat = make_battery(&cfg);
     let env = base_env();
     let dt = Duration::from_secs(60);
     let n_steps = 30_u32;
-    let charge_kw = 3.0;
+    let charge_w = 3000.0;
 
     // Charge phase
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: charge_kw,
-        reactive_power_kvar: None,
+        active_power_w: charge_w,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -1136,8 +1143,8 @@ fn battery_round_trip_efficiency_below_unity() {
 
     // Discharge phase
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -charge_kw,
-        reactive_power_kvar: None,
+        active_power_w: -charge_w,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })

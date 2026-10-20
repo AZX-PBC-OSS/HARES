@@ -21,14 +21,13 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use chrono::Duration;
 use parquet::arrow::arrow_writer::ArrowWriter;
-use tempfile::{NamedTempFile, tempdir};
+use tempfile::tempdir;
 
-use hares_io::output::metrics::MetricsCalculator;
+use hares_io::output::metrics::{MetricsCalculator, MetricsInputPlan};
 use hares_io::{
-    ColumnMapper, OutputFormat, ResStockError, ResStockVersion, SimulationConfig, build_schema,
-    expected_columns_at_verbosity, parse_resstock_metadata,
+    ColumnMapper, Destination, ResStockError, ResStockVersion, SimulationConfig,
+    build_schema_for_specs, expected_columns_at_verbosity, parse_resstock_metadata,
 };
-use hares_physics::units::energy_therms_to_kwh;
 use hares_types::FuelType;
 
 // ---------------------------------------------------------------------------
@@ -43,18 +42,19 @@ fn test_config(deadband: Option<f64>) -> SimulationConfig {
         start_time: fixture_start::fixture_start(),
         duration: Duration::hours(1),
         time_res: Duration::hours(1),
-        output_verbosity: 0,
-        output_path: None,
-        write_output: false,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 16,
         master_seed: 0,
         setpoint_deadband_c: deadband,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::default(),
     }
 }
 
@@ -70,6 +70,8 @@ fn make_spec(name: &str, fuel: FuelType) -> hares_io::EquipmentSpec {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 
@@ -95,6 +97,76 @@ fn build_batch(columns: Vec<(&str, Vec<f64>)>) -> RecordBatch {
     RecordBatch::try_new(schema, arrays).expect("record batch")
 }
 
+/// The typed equipment end-use table of the specs a test schema was built
+/// from: the class's declared surface, the same source
+/// `build_schema_for_specs` reads.
+fn spec_end_uses(specs: &[hares_io::EquipmentSpec]) -> Vec<(String, hares_types::EndUse)> {
+    specs
+        .iter()
+        .filter_map(|s| {
+            hares_equipment::class_declared_surface(&s.name)
+                .map(|surface| (s.name.clone(), surface.end_use))
+        })
+        .collect()
+}
+
+/// The metrics input plan for a test schema: the schema's value-column
+/// names in order (a leading `Time` column skipped, the union-schema
+/// convention), with the specs' typed end-use table for the equipment
+/// gate.
+fn plan_for(
+    schema: &Schema,
+    config: &SimulationConfig,
+    equipment_end_uses: &[(String, hares_types::EndUse)],
+) -> MetricsInputPlan {
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .skip(usize::from(
+            schema.fields().first().is_some_and(|f| f.name() == "Time"),
+        ))
+        .map(|f| f.name().clone())
+        .collect();
+    MetricsInputPlan::build(&names, config, equipment_end_uses).expect("metrics plan builds")
+}
+
+/// The calculator for a test schema.
+fn calc_for(
+    schema: &Schema,
+    time_res_secs: u32,
+    config: &SimulationConfig,
+    equipment_end_uses: &[(String, hares_types::EndUse)],
+) -> MetricsCalculator {
+    MetricsCalculator::new(
+        plan_for(schema, config, equipment_end_uses),
+        time_res_secs,
+        config,
+    )
+    .expect("calculator builds")
+}
+
+/// Feeds every row of the batch, in order: the same values the producer
+/// row carried, one `accumulate_row` per row.
+fn accumulate(
+    calc: &mut MetricsCalculator,
+    batch: &RecordBatch,
+) -> Result<(), hares_io::output::metrics::MetricsError> {
+    for r in 0..batch.num_rows() {
+        let row: Vec<f64> = batch
+            .columns()
+            .iter()
+            .map(|c| {
+                c.as_any()
+                    .downcast_ref::<Float64Array>()
+                    .expect("f64 column")
+                    .value(r)
+            })
+            .collect();
+        calc.accumulate_row(&row)?;
+    }
+    Ok(())
+}
+
 fn write_parquet(path: &Path, batch: &RecordBatch) {
     let file = std::fs::File::create(path).expect("create parquet");
     let mut writer = ArrowWriter::try_new(file, batch.schema(), None).expect("writer");
@@ -108,11 +180,17 @@ fn write_parquet(path: &Path, batch: &RecordBatch) {
 
 #[test]
 fn build_schema_output_accepted_by_metrics_calculator_verbosity_0() {
-    let schema = build_schema(&[], 0, &[]);
-    let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
+    let schema = build_schema_for_specs(&[], 0, &[]);
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .skip(1)
+        .map(|f| f.name().clone())
+        .collect();
+    let result = MetricsInputPlan::build(&names, &test_config(None), &[]);
     assert!(
         result.is_ok(),
-        "MetricsCalculator::new must accept build_schema([], 0, &[]) output: {:?}",
+        "MetricsInputPlan::build must accept build_schema([], 0, &[]) output: {:?}",
         result.err()
     );
 }
@@ -123,11 +201,17 @@ fn build_schema_output_accepted_by_metrics_calculator_verbosity_1() {
         make_spec("ASHP Heater", FuelType::Electric),
         make_spec("Gas Furnace", FuelType::Gas),
     ];
-    let schema = build_schema(&specs, 1, &[]);
-    let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
+    let schema = build_schema_for_specs(&specs, 1, &[]);
+    let names: Vec<String> = schema
+        .fields()
+        .iter()
+        .skip(1)
+        .map(|f| f.name().clone())
+        .collect();
+    let result = MetricsInputPlan::build(&names, &test_config(None), &spec_end_uses(&specs));
     assert!(
         result.is_ok(),
-        "MetricsCalculator::new must accept build_schema(specs, 1, &[]) output: {:?}",
+        "MetricsInputPlan::build must accept build_schema(specs, 1, &[]) output: {:?}",
         result.err()
     );
 }
@@ -140,11 +224,17 @@ fn build_schema_output_accepted_by_metrics_calculator_all_verbosity_levels() {
         make_spec("Battery", FuelType::Electric),
     ];
     for v in 0..=8 {
-        let schema = build_schema(&specs, v, &[]);
-        let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
+        let schema = build_schema_for_specs(&specs, v, &[]);
+        let names: Vec<String> = schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|f| f.name().clone())
+            .collect();
+        let result = MetricsInputPlan::build(&names, &test_config(None), &spec_end_uses(&specs));
         assert!(
             result.is_ok(),
-            "MetricsCalculator::new must accept build_schema output at verbosity {v}: {:?}",
+            "MetricsInputPlan::build must accept build_schema output at verbosity {v}: {:?}",
             result.err()
         );
     }
@@ -156,7 +246,7 @@ fn build_schema_output_accepted_by_metrics_calculator_all_verbosity_levels() {
 
 #[test]
 fn verbosity_2_produces_ochre_temperature_format() {
-    let schema = build_schema(&[], 2, &[]);
+    let schema = build_schema_for_specs(&[], 2, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"Temperature - Indoor (C)"),
@@ -171,7 +261,7 @@ fn verbosity_2_produces_ochre_temperature_format() {
 
 #[test]
 fn verbosity_0_column_names_match_ochre() {
-    let schema = build_schema(&[], 0, &[]);
+    let schema = build_schema_for_specs(&[], 0, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"Total Electric Power (kW)"),
@@ -199,7 +289,7 @@ fn expected_columns_at_verbosity_2_includes_ochre_temp_format() {
 #[test]
 fn context_columns_present_at_all_verbosity_levels() {
     for v in 0..=8u8 {
-        let schema = build_schema(&[], v, &[]);
+        let schema = build_schema_for_specs(&[], v, &[]);
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert!(
             names.contains(&"Outdoor Dry Bulb (C)"),
@@ -238,8 +328,8 @@ fn expected_columns_at_verbosity_includes_context_columns_at_all_levels() {
 #[test]
 fn verbosity_6_produces_additional_columns_beyond_level_5() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema_5 = build_schema(&specs, 5, &[]);
-    let schema_6 = build_schema(&specs, 6, &[]);
+    let schema_5 = build_schema_for_specs(&specs, 5, &[]);
+    let schema_6 = build_schema_for_specs(&specs, 6, &[]);
     assert!(
         schema_6.fields().len() > schema_5.fields().len(),
         "verbosity 6 ({}) must produce more columns than verbosity 5 ({})",
@@ -251,8 +341,8 @@ fn verbosity_6_produces_additional_columns_beyond_level_5() {
 #[test]
 fn verbosity_7_produces_additional_columns_beyond_level_6() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema_6 = build_schema(&specs, 6, &[]);
-    let schema_7 = build_schema(&specs, 7, &[]);
+    let schema_6 = build_schema_for_specs(&specs, 6, &[]);
+    let schema_7 = build_schema_for_specs(&specs, 7, &[]);
     assert!(
         schema_7.fields().len() > schema_6.fields().len(),
         "verbosity 7 ({}) must produce more columns than verbosity 6 ({})",
@@ -267,8 +357,8 @@ fn verbosity_8_produces_at_least_as_many_columns_as_level_7() {
     // promoted from v8 to v7 per OCHRE HVAC.py:584,598). v8 may gain
     // additional columns in future; for now it must not lose any.
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema_7 = build_schema(&specs, 7, &[]);
-    let schema_8 = build_schema(&specs, 8, &[]);
+    let schema_7 = build_schema_for_specs(&specs, 7, &[]);
+    let schema_8 = build_schema_for_specs(&specs, 8, &[]);
     assert!(
         schema_8.fields().len() >= schema_7.fields().len(),
         "verbosity 8 ({}) must produce at least as many columns as verbosity 7 ({})",
@@ -280,7 +370,7 @@ fn verbosity_8_produces_at_least_as_many_columns_as_level_7() {
 #[test]
 fn verbosity_6_includes_envelope_component_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema = build_schema(&specs, 6, &[]);
+    let schema = build_schema_for_specs(&specs, 6, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"Window Transmitted Solar Gain (W)"),
@@ -291,7 +381,7 @@ fn verbosity_6_includes_envelope_component_columns() {
 #[test]
 fn verbosity_7_includes_schedule_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema = build_schema(&specs, 7, &[]);
+    let schema = build_schema_for_specs(&specs, 7, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"ASHP Heater Schedule (-)"),
@@ -302,7 +392,7 @@ fn verbosity_7_includes_schedule_columns() {
 #[test]
 fn verbosity_8_includes_capacity_and_cop_columns() {
     let specs = vec![make_spec("ASHP Heater", FuelType::Electric)];
-    let schema = build_schema(&specs, 8, &[]);
+    let schema = build_schema_for_specs(&specs, 8, &[]);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         names.contains(&"ASHP Heater Capacity (W)"),
@@ -322,11 +412,14 @@ fn verbosity_8_includes_capacity_and_cop_columns() {
 fn gas_annual_energy_therms_is_non_none_with_gas_column() {
     let schema =
         schema_from_columns(&["Total Electric Power (kW)", "Total Gas Power (therms/hour)"]);
-    let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-    calc.accumulate(&build_batch(vec![
-        ("Total Electric Power (kW)", vec![1.0, 2.0]),
-        ("Total Gas Power (therms/hour)", vec![0.5, 1.5]),
-    ]))
+    let mut calc = calc_for(&schema, 3600, &test_config(None), &[]);
+    accumulate(
+        &mut calc,
+        &build_batch(vec![
+            ("Total Electric Power (kW)", vec![1.0, 2.0]),
+            ("Total Gas Power (therms/hour)", vec![0.5, 1.5]),
+        ]),
+    )
     .unwrap();
     let metrics = calc.finish().unwrap();
 
@@ -345,11 +438,14 @@ fn gas_annual_energy_therms_is_non_none_with_gas_column() {
 fn total_energy_includes_both_electric_and_gas() {
     let schema =
         schema_from_columns(&["Total Electric Power (kW)", "Total Gas Power (therms/hour)"]);
-    let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-    calc.accumulate(&build_batch(vec![
-        ("Total Electric Power (kW)", vec![1.0]),
-        ("Total Gas Power (therms/hour)", vec![1.0]),
-    ]))
+    let mut calc = calc_for(&schema, 3600, &test_config(None), &[]);
+    accumulate(
+        &mut calc,
+        &build_batch(vec![
+            ("Total Electric Power (kW)", vec![1.0]),
+            ("Total Gas Power (therms/hour)", vec![1.0]),
+        ]),
+    )
     .unwrap();
     let metrics = calc.finish().unwrap();
 
@@ -359,7 +455,9 @@ fn total_energy_includes_both_electric_and_gas() {
     let combined = electric_kwh + gas.total_kwh_equivalent;
 
     // combined = electric_kwh + energy_therms_to_kwh(gas_therms)
-    let expected_combined = electric_kwh + energy_therms_to_kwh(gas_therms);
+    let expected_combined = electric_kwh
+        + uom::si::f64::Energy::new::<hares_types::si_units::energy::therm>(gas_therms)
+            .get::<uom::si::energy::kilowatt_hour>();
     assert!(
         (combined - expected_combined).abs() < 1e-6,
         "combined total ({combined}) should equal electric ({electric_kwh}) + gas ({gas_therms}) therms converted to kWh = {expected_combined}"
@@ -490,27 +588,31 @@ fn null_bldg_id_returns_error() {
 
 #[test]
 fn csv_writer_finish_flushes_all_data() {
-    let tmp = NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempdir().unwrap();
+    let path = tmp.path().join("out.csv");
 
     let schema = Schema::new(vec![
-        Field::new("Time", DataType::Utf8, false),
+        Field::new(
+            "Time",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        ),
         Field::new("Total Electric Power (kW)", DataType::Float64, true),
     ]);
     let mut recorder = hares_io::StreamingRecorder::new(
         schema,
         1000,
-        OutputFormat::Csv,
-        &path,
-        false,
-        hares_io::RotationPolicy::None,
+        Destination::Csv {
+            path: path.clone(),
+            overwrite: false,
+        },
     )
     .unwrap();
 
     // Write fewer rows than chunk_size to ensure finish() triggers flush.
     for i in 0..5 {
         recorder
-            .push_row(&format!("2024-01-01T00:{i:02}:00Z"), &[i as f64])
+            .push_row(i64::from(i) * 60_000, &[i as f64], &[true])
             .unwrap();
     }
     assert_eq!(recorder.buffered_rows(), 5);
@@ -543,7 +645,11 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
 
     // Write a valid file first.
     let schema = Schema::new(vec![
-        Field::new("Time", DataType::Utf8, false),
+        Field::new(
+            "Time",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        ),
         Field::new("Total Electric Power (kW)", DataType::Float64, true),
     ]);
 
@@ -552,13 +658,13 @@ fn csv_writer_finish_on_read_only_path_propagates_io_error() {
     let mut recorder = hares_io::StreamingRecorder::new(
         schema,
         1000,
-        OutputFormat::Csv,
-        &path,
-        false,
-        hares_io::RotationPolicy::None,
+        Destination::Csv {
+            path,
+            overwrite: false,
+        },
     )
     .unwrap();
-    recorder.push_row("2024-01-01T00:00:00Z", &[1.0]).unwrap();
+    recorder.push_row(0, &[1.0], &[true]).unwrap();
 
     // finish() should succeed here -- the main path works.
     let summary = recorder.finish().unwrap();
@@ -591,6 +697,35 @@ fn write_complete_ev_mapping(dir: &std::path::Path) {
         ));
     }
     std::fs::write(ev_dir.join("vehicle_mapping.csv"), csv_content).unwrap();
+}
+
+/// The required CSVs a loadable tree carries beside the files under test:
+/// the water-heating CSV and the envelope LUT's three CSVs, header-only.
+fn write_required_csvs(dir: &std::path::Path) {
+    let wh = dir.join("water_heating");
+    std::fs::create_dir_all(&wh).unwrap();
+    std::fs::write(
+        wh.join("default_paramters.csv"),
+        "Description,Name,Value,Units\n",
+    )
+    .unwrap();
+    let env = dir.join("envelope");
+    std::fs::create_dir_all(&env).unwrap();
+    std::fs::write(
+        env.join("Envelope Boundary Types.csv"),
+        "Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Assembly R Value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.join("Envelope Materials.csv"),
+        "Boundary Name,Boundary Type,Resistance (m^2-K/W),Capacitance (kJ/m^2-K)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.join("Envelope Boundaries.csv"),
+        "Boundary Name,Exterior Zone Label,Interior Zone Label\n",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -673,6 +808,18 @@ tdb_bounds = [-20.0, 30.0]
          [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
     )
     .unwrap();
+    std::fs::write(
+        dir.path().join("HVAC Multispeed Parameters.csv"),
+        "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,SHR 1\n",
+    )
+    .unwrap();
+    write_required_csvs(dir.path());
+    std::fs::write(
+        dir.path().join("HVAC Multispeed Parameters.csv"),
+        "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,SHR 1\n",
+    )
+    .unwrap();
+    write_required_csvs(dir.path());
 
     let store = hares_io::DefaultsStore::load(dir.path()).expect("load defaults");
 
@@ -779,6 +926,12 @@ tdb_bounds = [-25.0, 25.0]
          [[points]]\ncapacity_ratio = 1.0\nefficiency_ratio = 1.0\n",
     )
     .unwrap();
+    std::fs::write(
+        dir.path().join("HVAC Multispeed Parameters.csv"),
+        "HVAC Name,HVAC Efficiency,Number of Speeds,Capacity Ratio 1,Air Flow Ratio 1,COP 1,SHR 1\n",
+    )
+    .unwrap();
+    write_required_csvs(dir.path());
 
     let store = hares_io::DefaultsStore::load(dir.path()).expect("load");
 
@@ -822,9 +975,13 @@ fn missing_in_state_returns_error_not_default() {
 
     let err = parse_resstock_metadata(&pq, ResStockVersion::V2024_1, tmp.path()).unwrap_err();
     match err {
-        ResStockError::MissingCharacteristic(col) => {
+        ResStockError::MissingCharacteristic {
+            bldg_id,
+            characteristic,
+        } => {
+            assert_eq!(bldg_id, 1);
             assert_eq!(
-                col, "in.state",
+                characteristic, "in.state",
                 "error must indicate the missing characteristic is 'in.state'"
             );
         }

@@ -75,10 +75,12 @@ fn write_synthetic_toml(
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = {duration_s}
-
+time_res = 60
+duration = {duration_s}
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -101,13 +103,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#
     );
     fs::write(path, content).expect("failed to write synthetic TOML");
@@ -176,7 +171,7 @@ fn zone_temperatures_evolve_across_multiple_steps() {
 // Test: net electric power is positive and finite when furnace is running
 //
 // An electric furnace at -10 C outdoor will be active. The StepResult must
-// carry a positive net_electric_power_kw. This proves the electrical solver
+// carry a positive net_electric_power_w. This proves the electrical solver
 // aggregates equipment contributions through the full pipeline.
 // ---------------------------------------------------------------------------
 
@@ -195,17 +190,17 @@ fn net_electric_power_is_positive_with_active_electric_furnace() {
     for _ in 0..60 {
         let result = dwelling.step().expect("step must succeed");
         assert!(
-            result.net_electric_power_kw.is_finite(),
-            "net_electric_power_kw must be finite at every step"
+            result.net_electric_power_w.is_finite(),
+            "net_electric_power_w must be finite at every step"
         );
-        if result.net_electric_power_kw > 0.0 {
+        if result.net_electric_power_w > 0.0 {
             ever_positive = true;
         }
     }
 
     assert!(
         ever_positive,
-        "net_electric_power_kw must be positive in at least one of 60 steps when an \
+        "net_electric_power_w must be positive in at least one of 60 steps when an \
          electric furnace is running at -10 C outdoor; this indicates the electrical solver \
          is not receiving furnace contributions"
     );
@@ -375,17 +370,23 @@ fn stale_zone_temp_regression_occupancy_gain_raises_mean_zone_temperature() {
     let path_b = dir.path().join("stale-b.toml");
 
     // Dwelling A: occupancy = 1.0 → apply_occupancy_gains deposits 75 W sensible
-    // (plus latent) into the zone thermal port every step.
+    // (plus latent) into the zone thermal port every step. The warm-up is
+    // disabled: the derivation below is the cold-start transient's; a
+    // warmed pair would sit at each dwelling's own occupancy-dependent
+    // equilibrium, past this band's ceiling.
     fs::write(
         &path_a,
         r#"building_id = 1
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 21600
-
+time_res = 60
+duration = 21600
+output_chunk_size = 1000
+master_seed = 0
+warmup = "disabled"
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -408,13 +409,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#,
     )
     .expect("write dwelling A toml");
@@ -427,10 +421,13 @@ master_seed = 0
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 21600
-
+time_res = 60
+duration = 21600
+output_chunk_size = 1000
+master_seed = 0
+warmup = "disabled"
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -453,13 +450,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#,
     )
     .expect("write dwelling B toml");
@@ -574,9 +564,9 @@ master_seed = 0
 // hvac_heating_w integral over the run.
 //
 // We assert on integrated hvac_heating_w (delivered thermal energy) rather
-// than net_electric_power_kw because IdealHVAC by design has no electric draw
+// than net_electric_power_w because IdealHVAC by design has no electric draw
 // for the heating leg itself (only optional fan power, which the synthetic
-// TOML path does not configure), so net_electric_power_kw is identically zero
+// TOML path does not configure), so net_electric_power_w is identically zero
 // in both A and B.  Thermal energy delivered is the first observable along
 // the occupancy → zone port → thermal solver → equipment back-solve chain
 // that shows the full cumulative-energy signature of the 75 W gain.
@@ -597,10 +587,12 @@ fn ideal_hvac_occupancy_gain_reduces_cumulative_heating_energy() {
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 300
-duration_s = 18000
-
+time_res = 300
+duration = 18000
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -627,13 +619,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#,
     )
     .expect("write dwelling A toml");
@@ -644,10 +629,12 @@ master_seed = 0
 
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 300
-duration_s = 18000
-
+time_res = 300
+duration = 18000
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -674,13 +661,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#,
     )
     .expect("write dwelling B toml");
@@ -913,10 +893,13 @@ fn normal_operation_produces_no_dispatch_warnings() {
         dwelling.step().expect("step");
     }
 
-    let dispatch_warnings: Vec<&String> = dwelling
+    let dispatch_warnings: Vec<&hares_types::Warning> = dwelling
         .warnings
         .iter()
-        .filter(|w| w.contains("control target not found") || w.contains("control apply failed"))
+        .filter(|w| {
+            w.message.contains("control target not found")
+                || w.message.contains("control apply failed")
+        })
         .collect();
     assert!(
         dispatch_warnings.is_empty(),
@@ -1102,7 +1085,7 @@ fn thermostat_is_evicted_with_its_equipment() {
     assert!(
         warnings
             .iter()
-            .any(|w| w.contains("IdealThermostat") && w.contains(&heating_name)),
+            .any(|w| w.message.contains("IdealThermostat") && w.message.contains(&heating_name)),
         "the removed override is reported, got {warnings:?}"
     );
     dwelling

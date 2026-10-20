@@ -7,9 +7,6 @@ use super::core_config::default_one;
 use super::heat_pump::defrost::DefrostConfig;
 use super::heating_config::{DuctConfig, HvacSetpointConfig};
 
-fn default_min_compressor_fraction() -> f64 {
-    0.25
-}
 use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
 use hares_types::{FuelType, ThermostatBandClass, validate_thermostat_band_c};
@@ -84,13 +81,16 @@ pub struct HeatPumpCommonConfig {
     pub plf_min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plf_max: Option<f64>,
-    /// Minimum compressor speed as a fraction of rated capacity for mini-split heat pumps.
-    /// Default 0.25 matches the original hardcoded value; OCHRE uses 0.40 for MSHP Heater
-    /// (from "HVAC Multispeed Parameters.csv"). EnergyPlus sets minimum compressor capacity
-    /// via the ratio of Speed 1 to Speed N `Gross Rated Heating Capacity` fields in
+    /// Minimum compressor speed as a fraction of rated capacity for mini-split heat
+    /// pumps, as declared by the input (HPXML `MinimumCapacity` / HeatingCapacity).
+    /// `None` (the serde default) means undeclared: the mini-split heater takes
+    /// OCHRE's default stage table (`MSHP_DEFAULT_STAGE_RATIOS`). A declared value,
+    /// including 0.25, keeps the even stage family from that fraction as the
+    /// explicit override. EnergyPlus sets minimum compressor capacity via the ratio
+    /// of Speed 1 to Speed N `Gross Rated Heating Capacity` fields in
     /// `Coil:Heating:DX:MultiSpeed` — there is no single "minimum fraction" parameter.
-    #[serde(default = "default_min_compressor_fraction")]
-    pub min_compressor_fraction: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_compressor_fraction: Option<f64>,
     /// Fractional EIR reduction at part load: `eir[i] = rated_eir * (1 - benefit * (1 - frac[i]))`.
     /// Default `None` = 0.0 (constant EIR, current behavior). Values of 0.1–0.2 are typical
     /// for inverter compressors where COP improves at lower compressor speeds due to reduced
@@ -221,7 +221,7 @@ impl Default for HeatPumpCommonConfig {
             ff_max: None,
             plf_min: None,
             plf_max: None,
-            min_compressor_fraction: 0.25,
+            min_compressor_fraction: None,
             eir_part_load_benefit: None,
             er_stages: 1,
             charge_defect_ratio: None,
@@ -305,6 +305,928 @@ pub struct HeatPumpHeaterConfig {
 impl EquipmentTypedConfig for HeatPumpHeaterConfig {
     fn equipment_type_name() -> &'static str {
         super::core_config::equipment_type_name::ASHP_HEATER
+    }
+}
+
+/// The heat pump heater's fields as the input schema publishes them: the
+/// flattened common's, the heater-only ones and the flattened defrost's,
+/// hand-listed (a flattened struct rejects the probe without a list) and
+/// pinned by the deserialisation round trip in the module's tests.
+impl hares_types::DescribeFields for HeatPumpHeaterConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::named_field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_eir",
+                hares_types::FieldMeta {
+                    description: Some("the heating energy input ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_heating_capacities_w",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage heating capacities, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_heating_eirs",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage heating energy input ratios"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_fuel",
+                hares_types::FieldMeta {
+                    description: Some("the backup heating fuel"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the backup heating capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_eir",
+                hares_types::FieldMeta {
+                    description: Some("the backup heating energy input ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fraction_heating_load_served",
+                hares_types::FieldMeta {
+                    description: Some("the fraction of the heating load the equipment serves"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cooling_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cooling_eir",
+                hares_types::FieldMeta {
+                    description: Some("the cooling energy input ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_cooling_capacities_w",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage cooling capacities, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_cooling_eirs",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage cooling energy input ratios"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fraction_cooling_load_served",
+                hares_types::FieldMeta {
+                    description: Some("the fraction of the cooling load the equipment serves"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_speeds",
+                hares_types::FieldMeta {
+                    description: Some("the number of speed stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "is_mini_split",
+                hares_types::FieldMeta {
+                    description: Some("whether the unit is a ductless mini-split"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "shr",
+                hares_types::FieldMeta {
+                    description: Some("the sensible heat ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w_per_cfm",
+                hares_types::FieldMeta {
+                    description: Some("the fan power per cfm of airflow, W/cfm"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "airflow_m3_s_per_w",
+                hares_types::FieldMeta {
+                    description: Some("the explicit airflow per watt of capacity, m3/s/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hysteresis_c",
+                hares_types::FieldMeta {
+                    description: Some("the cycling hysteresis band, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct",
+                hares_types::FieldMeta {
+                    description: Some("the duct distribution configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x1_min",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's indoor-temperature lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x1_max",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's indoor-temperature upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x2_min",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's outdoor-temperature lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x2_max",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's outdoor-temperature upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ff_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor curve's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ff_max",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor curve's upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_max",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_compressor_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the compressor's minimum modulation fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eir_part_load_benefit",
+                hares_types::FieldMeta {
+                    description: Some("the part-load EIR benefit"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "er_stages",
+                hares_types::FieldMeta {
+                    description: Some("the electric-resistance backup's stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charge_defect_ratio",
+                hares_types::FieldMeta {
+                    description: Some("the refrigerant charge defect ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_loop_depth_m",
+                hares_types::FieldMeta {
+                    description: Some("the ground loop's depth, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_pipe_diameter_m",
+                hares_types::FieldMeta {
+                    description: Some("the ground loop's pipe diameter, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_flow_rate_m3_per_s",
+                hares_types::FieldMeta {
+                    description: Some("the ground loop's flow rate, m3/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the circulation pump's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_motor_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the pump motor's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_system_head_loss_m",
+                hares_types::FieldMeta {
+                    description: Some("the pump system's head loss, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "enter_water_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the ground loop's entering water temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_depth_m",
+                hares_types::FieldMeta {
+                    description: Some("the borehole's depth, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_radius_m",
+                hares_types::FieldMeta {
+                    description: Some("the borehole's radius, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_shank_spacing_m",
+                hares_types::FieldMeta {
+                    description: Some("the borehole's shank spacing, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_boreholes",
+                hares_types::FieldMeta {
+                    description: Some("the borefield's borehole count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_soil_conductivity_w_per_m_k",
+                hares_types::FieldMeta {
+                    description: Some("the soil's thermal conductivity, W/m K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_soil_diffusivity_m2_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the soil's thermal diffusivity, m2/day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_grout_conductivity_w_per_m_k",
+                hares_types::FieldMeta {
+                    description: Some("the grout's thermal conductivity, W/m K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_pipe_outer_radius_m",
+                hares_types::FieldMeta {
+                    description: Some("the U-tube's outer radius, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_pipe_inner_radius_m",
+                hares_types::FieldMeta {
+                    description: Some("the U-tube's inner radius, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_pipe_conductivity_w_per_m_k",
+                hares_types::FieldMeta {
+                    description: Some("the pipe's thermal conductivity, W/m K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hp_lockout_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the heat pump's lockout outdoor temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "er_lockout_temp_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the electric-resistance backup's lockout temperature, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_oat_supplemental_c",
+                hares_types::FieldMeta {
+                    description: Some("the supplemental ER's outdoor-temperature cap, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "er_setpoint_offset_c",
+                hares_types::FieldMeta {
+                    description: Some("the ER call threshold below the heating setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "er_hard_lockout_time_s",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the ER hard lockout duration after a setpoint raise, seconds",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_shr",
+                hares_types::FieldMeta {
+                    description: Some("the heating-side sensible heat ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_ratio_at_17f",
+                hares_types::FieldMeta {
+                    description: Some("the heating capacity's ratio at 17 F to its rated capacity"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_capacity_reduction_factor",
+                hares_types::FieldMeta {
+                    description: Some("the defrost's capacity reduction factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fixed defrost power draw, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_control",
+                hares_types::FieldMeta {
+                    description: Some("the defrost control mode"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_strategy",
+                hares_types::FieldMeta {
+                    description: Some("the defrost strategy"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_time_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the timed defrost's hour fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_max_oat_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the defrost activation's maximum outdoor temperature, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_eir_coeffs",
+                hares_types::FieldMeta {
+                    description: Some("the defrost EIR curve's coefficients"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "resistive_defrost_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the resistive defrost heater's capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "resistive_defrost_zone_fraction",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the resistive defrost element's share of heat reaching the zone; \
+                         the remainder is frost-melt loss outdoors",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "defrost_discrete_cycle",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "whether the discrete frost cycle resolves the defrost penalty \
+                         into explicit events owning the per-step multipliers",
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The heat pump cooler's fields, the common's plus the cooler-only ones.
+impl hares_types::DescribeFields for HeatPumpCoolerConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::named_field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_eir",
+                hares_types::FieldMeta {
+                    description: Some("the heating energy input ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_heating_capacities_w",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage heating capacities, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_heating_eirs",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage heating energy input ratios"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_fuel",
+                hares_types::FieldMeta {
+                    description: Some("the backup heating fuel"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the backup heating capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "backup_eir",
+                hares_types::FieldMeta {
+                    description: Some("the backup heating energy input ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fraction_heating_load_served",
+                hares_types::FieldMeta {
+                    description: Some("the fraction of the heating load the equipment serves"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cooling_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cooling_eir",
+                hares_types::FieldMeta {
+                    description: Some("the cooling energy input ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_cooling_capacities_w",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage cooling capacities, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_cooling_eirs",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage cooling energy input ratios"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fraction_cooling_load_served",
+                hares_types::FieldMeta {
+                    description: Some("the fraction of the cooling load the equipment serves"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_speeds",
+                hares_types::FieldMeta {
+                    description: Some("the number of speed stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "is_mini_split",
+                hares_types::FieldMeta {
+                    description: Some("whether the unit is a ductless mini-split"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "shr",
+                hares_types::FieldMeta {
+                    description: Some("the sensible heat ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w_per_cfm",
+                hares_types::FieldMeta {
+                    description: Some("the fan power per cfm of airflow, W/cfm"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "airflow_m3_s_per_w",
+                hares_types::FieldMeta {
+                    description: Some("the explicit airflow per watt of capacity, m3/s/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hysteresis_c",
+                hares_types::FieldMeta {
+                    description: Some("the cycling hysteresis band, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct",
+                hares_types::FieldMeta {
+                    description: Some("the duct distribution configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x1_min",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's indoor-temperature lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x1_max",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's indoor-temperature upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x2_min",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's outdoor-temperature lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x2_max",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's outdoor-temperature upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ff_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor curve's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ff_max",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor curve's upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_max",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_compressor_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the compressor's minimum modulation fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eir_part_load_benefit",
+                hares_types::FieldMeta {
+                    description: Some("the part-load EIR benefit"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "er_stages",
+                hares_types::FieldMeta {
+                    description: Some("the electric-resistance backup's stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charge_defect_ratio",
+                hares_types::FieldMeta {
+                    description: Some("the refrigerant charge defect ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_loop_depth_m",
+                hares_types::FieldMeta {
+                    description: Some("the ground loop's depth, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_pipe_diameter_m",
+                hares_types::FieldMeta {
+                    description: Some("the ground loop's pipe diameter, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_flow_rate_m3_per_s",
+                hares_types::FieldMeta {
+                    description: Some("the ground loop's flow rate, m3/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the circulation pump's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_motor_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the pump motor's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pump_system_head_loss_m",
+                hares_types::FieldMeta {
+                    description: Some("the pump system's head loss, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "enter_water_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the ground loop's entering water temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_depth_m",
+                hares_types::FieldMeta {
+                    description: Some("the borehole's depth, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_radius_m",
+                hares_types::FieldMeta {
+                    description: Some("the borehole's radius, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_shank_spacing_m",
+                hares_types::FieldMeta {
+                    description: Some("the borehole's shank spacing, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_boreholes",
+                hares_types::FieldMeta {
+                    description: Some("the borefield's borehole count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_soil_conductivity_w_per_m_k",
+                hares_types::FieldMeta {
+                    description: Some("the soil's thermal conductivity, W/m K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_soil_diffusivity_m2_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the soil's thermal diffusivity, m2/day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_grout_conductivity_w_per_m_k",
+                hares_types::FieldMeta {
+                    description: Some("the grout's thermal conductivity, W/m K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_pipe_outer_radius_m",
+                hares_types::FieldMeta {
+                    description: Some("the U-tube's outer radius, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_pipe_inner_radius_m",
+                hares_types::FieldMeta {
+                    description: Some("the U-tube's inner radius, metres"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "borehole_pipe_conductivity_w_per_m_k",
+                hares_types::FieldMeta {
+                    description: Some("the pipe's thermal conductivity, W/m K"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_shrs",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage sensible heat ratios"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "crankcase_heater_w",
+                hares_types::FieldMeta {
+                    description: Some("the crankcase heater's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "crankcase_heater_threshold_c",
+                hares_types::FieldMeta {
+                    description: Some("the crankcase heater's outdoor threshold, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_oat_cooling_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the compressor's minimum outdoor temperature for cooling, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ])
     }
 }
 
@@ -436,13 +1358,13 @@ impl HeatPumpHeaterConfig {
                 }
             }
         }
-        if self.common.is_mini_split {
-            let v = self.common.min_compressor_fraction;
-            if !v.is_finite() || !(0.1..=0.5).contains(&v) {
-                return Err(HaresError::Equipment(format!(
-                    "HeatPumpHeaterConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
-                )));
-            }
+        if self.common.is_mini_split
+            && let Some(v) = self.common.min_compressor_fraction
+            && (!v.is_finite() || !(0.1..=0.5).contains(&v))
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpHeaterConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
+            )));
         }
         if let Some(v) = self.common.eir_part_load_benefit {
             if !v.is_finite() || !(0.0..=1.0).contains(&v) {
@@ -494,7 +1416,7 @@ pub struct HeatPumpCoolerConfig {
     /// ASHP default 0.050 kW (50 W) at 12.78°C (55°F); MSHP default 0.015 kW
     /// (15 W) at 0°C (32°F). OCHRE HVAC.py AirConditioner class.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crankcase_heater_kw: Option<f64>,
+    pub crankcase_heater_w: Option<f64>,
     /// Crankcase heater activation threshold [°C]. The heater draws power when
     /// OAT < this threshold and the compressor is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -531,7 +1453,7 @@ impl Default for HeatPumpCoolerConfig {
         Self {
             common: HeatPumpCommonConfig::default(),
             stage_shrs: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: default_min_oat_cooling_c(),
             reject_unknown_keys: crate::RejectUnknownKeys,
@@ -667,13 +1589,13 @@ impl HeatPumpCoolerConfig {
             ));
         }
 
-        if self.common.is_mini_split {
-            let v = self.common.min_compressor_fraction;
-            if !v.is_finite() || !(0.1..=0.5).contains(&v) {
-                return Err(HaresError::Equipment(format!(
-                    "HeatPumpCoolerConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
-                )));
-            }
+        if self.common.is_mini_split
+            && let Some(v) = self.common.min_compressor_fraction
+            && (!v.is_finite() || !(0.1..=0.5).contains(&v))
+        {
+            return Err(HaresError::Equipment(format!(
+                "HeatPumpCoolerConfig: min_compressor_fraction must be in [0.1, 0.5], got {v}"
+            )));
         }
         if let Some(v) = self.common.eir_part_load_benefit {
             if !v.is_finite() || !(0.0..=1.0).contains(&v) {
@@ -762,7 +1684,7 @@ mod tests {
                 ff_max: Some(1.2),
                 plf_min: Some(0.7),
                 plf_max: Some(1.0),
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: Some(0.25),
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -859,7 +1781,7 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: Some(vec![0.78, 0.72]),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: 10.0,
         };
@@ -981,7 +1903,7 @@ mod tests {
                 ff_max: Some(1.2),
                 plf_min: Some(0.7),
                 plf_max: Some(1.0),
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: Some(0.25),
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -1041,7 +1963,7 @@ mod tests {
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: Some(vec![0.78, 0.72]),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: 10.0,
         };
@@ -1123,11 +2045,11 @@ mod tests {
                 cooling_capacity_w: Some(12_000.0),
                 cooling_eir: Some(0.25),
                 is_mini_split: true,
-                min_compressor_fraction: 0.05,
+                min_compressor_fraction: Some(0.05),
                 ..HeatPumpCommonConfig::default()
             },
             stage_shrs: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: 10.0,
         };
@@ -1138,7 +2060,7 @@ mod tests {
             "cooler validation must reject min_compressor_fraction < 0.1; got: {err}",
         );
 
-        cfg_below.common.min_compressor_fraction = 0.55;
+        cfg_below.common.min_compressor_fraction = Some(0.55);
         let err = cfg_below.validate().unwrap_err();
         assert!(
             err.to_string()
@@ -1148,17 +2070,30 @@ mod tests {
     }
 
     #[test]
-    fn min_compressor_fraction_defaults_to_25_percent() {
+    fn min_compressor_fraction_defaults_to_undeclared() {
         let json = serde_json::json!({
             "heating_capacity_w": 10_000.0,
             "heating_eir": 0.25,
         });
         let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
         assert!(
-            (cfg.common.min_compressor_fraction - 0.25).abs() < 1e-9,
-            "default min_compressor_fraction must be 0.25; got {}",
+            cfg.common.min_compressor_fraction.is_none(),
+            "default min_compressor_fraction must be undeclared; got {:?}",
             cfg.common.min_compressor_fraction,
         );
+    }
+
+    #[test]
+    fn min_compressor_fraction_declared_25_percent_round_trips() {
+        // A declared 0.25 must survive as declared: it is not the undeclared
+        // default. The declared value keeps the even stage family (D-020).
+        let json = serde_json::json!({
+            "heating_capacity_w": 10_000.0,
+            "heating_eir": 0.25,
+            "min_compressor_fraction": 0.25,
+        });
+        let cfg: HeatPumpHeaterConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.common.min_compressor_fraction, Some(0.25));
     }
 
     #[test]

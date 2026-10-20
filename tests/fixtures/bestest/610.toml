@@ -1,12 +1,15 @@
 building_id = 610
 
+# The warm-up: the [simulation] table's warmup field, the default
+# converging warm-up (the EnergyPlus criteria).
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 172800
-initialization_duration_s = 86400  # 1 day warmup (lightweight construction)
-
+time_res = 60
+duration = 172800
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -30,9 +33,3 @@ ach = 0.0
 [schedule]
 occupancy = 0.0
 occupants_present = false
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0

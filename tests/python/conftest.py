@@ -6,9 +6,13 @@ import ast
 import sys
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from skip_gate import pytest_addoption, pytest_configure  # noqa: F401  (hooks)
+
+if TYPE_CHECKING:
+    from hares import ReportSpec
 
 # Every test runs off the network unless marked ``network`` (offline_guard).
 pytest_plugins = ["offline_guard_plugin", "pytester"]
@@ -28,10 +32,33 @@ if str(PYTHON_SRC) not in sys.path:
 # the defect and its signal are pinned in test_helics_pyarrow_symbol_order.py.
 import pyarrow.parquet  # noqa: F401  (must precede any helics import)
 
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
+
+# The removed-key messages the four site keywords raise on every Python
+# constructor, exactly as the Rust removed-keys table spells them. One
+# constant: every Python pin of the message reads it, so a wording change
+# is one edit, and the pins assert the full text, not a fragment.
+REMOVED_SITE_KEYWORD_MESSAGES: dict[str, str] = {
+    "latitude": (
+        "configuration key 'latitude' was removed: pass site_location = "
+        "SiteLocationOverride(latitude_deg=...)"
+    ),
+    "longitude": (
+        "configuration key 'longitude' was removed: pass site_location = "
+        "SiteLocationOverride(longitude_deg=...)"
+    ),
+    "elevation_m": (
+        "configuration key 'elevation_m' was removed: pass site_location = "
+        "SiteLocationOverride(elevation_m=...)"
+    ),
+    "utc_offset_h": (
+        "configuration key 'utc_offset_h' was removed: pass site_location = "
+        "SiteLocationOverride(utc_offset_h=...)"
+    ),
+}
 
 # The modules marked ochre import OCHRE (or its group's xmltodict) at module
 # level, with no skip guard, and marker selection applies only after a module
@@ -94,70 +121,93 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
     return None
 
 
-def output_in_test_dir(config: Mapping[str, object], filename: str) -> Callable[..., None]:
-    """An autouse fixture pointing ``config["output_path"]`` into each test's ``tmp_path``.
+def reports_for(verbosity: int = 0, csv_path: str | None = None) -> list[ReportSpec]:
+    """The report requests for a test run: a ``verbosity`` memory report
+    (its batches are the frame a finished run's ``RunResult`` reports
+    carry, read through ``ReportResult.table()``), plus a csv file
+    destination when a test reads the file. Reports live only where a test
+    declares them: nothing is recorded that no report requests."""
+    from hares import Destination, ReportSpec, Selection
 
-    For a module whose shared run config must write output: bind the result to
-    a module-level name and every test in the module writes its own file,
-    removed with the test's temporary directory.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _output_in_test_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setitem(config, "output_path", str(tmp_path / filename))
-
-    return _output_in_test_dir
+    reports: list[ReportSpec] = []
+    if verbosity >= 0:
+        reports.append(
+            ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())
+        )
+    if csv_path is not None:
+        reports.append(
+            ReportSpec("file", Selection.verbosity(max(verbosity, 0)), Destination.csv(csv_path))
+        )
+    return reports
 
 
 def _is_helics_module(name: str) -> bool:
-    return name in ("helics", "ochre_next.helics") or name.startswith(("helics.", "ochre_next.helics."))
+    return name in ("helics", "hares.helics") or name.startswith(("helics.", "hares.helics."))
 
 
 @pytest.fixture
 def restore_helics_modules() -> Iterator[None]:
-    """Put back the real ``helics`` and ``ochre_next.helics`` modules after the test.
+    """Put back the real ``helics`` and ``hares.helics`` modules after the test.
 
-    For a test that re-imports ``ochre_next.helics`` under a fake ``helics``:
+    For a test that re-imports ``hares.helics`` under a fake ``helics``:
     without it the fake-bound modules stay in ``sys.modules``, and every later
     test in the process that imports them gets the fake.
     """
-    import ochre_next
+    import hares
 
     saved = {name: module for name, module in sys.modules.items() if _is_helics_module(name)}
-    package = ochre_next.__dict__.get("helics")
+    package = hares.__dict__.get("helics")
     yield
     for name in [name for name in sys.modules if _is_helics_module(name)]:
         del sys.modules[name]
     sys.modules.update(saved)
     if package is None:
-        ochre_next.__dict__.pop("helics", None)
+        hares.__dict__.pop("helics", None)
     else:
-        ochre_next.__dict__["helics"] = package
+        hares.__dict__["helics"] = package
 
 
 def make_dwelling(
     duration_s: int = 300,
     time_res_s: int = 60,
     seed: int = 0,
-    output_verbosity: int = 0,
+    verbosity: int = 0,
     start_time: str = "2019-01-01T00:00:00",
-    write_output: bool = False,
+    sim_config=None,
+    csv_path: str | None = None,
+    metrics: bool = True,
     **kw,
 ):
-    from ochre_next import Dwelling
+    """Build and initialize a dwelling from the committed BEopt inputs.
 
+    The sim config states every field the tests' frames read: the
+    ``verbosity`` memory report keeps the recorder's batches in memory,
+    which the finished run's ``RunResult`` carries and a report's
+    ``table()`` reads for the full schema; ``csv_path`` adds a csv file
+    destination when a test reads the file. ``metrics`` requests the run
+    metrics the tests read (pass ``metrics=False`` for a run that must
+    carry none). Nothing in the engine defaults a report on: nothing is
+    recorded that no report requests, and no metrics are computed that
+    were not requested.
+    """
+    from hares import Dwelling, SimulationConfig
+
+    if sim_config is None:
+        sim_config = SimulationConfig(
+            start_time=start_time,
+            duration=duration_s,
+            time_res=time_res_s,
+            master_seed=seed,
+            reports=reports_for(verbosity, csv_path),
+            metrics=metrics,
+        )
     dw = Dwelling.from_hpxml(
         HPXML,
         SCHEDULE,
         WEATHER,
-        start_time=start_time,
-        duration_s=duration_s,
-        time_res_s=time_res_s,
-        defaults_path=str(HARES_DEFAULTS),
+        config=sim_config,
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
-        master_seed=seed,
-        output_verbosity=output_verbosity,
-        write_output=write_output,
         **kw,
     )
     dw.initialize()

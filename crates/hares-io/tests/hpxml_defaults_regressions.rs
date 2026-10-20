@@ -23,7 +23,7 @@ fn repo_defaults() -> DefaultsStore {
         .expect("crates dir")
         .parent()
         .expect("repo root")
-        .join("defaults");
+        .join("python/hares/defaults");
     DefaultsStore::load(&defaults_dir).expect("load defaults")
 }
 
@@ -38,6 +38,7 @@ fn minimal_hpxml_with_systems(systems_xml: &str) -> String {
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+          <NumberofBedrooms>3</NumberofBedrooms>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -227,7 +228,14 @@ fn missing_hvac_type_tags_fail_resolution_instead_of_defaulting() {
     for (label, systems_xml, missing_field) in cases {
         let xml = minimal_hpxml_with_systems(systems_xml);
         let building = parse_building(&xml).expect("minimal fixture should parse");
-        let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
+        let result = resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &DefaultsStore::empty(),
+            None,
+            &mut Vec::new(),
+        );
         // Every missing HVAC type tag fails resolution: an HVAC
         // system whose type the input does not state is an input defect,
         // not a system to skip. ResStock homes that encode "no central
@@ -251,8 +259,15 @@ fn base_fixture_resolves_expected_typed_specs_with_repo_defaults() {
     // without triggering the no-silent-defaults guard.
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
-    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-        .expect("base fixture equipment should resolve with repo defaults");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("base fixture equipment should resolve with repo defaults");
 
     let furnace = specs
         .iter()
@@ -292,8 +307,15 @@ fn dehumidifier_capacity_pints_to_liters_conversion_uses_correct_factor() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-        .expect("dehumidifier fixture equipment should resolve");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("dehumidifier fixture equipment should resolve");
 
     let dehumidifier_spec = specs
         .iter()
@@ -357,8 +379,15 @@ fn central_ac_seer_18_two_stage_populates_per_stage_data() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-        .expect("AC equipment should resolve");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("AC equipment should resolve");
 
     let ac_spec = specs
         .iter()
@@ -429,8 +458,15 @@ fn central_ac_seer_22_fallback_4_speed_populates_per_stage_data() {
     building.site.latitude_deg = Some(39.75);
     building.site.longitude_deg = Some(-104.99);
 
-    let specs = resolve_equipment(&building, &repo_defaults(), None, &mut Vec::new())
-        .expect("AC 4-speed equipment should resolve");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("AC 4-speed equipment should resolve");
 
     let ac_spec = specs
         .iter()

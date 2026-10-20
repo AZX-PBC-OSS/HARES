@@ -22,6 +22,15 @@ fn load_fixture() -> WeatherTimeSeries {
     parse_psm3(fixture_path()).expect("fixture should parse without error")
 }
 
+/// The run start the resample tests read from: the fixture's own first
+/// midnight.
+fn test_start() -> chrono::NaiveDateTime {
+    chrono::NaiveDate::from_ymd_opt(2018, 1, 1)
+        .expect("date")
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight")
+}
+
 /// Write a temporary PSM3 file from a string, returning the path.
 /// The file is deleted when the returned handle is dropped.
 fn write_temp_psm3(contents: &str) -> tempfile::NamedTempFile {
@@ -215,7 +224,14 @@ fn psm3_detects_hourly_resolution() {
 #[test]
 fn psm3_5min_no_resample_at_300s() {
     let ts = load_fixture();
-    let resampled = ts.resample(300).expect("no-op resample should succeed");
+    let resampled = ts
+        .resample(
+            300,
+            hares_io::FirstHour::default(),
+            test_start(),
+            hares_io::WeatherYear::Typical,
+        )
+        .expect("no-op resample should succeed");
     assert_eq!(resampled.len(), ts.len());
     assert_eq!(resampled.meta.source_step_secs, 300);
     assert_eq!(resampled.dry_bulb_c, ts.dry_bulb_c);
@@ -225,40 +241,25 @@ fn psm3_5min_no_resample_at_300s() {
     assert_eq!(resampled.ground_temp_c, ts.ground_temp_c);
 }
 
-/// Downsampling from 5-min to hourly must preserve the daily solar energy integral.
-///
-/// For period-average irradiance, energy = mean_irradiance × duration.
-/// Downsampling via mean preserves the average, so
-///   sum(GHI_5min) × 300s == sum(GHI_hourly) × 3600s
-/// for each 24-hour block.
+/// A sub-hourly file at any other step is the interval-mismatch error:
+/// the file's records are the run's timesteps, so a 5-minute file runs
+/// at a 300 s step or not at all (EnergyPlus refuses the mismatch,
+/// WeatherManager.cc:715-722).
 #[test]
-fn psm3_downsample_preserves_daily_solar_integral() {
+fn psm3_subhourly_file_at_another_interval_is_an_error() {
     let ts = load_fixture();
-    let hourly = ts
-        .resample(3600)
-        .expect("downsample to hourly should succeed");
-    assert_eq!(hourly.len(), 8_760);
-
-    // Compare total GHI energy over the full year.
-    // Energy_5min = sum(GHI_5min) * 300 [W·s/m²]
-    // Energy_hourly = sum(GHI_hourly) * 3600 [W·s/m²]
-    let energy_5min: f64 = ts.ghi_w_m2.iter().sum::<f64>() * 300.0;
-    let energy_hourly: f64 = hourly.ghi_w_m2.iter().sum::<f64>() * 3600.0;
-
-    let rel_err = (energy_5min - energy_hourly).abs() / energy_5min.max(1.0);
-    assert!(
-        rel_err < 1e-8,
-        "solar integral mismatch: 5min={energy_5min:.1}, hourly={energy_hourly:.1}, rel_err={rel_err:.2e}"
-    );
-
-    // Also verify per-day: pick day 1 (indices 0..288 for 5-min, 0..24 for hourly).
-    let day1_5min: f64 = ts.ghi_w_m2[..288].iter().sum::<f64>() * 300.0;
-    let day1_hourly: f64 = hourly.ghi_w_m2[..24].iter().sum::<f64>() * 3600.0;
-    let day1_rel = (day1_5min - day1_hourly).abs() / day1_5min.max(1.0);
-    assert!(
-        day1_rel < 1e-8,
-        "day 1 solar integral mismatch: 5min={day1_5min:.1}, hourly={day1_hourly:.1}"
-    );
+    for step in [900, 3600] {
+        let err = ts
+            .resample(
+                step,
+                hares_io::FirstHour::default(),
+                test_start(),
+                hares_io::WeatherYear::Typical,
+            )
+            .expect_err("the interval mismatch is an error");
+        assert!(err.to_string().contains("300"), "{err}");
+        assert!(err.to_string().contains(&step.to_string()), "{err}");
+    }
 }
 
 /// Sky temperature is computed via the Clark & Allen (1978) clear-sky emissivity model.
@@ -302,45 +303,6 @@ Year,Month,Day,Hour,Minute,GHI,DNI,DHI,Temperature,Pressure,Dew Point,Relative H
     assert!(
         err.to_string().contains("not one of"),
         "unexpected error: {err}"
-    );
-}
-
-/// Downsampling from 5-minute to hourly resolution.
-///
-/// Note: PSM3 files do not contain precipitation data. The parser fills
-/// `liquid_precip_m` with zeros, so the sum after downsampling is always 0.
-#[test]
-fn psm3_5min_downsample_to_hourly() {
-    let ts = load_fixture();
-    assert_eq!(ts.meta.source_step_secs, 300);
-
-    let hourly = ts
-        .resample(3600)
-        .expect("downsample to hourly should succeed");
-    assert_eq!(hourly.len(), 8_760);
-
-    // Dry bulb: mean of each 12-record block.
-    // Spot-check first hour: mean of ts.dry_bulb_c[0..12].
-    let expected_db_mean: f64 = ts.dry_bulb_c[..12].iter().sum::<f64>() / 12.0;
-    assert!(
-        (hourly.dry_bulb_c[0] - expected_db_mean).abs() < 1e-10,
-        "first-hour dry_bulb: expected {expected_db_mean}, got {}",
-        hourly.dry_bulb_c[0]
-    );
-
-    // GHI: mean of each 12-record block.
-    let expected_ghi_mean: f64 = ts.ghi_w_m2[..12].iter().sum::<f64>() / 12.0;
-    assert!(
-        (hourly.ghi_w_m2[0] - expected_ghi_mean).abs() < 1e-10,
-        "first-hour GHI: expected {expected_ghi_mean}, got {}",
-        hourly.ghi_w_m2[0]
-    );
-
-    // Precipitation: PSM3 has no precip data, so sum must be 0.
-    let total_precip: f64 = hourly.liquid_precip_m.iter().sum();
-    assert!(
-        total_precip.abs() < 1e-15,
-        "PSM3 has no precipitation; sum should be 0, got {total_precip}"
     );
 }
 

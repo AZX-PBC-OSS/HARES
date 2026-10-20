@@ -5,8 +5,8 @@ from datetime import datetime
 import polars as pl
 import pytest
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER
-from ochre_next import ASHPCooler, ASHPHeater, Battery, DwellingBlueprint, EndUse
-from ochre_next.simulation_plan import SimulationPlan
+from hares import ASHPCooler, ASHPHeater, Battery, DwellingBlueprint, EndUse
+from hares.simulation_plan import SimulationPlan
 
 
 def test_simulation_plan_single_segment():
@@ -14,10 +14,9 @@ def test_simulation_plan_single_segment():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
-        write_output=False,
     )
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
@@ -34,10 +33,9 @@ def test_simulation_plan_two_segments_same_equipment():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
-        write_output=False,
     )
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),
@@ -58,13 +56,38 @@ def test_simulation_plan_empty_segments_raises():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=300,
-        write_output=False,
     )
     with pytest.raises(ValueError, match="no segments"):
         plan.run()
+
+
+def test_run_returns_the_full_batch_schema(tmp_path):
+    """run()'s frame is the memory report's batch schema, not the two-column
+    steps fallback: the plan defaults to a verbosity memory report because
+    its contract is returning the run's report table, whose full schema
+    exists only when a memory report retains the flushed batches."""
+    plan = SimulationPlan(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        defaults=str(HARES_DEFAULTS),
+        bldg_id=42,
+        time_res_s=60,
+        verbosity=0,
+        output_chunk_size=4,
+    )
+    plan.add_segment(
+        start=datetime(2024, 1, 1, 0, 0),
+        end=datetime(2024, 1, 1, 0, 10),
+    )
+    results = plan.run()
+    assert "segment" in results.columns
+    # Batch-schema columns the steps fallback cannot carry.
+    assert "Outdoor Dry Bulb (C)" in results.columns
+    assert "Temperature - Indoor (C)" in results.columns
 
 
 def test_simulation_plan_swap_furnace_to_ashp():
@@ -72,10 +95,9 @@ def test_simulation_plan_swap_furnace_to_ashp():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=60,
-        write_output=False,
     )
     # Hour-long segments: the furnace segment can end with the zone above the
     # heating setpoint, and under the zone's full air capacitance it takes
@@ -124,10 +146,9 @@ def test_thermal_continuity_across_segments():
         HPXML,
         SCHEDULE,
         WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
+        defaults=str(HARES_DEFAULTS),
         bldg_id=42,
         time_res_s=300,
-        write_output=False,
     )
 
     plan.add_segment(
@@ -161,16 +182,15 @@ def test_post_build_callback_adds_battery():
     """post_build callback can add equipment before initialize."""
     plan = SimulationPlan(
         HPXML, SCHEDULE, WEATHER,
-        defaults_path=str(HARES_DEFAULTS), bldg_id=42,
+        defaults=str(HARES_DEFAULTS), bldg_id=42,
         time_res_s=300,
-        write_output=False,
     )
     battery_added = []
 
     def add_battery_post_build(dw):
         battery_added.append(True)
         assert hasattr(dw, "add_battery"), "Dwelling has no add_battery method"
-        dw.add_battery(Battery("TestBat", capacity_kwh=10))
+        dw.add_battery(Battery("TestBat", capacity_j=36000000))
 
     plan.add_segment(
         start=datetime(2024, 1, 1, 0, 0),

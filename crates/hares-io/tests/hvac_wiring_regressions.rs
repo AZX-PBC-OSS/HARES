@@ -33,6 +33,7 @@ fn wrap_systems(systems_xml: &str) -> String {
           <ConditionedFloorArea>1500</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">12000</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+          <NumberofBedrooms>3</NumberofBedrooms>
         </BuildingConstruction>
       </BuildingSummary>
       <Enclosure><Walls /></Enclosure>
@@ -45,8 +46,15 @@ fn wrap_systems(systems_xml: &str) -> String {
 
 fn resolve_ok(xml: &str) -> Vec<hares_io::hpxml::EquipmentSpec> {
     let building = parse_building(xml).expect("HPXML must parse");
-    resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment must succeed")
+    resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment must succeed")
 }
 
 fn find_spec<'a>(
@@ -106,9 +114,9 @@ fn g1_crankcase_heater_watts_wired_from_hpxml() {
         .expect("must deserialize into CentralAirConditionerConfig");
 
     assert_eq!(
-        cfg.crankcase_heater_kw,
-        Some(0.075),
-        "CrankcaseHeaterWatts=75 must wire to crankcase_heater_kw=Some(0.075 kW)"
+        cfg.crankcase_heater_w,
+        Some(75.0),
+        "CrankcaseHeaterWatts=75 must wire to crankcase_heater_w=Some(75 W)"
     );
 }
 
@@ -141,9 +149,9 @@ fn g1_crankcase_heater_absent_uses_ochre_default() {
         .expect("must deserialize into CentralAirConditionerConfig");
 
     assert_eq!(
-        cfg.crankcase_heater_kw,
-        Some(0.050),
-        "absent crankcase must apply OCHRE default of 0.050 kW (50 W) for central AC"
+        cfg.crankcase_heater_w,
+        Some(50.0),
+        "absent crankcase must apply OCHRE default of 50 W for central AC"
     );
     let threshold = cfg.crankcase_heater_threshold_c.unwrap_or(f64::NAN);
     assert!(

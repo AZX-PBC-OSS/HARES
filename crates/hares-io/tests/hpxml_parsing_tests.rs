@@ -42,6 +42,7 @@ fn minimal_xml_with_systems(systems_xml: &str) -> String {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -65,7 +66,8 @@ fn empty_weather_meta() -> WeatherMeta {
         elevation_m: 1600.0,
         wf_allows_leap_years: true,
         source_step_secs: 3600,
-        midpoint_offset_secs: 0,
+        record_label: hares_io::RecordLabel::IntervalEnd,
+        data_period: hares_io::DataPeriod::complete_year(),
         has_embedded_location: false,
         station_wmo: None,
     }
@@ -74,6 +76,7 @@ fn empty_weather_meta() -> WeatherMeta {
 fn empty_weather_ts() -> WeatherTimeSeries {
     WeatherTimeSeries {
         meta: empty_weather_meta(),
+        stamps: Vec::new(),
         dry_bulb_c: vec![20.0],
         dew_point_c: vec![10.0],
         rel_humidity_pct: vec![50.0],
@@ -301,8 +304,15 @@ fn ev_plug_load_emits_ev_equipment_spec_with_correct_parameters() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let ev = specs
         .iter()
@@ -318,13 +328,13 @@ fn ev_plug_load_emits_ev_equipment_spec_with_correct_parameters() {
 
     assert_eq!(typed.charging_level.as_deref(), Some("Level 2"));
 
-    // kwh=1200 < 1500 → range_miles=100 → capacity = 32.5 kWh
-    let battery_kwh = typed.capacity_kwh;
+    // kwh=1200 < 1500 → range 100 mi → capacity = 32.5 kWh, in J
+    let battery_j = typed.capacity_j;
     assert!(
-        (battery_kwh - 32.5).abs() < 0.1,
-        "capacity_kwh for 100-mile EV should be ~32.5 kWh, got {battery_kwh:.2}"
+        (battery_j - 32.5 * 3.6e6).abs() < 0.1,
+        "capacity_j for 100-mile EV should be ~1.17e8 J, got {battery_j:.2}"
     );
-    assert!((typed.max_charging_power_kw - 7.2).abs() < 1e-9);
+    assert!((typed.max_charging_power_w - 7200.0).abs() < 1e-9);
 }
 
 #[test]
@@ -338,8 +348,15 @@ fn ev_plug_load_large_kwh_emits_250_mile_range() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let ev = specs
         .iter()
@@ -353,13 +370,13 @@ fn ev_plug_load_large_kwh_emits_250_mile_range() {
         .typed()
         .expect("EV typed config");
 
-    // kwh=2000 >= 1500 → range_miles=250 → capacity = 81.25 kWh
-    let battery_kwh = typed.capacity_kwh;
+    // kwh=2000 >= 1500 → range 250 mi → capacity = 81.25 kWh, in J
+    let battery_j = typed.capacity_j;
     assert!(
-        (battery_kwh - 81.25).abs() < 0.1,
-        "capacity_kwh for 250-mile EV should be ~81.25 kWh, got {battery_kwh:.2}"
+        (battery_j - 81.25 * 3.6e6).abs() < 0.1,
+        "capacity_j for 250-mile EV should be ~2.925e8 J, got {battery_j:.2}"
     );
-    assert!((typed.max_charging_power_kw - 11.5).abs() < 1e-9);
+    assert!((typed.max_charging_power_w - 11500.0).abs() < 1e-9);
 }
 
 #[test]
@@ -373,8 +390,15 @@ fn ev_plug_load_not_emitted_as_scheduled_load() {
         </MiscLoads>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     // Should NOT produce a ScheduledLoad/MELs entry
     assert!(
@@ -399,8 +423,15 @@ fn whole_building_ventilation_fan_is_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let fan = specs
         .iter()
@@ -435,8 +466,15 @@ fn exhaust_fan_without_whole_building_flag_is_not_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     assert!(
         !specs.iter().any(|s| s.name == "Ventilation Fan"),
@@ -456,8 +494,15 @@ fn seasonal_cooling_fan_is_emitted() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     assert!(
         specs.iter().any(|s| s.name == "Ventilation Fan"),
@@ -478,8 +523,15 @@ fn whole_house_fan_type_resolves_to_exhaust_fan_not_hrv() {
         </VentilationFans></MechanicalVentilation></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let fan = specs
         .iter()
@@ -608,6 +660,7 @@ fn missing_enclosure_returns_error() {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -632,6 +685,7 @@ fn missing_site_returns_error() {
     <BuildingDetails>
       <BuildingSummary>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -669,6 +723,7 @@ fn complete_minimal_xml_passes_schema_check() {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -696,6 +751,7 @@ fn area_above_1000_without_units_is_converted_as_ft2() {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>2000</ConditionedFloorArea>
           <ConditionedBuildingVolume>16000</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -729,6 +785,7 @@ fn area_without_units_is_treated_as_ft2() {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea>200</ConditionedFloorArea>
           <ConditionedBuildingVolume>1600</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -851,8 +908,15 @@ fn hvac_capacity_equipment_resolution_stores_kbtu_h() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let furnace = specs
         .iter()
@@ -877,12 +941,21 @@ fn water_heater_setpoint_equipment_resolution_stores_celsius() {
                 <HotWaterTemperature>125.0</HotWaterTemperature>
                 <FuelType>electricity</FuelType>
                 <WaterHeaterType>storage water heater</WaterHeaterType>
+                <EnergyFactor>0.95</EnergyFactor>
+                <TankVolume>50</TankVolume>
             </WaterHeatingSystem>
         </WaterHeating></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment");
 
     let wh = specs
         .iter()
@@ -925,20 +998,27 @@ fn pv_inverter_max_power_output_w_converted_to_kw() {
 
     let building = parse_building(&xml).expect("should parse");
     let defaults = DefaultsStore::default();
-    let specs = resolve_equipment(&building, &defaults, None, &mut Vec::new())
-        .expect("should resolve equipment");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &defaults,
+        None,
+        &mut Vec::new(),
+    )
+    .expect("should resolve equipment");
 
     let pv = specs
         .iter()
         .find(|s| s.name == "PV")
         .expect("should emit PV spec");
 
-    let cap_kw = pv.parameters["inverter_capacity_kw"]
+    let cap_w = pv.parameters["inverter_capacity_w"]
         .as_f64()
-        .expect("inverter_capacity_kw should be present");
+        .expect("inverter_capacity_w should be present");
     assert!(
-        (cap_kw - 5.0).abs() < 1e-9,
-        "5000 W inverter should be 5.0 kW, got {cap_kw}"
+        (cap_w - 5000.0).abs() < 1e-9,
+        "5000 W inverter should be 5000 W, got {cap_w}"
     );
 
     let eff = pv.parameters["inverter_efficiency"]
@@ -972,6 +1052,7 @@ fn wall_xml_with_stud_geometry(spacing_in: f64, width_in: f64) -> String {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -1075,6 +1156,7 @@ fn wall_xml_with_construction_type(construction_type_element: &str) -> String {
       <BuildingSummary>
         <Site><SiteType>suburban</SiteType></Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -1189,8 +1271,15 @@ fn eer_only_cooling_system_does_not_resolve_via_seer_zero_sentinel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment should succeed for EER-only room AC");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed for EER-only room AC");
 
     let ac = specs
         .iter()
@@ -1259,8 +1348,15 @@ fn high_eer_central_ac_without_seer_resolves_via_eer_not_zero_sentinel() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("EER-only central AC should resolve without error");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("EER-only central AC should resolve without error");
 
     let ac = specs
         .iter()
@@ -1295,7 +1391,14 @@ fn cooling_system_missing_both_seer_and_eer_produces_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
+    let result = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    );
 
     assert!(
         result.is_err(),
@@ -1320,8 +1423,15 @@ fn seer_present_cooling_system_resolves_normally_regression() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("SEER-present system must resolve without error");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("SEER-present system must resolve without error");
 
     let ac = specs
         .iter()
@@ -1355,6 +1465,7 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
           <Longitude>-105.0</Longitude>
         </Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
           <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -1430,8 +1541,15 @@ fn cfm25_duct_leakage_parse_resolve_pipeline_succeeds() {
     // when CFM25 duct leakage is present (the old bug caused silent
     // zeroing, not a crash, but verifying the full pipeline runs is
     // still a valid integration smoke test).
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("equipment resolution must succeed with CFM25 duct leakage");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("equipment resolution must succeed with CFM25 duct leakage");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     // ElectricResistance without duct distribution resolves to Electric Baseboard.
@@ -1479,8 +1597,15 @@ fn refrigerator_in_conditioned_basement_retains_gain_fractions() {
 </HPXML>
 "#;
     let building = parse_building(xml).expect("HPXML should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment should succeed");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed");
 
     let fridge = specs
         .iter()
@@ -1574,8 +1699,15 @@ fn hpxml_v3_parses_resolves_equipment_with_schema_warning() {
     );
 
     // Resolve equipment → heating, cooling, and water heater must all resolve.
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment should succeed for 3.x fixture");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed for 3.x fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
@@ -1620,8 +1752,15 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     );
 
     let building = parse_building(&xml).expect("fixture should parse");
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment should succeed for fixture");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed for fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
 
@@ -1636,9 +1775,9 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     assert_eq!(
         pool_pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64()),
-        Some(2700.0)
+        Some(2700.0 * 3.6e6)
     );
     // Schedule extension should be parsed
     assert_eq!(
@@ -1674,9 +1813,9 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     assert_eq!(
         pool_heater
             .parameters
-            .get("annual_gas_therms")
+            .get("annual_gas_j")
             .and_then(|v| v.as_f64()),
-        Some(500.0)
+        Some(500.0 * 105505600.0)
     );
     assert_eq!(
         pool_heater
@@ -1697,9 +1836,9 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     assert_eq!(
         spa_pump
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64()),
-        Some(1000.0)
+        Some(1000.0 * 3.6e6)
     );
 
     // Spa heater: 1300 kWh/year from <HotTubs>/<HotTub>/<Heater>/<Load>
@@ -1715,9 +1854,9 @@ fn pool_and_hot_tub_loads_parsed_from_ochre_fixture() {
     assert_eq!(
         spa_heater
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64()),
-        Some(1300.0)
+        Some(1300.0 * 3.6e6)
     );
 }
 
@@ -1802,8 +1941,15 @@ fn hpxml_v4_building_sync_parses_resolves_without_rejection() {
     );
 
     // Resolve equipment — the full pipeline must succeed.
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment should succeed for BuildingSync fixture");
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed for BuildingSync fixture");
 
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert!(
@@ -1843,13 +1989,19 @@ fn resstock_2025_1_failing_buildings_parse_and_resolve() {
                 panic!("{name}: HPXML parse failed: {e}");
             }
         };
-        let specs =
-            match resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()) {
-                Ok(s) => s,
-                Err(e) => {
-                    panic!("{name}: equipment resolution failed: {e}");
-                }
-            };
+        let specs = match resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &DefaultsStore::empty(),
+            None,
+            &mut Vec::new(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                panic!("{name}: equipment resolution failed: {e}");
+            }
+        };
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         eprintln!(
             "  {name}: OK — heating_sp={:?}, cooling_sp={:?}, equipment={names:?}",
@@ -1989,7 +2141,14 @@ fn unrecognized_fuel_type_on_heating_system_returns_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
+    let result = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    );
 
     assert!(
         result.is_err(),
@@ -2019,7 +2178,14 @@ fn unrecognized_fuel_type_on_cooling_system_returns_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
+    let result = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    );
 
     assert!(
         result.is_err(),
@@ -2048,7 +2214,14 @@ fn missing_fuel_on_heating_system_returns_error() {
         </HVAC></Systems>"#,
     );
     let building = parse_building(&xml).expect("should parse XML structure");
-    let result = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new());
+    let result = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    );
     assert!(
         result.is_err(),
         "resolve_equipment must return Err when HeatingSystemFuel is absent"
@@ -2113,7 +2286,14 @@ fn resolve_vendored_water_heater(
     ));
     let building = parse_building(&xml).unwrap_or_else(|e| panic!("{sample} should parse: {e:?}"));
     let mut warnings = Vec::new();
-    let specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut warnings)?;
+    let specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut warnings,
+    )?;
     let spec = specs
         .into_iter()
         .find(|s| s.name.contains("Water Heater") || s.name == "Indirect Tank")
@@ -2374,7 +2554,7 @@ fn every_xsd_boolean_site_uses_the_xs_boolean_reader() {
             "<MechanicalVentilation><VentilationFans><VentilationFan><UsedForSeasonalCoolingLoadReduction>{v}</UsedForSeasonalCoolingLoadReduction><RatedFlowRate>72</RatedFlowRate><FanPower>30</FanPower></VentilationFan></VentilationFans></MechanicalVentilation>"
         ),
         11 => format!(
-            "<WaterHeating><WaterFixture><LowFlow>{v}</LowFlow></WaterFixture><WaterHeatingSystem><WaterHeaterType>storage water heater</WaterHeaterType><FuelType>electricity</FuelType><EnergyFactor>0.95</EnergyFactor></WaterHeatingSystem></WaterHeating>"
+            "<WaterHeating><WaterFixture><LowFlow>{v}</LowFlow></WaterFixture><WaterHeatingSystem><WaterHeaterType>storage water heater</WaterHeaterType><FuelType>electricity</FuelType><EnergyFactor>0.95</EnergyFactor><TankVolume>50</TankVolume></WaterHeatingSystem></WaterHeating>"
         ),
         _ => unreachable!(),
     };
@@ -2398,8 +2578,15 @@ fn every_xsd_boolean_site_uses_the_xs_boolean_reader() {
 
     let resolve = |xml: &str| -> Vec<hares_io::EquipmentSpec> {
         let building = parse_building(xml).expect("should parse");
-        resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-            .expect("resolve_equipment should succeed")
+        resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &DefaultsStore::empty(),
+            None,
+            &mut Vec::new(),
+        )
+        .expect("resolve_equipment should succeed")
     };
 
     let site_names = [
@@ -2522,9 +2709,9 @@ fn every_xsd_boolean_site_uses_the_xs_boolean_reader() {
                         .find(|s| s.name == "Cooking Range")
                         .expect("cooking range spec expected")
                         .parameters
-                        .get("annual_electric_kwh")
+                        .get("annual_electric_j")
                         .and_then(serde_json::Value::as_f64)
-                        .expect("annual kwh expected")
+                        .expect("annual energy expected")
                 };
                 // Induction burners carry a 0.91 burner efficiency factor
                 // against 1.0 for a standard range, so the annual kWh differ.
@@ -3336,5 +3523,45 @@ fn setback_without_hours_is_an_error() {
     assert!(
         err.to_string().contains("TotalSetbackHoursperWeekHeating"),
         "got: {err}"
+    );
+}
+
+/// The old synthetic extension element is refused: the synthetic path
+/// writes `active_power_w` (SI); a document carrying the old kW spelling
+/// fails the parse naming the element and `active_power_w`.
+#[test]
+fn hpxml_active_power_kw_extension_is_rejected() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <XMLTransactionalData>
+    <XMLDocumentID>test</XMLDocumentID>
+  </XMLTransactionalData>
+  <Building>
+    <BuildingID>test</BuildingID>
+    <ProjectStatus><EventType>proposed workscope</EventType></ProjectStatus>
+    <BuildingDetails>
+      <BuildingSummary>
+        <BuildingConstruction>
+          <ResidentialFacilityType>single-family attached</ResidentialFacilityType>
+          <NumberofConditionedFloors>1</NumberofConditionedFloors>
+          <NumberofConditionedBedrooms>3</NumberofConditionedBedrooms>
+          <ConditionedBuildingVolume>12000</ConditionedBuildingVolume>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Appliances>
+        <CookingRange>
+          <SystemIdentifier id="range1"/>
+          <Extension>
+            <active_power_kw>1.5</active_power_kw>
+          </Extension>
+        </CookingRange>
+      </Appliances>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#;
+    let err = hares_io::hpxml::parse_hpxml_str(xml).expect_err("the old element fails the parse");
+    assert!(
+        err.to_string().contains("active_power_kw") && err.to_string().contains("active_power_w"),
+        "the error must name the element and its replacement, got: {err}"
     );
 }

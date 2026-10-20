@@ -4,13 +4,15 @@
 //! defaults directory, optional per-file defaults replacements, a
 //! `SimulationConfig` table verbatim, an optional `[tariff]` table
 //! (dwelling manifests only), and the homes; a fleet manifest also states
-//! each home's weight and the resolution its products are bucketed at.
+//! each home's weight and its `[fleet]` table (the fleet report's request:
+//! the selection, the frequency and the health policy).
 //! Unknown keys are rejected at every level the tool owns, so a typo
 //! cannot silently change what a golden pins.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use chrono::FixedOffset;
 use serde::Deserialize;
 
 use crate::error::{FrameGoldenError, FrameGoldenResult};
@@ -37,15 +39,128 @@ impl Feature {
 pub enum ManifestKind {
     Dwelling,
     Fleet,
+    #[serde(rename = "resstock_fleet")]
+    ResstockFleet,
 }
 
-/// The resolution a fleet's products are bucketed at, as the manifest
-/// spells it. Any other string is rejected at parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManifestResolution {
-    FifteenMin,
-    Hourly,
+/// The `[fleet]` table's variable selection, as the manifest spells it:
+/// `verbosity-N` selects every variable the home's catalogue declares at
+/// verbosity level N or below. Any other spelling is rejected at parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestSelection {
+    Verbosity(u8),
+}
+
+impl ManifestSelection {
+    /// The verbosity level the selection stands for.
+    pub fn verbosity(self) -> u8 {
+        match self {
+            ManifestSelection::Verbosity(level) => level,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ManifestSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        let level = text
+            .strip_prefix("verbosity-")
+            .and_then(|rest| rest.parse::<u8>().ok())
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "unknown selection {text:?}: the accepted spelling is \"verbosity-<level>\" with a level of 0 to {}",
+                    hares_io::MAX_VERBOSITY
+                ))
+            })?;
+        if level > hares_io::MAX_VERBOSITY {
+            return Err(serde::de::Error::custom(format!(
+                "selection {text:?}: verbosity level {level} exceeds the maximum of {}",
+                hares_io::MAX_VERBOSITY
+            )));
+        }
+        Ok(ManifestSelection::Verbosity(level))
+    }
+}
+
+/// The manifest's `[fleet]` table's alignment, as the manifest spells it:
+/// a fixed UTC offset (`"+00:00"`, `"-07:00"`) is the engine's
+/// `Alignment::Instant`, the offset the homes reduce and label on; the
+/// spelling `"local_clock"` is the engine's `Alignment::LocalClock`. Any
+/// other spelling is rejected at parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestAlignment {
+    Instant(FixedOffset),
+    LocalClock,
+}
+
+impl ManifestAlignment {
+    /// The engine's alignment the spelling states.
+    #[must_use]
+    pub fn alignment(self) -> hares_fleet::Alignment {
+        match self {
+            ManifestAlignment::Instant(offset) => hares_fleet::Alignment::Instant(offset),
+            ManifestAlignment::LocalClock => hares_fleet::Alignment::LocalClock,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ManifestAlignment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        if text.eq_ignore_ascii_case("local_clock") {
+            return Ok(ManifestAlignment::LocalClock);
+        }
+        text.parse::<FixedOffset>()
+            .map(ManifestAlignment::Instant)
+            .map_err(|err| {
+                serde::de::Error::custom(format!(
+                    "unknown alignment {text:?}: the accepted spellings are a fixed UTC \
+                 offset (for example \"+00:00\" or \"-07:00\") or \"local_clock\": {err}"
+                ))
+            })
+    }
+}
+
+/// The manifest's required `[fleet]` table for the fleet kinds: the fleet
+/// report's request, as the engine spells it. The frequency is a
+/// `hares_io::Frequency` verbatim (`"hourly"`, `{ minutes = 15 }`, and so
+/// on); the selection is the `verbosity-N` spelling; the optional
+/// `health_policy` is a `hares_io::HealthPolicy` verbatim, the default
+/// empty policy left implicit; the optional `alignment` is the fleet's
+/// declared time alignment, absent meaning no declared alignment (the
+/// engine's own meaning).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetReportSpec {
+    /// The frequency the fleet's products are bucketed at.
+    pub frequency: hares_io::Frequency,
+    /// The variable selection the fleet's homes report.
+    pub selection: ManifestSelection,
+    /// The fleet's health policy, applied to every home's run.
+    #[serde(default)]
+    pub health_policy: Option<hares_io::HealthPolicy>,
+    /// The fleet's declared time alignment; absent means no declared
+    /// alignment.
+    #[serde(default)]
+    pub alignment: Option<ManifestAlignment>,
+}
+
+impl FleetReportSpec {
+    /// The engine's fleet report the table states.
+    #[must_use]
+    pub fn fleet_report(&self) -> hares_fleet::FleetReport {
+        hares_fleet::FleetReport {
+            selection: hares_io::Selection::Verbosity(self.selection.verbosity()),
+            frequency: self.frequency,
+            health_policy: self.health_policy.clone().unwrap_or_default(),
+        }
+    }
 }
 
 /// One `[[home]]` entry. Paths are repository-relative; `overrides` is the
@@ -57,14 +172,6 @@ pub struct HomeEntry {
     pub hpxml: String,
     pub schedule: String,
     pub weather: String,
-    /// Warm-up setting: `0` runs no warm-up and a positive value runs the
-    /// engine's converging warm-up: the rule the Python binding applies
-    /// (`crates/hares-python/src/py_dwelling.rs`: zero maps to
-    /// `initialization_duration: None`, a positive value to `Some`). The
-    /// engine ignores the value's magnitude: any positive setting runs the
-    /// same fixed convergence loop, so the number of warm-up days is not
-    /// chosen here.
-    pub initialization_duration_s: u64,
     /// The home's sample weight: what the home contributes to the fleet
     /// aggregate. Required for kind "fleet" and rejected for kind
     /// "dwelling"; a NaN, infinite or negative value fails the run when
@@ -103,27 +210,66 @@ pub struct GoldenManifest {
     pub defaults: String,
     #[serde(default)]
     pub defaults_files: BTreeMap<String, String>,
-    pub simulation: toml::Table,
+    /// A `SimulationConfig` table verbatim, required for kinds "dwelling"
+    /// and "fleet" and rejected for kind "resstock_fleet" (whose homes'
+    /// sim config is the ResStock constructor's own).
+    #[serde(default)]
+    pub simulation: Option<toml::Table>,
     /// Defaulted so a manifest with no `[[home]]` reaches the domain
     /// validator (which states the per-kind rule) instead of a generic
     /// serde missing-field error.
     #[serde(default)]
     pub home: Vec<HomeEntry>,
-    /// The resolution the fleet's products are bucketed at. Required for
-    /// kind "fleet" and rejected for kind "dwelling"; the validator states
-    /// both rules.
-    #[serde(default)]
-    pub resolution: Option<ManifestResolution>,
     /// The optional `[tariff]` table. `parse` checks its shape (dwelling
     /// manifests only, `file` and `zone` present, no other key) and parses
     /// `zone`; [`GoldenManifest::tariff`] reads and validates the file at
     /// run time.
     #[serde(default)]
     pub tariff: Option<TariffConfig>,
+    /// Kind "resstock_fleet" only: the metadata parquet the fleet builds
+    /// from, repository-relative. Every other kind rejects the key.
+    #[serde(default)]
+    pub metadata: Option<String>,
+    /// Kind "resstock_fleet" only: the unpacked buildings directory
+    /// (`bldg<bldg_id:07>/home.xml` and `in.schedules.csv` per building),
+    /// repository-relative.
+    #[serde(default)]
+    pub buildings_dir: Option<String>,
+    /// Kind "resstock_fleet" only: the weather directory the buildings'
+    /// HPXML station FIPS resolve against, repository-relative.
+    #[serde(default)]
+    pub weather_dir: Option<String>,
+    /// Kind "resstock_fleet" only: the ResStock release the metadata
+    /// speaks.
+    #[serde(default, deserialize_with = "resstock_version")]
+    pub version: Option<hares_io::ResStockVersion>,
+    /// Kind "resstock_fleet" only: the simulation duration in seconds.
+    /// The fleet's own sim config (the ResStock constructor's) carries the
+    /// start, the step and the output settings.
+    #[serde(default)]
+    pub duration: Option<u64>,
+    /// The required `[fleet]` table for the fleet kinds (`fleet` and
+    /// `resstock_fleet`): the fleet report's request. Kind "dwelling"
+    /// rejects the table.
+    #[serde(default)]
+    pub fleet: Option<FleetReportSpec>,
     /// Where the manifest was parsed from, for error messages; not part
     /// of the manifest text itself.
     #[serde(skip)]
     pub source: PathBuf,
+}
+
+/// Deserializes a `ResStockVersion` from its release spelling, so a
+/// manifest naming an unknown release fails with the known spellings.
+fn resstock_version<'de, D>(deserializer: D) -> Result<Option<hares_io::ResStockVersion>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = Option::<String>::deserialize(deserializer)?;
+    match text {
+        None => Ok(None),
+        Some(text) => text.parse().map(Some).map_err(serde::de::Error::custom),
+    }
 }
 
 /// Every field of `hares_io::SimulationConfig`. A manifest key outside this
@@ -132,17 +278,19 @@ const SIMULATION_KEYS: &[&str] = &[
     "start_time",
     "duration",
     "time_res",
-    "output_verbosity",
-    "output_path",
-    "write_output",
-    "output_format",
+    "reports",
+    "diagnostics",
+    "metrics",
     "output_chunk_size",
     "setpoint_deadband_c",
     "master_seed",
-    "retain_batches",
     "civil_timezone",
-    "rotation",
     "site_location",
+    "max_consecutive_step_failures",
+    "health_policy",
+    "first_hour_interpolation",
+    "weather_year",
+    "warmup",
 ];
 
 /// The feature set the running binary was built with. The tool's features
@@ -179,84 +327,138 @@ impl GoldenManifest {
     }
 
     fn validate(&self, path: &Path) -> FrameGoldenResult<()> {
-        for key in self.simulation.keys() {
-            if !SIMULATION_KEYS.contains(&key.as_str()) {
-                return Err(FrameGoldenError::Manifest {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "unknown key {key:?} in [simulation]: known keys are {SIMULATION_KEYS:?}"
-                    ),
-                });
+        let fail = |detail: String| FrameGoldenError::Manifest {
+            path: path.to_path_buf(),
+            detail,
+        };
+        let resstock_only_keys: [(&str, bool); 5] = [
+            ("metadata", self.metadata.is_some()),
+            ("buildings_dir", self.buildings_dir.is_some()),
+            ("weather_dir", self.weather_dir.is_some()),
+            ("version", self.version.is_some()),
+            ("duration", self.duration.is_some()),
+        ];
+        match self.kind {
+            ManifestKind::ResstockFleet => {
+                for (key, present) in resstock_only_keys {
+                    if !present {
+                        return Err(fail(format!(
+                            "kind \"resstock_fleet\" requires the key {key:?}"
+                        )));
+                    }
+                }
+                if !self.home.is_empty() {
+                    return Err(fail(
+                        "kind \"resstock_fleet\" takes no [[home]] entries: the homes come from the metadata"
+                            .to_string(),
+                    ));
+                }
+                if self.duration == Some(0) {
+                    return Err(fail("duration must be positive".to_string()));
+                }
             }
+            ManifestKind::Dwelling | ManifestKind::Fleet => {
+                for (key, present) in resstock_only_keys {
+                    if present {
+                        return Err(fail(format!(
+                            "{key} is accepted for kind \"resstock_fleet\" only, found kind {:?}",
+                            self.kind
+                        )));
+                    }
+                }
+            }
+        }
+        // The [fleet] table: required for both fleet kinds, rejected for
+        // kind "dwelling".
+        match (self.kind, self.fleet.is_some()) {
+            (ManifestKind::Dwelling, true) => {
+                return Err(fail(format!(
+                    "fleet is accepted for the fleet kinds only, found kind {:?}",
+                    self.kind
+                )));
+            }
+            (ManifestKind::Fleet, false) => {
+                return Err(fail(
+                    "kind \"fleet\" requires the [fleet] table: the fleet report's \
+                     selection, frequency and health policy"
+                        .to_string(),
+                ));
+            }
+            (ManifestKind::ResstockFleet, false) => {
+                return Err(fail(
+                    "kind \"resstock_fleet\" requires the [fleet] table: the fleet \
+                     report's selection, frequency and health policy"
+                        .to_string(),
+                ));
+            }
+            (ManifestKind::Dwelling | ManifestKind::Fleet | ManifestKind::ResstockFleet, _) => {}
+        }
+        match &self.simulation {
+            Some(simulation) => {
+                if self.kind == ManifestKind::ResstockFleet {
+                    return Err(fail(format!(
+                        "[simulation] is accepted for kinds \"dwelling\" and \"fleet\" only, found kind {:?}: a resstock fleet's sim config is its constructor's own",
+                        self.kind
+                    )));
+                }
+                for key in simulation.keys() {
+                    if !SIMULATION_KEYS.contains(&key.as_str()) {
+                        return Err(fail(format!(
+                            "unknown key {key:?} in [simulation]: known keys are {SIMULATION_KEYS:?}"
+                        )));
+                    }
+                }
+            }
+            None if self.kind != ManifestKind::ResstockFleet => {
+                return Err(fail(format!(
+                    "kind {:?} requires a [simulation] table",
+                    self.kind
+                )));
+            }
+            None => {}
         }
         if let Some(tariff) = &self.tariff {
             if self.kind != ManifestKind::Dwelling {
-                return Err(FrameGoldenError::Manifest {
-                    path: path.to_path_buf(),
-                    detail: format!(
-                        "[tariff] is accepted for kind \"dwelling\" only, found kind {:?}",
-                        self.kind
-                    ),
-                });
+                return Err(fail(format!(
+                    "[tariff] is accepted for kind \"dwelling\" only, found kind {:?}",
+                    self.kind
+                )));
             }
             tariff
                 .zone_tz()
-                .map_err(|detail| FrameGoldenError::Manifest {
-                    path: path.to_path_buf(),
-                    detail: format!("[tariff] {detail}"),
-                })?;
+                .map_err(|detail| fail(format!("[tariff] {detail}")))?;
         }
         let count = self.home.len();
         match self.kind {
-            ManifestKind::Dwelling if count != 1 => Err(FrameGoldenError::Manifest {
-                path: path.to_path_buf(),
-                detail: format!("kind \"dwelling\" requires exactly one [[home]], found {count}"),
-            }),
-            ManifestKind::Fleet if count < 2 => Err(FrameGoldenError::Manifest {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "kind \"fleet\" requires two or more [[home]] entries, found {count}"
-                ),
-            }),
-            ManifestKind::Dwelling | ManifestKind::Fleet => Ok(()),
+            ManifestKind::Dwelling if count != 1 => Err(fail(format!(
+                "kind \"dwelling\" requires exactly one [[home]], found {count}"
+            ))),
+            ManifestKind::Fleet if count < 2 => Err(fail(format!(
+                "kind \"fleet\" requires two or more [[home]] entries, found {count}"
+            ))),
+            ManifestKind::Dwelling | ManifestKind::Fleet | ManifestKind::ResstockFleet => Ok(()),
         }?;
         for home in &self.home {
             match (self.kind, home.weight) {
                 (ManifestKind::Fleet, None) => {
-                    return Err(FrameGoldenError::Manifest {
-                        path: path.to_path_buf(),
-                        detail: format!(
-                            "[[home]] bldg_id {}: weight is required for kind \"fleet\"",
-                            home.bldg_id
-                        ),
-                    });
+                    return Err(fail(format!(
+                        "[[home]] bldg_id {}: weight is required for kind \"fleet\"",
+                        home.bldg_id
+                    )));
                 }
                 (ManifestKind::Dwelling, Some(_)) => {
-                    return Err(FrameGoldenError::Manifest {
-                        path: path.to_path_buf(),
-                        detail: format!(
-                            "[[home]] bldg_id {}: weight is accepted for kind \"fleet\" only, found kind {:?}",
-                            home.bldg_id, self.kind
-                        ),
-                    });
+                    return Err(fail(format!(
+                        "[[home]] bldg_id {}: weight is accepted for kind \"fleet\" only, found kind {:?}",
+                        home.bldg_id, self.kind
+                    )));
                 }
+                // A resstock fleet takes no [[home]] entries at all; the
+                // check above rejects one before the weights matter.
+                (ManifestKind::ResstockFleet, _weight) => {}
                 (ManifestKind::Fleet, Some(_)) | (ManifestKind::Dwelling, None) => {}
             }
         }
-        match (self.kind, self.resolution) {
-            (ManifestKind::Fleet, None) => Err(FrameGoldenError::Manifest {
-                path: path.to_path_buf(),
-                detail: "resolution is required for kind \"fleet\"".to_string(),
-            }),
-            (ManifestKind::Dwelling, Some(_)) => Err(FrameGoldenError::Manifest {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "resolution is accepted for kind \"fleet\" only, found kind {:?}",
-                    self.kind
-                ),
-            }),
-            (ManifestKind::Fleet, Some(_)) | (ManifestKind::Dwelling, None) => Ok(()),
-        }
+        Ok(())
     }
 
     /// The manifest's feature set as strings, in manifest order.
@@ -274,10 +476,17 @@ impl GoldenManifest {
 
     /// Parses the `[simulation]` table through `SimulationConfig::from_toml`
     /// so its validation rules (positive, time_res-divisible duration and
-    /// the verbosity cap) apply exactly as they do anywhere else.
+    /// the verbosity cap) apply exactly as they do anywhere else. The
+    /// validator rejects a kind without the table it needs, so the
+    /// `None` here is unreachable through [`GoldenManifest::load`].
     pub fn simulation_config(&self) -> FrameGoldenResult<hares_io::SimulationConfig> {
-        let text = toml::to_string(&self.simulation)
-            .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))?;
+        let text = toml::to_string(self.simulation.as_ref().ok_or_else(|| {
+            FrameGoldenError::SimulationConfig(format!(
+                "manifest {:?}: kind {:?} carries no [simulation] table",
+                self.source, self.kind
+            ))
+        })?)
+        .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))?;
         hares_io::SimulationConfig::from_toml(&text)
             .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))
     }
@@ -396,4 +605,66 @@ pub fn select_manifests(dir: &Path, features: &[String]) -> FrameGoldenResult<Ve
         }
     }
     Ok(selected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pin: `SIMULATION_KEYS` is exactly `SimulationConfig`'s field
+    /// names. A struct field the list omits makes a manifest that sets it
+    /// rejected as an unknown key (the list went stale, as
+    /// `max_consecutive_step_failures` did); a list entry the struct lacks
+    /// lets a manifest through that the engine's own deserialisation then
+    /// refuses. `to_toml()` serialises every field, so the serialised
+    /// table's key set is the struct's field-name set.
+    #[test]
+    fn simulation_keys_match_the_struct() {
+        let cfg = hares_io::SimulationConfig {
+            start_time: chrono::DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
+                .expect("parse start"),
+            duration: chrono::Duration::seconds(86400),
+            time_res: chrono::Duration::seconds(3600),
+            reports: vec![hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(2),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Memory,
+            }],
+            diagnostics: false,
+            metrics: false,
+            output_chunk_size: 1024,
+            setpoint_deadband_c: Some(1.0),
+            master_seed: 0,
+            civil_timezone: Some("UTC".into()),
+            site_location: hares_io::SiteLocationOverride {
+                latitude_deg: Some(40.0),
+                longitude_deg: None,
+                elevation_m: None,
+                utc_offset_h: None,
+            },
+            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_io::HealthPolicy::default(),
+            first_hour_interpolation: hares_io::FirstHour::default(),
+            weather_year: hares_io::WeatherYear::default(),
+            warmup: hares_io::Warmup::default(),
+        };
+        let text = cfg.to_toml().expect("serialise the config");
+        let table: toml::Table = toml::from_str(&text).expect("parse the TOML back");
+
+        for key in table.keys() {
+            assert!(
+                SIMULATION_KEYS.contains(&key.as_str()),
+                "SIMULATION_KEYS omits the struct field {key:?}; a manifest that \
+                 sets it in [simulation] is rejected as an unknown key"
+            );
+        }
+        for key in SIMULATION_KEYS {
+            assert!(
+                table.contains_key(*key),
+                "SIMULATION_KEYS entry {key:?} is no SimulationConfig field; the \
+                 manifest would accept a key the engine then refuses"
+            );
+        }
+    }
 }

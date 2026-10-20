@@ -3,17 +3,18 @@
 from pathlib import Path
 
 import pytest
-from ochre_next import (
+from hares import (
     ControlCapabilities,
     ControlSignal,
     EndUse,
     ExecutionStage,
     FuelType,
+    SimulationConfig,
     TelemetryField,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
@@ -22,20 +23,9 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 @pytest.fixture(scope="module")
 def dwelling():
-    from ochre_next import Dwelling
+    from hares import Dwelling
 
-    dw = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=3600,
-        time_res_s=60,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42,
-        master_seed=0,
-        write_output=False,
-    )
+    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60,master_seed=0))
     dw.initialize()
     return dw
 
@@ -198,12 +188,12 @@ class TestValidateControl:
         names = dwelling.equipment_names()
         assert len(names) > 0, "should have at least one equipment"
 
-        valid_signal = ControlSignal.power_setpoint(1.0)
+        valid_signal = ControlSignal.power_setpoint(active_power_w=1000.0)
         result = dwelling.validate_control(names[0], valid_signal)
         assert isinstance(result, bool), "should return a boolean"
 
     def test_validate_control_returns_false_for_nonexistent_equipment(self, dwelling):
-        signal = ControlSignal.power_setpoint(1.0)
+        signal = ControlSignal.power_setpoint(active_power_w=1000.0)
         result = dwelling.validate_control("nonexistent_equipment_name", signal)
 
         assert result is False, "should return False for nonexistent equipment"

@@ -51,10 +51,10 @@ pub struct PremiseZip {
 /// `None` when the column index is out of range, the column is empty, or
 /// the column contains non-finite (NaN/±inf) values: corrupt schedule data
 /// makes the expected draw not computable, which the aggregation rosters
-/// as `mean_power_kw: None` — distinguishable from a real weight — instead
+/// as `mean_power_w: None` — distinguishable from a real weight — instead
 /// of silently skewing the mean (`f64::max` would drop a NaN operand and
 /// average it in as zero draw).
-fn schedule_column_mean_kw(schedule: &ScheduleTimeSeries, col_idx: usize) -> Option<f64> {
+fn schedule_column_mean_w(schedule: &ScheduleTimeSeries, col_idx: usize) -> Option<f64> {
     let column = schedule.columns.get(col_idx)?;
     if column.is_empty() || !column.iter().all(|v| v.is_finite()) {
         return None;
@@ -97,10 +97,10 @@ pub(crate) fn aggregate_premise_zip(
             constant_power.push(name);
             continue;
         }
-        let mean_power_kw = match eq.expected_mean_power_kw() {
-            Some(ExpectedMeanPower::Kw(kw)) => Some(kw),
+        let mean_power_w = match eq.expected_mean_power_w() {
+            Some(ExpectedMeanPower::W(w)) => Some(w),
             Some(ExpectedMeanPower::ScheduleColumn(col_idx)) => {
-                schedule_column_mean_kw(schedule, col_idx)
+                schedule_column_mean_w(schedule, col_idx)
             }
             None => None,
         };
@@ -119,9 +119,9 @@ pub(crate) fn aggregate_premise_zip(
         ]
         .iter()
         .all(|v| v.is_finite());
-        let roster_weight = if zip_is_finite { mean_power_kw } else { None };
+        let roster_weight = if zip_is_finite { mean_power_w } else { None };
         governing.push((name, roster_weight));
-        if let Some(w) = mean_power_kw
+        if let Some(w) = mean_power_w
             && w > 0.0
             && w.is_finite()
             && zip_is_finite
@@ -216,6 +216,10 @@ mod tests {
         fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
             &self.descriptor
         }
+
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
         fn ports(&self) -> &[PortDeclaration] {
             unimplemented!()
         }
@@ -267,7 +271,7 @@ mod tests {
         fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
             self.resolved
         }
-        fn expected_mean_power_kw(&self) -> Option<ExpectedMeanPower> {
+        fn expected_mean_power_w(&self) -> Option<ExpectedMeanPower> {
             self.mean
         }
     }
@@ -315,7 +319,7 @@ mod tests {
             governing_load(
                 "Always On",
                 ZipLoad::constant_power(),
-                Some(ExpectedMeanPower::Kw(3.0)),
+                Some(ExpectedMeanPower::W(3.0)),
             ),
             pinned_load("Gas Furnace"),
         ];
@@ -344,7 +348,7 @@ mod tests {
             governing_load(
                 "Always On",
                 ZipLoad::constant_power(),
-                Some(ExpectedMeanPower::Kw(2.0)),
+                Some(ExpectedMeanPower::W(2.0)),
             ),
         ];
         let premise = aggregate_premise_zip(&equipment, &empty_schedule()).expect("aggregates");
@@ -375,7 +379,7 @@ mod tests {
         let equipment: Vec<Box<dyn Equipment>> = vec![governing_load(
             "Seasonal Pump",
             lighting,
-            Some(ExpectedMeanPower::Kw(0.0)),
+            Some(ExpectedMeanPower::W(0.0)),
         )];
         assert!(aggregate_premise_zip(&equipment, &empty_schedule()).is_none());
     }
@@ -398,8 +402,8 @@ mod tests {
             column_aggregations: Vec::new(),
         };
         // Negative placeholder values draw no power, matching load semantics.
-        assert_eq!(schedule_column_mean_kw(&schedule, 0), Some(2.0));
-        assert_eq!(schedule_column_mean_kw(&schedule, 1), None);
+        assert_eq!(schedule_column_mean_w(&schedule, 0), Some(2.0));
+        assert_eq!(schedule_column_mean_w(&schedule, 1), None);
     }
 
     #[test]
@@ -409,7 +413,7 @@ mod tests {
         // averaged as if the NaN timesteps were zero draw — that publishes a
         // plausible but wrong premise weight with no signal to the caller.
         // The honest degradation is `None` (expected draw not computable):
-        // the equipment is then rostered with `mean_power_kw: None`, which
+        // the equipment is then rostered with `mean_power_w: None`, which
         // is distinguishable from a real weight.
         let schedule = ScheduleTimeSeries {
             timestamps: Vec::new(),
@@ -420,7 +424,7 @@ mod tests {
             column_aggregations: Vec::new(),
         };
         assert_eq!(
-            schedule_column_mean_kw(&schedule, 0),
+            schedule_column_mean_w(&schedule, 0),
             None,
             "NaN schedule data must degrade to 'no computable mean', not a \
              silently undercounted average"
@@ -440,7 +444,7 @@ mod tests {
                 source_step_secs: 60,
                 column_aggregations: Vec::new(),
             };
-            assert_eq!(schedule_column_mean_kw(&schedule, 0), None);
+            assert_eq!(schedule_column_mean_w(&schedule, 0), None);
         }
     }
 
@@ -448,7 +452,7 @@ mod tests {
     fn nan_column_rosters_equipment_without_weight_not_as_zero_draw() {
         // Observable at the aggregate level: an equipment whose schedule
         // column contains NaN stays on the governing roster with an
-        // explicitly absent weight (`mean_power_kw: None`), so the caller
+        // explicitly absent weight (`mean_power_w: None`), so the caller
         // can see the degradation — it must not silently vanish from the
         // roster, nor contribute a clamped-to-zero weight.
         let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
@@ -469,7 +473,7 @@ mod tests {
             governing_load(
                 "Always On",
                 ZipLoad::constant_power(),
-                Some(ExpectedMeanPower::Kw(2.0)),
+                Some(ExpectedMeanPower::W(2.0)),
             ),
         ];
         let premise = aggregate_premise_zip(&equipment, &nan_schedule).expect("aggregates");
@@ -508,12 +512,12 @@ mod tests {
             governing_load(
                 "Corrupt Sidecar Load",
                 corrupt,
-                Some(ExpectedMeanPower::Kw(2.0)),
+                Some(ExpectedMeanPower::W(2.0)),
             ),
             governing_load(
                 "Always On",
                 ZipLoad::constant_power(),
-                Some(ExpectedMeanPower::Kw(1.0)),
+                Some(ExpectedMeanPower::W(1.0)),
             ),
         ];
         match aggregate_premise_zip(&equipment, &empty_schedule()) {
@@ -544,7 +548,7 @@ mod tests {
         // The audit contract a caller relies on (pinned end-to-end by
         // `test_premise_aggregate_is_weighted_mean_of_governing_
         // coefficients` in tests/python): recomputing the weighted mean
-        // from the rostered positive `mean_power_kw` entries and each
+        // from the rostered positive `mean_power_w` entries and each
         // equipment's published ZIP must reproduce the published
         // aggregate — "any divergence means the aggregate silently used
         // different coefficients or weights than it published". A
@@ -567,9 +571,9 @@ mod tests {
             governing_load(
                 "Corrupt Sidecar Load",
                 corrupt,
-                Some(ExpectedMeanPower::Kw(2.0)),
+                Some(ExpectedMeanPower::W(2.0)),
             ),
-            governing_load("Honest Load", honest, Some(ExpectedMeanPower::Kw(1.0))),
+            governing_load("Honest Load", honest, Some(ExpectedMeanPower::W(1.0))),
         ];
         let premise = aggregate_premise_zip(&equipment, &empty_schedule())
             .expect("the honest load has a positive computable draw");
@@ -620,6 +624,6 @@ mod tests {
             source_step_secs: 60,
             column_aggregations: Vec::new(),
         };
-        assert_eq!(schedule_column_mean_kw(&schedule, 0), None);
+        assert_eq!(schedule_column_mean_w(&schedule, 0), None);
     }
 }

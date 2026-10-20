@@ -36,7 +36,7 @@ use hares_types::parse_trimmed_f64;
 use crate::epw::{
     SkyTempModel, compute_sky_temp_c, doe2_ground_temp_monthly, interpolate_ground_temp_c,
 };
-use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
+use crate::weather::{RecordLabel, WeatherError, WeatherMeta, WeatherTimeSeries};
 
 const EXPECTED_RECORDS_STANDARD: usize = 8760;
 const EXPECTED_RECORDS_LEAP: usize = 8784;
@@ -53,6 +53,7 @@ pub fn parse_tmy3(path: impl AsRef<Path>) -> Result<WeatherTimeSeries, WeatherEr
 
 /// Parse a TMY3 CSV from an in-memory string (useful for testing).
 pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
+    crate::parse_counts::bump_weather();
     let mut lines = contents.lines();
 
     // --- Line 1: station metadata ---
@@ -89,14 +90,14 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
     let mut dhi_w_m2 = Vec::with_capacity(n);
     let mut wind_speed_m_s = Vec::with_capacity(n);
     let mut wind_dir_deg = Vec::with_capacity(n);
-    // (month, day, hour_1_to_24) -- EPW end-of-interval convention.
-    let mut timestamps: Vec<(u32, u32, u32)> = Vec::with_capacity(n);
+    // (year, month, day, hour_1_to_24) -- EPW end-of-interval convention.
+    let mut timestamps: Vec<(i32, u32, u32, u32)> = Vec::with_capacity(n);
 
     for (data_idx, line) in data_lines.iter().enumerate() {
         let row = data_idx + 3; // 1-based, accounting for 2 header lines
         let fields: Vec<&str> = line.split(',').collect();
 
-        let (month, day, hour) = parse_datetime(&fields, &col_map, row)?;
+        let (year, month, day, hour) = parse_datetime(&fields, &col_map, row)?;
 
         let db = parse_f64(&fields, col_map.dry_bulb, row, "Dry-bulb")?;
         if !(-60.0..=55.0).contains(&db) {
@@ -167,7 +168,7 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
         dhi_w_m2.push(dhi);
         wind_speed_m_s.push(ws);
         wind_dir_deg.push(wd);
-        timestamps.push((month, day, hour));
+        timestamps.push((year, month, day, hour));
     }
 
     // Sky temperature via compute_sky_temp_c — passes IR=0.0 so the function
@@ -182,9 +183,9 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
         .collect();
 
     // Ground temperature via DOE-2 sinusoidal model.
-    let monthly_ground_temps = doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year)?;
+    let monthly_ground_temps = doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year, 1)?;
     let mut ground_temp_c = Vec::with_capacity(n);
-    for &(month, day, hour) in &timestamps {
+    for &(_year, month, day, hour) in &timestamps {
         ground_temp_c.push(interpolate_ground_temp_c(
             &monthly_ground_temps,
             month,
@@ -202,6 +203,16 @@ pub fn parse_tmy3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError>
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
+        stamps: timestamps
+            .iter()
+            .map(|&(year, month, day, hour)| crate::weather::RecordStamp {
+                year,
+                month: month as u8,
+                day: day as u8,
+                hour: hour as u8,
+                minute: 0,
+            })
+            .collect(),
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,
@@ -247,16 +258,33 @@ fn parse_station_header(line: &str) -> Result<WeatherMeta, WeatherError> {
         elevation_m,
         wf_allows_leap_years: true,
         source_step_secs: 3600,
-        // TMY3 uses hour-ending convention: timestamp marks the end of each
-        // measurement interval (e.g., hour 1 = 00:01–01:00). The midpoint of
-        // each hour is 30 minutes before the timestamp, so offset = 1800 s.
+        // TMY3 uses hour-ending convention: the timestamp marks the end of
+        // each measurement interval (e.g., hour 1 = 00:01-01:00).
         // See Wilcox & Marion 2008, NREL/TP-581-43156. Consistent with EPW.
-        midpoint_offset_secs: 1800,
+        record_label: RecordLabel::IntervalEnd,
+        // The count check above validated a complete year.
+        data_period: crate::weather::DataPeriod::complete_year(),
         has_embedded_location: true,
         station_wmo: Some(fields[0].trim())
             .filter(|id| !id.is_empty())
             .map(str::to_string),
     })
+}
+
+/// Reads a TMY3 file's header metadata with no data row read: the same
+/// station header the full parser builds its metadata from, for a caller
+/// that needs only the site's location (the fleet's alignment pre-pass).
+/// The row-derived fields the header does not carry are the format's
+/// hourly defaults; the site-location resolution reads none of them.
+pub(crate) fn read_meta(path: &std::path::Path) -> Result<WeatherMeta, WeatherError> {
+    let meta_line = crate::epw::read_first_line(path)?;
+    parse_station_header(&meta_line)
+}
+
+/// The TMY3 station header's metadata, read from the header line itself:
+/// the content twin of [`read_meta`] for an in-memory weather input.
+pub(crate) fn read_meta_str(station_line: &str) -> Result<WeatherMeta, WeatherError> {
+    parse_station_header(station_line)
 }
 
 /// Column index mapping for TMY3 data fields.
@@ -299,7 +327,7 @@ fn build_column_map(col_names: &[&str]) -> Result<Tmy3ColumnMap, WeatherError> {
     })
 }
 
-/// Parse the date and time fields and return `(month, day, hour_1_to_24)`.
+/// Parse the date and time fields and return `(year, month, day, hour_1_to_24)`.
 ///
 /// TMY3 date format: `MM/DD/YYYY`, time format: `HH:MM`.
 /// Hour `01:00` represents the interval ending at 01:00 (end-of-interval, matching EPW).
@@ -307,7 +335,7 @@ fn parse_datetime(
     fields: &[&str],
     col_map: &Tmy3ColumnMap,
     row: usize,
-) -> Result<(u32, u32, u32), WeatherError> {
+) -> Result<(i32, u32, u32, u32), WeatherError> {
     let date_str = fields
         .get(col_map.date)
         .ok_or_else(|| WeatherError::Parse(format!("row {row}: missing Date field")))?
@@ -332,7 +360,7 @@ fn parse_datetime(
         )));
     }
 
-    Ok((date.month(), date.day(), hh))
+    Ok((date.year(), date.month(), date.day(), hh))
 }
 
 fn parse_hhmm(s: &str, row: usize) -> Result<(u32, u32), WeatherError> {
@@ -574,12 +602,13 @@ mod tests {
     ///
     /// Reference: Wilcox & Marion 2008, NREL/TP-581-43156 §3.
     #[test]
-    fn tmy3_midpoint_offset_is_1800_seconds() {
+    fn tmy3_record_label_is_interval_end() {
         let csv = make_tmy3_csv(false);
         let ts = parse_tmy3_str(&csv).expect("should parse standard TMY3 year");
         assert_eq!(
-            ts.meta.midpoint_offset_secs, 1800,
-            "TMY3 uses hour-ending convention: midpoint_offset_secs must be 1800 s (30 min)"
+            ts.meta.record_label,
+            RecordLabel::IntervalEnd,
+            "TMY3 uses hour-ending convention: the record's stamp labels its interval's end"
         );
     }
 
@@ -590,11 +619,12 @@ mod tests {
         let csv = make_tmy3_csv(false);
         let ts = parse_tmy3_str(&csv).expect("should parse standard TMY3 year");
 
-        // First record timestamp sits at 3600 s (01:00) into the year.
-        // Midpoint = timestamp_secs - midpoint_offset_secs = 3600 - 1800 = 1800 s = 00:30.
-        let offset = ts.meta.midpoint_offset_secs as u64;
+        // First record timestamp sits at 3600 s (01:00) into the year. The
+        // interval-end label puts the record's coverage at (00:00, 01:00],
+        // whose midpoint is 1800 s (00:30) into the year.
+        assert_eq!(ts.meta.record_label, RecordLabel::IntervalEnd);
         let first_timestamp_secs: u64 = ts.meta.source_step_secs as u64; // one step = 3600 s
-        let midpoint_secs = first_timestamp_secs - offset;
+        let midpoint_secs = first_timestamp_secs - 1800;
         assert_eq!(
             midpoint_secs, 1800,
             "midpoint of first TMY3 record should be 1800 s (00:30) into year, \

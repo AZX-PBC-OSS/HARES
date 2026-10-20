@@ -24,13 +24,13 @@ if importlib.util.find_spec("helics") is None:  # pragma: no cover - optional de
 
 import helics
 
-from ochre_next import Battery, ControlSignal, Dwelling, DwellingConfig, SimulationConfig, SteppableFleet
+from hares import Battery, ControlSignal, Dwelling, DwellingConfig, SimulationConfig, SteppableFleet
 
 if TYPE_CHECKING:
     # The extension's step() returns a plain dict at runtime; its declared
-    # shape lives in ochre_next._hares_types.
-    from ochre_next._hares_types import StepResult
-from ochre_next.helics import (
+    # shape lives in hares._hares_types.
+    from hares._hares_types import StepResult
+from hares.helics import (
     HELICSDwelling,
     HELICSFleet,
     create_broker,
@@ -39,9 +39,9 @@ from ochre_next.helics import (
     request_time_with_timeout,
     wait_for_pending_aborts,
 )
-from ochre_next.helics import federate as federate_module
-from ochre_next.helics.broker import allocate_ephemeral_port
-from ochre_next.helics.federate import create_value_federate
+from hares.helics import federate as federate_module
+from hares.helics.broker import allocate_ephemeral_port
+from hares.helics.federate import create_value_federate
 
 # Last-resort backstop: raw HELICS calls block inside the C library where
 # SIGALRM cannot interrupt them, so use pytest-timeout's thread method.
@@ -296,7 +296,7 @@ class _RecordingDwelling:
         result = self._dwelling.step()
         telemetry = self._dwelling.telemetry().equipment()
         names = telemetry.get("names", [])
-        power = telemetry.get("power_kw", [])
+        power = telemetry.get("power_w", [])
         if self._tracked_equipment in names:
             index = names.index(self._tracked_equipment)
             self.battery_power_trace_kw.append(float(power[index]))
@@ -314,6 +314,9 @@ class _RecordingDwelling:
     def apply_control(self, name: str, signal: ControlSignal) -> None:
         self.applied_controls.append(name)
         self._dwelling.apply_control(name, signal)
+
+    def finish(self):
+        return self._dwelling.finish()
 
 
 class _FaultyDwelling:
@@ -344,6 +347,9 @@ class _FaultyDwelling:
 
     def apply_control(self, name: str, signal: ControlSignal) -> None:
         self._dwelling.apply_control(name, signal)
+
+    def finish(self):
+        return self._dwelling.finish()
 
 
 class _FaultyAggregator:
@@ -378,7 +384,7 @@ class _FaultyAggregator:
             self._fed, helics.HELICS_FLAG_TERMINATE_ON_ERROR, 1
         )
         _pub_voltage = self._fed.register_global_publication("grid/voltage", "double")
-        _sub_power = self._fed.register_subscription("house_1/total_power_kw", "double")
+        _sub_power = self._fed.register_subscription("house_1/total_power_w", "double")
         ready()
 
         try:
@@ -410,32 +416,20 @@ class _FaultyAggregator:
 
 
 def _new_dwelling(*, bldg_id: int = 42) -> Dwelling:
-    dwelling = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=_DURATION_S,
-        time_res_s=int(_TIME_RES_S),
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=bldg_id,
-        master_seed=0,
-        output_verbosity=0,
-        write_output=False,
-    )
+    dwelling = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=bldg_id, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=_DURATION_S, time_res=int(_TIME_RES_S), master_seed=0))
     dwelling.initialize()
     return dwelling
 
 
 def _new_fleet(n_dwellings: int = 3) -> SteppableFleet:
-    sim_config = SimulationConfig(duration_s=_DURATION_S, time_res_s=int(_TIME_RES_S), write_output=False)
+    sim_config = SimulationConfig(start_time="2019-01-01T00:00:00", duration=_DURATION_S, time_res=int(_TIME_RES_S))
     configs = [
         DwellingConfig(
             hpxml=HPXML,
             schedule=SCHEDULE,
             weather=WEATHER,
             config=sim_config,
-            defaults_path=str(HARES_DEFAULTS),
+            defaults=str(HARES_DEFAULTS),
             bldg_id=i + 1,
         )
         for i in range(n_dwellings)
@@ -468,7 +462,7 @@ def _run_single_dwelling_exchange(voltage_pu: float) -> list[float]:
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_1/total_power_w", "double")
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         power_trace: list[float] = []
@@ -491,12 +485,12 @@ def _avg(values: list[float]) -> float:
 
 
 def _clear_helics_modules() -> None:
-    sys.modules.pop("ochre_next.helics", None)
-    sys.modules.pop("ochre_next.helics.broker", None)
-    sys.modules.pop("ochre_next.helics.dwelling", None)
-    sys.modules.pop("ochre_next.helics.federate", None)
-    sys.modules.pop("ochre_next.helics.fleet", None)
-    sys.modules.pop("ochre_next.helics.runner", None)
+    sys.modules.pop("hares.helics", None)
+    sys.modules.pop("hares.helics.broker", None)
+    sys.modules.pop("hares.helics.dwelling", None)
+    sys.modules.pop("hares.helics.federate", None)
+    sys.modules.pop("hares.helics.fleet", None)
+    sys.modules.pop("hares.helics.runner", None)
 
 
 def test_a_federate_that_fails_before_it_is_ready_fails_the_test_with_its_own_error() -> None:
@@ -581,9 +575,9 @@ def test_fleet_cosim_with_mock_aggregator() -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_kw", "double")
+        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_w", "double")
         sub_dwelling = [
-            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_kw", "double")
+            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_w", "double")
             for idx in range(3)
         ]
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
@@ -620,7 +614,7 @@ def test_control_signal_via_helics() -> None:
     with _Federation(n_federates=2) as federation:
         baseline = _RecordingDwelling(_new_dwelling())
         baseline._dwelling.add_battery(
-            Battery("Battery", 13.5, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.4)
+            Battery("Battery", capacity_j=48600000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.4)
         )
 
         def _run_federate(ready: Callable[[], None]) -> None:
@@ -639,7 +633,7 @@ def test_control_signal_via_helics() -> None:
         for step_idx in range(_TOTAL_STEPS):
             _request(aggregator, step_idx * _TIME_RES_S)
             if step_idx == 1:
-                # A discharge setpoint (negative active_power_kw), not a charge
+                # A discharge setpoint (negative active_power_w), not a charge
                 # setpoint: the dwelling's default scenario starts at January
                 # midnight outdoor temperature, below the battery's
                 # min_charge_temp_c safety lockout, so a charge request would be
@@ -649,7 +643,7 @@ def test_control_signal_via_helics() -> None:
                     json.dumps(
                         {
                             "equipment": "Battery",
-                            "signal": {"type": "PowerSetpoint", "active_power_kw": -3.0},
+                            "signal": {"type": "PowerSetpoint", "active_power_w": -3000.0},
                         }
                     )
                 )
@@ -714,14 +708,14 @@ def test_malformed_control_payload_does_not_crash_federate(
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_1/total_power_w", "double")
         pub_control = aggregator.register_global_publication("grid/control", "string")
 
         with caplog.at_level("WARNING"):
             _enter_exec(aggregator)
             payloads = [
                 "not json",
-                json.dumps({"unknown_equipment": {"type": "PowerSetpoint", "active_power_kw": 3.0}}),
+                json.dumps({"unknown_equipment": {"type": "PowerSetpoint", "active_power_w": 3000.0}}),
                 json.dumps({"equipment": "Battery", "signal": {"type": "InvalidType"}}),
             ]
             for step_idx in range(_TOTAL_STEPS):
@@ -756,7 +750,7 @@ def test_helics_import_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtins, "__import__", _raising_import)
 
     with pytest.raises(ImportError, match="HELICS not installed"):
-        from ochre_next.helics import HELICSDwelling  # noqa: F401
+        from hares.helics import HELICSDwelling  # noqa: F401
 
 
 def test_stale_broker_raises_timeout_instead_of_hanging() -> None:
@@ -788,17 +782,7 @@ def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
     AGG_STEPS = DWELL_DURATION_S // AGG_TIME_RES_S  # 18
 
     with _Federation(n_federates=2) as federation:
-        dwelling_raw = Dwelling.from_hpxml(
-            HPXML, SCHEDULE, WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=DWELL_DURATION_S,
-            time_res_s=DWELL_TIME_RES_S,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=99,
-            master_seed=0,
-            output_verbosity=0,
-            write_output=False,
-        )
+        dwelling_raw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=99, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=DWELL_DURATION_S, time_res=DWELL_TIME_RES_S, master_seed=0))
         dwelling_raw.initialize()
         recording = _RecordingDwelling(dwelling_raw)
 
@@ -813,7 +797,7 @@ def test_multi_rate_dwelling_steps_only_at_own_period() -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("agg_mr", time_res_s=float(AGG_TIME_RES_S))
-        sub_power = aggregator.register_subscription("house_mr/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_mr/total_power_w", "double")
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         power_trace: list[float] = []
@@ -874,7 +858,7 @@ def test_single_dwelling_completion_signal_unblocks_aggregator(core_type: str) -
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_power = aggregator.register_subscription("house_1/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_1/total_power_w", "double")
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         _enter_exec(aggregator)
@@ -927,9 +911,9 @@ def test_fleet_completion_signal_unblocks_aggregator(core_type: str) -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_1")
-        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_kw", "double")
+        sub_aggregate = aggregator.register_subscription("fleet_1/aggregate_power_w", "double")
         _ = [
-            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_kw", "double")
+            aggregator.register_subscription(f"fleet_1/dwelling_{idx}/total_power_w", "double")
             for idx in range(3)
         ]
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
@@ -971,10 +955,10 @@ def test_publication_info_via_helics_api_fallback() -> None:
         assert helics_dwelling._pub_reactive is not None
 
         power_info = helics.helicsPublicationGetInfo(helics_dwelling._pub_power)
-        assert power_info == "units=kW"
+        assert power_info == "units=W"
 
         reactive_info = helics.helicsPublicationGetInfo(helics_dwelling._pub_reactive)
-        assert reactive_info == "units=kvar"
+        assert reactive_info == "units=VAR"
 
 
 def test_voltage_in_volts_triggers_out_of_range_warning() -> None:
@@ -986,17 +970,7 @@ def test_voltage_in_volts_triggers_out_of_range_warning() -> None:
     act on it.
     """
     with _Federation(n_federates=2) as federation:
-        dwelling_raw = Dwelling.from_hpxml(
-            HPXML, SCHEDULE, WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=300,  # 5 steps at 60s
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=99,
-            master_seed=0,
-            output_verbosity=0,
-            write_output=False,
-        )
+        dwelling_raw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=99, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=300, time_res=60, master_seed=0))
         dwelling_raw.initialize()
         orchestrator_ref: list[HELICSDwelling] = []
 
@@ -1095,7 +1069,7 @@ def test_mismatched_subscription_topic_logs_stale_warning() -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("aggregator_stale")
-        sub_power = aggregator.register_subscription("house_stale/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("house_stale/total_power_w", "double")
         # Aggregator publishes to the correct topic (not to voltage_typo)
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
@@ -1137,19 +1111,7 @@ _YEAR_DRIFT_TOLERANCE_S = 8.76e-3  # 1e-6 per step × 8760 steps
 
 
 def _new_year_dwelling(bldg_id: int = 42) -> Dwelling:
-    dwelling = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=_YEAR_DURATION_S,
-        time_res_s=int(_YEAR_TIME_RES_S),
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=bldg_id,
-        master_seed=0,
-        output_verbosity=0,
-        write_output=False,
-    )
+    dwelling = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=bldg_id, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=_YEAR_DURATION_S, time_res=int(_YEAR_TIME_RES_S), master_seed=0))
     dwelling.initialize()
     return dwelling
 
@@ -1241,7 +1203,7 @@ def test_year_scale_time_drift_multi_federate() -> None:
         thread.wait_ready()
 
         aggregator = federation.value_federate("year_agg", time_res_s=_YEAR_TIME_RES_S)
-        sub_power = aggregator.register_subscription("year_house_2/total_power_kw", "double")
+        sub_power = aggregator.register_subscription("year_house_2/total_power_w", "double")
         pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
 
         agg_granted_times: list[float] = []
@@ -1342,19 +1304,7 @@ def test_drift_guard_raises_when_cumulative_drift_exceeds_tolerance() -> None:
     _DURATION = _STEPS * int(_TIME_RES)
 
     with _Federation(n_federates=1) as federation:
-        dwelling = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=_DURATION,
-            time_res_s=int(_TIME_RES),
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=99,
-            master_seed=0,
-            output_verbosity=0,
-            write_output=False,
-        )
+        dwelling = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=99, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=_DURATION, time_res=int(_TIME_RES), master_seed=0))
         dwelling.initialize()
 
         helics_dwelling = federation.helics_dwelling(dwelling, "drift_guard", max_time_drift_tolerance_s=-1.0)

@@ -3,6 +3,8 @@
 //! shoulder-season evening (the outdoor air below the zone, the home still
 //! in cooling), a furnace pre-heats in January, and no signal is rejected.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -80,37 +82,40 @@ fn build(home: &Home) -> Dwelling {
     std::fs::write(&hpxml_path, xml).expect("write home.xml");
     let (year, month, day, hour) = home.start;
     let config = DwellingConfig {
-        hpxml_path: hpxml_path.clone(),
-        schedule_path: Some(fixture.join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather")
-            .join(home.weather),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: SimulationConfig {
-            start_time: FixedOffset::east_opt(home.utc_offset_h * 3600)
-                .expect("offset")
-                .with_ymd_and_hms(year, month, day, hour, 0, 0)
-                .unwrap(),
-            duration: Duration::hours(3),
-            time_res: Duration::seconds(900),
-            output_verbosity: 0,
-            write_output: false,
-            output_path: None,
-            output_format: hares_io::OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id: 3,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path.clone()),
+        schedule: Some(InputSource::Path(fixture.join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root()
+                .join("tests/fixtures/resstock/2025.1/weather")
+                .join(home.weather),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: FixedOffset::east_opt(home.utc_offset_h * 3600)
+                    .expect("offset")
+                    .with_ymd_and_hms(year, month, day, hour, 0, 0)
+                    .unwrap(),
+                duration: Duration::hours(3),
+                time_res: Duration::seconds(900),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            3,
+            None,
+        ),
     };
     let dwelling = Dwelling::from_config(config);
     std::fs::remove_file(&hpxml_path).expect("remove home.xml");
@@ -194,7 +199,7 @@ fn a_preconditioning_event_on_an_air_conditioner_precools() {
 
 fn bestest_600() -> Dwelling {
     let path = project_root().join("tests/fixtures/bestest/600.toml");
-    Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("build BESTEST 600")
+    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("build BESTEST 600")
 }
 
 fn ideal_unit(dwelling: &Dwelling) -> String {
@@ -226,8 +231,12 @@ fn a_dual_mode_unit_displaces_only_the_named_axis_for_a_year() {
         .expect("register the DR actor");
 
     let (mut heating_steps, mut cooling_steps) = (0_u32, 0_u32);
+    // The run's simulated step count: 2024's leap Feb 29 is not
+    // simulated over this typical file, so the engine's own step count
+    // (8736) is the year the loop walks, not the calendar's 8760.
+    let total_steps = dwelling.clock.total_steps() as usize;
     dwelling.step().expect("first step");
-    for step in 1..8760 {
+    for step in 1..total_steps {
         dwelling.step().expect("step");
         let eq = dwelling
             .equipment()
@@ -501,6 +510,10 @@ impl Equipment for ThermostatProbe {
         &self.descriptor
     }
 
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
+    }
+
     fn rename(&mut self, name: String) {
         self.descriptor.name = name;
     }
@@ -745,7 +758,7 @@ fn removing_an_actors_unit_evicts_it_with_a_counted_warning() {
             assert_eq!(
                 warnings
                     .iter()
-                    .filter(|w| w.contains("actor 'DR' is evicted"))
+                    .filter(|w| w.message.contains("actor 'DR' is evicted"))
                     .count(),
                 1,
                 "{context}: {warnings:?}"
@@ -797,7 +810,7 @@ fn an_actor_is_evicted_only_when_a_target_loses_its_last_unit() {
     assert!(
         warnings
             .iter()
-            .any(|w| w.contains("actor 'Two Target DR' is evicted")),
+            .any(|w| w.message.contains("actor 'Two Target DR' is evicted")),
         "{warnings:?}"
     );
     steps_without_rejections(&mut dwelling, "the end-use actor heats the backup unit");

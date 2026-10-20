@@ -18,18 +18,19 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
     FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId, OperatingMode,
-    PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField,
-    ThermalCategory, telemetry_keys as tk,
+    PortContribution, PortDeclaration, PortSlots, ScheduleSource, ScheduleSourceState, Telemetry,
+    TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::schedule_helpers::{capture_schedule_source_state, restore_optional_source};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
-    tank_thermostat_update, weighted_average_tank_temp,
+    step_setpoint_c, tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 
@@ -39,6 +40,10 @@ use super::{
     DEFAULT_TANK_DIAMETER_M, DEFAULT_TANK_HEIGHT_M, DEFAULT_TANK_VOLUME_M3, DEFAULT_UA_W_PER_K,
 };
 
+/// Version of the indirect tank's postcard checkpoint format. v1 was the
+/// implicit trait default (no override); v2 carries the draw, mains and
+/// appliance schedule sources' positions.
+const INDIRECT_TANK_CHECKPOINT_VERSION: u32 = 2;
 /// Default HX UA coefficient [W/K] for a copper-coil heat exchanger
 /// in a 50-gal indirect tank.
 const DEFAULT_HX_UA_W_PER_K: f64 = 150.0;
@@ -69,6 +74,11 @@ struct IndirectTankState {
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
     dr_duration_remaining_s: Option<f64>,
+    // --- Schedule-source positions (the draws and cursors a restore
+    // continues from) ---
+    draw_source_state: Option<ScheduleSourceState>,
+    mains_source_state: Option<ScheduleSourceState>,
+    appliance_draw_source_state: Option<ScheduleSourceState>,
 }
 
 pub struct IndirectTank {
@@ -93,6 +103,8 @@ pub struct IndirectTank {
     draw_flow_rate_kg_s: f64,
     draw_l_per_min_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
+    /// The wet appliances' untempered draw [kg/s], from its schedule column.
+    appliance_draw_source: Option<ScheduleSource>,
     target_setpoint_c: f64,
     fixture_delivery_temp_c: f64,
     hot_draw_temp_c: Option<f64>,
@@ -112,6 +124,8 @@ impl IndirectTank {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let siting = Siting::from_constructor_config(&config);
+        // Pre-init placeholder: init requires the config's boiler loop id
+        // (the allocator's assignment) and re-declares the ports from it.
         let boiler_loop_id =
             crate::hvac::helpers::loop_id_from_config(&config, &["boiler_loop_id", "loop_id"])
                 .unwrap_or_default();
@@ -173,6 +187,7 @@ impl IndirectTank {
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
+            appliance_draw_source: None,
             target_setpoint_c: DEFAULT_SETPOINT_C,
             fixture_delivery_temp_c: 40.6,
             hot_draw_temp_c: None,
@@ -187,8 +202,10 @@ impl IndirectTank {
         }
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the tank at 2 C, not off, so standby losses continue.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
     fn bottom_temp_c(&self) -> f64 {
@@ -231,7 +248,11 @@ impl IndirectTank {
         self.siting.resolve(config, c.zone_type.as_deref())?;
         self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.boiler_loop_id = c.boiler_loop_id.map(LoopId).unwrap_or(self.boiler_loop_id);
+        // The loop id is stated input (its wiring's or the loop allocator's
+        // assignment): an init without one cannot declare the boiler's
+        // hydronic loop, and loop 0 is the unassigned sentinel, not a loop.
+        self.boiler_loop_id =
+            crate::hvac::helpers::require_loop_id(c.boiler_loop_id, "Indirect Tank", &config.name)?;
         self.ports = siting::storage_ports(&[], &self.siting, self.boiler_loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
@@ -274,6 +295,10 @@ impl IndirectTank {
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
+        self.appliance_draw_source = c
+            .appliance_draw_flow_rate_source
+            .clone()
+            .map(|s| s.into_runtime());
 
         self.target_setpoint_c = self.setpoint_c;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
@@ -328,6 +353,52 @@ impl IndirectTank {
 }
 
 impl Equipment for IndirectTank {
+    /// v2: the state carries the draw, mains and appliance schedule
+    /// sources' positions; a v1 blob decoded against the new shape would
+    /// read a field that is not there, so the version gate rejects it.
+    fn checkpoint_version() -> u32 {
+        INDIRECT_TANK_CHECKPOINT_VERSION
+    }
+
+    fn reset_stochastic_state(&mut self) {
+        // The draw, mains and appliance sources at their seeds and
+        // cursors: the production phase reads them from the construction
+        // position, whatever the warm-up drew.
+        if let Some(source) = self.draw_l_per_min_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.mains_temp_c_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.appliance_draw_source.as_mut() {
+            source.reset();
+        }
+    }
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "setpoint_c",
+                self.setpoint_c,
+                hares_types::Unit::Celsius,
+            ),
+            hares_types::ResolvedParameter::new(
+                "tank_volume_m3",
+                self.tank.total_volume_m3(),
+                hares_types::Unit::CubicMeter,
+            ),
+            hares_types::ResolvedParameter::new(
+                "ua_w_k",
+                self.tank.ua_w_per_k(),
+                hares_types::Unit::WattPerKelvin,
+            ),
+            hares_types::ResolvedParameter::new(
+                "hx_ua_w_k",
+                self.hx_ua_w_per_k,
+                hares_types::Unit::WattPerKelvin,
+            ),
+        ]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -386,7 +457,7 @@ impl Equipment for IndirectTank {
         }
 
         let bottom_temp = self.bottom_temp_c();
-        let effective_sp = self.effective_setpoint_c();
+        let effective_sp = self.effective_setpoint_c(env);
         self.heating_on =
             hysteresis_call(bottom_temp, effective_sp, self.deadband_c, self.heating_on);
 
@@ -438,8 +509,22 @@ impl Equipment for IndirectTank {
             draw_l_per_min_source,
             mains_temp_c_source,
         )?;
-        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
+        // The wet appliances' untempered draw rides its own schedule column
+        // beside the tempered fixture draw: the full hot withdrawal, at the
+        // hot supply temperature, never mixed with cold mains.
+        let appliance_draw_kg_s = self
+            .appliance_draw_source
+            .as_mut()
+            .map(|source| {
+                source
+                    .value_at(env)
+                    .map_err(|err| {
+                        HaresError::Equipment(format!("{}: {err}", self.descriptor.name))
+                    })
+                    .map(|v| v.max(0.0))
+            })
+            .transpose()?;
+        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_draw_kg_s.unwrap_or(0.0);
 
         let hot_draw_temp_c = self.hot_draw_temp_c.unwrap_or(self.setpoint_c);
         let tmv = TemperedDrawConfig {
@@ -449,7 +534,8 @@ impl Equipment for IndirectTank {
         };
         let tempered_flow_m3_s =
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
-        let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
+        let hot_flow_m3_s =
+            appliance_draw_kg_s.unwrap_or(0.0) / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
             TemperedDrawInputs {
                 ambient_temp_c: ambient_c,
@@ -536,8 +622,8 @@ impl Equipment for IndirectTank {
 
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: None,
+                electric_w: None,
+                reactive_power_var: None,
                 fuel_w: None,
                 thermal_output_w: Some(hx_power_w.max(0.0)),
                 sensible_cooling_w: None,
@@ -551,7 +637,7 @@ impl Equipment for IndirectTank {
             },
             performance: CorePerformance {
                 cop: None,
-                main_power_kw: None,
+                main_power_w: None,
             },
         };
         self.core_output = core_output;
@@ -573,6 +659,10 @@ impl Equipment for IndirectTank {
 
     // `resolved_zip()` keeps the default `None`: the indirect tank is heated
     // by the boiler loop and has no electric draw of its own.
+
+    fn stored_energy_j(&self) -> Option<f64> {
+        Some(self.tank.stored_energy_j())
+    }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
@@ -597,6 +687,18 @@ impl Equipment for IndirectTank {
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
                 dr_load_fraction: self.dr_load_fraction,
                 dr_duration_remaining_s: self.dr_duration_remaining_s,
+                draw_source_state: self
+                    .draw_l_per_min_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                mains_source_state: self
+                    .mains_temp_c_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                appliance_draw_source_state: self
+                    .appliance_draw_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
             },
             Self::checkpoint_version(),
             "IndirectTank",
@@ -628,6 +730,12 @@ impl Equipment for IndirectTank {
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        restore_optional_source(&mut self.draw_l_per_min_source, decoded.draw_source_state)?;
+        restore_optional_source(&mut self.mains_temp_c_source, decoded.mains_source_state)?;
+        restore_optional_source(
+            &mut self.appliance_draw_source,
+            decoded.appliance_draw_source_state,
+        )?;
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the thermal flow from
         // the checkpointed `hx_power_w`, the mode re-derived by the step's
@@ -646,8 +754,8 @@ impl Equipment for IndirectTank {
         .resolve_idle(has_nonzero_flow, Some(decoded.hx_power_w.max(0.0)));
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: None,
+                electric_w: None,
+                reactive_power_var: None,
                 fuel_w: None,
                 thermal_output_w: Some(decoded.hx_power_w.max(0.0)),
                 sensible_cooling_w: None,
@@ -691,6 +799,9 @@ impl Equipment for IndirectTank {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
@@ -713,54 +824,37 @@ pub fn register_with_registry(registry: &mut EquipmentRegistry) {
 
 fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::TANK_AVG_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Volume-weighted average tank temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric power (always 0 for indirect tank)".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "HX heat transfer power".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Total DHW draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::UNMET_LOAD_W.to_string(),
-            unit: "W".to_string(),
-            description: "Unmet DHW load".to_string(),
-        },
-        TelemetryField {
-            name: tk::OUTLET_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "DHW outlet temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::SKIN_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Tank jacket thermal loss to the surrounding zone or ambient location"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "".to_string(),
-            description: "Operating mode (1=heating, 0=off)".to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::TANK_AVG_TEMP_C,
+            "Volume-weighted average tank temperature",
+        ),
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Electric power (always 0 for indirect tank)",
+        ),
+        TelemetryField::power_w(tk::ELECTRIC_POWER_W, "HX heat transfer power"),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Total DHW draw flow rate",
+        ),
+        TelemetryField::power_w(tk::UNMET_LOAD_W, "Unmet DHW load"),
+        TelemetryField::temp_c(tk::OUTLET_TEMP_C, "DHW outlet temperature"),
+        TelemetryField::power_w(
+            tk::SKIN_LOSS_W,
+            "Tank jacket thermal loss to the surrounding zone or ambient location",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode (1=heating, 0=off)",
+        ),
     ];
     for i in 0..n_nodes {
-        fields.push(TelemetryField {
-            name: format!("tank_node_{i}_temp_c"),
-            unit: "C".to_string(),
-            description: format!("Tank node {i} temperature"),
-        });
+        fields.push(TelemetryField::temp_c_owned(
+            format!("tank_node_{i}_temp_c"),
+            format!("Tank node {i} temperature"),
+        ));
     }
     fields
 }
@@ -784,7 +878,8 @@ mod control_domain_tests {
     use crate::Equipment;
     use chrono::{FixedOffset, TimeZone};
     use hares_types::{
-        ControlSignal, EnvironmentState, GridState, PortSlots, WeatherState, ZoneState,
+        ControlSignal, EnvironmentState, GridState, OperatingMode, PortSlots, WeatherState,
+        ZoneState,
     };
     use std::time::Duration;
 
@@ -817,6 +912,7 @@ mod control_domain_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -849,6 +945,7 @@ mod control_domain_tests {
             avg_water_draw_l_per_day: Some(227.0),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: Some(0.92),
             zone_type: Some("conditioned".to_string()),
             first_hour_rating_m3: Some(0.2),
@@ -861,6 +958,39 @@ mod control_domain_tests {
             .expect("typed config")
     }
 
+    /// A typed config stripped of its boiler loop id fails init naming the
+    /// equipment: the loop id is stated input (its wiring's or the loop
+    /// allocator's assignment), loop 0 is the unassigned sentinel and not a
+    /// loop, and no stand-in loop is stepped on. The pre-fix code accepted
+    /// the absent id silently (`unwrap_or_default()`).
+    #[test]
+    fn init_without_a_loop_id_fails_naming_the_equipment() {
+        let stripped = {
+            let mut cfg = crate::config::EquipmentConfig::from_typed(
+                "IHWH".to_string(),
+                "Indirect Tank".to_string(),
+                IndirectTankConfig {
+                    boiler_loop_id: None,
+                    ..config()
+                        .typed::<IndirectTankConfig>()
+                        .expect("the test config reads as its type")
+                },
+            )
+            .expect("the loop-less config builds");
+            cfg.name = "IHWH".to_string();
+            cfg
+        };
+        let mut eq = IndirectTank::new(stripped.clone());
+        let err = eq
+            .init(&stripped, &env())
+            .expect_err("a config with no loop id must fail init");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("Indirect Tank") && shown.contains("no fluid loop id"),
+            "the error names the equipment and the missing loop id: {shown}"
+        );
+    }
+
     #[test]
     fn thermal_setpoint_band_follows_the_shared_contract() {
         let cfg = config();
@@ -871,6 +1001,42 @@ mod control_domain_tests {
             |e| (e.setpoint_c, e.deadband_c),
             |e, db| e.deadband_c = db,
         );
+    }
+
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the indirect tank back to its own thermostat.
+    #[test]
+    fn mode_release_returns_the_tank_to_its_own_thermostat() {
+        let mut typed = config().typed::<IndirectTankConfig>().unwrap();
+        typed.initial_tank_temp_c = Some(40.0);
+        let cfg = crate::EquipmentConfig::from_typed(
+            "indirect".to_string(),
+            "Indirect Tank".to_string(),
+            typed,
+        )
+        .expect("typed config");
+        let mut eq = IndirectTank::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        assert_eq!(eq.update_control(&env()), OperatingMode::Off);
+        assert!(
+            !eq.heating_on,
+            "the forced-off tank must not call for boiler heat"
+        );
+
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        let mode = eq.update_control(&env());
+        assert_eq!(
+            mode,
+            OperatingMode::Heating,
+            "a cold tank is below the call edge: the release must let it heat again"
+        );
+        assert!(eq.heating_on);
     }
 
     /// The central validator rejects out-of-domain setpoints and load
@@ -942,8 +1108,12 @@ mod control_domain_tests {
             restored.core_output().flows.thermal_output_w.is_some(),
             "the restored output must publish its thermal flow"
         );
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("an indirect-tank checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("an indirect-tank checkpoint must restore a contract-valid output");
     }
 
     /// Port accumulators for the config's declared ports: the indirect
@@ -953,11 +1123,74 @@ mod control_domain_tests {
     fn ports() -> PortSlots {
         PortSlots {
             thermal: vec![hares_types::ThermalAccumulator::new(hares_types::ZoneId(2))],
-            fluid: vec![hares_types::FluidAccumulator::new(
-                hares_types::LoopId(3),
-                hares_types::FluidType::Water,
-            )],
+            fluid: vec![
+                hares_types::FluidAccumulator::new(
+                    hares_types::LoopId(3),
+                    hares_types::FluidType::Water,
+                ),
+                // The DHW draw's outbound loop accumulator.
+                hares_types::FluidAccumulator::new(
+                    crate::water_heater::DHW_DEMAND_LOOP,
+                    hares_types::FluidType::Water,
+                ),
+            ],
             ..Default::default()
+        }
+    }
+
+    /// The wet appliances' draw reaches the tank through the wired schedule
+    /// column: at every time step the tank's reported draw is the column's
+    /// value for that step (the fixture draw is zero here), so a step never
+    /// sees a stale or dropped appliance draw.
+    #[test]
+    fn appliance_draw_column_reaches_the_tank_at_every_step() {
+        use hares_types::{
+            BoundaryPolicy, DomainUpdate, SCHEDULE_DOMAIN_ID, ScheduleSourceConfig,
+            telemetry_keys as tk,
+        };
+
+        let mut typed = config().typed::<IndirectTankConfig>().unwrap();
+        typed.appliance_draw_flow_rate_source = Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 1,
+            boundary: BoundaryPolicy::Clamp,
+        });
+        let cfg = crate::EquipmentConfig::from_typed(
+            "indirect".to_string(),
+            "Indirect Tank".to_string(),
+            typed,
+        )
+        .expect("typed config");
+
+        let mut eq = IndirectTank::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+
+        // Per-step appliance draw values [kg/s]: distinct across the steps
+        // so a stale read cannot pass.
+        let step_draws = [0.0, 0.002, 0.0, 0.005, 0.001];
+        for (step, draw_kg_s) in step_draws.iter().enumerate() {
+            let mut env = env();
+            env.domains.schedule.set_from(&DomainUpdate {
+                domain_id: SCHEDULE_DOMAIN_ID,
+                zone_temperatures_c: Vec::new(),
+                custom_payload: Some(vec![0.0, *draw_kg_s]),
+            });
+            env.current_time = chrono::FixedOffset::east_opt(0)
+                .expect("UTC offset")
+                .with_ymd_and_hms(2026, 1, 1, 0, step as u32, 0)
+                .single()
+                .expect("valid");
+
+            let mut p = ports();
+            eq.step(&env, Duration::from_secs(60), &mut p).unwrap();
+
+            let got = eq
+                .telemetry()
+                .get(tk::DRAW_FLOW_RATE_KG_S)
+                .unwrap_or_else(|| panic!("step {step}: the tank publishes its draw"));
+            assert!(
+                (got - draw_kg_s).abs() < 1e-9,
+                "step {step}: the tank's draw must be the column's {draw_kg_s} kg/s, got {got}"
+            );
         }
     }
 }
@@ -991,6 +1224,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1012,7 +1246,7 @@ mod tests {
             crate::IndirectTankConfig {
                 equipment_id: None,
                 zone_id: None,
-                boiler_loop_id: None,
+                boiler_loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 ua_w_per_k: None,
@@ -1026,6 +1260,7 @@ mod tests {
                 avg_water_draw_l_per_day: None,
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 performance_adjustment: None,
                 zone_type: Some(zone_type.to_string()),
                 first_hour_rating_m3: None,

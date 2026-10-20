@@ -21,9 +21,10 @@ from typing import Any, TypedDict
 from conftest import make_dwelling
 
 import pathlib
+from hares import SimulationConfig
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
@@ -62,12 +63,11 @@ class _CommonKwargs(TypedDict):
     defaults_path: str
     bldg_id: int
     master_seed: int
-    write_output: bool
 
 
 def _battery_kw(name, equipment_list):
     idx = equipment_list["names"].index(name)
-    return equipment_list["power_kw"][idx]
+    return equipment_list["power_w"][idx]
 
 
 def _equipment_telemetry(dw, name):
@@ -92,7 +92,7 @@ def _equipment_core_output(dw, name):
 
 class TestBatteryPowerFactorCharging:
     def test_charging_q_positive_and_ratio_matches_tan_acos_pf(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -100,9 +100,9 @@ class TestBatteryPowerFactorCharging:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.3,
             standby_power_w=0.0,
             charge_efficiency=1.0,
@@ -110,7 +110,7 @@ class TestBatteryPowerFactorCharging:
             power_factor=0.9,
         )
         dw.add_battery(bat)
-        dw.apply_control("Bat", ControlSignal.power_setpoint(3.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=3000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "Bat")
@@ -126,7 +126,7 @@ class TestBatteryPowerFactorCharging:
         )
 
     def test_core_output_reactive_matches_telemetry(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -134,9 +134,9 @@ class TestBatteryPowerFactorCharging:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.3,
             standby_power_w=0.0,
             charge_efficiency=1.0,
@@ -144,14 +144,14 @@ class TestBatteryPowerFactorCharging:
             power_factor=0.9,
         )
         dw.add_battery(bat)
-        dw.apply_control("Bat", ControlSignal.power_setpoint(3.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=3000.0))
         dw.step()
 
         co = _equipment_core_output(dw, "Bat")
         tel = _equipment_telemetry(dw, "Bat")
-        assert co.reactive_power_kvar is not None
+        assert co.reactive_power_var is not None
         assert math.isclose(
-            co.reactive_power_kvar, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
+            co.reactive_power_var, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
         ), "CoreOutput Q and telemetry Q must agree"
 
 
@@ -162,7 +162,7 @@ class TestBatteryPowerFactorCharging:
 
 class TestBatteryReactiveSetpoint:
     def test_reactive_setpoint_reflected_in_telemetry(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -170,31 +170,31 @@ class TestBatteryReactiveSetpoint:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             charge_efficiency=1.0,
             discharge_efficiency=1.0,
             power_factor=0.9,
-            inverter_capacity_kva=10.0,
+            inverter_capacity_va=10000,
         )
         dw.add_battery(bat)
         # ReactiveSetpoint takes precedence over baseline pf.
-        dw.apply_control("Bat", ControlSignal.reactive_setpoint(1.5))
+        dw.apply_control("Bat", ControlSignal.reactive_setpoint(var=1500.0))
         # Also command charging so P>0.
-        dw.apply_control("Bat", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "Bat")
         q = tel["reactive_power_kvar"]
-        assert math.isclose(q, 1.5, rel_tol=1e-6), (
-            f"ReactiveSetpoint(1.5) should override baseline pf, got Q={q}"
+        assert math.isclose(q, 1500.0, rel_tol=1e-6), (
+            f"ReactiveSetpoint(1.5 kvar) should override baseline pf, got Q={q} var"
         )
 
     def test_power_factor_setpoint_reflected_in_telemetry(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -202,9 +202,9 @@ class TestBatteryReactiveSetpoint:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             charge_efficiency=1.0,
@@ -213,7 +213,7 @@ class TestBatteryReactiveSetpoint:
         dw.add_battery(bat)
         # PowerFactorSetpoint updates pf; Q follows new pf baseline.
         dw.apply_control("Bat", ControlSignal.power_factor_setpoint(0.8))
-        dw.apply_control("Bat", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "Bat")
@@ -226,7 +226,7 @@ class TestBatteryReactiveSetpoint:
         )
 
     def test_power_setpoint_with_reactive_kvar_accepted(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -234,25 +234,25 @@ class TestBatteryReactiveSetpoint:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             charge_efficiency=1.0,
             discharge_efficiency=1.0,
-            inverter_capacity_kva=10.0,
+            inverter_capacity_va=10000,
         )
         dw.add_battery(bat)
         dw.apply_control(
-            "Bat", ControlSignal.power_setpoint(2.0, reactive_kvar=0.75)
+            "Bat", ControlSignal.power_setpoint(active_power_w=2000.0, reactive_power_var=750.0)
         )
         dw.step()
 
         tel = _equipment_telemetry(dw, "Bat")
         q = tel["reactive_power_kvar"]
-        assert math.isclose(q, 0.75, rel_tol=1e-6), (
-            f"PowerSetpoint(reactive=0.75) should set Q=0.75, got Q={q}"
+        assert math.isclose(q, 750.0, rel_tol=1e-6), (
+            f"PowerSetpoint(reactive=750 var) should set Q=750 var, got Q={q}"
         )
 
 
@@ -263,7 +263,7 @@ class TestBatteryReactiveSetpoint:
 
 class TestEvPowerFactorCharging:
     def test_charging_with_pf_0_9_produces_reactive_power_q_positive(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -271,12 +271,12 @@ class TestEvPowerFactorCharging:
         dw.initialize()
         ev = EV(
             "TestEV",
-            capacity_kwh=75.0,
-            max_charging_kw=7.2,
+            capacity_j=270000000,
+            max_charging_power_w=7200,
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
             power_factor=0.9,
-            charger_capacity_kva=15.0,
+            charger_capacity_va=15000,
         )
         dw.add_ev(ev)
         dw.step()
@@ -294,7 +294,7 @@ class TestEvPowerFactorCharging:
         )
 
     def test_core_output_reactive_matches_telemetry(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -302,35 +302,35 @@ class TestEvPowerFactorCharging:
         dw.initialize()
         ev = EV(
             "TestEV",
-            capacity_kwh=75.0,
-            max_charging_kw=7.2,
+            capacity_j=270000000,
+            max_charging_power_w=7200,
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
             power_factor=0.9,
-            charger_capacity_kva=15.0,
+            charger_capacity_va=15000,
         )
         dw.add_ev(ev)
         dw.step()
 
         co = _equipment_core_output(dw, "TestEV")
         tel = _equipment_telemetry(dw, "TestEV")
-        assert co.reactive_power_kvar is not None
+        assert co.reactive_power_var is not None
         assert math.isclose(
-            co.reactive_power_kvar, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
+            co.reactive_power_var, tel["reactive_power_kvar"], rel_tol=0, abs_tol=1e-12
         ), "CoreOutput Q and telemetry Q must agree"
 
 
 class TestEvReactiveSetpoint:
     def _make_ev_dwelling(self, **ev_kw: Any):
-        from ochre_next import EV, EvConnectionState
+        from hares import EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
         )
         dw.initialize()
         defaults: dict[str, Any] = dict(
-            capacity_kwh=75.0,
-            max_charging_kw=7.2,
+            capacity_j=270000000,
+            max_charging_power_w=7200,
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
         )
@@ -340,27 +340,27 @@ class TestEvReactiveSetpoint:
         return dw
 
     def test_reactive_setpoint_reflected_in_telemetry(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = self._make_ev_dwelling(
-            power_factor=0.9, charger_capacity_kva=10.0
+            power_factor=0.9, charger_capacity_va=10000
         )
-        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(1.5))
-        dw.apply_control("TestEV", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(var=1500.0))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "TestEV")
         q = tel["reactive_power_kvar"]
-        assert math.isclose(q, 1.5, rel_tol=1e-6), (
-            f"ReactiveSetpoint(1.5) should override baseline pf, got Q={q}"
+        assert math.isclose(q, 1500.0, rel_tol=1e-6), (
+            f"ReactiveSetpoint(1.5 kvar) should override baseline pf, got Q={q} var"
         )
 
     def test_power_factor_setpoint_reflected_in_telemetry(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = self._make_ev_dwelling()
         dw.apply_control("TestEV", ControlSignal.power_factor_setpoint(0.8))
-        dw.apply_control("TestEV", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         tel = _equipment_telemetry(dw, "TestEV")
@@ -373,31 +373,31 @@ class TestEvReactiveSetpoint:
         )
 
     def test_power_setpoint_with_reactive_kvar_accepted(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
-        dw = self._make_ev_dwelling(charger_capacity_kva=10.0)
+        dw = self._make_ev_dwelling(charger_capacity_va=10000)
         dw.apply_control(
-            "TestEV", ControlSignal.power_setpoint(2.0, reactive_kvar=0.75)
+            "TestEV", ControlSignal.power_setpoint(active_power_w=2000.0, reactive_power_var=750.0)
         )
         dw.step()
 
         tel = _equipment_telemetry(dw, "TestEV")
         q = tel["reactive_power_kvar"]
-        assert math.isclose(q, 0.75, rel_tol=1e-6), (
-            f"PowerSetpoint(reactive=0.75) should set Q=0.75, got Q={q}"
+        assert math.isclose(q, 750.0, rel_tol=1e-6), (
+            f"PowerSetpoint(reactive=750 var) should set Q=750 var, got Q={q}"
         )
 
     def test_real_power_unchanged_by_reactive_setpoint(self):
         """Sending a ReactiveSetpoint must not alter real power."""
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
-        dw = self._make_ev_dwelling(power_factor=0.9, charger_capacity_kva=10.0)
-        dw.apply_control("TestEV", ControlSignal.power_setpoint(3.0))
+        dw = self._make_ev_dwelling(power_factor=0.9, charger_capacity_va=10000)
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(active_power_w=3000.0))
         dw.step()
         tel_before = _equipment_telemetry(dw, "TestEV")
         p_before = tel_before["active_power_kw"]
 
-        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(0.5))
+        dw.apply_control("TestEV", ControlSignal.reactive_setpoint(var=500.0))
         dw.step()
         tel_after = _equipment_telemetry(dw, "TestEV")
         p_after = tel_after["active_power_kw"]
@@ -406,14 +406,14 @@ class TestEvReactiveSetpoint:
         assert math.isclose(p_after, p_before, rel_tol=1e-6), (
             f"Real power changed after ReactiveSetpoint: {p_before} → {p_after}"
         )
-        assert math.isclose(q_after, 0.5, rel_tol=1e-6), (
-            f"ReactiveSetpoint(0.5) should give Q=0.5, got Q={q_after}"
+        assert math.isclose(q_after, 500.0, rel_tol=1e-6), (
+            f"ReactiveSetpoint(0.5 kvar) should give Q=500 var, got Q={q_after}"
         )
 
 
 class TestDefaultEvZeroQ:
     def test_default_ev_emits_q_zero_and_real_power_unchanged(self):
-        from ochre_next import ControlSignal, EV, EvConnectionState
+        from hares import ControlSignal, EV, EvConnectionState
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -421,25 +421,25 @@ class TestDefaultEvZeroQ:
         dw.initialize()
         ev = EV(
             "TestEV",
-            capacity_kwh=75.0,
-            max_charging_kw=7.2,
+            capacity_j=270000000,
+            max_charging_power_w=7200,
             initial_soc=0.5,
             initial_connection_state=EvConnectionState.HomePluggedIn,
         )
         dw.add_ev(ev)
-        dw.apply_control("TestEV", ControlSignal.power_setpoint(3.0))
+        dw.apply_control("TestEV", ControlSignal.power_setpoint(active_power_w=3000.0))
         dw.step()
 
         co = _equipment_core_output(dw, "TestEV")
         tel = _equipment_telemetry(dw, "TestEV")
-        assert co.reactive_power_kvar is not None, (
+        assert co.reactive_power_var is not None, (
             "EV with REACTIVE cap must set reactive_power_kvar to Some"
         )
-        assert abs(co.reactive_power_kvar) < 1e-9, (
-            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_kvar}"
+        assert abs(co.reactive_power_var) < 1e-9, (
+            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_var}"
         )
         assert abs(tel["reactive_power_kvar"]) < 1e-9, (
-            f"Telemetry Q should be ≈0 for default EV, got {tel['reactive_power_kvar']}"
+            f"Telemetry Q should be ≈0 for default EV, got {tel['reactive_power_var']}"
         )
         assert tel["active_power_kw"] > 0, "Real power should be >0 with power setpoint"
 
@@ -451,7 +451,7 @@ class TestDefaultEvZeroQ:
 
 class TestZipPfOverride:
     def test_zip_pf_override_changes_q_leaves_p_identical(self, tmp_path):
-        from ochre_next import Dwelling
+        from hares import Dwelling, SimulationConfig
 
         # July afternoon so the AC compressor actually runs (a pf override
         # retargets the compressor component; the resistive crankcase heater
@@ -463,33 +463,54 @@ class TestZipPfOverride:
             "schedule": SCHEDULE,
             "weather": WEATHER,
             "start_time": "2019-07-01T14:00:00",
-            # Three hours: the merged ground-coupled basement damps the
-            # zone's climb to the cooling call (it crosses at ~2 h into the
-            # July afternoon), and the loop breaks when the compressor runs.
-            "duration_s": 10800,
+            # Six hours: the merged ground-coupled basement damps the
+            # zone's climb to the cooling call. The run's first hour's
+            # weather interpolates from the first day's hour-24 record
+            # (the EnergyPlus first-hour rule), which delays the climb to
+            # ~3 h into the afternoon, and the loop breaks when the
+            # compressor runs.
+            "duration_s": 21600,
             "time_res_s": 60,
             "defaults_path": str(HARES_DEFAULTS),
             "bldg_id": 42,
             "master_seed": 0,
-            "write_output": False,
+
         }
+        sim_config = SimulationConfig(
+            start_time=common["start_time"],
+            duration=common["duration_s"],
+            time_res=common["time_res_s"],
+            master_seed=common["master_seed"],
+        )
 
         # Baseline: no override.
-        dw_base = Dwelling.from_hpxml(**common)
+        dw_base = Dwelling.from_hpxml(
+            hpxml=common["hpxml"],
+            schedule=common["schedule"],
+            weather=common["weather"],
+            defaults=common["defaults_path"],
+            bldg_id=common["bldg_id"],
+            config=sim_config,
+        )
         dw_base.initialize()
 
         # Override: change Air Conditioner compressor pf from 0.96 → 0.9.
         dw_ov = Dwelling.from_hpxml(
+            hpxml=common["hpxml"],
+            schedule=common["schedule"],
+            weather=common["weather"],
+            defaults=common["defaults_path"],
+            bldg_id=common["bldg_id"],
+            config=sim_config,
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
-            **common,
         )
         dw_ov.initialize()
 
         # Step until the compressor draws power (the merged ground-coupled
-        # basement damps the zone's climb to the cooling call; it crosses at
-        # ~2 h into the July afternoon).
+        # basement damps the zone's climb to the cooling call; it crosses
+        # at ~3 h into the July afternoon).
         compressor_kw = 0.0
-        for _ in range(180):
+        for _ in range(360):
             dw_base.step()
             dw_ov.step()
             tel = _equipment_telemetry(dw_base, "Air Conditioner")
@@ -501,15 +522,15 @@ class TestZipPfOverride:
         co_base = _equipment_core_output(dw_base, "Air Conditioner")
         co_ov = _equipment_core_output(dw_ov, "Air Conditioner")
 
-        p_base = co_base.electric_kw
-        p_ov = co_ov.electric_kw
+        p_base = co_base.electric_w
+        p_ov = co_ov.electric_w
         assert p_base is not None and p_ov is not None
         assert p_base == p_ov, (
             f"Real power must be bit-identical (Rule R1), got {p_base} vs {p_ov}"
         )
 
-        q_base = co_base.reactive_power_kvar
-        q_ov = co_ov.reactive_power_kvar
+        q_base = co_base.reactive_power_var
+        q_ov = co_ov.reactive_power_var
         assert q_base is not None and q_ov is not None
         assert q_base != q_ov, (
             f"Q must change with pf override, got baseline={q_base} override={q_ov}"
@@ -518,8 +539,8 @@ class TestZipPfOverride:
         # Per-component model: Q = comp*tan(acos(pf_comp)) + fan*tan(acos(0.87)).
         # The override changes only the compressor arm.
         tel = _equipment_telemetry(dw_base, "Air Conditioner")
-        fan_kw = tel.get("fan_kw", 0.0)
-        fan_q = fan_kw * math.tan(math.acos(0.87))
+        fan_w = tel.get("fan_kw", 0.0)
+        fan_q = fan_w * math.tan(math.acos(0.87))
         expected_q_base = compressor_kw * math.tan(math.acos(0.96)) + fan_q
         expected_q_ov = compressor_kw * math.tan(math.acos(0.9)) + fan_q
         assert math.isclose(q_base, expected_q_base, rel_tol=1e-6), (
@@ -532,7 +553,7 @@ class TestZipPfOverride:
         )
 
     def test_zip_override_telemetry_reactive_key_present(self, tmp_path):
-        from ochre_next import Dwelling
+        from hares import Dwelling, SimulationConfig
 
         # July afternoon: the compressor must run for Q != 0 — on winter
         # standby only the resistive crankcase heater draws power and the
@@ -544,25 +565,39 @@ class TestZipPfOverride:
             "schedule": SCHEDULE,
             "weather": WEATHER,
             "start_time": "2019-07-01T14:00:00",
-            # Three hours: the merged ground-coupled basement damps the
-            # zone's climb to the cooling call (it crosses at ~2 h into the
-            # July afternoon), and the loop breaks when the compressor runs.
-            "duration_s": 10800,
+            # Six hours: the merged ground-coupled basement damps the
+            # zone's climb to the cooling call. The run's first hour's
+            # weather interpolates from the first day's hour-24 record
+            # (the EnergyPlus first-hour rule), which delays the climb to
+            # ~3 h into the afternoon, and the loop breaks when the
+            # compressor runs.
+            "duration_s": 21600,
             "time_res_s": 60,
             "defaults_path": str(HARES_DEFAULTS),
             "bldg_id": 42,
             "master_seed": 0,
-            "write_output": False,
+
         }
+        sim_config = SimulationConfig(
+            start_time=common["start_time"],
+            duration=common["duration_s"],
+            time_res=common["time_res_s"],
+            master_seed=common["master_seed"],
+        )
 
         dw = Dwelling.from_hpxml(
+            hpxml=common["hpxml"],
+            schedule=common["schedule"],
+            weather=common["weather"],
+            defaults=common["defaults_path"],
+            bldg_id=common["bldg_id"],
+            config=sim_config,
             overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
-            **common,
         )
         dw.initialize()
 
         tel = None
-        for _ in range(180):
+        for _ in range(360):
             dw.step()
             tel = _equipment_telemetry(dw, "Air Conditioner")
             if tel.get("compressor_kw", 0.0) > 0.0:
@@ -581,7 +616,7 @@ class TestZipPfOverride:
 
 class TestDefaultBatteryZeroQ:
     def test_default_battery_q_zero(self):
-        from ochre_next import Battery, ControlSignal
+        from hares import Battery, ControlSignal
 
         dw = make_dwelling(
             duration_s=600, time_res_s=60, start_time="2019-07-01T12:00:00"
@@ -589,25 +624,25 @@ class TestDefaultBatteryZeroQ:
         dw.initialize()
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             charge_efficiency=1.0,
             discharge_efficiency=1.0,
         )
         dw.add_battery(bat)
-        dw.apply_control("Bat", ControlSignal.power_setpoint(2.0))
+        dw.apply_control("Bat", ControlSignal.power_setpoint(active_power_w=2000.0))
         dw.step()
 
         co = _equipment_core_output(dw, "Bat")
         tel = _equipment_telemetry(dw, "Bat")
-        assert co.reactive_power_kvar is not None, (
+        assert co.reactive_power_var is not None, (
             "Battery with REACTIVE cap must set reactive_power_kvar to Some"
         )
-        assert abs(co.reactive_power_kvar) < 1e-9, (
-            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_kvar}"
+        assert abs(co.reactive_power_var) < 1e-9, (
+            f"Default pf=1.0 should give Q≈0, got {co.reactive_power_var}"
         )
         assert abs(tel["reactive_power_kvar"]) < 1e-9
 
@@ -630,13 +665,13 @@ def _equipment_resolved_zip(dw, name):
 
 class TestResolvedZipInspection:
     def _add_battery(self, dw, **kw):
-        from ochre_next import Battery
+        from hares import Battery
 
         bat = Battery(
             "Bat",
-            10.0,
-            max_charge_kw=5.0,
-            max_discharge_kw=5.0,
+            capacity_j=36000000,
+            max_charge_w=5000,
+            max_discharge_w=5000,
             initial_soc=0.5,
             standby_power_w=0.0,
             **kw,
@@ -659,18 +694,9 @@ class TestResolvedZipInspection:
         assert _equipment_resolved_zip(dw, "Bat") == zip_dict
 
     def test_ashp_heater_resolved_zip_pf_084(self):
-        from ochre_next import ASHPHeater, DwellingBlueprint, EndUse
+        from hares import ASHPHeater, DwellingBlueprint, EndUse
 
-        bp = DwellingBlueprint.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            duration_s=600,
-            time_res_s=60,
-            write_output=False,
-        )
+        bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=600, time_res=60,start_time="2019-01-01T00:00:00"))
         bp.remove_equipment_by_end_use([EndUse.HVAC_HEATING])
         bp.add_equipment(
             ASHPHeater("ASHP", capacity_w=12000, hspf=9.5, backup_capacity_w=5000)
@@ -687,21 +713,9 @@ class TestResolvedZipInspection:
         assert _equipment_resolved_zip(dw, "ASHP") == zip_dict
 
     def test_user_zip_override_pf_09_visible(self):
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
-        dw = Dwelling.from_hpxml(
-            HPXML,
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-07-01T14:00:00",
-            duration_s=600,
-            time_res_s=60,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=0,
-            overrides={"Air Conditioner": {"zip": {"pf": 0.9}}},
-            write_output=False,
-        )
+        dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, overrides={"Air Conditioner": {"zip": {"pf": 0.9}}}, config=SimulationConfig(start_time="2019-07-01T14:00:00", duration=600, time_res=60,master_seed=0))
         dw.initialize()
 
         zip_dict = dw.equipment_zip("Air Conditioner")
@@ -715,7 +729,7 @@ class TestResolvedZipInspection:
         assert _equipment_resolved_zip(dw, "Air Conditioner") == zip_dict
 
     def test_battery_power_factor_setpoint_updates_resolved_zip(self):
-        from ochre_next import ControlSignal
+        from hares import ControlSignal
 
         dw = make_dwelling(duration_s=600, time_res_s=60)
         dw.initialize()

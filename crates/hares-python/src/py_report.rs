@@ -1,0 +1,380 @@
+//! Python bindings for the report requests: `ReportSpec`, `Selection`,
+//! `Frequency` and `Destination`.
+//!
+//! Each wraps the Rust value the configuration records, so a report built
+//! here resolves exactly like one parsed from TOML
+//! (`[[simulation.reports]]`). The variants this entry adds are the ones
+//! that can run; every later variant's constructor lands with its entry.
+
+use hares_io::output::report::{Destination, Frequency, ReportSpec, Selection};
+use pyo3::prelude::*;
+use std::hash::{Hash, Hasher};
+
+/// What a report selects.
+#[pyclass(name = "Selection", from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PySelection(pub Selection);
+
+#[pymethods]
+impl PySelection {
+    /// The verbosity preset: every variable the tier emits.
+    #[staticmethod]
+    pub fn verbosity(verbosity: u8) -> Self {
+        Self(Selection::Verbosity(verbosity))
+    }
+
+    /// Explicit variable names, resolved exactly and case-sensitively.
+    #[staticmethod]
+    pub fn named(names: Vec<String>) -> Self {
+        Self(Selection::Named(names))
+    }
+
+    /// A glob over variable names (`*`, `?`; case-sensitive).
+    #[staticmethod]
+    pub fn pattern(pattern: String) -> Self {
+        Self(Selection::Pattern(pattern))
+    }
+
+    pub fn __repr__(&self) -> String {
+        match &self.0 {
+            Selection::Verbosity(v) => format!("Selection.verbosity({v})"),
+            Selection::Named(names) => format!("Selection.named({names:?})"),
+            Selection::Pattern(pattern) => format!("Selection.pattern({pattern:?})"),
+            Selection::Diagnostics => "Selection.diagnostics()".to_string(),
+        }
+    }
+
+    /// Value equality: two selections built apart select alike. The presets
+    /// a consumer holds are compared against the engine's named tiers.
+    pub fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// Hash of the selection's own fields, the companion `__eq__` needs:
+    /// equal selections hash equal, so a selection is a dict key again.
+    pub fn __hash__(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The pickling state: the selection's own serde JSON, the form the
+    /// engine's TOML config carries it in, so a selection crosses a process
+    /// boundary as data and rebuilds as the same selection.
+    pub fn state_json(&self) -> String {
+        serde_json::to_string(&self.0).expect("a selection serialises")
+    }
+
+    /// `__reduce__` over that state: the rebuild callable is the extension
+    /// module's `_selection_from_state`, pickled by reference.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObject;
+
+        let state = slf.borrow().state_json();
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_selection_from_state")?.unbind();
+        let args = (state,).into_pyobject(py)?.unbind().into_any();
+        Ok((rebuild, args).into_pyobject(py)?.unbind().into_any())
+    }
+}
+
+/// The reporting frequency. Only the timestep frequency runs in this
+/// build; the period frequencies arrive with the reporting-frequency entry.
+#[pyclass(name = "Frequency", from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct PyFrequency(pub Frequency);
+
+#[pymethods]
+impl PyFrequency {
+    /// Every timestep is a row.
+    #[staticmethod]
+    pub fn timestep() -> Self {
+        Self(Frequency::Timestep)
+    }
+
+    /// Sub-hourly periods of `n` minutes: `n` divides the hour. Zero is
+    /// the typed value error, the reporting-frequency rule's own message,
+    /// never a panic.
+    #[staticmethod]
+    pub fn minutes(n: u32) -> PyResult<Self> {
+        let minutes = std::num::NonZeroU32::new(n).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Frequency.minutes({n}) is not a valid reporting frequency: \
+                 n must divide the hour (60)"
+            ))
+        })?;
+        Ok(Self(Frequency::Minutes(minutes)))
+    }
+
+    /// Calendar hours in the naive local wall clock.
+    #[staticmethod]
+    pub fn hourly() -> Self {
+        Self(Frequency::Hourly)
+    }
+
+    /// Calendar days in the naive local wall clock.
+    #[staticmethod]
+    pub fn daily() -> Self {
+        Self(Frequency::Daily)
+    }
+
+    /// Calendar months in the naive local wall clock.
+    #[staticmethod]
+    pub fn monthly() -> Self {
+        Self(Frequency::Monthly)
+    }
+
+    /// Calendar years in the naive local wall clock.
+    #[staticmethod]
+    pub fn annual() -> Self {
+        Self(Frequency::Annual)
+    }
+
+    /// One row covering the whole run.
+    #[staticmethod]
+    pub fn run_period() -> Self {
+        Self(Frequency::RunPeriod)
+    }
+
+    pub fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// Hash of the frequency's own fields, the companion `__eq__` needs:
+    /// equal frequencies hash equal, so a frequency is a dict key again.
+    pub fn __hash__(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The pickling state: the frequency's own serde JSON, the form the
+    /// engine's TOML config carries it in, so a frequency crosses a process
+    /// boundary as data and rebuilds as the same frequency.
+    pub fn state_json(&self) -> String {
+        serde_json::to_string(&self.0).expect("a frequency serialises")
+    }
+
+    /// `__reduce__` over that state: the rebuild callable is the extension
+    /// module's `_frequency_from_state`, pickled by reference.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObject;
+
+        let state = slf.borrow().state_json();
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_frequency_from_state")?.unbind();
+        let args = (state,).into_pyobject(py)?.unbind().into_any();
+        Ok((rebuild, args).into_pyobject(py)?.unbind().into_any())
+    }
+
+    pub fn __repr__(&self) -> String {
+        match &self.0 {
+            Frequency::Timestep => "Frequency.timestep()".to_string(),
+            Frequency::Minutes(n) => format!("Frequency.minutes({n})"),
+            Frequency::Hourly => "Frequency.hourly()".to_string(),
+            Frequency::Daily => "Frequency.daily()".to_string(),
+            Frequency::Monthly => "Frequency.monthly()".to_string(),
+            Frequency::Annual => "Frequency.annual()".to_string(),
+            Frequency::RunPeriod => "Frequency.run_period()".to_string(),
+        }
+    }
+}
+
+/// Where a report's batches go.
+#[pyclass(name = "Destination", from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyDestination(pub Destination);
+
+#[pymethods]
+impl PyDestination {
+    /// Every flushed batch retained in memory: the report's frame.
+    #[staticmethod]
+    pub fn memory() -> Self {
+        Self(Destination::Memory)
+    }
+
+    /// Stream to a Parquet file, published at the run's end. An existing
+    /// target fails the run unless `overwrite` is set.
+    #[staticmethod]
+    #[pyo3(signature = (path, overwrite = false))]
+    pub fn parquet(path: String, overwrite: bool) -> Self {
+        Self(Destination::Parquet {
+            path: path.into(),
+            overwrite,
+        })
+    }
+
+    /// Stream to a CSV file, published at the run's end. An existing
+    /// target fails the run unless `overwrite` is set.
+    #[staticmethod]
+    #[pyo3(signature = (path, overwrite = false))]
+    pub fn csv(path: String, overwrite: bool) -> Self {
+        Self(Destination::Csv {
+            path: path.into(),
+            overwrite,
+        })
+    }
+
+    /// Deliver every flushed batch to the callable
+    /// `Dwelling.attach_callback` registered on the report, in flush
+    /// order; nothing is retained. A run whose callback report has no
+    /// attached callback fails its first step.
+    #[staticmethod]
+    pub fn callback() -> Self {
+        Self(Destination::Callback)
+    }
+
+    pub fn __repr__(&self) -> String {
+        match &self.0 {
+            Destination::Memory => "Destination.memory()".to_string(),
+            Destination::Parquet { path, overwrite } => format!(
+                "Destination.parquet({}, overwrite={overwrite:?})",
+                path.display()
+            ),
+            Destination::Csv { path, overwrite } => format!(
+                "Destination.csv({}, overwrite={overwrite:?})",
+                path.display()
+            ),
+            Destination::Callback => "Destination.callback()".to_string(),
+        }
+    }
+
+    pub fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+
+    /// Hash of the destination's own fields, the companion `__eq__` needs:
+    /// equal destinations hash equal, so a destination is a dict key again.
+    pub fn __hash__(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The pickling state: the destination's own serde JSON, the form the
+    /// engine's TOML config carries it in, so a destination crosses a
+    /// process boundary as data and rebuilds as the same destination.
+    pub fn state_json(&self) -> String {
+        serde_json::to_string(&self.0).expect("a destination serialises")
+    }
+
+    /// `__reduce__` over that state: the rebuild callable is the extension
+    /// module's `_destination_from_state`, pickled by reference.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObject;
+
+        let state = slf.borrow().state_json();
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_destination_from_state")?.unbind();
+        let args = (state,).into_pyobject(py)?.unbind().into_any();
+        Ok((rebuild, args).into_pyobject(py)?.unbind().into_any())
+    }
+}
+
+/// The pickling rebuilds: each report-surface value's own serde JSON back
+/// into the same value. The `__reduce__` methods above pickle these by
+/// reference, so a value crosses a spawn boundary as data and the child
+/// rebuilds it through the installed extension module.
+#[pyfunction]
+pub fn _selection_from_state(state: String) -> PyResult<PySelection> {
+    let selection: Selection = serde_json::from_str(&state)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PySelection(selection))
+}
+
+#[pyfunction]
+pub fn _frequency_from_state(state: String) -> PyResult<PyFrequency> {
+    let frequency: Frequency = serde_json::from_str(&state)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PyFrequency(frequency))
+}
+
+#[pyfunction]
+pub fn _destination_from_state(state: String) -> PyResult<PyDestination> {
+    let destination: Destination = serde_json::from_str(&state)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PyDestination(destination))
+}
+
+#[pyfunction]
+pub fn _reportspec_from_state(state: String) -> PyResult<PyReportSpec> {
+    let spec: ReportSpec = serde_json::from_str(&state)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PyReportSpec(spec))
+}
+
+/// One report request: what a run records and where it goes.
+///
+/// `ReportSpec(name, selection, destination, frequency=Frequency.timestep())`.
+#[pyclass(name = "ReportSpec", from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyReportSpec(pub ReportSpec);
+
+#[pymethods]
+impl PyReportSpec {
+    #[new]
+    #[pyo3(signature = (name, selection, destination, frequency = None))]
+    pub fn new(
+        name: String,
+        selection: PySelection,
+        destination: PyDestination,
+        frequency: Option<PyFrequency>,
+    ) -> PyResult<Self> {
+        let spec = ReportSpec {
+            name,
+            selection: selection.0,
+            frequency: frequency.map_or(Frequency::Timestep, |f| f.0),
+            destination: destination.0,
+        };
+        Ok(Self(spec))
+    }
+
+    #[getter]
+    pub fn name(&self) -> String {
+        self.0.name.clone()
+    }
+
+    #[getter]
+    pub fn selection(&self) -> PySelection {
+        PySelection(self.0.selection.clone())
+    }
+
+    #[getter]
+    pub fn destination(&self) -> PyDestination {
+        PyDestination(self.0.destination.clone())
+    }
+
+    #[getter]
+    pub fn frequency(&self) -> PyFrequency {
+        PyFrequency(self.0.frequency)
+    }
+
+    /// The pickling state: the request's own serde JSON, the form the
+    /// engine's TOML config carries a report list in, so a whole report
+    /// request (its selection, destination and frequency included) crosses
+    /// a process boundary as data and rebuilds as the same request.
+    pub fn state_json(&self) -> String {
+        serde_json::to_string(&self.0).expect("a report request serialises")
+    }
+
+    /// `__reduce__` over that state: the rebuild callable is the extension
+    /// module's `_reportspec_from_state`, pickled by reference.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObject;
+
+        let state = slf.borrow().state_json();
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_reportspec_from_state")?.unbind();
+        let args = (state,).into_pyobject(py)?.unbind().into_any();
+        Ok((rebuild, args).into_pyobject(py)?.unbind().into_any())
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "ReportSpec(name={:?}, selection={}, destination={})",
+            self.0.name,
+            PySelection(self.0.selection.clone()).__repr__(),
+            PyDestination(self.0.destination.clone()).__repr__(),
+        )
+    }
+}

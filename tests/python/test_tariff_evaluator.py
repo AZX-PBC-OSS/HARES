@@ -7,7 +7,7 @@ without a full dwelling simulation.
 import datetime as _dt
 from datetime import datetime, timedelta
 
-from ochre_next import ElectricTariff, TariffEvaluator
+from hares import ElectricTariff, TariffEvaluator
 
 off_utc = _dt.timezone(_dt.timedelta(0))
 
@@ -57,7 +57,7 @@ class TestStandaloneFlatRate:
         dt = start
         for _ in range(8760):
             dt += interval
-            s = ev.step(1.0, 3600.0, dt)
+            s = ev.step(net_power_w=1000.0, dt_seconds=3600.0, current_time=dt)
             if s is not None:
                 summaries.append(s)
 
@@ -88,9 +88,10 @@ class TestTOUPricing:
         dt = start
         for hour in range(24):
             dt += interval
-            # Peak hours: 16:00-21:00 (UTC, same as local here)
-            load = 2.0 if 16 <= hour < 21 else 1.0
-            s = ev.step(load, 3600.0, dt)
+            # Peak hours: 16:00-21:00 (UTC, same as local here); the
+            # step takes watts.
+            load = 2000.0 if 16 <= hour < 21 else 1000.0
+            s = ev.step(net_power_w=load, dt_seconds=3600.0, current_time=dt)
             if s is not None:
                 summaries.append(s)
 
@@ -120,8 +121,8 @@ class TestIdempotent:
             dt = start
             for hour in range(24):
                 dt += interval
-                load = 2.0 if hour % 2 == 0 else 1.0
-                s = ev.step(load, 3600.0, dt)
+                load = 2000.0 if hour % 2 == 0 else 1000.0
+                s = ev.step(net_power_w=load, dt_seconds=3600.0, current_time=dt)
                 if s is not None:
                     summaries.append(s)
             final = ev.finalize(end)
@@ -167,12 +168,12 @@ class TestCurrentMetrics:
         ev = TariffEvaluator(tariff, start, end, interval)
 
         dt = start + timedelta(hours=12)
-        ev.step(2.0, 3600.0, dt)
+        ev.step(net_power_w=2000.0, dt_seconds=3600.0, current_time=dt)
 
         metrics = ev.current_metrics
         assert metrics.total_import_kwh > 0
         assert metrics.energy_charge_usd > 0
-        # Peak demand should reflect the 2 kW load
+        # Peak demand should reflect the 2000 W load
         assert abs(metrics.peak_demand_kw - 2.0) < 1e-6
 
     def test_current_metrics_before_any_steps(self):

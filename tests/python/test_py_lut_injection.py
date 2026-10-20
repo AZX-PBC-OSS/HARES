@@ -1,4 +1,4 @@
-"""Tests for PY-013: battery/EV LUT injection via Python bindings.
+"""Tests for battery/EV LUT injection via Python bindings.
 
 Verifies that charging curve LUTs (4D: soc × temp × c_rate × soh),
 OCV tables, and UNeg tables can be injected into Battery and EV equipment
@@ -10,10 +10,11 @@ import pytest
 
 from pathlib import Path
 
-from ochre_next import Battery, ControlSignal, Dwelling, EV, LutType
+from hares import Battery, ControlSignal, Dwelling, EV, LutType
+from hares import SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
@@ -26,16 +27,7 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 def _make_dwelling() -> Dwelling:
     """Create a minimal dwelling for LUT injection testing."""
-    dw = Dwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=3600,
-        time_res_s=60,
-        defaults_path=str(HARES_DEFAULTS),
-        write_output=False,
-    )
+    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60))
     dw.initialize()
     return dw
 
@@ -81,21 +73,21 @@ def _simple_uneg_table() -> list[tuple[float, float]]:
 class TestBatteryLutInjection:
     def test_add_battery_with_charging_curve_lut(self):
         lut = _simple_charging_lut()
-        bat = Battery("TestBat", 10.0, charging_curve_lut=lut)
+        bat = Battery("TestBat", capacity_j=36000000, charging_curve_lut=lut)
         dw = _make_dwelling()
         dw.add_battery(bat)
         assert "TestBat" in dw.equipment_names()
 
     def test_add_battery_with_ocv_table(self):
         ocv = _lfp_ocv_table()
-        bat = Battery("TestBat", 10.0, ocv_table=ocv)
+        bat = Battery("TestBat", capacity_j=36000000, ocv_table=ocv)
         dw = _make_dwelling()
         dw.add_battery(bat)
         assert "TestBat" in dw.equipment_names()
 
     def test_add_battery_with_uneg_table(self):
         uneg = _simple_uneg_table()
-        bat = Battery("TestBat", 10.0, uneg_table=uneg)
+        bat = Battery("TestBat", capacity_j=36000000, uneg_table=uneg)
         dw = _make_dwelling()
         dw.add_battery(bat)
         assert "TestBat" in dw.equipment_names()
@@ -103,7 +95,7 @@ class TestBatteryLutInjection:
     def test_add_battery_with_all_luts(self):
         bat = Battery(
             "TestBat",
-            10.0,
+            capacity_j=36000000,
             charging_curve_lut=_simple_charging_lut(),
             ocv_table=_lfp_ocv_table(),
             uneg_table=_simple_uneg_table(),
@@ -133,34 +125,34 @@ class TestBatteryLutInjection:
             "lut": np.ones((n_soc, n_temp, n_crate, n_soh), dtype=np.float32),
             "fallback_mask": np.zeros((n_temp, n_crate, n_soh), dtype=np.uint8),
         }
-        bat = Battery("TestBat", 10.0, charging_curve_lut=lut)
+        bat = Battery("TestBat", capacity_j=36000000, charging_curve_lut=lut)
         dw = _make_dwelling()
         dw.add_battery(bat)
         assert "TestBat" in dw.equipment_names()
 
     def test_set_equipment_lut_charging_curve(self):
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw = _make_dwelling()
         dw.add_battery(bat)
         dw.set_equipment_lut("TestBat", LutType.ChargingCurve, _simple_charging_lut())
         assert dw.has_equipment_lut("TestBat", LutType.ChargingCurve)
 
     def test_set_equipment_lut_ocv(self):
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw = _make_dwelling()
         dw.add_battery(bat)
         dw.set_equipment_lut("TestBat", LutType.Ocv, _lfp_ocv_table())
         assert dw.has_equipment_lut("TestBat", LutType.Ocv)
 
     def test_set_equipment_lut_uneg(self):
-        bat = Battery("TestBat", 10.0)
+        bat = Battery("TestBat", capacity_j=36000000)
         dw = _make_dwelling()
         dw.add_battery(bat)
         dw.set_equipment_lut("TestBat", LutType.UNeg, _simple_uneg_table())
         assert dw.has_equipment_lut("TestBat", LutType.UNeg)
 
     def test_clear_equipment_lut_charging_curve(self):
-        bat = Battery("TestBat", 10.0, charging_curve_lut=_simple_charging_lut())
+        bat = Battery("TestBat", capacity_j=36000000, charging_curve_lut=_simple_charging_lut())
         dw = _make_dwelling()
         dw.add_battery(bat)
         assert dw.has_equipment_lut("TestBat", LutType.ChargingCurve)
@@ -168,7 +160,7 @@ class TestBatteryLutInjection:
         assert not dw.has_equipment_lut("TestBat", LutType.ChargingCurve)
 
     def test_clear_equipment_lut_ocv_resets_to_default(self):
-        bat = Battery("TestBat", 10.0, ocv_table=_lfp_ocv_table())
+        bat = Battery("TestBat", capacity_j=36000000, ocv_table=_lfp_ocv_table())
         dw = _make_dwelling()
         dw.add_battery(bat)
         assert dw.has_equipment_lut("TestBat", LutType.Ocv)
@@ -182,7 +174,7 @@ class TestBatteryLutInjection:
 
     def test_set_ocv_on_ev_succeeds(self):
         """EV supports OCV injection (chemistry-aware, same as Battery)."""
-        ev = EV("TestEV", capacity_kwh=65.0)
+        ev = EV("TestEV", capacity_j=234000000)
         dw = _make_dwelling()
         dw.add_ev(ev)
         dw.set_equipment_lut("TestEV", LutType.Ocv, _lfp_ocv_table())
@@ -198,20 +190,20 @@ class TestBatteryLutInjection:
 class TestEvLutInjection:
     def test_add_ev_with_charging_curve_lut(self):
         lut = _simple_charging_lut()
-        ev = EV("TestEV", capacity_kwh=65.0, charging_curve_lut=lut)
+        ev = EV("TestEV", capacity_j=234000000, charging_curve_lut=lut)
         dw = _make_dwelling()
         dw.add_ev(ev)
         assert "TestEV" in dw.equipment_names()
 
     def test_set_ev_charging_curve_after_add(self):
-        ev = EV("TestEV", capacity_kwh=65.0)
+        ev = EV("TestEV", capacity_j=234000000)
         dw = _make_dwelling()
         dw.add_ev(ev)
         dw.set_equipment_lut("TestEV", LutType.ChargingCurve, _simple_charging_lut())
         assert dw.has_equipment_lut("TestEV", LutType.ChargingCurve)
 
     def test_clear_ev_charging_curve(self):
-        ev = EV("TestEV", capacity_kwh=65.0, charging_curve_lut=_simple_charging_lut())
+        ev = EV("TestEV", capacity_j=234000000, charging_curve_lut=_simple_charging_lut())
         dw = _make_dwelling()
         dw.add_ev(ev)
         assert dw.has_equipment_lut("TestEV", LutType.ChargingCurve)
@@ -234,25 +226,25 @@ class TestInputFormats:
             "soh_grid": np.array([1.0]),
             "lut": np.array([1.0, 0.5, 0.0], dtype=np.float32),
         }
-        bat = Battery("TestBat", 10.0, charging_curve_lut=lut)
+        bat = Battery("TestBat", capacity_j=36000000, charging_curve_lut=lut)
         dw = _make_dwelling()
         dw.add_battery(bat)
 
     def test_ocv_tuple_list_format(self):
         ocv = [(0.0, 3.0), (0.5, 3.6), (1.0, 4.2)]
-        bat = Battery("TestBat", 10.0, ocv_table=ocv)
+        bat = Battery("TestBat", capacity_j=36000000, ocv_table=ocv)
         dw = _make_dwelling()
         dw.add_battery(bat)
 
     def test_ocv_dict_format(self):
         ocv = {"soc": [0.0, 0.5, 1.0], "voltage": [3.0, 3.6, 4.2]}
-        bat = Battery("TestBat", 10.0, ocv_table=ocv)
+        bat = Battery("TestBat", capacity_j=36000000, ocv_table=ocv)
         dw = _make_dwelling()
         dw.add_battery(bat)
 
     def test_uneg_tuple_list_format(self):
         uneg = [(0.0, 1.2), (0.5, 0.12), (1.0, 0.08)]
-        bat = Battery("TestBat", 10.0, uneg_table=uneg)
+        bat = Battery("TestBat", capacity_j=36000000, uneg_table=uneg)
         dw = _make_dwelling()
         dw.add_battery(bat)
 
@@ -262,7 +254,7 @@ class TestInputFormats:
         npz_path = tmp_path / "test_lut.npz"
         np.savez_compressed(npz_path, **lut_data)
 
-        bat = Battery("TestBat", 10.0, charging_curve_lut=str(npz_path))
+        bat = Battery("TestBat", capacity_j=36000000, charging_curve_lut=str(npz_path))
         dw = _make_dwelling()
         dw.add_battery(bat)
 
@@ -274,21 +266,21 @@ class TestInputFormats:
 
 class TestValidation:
     def test_valid_ocv_single_point_does_not_raise(self):
-        Battery("TestBat", 10.0, ocv_table=[(0.0, 3.0)])
+        Battery("TestBat", capacity_j=36000000, ocv_table=[(0.0, 3.0)])
 
     def test_invalid_ocv_mismatched_lengths_raises(self):
         with pytest.raises(Exception):
             Battery(
-                "TestBat",
-                10.0,
+            "TestBat",
+            capacity_j=36000000,
                 ocv_table={"soc": [0.0, 0.5], "voltage": [3.0]},
             )
 
     def test_invalid_ocv_non_increasing_soc_raises(self):
         with pytest.raises(Exception):
             Battery(
-                "TestBat",
-                10.0,
+            "TestBat",
+            capacity_j=36000000,
                 ocv_table=[(0.5, 3.6), (0.3, 3.4), (1.0, 4.2)],
             )
 
@@ -301,7 +293,7 @@ class TestValidation:
             "lut": np.array([], dtype=np.float32),
         }
         with pytest.raises(Exception, match="empty"):
-            Battery("TestBat", 10.0, charging_curve_lut=lut)
+            Battery("TestBat", capacity_j=36000000, charging_curve_lut=lut)
 
     def test_invalid_charging_lut_shape_mismatch_raises(self):
         """LUT values with incorrect length must raise an error."""
@@ -313,12 +305,12 @@ class TestValidation:
             "lut": np.array([1.0, 0.5], dtype=np.float32),
         }
         with pytest.raises(Exception, match="length"):
-            Battery("TestBat", 10.0, charging_curve_lut=lut)
+            Battery("TestBat", capacity_j=36000000, charging_curve_lut=lut)
 
     def test_charging_lut_dimension_check_passes_for_valid_4d(self):
         """Valid 4D LUT must be accepted (ndim check must pass)."""
         lut = _simple_charging_lut()
-        bat = Battery("TestBat", 10.0, charging_curve_lut=lut)
+        bat = Battery("TestBat", capacity_j=36000000, charging_curve_lut=lut)
         dw = _make_dwelling()
         dw.add_battery(bat)
         assert dw.has_equipment_lut("TestBat", LutType.ChargingCurve)
@@ -339,8 +331,8 @@ class TestLutBehavior:
             duration_s=300, time_res_s=60, start_time="2019-07-01T12:00:00"
         )
         dw.initialize()
-        bat_default = Battery("Default", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5)
-        bat_custom = Battery("Custom", 10.0, max_charge_kw=5.0, max_discharge_kw=5.0, initial_soc=0.5)
+        bat_default = Battery("Default", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.5)
+        bat_custom = Battery("Custom", capacity_j=36000000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.5)
         dw.add_battery(bat_default)
         dw.add_battery(bat_custom)
 
@@ -365,10 +357,14 @@ class TestLutBehavior:
         # Both batteries should be charging (SOC above initial 0.5)
         assert soc_d > 0.5, f"Default battery should be charging, SOC={soc_d}"
         assert soc_c > 0.5, f"Custom battery should be charging, SOC={soc_c}"
-        # Different OCV curves produce different internal voltages and ohmic
-        # losses, leading to measurably different SOC trajectories. The
-        # difference is small over 5 minutes but must be non-zero.
-        assert soc_d != soc_c, (
-            f"Custom OCV should produce different charging behavior: "
-            f"default SOC={soc_d:.6f}, custom SOC={soc_c:.6f}"
+        # The OCV curve's direct observable: the terminal voltage differs,
+        # so the grid draw at the same charge command differs (the ohmic
+        # losses sit in the drawn power). The SOC integrates the charge
+        # command's DC power, whose loss split is internal to the step,
+        # so the SOC trajectories diverge only through the thermal
+        # feedback and are equal to printed precision here.
+        assert tel["power_w"][idx_d] != tel["power_w"][idx_c], (
+            f"Custom OCV should produce a different drawn power at the same "
+            f"charge command: default={tel['power_w'][idx_d]}, "
+            f"custom={tel['power_w'][idx_c]}"
         )

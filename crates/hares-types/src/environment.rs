@@ -37,54 +37,54 @@ pub struct PriceSignal {
 /// so actors can make informed decisions (e.g., BMS self-consumption
 /// needs to know PV generation vs home load).
 ///
-/// `pv_generation_kw` may carry forecast values in forecast-driven
-/// simulation modes (e.g., model-predictive-control). `actual_pv_kw`
+/// `pv_generation_w` may carry forecast values in forecast-driven
+/// simulation modes (e.g., model-predictive-control). `actual_pv_w`
 /// always holds the observed PV output from the prior timestep's
 /// equipment step. Real-time dispatch strategies (solar surplus
-/// tracking, V2H) should read `actual_pv_kw` and fall back to
-/// `pv_generation_kw` when `actual_pv_kw` is zero.
+/// tracking, V2H) should read `actual_pv_w` and fall back to
+/// `pv_generation_w` when `actual_pv_w` is zero.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ElectricalSummary {
-    /// Total PV generation (kW), positive = producing.
+    /// Total PV generation (W), positive = producing.
     /// In forecast-driven modes this may carry forecast values;
     /// in normal simulation it holds the prior-step actual output.
-    pub pv_generation_kw: f64,
-    /// Total non-dispatchable load (kW), positive = consuming.
+    pub pv_generation_w: f64,
+    /// Total non-dispatchable load (W), positive = consuming.
     /// Excludes battery and EV (those are dispatchable).
-    pub base_load_kw: f64,
-    /// Net grid power (kW), positive = importing, negative = exporting.
-    pub net_grid_kw: f64,
-    /// Total battery power (kW), positive = charging, negative = discharging.
-    pub battery_power_kw: f64,
-    /// Total EV power (kW), positive = charging.
-    pub ev_power_kw: f64,
-    /// Actual (observed) PV generation from equipment step (kW), positive = producing.
+    pub base_load_w: f64,
+    /// Net grid power (W), positive = importing, negative = exporting.
+    pub net_grid_w: f64,
+    /// Total battery power (W), positive = charging, negative = discharging.
+    pub battery_power_w: f64,
+    /// Total EV power (W), positive = charging.
+    pub ev_power_w: f64,
+    /// Actual (observed) PV generation from equipment step (W), positive = producing.
     ///
     /// Always reflects real equipment output; never carries forecast values.
     /// Set to 0.0 when no PV equipment is present or when actual data is
     /// unavailable. Real-time dispatch strategies that must not over-commit
     /// on forecast values should use this field with a fallback to
-    /// `pv_generation_kw` when this value is zero.
+    /// `pv_generation_w` when this value is zero.
     #[serde(default)]
-    pub actual_pv_kw: f64,
+    pub actual_pv_w: f64,
 }
 
 impl ElectricalSummary {
     /// Best-available PV generation for real-time dispatch decisions.
     ///
-    /// Returns `actual_pv_kw` when it is non-zero (real observed output from
-    /// equipment step). Falls back to `pv_generation_kw` when `actual_pv_kw`
+    /// Returns `actual_pv_w` when it is non-zero (real observed output from
+    /// equipment step). Falls back to `pv_generation_w` when `actual_pv_w`
     /// is zero — because zero actual PV at night is indistinguishable from
     /// "no measurement available" in the current infrastructure. The `> 0.0`
     /// sentinel treats zero as absent, not as true zero-PV-now.
     ///
     /// Callers that must not over-commit on forecast values should use this
-    /// method instead of reading `pv_generation_kw` directly.
-    pub fn actual_pv_kw_or_fallback(&self) -> f64 {
-        if self.actual_pv_kw > 0.0 {
-            self.actual_pv_kw
+    /// method instead of reading `pv_generation_w` directly.
+    pub fn actual_pv_w_or_fallback(&self) -> f64 {
+        if self.actual_pv_w > 0.0 {
+            self.actual_pv_w
         } else {
-            self.pv_generation_kw
+            self.pv_generation_w
         }
     }
 }
@@ -419,10 +419,16 @@ impl GridState {
     /// backup source). Loads must force off at the control level when this is
     /// false; source-type equipment (battery discharge, generator, V2G EV)
     /// must NOT gate on this — they are what keeps it true.
+    ///
+    /// NaN-robust by construction: a non-finite voltage compares false
+    /// against `> 0.0`, so a poisoned state de-energizes the bus (every
+    /// load off) instead of un-gating it: a NaN override that passed
+    /// `NaN != 0.0` would run every load at full power on a bus whose
+    /// voltage is meaningless.
     #[inline]
     #[must_use]
     pub fn bus_energized(&self) -> bool {
-        self.bus_voltage_pu() != 0.0
+        self.bus_voltage_pu() > 0.0
     }
 
     /// True when the home is islanded: the utility is out but a backup
@@ -431,6 +437,138 @@ impl GridState {
     #[must_use]
     pub fn islanded(&self) -> bool {
         self.grid_outage() && self.bus_energized()
+    }
+}
+
+/// The four OpenStudio-HPXML unavailable-period types
+/// (`HPXMLtoOpenStudio/resources/data/unavailable_periods.csv`, v1.12.0:
+/// the CSV's period columns, each a `ColumnName` an HPXML period names).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnavailableKind {
+    Vacancy,
+    PowerOutage,
+    NoSpaceHeating,
+    NoSpaceCooling,
+}
+
+impl UnavailableKind {
+    /// The HPXML `ColumnName` spelling.
+    #[must_use]
+    pub fn column_name(self) -> &'static str {
+        match self {
+            Self::Vacancy => "Vacancy",
+            Self::PowerOutage => "Power Outage",
+            Self::NoSpaceHeating => "No Space Heating",
+            Self::NoSpaceCooling => "No Space Cooling",
+        }
+    }
+
+    /// The kind a `ColumnName` spelling names, `None` when it is no
+    /// period type (OpenStudio-HPXML fails such a run:
+    /// `resources/schedules.rb` `unavailable_period_applies`, the `fail`
+    /// on a column the table does not carry).
+    #[must_use]
+    pub fn parse(column: &str) -> Option<Self> {
+        match column {
+            "Vacancy" => Some(Self::Vacancy),
+            "Power Outage" => Some(Self::PowerOutage),
+            "No Space Heating" => Some(Self::NoSpaceHeating),
+            "No Space Cooling" => Some(Self::NoSpaceCooling),
+            _ => None,
+        }
+    }
+
+    /// The kind's flag in the state.
+    #[must_use]
+    pub fn zeroed(self, state: UnavailablePeriodState) -> bool {
+        match self {
+            Self::Vacancy => state.vacancy,
+            Self::PowerOutage => state.power_outage,
+            Self::NoSpaceHeating => state.no_space_heating,
+            Self::NoSpaceCooling => state.no_space_cooling,
+        }
+    }
+
+    /// The four kinds, in the reference table's column order.
+    #[must_use]
+    pub fn all() -> [Self; 4] {
+        [
+            Self::Vacancy,
+            Self::PowerOutage,
+            Self::NoSpaceHeating,
+            Self::NoSpaceCooling,
+        ]
+    }
+}
+
+/// The per-step unavailable-period state an equipment reads beside
+/// `bus_energized`: which of the four period kinds flag the step (the
+/// period zeroes the schedule columns and the end uses its
+/// `unavailable_periods.csv` row names), and the natural-ventilation
+/// availability the periods set. An HPXML `Power Outage` period is the
+/// end-use convention the reference applies (PV runs, occupants stay);
+/// it does not de-energize the bus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailablePeriodState {
+    #[serde(default)]
+    pub vacancy: bool,
+    #[serde(default)]
+    pub power_outage: bool,
+    #[serde(default)]
+    pub no_space_heating: bool,
+    #[serde(default)]
+    pub no_space_cooling: bool,
+    /// The step's natural-ventilation availability: `None` when every
+    /// applying period leaves the regular schedule, `Some(false)` when a
+    /// period's `NaturalVentilation` makes it unavailable, `Some(true)`
+    /// when made available.
+    #[serde(default)]
+    pub natural_ventilation: Option<bool>,
+}
+
+impl UnavailablePeriodState {
+    /// Whether the step zeroes the `space_heating` row: a `Power Outage`
+    /// or a `No Space Heating` period.
+    #[must_use]
+    pub fn zeroes_space_heating(self) -> bool {
+        self.power_outage || self.no_space_heating
+    }
+
+    /// Whether the step zeroes the `space_cooling` row: a `Power Outage`
+    /// or a `No Space Cooling` period.
+    #[must_use]
+    pub fn zeroes_space_cooling(self) -> bool {
+        self.power_outage || self.no_space_cooling
+    }
+
+    /// Whether the step zeroes the `water_heater` row: a `Power Outage`
+    /// period (the water heater's setpoint then holds 2 C, freeze
+    /// protection, so standby losses continue).
+    #[must_use]
+    pub fn zeroes_water_heater(self) -> bool {
+        self.power_outage
+    }
+
+    /// Whether the step zeroes the `dehumidifier` row: a `Power Outage`
+    /// period.
+    #[must_use]
+    pub fn zeroes_dehumidifier(self) -> bool {
+        self.power_outage
+    }
+
+    /// Whether the step zeroes the battery's rows (`battery_charging`,
+    /// `battery_discharging`): a `Power Outage` period.
+    #[must_use]
+    pub fn zeroes_battery(self) -> bool {
+        self.power_outage
+    }
+
+    /// Whether the step zeroes the EV's rows
+    /// (`electric_vehicle_charging`, `electric_vehicle_discharging`): a
+    /// `Vacancy` or a `Power Outage` period.
+    #[must_use]
+    pub fn zeroes_electric_vehicle(self) -> bool {
+        self.vacancy || self.power_outage
     }
 }
 
@@ -529,6 +667,13 @@ pub struct EnvironmentState {
     /// only in a state built without one.
     #[serde(default)]
     pub schedule_row: Option<usize>,
+    /// The step's unavailable-period state beside
+    /// [`GridState::bus_energized`]: the period kinds flagging the step
+    /// and the periods' natural-ventilation availability. All-default
+    /// (no period flags) in a state built without an environment
+    /// manager.
+    #[serde(default)]
+    pub unavailable_periods: crate::environment::UnavailablePeriodState,
     /// Air states for the scheduled-space placements in use, computed once
     /// per step; equipment in an "other ..." HPXML location reads these
     /// instead of a zone's state.
@@ -675,6 +820,31 @@ mod tests {
     }
 
     #[test]
+    fn bus_energized_is_nan_robust() {
+        // A non-finite voltage must de-energize the bus, never un-gate it:
+        // `NaN != 0.0` reads as energized and runs every load at full
+        // power on a bus whose voltage is meaningless. The setter
+        // validates, and this comparison is the second belt.
+        let nan = GridState {
+            voltage_pu: f64::NAN,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: None,
+        };
+        assert!(nan.bus_voltage_pu().is_nan());
+        assert!(!nan.bus_energized());
+
+        // The same holds for a poisoned island value surfacing through the
+        // outage path.
+        let nan_island = GridState {
+            voltage_pu: 0.0,
+            frequency_hz: 60.0,
+            island_bus_voltage_pu: Some(f64::NAN),
+        };
+        assert!(!nan_island.bus_energized());
+        assert!(!nan_island.islanded());
+    }
+
+    #[test]
     fn environment_state_round_trips_through_json() {
         let mut state = EnvironmentState {
             zones: vec![ZoneState {
@@ -720,6 +890,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: crate::environment::UnavailablePeriodState::default(),
             domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -769,6 +940,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: crate::environment::UnavailablePeriodState::default(),
             domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -784,31 +956,31 @@ mod tests {
                 ghg_intensity: Some(0.4),
             },
             electrical: ElectricalSummary {
-                pv_generation_kw: 3.5,
-                actual_pv_kw: 3.5,
-                base_load_kw: 1.2,
-                net_grid_kw: -2.3,
-                battery_power_kw: 0.0,
-                ev_power_kw: 0.0,
+                pv_generation_w: 3.5,
+                actual_pv_w: 3.5,
+                base_load_w: 1.2,
+                net_grid_w: -2.3,
+                battery_power_w: 0.0,
+                ev_power_w: 0.0,
             },
         };
 
         let json = serde_json::to_string(&state).expect("serialize");
         let decoded: EnvironmentState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.price_signal.electricity_price, Some(0.25));
-        assert_eq!(decoded.electrical.pv_generation_kw, 3.5);
+        assert_eq!(decoded.electrical.pv_generation_w, 3.5);
         assert_eq!(decoded, state);
     }
 
     #[test]
     fn environment_state_default_electrical_summary() {
         let summary = ElectricalSummary::default();
-        assert_eq!(summary.pv_generation_kw, 0.0);
-        assert_eq!(summary.base_load_kw, 0.0);
-        assert_eq!(summary.net_grid_kw, 0.0);
-        assert_eq!(summary.battery_power_kw, 0.0);
-        assert_eq!(summary.ev_power_kw, 0.0);
-        assert_eq!(summary.actual_pv_kw, 0.0);
+        assert_eq!(summary.pv_generation_w, 0.0);
+        assert_eq!(summary.base_load_w, 0.0);
+        assert_eq!(summary.net_grid_w, 0.0);
+        assert_eq!(summary.battery_power_w, 0.0);
+        assert_eq!(summary.ev_power_w, 0.0);
+        assert_eq!(summary.actual_pv_w, 0.0);
     }
 
     #[test]

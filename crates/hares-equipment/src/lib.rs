@@ -4,7 +4,9 @@
 mod macros;
 
 pub mod battery;
+pub mod combustion;
 pub mod config;
+pub mod describe_fields;
 pub mod ev;
 pub mod event_load;
 pub(crate) mod gain_fractions;
@@ -17,6 +19,7 @@ pub mod protocol_bridge;
 pub mod pv;
 pub mod raw_params;
 pub mod registry;
+pub mod sample_config;
 pub(crate) mod schedule_helpers;
 pub mod scheduled_load;
 pub mod serial;
@@ -38,16 +41,16 @@ pub enum ActorSeed {
     Battery {
         bms_mode: BmsMode,
         grid_export_rule: GridExportRule,
-        max_charge_kw: f64,
-        max_discharge_kw: f64,
+        max_charge_w: f64,
+        max_discharge_w: f64,
         min_dwell_steps: usize,
     },
     Ev {
         strategy: ChargingStrategy,
         plug_in_policy: PlugInPolicy,
-        capacity_kwh: f64,
-        max_charge_kw: f64,
-        fuel_economy_kwh_per_mi: f64,
+        capacity_j: f64,
+        max_charge_w: f64,
+        fuel_economy_j_per_m: f64,
     },
 }
 
@@ -88,7 +91,12 @@ pub use protocol_bridge::{
 };
 pub use pv::{PvConfig, PvOrientation};
 pub use raw_params::{IndexCount, ParamForm, ParamKind, RawParam, RawParams, raw_params_for_class};
-pub use registry::{CANONICAL_EQUIPMENT_NAMES, EquipmentFactory, EquipmentRegistry};
+pub use registry::{
+    CANONICAL_EQUIPMENT_NAMES, ClassDeclaredSurface, EquipmentFactory, EquipmentRegistry,
+    UnavailableRow, class_declared_surface, config_type_for_class,
+    unavailable_period_gated_classes, unavailable_period_rows,
+    unavailable_period_rows_for_equipment,
+};
 pub use ventilation::VentilationConfig;
 pub use water_heater::DHW_DEMAND_LOOP;
 pub use water_heater::wh_config::{
@@ -144,11 +152,11 @@ pub(crate) fn linear_temp_derate(temp_c: f64, temp_min: f64, temp_max: f64) -> f
 
 /// How an equipment's expected mean real power can be determined for
 /// premise-level ZIP aggregation. See
-/// [`Equipment::expected_mean_power_kw`].
+/// [`Equipment::expected_mean_power_w`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExpectedMeanPower {
-    /// Known expected mean draw (kW) from the equipment's own configuration.
-    Kw(f64),
+    /// Known expected mean draw (W, SI) from the equipment's own configuration.
+    W(f64),
     /// The draw follows a column of the dwelling's schedule data (index
     /// into the loaded schedule's columns); the mean must be computed from
     /// that column by the caller.
@@ -172,6 +180,22 @@ pub trait Equipment: Send + Sync {
 
     fn save_state(&self) -> crate::Result<Vec<u8>>;
     fn load_state(&mut self, state: &[u8]) -> Result<()>;
+
+    /// The energy the equipment's internal state carries [J], when that
+    /// state holds energy the port snapshot cannot see: the water a tank
+    /// has heated, the charge a pack holds. `None` when the state carries
+    /// no measurable energy (the default).
+    ///
+    /// Read by the dwelling before every equipment step and again when
+    /// the step fails: the rollback restores the port contributions but
+    /// keeps the committed internal state (the documented design), so the
+    /// state's energy delta across the failed step is energy the step's
+    /// accounts no longer explain. The difference is counted in
+    /// `RunHealth::discarded_state_energy_wh` and the run's first event
+    /// is warned naming the equipment and the energy.
+    fn stored_energy_j(&self) -> Option<f64> {
+        None
+    }
 
     /// Rename this equipment instance by updating its descriptor `name`.
     ///
@@ -318,6 +342,13 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// The resolved parameters the physics uses, read back: the values
+    /// this equipment steps with, after defaults, autosizing and
+    /// overrides, each SI, under the name the resolved model reports it
+    /// by. No default: every implementor states its own, so a class the
+    /// registry knows cannot skip the read-back.
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter>;
+
     /// Whether this equipment can act as an islanding source that keeps the
     /// home bus energized during a utility outage.
     ///
@@ -353,6 +384,40 @@ pub trait Equipment: Send + Sync {
         false
     }
 
+    /// Re-derives this equipment's random stream from the dwelling's
+    /// generator key `seed`: the stream nonce construction assigned is
+    /// kept, the generator starts at its start (word position zero). The
+    /// dwelling calls it on every equipment that answers
+    /// [`Self::uses_rng_stream`]; the default refuses, so a seeded
+    /// equipment that does not implement it fails the reseed naming the
+    /// component instead of silently keeping its old stream.
+    fn reseed(&mut self, seed: [u8; 32]) -> Result<()> {
+        let _ = seed;
+        Err(HaresError::Control(
+            "this equipment holds no reseedable random stream (the default \
+             Equipment::reseed)"
+                .to_string(),
+        ))
+    }
+
+    /// Rewinds every stochastic schedule source this equipment holds to
+    /// its construction position: the generators at their seeds, the draw
+    /// counters and shared cursors at zero, any event phase back at idle.
+    /// The warm-up path calls it on every equipment once warm-up ends, so
+    /// the production phase starts each source where a no-warm-up run
+    /// would, whatever the warm-up drew; the equipment's thermal state is
+    /// warm-up's product and is never touched. The default does nothing:
+    /// equipment without schedule sources has nothing to rewind.
+    fn reset_stochastic_state(&mut self) {}
+
+    /// The equipment's current random-stream state (the generator key,
+    /// the stream nonce, the word position), read back for the
+    /// reproducibility checks. `None` for equipment the dwelling seeded
+    /// no stream into.
+    fn rng_stream_state(&self) -> Option<hares_types::rng::RngStreamState> {
+        None
+    }
+
     /// Returns the per-timestep effective ventilation recovery efficiencies
     /// `(sensible, latent)` if this equipment is a ventilation device (HRV/ERV).
     ///
@@ -382,7 +447,7 @@ pub trait Equipment: Send + Sync {
     ///   reactive-only ZIP synthesized from the *current* effective power
     ///   factor (config baseline, later mutated by `PowerFactorSetpoint`),
     ///   mirroring exactly how their baseline Q is computed. A pending
-    ///   `q_setpoint_kvar` absolute override is runtime control state, not
+    ///   `q_setpoint_var` absolute override is runtime control state, not
     ///   part of the ZIP model, and is not reflected here.
     /// - **`None`** (the default): the equipment has no electrical ZIP
     ///   concept (e.g. generator with Q ≡ 0 by design, protocol bridge,
@@ -439,7 +504,7 @@ pub trait Equipment: Send + Sync {
     ///
     /// This is a pure inspection surface for aggregation; it never
     /// influences stepping.
-    fn expected_mean_power_kw(&self) -> Option<ExpectedMeanPower> {
+    fn expected_mean_power_w(&self) -> Option<ExpectedMeanPower> {
         None
     }
 
@@ -558,13 +623,13 @@ pub trait Equipment: Send + Sync {
         None
     }
 
-    /// Additional init-time provenance lines for the diagnostic CSV.
+    /// Additional init-time provenance lines for the run's provenance
+    /// surface.
     ///
-    /// Each string is written as a `# eq ...` comment line by
-    /// `diagnostics::write_equipment_init`. Equipment types that expose
-    /// model-parameter provenance beyond the standard zone-id / OCV-source
-    /// comments override this to surface scaling choices, coefficient
-    /// conventions, or other init-time metadata.
+    /// Equipment types that expose model-parameter provenance beyond the
+    /// standard zone-id / OCV-source records override this to surface
+    /// scaling choices, coefficient conventions, or other init-time
+    /// metadata.
     fn provenance_lines(&self) -> Vec<String> {
         Vec::new()
     }
@@ -619,11 +684,7 @@ mod tests {
                     stage: ExecutionStage::Independent,
                     control_capabilities,
                     core_capabilities: CoreCapabilities::empty(),
-                    telemetry_fields: vec![TelemetryField {
-                        name: "x".to_string(),
-                        unit: "-".to_string(),
-                        description: "mock value".to_string(),
-                    }],
+                    telemetry_fields: vec![TelemetryField::ratio("x", "mock value")],
                     zone_type: None,
                 },
                 ports: vec![PortDeclaration::electrical()],
@@ -637,6 +698,10 @@ mod tests {
     }
 
     impl Equipment for MockEquipment {
+        fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+            Vec::new()
+        }
+
         fn descriptor(&self) -> &EquipmentDescriptor {
             &self.descriptor
         }
@@ -713,11 +778,8 @@ mod tests {
         }
 
         fn apply_signal(&mut self, signal: &ControlSignal) -> crate::Result<()> {
-            if let ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } = signal
-            {
-                self.state_value = *active_power_kw;
+            if let ControlSignal::PowerSetpoint { active_power_w, .. } = signal {
+                self.state_value = *active_power_w;
                 self.telemetry.insert("x", self.state_value);
             }
             Ok(())
@@ -772,6 +834,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
@@ -842,8 +905,8 @@ mod tests {
     fn apply_control_rejects_unsupported_signals() {
         let mut eq = MockEquipment::new(ControlCapabilities::MODE_OVERRIDE);
         let signal = ControlSignal::PowerSetpoint {
-            active_power_kw: 3.0,
-            reactive_power_kvar: None,
+            active_power_w: 3000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         };
@@ -1048,8 +1111,8 @@ mod tests {
     fn equipment_core_output_default_returns_empty() {
         let eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
         let out = eq.core_output();
-        assert!(out.flows.electric_kw.is_none());
-        assert!(out.flows.reactive_power_kvar.is_none());
+        assert!(out.flows.electric_w.is_none());
+        assert!(out.flows.reactive_power_var.is_none());
         assert!(out.flows.fuel_w.is_none());
         assert!(out.state.operating_mode.is_none());
         assert!(out.state.soc.is_none());
@@ -1061,8 +1124,8 @@ mod tests {
         let mut eq = MockEquipment::new(ControlCapabilities::POWER_SETPOINT);
         eq.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(1.5)),
-                reactive_power_kvar: Some(0.2),
+                electric_w: Some(ElectricPower::Consumption(1.5)),
+                reactive_power_var: Some(0.2),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -1078,7 +1141,7 @@ mod tests {
         };
         let out = eq.core_output();
         assert!(
-            matches!(out.flows.electric_kw, Some(ElectricPower::Consumption(kw)) if (kw - 1.5).abs() < 1e-10)
+            matches!(out.flows.electric_w, Some(ElectricPower::Consumption(kw)) if (kw - 1.5).abs() < 1e-10)
         );
         assert_eq!(out.state.operating_mode, Some(OperatingMode::Charging));
     }
@@ -1132,8 +1195,8 @@ mod tests {
             ),
             (
                 ControlSignal::PowerSetpoint {
-                    active_power_kw: 1.0,
-                    reactive_power_kvar: None,
+                    active_power_w: 1000.0,
+                    reactive_power_var: None,
                     min_soc: None,
                     max_soc: None,
                 },
@@ -1141,8 +1204,8 @@ mod tests {
             ),
             (
                 ControlSignal::PowerLimit {
-                    max_power_kw: 5.0,
-                    ramp_rate_kw_per_s: None,
+                    max_power_w: 5000.0,
+                    ramp_rate_w_per_s: None,
                 },
                 ControlCapabilities::POWER_LIMIT,
             ),
@@ -1202,7 +1265,7 @@ mod tests {
                 ControlCapabilities::CURTAILMENT_PERCENT,
             ),
             (
-                ControlSignal::ReactiveSetpoint { kvar: 1.0 },
+                ControlSignal::ReactiveSetpoint { var: 1.0 },
                 ControlCapabilities::REACTIVE_SETPOINT,
             ),
             (
@@ -1242,11 +1305,11 @@ mod tests {
                 ControlCapabilities::EV_PLUG_IN,
             ),
             (
-                ControlSignal::EvDrive { kwh: 1.0 },
+                ControlSignal::EvDrive { energy_j: 1.0 },
                 ControlCapabilities::EV_DRIVE,
             ),
             (
-                ControlSignal::EvAwayCharge { power_kw: 1.0 },
+                ControlSignal::EvAwayCharge { power_w: 1.0 },
                 ControlCapabilities::EV_AWAY_CHARGE,
             ),
             (
@@ -1320,6 +1383,10 @@ mod tests {
         }
 
         impl Equipment for BadSerializingEquipment {
+            fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+                Vec::new()
+            }
+
             fn descriptor(&self) -> &EquipmentDescriptor {
                 &self.descriptor
             }
@@ -1408,8 +1475,8 @@ mod tests {
     fn apply_control_rejects_infinite_power_setpoint() {
         let mut eq = mock_with_all_caps();
         let signal = ControlSignal::PowerSetpoint {
-            active_power_kw: f64::INFINITY,
-            reactive_power_kvar: None,
+            active_power_w: f64::INFINITY,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         };
@@ -1438,8 +1505,8 @@ mod tests {
     fn apply_control_rejects_negative_power_limit() {
         let mut eq = mock_with_all_caps();
         let signal = ControlSignal::PowerLimit {
-            max_power_kw: -5.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: -5.0,
+            ramp_rate_w_per_s: None,
         };
         let err = eq.apply_control(&signal).unwrap_err();
         assert!(

@@ -22,10 +22,10 @@ use hares_types::{EnvironmentState, GridState, PortSlots, WeatherState, ZoneId, 
 
 struct CsvIndex {
     vehicle_id: usize,
-    avg_power_kw: usize,
+    avg_power_w: usize,
     charge_time: usize,
     total_charge: usize,
-    capacity_kwh: usize,
+    capacity_energy_j: usize,
 }
 
 /// Parse a single CSV line into fields, handling quoted fields containing commas.
@@ -75,16 +75,16 @@ fn parse_header_indices(path: &str) -> CsvIndex {
 
     CsvIndex {
         vehicle_id: find("vehicle_id"),
-        avg_power_kw: find("avg_power_kw"),
+        avg_power_w: find("avg_power_kw"),
         charge_time: find("charge_time"),
         total_charge: find("total_charge"),
-        capacity_kwh: find("Capacity (kWh)"),
+        capacity_energy_j: find("Capacity (kWh)"),
     }
 }
 
 fn csv_path(filename: &str) -> String {
     format!(
-        "{}/../../defaults/ev/{filename}",
+        "{}/../../python/hares/defaults/ev/{filename}",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -130,6 +130,7 @@ fn default_env() -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
@@ -155,9 +156,13 @@ fn l1_ev_config(
         "EV".to_string(),
         EvConfig {
             equipment_id: None,
-            capacity_kwh,
+            // The CSV's Capacity (kWh) column is the external figure;
+            // the config is J (SI), converted once here.
+            capacity_j: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(capacity_kwh)
+                .get::<uom::si::energy::joule>(),
             charging_level: Some("L1".to_string()),
-            max_charging_power_kw: wall_kw,
+            max_charging_power_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(wall_kw)
+                .get::<uom::si::power::watt>(),
             charging_efficiency: Some(efficiency),
             l1_current_a: None,
             l1_voltage_v: None,
@@ -175,19 +180,19 @@ fn l1_ev_config(
             cell_resistance_ohm: None,
             v2l_enabled: None,
             v2l_soc_reserve: None,
-            v2l_max_discharge_kw: None,
+            v2l_max_discharge_w: None,
             v2g_enabled: None,
             v2g_soc_reserve: None,
-            v2g_max_discharge_kw: None,
+            v2g_max_discharge_w: None,
             chemistry: None,
-            fuel_economy_kwh_per_mi: None,
+            fuel_economy_j_per_m: None,
             ready_soc: None,
             charging_strategy: None,
             plug_in_policy: None,
-            power_limit_kw: None,
+            power_limit_w: None,
             initial_connection_state: None,
             power_factor: None,
-            charger_capacity_kva: None,
+            charger_capacity_va: None,
             cc_cv_transition_soc: None,
             charging_priority: None,
             discharge_respects_deadline: true,
@@ -212,7 +217,7 @@ fn bev_level1_avg_power_kw_is_1_26_kw_battery_side() {
     );
 
     for row in &rows {
-        let avg_power: f64 = row[idx.avg_power_kw]
+        let avg_power: f64 = row[idx.avg_power_w]
             .parse()
             .expect("avg_power_kw should parse as f64");
         assert!(
@@ -235,7 +240,7 @@ fn phev_level1_avg_power_kw_is_1_26_kw_battery_side() {
     );
 
     for row in &rows {
-        let avg_power: f64 = row[idx.avg_power_kw]
+        let avg_power: f64 = row[idx.avg_power_w]
             .parse()
             .expect("avg_power_kw should parse as f64");
         assert!(
@@ -255,7 +260,7 @@ fn bev_level1_total_charge_consistent_with_avg_power() {
     let rows = read_csv_rows(&path);
 
     for row in &rows {
-        let avg_power: f64 = row[idx.avg_power_kw]
+        let avg_power: f64 = row[idx.avg_power_w]
             .parse()
             .expect("avg_power_kw should parse as f64");
         let charge_time: f64 = row[idx.charge_time]
@@ -282,7 +287,7 @@ fn phev_level1_total_charge_consistent_with_avg_power() {
     let rows = read_csv_rows(&path);
 
     for row in &rows {
-        let avg_power: f64 = row[idx.avg_power_kw]
+        let avg_power: f64 = row[idx.avg_power_w]
             .parse()
             .expect("avg_power_kw should parse as f64");
         let charge_time: f64 = row[idx.charge_time]
@@ -303,13 +308,13 @@ fn phev_level1_total_charge_consistent_with_avg_power() {
 }
 
 #[test]
-fn bev_level1_capacity_kwh_is_117_6() {
+fn bev_level1_capacity_j_is_117_6() {
     let path = csv_path("BEV_level_1.csv");
     let idx = parse_header_indices(&path);
     let rows = read_csv_rows(&path);
 
     for row in &rows {
-        let capacity: f64 = row[idx.capacity_kwh]
+        let capacity: f64 = row[idx.capacity_energy_j]
             .parse()
             .expect("Capacity (kWh) should parse as f64");
         assert!(
@@ -321,13 +326,13 @@ fn bev_level1_capacity_kwh_is_117_6() {
 }
 
 #[test]
-fn phev_level1_capacity_kwh_is_14_8() {
+fn phev_level1_capacity_j_is_14_8() {
     let path = csv_path("PHEV_level_1.csv");
     let idx = parse_header_indices(&path);
     let rows = read_csv_rows(&path);
 
     for row in &rows {
-        let capacity: f64 = row[idx.capacity_kwh]
+        let capacity: f64 = row[idx.capacity_energy_j]
             .parse()
             .expect("Capacity (kWh) should parse as f64");
         assert!(
@@ -357,6 +362,7 @@ const TYPICAL_L1_EFFICIENCY: f64 = 0.875;
 ///   battery_energy = wall_power × time × efficiency
 #[test]
 fn l1_sae_baseline_charging_preserves_energy_relationship() {
+    // The CSV's Capacity (kWh) figure.
     let capacity_kwh = 117.6;
     let initial_soc = 0.5;
     let config = l1_ev_config(
@@ -379,14 +385,16 @@ fn l1_sae_baseline_charging_preserves_energy_relationship() {
     let mut ports = PortSlots::default();
     ev.step(&env, dt, &mut ports).unwrap();
 
-    let wall_kw = ev
+    let wall_w = ev
         .telemetry()
         .get("active_power_kw")
-        .expect("active_power_kw should be present in telemetry");
+        .expect("active_power_w should be present in telemetry");
 
     assert!(
-        (wall_kw - SAE_L1_BASELINE_WALL_KW).abs() < 1e-9,
-        "wall power should be {SAE_L1_BASELINE_WALL_KW} kW, got {wall_kw}"
+        (wall_w - SAE_L1_BASELINE_WALL_KW * 1000.0).abs() < 1e-6,
+        "wall power should be {} W ({} kW), got {wall_w}",
+        SAE_L1_BASELINE_WALL_KW * 1000.0,
+        SAE_L1_BASELINE_WALL_KW
     );
 
     let soc_after = ev
@@ -394,12 +402,13 @@ fn l1_sae_baseline_charging_preserves_energy_relationship() {
         .get("soc")
         .expect("soc should be present in telemetry");
 
-    let dt_hours = dt.as_secs_f64() / 3600.0;
     // The divisor is the usable capacity (rated × the temperature derate
-    // at the ambient-resolved 20 °C pack temperature), not the rated value.
-    let usable_kwh =
-        capacity_kwh * hares_equipment::battery::CapacityDerateModel::default().evaluate(20.0);
-    let expected_soc_delta = wall_kw * dt_hours * TYPICAL_L1_EFFICIENCY / usable_kwh;
+    // at the ambient-resolved 20 °C pack temperature), not the rated
+    // value; the wall power is W (SI).
+    let usable_j = capacity_kwh
+        * 3.6e6
+        * hares_equipment::battery::CapacityDerateModel::default().evaluate(20.0);
+    let expected_soc_delta = wall_w * dt.as_secs_f64() * TYPICAL_L1_EFFICIENCY / usable_j;
     let actual_soc_delta = soc_after - soc_before;
 
     assert!(
@@ -410,7 +419,7 @@ fn l1_sae_baseline_charging_preserves_energy_relationship() {
 
     // Verify the battery-side effective power matches the CSV convention:
     // 1.44 kW wall × 0.875 efficiency = 1.26 kW battery-side.
-    let battery_side_kw = wall_kw * TYPICAL_L1_EFFICIENCY;
+    let battery_side_kw = wall_w * TYPICAL_L1_EFFICIENCY / 1000.0;
     assert!(
         (battery_side_kw - 1.26).abs() < 1e-9,
         "battery-side effective power should be 1.26 kW, got {battery_side_kw}"

@@ -4,22 +4,21 @@ These tests verify BEHAVIOR, not just structure. Each test asserts something
 that would fail if the underlying physics or actor logic were broken.
 """
 
-from typing import NotRequired, TypedDict
-
 import polars as pl
 import pytest
-from conftest import make_dwelling, output_in_test_dir
+from conftest import make_dwelling
+from hares import ReportSpec, SimulationConfig
 
 
-class _OutputKwargs(TypedDict):
-    write_output: bool
-    output_path: NotRequired[str]
+def _frame_report(verbosity: int) -> list[ReportSpec]:
+    """One verbosity memory report: the frame ``simulate()`` returns."""
+    from hares import Destination, ReportSpec, Selection
+
+    return [ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())]
 
 
-# Tests that consume simulate() DataFrame columns need the output pipeline
-# (write_output=True).
-OUTPUT: _OutputKwargs = {"write_output": True}
-_output_in_test_dir = output_in_test_dir(OUTPUT, "dwelling_42.csv")
+# Tests that consume simulate() DataFrame columns read the verbosity memory
+# report's frame: make_dwelling's ``verbosity`` builds it.
 
 
 def _scalar(value: object, what: str) -> float:
@@ -29,7 +28,7 @@ def _scalar(value: object, what: str) -> float:
 
 
 def _build_flat_tariff(rate: float = 0.15):
-    from ochre_next import ElectricTariff
+    from hares import ElectricTariff
 
     return (
         ElectricTariff.builder()
@@ -60,7 +59,7 @@ class TestArchetypeTariffIntegration:
     def test_ev_with_tariff_produces_nonempty_billing(self):
         """Flat tariff over 35 days must produce at least 1 billing summary
         with positive import kWh (house always draws power)."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(duration_s=35 * 86400, time_res_s=900, seed=42)
@@ -81,7 +80,7 @@ class TestArchetypeTariffIntegration:
 
     def test_ev_soc_varies_over_week(self):
         """EV SOC must drop (driving) and recover (charging) during a week."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(duration_s=7 * 86400, time_res_s=900, seed=42)
         dw.initialize()
@@ -113,17 +112,17 @@ class TestArchetypeTariffIntegration:
     def test_different_archetypes_produce_different_loads(self):
         """DailyCommuterL2 drives ~38mi/day, WfhOccasional ~12mi.
         Their EV energy consumption must differ significantly."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         def total_ev_kwh(archetype_id):
             dw = make_dwelling(
-                duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+                duration_s=7 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
             dw.add_ev_with_driver(
                 VehicleId.tesla_model_y_lr(), archetype_id, seed=42
             )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             col = _ev_power_col(df, "Tesla Model Y LR AWD")
             # Sum of positive values = total charging energy
             return _scalar(df[col].filter(df[col] > 0).sum(), "total EV charging energy")
@@ -140,7 +139,7 @@ class TestArchetypeTariffIntegration:
 
     def test_deterministic_replay_same_seed(self):
         """Same vehicle + archetype + seed must produce bit-identical results."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         def run():
             dw = make_dwelling(duration_s=3 * 86400, time_res_s=900, seed=42)
@@ -150,7 +149,7 @@ class TestArchetypeTariffIntegration:
                 EvArchetypeId.daily_commuter_l2(),
                 seed=99,
             )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             return df["Total Electric Power (kW)"].to_list()
 
         run1 = run()
@@ -163,10 +162,10 @@ class TestArchetypeTariffIntegration:
 
     def test_phev_archetype_produces_ev_power(self):
         """PHEV vehicle charges from grid -- must show positive EV power."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -174,7 +173,7 @@ class TestArchetypeTariffIntegration:
             EvArchetypeId.phev_commuter(),
             seed=42,
         )
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         col = _ev_power_col(df, "Toyota RAV4 Prime")
         max_power = df[col].max()
         assert isinstance(max_power, (int, float)) and max_power > 0, (
@@ -183,17 +182,17 @@ class TestArchetypeTariffIntegration:
 
     def test_l1_archetype_charges_slower(self):
         """L1 max charge power must be strictly less than L2 for same vehicle."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         def max_ev_power(archetype_id):
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+                duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
             dw.add_ev_with_driver(
                 VehicleId.nissan_leaf30(), archetype_id, seed=42
             )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             col = _ev_power_col(df, "Nissan Leaf S 30kWh")
             return _scalar(df[col].max(), "max EV power")
 
@@ -212,10 +211,10 @@ class TestChargingLoadProfile:
     def test_charging_happens_after_arrival(self):
         """EV charging must occur after the driver arrives home (~18:00),
         not before departure or while driving."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=3, **OUTPUT
+            duration_s=7 * 86400, time_res_s=900, seed=42, verbosity=3
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -223,12 +222,10 @@ class TestChargingLoadProfile:
             EvArchetypeId.daily_commuter_l2(),
             seed=42,
         )
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         col = _ev_power_col(df, "Tesla Model Y LR AWD")
 
-        df = df.with_columns(
-            pl.col("Time").str.slice(11, 2).cast(pl.Int32).alias("hour")
-        )
+        df = df.with_columns(pl.col("Time").dt.hour().cast(pl.Int32).alias("hour"))
         charging = df.filter(pl.col(col) > 0.5)
 
         assert charging.height > 0, "A daily commuter must charge within a week"
@@ -249,10 +246,10 @@ class TestChargingLoadProfile:
 
     def test_ev_charge_power_within_hardware_limits(self):
         """EV charge power must never exceed the vehicle's L2 rated power."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=7 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=7 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -260,7 +257,7 @@ class TestChargingLoadProfile:
             EvArchetypeId.daily_commuter_l2(),
             seed=42,
         )
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         col = _ev_power_col(df, "Tesla Model Y LR AWD")
         max_power = _scalar(df[col].max(), "max EV power")
 
@@ -271,7 +268,7 @@ class TestChargingLoadProfile:
 
     def test_ev_not_charging_while_soc_dropping(self):
         """When SOC is dropping (driving), residential EV power must be zero."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(duration_s=3 * 86400, time_res_s=900, seed=42)
         dw.initialize()
@@ -293,7 +290,7 @@ class TestChargingLoadProfile:
                 continue
             idx = tel["names"].index(ev_name)
             soc = tel["soc"][idx]
-            power = tel["power_kw"][idx]
+            power = tel["power_w"][idx]
 
             if prev_soc is not None and soc < prev_soc - 0.005:
                 total_driving_steps += 1
@@ -310,10 +307,10 @@ class TestChargingLoadProfile:
 
     def test_l1_charge_power_realistic(self):
         """L1 charging should be in the 1.0-1.8 kW range (120V/12-15A)."""
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -321,7 +318,7 @@ class TestChargingLoadProfile:
             EvArchetypeId.daily_commuter_l1(),
             seed=42,
         )
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         col = _ev_power_col(df, "Nissan Leaf S 30kWh")
         charging = df.filter(pl.col(col) > 0.1)
 
@@ -349,7 +346,7 @@ class TestHpxmlDeclaredEv:
 
     def test_hpxml_declared_ev_default_strategy_charges(self, tmp_path):
         from conftest import HPXML, SCHEDULE, WEATHER, HARES_DEFAULTS
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         xml = open(HPXML).read().replace(
             "</Systems>",
@@ -367,22 +364,9 @@ class TestHpxmlDeclaredEv:
         hpxml_path = tmp_path / "with_ev.xml"
         hpxml_path.write_text(xml)
 
-        dw = Dwelling.from_hpxml(
-            str(hpxml_path),
-            SCHEDULE,
-            WEATHER,
-            start_time="2019-01-01T00:00:00",
-            duration_s=3 * 86400,
-            time_res_s=900,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=42,
-            master_seed=42,
-            output_verbosity=1,
-            write_output=True,
-            output_path=str(tmp_path / "dwelling_42.csv"),
-        )
+        dw = Dwelling.from_hpxml(str(hpxml_path), SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3 * 86400, time_res=900, master_seed=42, reports=_frame_report(1)))
         dw.initialize()
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
 
         col = _ev_power_col(df, "EV")
         charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
@@ -410,16 +394,16 @@ class TestDefaultStrategyEv:
         the EV's actor seed. Over 3 days of driving the EV must draw a
         substantial, non-zero amount of energy.
         """
-        from ochre_next import EV
+        from hares import EV
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         dw.set_electric_tariff(tariff)
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
 
         col = _ev_power_col(df, "EV1")
         charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
@@ -435,14 +419,14 @@ class TestDefaultStrategyEv:
         construction-time actor registration; add_ev re-runs registration
         itself so the EV is driven whether or not a tariff is ever set.
         """
-        from ochre_next import EV
+        from hares import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
-        df = dw.simulate()
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
+        df = dw.simulate().reports[0].table()
 
         col = _ev_power_col(df, "EV1")
         charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
@@ -462,7 +446,7 @@ class TestDefaultStrategyEv:
         name, so the re-run must recognize it and skip — two drivers would
         double the vehicle's driving schedule.
         """
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(duration_s=2 * 86400, time_res_s=900, seed=42)
@@ -490,14 +474,14 @@ class TestDefaultStrategyEv:
         A rebuild that failed to evict, or a dedup keyed coarser than the
         equipment name, would leave a duplicated or missing driver here.
         """
-        from ochre_next import EV
+        from hares import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
-        dw.add_ev(EV("EV2", capacity_kwh=60.0, max_charging_kw=7.2))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
+        dw.add_ev(EV("EV2", capacity_j=216000000, max_charging_power_w=7200))
         dw.step()
 
         actors = dw.telemetry().actors()
@@ -507,7 +491,7 @@ class TestDefaultStrategyEv:
             f"all actors: {sorted(actors)}"
         )
 
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         for name in ("EV1", "EV2"):
             col = _ev_power_col(df, name)
             charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), f"{name} charging energy")
@@ -525,11 +509,11 @@ class TestDefaultStrategyEv:
         vehicle's seed while still building the add_ev vehicle's driver —
         then set_electric_tariff re-runs the whole dance again.
         """
-        from ochre_next import EV, EvArchetypeId, VehicleId
+        from hares import EV, EvArchetypeId, VehicleId
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.add_ev_with_driver(
@@ -537,7 +521,7 @@ class TestDefaultStrategyEv:
             EvArchetypeId.daily_commuter_l2(),
             seed=42,
         )
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         dw.set_electric_tariff(tariff)
         dw.step()
 
@@ -548,7 +532,7 @@ class TestDefaultStrategyEv:
             f"all actors: {sorted(actors)}"
         )
 
-        df = dw.simulate()
+        df = dw.simulate().reports[0].table()
         for label in ("EV1", "Tesla Model Y LR AWD"):
             col = _ev_power_col(df, label)
             charge_kwh = _scalar(df[col].filter(df[col] > 0).sum(), f"{label} charging energy")
@@ -565,14 +549,14 @@ class TestDefaultStrategyEv:
         while the run is in progress) — the EV must still get its driver,
         and its SOC must actually move over the following day.
         """
-        from ochre_next import EV
+        from hares import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
         dw.step()  # simulation is now in progress
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
 
         soc_values = []
         for _ in range(2 * 96):  # two days of 15-min steps
@@ -609,14 +593,14 @@ class TestDefaultStrategyEv:
         gains > 2% within some 24h window). A frozen SOC or a never-charging
         EV is the stranded-vehicle failure shape.
         """
-        from ochre_next import EV
+        from hares import EV
 
         tariff = _build_flat_tariff()
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
 
         total_steps = 3 * 96  # quarter-hour steps in 3 days
 
@@ -704,15 +688,15 @@ class TestDefaultStrategyEv:
         tariff effects. Both runs share one seed, so the schedules are
         identical and the trajectories are comparable step-for-step.
         """
-        from ochre_next import EV
+        from hares import EV
 
         def run(set_tariff_mid_trip: bool):
             tariff = _build_flat_tariff()
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1
+                duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
-            dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+            dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
 
             socs = []
             prev = None
@@ -761,15 +745,15 @@ class TestDefaultStrategyEv:
         stale equipment id, the dedup then suppresses the new EV's seed,
         and the re-added EV is never driven.
         """
-        from ochre_next import EV
+        from hares import EV
 
         dw = make_dwelling(
-            duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+            duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         dw.remove_equipment("EV1")
-        dw.add_ev(EV("EV1", capacity_kwh=75.0, max_charging_kw=7.68))
+        dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
 
         soc_values = []
         for _ in range(2 * 96):  # two days of 15-min steps
@@ -807,11 +791,11 @@ class TestDefaultStrategyEv:
         control means two drivers are depleting (and recharging) one
         vehicle, and near zero means the re-added vehicle lost its driver.
         """
-        from ochre_next import EvArchetypeId, VehicleId
+        from hares import EvArchetypeId, VehicleId
 
         def charging_kwh(readd: bool) -> float:
             dw = make_dwelling(
-                duration_s=3 * 86400, time_res_s=900, seed=42, output_verbosity=1, **OUTPUT
+                duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
             )
             dw.initialize()
             dw.add_ev_with_driver(
@@ -826,7 +810,7 @@ class TestDefaultStrategyEv:
                     EvArchetypeId.daily_commuter_l2(),
                     seed=42,
                 )
-            df = dw.simulate()
+            df = dw.simulate().reports[0].table()
             col = _ev_power_col(df, "Tesla Model Y LR AWD")
             return _scalar(df[col].filter(df[col] > 0).sum(), "total charging energy")
 

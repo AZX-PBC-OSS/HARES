@@ -1,6 +1,8 @@
 //! HPXML building envelope and geometry parsing.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
@@ -16,6 +18,7 @@ use hares_physics::units as conv;
 
 use super::HpxmlError;
 use super::ParseError;
+use super::elements::*;
 use super::xml_helpers::{element_id, xs_boolean};
 
 /// HPXML `<SiteType>` -- the terrain class of the building's surroundings.
@@ -334,6 +337,15 @@ pub struct Building {
     /// Raw HPXML parse tree retained for downstream consumers that still read
     /// fields which have not been promoted to typed members on `Building`.
     pub details_xml: XmlNode,
+    /// `SoftwareInfo/extension/UnavailablePeriods`: the periods whose flagged
+    /// steps zero the schedule columns their `unavailable_periods.csv` rows
+    /// apply to (`crates/hares-io/src/unavailable_periods.rs`).
+    pub unavailable_periods: Vec<crate::unavailable_periods::UnavailablePeriod>,
+    /// `SoftwareInfo/extension/ERICalculation/Version`: the ANSI/RESNET/ICC
+    /// 301 version the wet appliance equations branch on
+    /// (`crates/hares-io/src/hpxml/wet_appliance.rs`), `None` when the HPXML
+    /// carries none (OpenStudio-HPXML then uses its latest equations).
+    pub eri_calculation_version: Option<String>,
     /// Schema warnings the parse raised (for example the HPXML 3.x
     /// deprecated-`EnergyFactor` notice), carried to the run instead of
     /// living only as `tracing` lines.
@@ -390,41 +402,83 @@ pub struct XmlNode {
 }
 
 impl XmlNode {
-    pub(crate) fn child(&self, name: &str) -> Option<&XmlNode> {
-        self.children.iter().find(|n| n.name == name)
+    pub(crate) fn child(
+        &self,
+        element: &'static super::elements::HpxmlElement,
+    ) -> Option<&XmlNode> {
+        #[cfg(test)]
+        super::elements::read_recorder::record(element.name);
+        self.children.iter().find(|n| n.name == element.name)
     }
 
-    pub(crate) fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a XmlNode> {
-        self.children.iter().filter(move |n| n.name == name)
+    pub(crate) fn children_named<'a>(
+        &'a self,
+        element: &'static super::elements::HpxmlElement,
+    ) -> impl Iterator<Item = &'a XmlNode> {
+        #[cfg(test)]
+        super::elements::read_recorder::record(element.name);
+        self.children.iter().filter(move |n| n.name == element.name)
     }
 
-    fn descendants<'a>(&'a self, name: &'a str, out: &mut Vec<&'a XmlNode>) {
-        if self.name == name {
+    fn descendants<'a>(
+        &'a self,
+        element: &'static super::elements::HpxmlElement,
+        out: &mut Vec<&'a XmlNode>,
+    ) {
+        #[cfg(test)]
+        super::elements::read_recorder::record(element.name);
+        if self.name == element.name {
             out.push(self);
         }
         for child in &self.children {
-            child.descendants(name, out);
+            child.descendants(element, out);
         }
     }
 
-    pub(crate) fn first_descendant<'a>(&'a self, name: &'a str) -> Option<&'a XmlNode> {
-        if self.name == name {
+    pub(crate) fn first_descendant<'a>(
+        &'a self,
+        element: &'static super::elements::HpxmlElement,
+    ) -> Option<&'a XmlNode> {
+        #[cfg(test)]
+        super::elements::read_recorder::record(element.name);
+        if self.name == element.name {
             return Some(self);
         }
         for child in &self.children {
-            if let Some(found) = child.first_descendant(name) {
+            if let Some(found) = child.first_descendant(element) {
                 return Some(found);
             }
         }
         None
     }
 
-    pub(crate) fn path<'a>(&'a self, path: &[&str]) -> Option<&'a XmlNode> {
+    pub(crate) fn path<'a>(
+        &'a self,
+        path: &[&'static super::elements::HpxmlElement],
+    ) -> Option<&'a XmlNode> {
         let mut cur = self;
         for segment in path {
             cur = cur.child(segment)?;
         }
         Some(cur)
+    }
+
+    /// The choice dispatch's gate: the declared choice element naming
+    /// this node, from the choices the dispatch reads. The choices are
+    /// the table's statics, so the parser cannot branch on an element
+    /// it has not declared, and the read is recorded like the other
+    /// accessors' reads.
+    pub(crate) fn declared_choice(
+        &self,
+        choices: &[&'static super::elements::HpxmlElement],
+    ) -> Option<&'static super::elements::HpxmlElement> {
+        let element = choices
+            .iter()
+            .copied()
+            .find(|element| self.name == element.name)?;
+        #[cfg(test)]
+        super::elements::read_recorder::record(element.name);
+        Some(element)
     }
 
     fn text_as_f64(&self) -> Option<f64> {
@@ -609,65 +663,111 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
 
 pub fn parse_building(xml: &str) -> Result<Building, HpxmlError> {
     let root = parse_xml_document(xml)?;
+    super::reject_declared_elements(&root)?;
     parse_building_from_node(&root)
 }
 
-pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> {
+/// Extracts one HPXML document's `Building/BuildingDetails/BuildingSummary/Site`:
+/// the elevation, the site type, the shielding, the latitude, the longitude
+/// and the `TimeZone/UTCOffset`, with the document-level fallbacks the
+/// element's fields read. `parse_building_from_node` runs it as part of the
+/// building parse, and `read_site` runs it alone, so both read the site the
+/// same way.
+fn extract_site(root: &XmlNode) -> Result<Site, HpxmlError> {
     let details = root
-        .path(&["Building", "BuildingDetails"])
+        .path(&[&BUILDING, &BUILDING_DETAILS])
         .ok_or_else(|| HpxmlError::Parse("missing Building/BuildingDetails".into()))?;
 
     let summary = details
-        .child("BuildingSummary")
+        .child(&BUILDING_SUMMARY)
         .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary".into()))?;
 
     let site_node = summary
-        .child("Site")
+        .child(&SITE)
         .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary/Site".into()))?;
 
-    let elevation_primary =
-        parse_value_with_units(site_node.child("Elevation"), ValueKind::Length)?;
+    let elevation_primary = parse_value_with_units(site_node.child(&ELEVATION), ValueKind::Length)?;
     let elevation_fallback1 = parse_value_with_units(
-        root.path(&["Building", "Site", "Elevation"]),
+        root.path(&[&BUILDING, &SITE, &ELEVATION]),
         ValueKind::Length,
     )?;
     let elevation_fallback2 =
-        parse_value_with_units(root.first_descendant("Altitude"), ValueKind::Length)?;
+        parse_value_with_units(root.first_descendant(&ALTITUDE), ValueKind::Length)?;
     let elevation_m = elevation_primary
         .or(elevation_fallback1)
         .or(elevation_fallback2);
-    let site_type = match site_node.child("SiteType") {
+    let site_type = match site_node.child(&SITE_TYPE) {
         Some(node) => Some(parse_site_type(&node.text)?),
         None => None,
     };
     // HPXML.xsd spells the element ShieldingofHome.
-    let shielding_of_home = match site_node.child("ShieldingofHome") {
+    let shielding_of_home = match site_node.child(&SHIELDINGOF_HOME) {
         Some(node) => Some(parse_shielding_of_home(&node.text)?),
         None => None,
     };
     let latitude_primary = root
-        .path(&["Building", "Site", "Latitude"])
+        .path(&[&BUILDING, &SITE, &LATITUDE])
         .and_then(XmlNode::text_as_f64);
-    let latitude_fallback = find_descendant_f64(root, "Latitude", ValueKind::Raw)?;
+    let latitude_fallback = find_descendant_f64(root, &LATITUDE, ValueKind::Raw)?;
     let latitude_deg = latitude_primary.or(latitude_fallback);
     let longitude_primary = root
-        .path(&["Building", "Site", "Longitude"])
+        .path(&[&BUILDING, &SITE, &LONGITUDE])
         .and_then(XmlNode::text_as_f64);
-    let longitude_fallback = find_descendant_f64(root, "Longitude", ValueKind::Raw)?;
+    let longitude_fallback = find_descendant_f64(root, &LONGITUDE, ValueKind::Raw)?;
     let longitude_deg = longitude_primary.or(longitude_fallback);
 
     // HPXML Site/TimeZone/UTCOffset — standard-time offset from UTC (no DST).
     // Optional; the site-location resolver falls back to the weather file's
     // timezone or a longitude-derived estimate when this is absent.
     let utc_offset_primary = site_node
-        .child("TimeZone")
-        .and_then(|tz| tz.child("UTCOffset"))
+        .child(&TIME_ZONE)
+        .and_then(|tz| tz.child(&UTC_OFFSET))
         .and_then(XmlNode::text_as_f64);
-    let utc_offset_fallback = find_descendant_f64(root, "UTCOffset", ValueKind::Raw)?;
+    let utc_offset_fallback = find_descendant_f64(root, &UTC_OFFSET, ValueKind::Raw)?;
     let utc_offset_h = utc_offset_primary.or(utc_offset_fallback);
 
+    Ok(Site {
+        elevation_m,
+        site_type,
+        shielding_of_home,
+        latitude_deg,
+        longitude_deg,
+        utc_offset_h,
+    })
+}
+
+/// Reads one HPXML document's `Site` alone: the elevation, the latitude,
+/// the longitude and the `TimeZone/UTCOffset` the site-location resolution
+/// reads, with no `Building` built. The fleet's alignment pre-pass reads a
+/// home's site offset through this, before any home is parsed.
+pub fn read_site(path: &Path) -> Result<Site, HpxmlError> {
+    let xml = fs::read_to_string(path).map_err(|source| HpxmlError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    read_site_str(&xml)
+}
+
+/// [`read_site`] from the document's own text: the content twin, for an
+/// in-memory HPXML input.
+pub fn read_site_str(xml: &str) -> Result<Site, HpxmlError> {
+    let root = parse_xml_document(xml)?;
+    extract_site(&root)
+}
+
+pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> {
+    let details = root
+        .path(&[&BUILDING, &BUILDING_DETAILS])
+        .ok_or_else(|| HpxmlError::Parse("missing Building/BuildingDetails".into()))?;
+
+    let summary = details
+        .child(&BUILDING_SUMMARY)
+        .ok_or_else(|| HpxmlError::Parse("missing BuildingSummary".into()))?;
+
+    let site = extract_site(root)?;
+
     let conditioned_floor_area_m2 = parse_value_with_units(
-        summary.path(&["BuildingConstruction", "ConditionedFloorArea"]),
+        summary.path(&[&BUILDING_CONSTRUCTION, &CONDITIONED_FLOOR_AREA]),
         ValueKind::Area,
     )?;
 
@@ -686,12 +786,12 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         }
     };
     let given_conditioned_volume_m3 = parse_value_with_units(
-        summary.path(&["BuildingConstruction", "ConditionedBuildingVolume"]),
+        summary.path(&[&BUILDING_CONSTRUCTION, &CONDITIONED_BUILDING_VOLUME]),
         ValueKind::Volume,
     )?;
     let average_ceiling_height_m = super::zone_geometry::average_ceiling_height_m(
         details,
-        summary.path(&["BuildingConstruction", "AverageCeilingHeight"]),
+        summary.path(&[&BUILDING_CONSTRUCTION, &AVERAGE_CEILING_HEIGHT]),
         given_conditioned_volume_m3,
         conditioned_floor_area_m2,
         &mut parse_warnings,
@@ -717,13 +817,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     let ceiling_height_m = conditioned_volume_m3 / conditioned_floor_area_m2;
 
     let total_conditioned_floors = parse_value_with_units(
-        summary.path(&["BuildingConstruction", "NumberofConditionedFloors"]),
+        summary.path(&[&BUILDING_CONSTRUCTION, &NUMBEROF_CONDITIONED_FLOORS]),
         ValueKind::Raw,
     )?;
     let floors_above_grade = parse_value_with_units(
         summary.path(&[
-            "BuildingConstruction",
-            "NumberofConditionedFloorsAboveGrade",
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_CONDITIONED_FLOORS_ABOVE_GRADE,
         ]),
         ValueKind::Raw,
     )?.ok_or_else(|| HpxmlError::MissingField {
@@ -734,7 +834,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     })?;
 
     let residential_facility_type = summary
-        .path(&["BuildingConstruction", "ResidentialFacilityType"])
+        .path(&[&BUILDING_CONSTRUCTION, &RESIDENTIAL_FACILITY_TYPE])
         .map(|n| n.text.trim().to_string())
         .filter(|s| !s.is_empty());
 
@@ -747,13 +847,13 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // InfiltrationHeight lives under AirInfiltrationMeasurement -- HPXML stores it in feet.
     let infiltration_height_m = parse_value_with_units(
-        details.first_descendant("InfiltrationHeight"),
+        details.first_descendant(&INFILTRATION_HEIGHT),
         ValueKind::Length,
     )?;
 
     // <EffectiveLeakageArea units="sq-in"> -- convert sq inches to cm² (1 in² = 6.4516 cm²).
     let infiltration_ela_cm2 = details
-        .first_descendant("EffectiveLeakageArea")
+        .first_descendant(&EFFECTIVE_LEAKAGE_AREA)
         .and_then(|node| node.text_as_f64())
         .map(|sq_in| sq_in * 6.4516);
 
@@ -763,14 +863,11 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
 
     // <extension><HasFlueOrChimneyInConditionedSpace> -- xsd:boolean text.
     // The element's older name <HasFlueOrChimney> is not read; a document
-    // carrying it is rejected so the declaration cannot be dropped silently.
-    if details.first_descendant("HasFlueOrChimney").is_some() {
-        return Err(HpxmlError::Parse(
-            "deprecated element <HasFlueOrChimney>; rename it to <HasFlueOrChimneyInConditionedSpace>".into(),
-        ));
-    }
+    // carrying it is rejected by the parse's rejection scan over
+    // HPXML_REJECTED_ELEMENTS, so the declaration cannot be dropped
+    // silently.
     let has_flue_or_chimney = details
-        .first_descendant("HasFlueOrChimneyInConditionedSpace")
+        .first_descendant(&HAS_FLUE_OR_CHIMNEY_IN_CONDITIONED_SPACE)
         .map(|n| {
             xs_boolean(
                 n,
@@ -787,24 +884,26 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // no Foundation thermal zone, foundation_name=None, with a warning.
     // When <FoundationType> is present but unrecognised, fail loudly matching
     // OCHRE's OCHREException for unknown foundation types.
-    let has_foundations_group = details.path(&["Enclosure", "Foundations"]).is_some();
+    let has_foundations_group = details.path(&[&ENCLOSURE, &FOUNDATIONS]).is_some();
 
     let foundation_name = if has_foundations_group {
         let ft_child = details
-            .path(&["Enclosure", "Foundations", "Foundation", "FoundationType"])
+            .path(&[&ENCLOSURE, &FOUNDATIONS, &FOUNDATION, &FOUNDATION_TYPE])
             .and_then(|ft| ft.children.first());
 
         match ft_child {
             Some(child) => {
-                let tag = child.name.as_str();
-                match tag {
-                    "Crawlspace" => Some("Crawlspace".to_string()),
-                    "Basement" => {
+                match child.declared_choice(FOUNDATION_TYPE_CHOICES) {
+                    Some(choice) if std::ptr::eq(choice, &CRAWLSPACE) => {
+                        Some("Crawlspace".to_string())
+                    }
+                    Some(choice) if std::ptr::eq(choice, &BASEMENT) => {
                         let foundation_id = details
-                            .path(&["Enclosure", "Foundations", "Foundation"])
+                            .path(&[&ENCLOSURE, &FOUNDATIONS, &FOUNDATION])
                             .and_then(element_id)
                             .unwrap_or_else(|| "unknown".to_string());
                         let is_finished = foundation_node_is_conditioned(
+                            Some(choice),
                             child,
                             &foundation_id,
                             total_conditioned_floors,
@@ -816,16 +915,18 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                             Some("Unfinished Basement".to_string())
                         }
                     }
-                    "SlabOnGrade" | "Ambient" | "AboveApartment" => None,
-                    other => {
+                    // SlabOnGrade, Ambient and AboveApartment name no
+                    // foundation the parser models a thermal zone for.
+                    Some(_) => None,
+                    None => {
                         tracing::error!(
-                            foundation_type = other,
+                            foundation_type = %child.name,
                             "Unrecognized FoundationType child tag"
                         );
                         return Err(HpxmlError::Parse(
                             format!(
                                 "Unrecognized FoundationType '{}' in <Foundations> group",
-                                other
+                                child.name
                             )
                             .into(),
                         ));
@@ -842,10 +943,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         None
     };
     let foundation_node = details
-        .path(&["Enclosure", "Foundations"])
-        .and_then(|group| group.children_named("Foundation").next());
+        .path(&[&ENCLOSURE, &FOUNDATIONS])
+        .and_then(|group| group.children_named(&FOUNDATION).next());
     let foundation_floor_area_m2 = match foundation_node {
-        Some(foundation) => parse_value_with_units(foundation.child("FloorArea"), ValueKind::Area)?,
+        Some(foundation) => parse_value_with_units(foundation.child(&FLOOR_AREA), ValueKind::Area)?,
         None => None,
     };
 
@@ -869,16 +970,16 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             }
         }
         // Doors also have AttachedToWall in HPXML.
-        if let Some(enclosure) = details.child("Enclosure")
-            && let Some(doors) = enclosure.child("Doors")
+        if let Some(enclosure) = details.child(&ENCLOSURE)
+            && let Some(doors) = enclosure.child(&DOORS)
         {
-            for door in doors.children_named("Door") {
+            for door in doors.children_named(&DOOR) {
                 if let Some(wall_id) = door
-                    .child("AttachedToWall")
+                    .child(&ATTACHED_TO_WALL)
                     .and_then(|n| n.attrs.get("idref"))
                 {
                     let area =
-                        parse_value_with_units(door.child("Area"), ValueKind::Area)?.unwrap_or(0.0);
+                        parse_value_with_units(door.child(&AREA), ValueKind::Area)?.unwrap_or(0.0);
                     if area > 0.0 {
                         *boundary_reductions.entry(wall_id.clone()).or_default() += area;
                     }
@@ -932,7 +1033,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     //
     // OCHRE envelope.py:462-485 for insulation details.
     // ASHRAE HoF 2021 Ch. 17 for F-factor perimeter method.
-    if let Some(slabs_group) = details.path(&["Enclosure", "Slabs"]) {
+    if let Some(slabs_group) = details.path(&[&ENCLOSURE, &SLABS]) {
         for bd in &mut boundaries {
             if bd.boundary_type == BoundaryType::Slab {
                 // The slab interface is at the base of the foundation wall
@@ -949,8 +1050,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                         .or(Some(hares_physics::ground::DEFAULT_SLAB_GROUND_DEPTH_M));
                 }
 
-                if let Some(slab_node) = slabs_group.children_named("Slab").find(|n| {
-                    n.child("SystemIdentifier")
+                if let Some(slab_node) = slabs_group.children_named(&SLAB).find(|n| {
+                    n.child(&SYSTEM_IDENTIFIER)
                         .and_then(|si| si.attrs.get("id"))
                         .map(|id| id == &bd.id)
                         .unwrap_or(false)
@@ -962,8 +1063,8 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                     // convert to meters via ValueKind::Length.
                     bd.perimeter_m = parse_value_with_units(
                         slab_node
-                            .child("ExposedPerimeter")
-                            .or_else(|| slab_node.child("Perimeter")),
+                            .child(&EXPOSED_PERIMETER)
+                            .or_else(|| slab_node.child(&PERIMETER)),
                         ValueKind::Length,
                     )?;
 
@@ -971,7 +1072,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
                     // HPXML NominalRValue is in IP ft²·°F·h/Btu; convert to SI m²·K/W
                     // via ValueKind::RValue.
                     bd.perimeter_insulation_r_m2_k_w = parse_value_with_units(
-                        slab_node.path(&["PerimeterInsulation", "Layer", "NominalRValue"]),
+                        slab_node.path(&[&PERIMETER_INSULATION, &LAYER, &NOMINAL_R_VALUE]),
                         ValueKind::RValue,
                     )?;
                 }
@@ -1097,7 +1198,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     // Auto-generate furniture boundaries per zone (same-zone thermal mass).
     // HPXML extension/FurnitureMass/AreaFraction overrides the conditioned zone default.
     let furniture_area_fraction_override = details
-        .path(&["Enclosure", "extension", "FurnitureMass", "AreaFraction"])
+        .path(&[&ENCLOSURE, &EXTENSION, &FURNITURE_MASS, &AREA_FRACTION])
         .and_then(XmlNode::text_as_f64);
     const FURNITURE_FRACTIONS: &[(ZoneType, f64)] = &[
         (ZoneType::Conditioned, 0.4),
@@ -1281,14 +1382,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
     }
 
     Ok(Building {
-        site: Site {
-            elevation_m,
-            site_type,
-            shielding_of_home,
-            latitude_deg,
-            longitude_deg,
-            utc_offset_h,
-        },
+        site,
         zones: zones_vec,
         boundaries,
         windows,
@@ -1300,14 +1394,14 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         infiltration_ach_natural,
         infiltration_ach50,
         hvac_capacity_w: {
-            let heating = find_descendant_f64(details, "HeatingCapacity", ValueKind::Raw)?;
-            let cooling = find_descendant_f64(details, "CoolingCapacity", ValueKind::Raw)?;
+            let heating = find_descendant_f64(details, &HEATING_CAPACITY, ValueKind::Raw)?;
+            let cooling = find_descendant_f64(details, &COOLING_CAPACITY, ValueKind::Raw)?;
             heating.or(cooling).map(conv::power_btu_h_to_w)
         },
-        seer2: find_descendant_f64(details, "SEER2", ValueKind::Raw)?,
-        hspf2: find_descendant_f64(details, "HSPF2", ValueKind::Raw)?,
-        water_heater_setpoint_c: match details.first_descendant("WaterHeatingSystem") {
-            Some(wh) => find_descendant_f64(wh, "HotWaterTemperature", ValueKind::Temperature)?,
+        seer2: find_descendant_f64(details, &SEER_2, ValueKind::Raw)?,
+        hspf2: find_descendant_f64(details, &HSPF_2, ValueKind::Raw)?,
+        water_heater_setpoint_c: match details.first_descendant(&WATER_HEATING_SYSTEM) {
+            Some(wh) => find_descendant_f64(wh, &HOT_WATER_TEMPERATURE, ValueKind::Temperature)?,
             None => None,
         },
         heating_weekday_setpoints_c: parse_hvac_setpoints(details, "Heating", true)?,
@@ -1316,10 +1410,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         cooling_weekend_setpoints_c: parse_hvac_setpoints(details, "Cooling", false)?,
         battery_round_trip_efficiency: find_descendant_f64(
             details,
-            "RoundTripEfficiency",
+            &ROUND_TRIP_EFFICIENCY,
             ValueKind::Raw,
         )?,
-        pv_tilt_deg: find_descendant_f64(details, "Tilt", ValueKind::Raw)?,
+        pv_tilt_deg: find_descendant_f64(details, &TILT, ValueKind::Raw)?,
         conditioned_volume_m3,
         ceiling_height_m,
         infiltration_height_m,
@@ -1334,9 +1428,14 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         )?,
         hvac_deadband_c: None,
         climate_zone_iecc: details
-            .path(&["ClimateandRiskZones", "ClimateZoneIECC"])
-            .and_then(|iecc| super::xml_helpers::child_text(iecc, "ClimateZone"))
+            .path(&[&CLIMATEAND_RISK_ZONES, &CLIMATE_ZONE_IECC])
+            .and_then(|iecc| super::xml_helpers::child_text(iecc, &CLIMATE_ZONE))
             .filter(|zone| !zone.is_empty()),
+        unavailable_periods: crate::unavailable_periods::parse_unavailable_periods(root)?,
+        eri_calculation_version: root
+            .path(&[&SOFTWARE_INFO, &EXTENSION, &ERI_CALCULATION, &VERSION])
+            .map(|version| version.text.trim().to_string())
+            .filter(|text| !text.is_empty()),
         details_xml: details.clone(),
         parse_warnings,
     })
@@ -1366,25 +1465,25 @@ fn parse_boundaries(
     let mut out = Vec::new();
     let mut pitch_absent_ids = Vec::new();
     let boundary_specs = [
-        ("Walls", "Wall", BoundaryType::Wall),
-        ("Roofs", "Roof", BoundaryType::Roof),
-        ("Floors", "Floor", BoundaryType::Floor),
-        ("FrameFloors", "FrameFloor", BoundaryType::Floor),
-        ("Doors", "Door", BoundaryType::Door),
-        ("RimJoists", "RimJoist", BoundaryType::RimJoist),
+        (&WALLS, &WALL, BoundaryType::Wall),
+        (&ROOFS, &ROOF, BoundaryType::Roof),
+        (&FLOORS, &FLOOR, BoundaryType::Floor),
+        (&FRAME_FLOORS, &FRAME_FLOOR, BoundaryType::Floor),
+        (&DOORS, &DOOR, BoundaryType::Door),
+        (&RIM_JOISTS, &RIM_JOIST, BoundaryType::RimJoist),
         (
-            "FoundationWalls",
-            "FoundationWall",
+            &FOUNDATION_WALLS,
+            &FOUNDATION_WALL,
             BoundaryType::FoundationWall,
         ),
-        ("Slabs", "Slab", BoundaryType::Slab),
+        (&SLABS, &SLAB, BoundaryType::Slab),
     ];
     // Skylights are NOT in this list — they are parsed separately via
     // parse_skylights() because, like windows, they have a dual representation
     // (Window struct in building.skylights + Boundary in building.boundaries)
     // and use fenestration-specific parsing (UFactor, SHGC, shading, etc.).
 
-    let enclosure = match details.child("Enclosure") {
+    let enclosure = match details.child(&ENCLOSURE) {
         Some(node) => node,
         None => return Ok((out, pitch_absent_ids)),
     };
@@ -1407,18 +1506,18 @@ fn parse_boundaries(
     // from AttachedToWall), so an exterior adjacency the door does not state
     // is derived from the wall, never defaulted to Outdoor. An attached
     // wall the boundary list does not hold is an error naming both ids.
-    // A subsurface (door) inherits the zones of the wall it is attached to:
-    // OS-HPXML gives a subsurface its parent surface's outside boundary
-    // condition (hpxml.rb subsurface handling, `OutsideBoundaryCondition`
-    // from AttachedToWall), so an exterior adjacency the door does not state
-    // is derived from the wall, never defaulted to Outdoor. An attached
-    // wall the boundary list does not hold is an error naming both ids.
     // The derivation is recorded as a parse warning naming the door and the
     // wall it was taken from.
-    if let Some(doors) = enclosure.child("Doors") {
-        for door in doors.children_named("Door") {
+    // Windows inherit the same way, from their own parse pass (their
+    // boundary entries join the list after this block); see
+    // `inherit_subsurface_interior_zone`. Skylights follow the skylight
+    // rule in their own parse pass (`skylight_interior_zone`): the
+    // conditioned space their attached roof or floor names, failing when
+    // that parent surface is unconditioned.
+    if let Some(doors) = enclosure.child(&DOORS) {
+        for door in doors.children_named(&DOOR) {
             let Some(wall_id) = door
-                .child("AttachedToWall")
+                .child(&ATTACHED_TO_WALL)
                 .and_then(|n| n.attrs.get("idref"))
                 .map(|id| id.to_string())
             else {
@@ -1469,22 +1568,74 @@ fn parse_boundaries(
     Ok((out, pitch_absent_ids))
 }
 
+/// A subsurface's interior zone when it states none: its attached parent
+/// surface's interior zone. OS-HPXML seats a subsurface in its parent
+/// surface's space (`geometry.rb` `set_surface_interior` takes the
+/// subsurface's space from `window.wall`'s interior adjacency, :1470-1476,
+/// applied to windows and doors at :510-523, :555-559). An
+/// `AttachedToWall` idref that matches no parsed boundary is an error
+/// naming both ids. Skylights follow the skylight rule instead (see
+/// `skylight_interior_zone`): the schema names no `AttachedToWall` and no
+/// adjacency child on a Skylight, and the reference seats a skylight in
+/// the conditioned space from its parent roof or floor alone.
+pub(crate) fn inherit_subsurface_interior_zone(
+    boundaries: &[Boundary],
+    subsurface_kind: &'static str,
+    subsurface_id: &str,
+    attached_id: Option<&str>,
+    interior_zone: Option<ZoneType>,
+) -> Result<Option<ZoneType>, HpxmlError> {
+    let Some(wall_id) = attached_id else {
+        return Ok(interior_zone);
+    };
+    if interior_zone.is_some() {
+        return Ok(interior_zone);
+    }
+    let Some(wall) = boundaries.iter().find(|bd| bd.id == wall_id) else {
+        return Err(HpxmlError::Parse(
+            format!(
+                "{subsurface_kind} '{subsurface_id}': its AttachedToWall idref \
+                 '{wall_id}' matches no parsed boundary, so the subsurface's \
+                 interior zone cannot be derived from it"
+            )
+            .into(),
+        ));
+    };
+    if wall.interior_zone.is_none() {
+        return Err(HpxmlError::Parse(
+            format!(
+                "{subsurface_kind} '{subsurface_id}': neither it nor its attached \
+                 surface '{wall_id}' names an interior adjacency; no zone may be \
+                 substituted for a location the input does not name"
+            )
+            .into(),
+        ));
+    }
+    tracing::debug!(
+        subsurface = %subsurface_id,
+        surface = %wall_id,
+        "subsurface interior zone derived from its attached surface (the \
+         subsurface's parent surface's space, as OS-HPXML does)"
+    );
+    Ok(wall.interior_zone.clone())
+}
+
 fn parse_windows(
     details: &XmlNode,
     boundaries: &mut Vec<Boundary>,
 ) -> Result<Vec<Window>, HpxmlError> {
     let mut windows = Vec::new();
-    let Some(enclosure) = details.child("Enclosure") else {
+    let Some(enclosure) = details.child(&ENCLOSURE) else {
         return Ok(windows);
     };
-    let Some(group) = enclosure.child("Windows") else {
+    let Some(group) = enclosure.child(&WINDOWS) else {
         return Ok(windows);
     };
 
-    for window in group.children_named("Window") {
+    for window in group.children_named(&WINDOW) {
         let id = element_id(window).unwrap_or_else(|| "unknown".to_string());
         let area_m2 =
-            parse_value_with_units(window.child("Area"), ValueKind::Area)?.ok_or_else(|| {
+            parse_value_with_units(window.child(&AREA), ValueKind::Area)?.ok_or_else(|| {
                 HpxmlError::Parse(
                     format!("window '{}' is missing required Area element", id).into(),
                 )
@@ -1494,23 +1645,23 @@ fn parse_windows(
                 format!("window '{}' has non-positive area: {}", id, area_m2).into(),
             ));
         }
-        let azimuth_deg = parse_value_with_units(window.child("Azimuth"), ValueKind::Raw)?;
-        let u_factor_w_m2_k = parse_value_with_units(window.child("UFactor"), ValueKind::UValue)?;
-        let shgc = window.child("SHGC").and_then(XmlNode::text_as_f64);
+        let azimuth_deg = parse_value_with_units(window.child(&AZIMUTH), ValueKind::Raw)?;
+        let u_factor_w_m2_k = parse_value_with_units(window.child(&U_FACTOR), ValueKind::UValue)?;
+        let shgc = window.child(&SHGC).and_then(XmlNode::text_as_f64);
 
         // InteriorShading/SummerShadingCoefficient is a transmittance multiplier
         // per ANSI/RESNET/ICC 301-2019 Table 4.2.2(1). Default 0.70 when
         // InteriorShading present but coefficient absent; 1.0 when absent entirely.
         let (interior_shading_fraction, winter_shading_fraction) =
-            match window.child("InteriorShading") {
+            match window.child(&INTERIOR_SHADING) {
                 Some(shading) => {
                     let summer = shading
-                        .child("SummerShadingCoefficient")
+                        .child(&SUMMER_SHADING_COEFFICIENT)
                         .and_then(XmlNode::text_as_f64)
                         .unwrap_or(0.70)
                         .clamp(0.0, 1.0);
                     let winter = shading
-                        .child("WinterShadingCoefficient")
+                        .child(&WINTER_SHADING_COEFFICIENT)
                         .and_then(XmlNode::text_as_f64)
                         .unwrap_or(0.85)
                         .clamp(0.0, 1.0);
@@ -1520,21 +1671,21 @@ fn parse_windows(
             };
 
         let fraction_operable = window
-            .child("FractionOperable")
+            .child(&FRACTION_OPERABLE)
             .and_then(XmlNode::text_as_f64)
             .unwrap_or(0.67)
             .clamp(0.0, 1.0);
 
         let (exterior_shading_summer, exterior_shading_winter) =
-            match window.child("ExteriorShading") {
+            match window.child(&EXTERIOR_SHADING) {
                 Some(shading) => {
                     let summer = shading
-                        .child("SummerShadingCoefficient")
+                        .child(&SUMMER_SHADING_COEFFICIENT)
                         .and_then(XmlNode::text_as_f64)
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0);
                     let winter = shading
-                        .child("WinterShadingCoefficient")
+                        .child(&WINTER_SHADING_COEFFICIENT)
                         .and_then(XmlNode::text_as_f64)
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0);
@@ -1544,25 +1695,11 @@ fn parse_windows(
             };
 
         let attached_to_wall_id = window
-            .child("AttachedToWall")
+            .child(&ATTACHED_TO_WALL)
             .and_then(|n| n.attrs.get("idref").cloned());
 
-        windows.push(Window {
-            id: id.clone(),
-            area_m2,
-            azimuth_deg,
-            u_factor_w_m2_k,
-            shgc,
-            interior_shading_fraction,
-            winter_shading_fraction,
-            fraction_operable,
-            exterior_shading_summer,
-            exterior_shading_winter,
-            attached_to_wall_id,
-        });
-
-        let window_interior = parse_zone_ref(window.child("InteriorAdjacentTo"));
-        let window_exterior = parse_zone_ref(window.child("ExteriorAdjacentTo"))
+        let window_interior = parse_zone_ref(window.child(&INTERIOR_ADJACENT_TO));
+        let window_exterior = parse_zone_ref(window.child(&EXTERIOR_ADJACENT_TO))
             .or_else(|| infer_exterior_zone(&BoundaryType::Window));
 
         #[cfg(feature = "observe")]
@@ -1581,6 +1718,30 @@ fn parse_windows(
 
         let (window_interior, window_exterior) =
             rewrite_adjacent_zone_pair(window_interior, window_exterior);
+
+        // The subsurface's interior zone derives from its attached wall when
+        // it states none (the OS-HPXML subsurface rule).
+        let window_interior = inherit_subsurface_interior_zone(
+            boundaries,
+            "Window",
+            &id,
+            attached_to_wall_id.as_deref(),
+            window_interior,
+        )?;
+
+        windows.push(Window {
+            id: id.clone(),
+            area_m2,
+            azimuth_deg,
+            u_factor_w_m2_k,
+            shgc,
+            interior_shading_fraction,
+            winter_shading_fraction,
+            fraction_operable,
+            exterior_shading_summer,
+            exterior_shading_winter,
+            attached_to_wall_id,
+        });
 
         boundaries.push(Boundary {
             id,
@@ -1613,29 +1774,32 @@ fn parse_windows(
 
 /// Parse `<Enclosure>/<Skylights>/<Skylight>` elements.
 ///
-/// HPXML 4.x defines Skylight as an extension of the Window base type, so the
-/// schema is identical: `Area`, `Azimuth`, `UFactor`, `SHGC`, `InteriorShading`,
-/// `ExteriorShading`, `FractionOperable`, and `AttachedToWall`.  The key
-/// difference is the tilt: skylights are roof-mounted (horizontal, 0° tilt)
-/// rather than wall-mounted (vertical, 90° tilt).
+/// HPXML v4's Skylight shares the WindowInfo group with Window, but the
+/// schema's parent-surface references differ: a Skylight names
+/// `AttachedToRoof` (required; the OS-HPXML schematron asserts
+/// "Expected AttachedToRoof", EPvalidator.sch [Skylight]) and optionally
+/// `AttachedToFloor` (the shaft or sun-tunnel connection), and defines no
+/// adjacency children.
 ///
-/// Ref: HPXML 4.2 §6.5 "Windows"; Skylight extends Window base type.
+/// Ref: HPXML 4.0 XSD `Skylight` (WindowInfo + AttachedToRoof/AttachedToFloor);
+/// OS-HPXML v1.12.0 hpxml.rb `Skylight` (`attached_to_roof_idref`,
+/// `attached_to_floor_idref`).
 fn parse_skylights(
     details: &XmlNode,
     boundaries: &mut Vec<Boundary>,
 ) -> Result<Vec<Window>, HpxmlError> {
     let mut skylights = Vec::new();
-    let Some(enclosure) = details.child("Enclosure") else {
+    let Some(enclosure) = details.child(&ENCLOSURE) else {
         return Ok(skylights);
     };
-    let Some(group) = enclosure.child("Skylights") else {
+    let Some(group) = enclosure.child(&SKYLIGHTS) else {
         return Ok(skylights);
     };
 
-    for skylight in group.children_named("Skylight") {
+    for skylight in group.children_named(&SKYLIGHT) {
         let id = element_id(skylight).unwrap_or_else(|| "unknown".to_string());
         let area_m2 =
-            parse_value_with_units(skylight.child("Area"), ValueKind::Area)?.ok_or_else(|| {
+            parse_value_with_units(skylight.child(&AREA), ValueKind::Area)?.ok_or_else(|| {
                 HpxmlError::Parse(
                     format!("skylight '{}' is missing required Area element", id).into(),
                 )
@@ -1645,21 +1809,21 @@ fn parse_skylights(
                 format!("skylight '{}' has non-positive area: {}", id, area_m2).into(),
             ));
         }
-        let azimuth_deg = parse_value_with_units(skylight.child("Azimuth"), ValueKind::Raw)?;
-        let u_factor_w_m2_k = parse_value_with_units(skylight.child("UFactor"), ValueKind::UValue)?;
-        let shgc = skylight.child("SHGC").and_then(XmlNode::text_as_f64);
+        let azimuth_deg = parse_value_with_units(skylight.child(&AZIMUTH), ValueKind::Raw)?;
+        let u_factor_w_m2_k = parse_value_with_units(skylight.child(&U_FACTOR), ValueKind::UValue)?;
+        let shgc = skylight.child(&SHGC).and_then(XmlNode::text_as_f64);
 
         // InteriorShading/SummerShadingCoefficient — same defaults as windows.
         let (interior_shading_fraction, winter_shading_fraction) =
-            match skylight.child("InteriorShading") {
+            match skylight.child(&INTERIOR_SHADING) {
                 Some(shading) => {
                     let summer = shading
-                        .child("SummerShadingCoefficient")
+                        .child(&SUMMER_SHADING_COEFFICIENT)
                         .and_then(XmlNode::text_as_f64)
                         .unwrap_or(0.70)
                         .clamp(0.0, 1.0);
                     let winter = shading
-                        .child("WinterShadingCoefficient")
+                        .child(&WINTER_SHADING_COEFFICIENT)
                         .and_then(XmlNode::text_as_f64)
                         .unwrap_or(0.85)
                         .clamp(0.0, 1.0);
@@ -1669,21 +1833,21 @@ fn parse_skylights(
             };
 
         let fraction_operable = skylight
-            .child("FractionOperable")
+            .child(&FRACTION_OPERABLE)
             .and_then(XmlNode::text_as_f64)
             .unwrap_or(0.67)
             .clamp(0.0, 1.0);
 
         let (exterior_shading_summer, exterior_shading_winter) =
-            match skylight.child("ExteriorShading") {
+            match skylight.child(&EXTERIOR_SHADING) {
                 Some(shading) => {
                     let summer = shading
-                        .child("SummerShadingCoefficient")
+                        .child(&SUMMER_SHADING_COEFFICIENT)
                         .and_then(XmlNode::text_as_f64)
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0);
                     let winter = shading
-                        .child("WinterShadingCoefficient")
+                        .child(&WINTER_SHADING_COEFFICIENT)
                         .and_then(XmlNode::text_as_f64)
                         .unwrap_or(1.0)
                         .clamp(0.0, 1.0);
@@ -1692,9 +1856,25 @@ fn parse_skylights(
                 None => (1.0, 1.0),
             };
 
-        let attached_to_wall_id = skylight
-            .child("AttachedToWall")
+        let attached_to_roof_id = skylight
+            .child(&ATTACHED_TO_ROOF)
             .and_then(|n| n.attrs.get("idref").cloned());
+        let attached_to_floor_id = skylight
+            .child(&ATTACHED_TO_FLOOR)
+            .and_then(|n| n.attrs.get("idref").cloned());
+
+        // The skylight's interior zone follows the OS-HPXML skylight rule
+        // (the schema defines no adjacency children on Skylight to read).
+        let skylight_interior = skylight_interior_zone(
+            boundaries,
+            &id,
+            attached_to_roof_id.as_deref(),
+            attached_to_floor_id.as_deref(),
+        )?;
+        // The exterior is outdoors: geometry.rb apply_skylights sets the
+        // skylight's parent surface's outside boundary condition outdoors
+        // unconditionally (:689).
+        let skylight_exterior = infer_exterior_zone(&BoundaryType::Skylight);
 
         skylights.push(Window {
             id: id.clone(),
@@ -1707,29 +1887,11 @@ fn parse_skylights(
             fraction_operable,
             exterior_shading_summer,
             exterior_shading_winter,
-            attached_to_wall_id,
+            // The parent surface's idref: a skylight's AttachedToRoof (the
+            // schema's required parent reference, whose area the skylight
+            // comes off).
+            attached_to_wall_id: attached_to_roof_id,
         });
-
-        let skylight_interior = parse_zone_ref(skylight.child("InteriorAdjacentTo"));
-        let skylight_exterior = parse_zone_ref(skylight.child("ExteriorAdjacentTo"))
-            .or_else(|| infer_exterior_zone(&BoundaryType::Skylight));
-
-        #[cfg(feature = "observe")]
-        if skylight_interior == Some(ZoneType::Adjacent)
-            || skylight_exterior == Some(ZoneType::Adjacent)
-        {
-            tracing::info!(
-                target: "observe",
-                column = "adjacent_boundary_rewrite",
-                boundary_id = id,
-                interior_before = ?skylight_interior,
-                exterior_before = ?skylight_exterior,
-                "rewriting Adjacent zone reference to match non-Adjacent zone"
-            );
-        }
-
-        let (skylight_interior, skylight_exterior) =
-            rewrite_adjacent_zone_pair(skylight_interior, skylight_exterior);
 
         // Skylight tilt defaults to 0° (horizontal, roof-mounted).
         // Per IECC 2021 Table R402.1.2, skylights have different U-factor
@@ -1765,6 +1927,110 @@ fn parse_skylights(
     Ok(skylights)
 }
 
+/// A skylight's interior zone per the OS-HPXML skylight rule: the skylight
+/// lives in the conditioned space. Its conditioned-ness comes from the
+/// parent surface it names: the attached floor when `AttachedToFloor` is
+/// stated (a skylight with a shaft through an attic), else the roof
+/// (hpxml.rb `Skylight#is_conditioned` reads the floor when present, then
+/// the roof). A parent surface whose interior adjacency is not conditioned
+/// fails the parse naming the rule (geometry.rb `apply_skylights` :639-641:
+/// "Skylight '...' not connected to conditioned space; if it's a skylight
+/// with a shaft, use AttachedToFloor to connect it to conditioned space.");
+/// a connected skylight's parent surface is seated unconditionally in the
+/// conditioned space (geometry.rb :687-688). `AttachedToRoof` is required:
+/// the OS-HPXML schematron asserts "Expected AttachedToRoof" on every
+/// skylight (EPvalidator.sch [Skylight]). An idref that matches no
+/// roof (or floor) boundary is an error naming both ids (hpxml.rb
+/// `Skylight#roof`/`#floor`: "Attached roof '...' not found for skylight
+/// '...'").
+fn skylight_interior_zone(
+    boundaries: &[Boundary],
+    skylight_id: &str,
+    attached_roof_id: Option<&str>,
+    attached_floor_id: Option<&str>,
+) -> Result<Option<ZoneType>, HpxmlError> {
+    let roof_id = attached_roof_id.ok_or_else(|| {
+        HpxmlError::Parse(
+            format!(
+                "skylight '{skylight_id}': expected AttachedToRoof; the OS-HPXML \
+                 schematron requires it and the skylight's interior zone derives \
+                 from the parent surface it names"
+            )
+            .into(),
+        )
+    })?;
+    let roof =
+        find_skylight_parent_surface(boundaries, "roof", "AttachedToRoof", roof_id, skylight_id)?;
+    // The floor, when stated, decides the skylight's conditioned-ness first.
+    let deciding = match attached_floor_id {
+        Some(floor_id) => find_skylight_parent_surface(
+            boundaries,
+            "floor",
+            "AttachedToFloor",
+            floor_id,
+            skylight_id,
+        )?,
+        None => roof,
+    };
+    match deciding.interior_zone {
+        // The conditioned locations ("conditioned space", "basement -
+        // conditioned", "crawlspace - conditioned"; hpxml.rb
+        // `conditioned_locations` :12311-12316, less its "other housing
+        // unit" member: that label parses as an Adjacent zone here, the
+        // OCHRE adiabatic reading, and the rewrite removes every Adjacent
+        // before the skylights parse; the label family's treatment is
+        // registered as docs/alignment/DIVERGENCES.md D-033) merge into
+        // the one conditioned space here: geometry.rb seats the skylight's
+        // parent surface in the conditioned space, never in the named
+        // location.
+        Some(ZoneType::Conditioned) => Ok(Some(ZoneType::Conditioned)),
+        // The rewrite stage removes every Adjacent adjacency before the
+        // skylights parse (the parse_boundaries invariant); a parent
+        // surface still carrying one is that stage's bug, not an input
+        // case.
+        Some(ZoneType::Adjacent) => unreachable!(
+            "skylight '{skylight_id}': its parent surface's interior adjacency \
+             is Adjacent after the rewrite stage, which removes every Adjacent"
+        ),
+        _ => Err(HpxmlError::Parse(
+            format!(
+                "skylight '{skylight_id}': not connected to conditioned space; if \
+                 it's a skylight with a shaft, use AttachedToFloor to connect it \
+                 to conditioned space (the OS-HPXML skylight rule: geometry.rb \
+                 apply_skylights :639-641 seats a skylight only when its parent \
+                 surface's interior adjacency is conditioned, :687-688 seats the \
+                 parent surface in the conditioned space)"
+            )
+            .into(),
+        )),
+    }
+}
+
+/// Find the skylight's parent surface of one boundary type by idref; an
+/// idref that matches no such boundary is an error naming the skylight and
+/// the idref (the reference's own lookup fails the same way).
+fn find_skylight_parent_surface<'a>(
+    boundaries: &'a [Boundary],
+    parent_kind: &str,
+    element_name: &str,
+    parent_id: &str,
+    skylight_id: &str,
+) -> Result<&'a Boundary, HpxmlError> {
+    boundaries
+        .iter()
+        .find(|bd| bd.id == parent_id && boundary_type_label(&bd.boundary_type) == parent_kind)
+        .ok_or_else(|| {
+            HpxmlError::Parse(
+                format!(
+                    "skylight '{skylight_id}': its {element_name} idref '{parent_id}' \
+                     matches no parsed {parent_kind}, so the skylight's interior \
+                     zone cannot be derived from it"
+                )
+                .into(),
+            )
+        })
+}
+
 fn parse_boundary(
     node: &XmlNode,
     boundary_type: BoundaryType,
@@ -1774,26 +2040,26 @@ fn parse_boundary(
     let area_m2 = parse_boundary_area(node, &boundary_type, &id)?;
     let r_value_layers_m2_k_w = parse_nominal_r_layers(node)?;
     let assembly_r_value_primary = parse_value_with_units(
-        node.first_descendant("AssemblyEffectiveRValue"),
+        node.first_descendant(&ASSEMBLY_EFFECTIVE_R_VALUE),
         ValueKind::RValue,
     )?;
     let assembly_r_value_fallback =
-        parse_value_with_units(node.first_descendant("RValue"), ValueKind::RValue)?;
+        parse_value_with_units(node.first_descendant(&R_VALUE), ValueKind::RValue)?;
     let assembly_r_value_m2_k_w = assembly_r_value_primary.or(assembly_r_value_fallback);
     let material_layers = parse_material_layers(node, area_m2)?;
 
     let has_radiant_barrier = node
-        .first_descendant("RadiantBarrier")
+        .first_descendant(&RADIANT_BARRIER)
         .map(|n| xs_boolean(n, "RadiantBarrier", "Envelope Surface", &id))
         .transpose()?
         .unwrap_or(false);
 
     // Solar absorptance and emittance from HPXML, validated to [0, 1].
     // Ref: OCHRE hpxml.py:155-158, OCHRE Envelope.py:222.
-    let solar_absorptance = parse_value_with_units(node.child("SolarAbsorptance"), ValueKind::Raw)?
+    let solar_absorptance = parse_value_with_units(node.child(&SOLAR_ABSORPTANCE), ValueKind::Raw)?
         .map(|v| v.clamp(0.0, 1.0));
     let emittance =
-        parse_value_with_units(node.child("Emittance"), ValueKind::Raw)?.map(|v| v.clamp(0.0, 1.0));
+        parse_value_with_units(node.child(&EMITTANCE), ValueKind::Raw)?.map(|v| v.clamp(0.0, 1.0));
 
     // Extract construction metadata for OCHRE LUT matching.
     let (construction_type, finish_type) = extract_construction_metadata(node, &boundary_type);
@@ -1802,13 +2068,13 @@ fn parse_boundary(
     // Surface tilt from HPXML <Pitch> (roofs) or implied by boundary type.
     // Pitch is rise:12 run (US roofing convention); tilt = atan(pitch/12).
     // Ref: OCHRE hpxml.py pitch2deg().
-    let interior_zone = parse_zone_ref(node.child("InteriorAdjacentTo"));
-    let exterior_zone = parse_zone_ref(node.child("ExteriorAdjacentTo"))
+    let interior_zone = parse_zone_ref(node.child(&INTERIOR_ADJACENT_TO));
+    let exterior_zone = parse_zone_ref(node.child(&EXTERIOR_ADJACENT_TO))
         .or_else(|| infer_exterior_zone(&boundary_type));
 
     let tilt_deg = match boundary_type {
         BoundaryType::Roof => {
-            let pitch = parse_value_with_units(node.child("Pitch"), ValueKind::Raw)?;
+            let pitch = parse_value_with_units(node.child(&PITCH), ValueKind::Raw)?;
             let pitch_value = match pitch {
                 Some(p) => p,
                 None => {
@@ -1879,7 +2145,7 @@ fn parse_boundary(
         id,
         boundary_type,
         area_m2,
-        azimuth_deg: parse_value_with_units(node.child("Azimuth"), ValueKind::Raw)?,
+        azimuth_deg: parse_value_with_units(node.child(&AZIMUTH), ValueKind::Raw)?,
         assembly_r_value_m2_k_w,
         r_value_layers_m2_k_w,
         interior_zone,
@@ -1894,7 +2160,7 @@ fn parse_boundary(
         emittance,
         tilt_deg,
         lut_boundary_name: None,
-        floor_or_ceiling: node.child("FloorOrCeiling").and_then(|n| {
+        floor_or_ceiling: node.child(&FLOOR_OR_CEILING).and_then(|n| {
             match n.text.trim().to_ascii_lowercase().as_str() {
                 "floor" => Some(FloorOrCeiling::Floor),
                 "ceiling" => Some(FloorOrCeiling::Ceiling),
@@ -1968,7 +2234,7 @@ fn parse_framing_factor(
     // Explicit FramingFactor from HPXML
     // Range (0, 1) excludes boundaries: 0.0 = no framing (equivalent to None),
     // 1.0 = all framing (physically impossible for an insulated wall).
-    if let Some(ff) = find_descendant_f64(node, "FramingFactor", ValueKind::Raw)?
+    if let Some(ff) = find_descendant_f64(node, &FRAMING_FACTOR, ValueKind::Raw)?
         && ff > 0.0
         && ff < 1.0
     {
@@ -1978,8 +2244,8 @@ fn parse_framing_factor(
     // Derive assembly framing fraction from stud geometry and wall height.
     // Per ASHRAE HoF 2021 Ch. 27 Table 6: the assembly-level framing fraction
     // includes studs, plates, headers, corners, and miscellaneous members.
-    let stud_spacing = find_descendant_f64(node, "StudSpacing", ValueKind::Raw)?;
-    let stud_width = find_descendant_f64(node, "StudWidth", ValueKind::Raw)?;
+    let stud_spacing = find_descendant_f64(node, &STUD_SPACING, ValueKind::Raw)?;
+    let stud_width = find_descendant_f64(node, &STUD_WIDTH, ValueKind::Raw)?;
     if let (Some(spacing_in), Some(width_in)) = (stud_spacing, stud_width)
         && spacing_in > 0.0
         && width_in > 0.0
@@ -1988,7 +2254,7 @@ fn parse_framing_factor(
         // WallHeight defaults to 96 in (8 ft) per ASHRAE/HPXML convention.
         // HPXML WallHeight is typically in feet; convert to inches.
         let wall_height_in = node
-            .child("WallHeight")
+            .child(&WALL_HEIGHT)
             .and_then(|n| {
                 let raw = n.text_as_f64()?;
                 let units_norm = n
@@ -2057,9 +2323,9 @@ fn parse_boundary_area(
     boundary_type: &BoundaryType,
     id: &str,
 ) -> Result<f64, HpxmlError> {
-    let area = parse_value_with_units(node.child("Area"), ValueKind::Area)?;
+    let area = parse_value_with_units(node.child(&AREA), ValueKind::Area)?;
     let interior = node
-        .child("InteriorAdjacentTo")
+        .child(&INTERIOR_ADJACENT_TO)
         .map(|n| n.text.trim().to_string())
         .unwrap_or_default();
     match boundary_type {
@@ -2072,8 +2338,8 @@ fn parse_boundary_area(
                 }
                 return Ok(a);
             }
-            let length = parse_value_with_units(node.child("Length"), ValueKind::Length)?;
-            let height = parse_value_with_units(node.child("Height"), ValueKind::Length)?;
+            let length = parse_value_with_units(node.child(&LENGTH), ValueKind::Length)?;
+            let height = parse_value_with_units(node.child(&HEIGHT), ValueKind::Length)?;
             match (length, height) {
                 (Some(l), Some(h)) if l > 0.0 && h > 0.0 => {
                     // HPXML 4.2: FoundationWall/Length = "Total length of foundation wall" [ft];
@@ -2189,10 +2455,10 @@ fn extract_foundation_wall_insulation(
 ) -> Result<(Option<String>, f64, f64), HpxmlError> {
     // Find the FoundationWall element matching this boundary's ID.
     let wall_node = details
-        .path(&["Enclosure", "FoundationWalls"])
+        .path(&[&ENCLOSURE, &FOUNDATION_WALLS])
         .and_then(|group| {
-            group.children_named("FoundationWall").find(|n| {
-                n.child("SystemIdentifier")
+            group.children_named(&FOUNDATION_WALL).find(|n| {
+                n.child(&SYSTEM_IDENTIFIER)
                     .and_then(|si| si.attrs.get("id"))
                     .map(|id| id == wall_id)
                     .unwrap_or(false)
@@ -2203,10 +2469,10 @@ fn extract_foundation_wall_insulation(
     };
 
     // Area scaling: depth_below_grade / height.
-    let height = parse_value_with_units(node.child("Height"), ValueKind::Length)?;
+    let height = parse_value_with_units(node.child(&HEIGHT), ValueKind::Length)?;
     let height_for_scale = height.unwrap_or(1.0);
     let depth_below_grade =
-        parse_value_with_units(node.child("DepthBelowGrade"), ValueKind::Length)?
+        parse_value_with_units(node.child(&DEPTH_BELOW_GRADE), ValueKind::Length)?
             .unwrap_or(height_for_scale);
     let area_scale = if let Some(height_m) = height {
         if height_m > 0.0 && (depth_below_grade - height_m).abs() > 0.01 {
@@ -2223,12 +2489,12 @@ fn extract_foundation_wall_insulation(
     // Read raw IP values (no unit conversion) for the LUT insulation details string,
     // since the LUT CSV uses IP R-values ("R10", "Half R5", etc.).
     let mut insulation_layers = Vec::new();
-    if let Some(ins) = node.child("Insulation") {
-        ins.descendants("Layer", &mut insulation_layers);
+    if let Some(ins) = node.child(&INSULATION) {
+        ins.descendants(&LAYER, &mut insulation_layers);
     }
     let r_ip: f64 = insulation_layers
         .iter()
-        .filter_map(|layer| layer.child("NominalRValue").and_then(|n| n.text_as_f64()))
+        .filter_map(|layer| layer.child(&NOMINAL_R_VALUE).and_then(|n| n.text_as_f64()))
         .sum();
 
     let insulation_details = if r_ip > 0.0 {
@@ -2238,12 +2504,12 @@ fn extract_foundation_wall_insulation(
             .iter()
             .map(|layer| {
                 let dist_bottom = parse_value_with_units(
-                    layer.child("DistanceToBottomOfInsulation"),
+                    layer.child(&DISTANCE_TO_BOTTOM_OF_INSULATION),
                     ValueKind::Length,
                 )?
                 .unwrap_or(height_for_scale);
                 let dist_top = parse_value_with_units(
-                    layer.child("DistanceToTopOfInsulation"),
+                    layer.child(&DISTANCE_TO_TOP_OF_INSULATION),
                     ValueKind::Length,
                 )?
                 .unwrap_or(0.0);
@@ -2277,11 +2543,11 @@ fn extract_foundation_wall_insulation(
 /// since the LUT CSV uses IP values.
 fn extract_slab_insulation(node: &XmlNode) -> Result<Option<String>, HpxmlError> {
     let r_perimeter = node
-        .path(&["PerimeterInsulation", "Layer", "NominalRValue"])
+        .path(&[&PERIMETER_INSULATION, &LAYER, &NOMINAL_R_VALUE])
         .and_then(|n| n.text_as_f64())
         .unwrap_or(0.0);
     let r_under = node
-        .path(&["UnderSlabInsulation", "Layer", "NominalRValue"])
+        .path(&[&UNDER_SLAB_INSULATION, &LAYER, &NOMINAL_R_VALUE])
         .and_then(|n| n.text_as_f64())
         .unwrap_or(0.0);
 
@@ -2291,7 +2557,7 @@ fn extract_slab_insulation(node: &XmlNode) -> Result<Option<String>, HpxmlError>
         "Minimal".to_string()
     } else if r_perimeter > 0.0 && r_under <= 0.0 {
         let depth = node
-            .path(&["PerimeterInsulation", "Layer", "InsulationDepth"])
+            .path(&[&PERIMETER_INSULATION, &LAYER, &INSULATION_DEPTH])
             .and_then(|n| n.text_as_f64())
             .unwrap_or(0.0);
         let d = depth.round() as i32;
@@ -2299,7 +2565,11 @@ fn extract_slab_insulation(node: &XmlNode) -> Result<Option<String>, HpxmlError>
         format!("{d}ft R{r} Perimeter")
     } else if r_perimeter <= 0.0 && r_under > 0.0 {
         let full_width = node
-            .path(&["UnderSlabInsulation", "Layer", "InsulationSpansEntireSlab"])
+            .path(&[
+                &UNDER_SLAB_INSULATION,
+                &LAYER,
+                &INSULATION_SPANS_ENTIRE_SLAB,
+            ])
             .map(|n| {
                 xs_boolean(
                     n,
@@ -2315,7 +2585,7 @@ fn extract_slab_insulation(node: &XmlNode) -> Result<Option<String>, HpxmlError>
             format!("R{r} Whole Slab")
         } else {
             let width = node
-                .path(&["UnderSlabInsulation", "Layer", "InsulationWidth"])
+                .path(&[&UNDER_SLAB_INSULATION, &LAYER, &INSULATION_WIDTH])
                 .and_then(|n| n.text_as_f64())
                 .unwrap_or(0.0);
             let w = width.round() as i32;
@@ -2336,17 +2606,18 @@ fn extract_construction_metadata(
     match boundary_type {
         BoundaryType::Wall | BoundaryType::FoundationWall | BoundaryType::RimJoist => {
             let construction_type = node
-                .child("WallType")
+                .child(&WALL_TYPE)
                 .and_then(|wt| wt.children.first())
                 .map(|child| child.name.clone());
             // A foundation wall's outside material is its own Type (solid
             // concrete, concrete block, double brick, wood); HPXML gives
             // walls and rim joists a Siding.
-            let material_element = if matches!(boundary_type, BoundaryType::FoundationWall) {
-                "Type"
-            } else {
-                "Siding"
-            };
+            let material_element: &'static super::elements::HpxmlElement =
+                if matches!(boundary_type, BoundaryType::FoundationWall) {
+                    &TYPE
+                } else {
+                    &SIDING
+                };
             let finish_type = node
                 .child(material_element)
                 .map(|n| n.text.trim().to_string())
@@ -2354,7 +2625,7 @@ fn extract_construction_metadata(
             (construction_type, finish_type)
         }
         BoundaryType::Roof => {
-            let construction_type = node.child("Pitch").map(|p| {
+            let construction_type = node.child(&PITCH).map(|p| {
                 let val = p.text_as_f64().unwrap_or(0.0);
                 if val > 0.0 {
                     "Pitched".to_string()
@@ -2363,7 +2634,7 @@ fn extract_construction_metadata(
                 }
             });
             let finish_type = node
-                .child("RoofType")
+                .child(&ROOF_TYPE)
                 .map(|n| n.text.trim().to_string())
                 .filter(|s| !s.is_empty());
             (construction_type, finish_type)
@@ -2371,14 +2642,14 @@ fn extract_construction_metadata(
         BoundaryType::Floor => {
             // <FloorType> child tag name → construction_type
             let construction_type = node
-                .child("FloorType")
+                .child(&FLOOR_TYPE)
                 .and_then(|ft| ft.children.first())
                 .map(|child| child.name.clone());
             (construction_type, None)
         }
         BoundaryType::Slab => {
             let construction_type = node
-                .child("FoundationType")
+                .child(&FOUNDATION_TYPE)
                 .and_then(|ft| ft.children.first())
                 .map(|child| child.name.clone());
             (construction_type, None)
@@ -2399,17 +2670,17 @@ fn extract_insulation_details(_node: &XmlNode) -> Option<String> {
 fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Result<Vec<MaterialLayer>, HpxmlError> {
     let mut layers = Vec::new();
     let mut layer_nodes = Vec::new();
-    node.descendants("Layer", &mut layer_nodes);
+    node.descendants(&LAYER, &mut layer_nodes);
 
     for layer in layer_nodes {
-        let thickness_m = parse_value_with_units(layer.child("Thickness"), ValueKind::Length)?;
+        let thickness_m = parse_value_with_units(layer.child(&THICKNESS), ValueKind::Length)?;
         let conductivity_w_m_k =
-            parse_value_with_units(layer.child("Conductivity"), ValueKind::Conductivity)?;
-        let density_kg_m3 = parse_value_with_units(layer.child("Density"), ValueKind::Density)?;
+            parse_value_with_units(layer.child(&CONDUCTIVITY), ValueKind::Conductivity)?;
+        let density_kg_m3 = parse_value_with_units(layer.child(&DENSITY), ValueKind::Density)?;
         let specific_heat_j_kg_k =
-            parse_value_with_units(layer.child("SpecificHeat"), ValueKind::SpecificHeat)?;
+            parse_value_with_units(layer.child(&SPECIFIC_HEAT), ValueKind::SpecificHeat)?;
         let nominal_r_m2_k_w =
-            parse_value_with_units(layer.child("NominalRValue"), ValueKind::RValue)?;
+            parse_value_with_units(layer.child(&NOMINAL_R_VALUE), ValueKind::RValue)?;
 
         let conductivity = match (conductivity_w_m_k, thickness_m, nominal_r_m2_k_w) {
             (Some(k), _, _) => Some(k),
@@ -2446,7 +2717,7 @@ fn parse_material_layers(node: &XmlNode, area_m2: f64) -> Result<Vec<MaterialLay
 ///
 /// Returns `(ventilation_ach, ventilation_sla)` based on the `UnitofMeasure` attribute.
 fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
-    let Some(vr) = node.child("VentilationRate") else {
+    let Some(vr) = node.child(&VENTILATION_RATE) else {
         return (None, None);
     };
     let value = vr.text_as_f64();
@@ -2460,8 +2731,8 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
         (Some(v), Some("sla")) => (None, Some(v)),
         _ => {
             // If there's a Value child element, try that path too
-            let value_node = vr.child("Value").and_then(|n| n.text_as_f64());
-            let unit_node = vr.child("UnitofMeasure").map(|n| normalize_ascii(&n.text));
+            let value_node = vr.child(&VALUE).and_then(|n| n.text_as_f64());
+            let unit_node = vr.child(&UNITOF_MEASURE).map(|n| normalize_ascii(&n.text));
             match (value_node, unit_node.as_deref()) {
                 (Some(v), Some("achnatural")) => (Some(v), None),
                 (Some(v), Some("sla")) => (None, Some(v)),
@@ -2484,25 +2755,29 @@ fn parse_ventilation_rate(node: &XmlNode) -> (Option<f64>, Option<f64>) {
 /// `<Basement>` or `<Crawlspace>`), else the OCHRE finished-basement
 /// inference for a basement (hpxml.py:276-280: total floors above the
 /// above-grade floors). A crawlspace with no explicit flag is
-/// unconditioned.
+/// unconditioned. The choice the type element's child declared names
+/// the kind; a child no choice declares reads as the basement form.
 fn foundation_node_is_conditioned(
+    choice: Option<&'static super::elements::HpxmlElement>,
     ft_child: &XmlNode,
     foundation_id: &str,
     total_conditioned_floors: Option<f64>,
     floors_above_grade: f64,
 ) -> Result<bool, HpxmlError> {
-    let path: &'static str = match ft_child.name.as_str() {
-        "Crawlspace" => "Crawlspace/Conditioned",
-        _ => "Basement/Conditioned",
+    let crawlspace = choice.is_some_and(|choice| std::ptr::eq(choice, &CRAWLSPACE));
+    let path: &'static str = if crawlspace {
+        "Crawlspace/Conditioned"
+    } else {
+        "Basement/Conditioned"
     };
     let explicit = ft_child
-        .child("Conditioned")
+        .child(&CONDITIONED)
         .map(|n| xs_boolean(n, path, "Foundation", foundation_id))
         .transpose()?;
     Ok(match explicit {
         Some(flag) => flag,
         None => {
-            ft_child.name == "Basement"
+            choice.is_some_and(|choice| std::ptr::eq(choice, &BASEMENT))
                 && total_conditioned_floors.is_some_and(|total| total > floors_above_grade)
         }
     })
@@ -2536,24 +2811,25 @@ fn build_zone_map(
         },
     );
 
-    if let Some(enclosure) = details.child("Enclosure") {
+    if let Some(enclosure) = details.child(&ENCLOSURE) {
         // Attics
-        if let Some(group) = enclosure.child("Attics") {
-            for node in group.children_named("Attic") {
+        if let Some(group) = enclosure.child(&ATTICS) {
+            for node in group.children_named(&ATTIC) {
                 // <FlatRoof/> means no attic cavity; skip zone creation (OCHRE hpxml.py:575-576).
-                let attic_type_child = node.child("AtticType").and_then(|at| at.children.first());
-                if let Some(child) = attic_type_child
-                    && child.name == "FlatRoof"
-                {
+                let attic_type_child = node.child(&ATTIC_TYPE).and_then(|at| at.children.first());
+                let flat_roof = attic_type_child
+                    .and_then(|child| child.declared_choice(ATTIC_TYPE_CHOICES))
+                    .is_some_and(|choice| std::ptr::eq(choice, &FLAT_ROOF));
+                if flat_roof {
                     continue;
                 }
 
                 let floor_area_m2 =
-                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area)?;
+                    parse_value_with_units(node.child(&FLOOR_AREA), ValueKind::Area)?;
 
                 // Parse vented status from <AtticType><Attic><Vented>
                 let vented = attic_type_child
-                    .and_then(|child| child.child("Vented"))
+                    .and_then(|child| child.child(&VENTED))
                     .map(|v| {
                         xs_boolean(
                             v,
@@ -2587,10 +2863,10 @@ fn build_zone_map(
         }
 
         // Garages
-        if let Some(group) = enclosure.child("Garages") {
-            for node in group.children_named("Garage") {
+        if let Some(group) = enclosure.child(&GARAGES) {
+            for node in group.children_named(&GARAGE) {
                 let floor_area_m2 =
-                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area)?;
+                    parse_value_with_units(node.child(&FLOOR_AREA), ValueKind::Area)?;
                 zones.entry("garage".to_string()).or_insert(Zone {
                     zone_type: ZoneType::Garage,
                     floor_area_m2,
@@ -2607,27 +2883,30 @@ fn build_zone_map(
         }
 
         // Foundations
-        if let Some(group) = enclosure.child("Foundations") {
-            for node in group.children_named("Foundation") {
+        if let Some(group) = enclosure.child(&FOUNDATIONS) {
+            for node in group.children_named(&FOUNDATION) {
                 let floor_area_m2 =
-                    parse_value_with_units(node.child("FloorArea"), ValueKind::Area)?;
+                    parse_value_with_units(node.child(&FLOOR_AREA), ValueKind::Area)?;
 
                 // Determine vented status from <FoundationType>.
                 // OCHRE hpxml.py:689-691: crawlspaces default to vented: true,
                 // basements default to vented: false.
                 let ft_child = node
-                    .child("FoundationType")
+                    .child(&FOUNDATION_TYPE)
                     .and_then(|ft| ft.children.first());
-                let foundation_type = ft_child.map(|child| child.name.as_str());
+                let ft_choice =
+                    ft_child.and_then(|child| child.declared_choice(FOUNDATION_TYPE_CHOICES));
+                let foundation_type = ft_choice.map(|choice| choice.name);
 
                 // A conditioned foundation is part of the conditioned space
                 // (OS-HPXML geometry.rb `create_or_get_space`, 1704-1716; the
                 // surfaces name it conditioned through `parse_zone_label`) and
                 // has no Foundation zone of its own.
-                if let Some(ft_child) = ft_child {
+                if let Some(child) = ft_child {
                     let foundation_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
                     if foundation_node_is_conditioned(
-                        ft_child,
+                        ft_choice,
+                        child,
                         &foundation_id,
                         total_conditioned_floors,
                         floors_above_grade,
@@ -2638,7 +2917,7 @@ fn build_zone_map(
                 }
 
                 let vented_explicit = ft_child
-                    .and_then(|child| child.child("Vented"))
+                    .and_then(|child| child.child(&VENTED))
                     .map(|v| {
                         xs_boolean(
                             v,
@@ -2648,9 +2927,13 @@ fn build_zone_map(
                         )
                     })
                     .transpose()?;
-                let vented = match foundation_type {
-                    Some("Crawlspace") => vented_explicit.unwrap_or(true),
-                    Some("Basement") => vented_explicit.unwrap_or(false),
+                let vented = match ft_choice {
+                    Some(choice) if std::ptr::eq(choice, &CRAWLSPACE) => {
+                        vented_explicit.unwrap_or(true)
+                    }
+                    Some(choice) if std::ptr::eq(choice, &BASEMENT) => {
+                        vented_explicit.unwrap_or(false)
+                    }
                     _ => vented_explicit.unwrap_or(false),
                 };
                 if vented_explicit.is_none() {
@@ -2787,26 +3070,26 @@ fn parse_duct_systems(
 ) -> Result<(), HpxmlError> {
     let mut ducts = Vec::new();
     let mut air_dist_nodes = Vec::new();
-    details.descendants("AirDistribution", &mut air_dist_nodes);
+    details.descendants(&AIR_DISTRIBUTION, &mut air_dist_nodes);
     let mut leakage_by_type: std::collections::HashMap<String, f64> =
         std::collections::HashMap::new();
     let mut leakage_cfm25_by_type: std::collections::HashMap<String, f64> =
         std::collections::HashMap::new();
     for air_dist in &air_dist_nodes {
         let mut measurements = Vec::new();
-        air_dist.descendants("DuctLeakageMeasurement", &mut measurements);
+        air_dist.descendants(&DUCT_LEAKAGE_MEASUREMENT, &mut measurements);
         for meas in &measurements {
             let dtype = meas
-                .first_descendant("DuctType")
+                .first_descendant(&DUCT_TYPE)
                 .map(|n| normalize_ascii(&n.text))
                 .unwrap_or_default();
-            if let Some(leak_node) = meas.first_descendant("DuctLeakage") {
+            if let Some(leak_node) = meas.first_descendant(&DUCT_LEAKAGE) {
                 let units = leak_node
-                    .first_descendant("Units")
+                    .first_descendant(&UNITS)
                     .map(|n| normalize_ascii(&n.text))
                     .unwrap_or_default();
                 if let Some(value) = leak_node
-                    .first_descendant("Value")
+                    .first_descendant(&VALUE)
                     .and_then(XmlNode::text_as_f64)
                 {
                     match units.as_str() {
@@ -2859,40 +3142,40 @@ fn parse_duct_systems(
             }
         }
         let mut child_ducts = Vec::new();
-        air_dist.descendants("Ducts", &mut child_ducts);
+        air_dist.descendants(&DUCTS, &mut child_ducts);
         ducts.extend(child_ducts);
     }
 
     for duct_node in ducts {
         let id = element_id(duct_node).unwrap_or_else(|| "unknown".to_string());
         let duct_type_text = duct_node
-            .first_descendant("DuctType")
+            .first_descendant(&DUCT_TYPE)
             .map(|n| normalize_ascii(&n.text))
             .unwrap_or_default();
         let leakage_fraction = leakage_by_type.get(&duct_type_text).copied();
         let leakage_cfm25 = leakage_cfm25_by_type.get(&duct_type_text).copied();
 
         let insulation_primary = parse_value_with_units(
-            duct_node.first_descendant("DuctInsulationRValue"),
+            duct_node.first_descendant(&DUCT_INSULATION_R_VALUE),
             ValueKind::RValue,
         )?;
         let insulation_fallback = parse_value_with_units(
-            duct_node.first_descendant("InsulationRValue"),
+            duct_node.first_descendant(&INSULATION_R_VALUE),
             ValueKind::RValue,
         )?;
         let insulation_r_value_m2_k_w = insulation_primary.or(insulation_fallback);
 
         let surface_area_m2 = parse_value_with_units(
-            duct_node.first_descendant("DuctSurfaceArea"),
+            duct_node.first_descendant(&DUCT_SURFACE_AREA),
             ValueKind::Area,
         )?;
 
         let location_text = duct_node
-            .first_descendant("DuctLocation")
+            .first_descendant(&DUCT_LOCATION)
             .map(|n| n.text.trim().to_string())
             .or_else(|| {
                 duct_node
-                    .first_descendant("Location")
+                    .first_descendant(&LOCATION)
                     .map(|n| n.text.trim().to_string())
             })
             .unwrap_or_else(|| "outside".to_string());
@@ -2900,7 +3183,7 @@ fn parse_duct_systems(
         let location = parse_duct_location(&location_text);
 
         let duct_type = duct_node
-            .first_descendant("DuctType")
+            .first_descendant(&DUCT_TYPE)
             .map(|n| match normalize_ascii(&n.text).as_str() {
                 "supply" => DuctType::Supply,
                 "return" => DuctType::Return,
@@ -2947,7 +3230,7 @@ fn parse_duct_systems(
 
 fn parse_nominal_r_layers(node: &XmlNode) -> Result<Vec<f64>, HpxmlError> {
     let mut layer_nodes = Vec::new();
-    node.descendants("NominalRValue", &mut layer_nodes);
+    node.descendants(&NOMINAL_R_VALUE, &mut layer_nodes);
     let mut values = Vec::new();
     for layer in &layer_nodes {
         if let Some(v) = parse_value_with_units(Some(layer), ValueKind::RValue)? {
@@ -2966,28 +3249,30 @@ fn temperature_capacitance_multiplier(
     root: &XmlNode,
     parse_warnings: &mut Vec<Warning>,
 ) -> Result<f64, HpxmlError> {
-    const ELEMENT: &str = "TemperatureCapacitanceMultiplier";
-    let Some(control) = root.path(&["SoftwareInfo", "extension", "SimulationControl"]) else {
+    const ELEMENT: &super::elements::HpxmlElement = &TEMPERATURE_CAPACITANCE_MULTIPLIER;
+    let Some(control) = root.path(&[&SOFTWARE_INFO, &EXTENSION, &SIMULATION_CONTROL]) else {
         return Ok(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT);
     };
     if let Some(legacy) = control.child(ELEMENT) {
         parse_warnings.push(Warning::new(
             "hpxml",
             format!(
-                "SimulationControl/{ELEMENT} ({}) is ignored, as OS-HPXML v1.12 reads it only \
+                "SimulationControl/{} ({}) is ignored, as OS-HPXML v1.12 reads it only \
                  under AdvancedResearchFeatures",
+                ELEMENT.name,
                 legacy.text.trim()
             ),
         ));
     }
-    let Some(node) = control.path(&["AdvancedResearchFeatures", ELEMENT]) else {
+    let Some(node) = control.path(&[&ADVANCED_RESEARCH_FEATURES, ELEMENT]) else {
         return Ok(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT);
     };
     match node.text_as_f64() {
         Some(value) if value.is_finite() && value > 0.0 => Ok(value),
         _ => Err(HpxmlError::Parse(
             format!(
-                "AdvancedResearchFeatures/{ELEMENT} must be a positive number, got '{}'",
+                "AdvancedResearchFeatures/{} must be a positive number, got '{}'",
+                ELEMENT.name,
                 node.text.trim()
             )
             .into(),
@@ -2997,10 +3282,10 @@ fn temperature_capacitance_multiplier(
 
 fn find_descendant_f64(
     root: &XmlNode,
-    name: &str,
+    element: &'static super::elements::HpxmlElement,
     kind: ValueKind,
 ) -> Result<Option<f64>, HpxmlError> {
-    match root.first_descendant(name) {
+    match root.first_descendant(element) {
         Some(node) => parse_value_with_units(Some(node), kind),
         None => Ok(None),
     }
@@ -3259,21 +3544,21 @@ fn convert_temperature_to_c(value: f64, units: Option<&str>) -> Result<f64, Hpxm
 /// the HPXML input is malformed and the user must correct it.
 fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<(Option<f64>, Option<f64>), HpxmlError> {
     // HPXML 3.x: BuildingAirLeakage wrapper with UnitofMeasure child element.
-    let measurement = match details.first_descendant("AirInfiltrationMeasurement") {
+    let measurement = match details.first_descendant(&AIR_INFILTRATION_MEASUREMENT) {
         Some(m) => m,
         None => return Ok((None, None)),
     };
-    if let Some(bal) = measurement.child("BuildingAirLeakage") {
+    if let Some(bal) = measurement.child(&BUILDING_AIR_LEAKAGE) {
         let unit = bal
-            .child("UnitofMeasure")
+            .child(&UNITOF_MEASURE)
             .map(|n| normalize_ascii(n.text.trim()));
         if let Some(unit_str) = unit.as_deref() {
             if unit_str == "cfm" {
-                let value = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+                let value = bal.child(&AIR_LEAKAGE).and_then(XmlNode::text_as_f64);
                 return Ok((value, None));
             }
             if unit_str == "cfmnatural" {
-                let raw = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+                let raw = bal.child(&AIR_LEAKAGE).and_then(XmlNode::text_as_f64);
                 let converted = raw.map(|v| ach_nat_to_ach50(v, NATURAL_TO_50PA_EXPONENT));
                 return Ok((converted, raw));
             }
@@ -3293,7 +3578,7 @@ fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
         return Ok((None, None));
     }
     // HPXML 4.x: <AirLeakage units="CFM50"> directly under AirInfiltrationMeasurement.
-    if let Some(al) = measurement.child("AirLeakage") {
+    if let Some(al) = measurement.child(&AIR_LEAKAGE) {
         let unit_attr = al
             .attrs
             .get("units")
@@ -3344,21 +3629,21 @@ fn parse_air_leakage_cfm50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
 /// the home to be modelled with effectively zero infiltration.
 fn parse_air_leakage_ach50(details: &XmlNode) -> Result<(Option<f64>, Option<f64>), HpxmlError> {
     // HPXML 3.x: BuildingAirLeakage wrapper with UnitofMeasure child element.
-    let measurement = match details.first_descendant("AirInfiltrationMeasurement") {
+    let measurement = match details.first_descendant(&AIR_INFILTRATION_MEASUREMENT) {
         Some(m) => m,
         None => return Ok((None, None)),
     };
-    if let Some(bal) = measurement.child("BuildingAirLeakage") {
+    if let Some(bal) = measurement.child(&BUILDING_AIR_LEAKAGE) {
         let unit = bal
-            .child("UnitofMeasure")
+            .child(&UNITOF_MEASURE)
             .map(|n| normalize_ascii(n.text.trim()));
         if let Some(unit_str) = unit.as_deref() {
             if unit_str == "ach" {
-                let value = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+                let value = bal.child(&AIR_LEAKAGE).and_then(XmlNode::text_as_f64);
                 return Ok((value, None));
             }
             if unit_str == "achnatural" {
-                let raw = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+                let raw = bal.child(&AIR_LEAKAGE).and_then(XmlNode::text_as_f64);
                 let converted = raw.map(|v| ach_nat_to_ach50(v, NATURAL_TO_50PA_EXPONENT));
                 return Ok((converted, raw));
             }
@@ -3375,12 +3660,12 @@ fn parse_air_leakage_ach50(details: &XmlNode) -> Result<(Option<f64>, Option<f64
             ));
         }
         // Absent UnitofMeasure — HPXML convention: bare BuildingAirLeakage value is ACH.
-        let value = bal.child("AirLeakage").and_then(XmlNode::text_as_f64);
+        let value = bal.child(&AIR_LEAKAGE).and_then(XmlNode::text_as_f64);
         return Ok((value, None));
     }
     // HPXML 4.x: <AirLeakage units="ACH50"> directly under AirInfiltrationMeasurement,
     // or bare <AirLeakage> with no units attribute (HPXML convention: ACH50 when HousePressure=50).
-    if let Some(al) = measurement.child("AirLeakage") {
+    if let Some(al) = measurement.child(&AIR_LEAKAGE) {
         let unit_attr = al
             .attrs
             .get("units")
@@ -3739,6 +4024,7 @@ mod tests {
         BoundaryType, DuctType, HpxmlError, ZoneType, assembly_framing_factor, parse_building,
         parse_xml_document,
     };
+    use crate::hpxml::elements::TEXT;
     use crate::hpxml::xml_helpers::assert_reads_xs_boolean;
 
     /// Attribute values and text normalize per XML 1.0, as the parser's
@@ -3753,7 +4039,7 @@ mod tests {
         let node = parse_xml_document(xml).expect("the document must parse");
         assert_eq!(node.attrs["a"], "x y z\tw&v");
         let text = node
-            .child("text")
+            .child(&TEXT)
             .expect("the text element must be in the tree");
         assert_eq!(text.text, "a\nb");
     }
@@ -3793,6 +4079,48 @@ mod tests {
         assert!(
             shown.contains("<HPXML>") && shown.contains("`schemaVersion`"),
             "the error must name the element and the attribute: {shown}"
+        );
+    }
+
+    /// A subsurface (window) that states no interior adjacency derives it
+    /// from its attached wall (the OS-HPXML subsurface rule), so a wall it
+    /// names but the boundary list does not hold fails the parse naming
+    /// both ids.
+    #[test]
+    fn window_interior_zone_derives_from_its_attached_wall() {
+        let base = include_str!("../../../../tests/fixtures/hpxml/ochre_samples/base.xml");
+
+        // The attached wall the list holds: the window's boundary carries the
+        // wall's interior zone without stating one itself.
+        let parsed = crate::hpxml::parse_hpxml_str(base).expect("the base fixture parses");
+        let wall = parsed
+            .boundaries
+            .iter()
+            .find(|bd| bd.id == "Wall1")
+            .expect("the base fixture declares Wall1");
+        let window = parsed
+            .boundaries
+            .iter()
+            .find(|bd| bd.id == "Window1")
+            .expect("the base fixture declares Window1");
+        assert_eq!(window.interior_zone, wall.interior_zone);
+        assert!(
+            window.interior_zone.is_some(),
+            "the window inherits the wall's stated interior zone"
+        );
+
+        // The attached wall the list does not hold: the derivation cannot
+        // run, and no zone is substituted for it.
+        let dangling = base.replace(
+            "<AttachedToWall idref='Wall1'/>\n          </Window>",
+            "<AttachedToWall idref='WallN'/>\n          </Window>",
+        );
+        let err = crate::hpxml::parse_hpxml_str(&dangling)
+            .expect_err("a dangling AttachedToWall must fail the parse");
+        let shown = format!("{err}");
+        assert!(
+            shown.contains("Window1") && shown.contains("WallN"),
+            "the error names the window and the missing wall: {shown}"
         );
     }
 
@@ -4530,6 +4858,15 @@ mod tests {
       </BuildingSummary>
       <Enclosure>
         <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
         <Skylights>
           {skylight_xml}
         </Skylights>
@@ -5768,6 +6105,7 @@ mod tests {
         let xml = xml_with_skylight(
             r#"<Skylight>
                 <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
                 <Area units="m2">5.0</Area>
                 <Azimuth>0</Azimuth>
                 <UFactor>0.35</UFactor>
@@ -5798,6 +6136,7 @@ mod tests {
         let xml = xml_with_skylight(
             r#"<Skylight>
                 <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
                 <UFactor>0.35</UFactor>
                 <SHGC>0.30</SHGC>
             </Skylight>"#,
@@ -5813,6 +6152,7 @@ mod tests {
         let xml = xml_with_skylight(
             r#"<Skylight>
                 <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
                 <Area>0</Area>
                 <UFactor>0.35</UFactor>
                 <SHGC>0.30</SHGC>
@@ -5829,6 +6169,7 @@ mod tests {
         let xml = xml_with_skylight(
             r#"<Skylight>
                 <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
                 <Area units="m2">5.0</Area>
                 <UFactor>0.35</UFactor>
                 <SHGC>0.30</SHGC>
@@ -5846,79 +6187,12 @@ mod tests {
     }
 
     #[test]
-    fn skylight_exterior_zone_defaults_to_outdoor() {
-        let xml = xml_with_skylight(
-            r#"<Skylight>
-                <SystemIdentifier id="SK1"/>
-                <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
-                <Area units="m2">5.0</Area>
-                <UFactor>0.55</UFactor>
-                <SHGC>0.35</SHGC>
-            </Skylight>"#,
-        );
-        let building = parse_building(&xml).expect("parse should succeed");
-        let boundary = building
-            .boundaries
-            .iter()
-            .find(|b| b.boundary_type == BoundaryType::Skylight)
-            .expect("skylight boundary expected");
-        assert_eq!(boundary.interior_zone, Some(ZoneType::Conditioned));
-        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
-    }
-
-    #[test]
-    fn skylight_interior_adjacent_to_attic_parsed() {
-        let xml = xml_with_skylight(
-            r#"<Skylight>
-                <SystemIdentifier id="SK1"/>
-                <InteriorAdjacentTo>attic vented</InteriorAdjacentTo>
-                <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
-                <Area units="m2">3.0</Area>
-                <UFactor>0.55</UFactor>
-                <SHGC>0.35</SHGC>
-            </Skylight>"#,
-        );
-        let building = parse_building(&xml).expect("parse should succeed");
-        let boundary = building
-            .boundaries
-            .iter()
-            .find(|b| b.boundary_type == BoundaryType::Skylight)
-            .expect("skylight boundary expected");
-        assert_eq!(boundary.interior_zone, Some(ZoneType::Attic));
-        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
-    }
-
-    #[test]
-    fn multiple_skylights_parsed() {
-        let xml = xml_with_skylight(
-            r#"<Skylight>
-                <SystemIdentifier id="SK1"/>
-                <Area units="m2">2.0</Area>
-                <UFactor>0.35</UFactor>
-                <SHGC>0.30</SHGC>
-            </Skylight>
-            <Skylight>
-                <SystemIdentifier id="SK2"/>
-                <Area units="m2">3.0</Area>
-                <UFactor>0.55</UFactor>
-                <SHGC>0.35</SHGC>
-            </Skylight>"#,
-        );
-        let building = parse_building(&xml).expect("parse should succeed");
-        assert_eq!(building.skylights.len(), 2);
-        assert_eq!(
-            building
-                .boundaries
-                .iter()
-                .filter(|b| b.boundary_type == BoundaryType::Skylight)
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn skylight_attached_to_roof_subtracts_area() {
-        // Skylight with AttachedToWall pointing to a Roof boundary.
+    fn skylight_exterior_is_outdoor_without_attached_roof_zones() {
+        // Schema-conformant skylight (HPXML v4: WindowInfo group plus
+        // AttachedToRoof/AttachedToFloor; no adjacency children): the
+        // exterior is outdoors (geometry.rb apply_skylights sets the parent
+        // surface's outside boundary condition outdoors, :689) and the
+        // interior is the conditioned space via its attached roof.
         let xml = r#"
 <HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
   <Building>
@@ -5948,7 +6222,277 @@ mod tests {
             <Area units="m2">5.0</Area>
             <UFactor>0.55</UFactor>
             <SHGC>0.35</SHGC>
-            <AttachedToWall idref="Roof1"/>
+            <AttachedToRoof idref="Roof1"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(xml).expect("parse should succeed");
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(boundary.interior_zone, Some(ZoneType::Conditioned));
+        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
+    }
+
+    #[test]
+    fn skylight_with_shaft_attached_to_floor_is_conditioned() {
+        // A skylight with a shaft through an attic states both
+        // AttachedToRoof (the attic roof it penetrates) and AttachedToFloor
+        // (the conditioned-space ceiling). The floor decides the skylight's
+        // conditioned-ness first (hpxml.rb Skylight#is_conditioned reads the
+        // floor when present, then the roof), so the skylight lives in the
+        // conditioned space even though its roof is the attic's.
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>attic - unvented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <FrameFloors>
+          <FrameFloor>
+            <SystemIdentifier id="AtticFloor1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>attic - unvented</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Insulation>
+              <Layer><NominalRValue>30</NominalRValue></Layer>
+            </Insulation>
+          </FrameFloor>
+        </FrameFloors>
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToRoof idref="Roof1"/>
+            <AttachedToFloor idref="AtticFloor1"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let building = parse_building(xml).expect("parse should succeed");
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(
+            boundary.interior_zone,
+            Some(ZoneType::Conditioned),
+            "the shaft's floor connects the skylight to the conditioned space"
+        );
+        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
+    }
+
+    #[test]
+    fn skylight_on_unconditioned_roof_fails_naming_the_rule() {
+        // The OS-HPXML skylight rule: a skylight whose parent surface's
+        // interior adjacency is not conditioned fails ("Skylight '...'
+        // not connected to conditioned space; if it's a skylight with a
+        // shaft, use AttachedToFloor to connect it to conditioned space.",
+        // geometry.rb apply_skylights :639-641).
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>attic - unvented</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToRoof idref="Roof1"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let err = parse_building(xml)
+            .expect_err("a skylight on an unconditioned roof must fail the parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SK1") && msg.contains("not connected to conditioned space"),
+            "the error names the skylight and the rule: {msg}"
+        );
+    }
+
+    #[test]
+    fn skylight_without_attached_roof_fails_naming_the_schematron_rule() {
+        // The OS-HPXML schematron requires AttachedToRoof on every skylight
+        // ("Expected AttachedToRoof", EPvalidator.sch [Skylight]); a
+        // skylight naming no parent surface has no zone to derive and the
+        // old zone-0 acceptance is gone.
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <Area units="m2">5.0</Area>
+                <UFactor>0.55</UFactor>
+                <SHGC>0.35</SHGC>
+            </Skylight>"#,
+        );
+        let err = parse_building(&xml)
+            .expect_err("a skylight with no AttachedToRoof must fail the parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SK1") && msg.contains("AttachedToRoof"),
+            "the error names the skylight and the required element: {msg}"
+        );
+    }
+
+    #[test]
+    fn skylight_dangling_attached_roof_errors_naming_both_ids() {
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToRoof idref="RoofN"/>
+          </Skylight>
+        </Skylights>
+      </Enclosure>
+    </BuildingDetails>
+  </Building>
+</HPXML>
+"#;
+        let err = parse_building(xml).expect_err("a dangling AttachedToRoof must fail the parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SK1") && msg.contains("RoofN"),
+            "the error names the skylight and the dangling idref: {msg}"
+        );
+    }
+
+    #[test]
+    fn multiple_skylights_parsed() {
+        let xml = xml_with_skylight(
+            r#"<Skylight>
+                <SystemIdentifier id="SK1"/>
+                <AttachedToRoof idref="Roof1"/>
+                <Area units="m2">2.0</Area>
+                <UFactor>0.35</UFactor>
+                <SHGC>0.30</SHGC>
+            </Skylight>
+            <Skylight>
+                <SystemIdentifier id="SK2"/>
+                <AttachedToRoof idref="Roof1"/>
+                <Area units="m2">3.0</Area>
+                <UFactor>0.55</UFactor>
+                <SHGC>0.35</SHGC>
+            </Skylight>"#,
+        );
+        let building = parse_building(&xml).expect("parse should succeed");
+        assert_eq!(building.skylights.len(), 2);
+        assert_eq!(
+            building
+                .boundaries
+                .iter()
+                .filter(|b| b.boundary_type == BoundaryType::Skylight)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn skylight_attached_to_roof_subtracts_area_and_seats_conditioned() {
+        // Schema-conformant skylight: AttachedToRoof (HPXML v4 XSD;
+        // OS-HPXML hpxml.rb Skylight reads attached_to_roof_idref). The
+        // skylight's area comes off its parent roof, and its interior zone
+        // is the conditioned space its cathedral roof names (the OS-HPXML
+        // skylight rule: geometry.rb apply_skylights seats the parent
+        // surface unconditionally in the conditioned space, :687-688).
+        let xml = r#"
+<HPXML schemaVersion="4.0" xmlns="http://hpxmlonline.com/2019/10">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure>
+        <Walls />
+        <Roofs>
+          <Roof>
+            <SystemIdentifier id="Roof1"/>
+            <InteriorAdjacentTo>conditioned space</InteriorAdjacentTo>
+            <ExteriorAdjacentTo>outside</ExteriorAdjacentTo>
+            <Area units="m2">100</Area>
+            <Pitch>6</Pitch>
+          </Roof>
+        </Roofs>
+        <Skylights>
+          <Skylight>
+            <SystemIdentifier id="SK1"/>
+            <Area units="m2">5.0</Area>
+            <UFactor>0.55</UFactor>
+            <SHGC>0.35</SHGC>
+            <AttachedToRoof idref="Roof1"/>
           </Skylight>
         </Skylights>
       </Enclosure>
@@ -5967,6 +6511,17 @@ mod tests {
             "roof area should be reduced by skylight area: expected 95, got {}",
             roof.area_m2
         );
+        let boundary = building
+            .boundaries
+            .iter()
+            .find(|b| b.boundary_type == BoundaryType::Skylight)
+            .expect("skylight boundary expected");
+        assert_eq!(
+            boundary.interior_zone,
+            Some(ZoneType::Conditioned),
+            "the skylight seats in the conditioned space its roof names"
+        );
+        assert_eq!(boundary.exterior_zone, Some(ZoneType::Outdoor));
     }
 
     #[test]

@@ -139,7 +139,79 @@ pub struct SiteLocationOverride {
     pub utc_offset_h: Option<f64>,
 }
 
+/// The override's fields as the input schema publishes them.
+impl hares_types::DescribeFields for SiteLocationOverride {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        use hares_types::{FieldMeta, describe};
+        describe(
+            &Self::sample(),
+            &[
+                (
+                    "latitude_deg",
+                    FieldMeta {
+                        bounds: Some(crate::input_schema::Bounds {
+                            min: Some(-90.0),
+                            max: Some(90.0),
+                            ..Default::default()
+                        }),
+                        description: Some("the site's latitude, degrees"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "longitude_deg",
+                    FieldMeta {
+                        bounds: Some(crate::input_schema::Bounds {
+                            min: Some(-180.0),
+                            max: Some(180.0),
+                            ..Default::default()
+                        }),
+                        description: Some("the site's longitude, degrees"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "elevation_m",
+                    FieldMeta {
+                        bounds: Some(crate::input_schema::Bounds {
+                            min: Some(-500.0),
+                            max: Some(9000.0),
+                            ..Default::default()
+                        }),
+                        description: Some("the site's elevation above sea level, metres"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "utc_offset_h",
+                    FieldMeta {
+                        bounds: Some(crate::input_schema::Bounds {
+                            min: Some(-14.0),
+                            max: Some(14.0),
+                            ..Default::default()
+                        }),
+                        description: Some("the site's standard-time UTC offset, hours"),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        )
+    }
+}
+
 impl SiteLocationOverride {
+    /// A sample instance every field set: the `DescribeFields` derive's
+    /// serialisation input (an `Option`'s key never skips).
+    #[must_use]
+    pub fn sample() -> Self {
+        Self {
+            latitude_deg: Some(39.74),
+            longitude_deg: Some(-104.99),
+            elevation_m: Some(1609.0),
+            utc_offset_h: Some(-7.0),
+        }
+    }
+
     /// `true` when no override field is set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -147,6 +219,33 @@ impl SiteLocationOverride {
             && self.longitude_deg.is_none()
             && self.elevation_m.is_none()
             && self.utc_offset_h.is_none()
+    }
+
+    /// The one site-location check every surface runs: `validate()` on the
+    /// simulation config, and the Python `SiteLocationOverride`
+    /// constructor's `ValueError`. Only set fields are checked.
+    ///
+    /// # Errors
+    ///
+    /// A set field that is not finite, or outside its physical range:
+    /// latitude [-90, 90] degrees, longitude [-180, 180] degrees,
+    /// elevation [-500, 9000] m, UTC offset [-14, 14] hours.
+    pub fn validate(&self) -> Result<(), crate::config::ConfigError> {
+        for (value, (low, high), name, unit) in [
+            (self.latitude_deg, (-90.0, 90.0), "latitude", "degrees"),
+            (self.longitude_deg, (-180.0, 180.0), "longitude", "degrees"),
+            (self.elevation_m, (-500.0, 9000.0), "elevation_m", "m"),
+            (self.utc_offset_h, (-14.0, 14.0), "utc_offset_h", "hours"),
+        ] {
+            if let Some(v) = value
+                && (!v.is_finite() || !(low..=high).contains(&v))
+            {
+                return Err(crate::config::ConfigError::Validation(format!(
+                    "{name} must be finite and within [{low}, {high}] {unit}, got {v}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -166,6 +265,32 @@ pub struct SiteLocation {
     pub longitude_source: FieldSource,
     pub elevation_source: FieldSource,
     pub utc_offset_source: FieldSource,
+}
+
+impl SiteLocation {
+    /// The site the building's own `Site` resolves to against no weather
+    /// location and no override: a direct resolver's form (the standalone
+    /// equipment resolves'), whose values are the building's own fields
+    /// with the resolution's fallbacks. The shared parse's building is
+    /// immutable, so a resolver that reads the resolved site takes it as
+    /// a parameter; this builds the same value from the building alone.
+    #[must_use]
+    pub fn from_site(site: &crate::hpxml::building::Site) -> SiteLocation {
+        let weather = crate::WeatherMeta {
+            location: String::new(),
+            latitude: 0.0,
+            longitude: 0.0,
+            timezone_offset_h: 0.0,
+            elevation_m: 0.0,
+            wf_allows_leap_years: true,
+            source_step_secs: 3600,
+            record_label: crate::weather::RecordLabel::IntervalEnd,
+            data_period: crate::weather::DataPeriod::complete_year(),
+            has_embedded_location: false,
+            station_wmo: None,
+        };
+        resolve_site_location(site, &weather, &SiteLocationOverride::default())
+    }
 }
 
 /// The three explicit value sources for a field, highest precedence first.
@@ -408,7 +533,8 @@ mod tests {
             elevation_m: elev,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            midpoint_offset_secs: 0,
+            record_label: crate::weather::RecordLabel::IntervalStart,
+            data_period: crate::weather::DataPeriod::complete_year(),
             has_embedded_location: true,
             station_wmo: None,
         }

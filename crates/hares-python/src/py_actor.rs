@@ -31,18 +31,22 @@
 //!         return []
 //! ```
 
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
-    ControlSignal, DutyCycleComponent, EnvironmentState, EvConnectionState, OperatingMode,
-    ProtocolId,
+    AcrossHomes, Aggregation, ControlSignal, DutyCycleComponent, EnumLabels, EnvironmentState,
+    EvConnectionState, OperatingMode, ProtocolId, Sampling, Telemetry, TelemetryField, Unit,
+    VariableKind,
 };
 
 use crate::py_enums::{
     PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
 };
-use crate::utils::validate_thermal_setpoint_band;
+use crate::utils::{validate_finite, validate_thermal_setpoint_band};
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -50,6 +54,14 @@ use pyo3::types::PyDict;
 #[pyclass(name = "Actor", subclass)]
 pub struct PyActor {
     cached_name: Arc<str>,
+    /// The output variable names the registered wrapper installed from the
+    /// actor's declarations: the exact set `set_output` accepts. Empty until
+    /// registration, so an unregistered actor's every publication is
+    /// undeclared.
+    declared_keys: Arc<HashSet<String>>,
+    /// The publications `set_output` collected during the current `decide()`,
+    /// drained into the wrapper's sealed telemetry when the call returns.
+    published: Vec<(String, f64)>,
 }
 
 #[pymethods]
@@ -58,6 +70,8 @@ impl PyActor {
     fn new() -> Self {
         Self {
             cached_name: Arc::from("PyActor"),
+            declared_keys: Arc::new(HashSet::new()),
+            published: Vec::new(),
         }
     }
 
@@ -70,12 +84,306 @@ impl PyActor {
     fn name(&self) -> &str {
         &self.cached_name
     }
+
+    /// The actor's declared output variables. A Python actor overrides this
+    /// to return `hares.OutputVariable` objects; the default declares
+    /// nothing. Read once by `add_actor`, which builds the wrapper's sealed
+    /// telemetry from them.
+    fn output_variables(&self) -> Vec<Py<PyOutputVariable>> {
+        Vec::new()
+    }
+
+    /// Publishes one output variable's value for this step. An undeclared
+    /// name raises `KeyError` at once, and the attempted publication still
+    /// latches the sealed telemetry: an undeclared published key fails the
+    /// step naming the actor and the key even when this error is caught. A
+    /// non-finite value latches like any actor's telemetry write.
+    #[pyo3(signature = (name, value))]
+    fn set_output(&mut self, name: String, value: f64) -> PyResult<()> {
+        self.published.push((name.clone(), value));
+        if !self.declared_keys.contains(&name) {
+            return Err(PyErr::new::<PyKeyError, _>(format!(
+                "'{name}' is not a declared output variable of actor '{}'; declare it in \
+                 output_variables()",
+                self.cached_name
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// One declared output variable of a Python actor: the typed declaration
+/// (`name`, unit, kind, aggregation, sampling, nullability, labels,
+/// description) the output catalogue and the wrapper's sealed telemetry are
+/// built from.
+#[pyclass(name = "OutputVariable")]
+pub struct PyOutputVariable {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    unit: String,
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    aggregation: Option<String>,
+    #[pyo3(get)]
+    across_homes: Option<String>,
+    #[pyo3(get)]
+    sampling: String,
+    #[pyo3(get)]
+    nullable: bool,
+    #[pyo3(get)]
+    labels: Option<Vec<String>>,
+    #[pyo3(get)]
+    description: String,
+    parsed_unit: Unit,
+    parsed_kind: VariableKind,
+    parsed_aggregation: Aggregation,
+    parsed_sampling: Sampling,
+}
+
+/// The over-time aggregation each non-quantity kind takes (the aggregation
+/// rule the decision log gives the kind); a quantity declares its own rule.
+fn kind_default_aggregation(kind: &str) -> Option<Aggregation> {
+    match kind {
+        "energy" => Some(Aggregation::Sum),
+        "enum" => Some(Aggregation::Mode),
+        "state" | "power" | "temperature" | "ratio" => Some(Aggregation::Mean),
+        _ => None,
+    }
+}
+
+/// The aggregations each kind allows: one per non-quantity kind, and the
+/// quantity's three rules (`"sum"`, `"mean"`, `"last"`).
+fn kind_allowed_aggregations(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "energy" => &["sum"],
+        "enum" => &["mode"],
+        "state" | "power" | "temperature" | "ratio" => &["mean"],
+        "quantity" => &["sum", "mean", "last"],
+        _ => &[],
+    }
+}
+
+fn parse_aggregation(spec: &str) -> Option<Aggregation> {
+    match spec {
+        "sum" => Some(Aggregation::Sum),
+        "mean" => Some(Aggregation::Mean),
+        "mode" => Some(Aggregation::Mode),
+        "last" => Some(Aggregation::Last),
+        _ => None,
+    }
+}
+
+const KIND_CHOICES: &str = "'energy', 'power', 'temperature', 'ratio', 'state', 'enum', 'quantity'";
+
+#[pymethods]
+impl PyOutputVariable {
+    #[new]
+    #[pyo3(signature = (
+        name,
+        unit,
+        kind,
+        aggregation=None,
+        across_homes=None,
+        sampling=None,
+        nullable=false,
+        labels=None,
+        description=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        name: String,
+        unit: String,
+        kind: String,
+        aggregation: Option<String>,
+        across_homes: Option<String>,
+        sampling: Option<String>,
+        nullable: bool,
+        labels: Option<Vec<String>>,
+        description: Option<String>,
+    ) -> PyResult<Self> {
+        let sampling = sampling.unwrap_or_else(|| "interval_mean".to_string());
+        let description = description.unwrap_or_default();
+        let parsed_unit = Unit::from_symbol(&unit).ok_or_else(|| {
+            let symbols: Vec<&str> = Unit::ALL.iter().map(|u| u.symbol()).collect();
+            PyValueError::new_err(format!(
+                "output variable '{name}': unknown unit symbol '{unit}'; the unit must be a \
+                 Unit symbol, one of: {}",
+                symbols.join(", ")
+            ))
+        })?;
+        if !matches!(
+            kind.as_str(),
+            "energy" | "power" | "temperature" | "ratio" | "state" | "enum" | "quantity"
+        ) {
+            return Err(PyValueError::new_err(format!(
+                "output variable '{name}': unknown kind '{kind}'; the kind is one of \
+                 {KIND_CHOICES}"
+            )));
+        }
+        let parsed_aggregation = match aggregation.as_deref() {
+            None => match kind_default_aggregation(&kind) {
+                Some(default) => default,
+                None => {
+                    return Err(PyValueError::new_err(format!(
+                        "output variable '{name}': a quantity declares its aggregation, one of \
+                         'sum', 'mean', 'last', the rule the variable holds"
+                    )));
+                }
+            },
+            Some(spec) => {
+                let parsed = parse_aggregation(spec).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "output variable '{name}': unknown aggregation '{spec}'; the aggregation \
+                         is one of 'sum', 'mean', 'mode', 'last'"
+                    ))
+                })?;
+                let allowed = kind_allowed_aggregations(&kind);
+                if !allowed.contains(&spec) {
+                    return Err(PyValueError::new_err(format!(
+                        "output variable '{name}': aggregation '{spec}' is not allowed for kind \
+                         '{kind}'; the kind allows {}",
+                        allowed.join(", ")
+                    )));
+                }
+                parsed
+            }
+        };
+        let parsed_across_homes = match across_homes.as_deref() {
+            None if kind == "quantity" => {
+                return Err(PyValueError::new_err(format!(
+                    "output variable '{name}': a quantity declares across_homes, one of 'sum', \
+                     'mean', the rule across homes"
+                )));
+            }
+            None => None,
+            Some(spec) => {
+                if kind != "quantity" {
+                    return Err(PyValueError::new_err(format!(
+                        "output variable '{name}': across_homes is declared only for kind \
+                         'quantity', not '{kind}'"
+                    )));
+                }
+                match spec {
+                    "sum" => Some(AcrossHomes::Sum),
+                    "mean" => Some(AcrossHomes::Mean),
+                    other => {
+                        return Err(PyValueError::new_err(format!(
+                            "output variable '{name}': unknown across_homes '{other}'; \
+                             across_homes is 'sum' or 'mean'"
+                        )));
+                    }
+                }
+            }
+        };
+        let parsed_labels = match (&labels, kind.as_str()) {
+            (None, "enum") => {
+                return Err(PyValueError::new_err(format!(
+                    "output variable '{name}': an enum declares labels, the list of strings its \
+                     codes decode to"
+                )));
+            }
+            (Some(list), "enum") if list.is_empty() => {
+                return Err(PyValueError::new_err(format!(
+                    "output variable '{name}': an enum's labels list is empty; a label-less \
+                     enum decodes to nothing"
+                )));
+            }
+            (None, _) => None,
+            (Some(_), "enum") => labels.clone(),
+            (Some(_), other) => {
+                return Err(PyValueError::new_err(format!(
+                    "output variable '{name}': labels are declared only for kind 'enum', not \
+                     '{other}'"
+                )));
+            }
+        };
+        let parsed_sampling = match sampling.as_str() {
+            "interval_mean" => Sampling::IntervalMean,
+            "instant_at_start" => Sampling::InstantAtStart,
+            "instant_at_end" => Sampling::InstantAtEnd,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "output variable '{name}': unknown sampling '{other}'; the sampling is one \
+                     of 'interval_mean', 'instant_at_start', 'instant_at_end'"
+                )));
+            }
+        };
+        let parsed_kind = match kind.as_str() {
+            "energy" => VariableKind::Energy,
+            "power" => VariableKind::Power,
+            "temperature" => VariableKind::Temperature,
+            "ratio" => VariableKind::Ratio,
+            "state" => VariableKind::State,
+            "enum" => {
+                let declared = parsed_labels.clone().expect("an enum declares labels");
+                let labels: Arc<[Arc<str>]> = declared
+                    .into_iter()
+                    .map(Arc::<str>::from)
+                    .collect::<Vec<_>>()
+                    .into();
+                VariableKind::Enum {
+                    labels: EnumLabels::Runtime(labels),
+                }
+            }
+            "quantity" => VariableKind::Quantity {
+                across_homes: parsed_across_homes.expect("a quantity declares across_homes"),
+            },
+            _ => unreachable!("the kind was validated above"),
+        };
+        Ok(Self {
+            name,
+            unit,
+            kind,
+            aggregation,
+            across_homes,
+            sampling,
+            nullable,
+            labels,
+            description,
+            parsed_unit,
+            parsed_kind,
+            parsed_aggregation,
+            parsed_sampling,
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "OutputVariable({}, {}, {})",
+            self.name, self.unit, self.kind
+        )
+    }
+}
+
+impl PyOutputVariable {
+    /// The typed declaration the wrapper's sealed telemetry and the output
+    /// catalogue are built from. Every field was validated at construction.
+    pub(crate) fn to_field(&self) -> TelemetryField {
+        TelemetryField {
+            name: Cow::Owned(self.name.clone()),
+            unit: self.parsed_unit,
+            kind: self.parsed_kind.clone(),
+            aggregation: self.parsed_aggregation,
+            sampling: self.parsed_sampling,
+            nullable: self.nullable,
+            description: Cow::Owned(self.description.clone()),
+        }
+    }
 }
 
 /// Rust wrapper for Python actor that implements the Actor trait.
 pub struct PyActorWrapper {
     obj: Py<PyActor>,
     name: Arc<str>,
+    /// The actor's typed declarations, read once from the Python actor's
+    /// `output_variables()`.
+    declared: Vec<TelemetryField>,
+    /// The sealed telemetry map the declarations build
+    /// (`Telemetry::from_fields`): exactly the declared keys are registered,
+    /// and every later undeclared write latches.
+    telemetry: Telemetry,
     /// Set when `decide()` raises an exception or returns an invalid type.
     /// Once set, `healthy()` returns false and the engine should not dispatch
     /// output from this actor.
@@ -83,23 +391,56 @@ pub struct PyActorWrapper {
 }
 
 impl PyActorWrapper {
-    pub fn new(py: Python<'_>, obj: Py<PyActor>) -> Self {
+    pub fn new(py: Python<'_>, obj: Py<PyActor>) -> PyResult<Self> {
         let name = obj
             .bind(py)
             .getattr("name")
             .and_then(|n| n.extract::<String>())
             .unwrap_or_else(|_| "PyActor".to_string());
-        Self {
+        let declared = Self::read_declarations(py, &obj)?;
+        let telemetry = Telemetry::from_fields(&declared);
+        {
+            let mut actor = obj.bind(py).borrow_mut();
+            let keys: HashSet<String> = declared
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect();
+            actor.declared_keys = Arc::new(keys);
+        }
+        Ok(Self {
             name: Arc::from(name),
             obj,
+            declared,
+            telemetry,
             last_error: None,
-        }
+        })
+    }
+
+    /// Reads the Python actor's `output_variables()` once: the declared
+    /// surface the sealed telemetry, the catalogue and `set_output`'s
+    /// accepted key set are built from. Every Python error the read raises
+    /// (the method's own exceptions, a wrong element type) surfaces through
+    /// `add_actor`.
+    fn read_declarations(py: Python<'_>, obj: &Py<PyActor>) -> PyResult<Vec<TelemetryField>> {
+        let list = obj.bind(py).call_method0("output_variables")?;
+        let variables = list.extract::<Vec<Py<PyOutputVariable>>>()?;
+        Ok(variables
+            .iter()
+            .map(|variable| variable.bind(py).borrow().to_field())
+            .collect())
     }
 }
 
 impl hares_core::Actor for PyActorWrapper {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &self.declared
+    }
+
+    fn telemetry(&self) -> Option<&Telemetry> {
+        Some(&self.telemetry)
     }
 
     fn healthy(&self) -> bool {
@@ -124,6 +465,20 @@ impl hares_core::Actor for PyActorWrapper {
             let env_dict = environment_to_py_dict(py, env);
 
             let result = obj.call_method1("decide", (&env_dict,));
+
+            // This decide()'s publications land in the sealed map, whatever
+            // the call returned: a declared key updates its value, an
+            // undeclared one latches (the publication was attempted even
+            // when its KeyError was caught), and a non-finite value latches
+            // like any actor's write.
+            {
+                let mut actor = obj.borrow_mut();
+                let published = std::mem::take(&mut actor.published);
+                for (key, value) in published {
+                    self.telemetry.set(&key, value);
+                }
+            }
+
             match result {
                 Ok(result) => match result.extract::<Vec<PyDispatchRequest>>() {
                     Ok(requests) => {
@@ -249,15 +604,18 @@ pub enum PySignal {
     ModeOverride {
         mode: PyMode,
     },
+    // pyo3 0.29 complex enums: a fieldless variant must be an empty tuple.
+    ModeOverrideRelease(),
     LoadFraction {
         fraction: f64,
     },
     PowerLimit {
-        max_kw: f64,
+        max_power_w: f64,
+        ramp_rate_w_per_s: Option<f64>,
     },
     PowerSetpoint {
-        active_power_kw: f64,
-        reactive_power_kvar: Option<f64>,
+        active_power_w: f64,
+        reactive_power_var: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
     },
@@ -283,14 +641,14 @@ pub enum PySignal {
         state: PyEvConnectionState,
     },
     EvDrive {
-        kwh: f64,
+        energy_j: f64,
     },
     EvSetReadyBy {
         departure_hour: f64,
         target_soc: f64,
     },
     EvAwayCharge {
-        power_kw: f64,
+        power_w: f64,
     },
     EventDelay {
         delay_s: f64,
@@ -315,7 +673,7 @@ pub enum PySignal {
         percent: f64,
     },
     ReactiveSetpoint {
-        kvar: f64,
+        var: f64,
     },
     PowerFactorSetpoint {
         power_factor: f64,
@@ -412,19 +770,23 @@ impl PySignal {
             PySignal::ModeOverride { mode } => ControlSignal::ModeOverride {
                 mode: mode.into_operating_mode(),
             },
+            PySignal::ModeOverrideRelease() => ControlSignal::ModeOverrideRelease,
             PySignal::LoadFraction { fraction } => ControlSignal::LoadFraction { fraction },
-            PySignal::PowerLimit { max_kw } => ControlSignal::PowerLimit {
-                max_power_kw: max_kw,
-                ramp_rate_kw_per_s: None,
+            PySignal::PowerLimit {
+                max_power_w,
+                ramp_rate_w_per_s,
+            } => ControlSignal::PowerLimit {
+                max_power_w,
+                ramp_rate_w_per_s,
             },
             PySignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             } => ControlSignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             },
@@ -460,7 +822,7 @@ impl PySignal {
             PySignal::EvPlugIn { state } => ControlSignal::EvPlugIn {
                 state: EvConnectionState::from(state),
             },
-            PySignal::EvDrive { kwh } => ControlSignal::EvDrive { kwh },
+            PySignal::EvDrive { energy_j } => ControlSignal::EvDrive { energy_j },
             PySignal::EvSetReadyBy {
                 departure_hour,
                 target_soc,
@@ -468,7 +830,7 @@ impl PySignal {
                 departure_hour,
                 target_soc,
             },
-            PySignal::EvAwayCharge { power_kw } => ControlSignal::EvAwayCharge { power_kw },
+            PySignal::EvAwayCharge { power_w } => ControlSignal::EvAwayCharge { power_w },
             PySignal::EventDelay { delay_s } => ControlSignal::EventDelay { delay_s },
             PySignal::HumiditySetpoint {
                 target_rh,
@@ -497,7 +859,7 @@ impl PySignal {
             PySignal::CurtailmentPercent { percent } => {
                 ControlSignal::CurtailmentPercent { percent }
             }
-            PySignal::ReactiveSetpoint { kvar } => ControlSignal::ReactiveSetpoint { kvar },
+            PySignal::ReactiveSetpoint { var } => ControlSignal::ReactiveSetpoint { var },
             PySignal::PowerFactorSetpoint { power_factor } => {
                 ControlSignal::PowerFactorSetpoint { power_factor }
             }
@@ -511,74 +873,7 @@ impl PySignal {
                 ControlSignal::MaxCapacityFraction { fraction }
             }
         };
-        #[cfg(feature = "observe")]
-        {
-            dispatch_observer::record_dispatch(&result);
-            if let ControlSignal::DutyCycle {
-                component: Some(comp),
-                on_fraction,
-                ..
-            } = &result
-            {
-                dispatch_observer::record_duty_cycle_component(*comp, *on_fraction);
-            }
-        }
         Ok(result)
-    }
-}
-
-#[cfg(feature = "observe")]
-mod dispatch_observer {
-    use std::sync::{LazyLock, Mutex};
-
-    use hares_types::{ControlSignal, DutyCycleComponent};
-
-    static COUNTERS: LazyLock<Mutex<[u64; 26]>> = LazyLock::new(|| Mutex::new([0; 26]));
-    static DUTY_CYCLE_COMPONENT_EVENTS: LazyLock<Mutex<Vec<(DutyCycleComponent, f64)>>> =
-        LazyLock::new(|| Mutex::new(Vec::new()));
-
-    fn variant_index(signal: &ControlSignal) -> usize {
-        match signal {
-            ControlSignal::ThermalSetpoint { .. } => 0,
-            ControlSignal::HumiditySetpoint { .. } => 1,
-            ControlSignal::PowerSetpoint { .. } => 2,
-            ControlSignal::PowerLimit { .. } => 3,
-            ControlSignal::SOCTarget { .. } => 4,
-            ControlSignal::ModeOverride { .. } => 5,
-            ControlSignal::DutyCycle { .. } => 6,
-            ControlSignal::LoadFraction { .. } => 7,
-            ControlSignal::GridConnect { .. } => 8,
-            ControlSignal::SelfConsumption { .. } => 9,
-            ControlSignal::DemandResponse { .. } => 10,
-            ControlSignal::ProtocolNative { .. } => 11,
-            ControlSignal::CurtailmentPercent { .. } => 12,
-            ControlSignal::ReactiveSetpoint { .. } => 13,
-            ControlSignal::PowerFactorSetpoint { .. } => 14,
-            ControlSignal::InverterPriorityMode { .. } => 15,
-            ControlSignal::IdealCapacity { .. } => 16,
-            ControlSignal::ThermalSetpointDelta { .. } => 17,
-            ControlSignal::IdealCapacityModeOverride { .. } => 18,
-            ControlSignal::EvPlugIn { .. } => 19,
-            ControlSignal::EvDrive { .. } => 20,
-            ControlSignal::EvAwayCharge { .. } => 21,
-            ControlSignal::EvSetReadyBy { .. } => 22,
-            ControlSignal::EventDelay { .. } => 23,
-            ControlSignal::MaxCapacityFraction { .. } => 24,
-            ControlSignal::NonHvacZoneInput { .. } => 25,
-        }
-    }
-
-    pub fn record_dispatch(signal: &ControlSignal) {
-        let idx = variant_index(signal);
-        if let Ok(mut counters) = COUNTERS.lock() {
-            counters[idx] += 1;
-        }
-    }
-
-    pub fn record_duty_cycle_component(component: DutyCycleComponent, on_fraction: f64) {
-        if let Ok(mut events) = DUTY_CYCLE_COMPONENT_EVENTS.lock() {
-            events.push((component, on_fraction));
-        }
     }
 }
 
@@ -691,30 +986,46 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, max_kw, priority=None))]
-    fn power_limit(target: String, max_kw: f64, priority: Option<PyPriority>) -> PyResult<Self> {
+    #[pyo3(signature = (target, *, max_power_w, ramp_rate_w_per_s=None, priority=None, **kwargs))]
+    fn power_limit(
+        target: String,
+        max_power_w: f64,
+        ramp_rate_w_per_s: Option<f64>,
+        priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.power_limit", kwargs)?;
         Ok(Self {
             target,
-            signal: PySignal::PowerLimit { max_kw },
+            signal: PySignal::PowerLimit {
+                max_power_w,
+                ramp_rate_w_per_s,
+            },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, active_power_kw, reactive_power_kvar=None, min_soc=None, max_soc=None, priority=None))]
+    #[pyo3(signature = (target, *, active_power_w, reactive_power_var=None, min_soc=None, max_soc=None, priority=None, **kwargs))]
     fn power_setpoint(
         target: String,
-        active_power_kw: f64,
-        reactive_power_kvar: Option<f64>,
+        active_power_w: f64,
+        reactive_power_var: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
         priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.power_setpoint", kwargs)?;
+        validate_finite(active_power_w, "active_power_w")?;
+        if let Some(q) = reactive_power_var {
+            validate_finite(q, "reactive_power_var")?;
+        }
         Ok(Self {
             target,
             signal: PySignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             },
@@ -809,25 +1120,33 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, kwh, priority=None))]
-    fn ev_drive(target: String, kwh: f64, priority: Option<PyPriority>) -> PyResult<Self> {
+    #[pyo3(signature = (target, *, energy_j, priority=None, **kwargs))]
+    fn ev_drive(
+        target: String,
+        energy_j: f64,
+        priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.ev_drive", kwargs)?;
         Ok(Self {
             target,
-            signal: PySignal::EvDrive { kwh },
+            signal: PySignal::EvDrive { energy_j },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, power_kw, priority=None))]
+    #[pyo3(signature = (target, *, power_w, priority=None, **kwargs))]
     fn ev_away_charge(
         target: String,
-        power_kw: f64,
+        power_w: f64,
         priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.ev_away_charge", kwargs)?;
         Ok(Self {
             target,
-            signal: PySignal::EvAwayCharge { power_kw },
+            signal: PySignal::EvAwayCharge { power_w },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
@@ -945,15 +1264,17 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (target, kvar, priority=None))]
+    #[pyo3(signature = (target, *, var, priority=None, **kwargs))]
     fn reactive_setpoint(
         target: String,
-        kvar: f64,
+        var: f64,
         priority: Option<PyPriority>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("DispatchRequest.reactive_setpoint", kwargs)?;
         Ok(Self {
             target,
-            signal: PySignal::ReactiveSetpoint { kvar },
+            signal: PySignal::ReactiveSetpoint { var },
             priority: priority.unwrap_or(PyPriority::Schedule),
         })
     }
@@ -1066,30 +1387,51 @@ impl PySignal {
         PySignal::ModeOverride { mode }
     }
 
+    /// The release form of `mode_override`: clears a stored mode override.
+    #[staticmethod]
+    fn mode_override_release() -> Self {
+        PySignal::ModeOverrideRelease()
+    }
+
     #[staticmethod]
     fn load_fraction(fraction: f64) -> Self {
         PySignal::LoadFraction { fraction }
     }
 
     #[staticmethod]
-    fn power_limit(max_kw: f64) -> Self {
-        PySignal::PowerLimit { max_kw }
+    #[pyo3(signature = (*, max_power_w, ramp_rate_w_per_s=None, **kwargs))]
+    fn power_limit(
+        max_power_w: f64,
+        ramp_rate_w_per_s: Option<f64>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.power_limit", kwargs)?;
+        Ok(PySignal::PowerLimit {
+            max_power_w,
+            ramp_rate_w_per_s,
+        })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (active_power_kw, reactive_power_kvar=None, min_soc=None, max_soc=None))]
+    #[pyo3(signature = (*, active_power_w, reactive_power_var=None, min_soc=None, max_soc=None, **kwargs))]
     fn power_setpoint(
-        active_power_kw: f64,
-        reactive_power_kvar: Option<f64>,
+        active_power_w: f64,
+        reactive_power_var: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
-    ) -> Self {
-        PySignal::PowerSetpoint {
-            active_power_kw,
-            reactive_power_kvar,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.power_setpoint", kwargs)?;
+        validate_finite(active_power_w, "active_power_w")?;
+        if let Some(q) = reactive_power_var {
+            validate_finite(q, "reactive_power_var")?;
+        }
+        Ok(PySignal::PowerSetpoint {
+            active_power_w,
+            reactive_power_var,
             min_soc,
             max_soc,
-        }
+        })
     }
 
     #[staticmethod]
@@ -1136,8 +1478,10 @@ impl PySignal {
     }
 
     #[staticmethod]
-    fn ev_drive(kwh: f64) -> Self {
-        PySignal::EvDrive { kwh }
+    #[pyo3(signature = (*, energy_j, **kwargs))]
+    fn ev_drive(energy_j: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.ev_drive", kwargs)?;
+        Ok(PySignal::EvDrive { energy_j })
     }
 
     #[staticmethod]
@@ -1149,8 +1493,10 @@ impl PySignal {
     }
 
     #[staticmethod]
-    fn ev_away_charge(power_kw: f64) -> Self {
-        PySignal::EvAwayCharge { power_kw }
+    #[pyo3(signature = (*, power_w, **kwargs))]
+    fn ev_away_charge(power_w: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.ev_away_charge", kwargs)?;
+        Ok(PySignal::EvAwayCharge { power_w })
     }
 
     #[staticmethod]
@@ -1195,8 +1541,10 @@ impl PySignal {
     }
 
     #[staticmethod]
-    fn reactive_setpoint(kvar: f64) -> Self {
-        PySignal::ReactiveSetpoint { kvar }
+    #[pyo3(signature = (*, var, **kwargs))]
+    fn reactive_setpoint(var: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        crate::py_control::check_signal_kwargs("Signal.reactive_setpoint", kwargs)?;
+        Ok(PySignal::ReactiveSetpoint { var })
     }
 
     #[staticmethod]
@@ -1472,8 +1820,13 @@ impl PyDRLevel {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+
     use super::*;
     use hares_core::Actor;
+    use hares_io::{CatalogueActor, CatalogueInput, build_catalogue};
+    use hares_types::{AcrossHomes, Aggregation, Unit, VariableKind};
+    use pyo3::types::PyModule;
 
     /// Every `PySignal` variant maps to a `ControlSignal` with a non-zero
     /// required capability: a variant mapping to zero would be silently
@@ -1498,12 +1851,15 @@ mod tests {
             },
             PySignal::LoadFraction { fraction: 0.7 },
             PySignal::PowerSetpoint {
-                active_power_kw: 2.0,
-                reactive_power_kvar: None,
+                active_power_w: 2.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
-            PySignal::PowerLimit { max_kw: 3.0 },
+            PySignal::PowerLimit {
+                max_power_w: 3000.0,
+                ramp_rate_w_per_s: None,
+            },
             PySignal::ModeOverride {
                 mode: PyMode::Cooling,
             },
@@ -1645,7 +2001,8 @@ mod tests {
     fn py_actor_wrapper_healthy_returns_true_when_no_error() {
         ensure_python(|py| {
             let actor_obj = Py::new(py, PyActor::new()).expect("could not create PyActor");
-            let wrapper = PyActorWrapper::new(py, actor_obj);
+            let wrapper =
+                PyActorWrapper::new(py, actor_obj).expect("the base actor declares nothing");
             assert!(wrapper.healthy(), "fresh PyActorWrapper should be healthy");
             assert!(
                 wrapper.last_error.is_none(),
@@ -1658,7 +2015,8 @@ mod tests {
     fn py_actor_wrapper_healthy_returns_false_after_decide_raises() {
         ensure_python(|py| {
             let actor_obj = Py::new(py, PyActor::new()).expect("could not create PyActor");
-            let mut wrapper = PyActorWrapper::new(py, actor_obj);
+            let mut wrapper =
+                PyActorWrapper::new(py, actor_obj).expect("the base actor declares nothing");
 
             let env = hares_core::actor::testing::test_env().build();
             let mut out = Vec::new();
@@ -1699,7 +2057,7 @@ mod tests {
         // uses Python::attach internally and must acquire it cleanly.
         let wrapper = Python::attach(|py| {
             let actor_obj = Py::new(py, PyActor::new()).expect("could not create PyActor");
-            PyActorWrapper::new(py, actor_obj)
+            PyActorWrapper::new(py, actor_obj).expect("the base actor declares nothing")
         });
 
         let handle = std::thread::spawn(move || {
@@ -1740,5 +2098,211 @@ mod tests {
         });
 
         handle.join().expect("spawned thread panicked");
+    }
+
+    /// Defines a Python `Probe(Actor)` subclass in a module that carries
+    /// this test binary's registered classes, so the wrapper's extraction
+    /// sees its own `OutputVariable` type. `body` is Python source spliced
+    /// into the class body.
+    fn probe_actor(py: Python<'_>, body: &str) -> Py<PyActor> {
+        let module = PyModule::new(py, "probe_actor_module").expect("create the test's module");
+        crate::_hares(&module).expect("register the classes");
+        let globals = PyDict::new(py);
+        globals
+            .set_item("Actor", module.getattr("Actor").expect("the Actor class"))
+            .expect("globals");
+        globals
+            .set_item(
+                "OutputVariable",
+                module
+                    .getattr("OutputVariable")
+                    .expect("the OutputVariable class"),
+            )
+            .expect("globals");
+        let source = format!("class Probe(Actor):\n{body}\n\nprobe = Probe()\n");
+        let code = CString::new(source).expect("source has no interior NUL");
+        py.run(code.as_c_str(), Some(&globals), None)
+            .expect("define the Probe subclass");
+        globals
+            .get_item("probe")
+            .expect("the globals hold probe")
+            .expect("probe is set")
+            .extract::<Py<PyActor>>()
+            .expect("a Probe instance is an Actor")
+    }
+
+    /// The class body of the declaration-and-publish probe: three declared
+    /// variables (a power, an enum with labels, a quantity with its
+    /// across-homes rule) and a `decide` that publishes all three.
+    const DECLARING_BODY: &str = "
+    def __init__(self):
+        super().__init__()
+        self.name = \"probe\"
+
+    def output_variables(self):
+        return [
+            OutputVariable(\"probe_kw\", \"kW\", \"power\", description=\"the probe's power\"),
+            OutputVariable(\"probe_mode\", \"code\", \"enum\", labels=[\"off\", \"low\", \"high\"]),
+            OutputVariable(
+                \"probe_level\", \"count\", \"quantity\", aggregation=\"last\", across_homes=\"mean\"
+            ),
+        ]
+
+    def decide(self, env):
+        self.set_output(\"probe_kw\", 7.5)
+        self.set_output(\"probe_mode\", 1.0)
+        self.set_output(\"probe_level\", 3.0)
+        return []
+    ";
+
+    #[test]
+    fn python_actor_declarations_build_the_wrappers_sealed_telemetry() {
+        ensure_python(|py| {
+            let obj = probe_actor(py, DECLARING_BODY);
+            let wrapper = PyActorWrapper::new(py, obj).expect("the wrapper builds");
+            let fields = wrapper.output_variables();
+            assert_eq!(fields.len(), 3, "the declared list passes through");
+            assert_eq!(fields[0].name.as_ref(), "probe_kw");
+            assert_eq!(fields[0].unit, Unit::Kilowatt);
+            assert!(matches!(fields[0].kind, VariableKind::Power));
+            assert_eq!(fields[0].description.as_ref(), "the probe's power");
+            match &fields[1].kind {
+                VariableKind::Enum { labels } => {
+                    assert_eq!(labels.get(0), Some("off"));
+                    assert_eq!(labels.get(2), Some("high"));
+                }
+                other => panic!("the enum declaration carries its labels: {other:?}"),
+            }
+            assert_eq!(fields[1].aggregation, Aggregation::Mode);
+            match &fields[2].kind {
+                VariableKind::Quantity { across_homes } => {
+                    assert_eq!(*across_homes, AcrossHomes::Mean);
+                }
+                other => panic!("the quantity declaration carries across_homes: {other:?}"),
+            }
+            assert_eq!(fields[2].aggregation, Aggregation::Last);
+            let telemetry = wrapper
+                .telemetry()
+                .expect("the wrapper exposes the telemetry built from the declarations");
+            assert!(telemetry.is_sealed(), "the telemetry is sealed");
+            assert_eq!(telemetry.len(), 3);
+        });
+    }
+
+    #[test]
+    fn python_actor_sealed_telemetry_latches_an_undeclared_set() {
+        ensure_python(|py| {
+            let obj = probe_actor(py, DECLARING_BODY);
+            let mut wrapper = PyActorWrapper::new(py, obj).expect("the wrapper builds");
+            // The same-module field access the Actor trait's shared &Telemetry
+            // read cannot do: the point is the seal's behavior on this map.
+            wrapper.telemetry.set("sneaky", 1.0);
+            assert_eq!(
+                wrapper.telemetry().expect("telemetry").unknown_key_latch(),
+                Some("sneaky"),
+                "the seal covers a Python actor's map: an undeclared set latches"
+            );
+        });
+    }
+
+    #[test]
+    fn python_actor_decide_publications_land_in_the_sealed_map() {
+        ensure_python(|py| {
+            let obj = probe_actor(py, DECLARING_BODY);
+            let mut wrapper = PyActorWrapper::new(py, obj).expect("the wrapper builds");
+            let env = hares_core::actor::testing::test_env().build();
+            let mut out = Vec::new();
+            wrapper.decide(&env, &mut out);
+            assert!(
+                wrapper.healthy(),
+                "a clean publication keeps the actor healthy"
+            );
+            let telemetry = wrapper.telemetry().expect("telemetry");
+            assert_eq!(telemetry.get("probe_kw"), Some(7.5));
+            assert_eq!(telemetry.get("probe_mode"), Some(1.0));
+            assert_eq!(telemetry.get("probe_level"), Some(3.0));
+        });
+    }
+
+    #[test]
+    fn python_actor_undeclared_publication_latches_and_fails_the_decide() {
+        ensure_python(|py| {
+            let body = "
+    def __init__(self):
+        super().__init__()
+        self.name = \"probe\"
+
+    def output_variables(self):
+        return [OutputVariable(\"probe_kw\", \"kW\", \"power\")]
+
+    def decide(self, env):
+        self.set_output(\"sneaky\", 1.0)
+        return []
+    ";
+            let obj = probe_actor(py, body);
+            let mut wrapper = PyActorWrapper::new(py, obj).expect("the wrapper builds");
+            let env = hares_core::actor::testing::test_env().build();
+            let mut out = Vec::new();
+            wrapper.decide(&env, &mut out);
+            assert!(
+                !wrapper.healthy(),
+                "the KeyError out of set_output fails the decide"
+            );
+            let detail = wrapper.health_detail().expect("the cause");
+            assert!(
+                detail.contains("sneaky"),
+                "the cause names the key: {detail}"
+            );
+            assert_eq!(
+                wrapper.telemetry().expect("telemetry").unknown_key_latch(),
+                Some("sneaky"),
+                "the attempted publication latched the undeclared key"
+            );
+        });
+    }
+
+    #[test]
+    fn catalogue_from_python_actor_declarations_carries_the_declared_surface() {
+        ensure_python(|py| {
+            let obj = probe_actor(py, DECLARING_BODY);
+            let wrapper = PyActorWrapper::new(py, obj).expect("the wrapper builds");
+            let input = CatalogueInput {
+                equipment: Vec::new(),
+                zones: Vec::new(),
+                actors: vec![CatalogueActor {
+                    name: Arc::from("probe"),
+                    output_variables: wrapper.output_variables().to_vec(),
+                }],
+            };
+            let catalogue =
+                build_catalogue(&input).expect("the catalogue builds from the declarations");
+            let power = catalogue
+                .resolve("actor:probe:probe_kw")
+                .expect("the power variable is in the catalogue");
+            assert_eq!(power.unit, Unit::Kilowatt);
+            let mode = catalogue
+                .resolve("actor:probe:probe_mode")
+                .expect("the enum variable is in the catalogue");
+            match &mode.kind {
+                VariableKind::Enum { labels } => {
+                    assert_eq!(
+                        labels.get(1),
+                        Some("low"),
+                        "the catalogue's labels decode the codes"
+                    );
+                }
+                other => panic!("enum labels in the catalogue: {other:?}"),
+            }
+            let level = catalogue
+                .resolve("actor:probe:probe_level")
+                .expect("the quantity variable is in the catalogue");
+            match &level.kind {
+                VariableKind::Quantity { across_homes } => {
+                    assert_eq!(*across_homes, AcrossHomes::Mean);
+                }
+                other => panic!("quantity across homes in the catalogue: {other:?}"),
+            }
+            assert_eq!(level.aggregation, Aggregation::Last);
+        });
     }
 }

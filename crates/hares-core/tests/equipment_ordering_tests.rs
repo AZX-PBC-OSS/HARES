@@ -211,10 +211,12 @@ fn write_minimal_toml(path: &Path) {
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -235,13 +237,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#;
     fs::write(path, content).expect("failed to write synthetic TOML");
 }
@@ -310,6 +305,10 @@ impl StepOrderSpy {
 impl Equipment for StepOrderSpy {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
     }
 
     fn rename(&mut self, name: String) {

@@ -1,4 +1,4 @@
-"""Tests for ochre_next.data.resstock (HARES-060)."""
+"""Tests for hares.data.resstock."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def _make_metadata_parquet(
 
 class TestVersionConfig:
     def test_v2024_1_zip_url(self):
-        from ochre_next.data.resstock import _version_config, _zip_url
+        from hares.data.resstock import _version_config, _zip_url
 
         cfg = _version_config("2024.1")
         url = _zip_url(cfg, bldg_id=1, upgrade_id=0)
@@ -75,7 +75,7 @@ class TestVersionConfig:
         assert "bldg0000001-up00.zip" in url
 
     def test_v2024_2_zip_url(self):
-        from ochre_next.data.resstock import _version_config, _zip_url
+        from hares.data.resstock import _version_config, _zip_url
 
         cfg = _version_config("2024.2")
         url = _zip_url(cfg, bldg_id=42, upgrade_id=0)
@@ -84,7 +84,7 @@ class TestVersionConfig:
         assert "upgrade=0" in url
 
     def test_v2025_1_zip_url(self):
-        from ochre_next.data.resstock import _version_config, _zip_url
+        from hares.data.resstock import _version_config, _zip_url
 
         cfg = _version_config("2025.1")
         url = _zip_url(cfg, bldg_id=7, upgrade_id=1)
@@ -92,7 +92,7 @@ class TestVersionConfig:
         assert "bldg0000007-up01.zip" in url
 
     def test_v2025_1_metadata_baseline(self):
-        from ochre_next.data.resstock import _version_config, metadata_url
+        from hares.data.resstock import _version_config, metadata_url
 
         cfg = _version_config("2025.1")
         url = metadata_url(cfg, upgrade_id=0)
@@ -100,28 +100,28 @@ class TestVersionConfig:
         assert "upgrade00" not in url  # NOT zero-padded for 2025.1
 
     def test_v2024_2_metadata_upgrade(self):
-        from ochre_next.data.resstock import _version_config, metadata_url
+        from hares.data.resstock import _version_config, metadata_url
 
         cfg = _version_config("2024.2")
         url = metadata_url(cfg, upgrade_id=3)
         assert "upgrade03_metadata_and_annual_results.parquet" in url
 
     def test_weather_url_v2024_2(self):
-        from ochre_next.data.resstock import _version_config, _weather_url
+        from hares.data.resstock import _version_config, _weather_url
 
         cfg = _version_config("2024.2")
         url = _weather_url(cfg, state="CO", fips="G0800130")
         assert "weather/state=CO/G0800130_TMY3.csv" in url
 
     def test_weather_url_v2025_1(self):
-        from ochre_next.data.resstock import _version_config, _weather_url
+        from hares.data.resstock import _version_config, _weather_url
 
         cfg = _version_config("2025.1")
         url = _weather_url(cfg, state="CO", fips="G0800130")
         assert "weather/state=CO/G0800130_2018.csv" in url
 
     def test_invalid_version_raises(self):
-        from ochre_next.data.resstock import _version_config
+        from hares.data.resstock import _version_config
 
         with pytest.raises(ValueError, match="Unknown ResStock version"):
             _version_config("9999.9")
@@ -134,7 +134,7 @@ class TestVersionConfig:
 
 class TestResStockBuilding:
     def test_frozen(self):
-        from ochre_next.data.resstock import ResStockBuilding
+        from hares.data.resstock import ResStockBuilding
 
         b = ResStockBuilding(
             bldg_id=1,
@@ -150,7 +150,7 @@ class TestResStockBuilding:
             mutable_view.bldg_id = 99
 
     def test_fields_accessible(self):
-        from ochre_next.data.resstock import ResStockBuilding
+        from hares.data.resstock import ResStockBuilding
 
         b = ResStockBuilding(1, 2.5, Path("/h.xml"), Path("/s.csv"), Path("/w.csv"))
         assert b.bldg_id == 1
@@ -164,7 +164,7 @@ class TestResStockBuilding:
 
 class TestFetchResStockBuilding:
     def test_downloads_and_extracts(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
         dummy_epw = tmp_path / "dummy.epw"
@@ -172,11 +172,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=_fake_download(zip_bytes, tmp_path),
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -189,7 +189,7 @@ class TestFetchResStockBuilding:
         assert result.schedule_path.name == "in.schedules.csv"
 
     def test_returns_resstock_building_instance(self, tmp_path: Path):
-        from ochre_next.data.resstock import ResStockBuilding, fetch_resstock_building
+        from hares.data.resstock import ResStockBuilding, fetch_resstock_building
 
         zip_bytes = _make_zip()
         dummy_epw = tmp_path / "dummy.epw"
@@ -197,11 +197,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=_fake_download(zip_bytes, tmp_path),
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -210,7 +210,7 @@ class TestFetchResStockBuilding:
         assert isinstance(result, ResStockBuilding)
 
     def test_sample_weight_is_one(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
         dummy_epw = tmp_path / "dummy.epw"
@@ -218,11 +218,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=_fake_download(zip_bytes, tmp_path),
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -231,7 +231,7 @@ class TestFetchResStockBuilding:
         assert result.sample_weight == 1.0
 
     def test_uses_cache_on_second_call(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
         dummy_epw = tmp_path / "dummy.epw"
@@ -244,11 +244,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=recording_download,
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -260,7 +260,7 @@ class TestFetchResStockBuilding:
         assert len(zip_urls) == 1
 
     def test_weather_override_skips_weather_download(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
         weather_file = tmp_path / "my_weather.epw"
@@ -272,7 +272,7 @@ class TestFetchResStockBuilding:
             _fake_download(zip_bytes, tmp_path)(url, dest)
 
         with mock.patch(
-            "ochre_next.data.resstock._download_file", side_effect=recording_download
+            "hares.data.resstock._download_file", side_effect=recording_download
         ):
             result = fetch_resstock_building(
                 1,
@@ -286,7 +286,7 @@ class TestFetchResStockBuilding:
         assert len(weather_urls) == 0
 
     def test_weather_downloaded_from_hpxml(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip(hpxml_content=_minimal_hpxml("G0800130"))
 
@@ -297,11 +297,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=_fake_download(zip_bytes, tmp_path),
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -311,7 +311,7 @@ class TestFetchResStockBuilding:
         assert "G0800130" in result.weather_path.name
 
     def test_upgrade_id_in_url(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
         dummy_epw = tmp_path / "dummy.epw"
@@ -324,11 +324,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=recording_download,
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -346,7 +346,7 @@ class TestFetchResStockBuilding:
         return p
 
     def test_fetch_resstock_building_with_metadata_weight(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         meta = self._write_metadata(tmp_path, [1, 7], weights=[9.0, 33.3])
         zip_bytes = _make_zip()
@@ -355,11 +355,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=_fake_download(zip_bytes, tmp_path),
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -370,7 +370,7 @@ class TestFetchResStockBuilding:
         assert result.sample_weight == pytest.approx(33.3)
 
     def test_fetch_resstock_building_weight_override(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         # Metadata says 33.3, but an explicit sample_weight must take precedence.
         meta = self._write_metadata(tmp_path, [7], weights=[33.3])
@@ -380,11 +380,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=_fake_download(zip_bytes, tmp_path),
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -399,7 +399,7 @@ class TestFetchResStockBuilding:
         assert result.sample_weight == pytest.approx(5.0)
 
     def test_fetch_resstock_building_no_metadata_warns(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip()
         dummy_epw = tmp_path / "dummy.epw"
@@ -407,11 +407,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=_fake_download(zip_bytes, tmp_path),
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
             pytest.warns(UserWarning, match="sample_weight defaults"),
@@ -421,7 +421,7 @@ class TestFetchResStockBuilding:
         assert result.sample_weight == 1.0
 
     def test_fetch_resstock_building_weight_matches_fleet(self, tmp_path: Path):
-        from ochre_next.data.resstock import (
+        from hares.data.resstock import (
             fetch_resstock_building,
             fetch_resstock_fleet,
         )
@@ -433,11 +433,11 @@ class TestFetchResStockBuilding:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=_fake_download(zip_bytes, tmp_path),
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -473,12 +473,12 @@ class TestFetchResStockFleet:
         return p
 
     def test_returns_n_buildings(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_fleet
+        from hares.data.resstock import fetch_resstock_fleet
 
         meta = self._metadata_file(tmp_path, list(range(1, 11)))
 
         with mock.patch(
-            "ochre_next.data.resstock.fetch_resstock_building",
+            "hares.data.resstock.fetch_resstock_building",
             side_effect=_fake_fleet_building(tmp_path),
         ):
             results = fetch_resstock_fleet(meta, n_buildings=3, cache_dir=tmp_path)
@@ -486,12 +486,12 @@ class TestFetchResStockFleet:
         assert len(results) == 3
 
     def test_returns_explicit_bldg_ids(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_fleet
+        from hares.data.resstock import fetch_resstock_fleet
 
         meta = self._metadata_file(tmp_path, [1, 2, 3, 4, 5])
 
         with mock.patch(
-            "ochre_next.data.resstock.fetch_resstock_building",
+            "hares.data.resstock.fetch_resstock_building",
             side_effect=_fake_fleet_building(tmp_path),
         ):
             results = fetch_resstock_fleet(meta, bldg_ids=[2, 4], cache_dir=tmp_path)
@@ -500,7 +500,7 @@ class TestFetchResStockFleet:
         assert returned_ids == {2, 4}
 
     def test_filter_by_state(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_fleet
+        from hares.data.resstock import fetch_resstock_fleet
 
         meta = self._metadata_file(
             tmp_path,
@@ -509,7 +509,7 @@ class TestFetchResStockFleet:
         )
 
         with mock.patch(
-            "ochre_next.data.resstock.fetch_resstock_building",
+            "hares.data.resstock.fetch_resstock_building",
             side_effect=_fake_fleet_building(tmp_path),
         ):
             results = fetch_resstock_fleet(
@@ -522,7 +522,7 @@ class TestFetchResStockFleet:
         assert all(r.bldg_id in (1, 3) for r in results)
 
     def test_filter_then_n_buildings(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_fleet
+        from hares.data.resstock import fetch_resstock_fleet
 
         meta = self._metadata_file(
             tmp_path,
@@ -531,7 +531,7 @@ class TestFetchResStockFleet:
         )
 
         with mock.patch(
-            "ochre_next.data.resstock.fetch_resstock_building",
+            "hares.data.resstock.fetch_resstock_building",
             side_effect=_fake_fleet_building(tmp_path),
         ):
             results = fetch_resstock_fleet(
@@ -544,7 +544,7 @@ class TestFetchResStockFleet:
         assert len(results) == 3
 
     def test_sample_weights_from_metadata(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_fleet
+        from hares.data.resstock import fetch_resstock_fleet
 
         meta = self._metadata_file(
             tmp_path,
@@ -553,7 +553,7 @@ class TestFetchResStockFleet:
         )
 
         with mock.patch(
-            "ochre_next.data.resstock.fetch_resstock_building",
+            "hares.data.resstock.fetch_resstock_building",
             side_effect=_fake_fleet_building(tmp_path),
         ):
             results = fetch_resstock_fleet(meta, bldg_ids=[10, 20], cache_dir=tmp_path)
@@ -563,7 +563,7 @@ class TestFetchResStockFleet:
         assert by_id[20].sample_weight == pytest.approx(17.3)
 
     def test_bldg_ids_and_n_buildings_mutually_exclusive(self, tmp_path: Path):
-        from ochre_next.data.resstock import fetch_resstock_fleet
+        from hares.data.resstock import fetch_resstock_fleet
 
         meta = self._metadata_file(tmp_path, [1, 2])
         with pytest.raises(ValueError, match="at most one"):
@@ -578,7 +578,7 @@ class TestFetchResStockFleet:
 class TestFallbackToUrllib:
     def test_urllib_fallback(self, tmp_path: Path):
         """_try_download falls back to urllib when httpx/boto3 are absent."""
-        from ochre_next.data.resstock import _try_download
+        from hares.data.resstock import _try_download
 
         zip_bytes = _make_zip()
         dest = tmp_path / "out.zip"
@@ -604,7 +604,7 @@ class TestFallbackToUrllib:
 
     def test_urllib_fallback_bounds_a_stalled_download(self, tmp_path: Path):
         """The urllib fallback gets the same timeout as the httpx client."""
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         with (
             mock.patch.dict(sys.modules, {"httpx": None, "boto3": None}),
@@ -621,8 +621,8 @@ class TestSharedHttpClient:
     ):
         """Every download reuses one thread-safe client with the 120 s timeout."""
         httpx = pytest.importorskip("httpx")
-        from ochre_next.data import resstock
-        from ochre_next.data._cuttable_transport import CuttableTransport
+        from hares.data import resstock
+        from hares.data._cuttable_transport import CuttableTransport
 
         clients: list[dict[str, object]] = []
         streamed: list[str] = []
@@ -670,7 +670,7 @@ class TestSharedHttpClient:
         import threading
 
         httpx = pytest.importorskip("httpx")
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         built: list[object] = []
         registered: list[object] = []
@@ -706,7 +706,15 @@ class TestSharedHttpClient:
 
         assert len(built) == 1
         assert received == built * 16
-        assert len(registered) == 1
+        # The shared client is the only registration of the module's own;
+        # the environment's lazy ones (certifi's exit hook, taken through
+        # the patched register inside the first get()) count nothing here.
+        closers = [
+            entry
+            for entry in registered
+            if getattr(entry, "__self__", None) in built
+        ]
+        assert len(closers) == 1
 
     @pytest.mark.parametrize("stage", ["reading", "tls-handshake", "connecting"])
     def test_aborting_the_client_ends_a_download_at_any_stage(
@@ -716,7 +724,7 @@ class TestSharedHttpClient:
         import threading
 
         pytest.importorskip("httpx")
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         shared = resstock._SharedClient()
         monkeypatch.setattr(resstock, "_shared_client", shared)
@@ -751,7 +759,7 @@ class TestSharedHttpClient:
 
 class TestParseWeatherStation:
     def test_parses_fips_code(self, tmp_path: Path):
-        from ochre_next.data.resstock import _parse_weather_station
+        from hares.data.resstock import _parse_weather_station
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_minimal_hpxml("G0800130"))
@@ -759,7 +767,7 @@ class TestParseWeatherStation:
         assert result == ("CO", "G0800130")
 
     def test_returns_none_for_unknown_fips(self, tmp_path: Path):
-        from ochre_next.data.resstock import _parse_weather_station
+        from hares.data.resstock import _parse_weather_station
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_minimal_hpxml("UNKNOWN_STATION"))
@@ -767,7 +775,7 @@ class TestParseWeatherStation:
         assert result is None
 
     def test_returns_none_for_missing_element(self, tmp_path: Path):
-        from ochre_next.data.resstock import _parse_weather_station
+        from hares.data.resstock import _parse_weather_station
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text("<HPXML><Building/></HPXML>")
@@ -775,7 +783,7 @@ class TestParseWeatherStation:
         assert result is None
 
     def test_returns_none_for_bad_xml(self, tmp_path: Path):
-        from ochre_next.data.resstock import _parse_weather_station
+        from hares.data.resstock import _parse_weather_station
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text("not xml at all <<<")
@@ -790,7 +798,7 @@ class TestParseWeatherStation:
 
 class TestResStockVersion:
     def test_values(self):
-        from ochre_next.data.resstock import ResStockVersion
+        from hares.data.resstock import ResStockVersion
 
         assert ResStockVersion.V2024_1.value == "2024.1"
         assert ResStockVersion.V2024_2.value == "2024.2"
@@ -799,7 +807,7 @@ class TestResStockVersion:
     def test_default_version_is_2024_2(self):
         import inspect
 
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         sig = inspect.signature(fetch_resstock_building)
         assert sig.parameters["version"].default == "2024.2"
@@ -826,7 +834,7 @@ def _fake_download(zip_bytes: bytes, tmp_path: Path):
 
 def _fake_fleet_building(tmp_path: Path):
     """Return a side_effect for fetch_resstock_building that creates fake files."""
-    from ochre_next.data.resstock import ResStockBuilding
+    from hares.data.resstock import ResStockBuilding
 
     def _inner(
         bldg_id: int,
@@ -1007,7 +1015,7 @@ from pathlib import Path
 
 signal.signal(signal.SIGINT, signal.default_int_handler)
 
-from ochre_next.data import resstock
+from hares.data import resstock
 
 resstock._OEDI_BASE = f"http://127.0.0.1:{sys.argv[1]}/"
 resstock._FLEET_DOWNLOAD_WORKERS = 2
@@ -1044,7 +1052,7 @@ def _make_epw_file(path: Path, state: str) -> None:
 
 class TestClimateZoneExtraction:
     def test_parses_iecc_zone(self, tmp_path: Path):
-        from ochre_next.data.resstock import _parse_climate_zone
+        from hares.data.resstock import _parse_climate_zone
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_make_hpxml_with_zone("5B"))
@@ -1052,7 +1060,7 @@ class TestClimateZoneExtraction:
         assert result == "5B"
 
     def test_parses_iecc_zone_2a(self, tmp_path: Path):
-        from ochre_next.data.resstock import _parse_climate_zone
+        from hares.data.resstock import _parse_climate_zone
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_make_hpxml_with_zone("2A"))
@@ -1060,7 +1068,7 @@ class TestClimateZoneExtraction:
         assert result == "2A"
 
     def test_returns_none_for_missing_zone(self, tmp_path: Path):
-        from ochre_next.data.resstock import _parse_climate_zone
+        from hares.data.resstock import _parse_climate_zone
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text("<HPXML><Building/></HPXML>")
@@ -1068,7 +1076,7 @@ class TestClimateZoneExtraction:
         assert result is None
 
     def test_returns_none_for_bad_xml(self, tmp_path: Path):
-        from ochre_next.data.resstock import _parse_climate_zone
+        from hares.data.resstock import _parse_climate_zone
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text("not xml <<<")
@@ -1078,7 +1086,7 @@ class TestClimateZoneExtraction:
 
 class TestExtractEpwState:
     def test_extracts_co(self, tmp_path: Path):
-        from ochre_next.data.resstock import _extract_epw_state
+        from hares.data.resstock import _extract_epw_state
 
         epw = tmp_path / "weather.epw"
         _make_epw_file(epw, "CO")
@@ -1086,7 +1094,7 @@ class TestExtractEpwState:
         assert result == "CO"
 
     def test_returns_none_for_non_epw_extension(self, tmp_path: Path):
-        from ochre_next.data.resstock import _extract_epw_state
+        from hares.data.resstock import _extract_epw_state
 
         csv = tmp_path / "weather.csv"
         csv.write_text("some,data")
@@ -1094,7 +1102,7 @@ class TestExtractEpwState:
         assert result is None
 
     def test_returns_none_for_missing_file(self, tmp_path: Path):
-        from ochre_next.data.resstock import _extract_epw_state
+        from hares.data.resstock import _extract_epw_state
 
         result = _extract_epw_state(tmp_path / "nonexistent.epw")
         assert result is None
@@ -1102,39 +1110,39 @@ class TestExtractEpwState:
 
 class TestValidateZoneForState:
     def test_match_co_zone5(self):
-        from ochre_next.data.resstock import _validate_zone_for_state
+        from hares.data.resstock import _validate_zone_for_state
 
         # Zone 5B is valid for CO — should not raise or warn.
         _validate_zone_for_state("5B", "CO")
 
     def test_match_fl_zone1(self):
-        from ochre_next.data.resstock import _validate_zone_for_state
+        from hares.data.resstock import _validate_zone_for_state
 
         # Zone 1A is valid for FL — should not raise or warn.
         _validate_zone_for_state("1A", "FL")
 
     def test_mismatch_warns_close_zone(self):
-        from ochre_next.data.resstock import _validate_zone_for_state
+        from hares.data.resstock import _validate_zone_for_state
 
         # Zone 3A in MN (valid zones: 6, 7) — diff=3, should warn not raise.
         with pytest.warns(UserWarning, match="Building IECC zone"):
             _validate_zone_for_state("3A", "MN")
 
     def test_mismatch_raises_far_zone(self):
-        from ochre_next.data.resstock import _validate_zone_for_state
+        from hares.data.resstock import _validate_zone_for_state
 
         # Zone 1A in MN (valid zones: 6, 7) — diff>=4, should raise ValueError.
         with pytest.raises(ValueError, match="incompatible"):
             _validate_zone_for_state("1A", "MN")
 
     def test_unknown_state_skips(self):
-        from ochre_next.data.resstock import _validate_zone_for_state
+        from hares.data.resstock import _validate_zone_for_state
 
         # Unknown state abbreviation — should not raise or warn.
         _validate_zone_for_state("5B", "ZZ")
 
     def test_invalid_zone_format_skips(self):
-        from ochre_next.data.resstock import _validate_zone_for_state
+        from hares.data.resstock import _validate_zone_for_state
 
         # Zone that doesn't start with a number — should skip silently.
         _validate_zone_for_state("ABC", "CO")
@@ -1142,7 +1150,7 @@ class TestValidateZoneForState:
 
 class TestValidateZoneForWeatherPath:
     def test_epw_match_passes(self, tmp_path: Path):
-        from ochre_next.data.resstock import _validate_zone_for_weather_path
+        from hares.data.resstock import _validate_zone_for_weather_path
 
         epw = tmp_path / "weather.epw"
         _make_epw_file(epw, "CO")
@@ -1150,7 +1158,7 @@ class TestValidateZoneForWeatherPath:
         _validate_zone_for_weather_path("5B", epw)
 
     def test_epw_mismatch_warns(self, tmp_path: Path):
-        from ochre_next.data.resstock import _validate_zone_for_weather_path
+        from hares.data.resstock import _validate_zone_for_weather_path
 
         epw = tmp_path / "weather.epw"
         _make_epw_file(epw, "CO")
@@ -1159,7 +1167,7 @@ class TestValidateZoneForWeatherPath:
             _validate_zone_for_weather_path("2A", epw)
 
     def test_non_epw_skips(self, tmp_path: Path):
-        from ochre_next.data.resstock import _validate_zone_for_weather_path
+        from hares.data.resstock import _validate_zone_for_weather_path
 
         csv = tmp_path / "weather.csv"
         csv.write_text("some,data")
@@ -1183,7 +1191,7 @@ class _FakeHTTPStatusError(Exception):
 class TestDownloadRetry:
     def test_download_retry_on_503(self, tmp_path: Path):
         """A 503 on the first two attempts followed by a 200 succeeds."""
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         zip_bytes = _make_zip()
         dest = tmp_path / "out.zip"
@@ -1207,7 +1215,7 @@ class TestDownloadRetry:
 
     def test_download_exhausts_retries(self, tmp_path: Path):
         """Persistent transient failure raises after exactly 3 attempts."""
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         dest = tmp_path / "out.zip"
         attempts: list[str] = []
@@ -1230,7 +1238,7 @@ class TestDownloadRetry:
 
     def test_download_no_retry_on_404(self, tmp_path: Path):
         """A permanent 404 fails immediately without retrying."""
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         dest = tmp_path / "out.zip"
         attempts: list[str] = []
@@ -1259,7 +1267,7 @@ class TestFleetResilience:
 
     def test_fleet_download_continues_after_building_failure(self, tmp_path: Path):
         """One failed building is skipped; the rest of the fleet is returned in order."""
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         meta = self._metadata_file(tmp_path, [1, 2, 3])
         good = _fake_fleet_building(tmp_path)
@@ -1282,7 +1290,7 @@ class TestFleetResilience:
         """Building 1 finishes only after building 2; the result still starts with 1."""
         import threading
 
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         meta = self._metadata_file(tmp_path, [1, 2, 3])
         good = _fake_fleet_building(tmp_path)
@@ -1308,7 +1316,7 @@ class TestFleetResilience:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ):
         """A failure after the download is reported as itself, not as a download failure."""
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         meta = self._metadata_file(tmp_path, [1, 2])
         good = _fake_fleet_building(tmp_path)
@@ -1320,7 +1328,7 @@ class TestFleetResilience:
 
         with (
             mock.patch.object(resstock, "fetch_resstock_building", side_effect=weather_fails),
-            caplog.at_level("ERROR", logger="ochre_next.data.resstock"),
+            caplog.at_level("ERROR", logger="hares.data.resstock"),
         ):
             resstock.fetch_resstock_fleet(meta, bldg_ids=[1, 2], cache_dir=tmp_path)
 
@@ -1331,7 +1339,7 @@ class TestFleetResilience:
 
     def test_an_unknown_version_is_refused_before_any_building_is_fetched(self, tmp_path: Path):
         """A mistyped dataset version fails the fetch instead of skipping every building."""
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         meta = self._metadata_file(tmp_path, [1, 2, 3])
 
@@ -1374,7 +1382,7 @@ class TestFleetResilience:
 class TestWeatherLock:
     def test_weather_cache_work_runs_under_the_fleet_weather_lock(self, tmp_path: Path):
         """Concurrent buildings share weather caches, so their cache work is serialised."""
-        from ochre_next.data import resstock
+        from hares.data import resstock
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_minimal_hpxml("G0800130"))
@@ -1398,7 +1406,7 @@ class TestWeatherLock:
 class TestZipIntegrity:
     def test_valid_zip_passes_testzip(self, tmp_path: Path):
         """_verify_zip returns without error for a valid ZIP."""
-        from ochre_next.data.resstock import _verify_zip
+        from hares.data.resstock import _verify_zip
 
         zip_path = tmp_path / "good.zip"
         zip_bytes = _make_zip()
@@ -1409,7 +1417,7 @@ class TestZipIntegrity:
 
     def test_truncated_zip_raises(self, tmp_path: Path):
         """_verify_zip raises ZipIntegrityError for a truncated ZIP."""
-        from ochre_next.data.resstock import ZipIntegrityError, _verify_zip
+        from hares.data.resstock import ZipIntegrityError, _verify_zip
 
         zip_path = tmp_path / "bad.zip"
         zip_bytes = _make_zip()
@@ -1421,7 +1429,7 @@ class TestZipIntegrity:
 
     def test_empty_file_raises(self, tmp_path: Path):
         """_verify_zip raises ZipIntegrityError for an empty file."""
-        from ochre_next.data.resstock import ZipIntegrityError, _verify_zip
+        from hares.data.resstock import ZipIntegrityError, _verify_zip
 
         zip_path = tmp_path / "empty.zip"
         zip_path.write_bytes(b"")
@@ -1431,14 +1439,14 @@ class TestZipIntegrity:
 
     def test_download_and_extract_valid_zip(self, tmp_path: Path):
         """_download_and_extract_zip downloads a valid ZIP and extracts it."""
-        from ochre_next.data.resstock import _download_and_extract_zip
+        from hares.data.resstock import _download_and_extract_zip
 
         zip_bytes = _make_zip()
         dest_dir = tmp_path / "extracted"
         url = "https://example.com/building.zip"
 
         with mock.patch(
-            "ochre_next.data.resstock._download_file",
+            "hares.data.resstock._download_file",
             side_effect=_fake_download(zip_bytes, tmp_path),
         ):
             _download_and_extract_zip(url, dest_dir)
@@ -1462,11 +1470,11 @@ class TestZipIntegrity:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file", side_effect=flaky_download
+                "hares.data.resstock._download_file", side_effect=flaky_download
             ),
-            mock.patch("ochre_next.data.resstock._wait_before_retry"),
+            mock.patch("hares.data.resstock._wait_before_retry"),
         ):
-            from ochre_next.data.resstock import _download_and_extract_zip
+            from hares.data.resstock import _download_and_extract_zip
 
             _download_and_extract_zip(url, dest_dir)
 
@@ -1482,11 +1490,11 @@ class TestZipIntegrity:
 class TestSha256Sidecar:
     def test_sidecar_hash_matches(self, tmp_path: Path):
         """_validate_cache_integrity returns True when sidecar matches."""
-        from ochre_next.data._checksum import (
+        from hares.data._checksum import (
             compute_sha256_hex,
             sha256_path,
         )
-        from ochre_next.data._checksum import (
+        from hares.data._checksum import (
             validate_cache_integrity as _validate_cache_integrity,
         )
 
@@ -1499,8 +1507,8 @@ class TestSha256Sidecar:
 
     def test_sidecar_hash_mismatch(self, tmp_path: Path):
         """_validate_cache_integrity returns False when sidecar mismatches."""
-        from ochre_next.data._checksum import sha256_path
-        from ochre_next.data._checksum import (
+        from hares.data._checksum import sha256_path
+        from hares.data._checksum import (
             validate_cache_integrity as _validate_cache_integrity,
         )
 
@@ -1512,7 +1520,7 @@ class TestSha256Sidecar:
 
     def test_no_sidecar_returns_true(self, tmp_path: Path):
         """_validate_cache_integrity returns True when no sidecar exists."""
-        from ochre_next.data._checksum import (
+        from hares.data._checksum import (
             validate_cache_integrity as _validate_cache_integrity,
         )
 
@@ -1523,10 +1531,10 @@ class TestSha256Sidecar:
 
     def test_remove_cache_with_sidecar(self, tmp_path: Path):
         """_remove_cache_with_sidecar deletes both file and sidecar."""
-        from ochre_next.data._checksum import (
+        from hares.data._checksum import (
             remove_cache_with_sidecar as _remove_cache_with_sidecar,
         )
-        from ochre_next.data._checksum import sha256_path
+        from hares.data._checksum import sha256_path
 
         f = tmp_path / "data.csv"
         f.write_text("data")
@@ -1546,7 +1554,7 @@ class TestSha256Sidecar:
 class TestWeatherCacheIntegrity:
     def test_csv_cache_reused_when_sidecar_matches(self, tmp_path: Path):
         """Weather CSV with valid sidecar is reused without re-download."""
-        from ochre_next.data._checksum import (
+        from hares.data._checksum import (
             write_sha256_sidecar as _write_sha256_sidecar,
         )
 
@@ -1565,10 +1573,10 @@ class TestWeatherCacheIntegrity:
             download_calls.append(url)
 
         with mock.patch(
-            "ochre_next.data.resstock._download_file",
+            "hares.data.resstock._download_file",
             side_effect=recording_download,
         ):
-            from ochre_next.data.resstock import (
+            from hares.data.resstock import (
                 WeatherFormat,
                 _fetch_weather,
                 _version_config,
@@ -1588,7 +1596,7 @@ class TestWeatherCacheIntegrity:
 
     def test_csv_re_downloaded_when_sidecar_mismatch(self, tmp_path: Path):
         """Weather CSV with mismatched sidecar triggers re-download."""
-        from ochre_next.data._checksum import sha256_path
+        from hares.data._checksum import sha256_path
 
         hpxml = tmp_path / "home.xml"
         hpxml.write_text(_minimal_hpxml("G0800130"))
@@ -1609,10 +1617,10 @@ class TestWeatherCacheIntegrity:
             download_calls.append(dest)
 
         with mock.patch(
-            "ochre_next.data.resstock._download_file",
+            "hares.data.resstock._download_file",
             side_effect=recording_download,
         ):
-            from ochre_next.data.resstock import (
+            from hares.data.resstock import (
                 WeatherFormat,
                 _fetch_weather,
                 _version_config,
@@ -1628,7 +1636,7 @@ class TestWeatherCacheIntegrity:
             )
 
         assert len(download_calls) == 1
-        from ochre_next.data._checksum import (
+        from hares.data._checksum import (
             validate_cache_integrity as _validate_cache_integrity,
         )
 
@@ -1636,7 +1644,7 @@ class TestWeatherCacheIntegrity:
 
     def test_no_sidecar_with_content_reuses_cache(self, tmp_path: Path):
         """A file with content >0 but no sidecar uses the cache."""
-        from ochre_next.data.resstock import (
+        from hares.data.resstock import (
             WeatherFormat,
             _fetch_weather,
             _version_config,
@@ -1656,7 +1664,7 @@ class TestWeatherCacheIntegrity:
             download_calls.append(url)
 
         with mock.patch(
-            "ochre_next.data.resstock._download_file",
+            "hares.data.resstock._download_file",
             side_effect=recording_download,
         ):
             cfg = _version_config(version)
@@ -1680,8 +1688,8 @@ class TestWeatherCacheIntegrity:
 class TestWeatherEpwIntegrity:
     def test_epw_cache_hit_with_valid_sidecar(self, tmp_path: Path):
         """get_epw_for_fips reuses cached EPW when SHA256 sidecar matches."""
-        from ochre_next.data._checksum import compute_sha256_hex, sha256_path
-        from ochre_next.data.weather import get_epw_for_fips
+        from hares.data._checksum import compute_sha256_hex, sha256_path
+        from hares.data.weather import get_epw_for_fips
 
         epw_dir = tmp_path / "BuildStock_TMY3_FIPS"
         epw_dir.mkdir(parents=True)
@@ -1695,8 +1703,8 @@ class TestWeatherEpwIntegrity:
 
     def test_epw_cache_mismatch_triggers_removal(self, tmp_path: Path):
         """get_epw_for_fips removes corrupted EPW when sidecar mismatches."""
-        from ochre_next.data._checksum import sha256_path
-        from ochre_next.data.weather import get_epw_for_fips
+        from hares.data._checksum import sha256_path
+        from hares.data.weather import get_epw_for_fips
 
         epw_dir = tmp_path / "BuildStock_TMY3_FIPS"
         epw_dir.mkdir(parents=True)
@@ -1705,7 +1713,7 @@ class TestWeatherEpwIntegrity:
         sha256_path(epw_path).write_text("0000000000000000000000000000000000000000\n")
 
         with mock.patch(
-            "ochre_next.data.weather._ensure_tmy3_zip_extracted",
+            "hares.data.weather._ensure_tmy3_zip_extracted",
             side_effect=lambda epw_d, cache_d: epw_path.write_text(
                 "LOCATION,City,CO,USA,TMY3,999999,39,-104,-7,1600\n"
             ),
@@ -1717,7 +1725,7 @@ class TestWeatherEpwIntegrity:
 
     def test_tmy3_zip_testzip_retries(self, tmp_path: Path):
         """_ensure_tmy3_zip_extracted retries ZIP download on corruption."""
-        from ochre_next.data import weather
+        from hares.data import weather
 
         epw_dir = tmp_path / "BuildStock_TMY3_FIPS"
         zip_bytes = _make_zip()
@@ -1752,14 +1760,14 @@ class TestWeatherEpwIntegrity:
 class TestBuildingCacheIntegrity:
     def test_sidecars_written_after_download_and_extract(self, tmp_path: Path):
         """_download_and_extract_zip writes .sha256 sidecars for extracted files."""
-        from ochre_next.data._checksum import sha256_path, validate_cache_integrity
-        from ochre_next.data.resstock import _download_and_extract_zip
+        from hares.data._checksum import sha256_path, validate_cache_integrity
+        from hares.data.resstock import _download_and_extract_zip
 
         zip_bytes = _make_zip()
         dest_dir = tmp_path / "extracted"
 
         with mock.patch(
-            "ochre_next.data.resstock._download_file",
+            "hares.data.resstock._download_file",
             side_effect=_fake_download(zip_bytes, tmp_path),
         ):
             _download_and_extract_zip("https://example.com/b.zip", dest_dir)
@@ -1775,8 +1783,8 @@ class TestBuildingCacheIntegrity:
 
     def test_cached_building_reused_when_sidecars_valid(self, tmp_path: Path):
         """fetch_resstock_building skips re-download when cached files pass SHA256."""
-        from ochre_next.data._checksum import write_sha256_sidecar
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data._checksum import write_sha256_sidecar
+        from hares.data.resstock import fetch_resstock_building
 
         bldg_dir = tmp_path / "2024.2" / "bldg0000001"
         bldg_dir.mkdir(parents=True)
@@ -1797,11 +1805,11 @@ class TestBuildingCacheIntegrity:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=record_download,
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -1814,7 +1822,7 @@ class TestBuildingCacheIntegrity:
 
     def test_corrupted_building_cache_detected_and_redownloaded(self, tmp_path: Path):
         """fetch_resstock_building re-downloads when cached files fail SHA256."""
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         zip_bytes = _make_zip(
             hpxml_content=_minimal_hpxml("G0800130"),
@@ -1849,11 +1857,11 @@ class TestBuildingCacheIntegrity:
 
         with (
             mock.patch(
-                "ochre_next.data.resstock._download_file",
+                "hares.data.resstock._download_file",
                 side_effect=record_download,
             ),
             mock.patch(
-                "ochre_next.data.weather.get_epw_for_fips",
+                "hares.data.weather.get_epw_for_fips",
                 return_value=dummy_epw,
             ),
         ):
@@ -1865,7 +1873,7 @@ class TestBuildingCacheIntegrity:
         zip_urls = [u for u in download_calls if u.endswith(".zip")]
         assert len(zip_urls) == 1
         # After re-download, sidecars should be valid.
-        from ochre_next.data._checksum import validate_cache_integrity
+        from hares.data._checksum import validate_cache_integrity
 
         assert validate_cache_integrity(result.hpxml_path) is True
         assert validate_cache_integrity(result.schedule_path) is True

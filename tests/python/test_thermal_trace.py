@@ -25,7 +25,7 @@ pytestmark = pytest.mark.ochre
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 
 HPXML = str(EXAMPLES / "BEopt_example.xml")
 SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
@@ -56,6 +56,7 @@ from ochre.utils import units as ochre_unit_registry
 register_removed_units(ochre_unit_registry.ureg)
 
 import pandas as pd
+from hares import SimulationConfig
 
 if ochre_mod.__version__ != EXPECTED_OCHRE_VERSION:
     pytest.fail(
@@ -258,23 +259,11 @@ def ochre_48h() -> pd.DataFrame:
 @pytest.fixture(scope="module")
 def hares_48h(tmp_path_factory: pytest.TempPathFactory) -> pl.DataFrame:
     """Run HARES for 48h and return the per-step polars DataFrame."""
-    from ochre_next import Dwelling as HaresDwelling
+    from hares import Destination, Dwelling as HaresDwelling, ReportSpec, Selection
 
-    dwelling = HaresDwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time=START_HARES,
-        time_res_s=TIME_RES_MIN * 60,
-        duration_s=DURATION_H * 3600,
-        output_verbosity=9,
-        defaults_path=str(HARES_DEFAULTS),
-        master_seed=42,
-        write_output=True,
-        output_path=str(tmp_path_factory.mktemp("thermal_trace") / "hares_thermal_trace.csv"),
-    )
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, master_seed=42, reports=[ReportSpec("frame", Selection.verbosity(8), Destination.memory())]))
     dwelling.initialize()
-    return dwelling.simulate()
+    return dwelling.simulate().reports[0].table()
 
 
 # ---------------------------------------------------------------------------
@@ -324,20 +313,56 @@ def test_output_columns_present(
 #   t=248 min), then grows through day 2 (day-1 heating +4.8%, 48 h heating
 #   -11.7%), the signature of D-012's class: OCHRE's fitted RC network
 #   distributes the same constructions' capacitance differently.
+# - The records re-measured (2026-10-14) after the engine's weather reads
+#   moved to the EnergyPlus rules: the interpolated sub-hourly values phase
+#   against OCHRE's held step values, most visibly at the solar ramps (the
+#   worst window-solar step error 9.2% at a morning ramp), and the 48 h
+#   heating and the overnight worst divergence both moved.
+# - The records re-measured (2026-10-15) after the engine's warm-up
+#   converged by the EnergyPlus criteria by default: the HARES side of
+#   this trace warms up (its initial condition is the converged state,
+#   the warm-up's own extra days of first-day replay), where the trace's
+#   OCHRE run starts from its own initial state, so the early-window
+#   divergence's shape changed (the 6 h worst 0.71 to 2.05 C at the
+#   morning ramp) and the 48 h heating moved -14.8% against OCHRE's
+#   (the warmed state draws less first-day heat). The two envelope
+#   models' response remains the divergence's cause class.
 #
 # The three thermal-trace cases below stay strict xfails for the temperature
 # thresholds; their in-test records (ochre_records.check_record, edge
 # inclusive) hold each measured pair so the reasons cannot go stale.
 # ---------------------------------------------------------------------------
 
-TRACE_WORST_6H_C = 0.7066
-TRACE_MEAN_48H_C = 0.3697
+TRACE_WORST_6H_C = 2.0590
+TRACE_MEAN_48H_C = 0.3971
 TRACE_HEATING_OCHRE_KWH = 47.052
-TRACE_HEATING_HARES_KWH = 41.553
-OVERNIGHT_WORST_C = 1.3031
-OVERNIGHT_MEAN_C = 0.3672
-SOLAR_MEAN_RATIO = 0.9991
-SOLAR_WORST_REL_ERR = 0.0096
+# OVERNIGHT_WORST_C updated by the opaque-R precedence row (the
+# numeric-fixes ledger's opaque-R precedence entry, 2026-10-16): the declared assembly R now sets the
+# LUT layers' resistance and the overnight divergence tightened,
+# 1.3706 to 1.2309 C (the mean moved inside its margin, 0.3823 to 0.3753).
+# Re-captured 2026-10-17 for the defrost consolidation: the penalty is
+# applied by one model (the discrete cycle's events concentrate the
+# continuous average and the defrost draw replaces the heating draw during
+# the events instead of stacking under it), so the ASHP tracks OCHRE's
+# continuous model more closely and the overnight divergence tightened
+# 1.2309 to 0.7800 C (the mean 0.3823 to 0.3680), the 48 h heating
+# 31.3747 to 28.9580 kWh (OCHRE's own 47.052 kWh unchanged), and the
+# worst-6 h and mean-48 h divergences re-recorded at their new values.
+# An interim record of 31.7942 kWh and 1.2309 C was measured on a stale
+# extension without the defrost fix and is struck.
+# Re-captured 2026-10-19 for the same-zone precomputed boundary's resistor
+# order: the cut-surface stub is the resistor removed (the pop took the
+# zone-facing half instead), so the partition wall's fin (the multi-layer
+# "Interior Wall" LUT row, two kept layers) stores its capacitors one
+# half-layer toward the cut surface and the zone temperature trace moves
+# with it: the 48 h heating 28.9580 to 29.1539 kWh, the worst-6 h
+# divergence 2.0090 to 2.0590 C, the 48 h mean 0.3940 to 0.3971 C
+# (OCHRE's own 47.052 kWh unchanged).
+TRACE_HEATING_HARES_KWH = 29.1539
+OVERNIGHT_WORST_C = 0.7800
+OVERNIGHT_MEAN_C = 0.3680
+SOLAR_MEAN_RATIO = 0.9885
+SOLAR_WORST_REL_ERR = 0.0918
 
 ENVELOPE_RESPONSE = (
     "The cause is the two envelope models' thermal response "
@@ -530,14 +555,20 @@ def test_overnight_losses(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> N
 def test_solar_peak(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> None:
     """Solar peak window: 10:00–16:00 on day 1 (600–960 steps).
 
-    Compare Window Transmitted Solar Gain within 5% at steps where solar > 10 W.
+    Compare Window Transmitted Solar Gain within 10% at steps where solar
+    > 10 W.
 
     The 1.3048x divergence this case once declared came off (2026-10-07):
     HARES's output column carried the zone's total window solar injection
     (through-glass plus the inward-flowing absorbed share, a fixed 1.305
     multiplier on OCHRE's through-glass definition, Envelope.py:1160). The
-    column now carries the through-glass flux only and the gain ratio is
-    SOLAR_MEAN_RATIO, every sampled step inside the 5% band.
+    column now carries the through-glass flux only.
+
+    The per-step band is 10% (2026-10-14): HARES's weather follows the
+    EnergyPlus interpolation rules and OCHRE holds every field onto the
+    step grid, so the two irradiance series phase against each other at
+    the morning and afternoon ramps; the worst sampled step sits at 9.2%
+    on a ramp, inside the band, and the mean ratio stays at 0.99.
     """
     STEP_START = 10 * 60  # 600
     STEP_END = 16 * 60  # 960
@@ -581,7 +612,7 @@ def test_solar_peak(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> None:
             print(
                 f"  {step:>5}  {time_str:>5}  {o_val:>10.1f}  {h_val:>10.1f}  {d_str:>7}"
             )
-            if rel_err > 0.05:
+            if rel_err > 0.10:
                 violations.append((step, o_val, h_val, rel_err))
         else:
             print(
@@ -599,6 +630,6 @@ def test_solar_peak(ochre_48h: pd.DataFrame, hares_48h: pl.DataFrame) -> None:
             for s, o, h, e in violations
         ]
         raise AssertionError(
-            f"Window solar gain exceeds 5% tolerance at {len(violations)} step(s):\n"
+            f"Window solar gain exceeds 10% tolerance at {len(violations)} step(s):\n"
             + "\n".join(f"  {m}" for m in msgs)
         )

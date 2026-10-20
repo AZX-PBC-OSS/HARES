@@ -7,9 +7,9 @@ use crate::pv::array_config::PvArraySpec;
 
 /// Typed configuration for a photovoltaic system.
 ///
-/// Supports both single-array (via the top-level `capacity_kw`, `tilt_deg`,
+/// Supports both single-array (via the top-level `capacity_w`, `tilt_deg`,
 /// `azimuth_deg` fields) and multi-array configurations (via the optional
-/// `arrays` field). When `arrays` is present and non-empty, `capacity_kw`
+/// `arrays` field). When `arrays` is present and non-empty, `capacity_w`
 /// must equal the sum of per-array capacities; other top-level singular
 /// fields are ignored in favour of the per-array specs.
 ///
@@ -32,12 +32,21 @@ pub struct PvConfig {
     pub equipment_id: Option<u32>,
     pub zone_id: Option<u16>,
 
-    // DC capacity of the array (single-array path)
-    pub capacity_kw: f64,
+    // DC capacity of the array (single-array path), in W (SI)
+    pub capacity_w: f64,
 
     // Array geometry (single-array path)
     pub tilt_deg: Option<f64>,
     pub azimuth_deg: Option<f64>,
+
+    /// The envelope boundary index of the roof this array attaches to, so
+    /// its collector area shades that roof's solar gains. Decided at
+    /// assembly by the attachment rule (the roof's orientation read from
+    /// the envelope's registered surface geometry); `None` when the array
+    /// matched no roof. The multi-array path carries the attachment on
+    /// each [`PvArraySpec`] instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_boundary_id: Option<u32>,
 
     // Module characteristics
     pub module_type: Option<String>,
@@ -47,7 +56,7 @@ pub struct PvConfig {
 
     // Inverter
     pub inverter_efficiency: Option<f64>,
-    pub inverter_capacity_kw: Option<f64>,
+    pub inverter_capacity_w: Option<f64>,
 
     // AC output
     pub power_factor: Option<f64>,
@@ -69,7 +78,7 @@ pub struct PvConfig {
     /// Per-array configuration for multi-array systems.
     ///
     /// When present and non-empty, each entry maps to one `PvArray`.
-    /// The top-level `capacity_kw` must equal the sum of per-array
+    /// The top-level `capacity_w` must equal the sum of per-array
     /// capacities; other top-level singular fields (`tilt_deg`,
     /// `azimuth_deg`, `module_type`, `noct_c`, `sam_lut_path`) are
     /// ignored in favour of the per-array specs. A multi-array PV is not
@@ -142,7 +151,7 @@ impl PvConfig {
         use hares_types::HaresError;
 
         // Validate per-array specs when multi-array config is present.
-        let total_capacity_kw = if let Some(ref arrays) = self.arrays {
+        let total_capacity_w = if let Some(ref arrays) = self.arrays {
             if arrays.is_empty() {
                 return Err(HaresError::Equipment(
                     "PV arrays list is empty; supply at least one array spec".to_string(),
@@ -152,20 +161,20 @@ impl PvConfig {
                 spec.validate()
                     .map_err(|e| HaresError::Equipment(format!("PV array[{i}]: {e}")))?;
             }
-            let sum: f64 = arrays.iter().map(|a| a.capacity_kw).sum();
-            if (self.capacity_kw - sum).abs() > 0.001 {
+            let sum: f64 = arrays.iter().map(|a| a.capacity_w).sum();
+            if (self.capacity_w - sum).abs() > 0.001 {
                 return Err(HaresError::Equipment(format!(
-                    "PV capacity_kw ({}) does not match sum of array capacities ({}); \
-                     set capacity_kw to the total or drop the field",
-                    self.capacity_kw, sum
+                    "PV capacity_w ({}) does not match sum of array capacities ({}); \
+                     set capacity_w to the total or drop the field",
+                    self.capacity_w, sum
                 )));
             }
             sum
         } else {
             // Single-array path: validate the top-level singular fields.
-            if !self.capacity_kw.is_finite() || self.capacity_kw <= 0.0 {
+            if !self.capacity_w.is_finite() || self.capacity_w <= 0.0 {
                 return Err(HaresError::Equipment(
-                    "PV capacity_kw must be finite and > 0".to_string(),
+                    "PV capacity_w must be finite and > 0".to_string(),
                 ));
             }
             if let Some(tilt) = self.tilt_deg {
@@ -184,7 +193,7 @@ impl PvConfig {
                     "PV azimuth_deg must be finite and within [0, 360)".to_string(),
                 ));
             }
-            self.capacity_kw
+            self.capacity_w
         };
 
         for (name, val) in [
@@ -206,18 +215,18 @@ impl PvConfig {
                 "PV system_losses_fraction must be finite and within [0, 1)".to_string(),
             ));
         }
-        if let Some(cap) = self.inverter_capacity_kw
+        if let Some(cap) = self.inverter_capacity_w
             && (!cap.is_finite() || cap <= 0.0)
         {
             return Err(HaresError::Equipment(
-                "PV inverter_capacity_kw must be finite and > 0".to_string(),
+                "PV inverter_capacity_w must be finite and > 0".to_string(),
             ));
         }
-        if let Some(inv_cap) = self.inverter_capacity_kw {
+        if let Some(inv_cap) = self.inverter_capacity_w {
             // Typical residential DC-to-AC ratios: 1.0–1.5 (NREL SAM documentation;
             // EnergyPlus PVWatts v8 default = 1.1, PVWatts.cc:88). [0.8, 2.0] is a
             // generous acceptance window that rejects clearly pathological configs.
-            let dc_ac_ratio = total_capacity_kw / inv_cap;
+            let dc_ac_ratio = total_capacity_w / inv_cap;
             if !(0.8..=2.0).contains(&dc_ac_ratio) {
                 return Err(HaresError::Equipment(format!(
                     "PV DC-to-AC ratio {dc_ac_ratio:.2} is outside reasonable range [0.8, 2.0]"
@@ -228,6 +237,136 @@ impl PvConfig {
     }
 }
 
+/// The the PV system's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for PvConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the array's rated capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "tilt_deg",
+                hares_types::FieldMeta {
+                    description: Some("the array's tilt from horizontal, degrees"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "azimuth_deg",
+                hares_types::FieldMeta {
+                    description: Some("the array's azimuth, degrees"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "attached_boundary_id",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the envelope boundary index of the roof the array \
+                         attaches to, decided at assembly by the attachment \
+                         rule; absent when the array matched no roof",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "module_type",
+                hares_types::FieldMeta {
+                    description: Some("the module type"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "noct_c",
+                hares_types::FieldMeta {
+                    description: Some("the module's nominal operating cell temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "array_type",
+                hares_types::FieldMeta {
+                    description: Some("the array's mounting type"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "system_losses_fraction",
+                hares_types::FieldMeta {
+                    description: Some("the system's loss fraction"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inverter_efficiency",
+                hares_types::FieldMeta {
+                    description: Some("the inverter's efficiency"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "inverter_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the inverter's capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "power_factor",
+                hares_types::FieldMeta {
+                    description: Some("the power factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "surface_resolution_deg",
+                hares_types::FieldMeta {
+                    description: Some("the surface sampling's resolution, degrees"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "sam_lut_path",
+                hares_types::FieldMeta {
+                    description: Some("the SAM lookup table's path"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "soiling",
+                hares_types::FieldMeta {
+                    description: Some("the soiling loss configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "arrays",
+                hares_types::FieldMeta {
+                    description: Some("the array's sub-arrays"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,15 +377,16 @@ mod tests {
         PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw: 5.0,
+            capacity_w: 5.0,
             tilt_deg: None,
             azimuth_deg: None,
+            attached_boundary_id: None,
             module_type: None,
             noct_c: None,
             array_type: None,
             system_losses_fraction: None,
             inverter_efficiency: None,
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
@@ -255,9 +395,9 @@ mod tests {
         }
     }
 
-    fn array(capacity_kw: f64, tilt_deg: Option<f64>, azimuth_deg: Option<f64>) -> PvArraySpec {
+    fn array(capacity_w: f64, tilt_deg: Option<f64>, azimuth_deg: Option<f64>) -> PvArraySpec {
         PvArraySpec {
-            capacity_kw,
+            capacity_w,
             tilt_deg,
             azimuth_deg,
             module_type: None,
@@ -340,7 +480,7 @@ mod tests {
             .unwrap();
         assert!(ec.is_typed());
         let recovered: PvConfig = ec.typed().unwrap();
-        assert_eq!(recovered.capacity_kw, cfg.capacity_kw);
+        assert_eq!(recovered.capacity_w, cfg.capacity_w);
     }
 
     #[test]
@@ -376,7 +516,7 @@ mod tests {
     #[test]
     fn pv_config_rejects_unknown_fields() {
         let json = serde_json::json!({
-            "capacity_kw": 5.0,
+            "capacity_w": 5.0,
             "not_a_field": true
         });
         let ec = EquipmentConfig::with_payload(
@@ -396,7 +536,7 @@ mod tests {
     #[test]
     fn pv_config_validate_rejects_zero_capacity() {
         let mut cfg = minimal_pv_config();
-        cfg.capacity_kw = 0.0;
+        cfg.capacity_w = 0.0;
         assert!(cfg.validate().is_err());
     }
 
@@ -423,8 +563,8 @@ mod tests {
     #[test]
     fn pv_config_validate_rejects_high_dc_ac_ratio() {
         let mut cfg = minimal_pv_config();
-        cfg.capacity_kw = 10.0;
-        cfg.inverter_capacity_kw = Some(0.4);
+        cfg.capacity_w = 10.0;
+        cfg.inverter_capacity_w = Some(0.4);
         // ratio = 25.0, well above the 2.0 upper bound
         assert!(cfg.validate().is_err());
     }
@@ -432,8 +572,8 @@ mod tests {
     #[test]
     fn pv_config_validate_rejects_low_dc_ac_ratio() {
         let mut cfg = minimal_pv_config();
-        cfg.capacity_kw = 1.0;
-        cfg.inverter_capacity_kw = Some(100.0);
+        cfg.capacity_w = 1.0;
+        cfg.inverter_capacity_w = Some(100.0);
         // ratio = 0.01, well below the 0.8 lower bound
         assert!(cfg.validate().is_err());
     }
@@ -441,8 +581,8 @@ mod tests {
     #[test]
     fn pv_config_validate_accepts_reasonable_dc_ac_ratio() {
         let mut cfg = minimal_pv_config();
-        cfg.capacity_kw = 5.0;
-        cfg.inverter_capacity_kw = Some(4.0);
+        cfg.capacity_w = 5.0;
+        cfg.inverter_capacity_w = Some(4.0);
         // ratio = 1.25, within [0.8, 2.0]
         assert!(cfg.validate().is_ok());
     }
@@ -455,7 +595,7 @@ mod tests {
         let cfg = PvConfig {
             arrays: Some(vec![
                 PvArraySpec {
-                    capacity_kw: 3.0,
+                    capacity_w: 3.0,
                     tilt_deg: Some(30.0),
                     azimuth_deg: Some(180.0),
                     module_type: None,
@@ -465,7 +605,7 @@ mod tests {
                     attached_boundary_id: None,
                 },
                 PvArraySpec {
-                    capacity_kw: 2.0,
+                    capacity_w: 2.0,
                     tilt_deg: Some(20.0),
                     azimuth_deg: Some(90.0),
                     module_type: None,
@@ -492,7 +632,7 @@ mod tests {
         use crate::pv::array_config::PvArraySpec;
         let mut cfg = minimal_pv_config();
         cfg.arrays = Some(vec![PvArraySpec {
-            capacity_kw: 0.0,
+            capacity_w: 0.0,
             tilt_deg: None,
             azimuth_deg: None,
             module_type: None,
@@ -509,11 +649,11 @@ mod tests {
     fn multi_array_dc_ac_ratio_uses_total_capacity() {
         use crate::pv::array_config::PvArraySpec;
         let mut cfg = minimal_pv_config();
-        cfg.capacity_kw = 6.0;
-        cfg.inverter_capacity_kw = Some(4.0);
+        cfg.capacity_w = 6.0;
+        cfg.inverter_capacity_w = Some(4.0);
         cfg.arrays = Some(vec![
             PvArraySpec {
-                capacity_kw: 3.0,
+                capacity_w: 3.0,
                 tilt_deg: None,
                 azimuth_deg: None,
                 module_type: None,
@@ -523,7 +663,7 @@ mod tests {
                 attached_boundary_id: None,
             },
             PvArraySpec {
-                capacity_kw: 3.0,
+                capacity_w: 3.0,
                 tilt_deg: None,
                 azimuth_deg: None,
                 module_type: None,
@@ -541,10 +681,10 @@ mod tests {
     fn multi_array_rejects_capacity_mismatch() {
         use crate::pv::array_config::PvArraySpec;
         let mut cfg = minimal_pv_config();
-        cfg.capacity_kw = 10.0;
+        cfg.capacity_w = 10.0;
         cfg.arrays = Some(vec![
             PvArraySpec {
-                capacity_kw: 3.0,
+                capacity_w: 3.0,
                 tilt_deg: None,
                 azimuth_deg: None,
                 module_type: None,
@@ -554,7 +694,7 @@ mod tests {
                 attached_boundary_id: None,
             },
             PvArraySpec {
-                capacity_kw: 2.0,
+                capacity_w: 2.0,
                 tilt_deg: None,
                 azimuth_deg: None,
                 module_type: None,
@@ -564,7 +704,7 @@ mod tests {
                 attached_boundary_id: None,
             },
         ]);
-        // capacity_kw = 10.0 but arrays sum to 5.0 → must be rejected
+        // capacity_w = 10.0 but arrays sum to 5.0 → must be rejected
         let err = cfg.validate().unwrap_err();
         assert!(
             err.to_string()
@@ -576,10 +716,10 @@ mod tests {
     fn multi_array_round_trips_via_equipment_config() {
         use crate::pv::array_config::PvArraySpec;
         let cfg = PvConfig {
-            capacity_kw: 6.0,
+            capacity_w: 6.0,
             arrays: Some(vec![
                 PvArraySpec {
-                    capacity_kw: 4.0,
+                    capacity_w: 4.0,
                     tilt_deg: Some(30.0),
                     azimuth_deg: Some(180.0),
                     module_type: Some("standard".to_string()),
@@ -589,7 +729,7 @@ mod tests {
                     attached_boundary_id: None,
                 },
                 PvArraySpec {
-                    capacity_kw: 2.0,
+                    capacity_w: 2.0,
                     tilt_deg: Some(20.0),
                     azimuth_deg: Some(90.0),
                     module_type: Some("premium".to_string()),
@@ -608,8 +748,8 @@ mod tests {
         let recovered: PvConfig = ec.typed().unwrap();
         let arrays = recovered.arrays.unwrap();
         assert_eq!(arrays.len(), 2);
-        assert_eq!(arrays[0].capacity_kw, 4.0);
-        assert_eq!(arrays[1].capacity_kw, 2.0);
+        assert_eq!(arrays[0].capacity_w, 4.0);
+        assert_eq!(arrays[1].capacity_w, 2.0);
         assert_eq!(arrays[0].tilt_deg, Some(30.0));
         assert_eq!(arrays[1].tilt_deg, Some(20.0));
     }

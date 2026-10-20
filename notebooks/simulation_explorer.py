@@ -96,7 +96,7 @@ def _building_resolver(
             kind="info",
         )
     elif building_source.value == "resstock":
-        from ochre_next.data.resstock import fetch_resstock_building
+        from hares.data.resstock import fetch_resstock_building
 
         with mo.status.spinner(title="Fetching ResStock building from OEDI S3..."):
             _bldg = fetch_resstock_building(
@@ -113,6 +113,9 @@ def _building_resolver(
         )
     else:
         mo.stop(True, mo.callout(mo.md("Select a building source."), kind="neutral"))
+        # mo.stop raises; the raise tells the type checker the branch ends here,
+        # so the variables the branches bind are never read unbound.
+        raise AssertionError("unreachable: mo.stop raises")
 
     return bldg_hpxml, bldg_schedule, bldg_weather, bldg_label
 
@@ -358,15 +361,19 @@ def _run_simulation(
 ):
     mo.stop(not run_btn.value)
 
-    from ochre_next import (
-        Dwelling,
+    from typing import Any, cast
+
+    from hares import (
+        Destination,
+        EV,
         PV,
         Battery,
-        EV,
-        ControlSignal,
-        BmsMode,
-        VehicleId,
+        Dwelling,
         EvArchetypeId,
+        ReportSpec,
+        Selection,
+        SimulationConfig,
+        VehicleId,
     )
 
     _SEASON_DATES: dict[str, str] = {
@@ -412,27 +419,31 @@ def _run_simulation(
                 hpxml,
                 schedule,
                 weather,
-                start_time=f"{start_date}T00:00:00",
-                duration_s=duration_days * 86400,
-                time_res_s=time_res_s,
-                defaults_path=defaults,
+                SimulationConfig(
+                    start_time=f"{start_date}T00:00:00",
+                    duration=duration_days * 86400,
+                    time_res=time_res_s,
+                    master_seed=seed_val,
+                    reports=[
+                        ReportSpec("frame", Selection.verbosity(3), Destination.memory())
+                    ],
+                ),
+                defaults=defaults,
                 bldg_id=42,
-                master_seed=seed_val,
-                output_verbosity=3,
             )
             dw.initialize()
 
             # --- PV ---
-            pv_info: dict[str, object] = {}
+            pv_info: dict[str, float | str | bool] = {}
             if pv_mode_val == "auto":
                 candidates = dw.pv_candidates()
                 if candidates:
                     best = candidates[0]
-                    pv_obj = PV("PV", best.max_capacity_kw, best.tilt_deg, best.azimuth_deg)
+                    pv_obj = PV("PV", capacity_w=best.max_capacity_w, tilt=best.tilt_deg, azimuth=best.azimuth_deg)
                     dw.add_pv(pv_obj)
                     pv_info = {
                         "enabled": True,
-                        "kw": best.max_capacity_kw,
+                        "w": best.max_capacity_w,
                         "tilt": best.tilt_deg,
                         "azimuth": best.azimuth_deg,
                         "source": "auto",
@@ -440,7 +451,7 @@ def _run_simulation(
                 else:
                     pv_info = {"enabled": False, "source": "auto", "reason": "no viable roof plane"}
             elif pv_mode_val == "manual":
-                dw.add_pv(PV("PV", pv_kw, pv_tilt_deg, pv_az_deg))
+                dw.add_pv(PV("PV", capacity_w=pv_kw * 1000.0, tilt=pv_tilt_deg, azimuth=pv_az_deg))
                 pv_info = {
                     "enabled": True,
                     "kw": pv_kw,
@@ -454,15 +465,17 @@ def _run_simulation(
             bat_name: str | None = None
             bat_charge_kw = bat_max_kw
             bat_discharge_kw = bat_max_kw
+            bat_charge_w = bat_charge_kw * 1000.0
+            bat_discharge_w = bat_discharge_kw * 1000.0
             if bat_mode_val == "catalog":
                 bat_obj = Battery.by_product_id(bat_product_val)
                 dw.add_battery(bat_obj)
-                bat_charge_kw = float(bat_obj.max_charge_kw or 5.0)
-                bat_discharge_kw = float(bat_obj.max_discharge_kw or 5.0)
+                bat_charge_kw = float(bat_obj.max_charge_w or 5000.0) / 1000.0
+                bat_discharge_kw = float(bat_obj.max_discharge_w or 5000.0) / 1000.0
                 bat_info = {
                     "enabled": True,
                     "product": bat_product_val,
-                    "kwh": bat_obj.capacity_kwh,
+                    "kwh": bat_obj.capacity_j / 3.6e6,
                     "max_kw": bat_charge_kw,
                     "chemistry": str(bat_obj.chemistry),
                     "control": bat_control_val,
@@ -470,7 +483,7 @@ def _run_simulation(
                 }
                 bat_name = bat_obj.name
             elif bat_mode_val == "manual":
-                bat_obj = Battery("Battery", bat_kwh, max_charge_kw=bat_max_kw, max_discharge_kw=bat_max_kw)
+                bat_obj = Battery("Battery", capacity_j=bat_kwh * 3.6e6, max_charge_w=bat_max_kw * 1000.0, max_discharge_w=bat_max_kw * 1000.0)
                 dw.add_battery(bat_obj)
                 bat_info = {
                     "enabled": True,
@@ -489,8 +502,8 @@ def _run_simulation(
                         "target": bat_name,
                         "mode": bat_control_val,
                         "grid_export_rule": bat_export_val,
-                        "max_charge_kw": bat_charge_kw,
-                        "max_discharge_kw": bat_discharge_kw,
+                        "max_charge_w": bat_charge_w,
+                        "max_discharge_w": bat_discharge_w,
                         "steps_per_day": 86400.0 / time_res_s,
                     },
                 )
@@ -508,7 +521,7 @@ def _run_simulation(
                     "source": "archetype",
                 }
             elif ev_mode_val == "manual":
-                ev_obj = EV("EV", capacity_kwh=ev_kwh, max_charging_kw=ev_kw)
+                ev_obj = EV("EV", capacity_j=ev_kwh * 3.6e6, max_charging_power_w=ev_kw * 1000.0)
                 dw.add_ev(ev_obj)
                 ev_info = {
                     "enabled": True,
@@ -517,7 +530,9 @@ def _run_simulation(
                     "source": "manual",
                 }
 
-            hares_df = dw.simulate()
+            # simulate() returns the run's RunResult; the results panel
+            # reads the frame off the memory report's table().
+            hares_df = dw.simulate().reports[0].table()
 
         ochre_df = None
         if do_ochre:
@@ -525,18 +540,18 @@ def _run_simulation(
             with mo.status.spinner(title="Running OCHRE comparison..."):
                 if vendor_ochre not in sys.path:
                     sys.path.insert(0, vendor_ochre)
-                from ochre import Dwelling as OchreDwelling  # type: ignore[import-not-found]
+                from ochre import Dwelling as OchreDwelling
 
                 _ochre_equip: dict[str, dict] = {}
                 if pv_info.get("enabled"):
-                    _pv_kw = pv_info["kw"]
-                    _pv_az_hpxml = pv_info.get("azimuth", 180)
+                    _pv_kw = float(pv_info["kw"])
+                    _pv_az_hpxml = float(pv_info.get("azimuth", 180))
                     _ochre_az = (_pv_az_hpxml - 180) % 360
                     if _ochre_az > 180:
                         _ochre_az -= 360
                     _ochre_equip["PV"] = {
                         "capacity": _pv_kw,
-                        "tilt": pv_info.get("tilt", 26),
+                        "tilt": float(pv_info.get("tilt", 26)),
                         "azimuth": _ochre_az,
                         "inverter_capacity": _pv_kw / 1.2,
                     }
@@ -561,7 +576,10 @@ def _run_simulation(
                     save_results=False,
                     Equipment=_ochre_equip,
                 )
-                _pdf, _, _ = _ochre_dw.simulate()
+                # The vendored OCHRE is untyped source: its simulate() returns
+                # (DataFrame, ..., ...); the cast names that for the checker.
+                _sim = cast(Any, _ochre_dw.simulate())
+                _pdf = _sim[0]
                 ochre_df = pl.from_pandas(_pdf.reset_index())
 
         sim_meta = {
@@ -620,7 +638,7 @@ def _visualizations(
     bldg_weather,
     go, make_subplots, pl,
 ):
-    from ochre_next import parse_epw
+    from hares import parse_epw
 
     _step_hours = sim_meta["time_res_s"] / 3600.0
     _duration_days = sim_meta["duration_days"]
@@ -1047,8 +1065,8 @@ def _visualizations(
 
 
 @app.cell
-def _show_results(results_tabs):
-    results_tabs
+def _show_results(mo, results_tabs):
+    mo.output.replace(results_tabs)
 
 
 if __name__ == "__main__":

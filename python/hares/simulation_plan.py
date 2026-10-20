@@ -1,0 +1,174 @@
+"""Multi-segment dwelling simulation with equipment swapping between time windows."""
+
+from __future__ import annotations
+
+import warnings
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+import polars as pl
+
+from hares import Dwelling, DwellingBlueprint, SimulationConfig
+
+
+def _noop(_bp: DwellingBlueprint) -> None:
+    """No-op setup callback for SimulationSegment default."""
+    pass
+
+
+@dataclass
+class SimulationSegment:
+    start: datetime
+    end: datetime
+    setup: Callable[[DwellingBlueprint], None] = field(
+        default=_noop, repr=False, compare=False
+    )
+    post_build: Callable[[Dwelling], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    @property
+    def duration_s(self) -> int:
+        return int((self.end - self.start).total_seconds())
+
+
+class SimulationPlan:
+    def __init__(
+        self,
+        hpxml: str,
+        schedule: str,
+        weather: str,
+        *,
+        defaults: str | None = None,
+        bldg_id: int = 0,
+        time_res_s: int = 300,
+        verbosity: int = 0,
+        master_seed: int = 42,
+        **extra_kwargs: Any,
+    ):
+        self.hpxml = hpxml
+        self.schedule = schedule
+        self.weather = weather
+        # Every simulation-level field rides on the one SimulationConfig the
+        # constructor builds, so a plan can configure recording and the
+        # warm-up like any other caller (warmup=None disables; the default
+        # converges). A caller can still pass `reports` explicitly through
+        # extra_kwargs.
+        self._sim_kwargs: dict[str, Any] = {
+            "time_res": time_res_s,
+            "master_seed": master_seed,
+            **extra_kwargs,
+        }
+        if "reports" not in self._sim_kwargs:
+            from hares import Destination, ReportSpec, Selection
+
+            self._sim_kwargs["reports"] = [
+                ReportSpec("frame", Selection.verbosity(verbosity), Destination.memory())
+            ]
+        self.base_kwargs: dict[str, Any] = {
+            "defaults": defaults,
+            "bldg_id": bldg_id,
+        }
+        self.segments: list[SimulationSegment] = []
+
+        DwellingBlueprint.from_hpxml(
+            hpxml, schedule, weather,
+            config=self._config("2000-01-01T00:00:00", time_res_s),
+            **self.base_kwargs,
+        )
+
+    def _config(self, start_time: str, duration_s: int, **extra: Any) -> SimulationConfig:
+        return SimulationConfig(
+            start_time=start_time,
+            duration=duration_s,
+            **{**self._sim_kwargs, **extra},
+        )
+
+    def add_segment(
+        self,
+        start: datetime,
+        end: datetime,
+        setup: Callable[[DwellingBlueprint], None] | None = None,
+        post_build: Callable[[Dwelling], None] | None = None,
+    ) -> None:
+        self.segments.append(
+            SimulationSegment(start, end, setup or _noop, post_build=post_build)
+        )
+
+    def run(self) -> pl.DataFrame:
+        if not self.segments:
+            raise ValueError("SimulationPlan has no segments")
+
+        all_frames: list[pl.DataFrame] = []
+        checkpoint = None
+
+        for i, seg in enumerate(self.segments):
+            kwargs = dict(self.base_kwargs)
+            # The warm-up rides the segment's config: disabled for segments
+            # 1+, where after segment 0's warmup restore_building_state
+            # transfers the thermal state forward, so re-initialization is
+            # unnecessary and would be discarded by the transfer.
+            warmup_kw: dict[str, Any] = {"warmup": None} if i > 0 else {}
+
+            bp = DwellingBlueprint.from_hpxml(
+                self.hpxml,
+                self.schedule,
+                self.weather,
+                config=self._config(seg.start.isoformat(), seg.duration_s, **warmup_kw),
+                **kwargs,
+            )
+            seg.setup(bp)
+            dw = bp.build()
+
+            if checkpoint is not None:
+                dw.restore_building_state(checkpoint)
+
+            if seg.post_build is not None:
+                seg.post_build(dw)
+
+            # initialize() snapshots the post-restore state as the "initial"
+            # state for this segment, ensuring the first step() call sees
+            # correct equipment core outputs from the transferred state.
+            try:
+                dw.initialize()
+                for _ in dw.timesteps():
+                    dw.step()
+            except Exception as e:
+                warnings.warn(
+                    f"Segment {i} failed: {e} — re-raising so caller can "
+                    "decide how to handle the failure",
+                    stacklevel=2,
+                )
+                raise
+
+            # The frame is the RunResult's: finish() finalises the segment
+            # (billing, flush, publish) and the memory report's table is
+            # the segment's frame.
+            run_result = dw.finish()
+            memory_reports = [
+                report for report in run_result.reports if report.path is None
+            ]
+            if not memory_reports:
+                raise ValueError(
+                    "the segment's config declares no Memory report: the plan's "
+                    "frame comes from a Memory report's retained batches; add a "
+                    "Destination.memory() report to SimulationConfig(reports=[...])"
+                )
+            df: pl.DataFrame = memory_reports[0].table()
+            if not df.is_empty():
+                df = df.with_columns(pl.lit(i).alias("segment"))
+                all_frames.append(df)
+            else:
+                warnings.warn(
+                    f"Segment {i} produced no results — "
+                    "this may indicate a simulation error",
+                    stacklevel=2,
+                )
+
+            checkpoint = dw.save_checkpoint()
+
+        if not all_frames:
+            raise RuntimeError("No simulation results produced")
+        return pl.concat(all_frames)

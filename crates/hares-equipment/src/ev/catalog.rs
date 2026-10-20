@@ -116,23 +116,44 @@ pub struct VehicleSpec {
     /// Sourced from fueleconomy.gov combined kWh/100mi ÷ 100 for BEVs,
     /// fueleconomy.gov MPGe → 33.7/MPGe for PHEVs with no kWh/100mi data,
     /// and fueleconomy.gov combined kWh/100mi for PHEVs (electric-only).
-    /// See docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md References.
     pub fuel_economy_kwh_per_mi: f64,
     pub degradation_per_year: f64,
     pub vehicle_type: VehicleType,
 }
 
 impl VehicleSpec {
-    pub fn to_config(&self) -> crate::Result<EquipmentConfig> {
-        let fuel_economy = self.fuel_economy_kwh_per_mi;
+    /// The datasheet capacity in SI (J), converted once for a config
+    /// fill: the catalogue keeps datasheet units as data.
+    #[must_use]
+    pub fn capacity_j(&self) -> f64 {
+        uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(self.capacity_kwh)
+            .get::<uom::si::energy::joule>()
+    }
 
+    /// The datasheet Level 2 charge power in SI (W).
+    #[must_use]
+    pub fn charger_power_w(&self) -> f64 {
+        uom::si::f64::Power::new::<uom::si::power::kilowatt>(self.max_l2_power_kw)
+            .get::<uom::si::power::watt>()
+    }
+
+    /// The datasheet wall-to-wheels fuel economy in SI (J/m), the `uom`
+    /// expression of the kWh/mi value.
+    #[must_use]
+    pub fn fuel_economy_j_per_m(&self) -> f64 {
+        (uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(self.fuel_economy_kwh_per_mi)
+            / uom::si::f64::Length::new::<uom::si::length::mile>(1.0))
+        .get::<uom::si::force::newton>()
+    }
+
+    pub fn to_config(&self) -> crate::Result<EquipmentConfig> {
         #[cfg(feature = "observe")]
         tracing::debug!(
             vehicle = self.label,
             capacity_kwh = self.capacity_kwh,
             range_miles = self.range_miles,
             dc_kwh_per_mi = self.capacity_kwh / self.range_miles,
-            effective_wall_kwh_per_mi = fuel_economy,
+            effective_wall_kwh_per_mi = self.fuel_economy_kwh_per_mi,
             "EV catalog: wall-to-wheels fuel economy",
         );
 
@@ -141,9 +162,9 @@ impl VehicleSpec {
             "EV".to_string(),
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: self.capacity_kwh,
+                capacity_j: self.capacity_j(),
                 charging_level: Some("L2".to_string()),
-                max_charging_power_kw: self.max_l2_power_kw,
+                max_charging_power_w: self.charger_power_w(),
                 charging_efficiency: None,
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -169,19 +190,19 @@ impl VehicleSpec {
                 cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
-                v2l_max_discharge_kw: None,
+                v2l_max_discharge_w: None,
                 v2g_enabled: None,
                 v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: Some(self.chemistry.as_config_str().to_string()),
-                fuel_economy_kwh_per_mi: Some(fuel_economy),
+                fuel_economy_j_per_m: Some(self.fuel_economy_j_per_m()),
                 ready_soc: Some(1.0),
                 charging_strategy: None,
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
@@ -308,7 +329,7 @@ static CATALOG: &[VehicleSpec] = &[
         id: VehicleId::NissanLeaf30,
         label: "Nissan Leaf S 30kWh",
         capacity_kwh: 27.5,
-        max_l2_power_kw: 3.3, // S trim standard OBC: 3.6 kW (3.3 kW net). 6.6 kW OBC is SV/SL trim or Quick Charge Package option. Source: Nissan Leaf specifications, docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 4.
+        max_l2_power_kw: 3.3, // S trim standard OBC: 3.6 kW (3.3 kW net). 6.6 kW OBC is SV/SL trim or Quick Charge Package option. Source: Nissan Leaf specifications.
         dcfc_power_kw: Some(50.0),
         chemistry: BatteryChemistry::Nmc,
         range_miles: 107.0,
@@ -452,7 +473,7 @@ impl std::str::FromStr for EvArchetypeId {
 /// microdata (NHTS Trip File Codebook v1.2, Aug 2020); sigma=0.65 yields
 /// CV≈0.725 in log-space.
 /// The log-normal has natural [0,∞) support, eliminating the need to clamp
-/// negative Gaussian draws. Call `build_miles_schedule` to construct the
+/// negative Gaussian draws. Call `build_distance_schedule` to construct the
 /// runtime ScheduleSource from a seed.
 ///
 /// Departure-time and duration parameters remain Gaussian because those
@@ -500,6 +521,8 @@ pub struct ArchetypePreset {
 /// Level 1 charging's power cap (kW): an L1 session draws at the vehicle's
 /// L2 rating only up to this ceiling.
 pub const L1_CAP_KW: f64 = 1.8;
+/// The same cap in W (SI), the value the SI config fills clamp against.
+pub const L1_CAP_W: f64 = 1800.0;
 
 impl ArchetypePreset {
     /// Build the runtime `ScheduleSource` for daily miles from this preset.
@@ -521,7 +544,16 @@ impl ArchetypePreset {
     /// distribution. CV ≈ 0.7–0.8 derived from TRPMILES microdata (NHTS
     /// Trip File Codebook v1.2, Aug 2020). sigma=0.65 yields CV≈0.725
     /// within this range. Mu values derived from archetype target means.
-    pub fn build_miles_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
+    pub fn build_distance_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
+        // The mile parameters are the catalogue's datasheet figures; the
+        // runtime schedule is metres (SI), converted once here. A
+        // log-normal's samples scale by a factor through its log-space
+        // mean (mu + ln factor, sigma unchanged), so the drawn distances
+        // are the drawn miles times the metre factor.
+        const MILE_M: f64 = 1_609.344;
+        let miles_to_m_shift = MILE_M.ln();
+
+        let scale = |min: f64| -> Option<f64> { (min > 0.0).then_some(min * MILE_M) };
         if let (Some(wd_mu), Some(wd_sigma), Some(we_mu), Some(we_sigma)) = (
             self.weekday_miles_mu,
             self.weekday_miles_sigma,
@@ -533,11 +565,7 @@ impl ArchetypePreset {
             // (offset + sample = LogNormal(mu,sigma)). This differs from
             // the old Gaussian approach where offset held the mean and
             // DistributionKind held the spread only.
-            let min_val = if self.daily_drive_miles_min > 0.0 {
-                Some(self.daily_drive_miles_min)
-            } else {
-                None
-            };
+            let min_val = scale(self.daily_drive_miles_min);
             ScheduleSource::noisy_time_windows(
                 vec![
                     TimeWindow::with_noise(
@@ -546,7 +574,7 @@ impl ArchetypePreset {
                         1440,
                         0.0,
                         DistributionKind::LogNormal {
-                            mu: wd_mu,
+                            mu: wd_mu + miles_to_m_shift,
                             sigma: wd_sigma,
                         },
                         min_val,
@@ -558,7 +586,7 @@ impl ArchetypePreset {
                         1440,
                         0.0,
                         DistributionKind::LogNormal {
-                            mu: we_mu,
+                            mu: we_mu + miles_to_m_shift,
                             sigma: we_sigma,
                         },
                         min_val,
@@ -569,14 +597,10 @@ impl ArchetypePreset {
                 seed,
             )
         } else {
-            let clamp_min = if self.daily_drive_miles_min > 0.0 {
-                Some(self.daily_drive_miles_min)
-            } else {
-                None
-            };
+            let clamp_min = scale(self.daily_drive_miles_min);
             ScheduleSource::Stochastic {
                 kind: DistributionKind::LogNormal {
-                    mu: self.daily_drive_miles_mu,
+                    mu: self.daily_drive_miles_mu + miles_to_m_shift,
                     sigma: self.daily_drive_miles_sigma,
                 },
                 seed,
@@ -588,10 +612,32 @@ impl ArchetypePreset {
         }
     }
 
+    /// The miles source's key: the base seed unmodified.
+    pub fn derive_miles_seed(seed: [u8; 32]) -> [u8; 32] {
+        seed
+    }
+
+    /// The departure source's key: the base seed with byte 0 flipped.
+    pub fn derive_departure_seed(mut seed: [u8; 32]) -> [u8; 32] {
+        seed[0] ^= 0xDE;
+        seed
+    }
+
+    /// The trip-duration source's key: the base seed with byte 1 flipped.
+    pub fn derive_duration_seed(mut seed: [u8; 32]) -> [u8; 32] {
+        seed[1] ^= 0xD0;
+        seed
+    }
+
+    /// The arrival source's key: the base seed with byte 2 flipped.
+    pub fn derive_arrival_seed(mut seed: [u8; 32]) -> [u8; 32] {
+        seed[2] ^= 0xAA;
+        seed
+    }
+
     /// Build a `ScheduleSource` for departure time (minute of day) with Gaussian noise.
     pub fn build_departure_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
-        let mut dep_seed = seed;
-        dep_seed[0] ^= 0xDE;
+        let dep_seed = Self::derive_departure_seed(seed);
         ScheduleSource::Stochastic {
             kind: DistributionKind::Gaussian {
                 mean: self.departure_minute_mean,
@@ -607,8 +653,7 @@ impl ArchetypePreset {
 
     /// Build a `ScheduleSource` for trip duration (minutes) with Gaussian noise.
     pub fn build_duration_schedule(&self, seed: [u8; 32]) -> ScheduleSource {
-        let mut dur_seed = seed;
-        dur_seed[1] ^= 0xD0;
+        let dur_seed = Self::derive_duration_seed(seed);
         ScheduleSource::Stochastic {
             kind: DistributionKind::Gaussian {
                 mean: self.duration_minutes_mean,
@@ -628,8 +673,7 @@ impl ArchetypePreset {
     pub fn build_arrival_schedule(&self, seed: [u8; 32]) -> Option<ScheduleSource> {
         let mean = self.arrival_minute_mean?;
         let stddev = self.arrival_minute_stddev?;
-        let mut arr_seed = seed;
-        arr_seed[2] ^= 0xAA;
+        let arr_seed = Self::derive_arrival_seed(seed);
         Some(ScheduleSource::Stochastic {
             kind: DistributionKind::Gaussian {
                 mean,
@@ -1024,6 +1068,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1152,11 +1197,17 @@ mod tests {
         let spec = VehicleId::TeslaModelYLr.spec();
         let cfg = spec.to_config().unwrap();
         let typed: EvConfig = cfg.typed().unwrap();
-        let fuel_econ = typed.fuel_economy_kwh_per_mi.unwrap();
-        // EPA wall-to-wheels: 0.280 kWh/mi (fueleconomy.gov 28 kWh/100mi)
-        let expected = spec.fuel_economy_kwh_per_mi;
-        assert!((fuel_econ - expected).abs() < 1e-10);
-        assert!(fuel_econ > spec.capacity_kwh / spec.range_miles);
+        let fuel_econ = typed.fuel_economy_j_per_m.unwrap();
+        // EPA wall-to-wheels: 0.280 kWh/mi (fueleconomy.gov 28 kWh/100mi),
+        // converted once with uom
+        let expected = spec.fuel_economy_j_per_m();
+        assert!((fuel_econ - expected).abs() < 1e-9);
+        assert!(
+            fuel_econ
+                > spec.capacity_j()
+                    / uom::si::f64::Length::new::<uom::si::length::mile>(spec.range_miles)
+                        .get::<uom::si::length::meter>()
+        );
         assert_eq!(typed.chemistry.as_deref(), Some("nca"));
         assert_eq!(typed.charging_level.as_deref(), Some("L2"));
     }
@@ -1167,10 +1218,10 @@ mod tests {
             let spec = id.spec();
             let cfg = spec.to_config().unwrap();
             let typed: EvConfig = cfg.typed().unwrap();
-            let actual = typed.fuel_economy_kwh_per_mi.unwrap();
-            let expected = spec.fuel_economy_kwh_per_mi;
+            let actual = typed.fuel_economy_j_per_m.unwrap();
+            let expected = spec.fuel_economy_j_per_m();
             assert!(
-                (actual - expected).abs() < 1e-10,
+                (actual - expected).abs() < 1e-9,
                 "{}: got {actual:.6}, expected {expected:.6}",
                 spec.label,
             );
@@ -1194,11 +1245,10 @@ mod tests {
         // Each value in the catalog must have a fueleconomy.gov source
         // documented in the inline comment. This test verifies that every
         // vehicle's stored fuel_economy_kwh_per_mi matches the EPA wall-to-wheels
-        // value cited in docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md
-        // and in the fueleconomy.gov inline source comments.
+        // value cited in the fueleconomy.gov inline source comments.
 
         // EPA data: fueleconomy.gov combined kWh/100mi for BEVs,
-        // puedeconomy.gov MPGe → 33.7/MPGe for plug-in hybrids using
+        // fueleconomy.gov MPGe → 33.7/MPGe for plug-in hybrids using
         // the EPA conversion of 33.7 kWh per gallon gasoline equivalent.
         let _epa_kwh_per_gallon: f64 = 33.7;
 
@@ -1255,7 +1305,7 @@ mod tests {
     #[test]
     fn wrangler_4xe_phev_all_electric_range_is_epa_21_mi() {
         // EPA all-electric range for the 2024–2025 Wrangler 4xe PHEV is 21 mi.
-        // Source: fueleconomy.gov; docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 5.
+        // Source: fueleconomy.gov.
         assert_eq!(
             VehicleId::Jeep4xe.spec().range_miles,
             21.0,
@@ -1267,8 +1317,7 @@ mod tests {
     fn mach_e_obc_power_is_11_kw() {
         // Ford Mustang Mach-E onboard charger AC input rating is 11 kW
         // (48A × 240V). Both SR LFP and ER NMC variants use the same OBC.
-        // Source: Wikipedia, EV-Database.org. Confirmed in
-        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 3.
+        // Source: Wikipedia, EV-Database.org.
         let sr = VehicleId::FordMacheSr.spec();
         let er = VehicleId::FordMacheEr.spec();
         assert_eq!(sr.max_l2_power_kw, 11.0, "Mach-E SR L2 AC power");
@@ -1280,8 +1329,7 @@ mod tests {
         // Nissan Leaf S 30kWh base trim came standard with a 3.3 kW (3.6 kW)
         // onboard charger. The 6.6 kW charger was standard only on SV and SL
         // trims, or as part of the Quick Charge Package option on the S trim.
-        // Source: Nissan Leaf specifications. Confirmed in
-        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 4.
+        // Source: Nissan Leaf specifications.
         let spec = VehicleId::NissanLeaf30.spec();
         assert_eq!(spec.max_l2_power_kw, 3.3, "Nissan Leaf S 30kWh L2 AC power");
     }
@@ -1291,8 +1339,7 @@ mod tests {
         // Toyota RAV4 Prime standard OBC is 6.6 kW for 2022+ model years
         // (all trims) and 2021 XSE. Only the 2021 SE base model had 3.3 kW.
         // 6.6 kW is the most representative default.
-        // Source: Toyota specifications, Wikipedia. Confirmed in
-        // docs/reviews/der-catalog/dercat-04-ev-vehicle-spec-catalog.md Finding 6.
+        // Source: Toyota specifications, Wikipedia.
         let spec = VehicleId::ToyotaRav4Prime.spec();
         assert_eq!(spec.max_l2_power_kw, 6.6, "Toyota RAV4 Prime L2 AC power");
     }
@@ -1373,11 +1420,11 @@ mod tests {
     }
 
     #[test]
-    fn archetype_build_miles_schedule_deterministic() {
+    fn archetype_build_distance_schedule_deterministic() {
         let preset = EvArchetypeId::DailyCommuterL2.preset();
         let seed = [42u8; 32];
-        let s1 = preset.build_miles_schedule(seed);
-        let s2 = preset.build_miles_schedule(seed);
+        let s1 = preset.build_distance_schedule(seed);
+        let s2 = preset.build_distance_schedule(seed);
         assert_eq!(s1, s2);
     }
 
@@ -1416,10 +1463,10 @@ mod tests {
     }
 
     #[test]
-    fn build_miles_schedule_emits_log_normal() {
+    fn build_distance_schedule_emits_log_normal() {
         for &id in EvArchetypeId::ALL {
             let preset = id.preset();
-            let schedule = preset.build_miles_schedule([0u8; 32]);
+            let schedule = preset.build_distance_schedule([0u8; 32]);
             match schedule {
                 ScheduleSource::Stochastic { kind, .. } => {
                     assert!(
@@ -1451,21 +1498,25 @@ mod tests {
         // Verify that switching from Gaussian to LogNormal preserves the
         // intended fleet mean within ±5% for all simple (non-TW) archetypes.
         // Original Gaussian means serve as the calibration target.
+        // The calibration targets are the archetype mean MILES; the
+        // schedule now returns metres (SI), so each target enters through
+        // the mile factor.
+        const MILE_M: f64 = 1_609.344;
         let calibration_targets: &[(EvArchetypeId, f64)] = &[
-            (EvArchetypeId::DailyCommuterL2, 38.0),
-            (EvArchetypeId::DailyCommuterL1, 25.0),
-            (EvArchetypeId::LongCommuterL2, 75.0),
-            (EvArchetypeId::WfhL1Minimal, 8.0),
-            (EvArchetypeId::HeavyUseSuv, 55.0),
-            (EvArchetypeId::ShiftWorker, 30.0),
-            (EvArchetypeId::WorkplaceCharger, 30.0),
-            (EvArchetypeId::RetireeL1, 10.0),
-            (EvArchetypeId::PhevCommuter, 35.0),
-            (EvArchetypeId::TouOptimizerCa, 38.0),
+            (EvArchetypeId::DailyCommuterL2, 38.0 * MILE_M),
+            (EvArchetypeId::DailyCommuterL1, 25.0 * MILE_M),
+            (EvArchetypeId::LongCommuterL2, 75.0 * MILE_M),
+            (EvArchetypeId::WfhL1Minimal, 8.0 * MILE_M),
+            (EvArchetypeId::HeavyUseSuv, 55.0 * MILE_M),
+            (EvArchetypeId::ShiftWorker, 30.0 * MILE_M),
+            (EvArchetypeId::WorkplaceCharger, 30.0 * MILE_M),
+            (EvArchetypeId::RetireeL1, 10.0 * MILE_M),
+            (EvArchetypeId::PhevCommuter, 35.0 * MILE_M),
+            (EvArchetypeId::TouOptimizerCa, 38.0 * MILE_M),
         ];
         for &(id, target) in calibration_targets {
             let preset = id.preset();
-            let schedule = preset.build_miles_schedule([1u8; 32]);
+            let schedule = preset.build_distance_schedule([1u8; 32]);
             let mean = schedule.mean();
             let rel_error = (mean - target).abs() / target;
             assert!(
@@ -1482,7 +1533,7 @@ mod tests {
     #[test]
     fn log_normal_never_produces_negative_draws() {
         let preset = EvArchetypeId::DailyCommuterL2.preset();
-        let mut schedule = preset.build_miles_schedule([42u8; 32]);
+        let mut schedule = preset.build_distance_schedule([42u8; 32]);
         let env = sample_env();
         for _ in 0..10_000 {
             let v = schedule.value_at(&env).unwrap();
@@ -1499,7 +1550,7 @@ mod tests {
         // - 95th percentile ≤ 95 mi  (theoretical ≈ 90 mi; 95 allows sampling noise)
         // - 99th percentile ≤ 160 mi (theoretical ≈ 140 mi; 160 allows sampling noise)
         let preset = EvArchetypeId::DailyCommuterL2.preset();
-        let mut schedule = preset.build_miles_schedule([7u8; 32]);
+        let mut schedule = preset.build_distance_schedule([7u8; 32]);
         let env = sample_env();
 
         let n = 100_000;
@@ -1509,9 +1560,11 @@ mod tests {
         }
 
         let mean: f64 = samples.iter().sum::<f64>() / n as f64;
+        // The drawn distances are metres; the 38 mi target converts once.
+        let target_m = 38.0 * 1_609.344;
         assert!(
-            (mean - 38.0).abs() / 38.0 < 0.05,
-            "empirical mean {mean:.2} deviates from 38.0 beyond 5%"
+            (mean - target_m).abs() / target_m < 0.05,
+            "empirical mean {mean:.2} deviates from {target_m} beyond 5%"
         );
 
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1526,14 +1579,14 @@ mod tests {
 
         let p95 = samples[(n as f64 * 0.95) as usize];
         assert!(
-            p95 <= 95.0,
-            "95th percentile {p95:.1} exceeds 95 mi threshold"
+            p95 <= 95.0 * 1_609.344,
+            "95th percentile {p95:.1} exceeds the 95 mi threshold"
         );
 
         let p99 = samples[(n as f64 * 0.99) as usize];
         assert!(
-            p99 <= 160.0,
-            "99th percentile {p99:.1} exceeds 160 mi threshold"
+            p99 <= 160.0 * 1_609.344,
+            "99th percentile {p99:.1} exceeds the 160 mi threshold"
         );
     }
 
@@ -1546,11 +1599,11 @@ mod tests {
         // now return a realistic non-zero daily miles mean.
         for &id in &[EvArchetypeId::WfhOccasional, EvArchetypeId::WeekendWarrior] {
             let preset = id.preset();
-            let schedule = preset.build_miles_schedule([1u8; 32]);
+            let schedule = preset.build_distance_schedule([1u8; 32]);
             let mean = schedule.mean();
             assert!(
-                mean > 5.0,
-                "{}: mean()={mean} should be >5 mi/day (was 0 before noise-aware fix)",
+                mean > 5.0 * 1_609.344,
+                "{}: mean()={mean} should be >5 mi/day in metres (was 0 before noise-aware fix)",
                 preset.label
             );
         }
@@ -1680,5 +1733,23 @@ mod tests {
             s1, s2,
             "build_arrival_schedule must be deterministic given same seed"
         );
+    }
+
+    /// The fuel economy converts to joules per metre: an `EvConfig`
+    /// filled from a `VehicleSpec` holds `fuel_economy_j_per_m` equal, on
+    /// bits, to `VehicleSpec::fuel_economy_j_per_m()`, and the uom
+    /// expression of 0.3 kWh/mi is 671.08 J/m to the printed digits.
+    #[test]
+    fn ev_fuel_economy_converts_to_joules_per_metre() {
+        let spec = VehicleId::TeslaModelYLr.spec();
+        let config = spec.to_config().unwrap();
+        let typed: EvConfig = config.typed().unwrap();
+        assert_eq!(
+            typed.fuel_economy_j_per_m.unwrap().to_bits(),
+            spec.fuel_economy_j_per_m().to_bits()
+        );
+        // 0.3 kWh/mi is 671.08 J/m to the printed digits.
+        let printed = format!("{:.2}", 0.3 * 3.6e6 / 1609.344);
+        assert_eq!(printed, "671.08");
     }
 }

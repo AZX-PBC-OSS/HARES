@@ -42,8 +42,8 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from ochre_next.data import fetch_resstock_building
-from ochre_next.data.resstock import (
+from hares.data import fetch_resstock_building
+from hares.data.resstock import (
     ResStockBuilding,
     _backoff_delay,
     _is_transient_error,
@@ -215,7 +215,7 @@ def _fetch_metadata_parquet(version: str, tmp_dir: Path) -> Path:
     Returns the path to the downloaded parquet file, or raises if the
     download fails.
     """
-    from ochre_next.data.resstock import _download_file, _version_config, metadata_url
+    from hares.data.resstock import _download_file, _version_config, metadata_url
 
     cfg = _version_config(version)
     url = metadata_url(cfg, upgrade_id=0)

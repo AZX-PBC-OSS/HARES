@@ -42,7 +42,7 @@ impl ChargingPreference for TimeWindowPref {
     fn score(&mut self, _ctx: &DecisionContext) -> PreferenceVote {
         PreferenceVote {
             target_soc: None,
-            power_kw: None,
+            power_w: None,
             departure_hour: None,
             min_soc: None,
             max_soc: None,
@@ -66,9 +66,9 @@ mod tests {
     fn make_ctx(env: &hares_types::EnvironmentState, minute: u16) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: 0.5,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 60.0,
+            max_charge_w: 7.2,
+            max_discharge_w: 5.0,
             env,
             current_minute: minute,
             next_departure_minute: None,
@@ -86,7 +86,7 @@ mod tests {
         match pref.constraint(&ctx) {
             Constraint::Override(vote) => {
                 assert_eq!(vote.label, "time_window:outside");
-                assert!(vote.power_kw.is_none());
+                assert!(vote.power_w.is_none());
             }
             Constraint::Inactive => panic!("expected Override outside window"),
         }
@@ -128,7 +128,7 @@ mod tests {
         match pref.constraint(&ctx) {
             Constraint::Override(vote) => {
                 assert_eq!(vote.label, "time_window:outside");
-                assert!(vote.power_kw.is_none());
+                assert!(vote.power_w.is_none());
             }
             Constraint::Inactive => panic!("expected Override outside window"),
         }

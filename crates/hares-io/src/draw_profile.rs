@@ -37,16 +37,20 @@ fn gal_to_l(gal: f64) -> f64 {
 /// Implements the OCHRE/ResStock draw profile normalization:
 ///
 /// ```text
-/// scale        = (avg_daily_L / 1440) / mean(raw_fractions)
+/// scale        = (avg_daily_L * rho / 1440) / mean(raw_fractions)
 /// result_kg_s  = raw_fractions * scale / 60.0
 /// ```
 ///
-/// The factor of 60 converts L/min → L/s, and water density is approximated as 1.0 kg/L.
+/// The factor of 60 converts L/min → L/s. The litre-to-kilogram conversion
+/// runs at `rho_kg_per_l`, the density of the drawn water: the one
+/// convention every draw path shares (the tanks re-convert mass to volume
+/// at their own top-node density on receipt).
 ///
 /// # Parameters
 /// - `raw_fractions`: dimensionless draw fractions (e.g., from a ResStock schedule column);
 ///   any non-negative values are accepted and their relative shape is preserved.
 /// - `avg_daily_consumption_l`: expected average daily hot water consumption [L/day].
+/// - `rho_kg_per_l`: the drawn water's density [kg/L] for the volume-to-mass conversion.
 ///
 /// # Returns
 /// A `Vec<f64>` of mass flow rates [kg/s], one per input sample.
@@ -55,7 +59,11 @@ fn gal_to_l(gal: f64) -> f64 {
 ///
 /// # Panics
 /// Does not panic; edge cases return all-zeros.
-pub fn normalize_draw_profile(raw_fractions: &[f64], avg_daily_consumption_l: f64) -> Vec<f64> {
+pub fn normalize_draw_profile(
+    raw_fractions: &[f64],
+    avg_daily_consumption_l: f64,
+    rho_kg_per_l: f64,
+) -> Vec<f64> {
     if raw_fractions.is_empty() {
         return Vec::new();
     }
@@ -73,10 +81,42 @@ pub fn normalize_draw_profile(raw_fractions: &[f64], avg_daily_consumption_l: f6
     }
 
     // Convert daily target to L/min rate, then build a scale factor that maps
-    // the fractional schedule mean to that rate.  Dividing by 60 converts L/min → L/s;
-    // with density ≈ 1 kg/L this equals kg/s directly.
+    // the fractional schedule mean to that rate in mass terms. Dividing by 60
+    // converts L/min → L/s; multiplying by the drawn water's density turns
+    // the litre rate into kg/s.
     let annual_mean_l_per_min = avg_daily_consumption_l / MINUTES_PER_DAY;
-    let scale = annual_mean_l_per_min / mean;
+    let scale = annual_mean_l_per_min * rho_kg_per_l / mean;
+
+    raw_fractions.iter().map(|&f| f * scale / 60.0).collect()
+}
+
+/// [`normalize_draw_profile`] with the mean stated explicitly instead of
+/// taken from the input: the caller passes the PRE-period column's mean
+/// while the shape comes from the post-period (zeroed) column, so an
+/// unavailable period removes the volume its days carried instead of
+/// spreading it over the remaining days (OpenStudio-HPXML computes every
+/// peak from the pre-period schedule and zeroes the columns after,
+/// `schedules.rb:1051-1052`).
+pub fn normalize_draw_profile_at_mean(
+    raw_fractions: &[f64],
+    mean_raw_fractions: f64,
+    avg_daily_consumption_l: f64,
+    rho_kg_per_l: f64,
+) -> Vec<f64> {
+    if raw_fractions.is_empty() {
+        return Vec::new();
+    }
+
+    if avg_daily_consumption_l <= 0.0 {
+        return vec![0.0; raw_fractions.len()];
+    }
+
+    if mean_raw_fractions <= 0.0 {
+        return vec![0.0; raw_fractions.len()];
+    }
+
+    let annual_mean_l_per_min = avg_daily_consumption_l / MINUTES_PER_DAY;
+    let scale = annual_mean_l_per_min * rho_kg_per_l / mean_raw_fractions;
 
     raw_fractions.iter().map(|&f| f * scale / 60.0).collect()
 }
@@ -287,24 +327,24 @@ mod tests {
 
     #[test]
     fn empty_input_returns_empty() {
-        assert!(normalize_draw_profile(&[], 100.0).is_empty());
+        assert!(normalize_draw_profile(&[], 100.0, 1.0).is_empty());
     }
 
     #[test]
     fn zero_consumption_returns_all_zeros() {
-        let result = normalize_draw_profile(&[0.5, 1.0, 0.5], 0.0);
+        let result = normalize_draw_profile(&[0.5, 1.0, 0.5], 0.0, 1.0);
         assert_eq!(result, vec![0.0, 0.0, 0.0]);
     }
 
     #[test]
     fn negative_consumption_returns_all_zeros() {
-        let result = normalize_draw_profile(&[0.5, 1.0], -10.0);
+        let result = normalize_draw_profile(&[0.5, 1.0], -10.0, 1.0);
         assert_eq!(result, vec![0.0, 0.0]);
     }
 
     #[test]
     fn all_zero_fractions_returns_all_zeros() {
-        let result = normalize_draw_profile(&[0.0, 0.0, 0.0], 100.0);
+        let result = normalize_draw_profile(&[0.0, 0.0, 0.0], 100.0, 1.0);
         assert_eq!(result, vec![0.0, 0.0, 0.0]);
     }
 
@@ -313,7 +353,7 @@ mod tests {
         // When all fractions are equal the output should be uniform.
         let fractions = vec![0.5_f64; 1440]; // 1440 samples at 1-min intervals
         let avg_daily_l = 150.0;
-        let result = normalize_draw_profile(&fractions, avg_daily_l);
+        let result = normalize_draw_profile(&fractions, avg_daily_l, 1.0);
 
         // All values should be identical (uniform input → uniform output).
         let first = result[0];
@@ -337,7 +377,7 @@ mod tests {
     fn nonuniform_fractions_preserve_shape() {
         // Fractions should scale proportionally; relative ratios must be preserved.
         let fractions = vec![1.0, 2.0, 3.0, 4.0];
-        let result = normalize_draw_profile(&fractions, 200.0);
+        let result = normalize_draw_profile(&fractions, 200.0, 1.0);
 
         // Each pair of adjacent elements should maintain the original ratio.
         for i in 1..fractions.len() {
@@ -356,7 +396,7 @@ mod tests {
         // (density ≈ 1 kg/L so kg/s * 60 s/sample → L/sample)
         let fractions: Vec<f64> = (0..1440).map(|i| (i % 24) as f64 + 1.0).collect();
         let avg_daily_l = 189.3;
-        let result = normalize_draw_profile(&fractions, avg_daily_l);
+        let result = normalize_draw_profile(&fractions, avg_daily_l, 1.0);
 
         let total_l: f64 = result.iter().map(|&v| v * 60.0).sum();
         assert!(
@@ -372,12 +412,32 @@ mod tests {
         // scale = (1/24) / 0.5 = 1/12
         // result_kg_s = 0.5 * (1/12) / 60 = 0.5 / 720 ≈ 6.944e-4
         let fractions = vec![0.5_f64; 4];
-        let result = normalize_draw_profile(&fractions, 60.0);
+        let result = normalize_draw_profile(&fractions, 60.0, 1.0);
         let expected = 0.5 * (60.0 / 1440.0 / 0.5) / 60.0;
         for v in &result {
             assert!(
                 (v - expected).abs() < 1e-15,
                 "got {v:.6e}, expected {expected:.6e}"
+            );
+        }
+    }
+
+    #[test]
+    fn density_scales_the_mass_flow_linearly() {
+        // The volume-to-mass conversion runs at the given density: hot
+        // supply water (~0.987 kg/L) yields proportionally less mass than
+        // the 1 kg/L approximation, same shape.
+        let fractions = vec![0.1_f64, 0.4, 0.0, 0.2];
+        let at_reference = normalize_draw_profile(&fractions, 200.0, 1.0);
+        let rho = 983.9 / 1000.0;
+        let at_hot_supply = normalize_draw_profile(&fractions, 200.0, rho);
+        for i in 0..fractions.len() {
+            if fractions[i] == 0.0 {
+                continue;
+            }
+            assert!(
+                (at_hot_supply[i] / at_reference[i] - rho).abs() < 1e-12,
+                "mass flow must scale with the drawn water's density"
             );
         }
     }

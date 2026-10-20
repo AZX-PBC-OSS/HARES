@@ -62,10 +62,13 @@ fn write_synthetic_toml(path: &Path, spec: SyntheticTomlSpec<'_>) {
 
 [simulation]
 start_time = "{start_time}"
-time_res_s = 60
-duration_s = {duration_s}
-
+time_res = 60
+duration = {duration_s}
+output_chunk_size = 1000
+master_seed = 0
+warmup = "disabled"
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -88,13 +91,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#
     );
     fs::write(path, content).expect("failed to write synthetic TOML");
@@ -161,6 +157,9 @@ impl CountingActor {
 impl Actor for CountingActor {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn interests(&self) -> &[ActorInterest] {
@@ -408,9 +407,13 @@ fn write_mode_toml(path: &std::path::Path) {
     let content = r#"building_id = 4243
 [simulation]
 start_time = "2024-01-15T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
+time_res = 60
+duration = 3600
+output_chunk_size = 1000
+master_seed = 0
+warmup = "disabled"
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -429,15 +432,8 @@ ach = 0.0
 [schedule]
 occupancy = 1.0
 [event_load]
-active_power_kw = 1.5
-event_probability = 1.0
-[output]
-write_output = false
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
-"#;
+active_power_w = 1500.0
+event_probability = 1.0"#;
     fs::write(path, content).expect("write synthetic TOML");
 }
 
@@ -643,11 +639,7 @@ impl ModeProbeEquipment {
                 stage: ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::HAS_MODE,
-                telemetry_fields: vec![TelemetryField {
-                    name: "probe".to_string(),
-                    unit: "-".to_string(),
-                    description: "mode probe".to_string(),
-                }],
+                telemetry_fields: vec![TelemetryField::ratio("probe", "mode probe")],
                 zone_type: None,
             },
             telemetry: Telemetry::with_capacity(1),
@@ -666,6 +658,10 @@ impl ModeProbeEquipment {
 impl Equipment for ModeProbeEquipment {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
     }
 
     fn rename(&mut self, name: String) {

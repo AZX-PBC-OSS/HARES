@@ -3,18 +3,19 @@ mod bestest_cases;
 #[path = "../../../tests/bestest/reference_bands.rs"]
 mod bestest_reference_bands;
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array, StringArray, TimestampMicrosecondArray};
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
-use hares_core::{Actor, Dwelling, DwellingConfig, SimStatus, SimulationEngine, StepResult};
-use hares_io::{OutputFormat, SimulationConfig};
-use hares_types::{ControlSignal, DRLevel, EndUse, OperatingMode};
+use hares_core::{Actor, Dwelling, DwellingConfig, SimulationEngine, StepResult};
+use hares_io::SimulationConfig;
+use hares_types::{ControlSignal, DRLevel, EndUse, OperatingMode, TelemetryField};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 
@@ -24,8 +25,12 @@ struct FixtureConfig {
     simulation: Option<toml::Table>,
     #[serde(default)]
     bldg_id: Option<i64>,
+    /// The fixture's equipment overrides, carried verbatim into the
+    /// dwelling config: the battery fixtures declare their control here
+    /// (`bms_mode = '"Manual"'`, the idle battery the OCHRE reference
+    /// models).
     #[serde(default)]
-    initialization_duration_seconds: Option<i64>,
+    overrides: Option<toml::Table>,
 }
 
 #[derive(Debug)]
@@ -66,6 +71,9 @@ impl Actor for EmitOnceActor {
     fn name(&self) -> &str {
         &self.name
     }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
+    }
 
     fn decide(&mut self, _env: &hares_types::EnvironmentState, out: &mut Vec<DispatchRequest>) {
         if self.step_idx == self.emit_step {
@@ -95,8 +103,24 @@ impl ParityFixture {
         self.root.join("schedule.csv")
     }
 
-    fn weather_epw(&self) -> PathBuf {
-        self.root.join("weather.epw")
+    fn weather_ochre_hold(&self) -> PathBuf {
+        self.root
+            .join(format!("weather_ochre_hold_{}s.epw", self.time_res_s()))
+    }
+
+    /// The fixture's step, from its config: the held weather file's interval
+    /// is the run's step, so the environment resample is a no-op.
+    fn time_res_s(&self) -> i64 {
+        let config_contents =
+            fs::read_to_string(self.config_toml()).expect("fixture config.toml must be readable");
+        let config = toml::from_str::<FixtureConfig>(&config_contents)
+            .expect("fixture config.toml must parse");
+        config
+            .simulation
+            .as_ref()
+            .and_then(|sim| sim.get("time_res"))
+            .and_then(|v| v.as_integer())
+            .expect("fixture config.toml must state [simulation] time_res")
     }
 
     fn reference_output_parquet(&self) -> PathBuf {
@@ -115,11 +139,10 @@ impl ParityFixture {
 fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
     let fixture = ParityFixture::new("cz4a_battery_only");
     let dwelling_config = build_dwelling_config(&fixture);
-    let local_offset = *dwelling_config.sim_config.start_time.offset();
-    let expected_start_time = dwelling_config.sim_config.start_time;
+    let expected_start_time = dwelling_config.settings.sim_config.start_time.naive_local();
 
     let Some(reference_time) =
-        read_reference_time_axis_local_opt(&fixture.reference_output_parquet(), local_offset)
+        read_reference_time_axis_local_opt(&fixture.reference_output_parquet())
     else {
         eprintln!(
             "[alignment] skipping {} (missing: reference_output.parquet)",
@@ -134,20 +157,16 @@ fn ochre_battery_fixture_time_axis_matches_config_and_reference_cadence() {
         "actual and reference time axes must have identical row counts"
     );
     assert_eq!(
-        actual_time.first().map(|ts| ts.naive_local()),
-        Some(expected_start_time.naive_local()),
+        actual_time.first().copied(),
+        Some(expected_start_time),
         "fixture must start at the configured local wall-clock time"
     );
     for (idx, (actual_value, reference_value)) in
         actual_time.iter().zip(reference_time.iter()).enumerate()
     {
         if idx > 0 {
-            let actual_step = actual_value
-                .naive_local()
-                .signed_duration_since(actual_time[idx - 1].naive_local());
-            let reference_step = reference_value
-                .naive_local()
-                .signed_duration_since(reference_time[idx - 1].naive_local());
+            let actual_step = actual_value.signed_duration_since(actual_time[idx - 1]);
+            let reference_step = reference_value.signed_duration_since(reference_time[idx - 1]);
             assert_eq!(
                 actual_step, reference_step,
                 "time axis cadence must match the OCHRE reference at row {idx}"
@@ -378,8 +397,12 @@ fn ochre_ashp_fixture_total_shape_and_timing_aligns() {
     // Updated after: eta_c fix, HPWH capacity, ER threshold, boiler space_fraction,
     // combined interior R_film (h_conv + h_rad), surface_node radiation topology,
     // OS-HPXML's temperature capacitance multiplier of 7 on every zone (OCHRE's
-    // own reference centre is step 37.3).
-    let expected_center: usize = 35;
+    // own reference centre is step 37.3),
+    // the same-zone precomputed boundary's resistor order (the cut stub is
+    // the resistor removed, so the partition wall's multi-layer fin stores
+    // its capacitors one half-layer toward the cut surface and the zone
+    // warms earlier: centre 35 to 32).
+    let expected_center: usize = 32;
     assert!(
         actual_center.abs_diff(expected_center) <= 2,
         "ASHP HVAC electric power timing center must stay near step {expected_center}: actual={actual_center}"
@@ -553,39 +576,43 @@ fn run_fixture_to_columns(fixture: &ParityFixture) -> BTreeMap<String, Vec<f64>>
 
 fn run_fixture_to_columns_with_verbosity(
     fixture: &ParityFixture,
-    output_verbosity_override: Option<u8>,
+    verbosity_override: Option<u8>,
 ) -> BTreeMap<String, Vec<f64>> {
     let mut dwelling_config = build_dwelling_config(fixture);
-    let mut sim_config = dwelling_config.sim_config.clone();
-    if let Some(v) = output_verbosity_override {
-        sim_config.output_verbosity = v;
-    }
+    let mut sim_config = dwelling_config.settings.sim_config.clone();
     let output_dir = tempfile::tempdir().expect("temp dir");
-    let output_path = output_dir.path().join(format!("{}.parquet", fixture.id));
-    sim_config.output_format = OutputFormat::Parquet;
-    sim_config.output_path = Some(output_path.clone());
-    // The helper reads the run back from the Parquet file, so the recorder
-    // must be on: build_dwelling_config leaves the fixture config's default
-    // (writing disabled) in place, and the output goes to the temporary
-    // directory above, not into the tree.
-    sim_config.write_output = true;
-    dwelling_config.sim_config = sim_config;
+    let csv_path = output_dir.path().join(format!("{}.parquet", fixture.id));
+    // The helper reads the run back from the Parquet file, so a report is
+    // set: the fixture's own verbosity selection when it carries one, the
+    // override here, else the verbosity-3 default the fixtures carry, with
+    // the output in the temporary directory above, not into the tree.
+    let verbosity = verbosity_override
+        .or_else(|| match &sim_config.reports.first().map(|r| &r.selection) {
+            Some(hares_io::Selection::Verbosity(v)) => Some(*v),
+            _ => None,
+        })
+        .unwrap_or(3);
+    sim_config.reports = vec![hares_io::ReportSpec {
+        name: "frame".to_string(),
+        selection: hares_io::Selection::Verbosity(verbosity),
+        frequency: hares_io::Frequency::default(),
+        destination: hares_io::Destination::Parquet {
+            path: csv_path.clone(),
+            overwrite: false,
+        },
+    }];
+    dwelling_config.settings.sim_config = sim_config;
 
     let engine = SimulationEngine::new();
     let outcome = engine
         .run(dwelling_config)
         .expect("parity fixture simulation must succeed");
-    assert!(
-        !matches!(outcome.status, SimStatus::Failed(_)),
-        "fixture {} must not fail simulation: {:?}",
-        fixture.id,
-        outcome.status
-    );
+    let published = outcome
+        .reports
+        .iter()
+        .find_map(|report| report.path().cloned());
 
-    let path = outcome
-        .timeseries_path
-        .as_deref()
-        .unwrap_or(output_path.as_path());
+    let path = published.as_deref().unwrap_or(csv_path.as_path());
     read_parquet_columns(path).expect("actual parquet output must be readable")
 }
 
@@ -593,37 +620,33 @@ fn simulate_fixture_steps(
     fixture: &ParityFixture,
     actor: Option<Box<dyn Actor>>,
 ) -> Vec<StepResult> {
-    // Recording is off, but the diagnostics CSV still lands beside the
-    // output path, so that path is in a directory removed afterwards.
-    let output_dir = tempfile::tempdir().expect("temp dir");
+    // Recording is off (no report is configured: nothing is recorded and
+    // no file is written). The step history is gone: the horizon's step
+    // results are what the stepping loop itself collects.
     let mut dwelling_config = build_dwelling_config(fixture);
-    dwelling_config.sim_config.write_output = false;
-    dwelling_config.sim_config.output_path =
-        Some(output_dir.path().join(format!("{}.csv", fixture.id)));
+    dwelling_config.settings.sim_config.reports = Vec::new();
     let mut dwelling = Dwelling::from_config(dwelling_config).expect("fixture dwelling must load");
     if let Some(actor) = actor {
         dwelling.add_actor(actor).unwrap();
     }
 
-    dwelling
-        .simulate()
-        .expect("fixture simulation must succeed")
-        .steps
+    let mut steps = Vec::new();
+    for _ in 0..dwelling.clock.total_steps() {
+        steps.push(dwelling.step().expect("fixture simulation must succeed"));
+    }
+    steps
 }
 
-fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<DateTime<FixedOffset>> {
+fn simulate_fixture_timestamps(config: DwellingConfig) -> Vec<NaiveDateTime> {
     let mut dwelling = Dwelling::from_config(config).expect("fixture dwelling must load");
-    let results = dwelling
-        .simulate()
-        .expect("fixture simulation must succeed")
-        .steps;
-    results.into_iter().map(|step| step.timestamp).collect()
+    let mut steps = Vec::new();
+    for _ in 0..dwelling.clock.total_steps() {
+        steps.push(dwelling.step().expect("fixture simulation must succeed"));
+    }
+    steps.into_iter().map(|step| step.timestamp).collect()
 }
 
-fn read_reference_time_axis_local(
-    path: &Path,
-    local_offset: FixedOffset,
-) -> Result<Vec<DateTime<FixedOffset>>, String> {
+fn read_reference_time_axis_local(path: &Path) -> Result<Vec<NaiveDateTime>, String> {
     let reference = read_parquet_columns(path)?;
     let reference_time = first_matching_column(&reference, &["Time"])
         .ok_or_else(|| format!("reference time column missing in '{}'", path.display()))?;
@@ -639,7 +662,7 @@ fn read_reference_time_axis_local(
                 )
             })?
             .naive_utc();
-        values.push(local_offset.from_utc_datetime(&naive));
+        values.push(naive);
     }
 
     Ok(values)
@@ -647,16 +670,12 @@ fn read_reference_time_axis_local(
 
 /// `read_reference_time_axis_local` with the same missing-file convention as
 /// [`read_parquet_columns_opt`]: `None` only when the file is absent.
-fn read_reference_time_axis_local_opt(
-    path: &Path,
-    local_offset: FixedOffset,
-) -> Option<Vec<DateTime<FixedOffset>>> {
+fn read_reference_time_axis_local_opt(path: &Path) -> Option<Vec<NaiveDateTime>> {
     if !path.exists() {
         return None;
     }
     Some(
-        read_reference_time_axis_local(path, local_offset)
-            .expect("reference parquet time axis must be readable"),
+        read_reference_time_axis_local(path).expect("reference parquet time axis must be readable"),
     )
 }
 
@@ -666,29 +685,39 @@ fn build_dwelling_config(fixture: &ParityFixture) -> DwellingConfig {
     let config = parse_fixture_config(&config_contents).expect("fixture config.toml must parse");
     let sim_config =
         parse_simulation_config(&config_contents, &config).expect("simulation config must parse");
-    let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+    let defaults_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
 
     // The fixture configs carry no output settings, so the parsed config
     // defaults to writing to a working-directory-relative path; these tests
     // compare in-memory series against the reference parquet, so the
-    // recorder is off.
+    // reports are dropped: nothing is recorded.
     let mut sim_config = sim_config;
-    sim_config.write_output = false;
+    sim_config.reports = Vec::new();
 
     DwellingConfig {
-        hpxml_path: fixture.building_xml(),
-        schedule_path: Some(fixture.schedule_csv()),
-        weather_path: fixture.weather_epw(),
-        sim_config,
-        defaults_path: Some(defaults_path),
-        overrides: None,
-        bldg_id: config.bldg_id.unwrap_or(1),
-        initialization_duration: config
-            .initialization_duration_seconds
-            .and_then(|seconds| u64::try_from(seconds).ok())
-            .map(StdDuration::from_secs),
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(fixture.building_xml()),
+        schedule: Some(InputSource::Path(fixture.schedule_csv())),
+        weather: WeatherInput::Path(
+            // These tests compare against OCHRE reference output, so the weather
+            // is the fixture's hourly file held at the fixture's step by the
+            // Python adapter's OCHRE hold (committed beside the source): the
+            // comparison's zero-order hold lives in the adapter, not in an
+            // engine override.
+            fixture.weather_ochre_hold(),
+        ),
+        defaults: DefaultsSource::directory(defaults_path),
+        settings: DwellingSettings::new(
+            sim_config,
+            // The fixture's `[overrides]` table, verbatim: the battery
+            // fixtures declare their control here, and a fixture with none
+            // carries no overrides.
+            config
+                .overrides
+                .map(|table| serde_json::to_value(&table).expect("overrides table serializes")),
+            config.bldg_id.unwrap_or(1),
+            None,
+        ),
     }
 }
 

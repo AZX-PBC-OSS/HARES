@@ -8,7 +8,7 @@ fn defaults_dir() -> std::path::PathBuf {
         .unwrap()
         .parent()
         .unwrap()
-        .join("defaults")
+        .join("python/hares/defaults")
 }
 
 // CSV filenames like "Air Conditioner.csv" normalize to
@@ -255,48 +255,152 @@ fn air_conditioner_multispeed_closest_match_on_seer_distance() {
 }
 
 #[test]
-fn mshp_cooler_14_5_seer_cop4_between_neighbors() {
+fn mshp_cooler_14_5_seer_row_is_ochres() {
+    // OCHRE's 14.5 SEER MSHP Cooler row is its own per-product entry
+    // ("testing_500 - bldg0000120", the same calibrated building as the
+    // 13.0 SEER row); a previous state of the shipped CSV re-derived it by
+    // interpolation, which is a broken window: the reference's data is the
+    // reference's data (D-020). The verbatim pin covers the whole row; this
+    // store-level check names the row so a re-derivation fails loudly here.
     let store = DefaultsStore::load(&defaults_dir()).expect("load defaults");
-    let p13 = store
-        .hvac_multispeed_parameters("MSHP Cooler", "SEER", 4, 13.0)
-        .expect("13.0 SEER MSHP Cooler entry");
-    let p14_5 = store
+    let p = store
         .hvac_multispeed_parameters("MSHP Cooler", "SEER", 4, 14.5)
         .expect("14.5 SEER MSHP Cooler entry");
-    let p16 = store
-        .hvac_multispeed_parameters("MSHP Cooler", "SEER", 4, 16.0)
-        .expect("16.0 SEER MSHP Cooler entry");
-
-    let cop4_13 = *p13.cops.last().unwrap();
-    let cop4_14_5 = *p14_5.cops.last().unwrap();
-    let cop4_16 = *p16.cops.last().unwrap();
-
-    assert!(
-        cop4_13 < cop4_14_5,
-        "13.0 SEER COP4 ({cop4_13}) should be < 14.5 SEER COP4 ({cop4_14_5})"
-    );
-    assert!(
-        cop4_14_5 < cop4_16,
-        "14.5 SEER COP4 ({cop4_14_5}) should be < 16.0 SEER COP4 ({cop4_16})"
-    );
-
-    // All COPs should increase with SEER tier (monotonic at each speed)
-    for i in 0..4 {
+    let expected_cops = [4.36175, 3.77512, 3.17313, 2.34548];
+    for (i, (a, e)) in p.cops.iter().zip(expected_cops).enumerate() {
         assert!(
-            p13.cops[i] < p14_5.cops[i],
-            "speed-{}: 13.0 COP ({}) should be < 14.5 COP ({})",
-            i + 1,
-            p13.cops[i],
-            p14_5.cops[i]
-        );
-        assert!(
-            p14_5.cops[i] < p16.cops[i],
-            "speed-{}: 14.5 COP ({}) should be < 16.0 COP ({})",
-            i + 1,
-            p14_5.cops[i],
-            p16.cops[i]
+            (a - e).abs() < 1e-6,
+            "MSHP Cooler 14.5 SEER COP {} = {a}, expected OCHRE's {e}",
+            i + 1
         );
     }
+}
+
+#[test]
+fn mshp_heater_rows_match_ochre_capacity_ratios_and_cops() {
+    // All seven shipped `MSHP Heater` rows are OCHRE's
+    // `ochre/defaults/HVAC Multispeed Parameters.csv` rows: capacity
+    // ratios 0.4/0.6/0.8/1.2 of rated (the top stage exceeds rated) with the
+    // per-stage COPs declining with speed. OCHRE applies the row to every
+    // mini-split whose input declares no stage list and raises when the rated
+    // efficiency has no row (HVAC.py:774-786), so the row is the reference's
+    // no-input default stage table. A previous state of this file renormalized
+    // the ratios to a 1.0 top (0.33333/0.5/0.66667/1.0) and re-derived the
+    // 11.0 HSPF row's COPs; both were broken windows (D-020).
+    let store = DefaultsStore::load(&defaults_dir()).expect("load defaults");
+    let expected_cops: Vec<(&str, [f64; 4])> = vec![
+        ("8.2", [4.19929, 3.36672, 3.08195, 2.79114]),
+        ("9.2", [5.14266, 3.96, 3.53, 3.11]),
+        ("9.5", [5.14266, 4.12161, 3.77355, 3.41917]),
+        ("11.0", [4.55, 4.36, 4.17, 3.98]),
+        ("13.0", [7.893351479, 6.282661747, 5.758473142, 5.2460162]),
+        ("13.3", [7.74616, 6.20218, 5.68075, 5.15429]),
+        ("14.0", [8.399982335, 6.724045293, 6.159368877, 5.590475552]),
+    ];
+    for (hspf, cops) in expected_cops {
+        let row = store
+            .hvac_multispeed_parameters("MSHP Heater", "HSPF", 4, hspf.parse::<f64>().unwrap())
+            .unwrap_or_else(|| panic!("MSHP Heater {hspf} HSPF row must exist"));
+        assert!(
+            row.capacity_ratios
+                .iter()
+                .zip([0.4, 0.6, 0.8, 1.2])
+                .all(|(a, e)| (a - e).abs() < 1e-5),
+            "MSHP Heater {hspf} HSPF capacity ratios {:?} must be OCHRE's [0.4, 0.6, 0.8, 1.2]",
+            row.capacity_ratios
+        );
+        for (i, (a, e)) in row.cops.iter().zip(cops).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-6,
+                "MSHP Heater {hspf} HSPF COP {} = {a}, expected {e}",
+                i + 1
+            );
+        }
+    }
+}
+
+/// The shipped CSV's first block is the vendored file byte for byte: the
+/// exact byte block, order-sensitive, with no \r tolerance (raw bytes, not
+/// `str::lines()`, which strips a trailing \r per line). Every row OCHRE
+/// ships (capacity ratios, air flow ratios, COPs, SHRs and the "Received
+/// From" provenance column) sits in it in the reference's order. The
+/// reference's data is the reference's data; a row re-derived for HARES is
+/// a broken window that must not live silently in a defaults file. The
+/// shipped CSV's HARES-only families (Gas Furnace, Air Conditioner, GSHP
+/// Cooler/Heater), which have no OCHRE row, follow the pinned block.
+#[test]
+fn shipped_multispeed_rows_match_ochre_verbatim() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let ochre_csv = root.join("vendors/OCHRE/ochre/defaults/HVAC Multispeed Parameters.csv");
+    let shipped_csv = defaults_dir().join("HVAC Multispeed Parameters.csv");
+    let ochre_bytes = std::fs::read(&ochre_csv).expect("vendored OCHRE multispeed CSV is readable");
+    let shipped_bytes = std::fs::read(&shipped_csv).expect("shipped multispeed CSV is readable");
+
+    let ochre_block: Vec<&[u8]> = ochre_bytes.split_inclusive(|&b| b == b'\n').collect();
+    let shipped_lines: Vec<&[u8]> = shipped_bytes.split_inclusive(|&b| b == b'\n').collect();
+    assert!(
+        shipped_lines.len() >= ochre_block.len(),
+        "shipped multispeed CSV must carry the vendored block ({} lines) before its \
+         HARES-only families, found {} lines",
+        ochre_block.len(),
+        shipped_lines.len(),
+    );
+
+    let diverging: Vec<String> = ochre_block
+        .iter()
+        .zip(shipped_lines.iter())
+        .enumerate()
+        .filter(|(_, (ochre, shipped))| ochre != shipped)
+        .map(|(i, (ochre, shipped))| {
+            format!(
+                "line {}: shipped {:?} != vendored {:?}",
+                i + 1,
+                String::from_utf8_lossy(shipped),
+                String::from_utf8_lossy(ochre),
+            )
+        })
+        .collect();
+    assert!(
+        diverging.is_empty(),
+        "shipped multispeed CSV's first {} lines must be OCHRE's block byte for byte; \
+         diverging lines:\n{}",
+        ochre_block.len(),
+        diverging.join("\n"),
+    );
+}
+
+/// The required CSVs a loadable tree carries beside the files under test:
+/// the water-heating CSV and the envelope LUT's three CSVs, header-only.
+fn write_required_csvs(dir: &std::path::Path) {
+    let wh = dir.join("water_heating");
+    std::fs::create_dir_all(&wh).unwrap();
+    std::fs::write(
+        wh.join("default_paramters.csv"),
+        "Description,Name,Value,Units\n",
+    )
+    .unwrap();
+    let env = dir.join("envelope");
+    std::fs::create_dir_all(&env).unwrap();
+    std::fs::write(
+        env.join("Envelope Boundary Types.csv"),
+        "Boundary Name,Boundary Type,Finish Type,Construction Type,Insulation Details,Assembly R Value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.join("Envelope Materials.csv"),
+        "Boundary Name,Boundary Type,Resistance (m^2-K/W),Capacitance (kJ/m^2-K)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        env.join("Envelope Boundaries.csv"),
+        "Boundary Name,Exterior Zone Label,Interior Zone Label\n",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -342,6 +446,7 @@ fn efficiency_lookup_falls_back_to_closest_when_no_exact_match() {
         ));
     }
     std::fs::write(ev_dir.join("vehicle_mapping.csv"), mapping).unwrap();
+    write_required_csvs(dir.path());
 
     let store = DefaultsStore::load(dir.path()).expect("load defaults");
 

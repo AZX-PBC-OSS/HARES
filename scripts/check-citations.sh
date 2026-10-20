@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Check for known erroneous citations in docs/.
-# Ticket T-0309: Corrected Cutler et al. (2013) citation — wrong first author
-# initial "B.", wrong title, wrong report number 57501 instead of 56354.
-# Ticket T-0310: Corrected Winkler thesis year from 2011 to 2009;
-# the Winkler doctoral dissertation is from 2009, not 2011.
-# DRUM repository at https://drum.lib.umd.edu/handle/1903/9493 confirms 2009.
+# Check for known erroneous citations in docs/. The check enforces the
+# corrected citations: Cutler, D., Winkler, J., Kruis, N., Christensen, C.,
+# Brandemuehl, M. (2013), "Improved Modeling of Residential Air Conditioners
+# and Heat Pumps for Energy Calculations," NREL/TP-5500-56354 (not the wrong
+# first author initial "B.", wrong title, or report number 57501); and
+# Winkler, J.M. (2009), "Development of a Component Based Simulation Tool for
+# the Steady State and Transient Analysis of Vapor Compression Systems,"
+# doctoral dissertation, University of Maryland (not 2011); the DRUM
+# repository at https://drum.lib.umd.edu/handle/1903/9493 confirms 2009.
 #
 # Strikes-through text (~~...~~) preserves provenance and is exempt.
-# docs/reviews/ is exempt — review documents may quote erroneous citations
-# as part of describing findings.
 
 FAILED=0
 
@@ -21,8 +22,6 @@ check_pattern() {
 
     mapfile -t RAW_MATCHES < <(
         grep -rn "$pattern" docs/ \
-            --exclude-dir=reviews \
-            --exclude-dir=tickets \
             --exclude-dir=eplus \
             --exclude-dir=vendors \
             2>/dev/null \

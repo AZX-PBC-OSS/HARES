@@ -158,7 +158,7 @@ Equipment writes contributions via a push model. Solvers read accumulated totals
 ```rust
 pub enum PortContribution {
     Thermal  { zone, sensible_gain_w, latent_gain_w, category },
-    Electrical { active_power_kw, reactive_power_kvar },
+    Electrical { active_power_w, reactive_power_var },
     Fuel     { fuel_type, consumption_w },
     Fluid    { loop_id, flow_rate_kg_s, supply_temp_c, return_temp_c, fluid_type },
     Custom   { domain_id, payload: [f64; 16] },
@@ -569,21 +569,21 @@ Each solver returns a `DomainUpdate` containing zone state changes and optional 
 ```mermaid
 graph TD
     META["ResStock Metadata CSV"] --> Fleet["PyFleet::from_resstock()"]
-    HPXML_DIR["HPXML Directory"] --> Fleet
+    BUILDINGS_DIR["Unpacked Buildings Directory"] --> Fleet
     WX_DIR["Weather Directory"] --> Fleet
 
-    Fleet --> |"Rayon par_iter"| D1["Dwelling 1"]
-    Fleet --> |"Rayon par_iter"| D2["Dwelling 2"]
-    Fleet --> |"Rayon par_iter"| D3["Dwelling N"]
+    Fleet --> |"chunks of homes, Rayon par_iter"| D1["Dwelling 1"]
+    Fleet --> |"chunks of homes, Rayon par_iter"| D2["Dwelling 2"]
+    Fleet --> |"chunks of homes, Rayon par_iter"| D3["Dwelling N"]
 
-    D1 --> R1["SimulationResults"]
-    D2 --> R2["SimulationResults"]
-    D3 --> R3["SimulationResults"]
+    D1 --> R1["PeriodReducer<br/>(fleet report callback)"]
+    D2 --> R2["PeriodReducer<br/>(fleet report callback)"]
+    D3 --> R3["PeriodReducer<br/>(fleet report callback)"]
 
-    R1 --> AGG["Aggregation<br/>15-min resolution"]
+    R1 --> AGG["Streaming ordered fold<br/>(entry order, chunk-bounded)"]
     R2 --> AGG
     R3 --> AGG
-    AGG --> OUT["PyFleetResults<br/>per-dwelling + aggregate metrics"]
+    AGG --> OUT["PyFleetResult<br/>aggregate + covered_weight + homes"]
 ```
 
 Individual dwellings are fully independent (no shared mutable state), enabling linear scaling with Rayon thread pools.
@@ -605,7 +605,7 @@ graph TD
     subgraph "Single Dwelling"
         PD -->|"from_hpxml()"| Init["Parse HPXML + EPW + Schedule"]
         Init --> DW["Dwelling"]
-        PD -->|"simulate()"| Full["Full horizon → DataFrame"]
+        PD -->|"simulate()"| Full["Full horizon → RunResult"]
         PD -->|"step()"| Step["Single timestep → Dict"]
         PD -->|"apply_control()"| Ctrl["Queue ControlSignal"]
     end
@@ -623,11 +623,11 @@ graph TD
 | Method | Description |
 |--------|-------------|
 | `PyDwelling.from_hpxml(hpxml, schedule, weather, **kwargs)` | Construct dwelling from file paths |
-| `PyDwelling.simulate()` | Run full simulation horizon, return Polars DataFrame |
+| `PyDwelling.simulate()` | Run full simulation horizon, return the run's `RunResult` (read the frame off `result.reports[i].table()`) |
 | `PyDwelling.step()` | Advance one timestep, return telemetry dict |
 | `PyDwelling.apply_control(name, signal)` | Queue control signal for next step |
-| `PyFleet.from_resstock(metadata, hpxml_dir, weather_dir)` | Load building portfolio |
-| `PyFleet.simulate(n_threads)` | Parallel simulation with aggregated results |
+| `PyFleet.from_resstock(metadata, buildings_dir, weather_dir)` | Load building portfolio |
+| `PyFleet.simulate(report, n_threads, chunk_size)` | Chunked parallel simulation, the streaming ordered fold into `FleetResult` |
 
 ---
 

@@ -1,46 +1,71 @@
 //! Python bindings for dwelling simulation.
 
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, FixedOffset};
 use hares_control::PriceSignal;
 use hares_core::{
-    ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingCheckpoint, DwellingConfig,
-    PremiseZip, environment::SurfaceGeometry,
+    ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingBlueprint,
+    DwellingBlueprintBuilder, DwellingCheckpoint, DwellingConfig, PremiseZip,
+    environment::SurfaceGeometry,
 };
 use hares_equipment::{
     BatteryConfig, BatteryLutType, EquipmentConfig, EquipmentRegistry, EvConfig,
     ProtocolBridgeConfig, PvConfig, config::ConfigValue,
 };
-use hares_io::{
-    OutputFormat, ResampleOverrides, SimulationConfig, SiteLocationOverride,
-    output::metrics::MetricsCalculator,
-};
 use hares_types::panic_hook::{self, PanicHookGuard};
 use hares_types::{BatteryChemistry, EvConnectionState, HaresError, SurfaceIrradiance};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyType};
 use rand::SeedableRng;
+use std::slice;
 use std::sync::MutexGuard;
 
-pyo3::create_exception!(_hares, HaresConfigError, pyo3::exceptions::PyValueError);
-pyo3::create_exception!(_hares, HaresEquipmentError, pyo3::exceptions::PyValueError);
+// The exceptions register under the extension module's importable path, so
+// an exception pickled in one process unpickles in another: the parent
+// imports `__module__` and looks the class up there.
 pyo3::create_exception!(
-    _hares,
+    hares._hares,
+    HaresConfigError,
+    pyo3::exceptions::PyValueError
+);
+pyo3::create_exception!(
+    hares._hares,
+    HaresEquipmentError,
+    pyo3::exceptions::PyValueError
+);
+pyo3::create_exception!(
+    hares._hares,
     HaresSimulationError,
     pyo3::exceptions::PyRuntimeError
 );
-pyo3::create_exception!(_hares, FatalDwellingError, pyo3::exceptions::PyRuntimeError);
+pyo3::create_exception!(hares._hares, HaresHealthPolicyError, HaresSimulationError);
+pyo3::create_exception!(hares._hares, HaresCallbackError, HaresSimulationError);
+pyo3::create_exception!(
+    hares._hares,
+    FatalDwellingError,
+    pyo3::exceptions::PyRuntimeError
+);
 
-use crate::conversions::{batches_or_steps_to_polars_df, chrono_to_py_datetime};
+/// Test-only: the number of full dwelling re-constructions
+/// `reset_with_seed` ran (its one `DwellingBlueprint::build_with_seed`
+/// call each). Lives in `hares-python` because `cfg(test)` is not set for
+/// `hares-core` when `hares-python`'s tests compile it: the reset the
+/// environments use (`load_state` then `reseed`) must leave the counter
+/// alone, and the counter is shown to count by a `reset_with_seed` call
+/// moving it.
+#[cfg(test)]
+pub(crate) static TEST_BUILD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+use crate::conversions::naive_chrono_to_py_datetime;
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
 use crate::py_config::PySimulationConfig;
-use crate::py_config::parse_rotation_policy;
 use crate::py_control::PyControlSignal;
 use crate::py_enums::PyLutType;
 use crate::py_enums::{PyEvArchetypeId, PyVehicleId};
@@ -48,18 +73,10 @@ use crate::py_equipment::{
     PyBattery, PyEquipment, PyEquipmentDescriptor, PyEv, PyProtocolBridge, PyPv,
     extract_charging_lut, extract_ocv_table, extract_u_neg_table,
 };
-use crate::py_metrics::PySimulationMetrics;
+use crate::py_result::{PyRunHealth, PyRunResult};
 use crate::py_telemetry::PyTelemetry;
-use crate::utils::extract_datetime;
-use crate::utils::extract_seconds;
 use crate::utils::finite_f64_optional;
-use crate::utils::parse_resample_method;
-use crate::utils::python_to_json_value;
 use crate::utils::validate_finite;
-
-const DEFAULT_START: &str = "2019-01-01T00:00:00Z";
-const DEFAULT_DURATION_S: i64 = 24 * 60 * 60;
-const DEFAULT_STEP_S: i64 = 60;
 
 fn parse_solar_override(
     py: Python<'_>,
@@ -462,11 +479,11 @@ fn battery_config_from_py(battery: &PyBattery) -> Result<EquipmentConfig, HaresE
     let cfg = BatteryConfig {
         equipment_id: None,
         zone_id: None,
-        capacity_kwh: battery.capacity_kwh,
-        max_charge_kw: battery.max_charge_kw.unwrap_or(5.0),
-        max_discharge_kw: battery.max_discharge_kw.unwrap_or(5.0),
+        capacity_j: battery.capacity_j,
+        max_charge_w: battery.max_charge_w.unwrap_or(5000.0),
+        max_discharge_w: battery.max_discharge_w.unwrap_or(5000.0),
         power_factor: battery.power_factor,
-        inverter_capacity_kva: battery.inverter_capacity_kva,
+        inverter_capacity_va: battery.inverter_capacity_va,
         n_series: battery.n_series,
         n_parallel: battery.n_parallel,
         ah_cell: None,
@@ -517,15 +534,16 @@ fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
     let cfg = PvConfig {
         equipment_id: None,
         zone_id: None,
-        capacity_kw: pv.capacity_kw,
+        capacity_w: pv.capacity_w,
         tilt_deg: Some(pv.tilt),
         azimuth_deg: Some(pv.azimuth),
+        attached_boundary_id: None,
         module_type: None,
         noct_c: None,
         array_type: None,
         system_losses_fraction: None,
         inverter_efficiency: None,
-        inverter_capacity_kw: None,
+        inverter_capacity_w: None,
         power_factor: None,
         surface_resolution_deg: None,
         sam_lut_path: pv.sam_lut_path.clone(),
@@ -536,15 +554,25 @@ fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
 }
 
 fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
-    let capacity_kwh = ev.capacity_kwh.unwrap_or(75.0);
-    let max_charging_power_kw =
-        ev.max_charging_kw
-            .unwrap_or(if capacity_kwh < 56.875 { 7.2 } else { 11.5 });
+    // The builder's defaults are datasheet values written in SI: 75 kWh
+    // is 2.7e8 J and 7.2 or 11.5 kW is 7200 or 11500 W, converted once
+    // with uom (the threshold 56.875 kWh is the same test in J).
+    let capacity_j = ev.capacity_j.unwrap_or(270000000.0);
+    let max_charging_power_w = ev.max_charging_power_w.unwrap_or_else(|| {
+        if capacity_j
+            < uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(56.875)
+                .get::<uom::si::energy::joule>()
+        {
+            7200.0
+        } else {
+            11500.0
+        }
+    });
     let cfg = EvConfig {
         equipment_id: None,
-        capacity_kwh,
+        capacity_j,
         charging_level: None,
-        max_charging_power_kw,
+        max_charging_power_w,
         charging_efficiency: None,
         l1_current_a: None,
         l1_voltage_v: None,
@@ -562,21 +590,21 @@ fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
         cell_resistance_ohm: ev.cell_resistance_ohm,
         v2l_enabled: None,
         v2l_soc_reserve: None,
-        v2l_max_discharge_kw: None,
+        v2l_max_discharge_w: None,
         v2g_enabled: None,
         v2g_soc_reserve: None,
-        v2g_max_discharge_kw: None,
+        v2g_max_discharge_w: None,
         chemistry: None,
-        fuel_economy_kwh_per_mi: None,
+        fuel_economy_j_per_m: None,
         ready_soc: None,
         charging_strategy: None,
         plug_in_policy: None,
-        power_limit_kw: None,
+        power_limit_w: None,
         initial_connection_state: ev
             .initial_connection_state
             .map(|state| EvConnectionState::from(state).to_string()),
         power_factor: ev.power_factor,
-        charger_capacity_kva: ev.charger_capacity_kva,
+        charger_capacity_va: ev.charger_capacity_va,
         cc_cv_transition_soc: None,
         charging_priority: None,
         discharge_respects_deadline: true,
@@ -612,63 +640,171 @@ fn protocol_bridge_config_from_py(
 /// boundaries.
 pub(crate) const FATAL_DWELLING_PREFIX: &str = "[FATAL_DWELLING] ";
 
+/// The per-zone temperature keys a step dict carries, in the step's zone
+/// order: "Temperature - Indoor (C)" for zone 0, "Temperature - Zone_N (C)"
+/// beyond it.
+pub(crate) fn zone_keys_for_step(step: &hares_core::StepResult) -> Vec<String> {
+    step.zone_temperatures_c
+        .iter()
+        .map(|(zone_id, _)| {
+            if zone_id.0 == 0 {
+                "Temperature - Indoor (C)".to_string()
+            } else {
+                format!("Temperature - Zone_{} (C)", zone_id.0)
+            }
+        })
+        .collect()
+}
+
+/// The dict `PyDwelling.step()` returns, built from one step result and the
+/// zone keys [`zone_keys_for_step`] names: the one conversion both
+/// `PyDwelling.step()` and every `batch_step` row go through, so both paths
+/// hand Python the same step dict.
+pub(crate) fn step_result_to_py_dict(
+    py: Python<'_>,
+    step: &hares_core::StepResult,
+    zone_keys: &[String],
+) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
+    out.set_item(
+        "timestamp",
+        naive_chrono_to_py_datetime(py, step.timestamp)?,
+    )?;
+    out.set_item("net_electric_power_w", step.net_electric_power_w)?;
+    out.set_item("hvac_heating_w", step.hvac_heating_w)?;
+    out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
+    out.set_item("gas_power_w", step.gas_power_w)?;
+    for ((_zone_id, temp_c), key) in step.zone_temperatures_c.iter().zip(zone_keys.iter()) {
+        out.set_item(key, *temp_c)?;
+    }
+    Ok(out.unbind().into())
+}
+
+/// The GIL state `construct_detached` observed inside the construction it
+/// ran, recorded for the `construction_runs_detached` test: 0 is released,
+/// 1 is held, -1 is no construction yet. Test-only, so no production call
+/// pays for the store.
+#[cfg(test)]
+pub(crate) static CONSTRUCT_GIL_STATE: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(-1);
+
+/// The one detached construction the Python-facing dwelling constructors
+/// share: the expensive parse+resolve runs with the GIL released, so
+/// parallel callers construct concurrently. Argument extraction stays
+/// attached, before the call, and the closure returns plain Rust values
+/// (`HaresError` crosses as data; the `PyErr` conversion needs the GIL and
+/// happens after). The audited construction path touches no Python-owned
+/// state while released: hares-core and hares-io carry no pyo3 dependency,
+/// and the batch callback attaches only to a built dwelling and
+/// re-acquires the GIL itself at delivery.
+pub(crate) fn construct_detached<T: Send>(py: Python<'_>, f: impl FnOnce() -> T + Send) -> T {
+    py.detach(|| {
+        #[cfg(test)]
+        // Safe: the check only reads the calling thread's GIL state.
+        CONSTRUCT_GIL_STATE.store(unsafe { pyo3::ffi::PyGILState_Check() }, Ordering::SeqCst);
+        f()
+    })
+}
+
 #[pyclass(name = "Dwelling")]
 pub struct PyDwelling {
     pub(crate) dwelling: Mutex<Dwelling>,
     pub(crate) poisoned: AtomicBool,
     pub(crate) mutex_poison_events: std::sync::atomic::AtomicU64,
     pub(crate) config: DwellingConfig,
-    sim_config: PySimulationConfig,
-    initial_state: Option<Vec<u8>>,
+    /// The blueprint the dwelling was built from: the shared parses and
+    /// the state every `reset_with_seed` rebuild clones.
+    pub(crate) blueprint: Arc<DwellingBlueprint>,
     initialized: bool,
     registry: ActorRegistry,
     equipment_registry: EquipmentRegistry,
     zone_keys: Option<Vec<String>>,
     gas_tariff: Option<crate::py_tariff::PyGasTariff>,
+    /// The attached batch callbacks' cause slot: one slot the dwelling
+    /// owns, shared by every attached callback's adapter. The adapter
+    /// stores the callable's exception there and the run-error mapping
+    /// chains it as `__cause__`. Cleared when the dwelling is rebuilt.
+    callback_cause: crate::py_callback::CallbackCauseSlot,
 }
 
 #[pymethods]
 impl PyDwelling {
     #[classmethod]
-    #[pyo3(signature = (hpxml, schedule, weather, **kwargs))]
+    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, defaults = None, overrides = None, **unexpected))]
+    // PyO3 #[classmethod] constructor must match the Python API parameter list.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
         _cls: &Bound<'_, PyType>,
-        hpxml: String,
-        schedule: Option<String>,
-        weather: String,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        hpxml: &Bound<'_, PyAny>,
+        schedule: Option<&Bound<'_, PyAny>>,
+        weather: &Bound<'_, PyAny>,
+        config: crate::py_config::PySimulationConfig,
+        bldg_id: i64,
+        defaults: Option<&Bound<'_, PyAny>>,
+        overrides: Option<&Bound<'_, PyDict>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let config = build_config(hpxml, schedule, weather, kwargs)?;
-        let sim_config = PySimulationConfig::from_sim_config(&config.sim_config);
-        let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
+        // The dwelling-level keywords are the config's own; every simulation
+        // setting rides on the one SimulationConfig object. Every handle
+        // argument is shared: its parse is used as is. The sources' parses
+        // and the assembly run in the detached section, the GIL released.
+        let (config, inputs) =
+            crate::py_config::resolve_args(crate::py_config::DwellingConfigArgs {
+                hpxml: crate::py_inputs::hpxml_arg(hpxml)?,
+                schedule: crate::py_blueprint::schedule_arg_maybe(schedule)?,
+                weather: crate::py_inputs::weather_arg(weather)?,
+                defaults: match defaults {
+                    Some(path) => crate::py_inputs::defaults_arg(path)?,
+                    None => {
+                        crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::directory(
+                            crate::py_inputs::packaged_defaults_dir(_cls.py())?,
+                        ))
+                    }
+                },
+                config,
+                bldg_id,
+                overrides,
+                unexpected,
+            })?;
+        let settings = config.settings.clone();
+        let (dwelling, blueprint) = construct_detached(_cls.py(), move || {
+            let inputs = crate::py_blueprint::builder_inputs(&inputs)?;
+            let builder = DwellingBlueprintBuilder::new(inputs, settings)?;
+            builder
+                .freeze()
+                .and_then(|blueprint| blueprint.build().map(|dwelling| (dwelling, blueprint)))
+        })
+        .map_err(to_py_err)?;
         Ok(Self {
             dwelling: Mutex::new(dwelling),
             poisoned: AtomicBool::new(false),
             mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
-            config,
-            sim_config,
-            initial_state: None,
+            config: config.clone(),
+            blueprint,
             initialized: false,
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
             gas_tariff: None,
+            callback_cause: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
-    pub fn initialize(&mut self) -> PyResult<()> {
-        if self.initialized || self.initial_state.is_some() {
-            self.initialized = true;
-            return Ok(());
+    /// The blueprint the dwelling was built from: the shared parses (one
+    /// per unique input) and the state every build clones.
+    pub fn blueprint(&self) -> crate::py_blueprint::PyDwellingBlueprintRef {
+        crate::py_blueprint::PyDwellingBlueprintRef {
+            inner: Arc::clone(&self.blueprint),
         }
+    }
 
-        let bytes = {
-            let dwelling = self.acquire()?;
-            serde_json::to_vec(&dwelling.save_checkpoint().map_err(to_py_err)?)
-                .map_err(to_py_err_display)?
-        };
+    fn config(&self) -> PySimulationConfig {
+        // Read through the dwelling's config, so a rebuilt one (a new seed)
+        // is the config the object reports.
+        PySimulationConfig(self.config.settings.sim_config.clone())
+    }
 
-        self.initial_state = Some(bytes);
+    pub fn initialize(&mut self) -> PyResult<()> {
         self.initialized = true;
         Ok(())
     }
@@ -726,6 +862,7 @@ impl PyDwelling {
             d.set_item("output_s", p.output.as_secs_f64())?;
             d.set_item("accounting_s", p.accounting.as_secs_f64())?;
             d.set_item("step_total_s", p.step_total.as_secs_f64())?;
+            d.set_item("finish_s", p.finish.map(|d| d.as_secs_f64()))?;
             d.set_item("memory_high_water_kb", p.memory_high_water_kb)?;
             d.set_item("hot_path_allocations", p.hot_path_allocations)?;
             d.set_item("hot_path_alloc_violations", p.hot_path_alloc_violations)?;
@@ -746,7 +883,10 @@ impl PyDwelling {
         }
     }
 
-    pub fn simulate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    /// Runs the full configured horizon and returns the finished run's
+    /// result: the one finalisation a stepped run takes through
+    /// `finish()` is the same path this takes at the horizon's end.
+    pub fn simulate(&self, py: Python<'_>) -> PyResult<PyRunResult> {
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
         {
@@ -760,20 +900,20 @@ impl PyDwelling {
                 "PyDwelling.simulate() called before initialize(). Call dwelling.initialize() first.",
             ));
         }
-        let sim_result: Result<Result<(), HaresError>, _> = py.detach(|| {
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let mut dwelling = self.acquire_hares()?;
-                dwelling.simulate()?;
-                Ok(())
-            }))
-        });
-        match sim_result {
-            Ok(Ok(())) => {}
+        let sim_result: Result<Result<std::sync::Arc<hares_core::RunResult>, HaresError>, _> = py
+            .detach(|| {
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    let mut dwelling = self.acquire_hares()?;
+                    dwelling.simulate()
+                }))
+            });
+        let result = match sim_result {
+            Ok(Ok(result)) => result,
             Ok(Err(e)) => {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(FatalDwellingError::new_err(e.to_string()));
                 }
-                return Err(to_py_err(e));
+                return Err(self.map_run_error(e));
             }
             Err(payload) => {
                 if self.dwelling.is_poisoned() {
@@ -784,7 +924,7 @@ impl PyDwelling {
                     panic_hook::panic_payload_to_string(payload)
                 )));
             }
-        }
+        };
 
         #[cfg(debug_assertions)]
         {
@@ -794,11 +934,73 @@ impl PyDwelling {
             );
         }
 
+        let catalogue = { self.acquire()?.catalogue() };
+        Ok(PyRunResult {
+            inner: result,
+            catalogue,
+        })
+    }
+
+    /// Finalises the run in place: the billing close, the post-hoc
+    /// diagnostics, the recorders' flush, close and publish (the final
+    /// partial batch included), the metrics, the health, the warning
+    /// record and the provenance, and returns the finished run's result.
+    /// Idempotent: a call after the first returns the first call's result.
+    /// A run that has stepped nothing cannot finish.
+    pub fn finish(&self, py: Python<'_>) -> PyResult<PyRunResult> {
+        let _guard = PanicHookGuard::new();
+        #[cfg(debug_assertions)]
+        {
+            assert!(
+                panic_hook::is_installed(),
+                "custom panic hook must be installed before finish"
+            );
+        }
+        let finish_outcome = py.detach(|| {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut dwelling = self.acquire_hares()?;
+                dwelling.finish()
+            }))
+        });
+        let finish_result = match finish_outcome {
+            Ok(result) => result,
+            Err(payload) => {
+                if self.dwelling.is_poisoned() {
+                    self.mark_poisoned();
+                }
+                return Err(PyRuntimeError::new_err(format!(
+                    "HARES internal panic: {}",
+                    panic_hook::panic_payload_to_string(payload)
+                )));
+            }
+        };
+        match finish_result {
+            Ok(result) => {
+                let catalogue = { self.acquire()?.catalogue() };
+                Ok(PyRunResult {
+                    inner: result,
+                    catalogue,
+                })
+            }
+            Err(e) => {
+                if self.poisoned.load(Ordering::Acquire) {
+                    return Err(FatalDwellingError::new_err(e.to_string()));
+                }
+                Err(self.map_run_error(e))
+            }
+        }
+    }
+
+    /// The run's live health totals: readable at any step, needing no
+    /// report.
+    pub fn health(&self) -> PyResult<PyRunHealth> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(reentry_refusal());
+        }
         let dwelling = self.acquire()?;
-        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
-        let steps = dwelling.results().steps.clone();
-        drop(dwelling);
-        batches_or_steps_to_polars_df(py, &batches, &steps)
+        Ok(PyRunHealth {
+            inner: dwelling.health().clone(),
+        })
     }
 
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -823,7 +1025,7 @@ impl PyDwelling {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(FatalDwellingError::new_err(e.to_string()));
                 }
-                return Err(to_py_err(e));
+                return Err(self.map_run_error(e));
             }
             Err(payload) => {
                 if self.dwelling.is_poisoned() {
@@ -845,34 +1047,14 @@ impl PyDwelling {
         }
 
         if self.zone_keys.is_none() {
-            let keys: Vec<String> = step
-                .zone_temperatures_c
-                .iter()
-                .map(|(zone_id, _)| {
-                    if zone_id.0 == 0 {
-                        "Temperature - Indoor (C)".to_string()
-                    } else {
-                        format!("Temperature - Zone_{} (C)", zone_id.0)
-                    }
-                })
-                .collect();
-            self.zone_keys = Some(keys);
+            self.zone_keys = Some(zone_keys_for_step(&step));
         }
 
-        let out = PyDict::new(py);
-        out.set_item("timestamp", chrono_to_py_datetime(py, step.timestamp)?)?;
-        out.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
-        out.set_item("hvac_heating_w", step.hvac_heating_w)?;
-        out.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
-        out.set_item("gas_power_w", step.gas_power_w)?;
         let zone_keys = self
             .zone_keys
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("zone keys not initialized"))?;
-        for ((_zone_id, temp_c), key) in step.zone_temperatures_c.iter().zip(zone_keys.iter()) {
-            out.set_item(key, *temp_c)?;
-        }
-        Ok(out.unbind().into())
+        step_result_to_py_dict(py, &step, zone_keys)
     }
 
     #[pyo3(signature = (name, signal, priority=None))]
@@ -892,7 +1074,7 @@ impl PyDwelling {
     /// Adds a Python actor to the dwelling's decision-making loop.
     pub fn add_actor(&self, py: Python<'_>, actor: Py<PyActor>) -> PyResult<()> {
         let mut dwelling = self.acquire()?;
-        let wrapper = crate::py_actor::PyActorWrapper::new(py, actor);
+        let wrapper = crate::py_actor::PyActorWrapper::new(py, actor)?;
         dwelling.add_actor(Box::new(wrapper)).map_err(to_py_err)?;
         Ok(())
     }
@@ -951,11 +1133,14 @@ impl PyDwelling {
         // Loud on non-finite per-unit voltage at the boundary (the
         // shared validators' section rationale, `utils.rs`): a NaN
         // voltage silently lands in the grid state and stops every
-        // per-unit comparison downstream. Finiteness only — the
-        // nominal-range contract is the grid model's.
+        // per-unit comparison downstream. The engine's setter validates
+        // the full contract (exactly 0.0 or a finite value in
+        // [0.5, 1.5] pu); finiteness is re-checked here so the Python
+        // caller sees the boundary's error class for NaN before the
+        // dwelling is acquired.
         validate_finite(voltage_pu, "voltage_pu")?;
         let mut dwelling = self.acquire()?;
-        dwelling.set_grid_voltage(voltage_pu);
+        dwelling.set_grid_voltage(voltage_pu).map_err(to_py_err)?;
         Ok(())
     }
 
@@ -983,6 +1168,9 @@ impl PyDwelling {
     }
 
     pub fn telemetry(&self) -> PyResult<PyTelemetry> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(reentry_refusal());
+        }
         let fatal = self.poisoned.load(Ordering::Acquire);
         if fatal {
             // Dwelling is fatally poisoned — the mutex cannot be locked, but we
@@ -998,6 +1186,28 @@ impl PyDwelling {
             ))
         })?;
         Ok(PyTelemetry::new(dwelling.telemetry().map_err(to_py_err)?))
+    }
+
+    /// The dwelling's output variable catalogue: every variable the built
+    /// model can produce, declared once, typed, with its source. Readable
+    /// from build on, before the first step; rebuilt on every equipment or
+    /// actor roster change.
+    pub fn catalogue(&self) -> PyResult<crate::py_catalogue::PyCatalogue> {
+        let dwelling = self.acquire()?;
+        Ok(crate::py_catalogue::PyCatalogue {
+            inner: dwelling.catalogue(),
+        })
+    }
+
+    /// The resolved-parameter read-back: the parameters the physics
+    /// actually uses, computed at assembly, after defaults, autosizing and
+    /// overrides and before warm-up. A dict of SI floats and strings: per
+    /// equipment its resolved parameters and the active setpoint sources
+    /// (their provenance labels), the boundaries' effective R, C and
+    /// layers, the resolved windows, the infiltration inputs and the site.
+    pub fn resolved_model(&self) -> PyResult<Py<PyAny>> {
+        let dwelling = self.acquire()?;
+        Python::attach(|py| resolved_model_to_py(py, dwelling.resolved_model()))
     }
 
     #[getter]
@@ -1300,16 +1510,16 @@ impl PyDwelling {
         seed: u64,
     ) -> PyResult<()> {
         use hares_core::actors::ev_driver::EvDriverActor;
-        use hares_equipment::ev::catalog::{EvArchetypeId, L1_CAP_KW, VehicleId};
+        use hares_equipment::ev::catalog::{EvArchetypeId, L1_CAP_W, VehicleId};
 
         let rust_vid: VehicleId = vehicle_id.into();
         let rust_aid: EvArchetypeId = archetype_id.into();
         let spec = rust_vid.spec();
         let preset = rust_aid.preset();
 
-        let max_power = match preset.charging_level {
-            hares_types::ChargingLevel::L1 => spec.max_l2_power_kw.min(L1_CAP_KW),
-            hares_types::ChargingLevel::L2 => spec.max_l2_power_kw,
+        let max_power_w = match preset.charging_level {
+            hares_types::ChargingLevel::L1 => spec.charger_power_w().min(L1_CAP_W),
+            hares_types::ChargingLevel::L2 => spec.charger_power_w(),
         };
 
         let config = EquipmentConfig::from_typed(
@@ -1317,12 +1527,12 @@ impl PyDwelling {
             "EV".to_string(),
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: spec.capacity_kwh,
+                capacity_j: spec.capacity_j(),
                 charging_level: Some(match preset.charging_level {
                     hares_types::ChargingLevel::L1 => "L1".to_string(),
                     hares_types::ChargingLevel::L2 => "L2".to_string(),
                 }),
-                max_charging_power_kw: max_power,
+                max_charging_power_w: max_power_w,
                 charging_efficiency: None,
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -1340,19 +1550,19 @@ impl PyDwelling {
                 cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
-                v2l_max_discharge_kw: None,
+                v2l_max_discharge_w: None,
                 v2g_enabled: None,
                 v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: None,
-                fuel_economy_kwh_per_mi: None,
+                fuel_economy_j_per_m: None,
                 ready_soc: None,
                 charging_strategy: None,
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
@@ -1380,7 +1590,7 @@ impl PyDwelling {
         let actor = EvDriverActor::new(
             &format!("EvDriver:{}", spec.label),
             spec.label,
-            ev_driver_params(spec, preset, seed_bytes, max_power),
+            ev_driver_params(spec, preset, seed_bytes, max_power_w),
             hares_core::ChaCha8Rng::from_seed(seed_bytes),
         );
 
@@ -1581,60 +1791,131 @@ impl PyDwelling {
         }
     }
 
-    pub fn results(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dwelling = self.acquire()?;
-        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
-        let steps = dwelling.results().steps.clone();
-        drop(dwelling);
-        batches_or_steps_to_polars_df(py, &batches, &steps)
+    /// Attaches a Python callable as the dwelling's batch callback: the
+    /// recorder calls it with the batch's info and the batch as the
+    /// zero-copy Arrow batch (pyo3-arrow's `PyRecordBatch`, the Arrow
+    /// PyCapsule array interface over the batch's own buffers), once per
+    /// flushed batch, in flush order. The step runs with the GIL
+    /// released, so the call re-acquires it; an exception from the
+    /// callable fails the run as a typed callback error with the raised
+    /// object chained as `__cause__`, and the run stays ended after it.
+    pub fn attach_callback(&mut self, report: &str, callback: Bound<'_, PyAny>) -> PyResult<()> {
+        if !callback.is_callable() {
+            let repr = callback
+                .repr()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|_| "unprintable".to_string());
+            return Err(PyTypeError::new_err(format!(
+                "the batch callback must be callable, got {repr}"
+            )));
+        }
+        let mut dwelling = self.acquire()?;
+        dwelling
+            .attach_callback(
+                report,
+                Box::new(crate::py_callback::PyBatchCallback::new(
+                    callback.unbind(),
+                    Arc::clone(&self.callback_cause),
+                )),
+            )
+            .map_err(to_py_err)?;
+        Ok(())
     }
 
-    pub fn metrics(&self) -> PyResult<PySimulationMetrics> {
+    /// Freezes the observation plan for `fields` against this dwelling:
+    /// every field resolved once to a typed source, failing on an unknown
+    /// field and naming it. The gym environments build their plans at
+    /// `reset()` and read every step through them.
+    pub fn observation_plan(
+        &self,
+        fields: Vec<String>,
+    ) -> PyResult<crate::py_gym::PyObservationPlan> {
         let dwelling = self.acquire()?;
-        let batches: Vec<_> = dwelling.flushed_batches().to_vec();
-
-        if batches.is_empty() {
-            return Err(PyValueError::new_err(
-                "no batches flushed yet; run simulate() first",
-            ));
-        }
-
-        let schema = batches[0].schema();
-        let time_res_secs = self.sim_config.time_res_s() as u32;
-
-        let mut calculator =
-            MetricsCalculator::new(&schema, time_res_secs, &self.config.sim_config).map_err(
-                |e| PyValueError::new_err(format!("failed to create metrics calculator: {e}")),
-            )?;
-
-        for batch in &batches {
-            calculator
-                .accumulate(batch)
-                .map_err(|e| PyValueError::new_err(format!("metrics accumulation failed: {e}")))?;
-        }
-
-        let full_metrics = calculator
-            .finish()
-            .map_err(|e| PyValueError::new_err(format!("metrics finalization failed: {e}")))?;
-        Ok(PySimulationMetrics {
-            inner: full_metrics,
+        let plan = dwelling.observation_plan(&fields).map_err(to_py_err)?;
+        Ok(crate::py_gym::PyObservationPlan {
+            plan: std::sync::Arc::new(plan),
         })
     }
 
-    pub fn reset_with_seed(&mut self, seed: u64) -> PyResult<()> {
-        let mut config = self.config.clone();
-        config.sim_config.master_seed = seed;
+    /// Writes the planned observation into `out` (any object exposing a
+    /// writable C-contiguous float64 buffer, a numpy row among them), in
+    /// place, allocation-free: the plan's typed sources read the
+    /// dwelling's live state directly, the values and NaN handling
+    /// `to_observation_vec` reports on the same state.
+    pub fn observe_into(
+        &self,
+        plan: &crate::py_gym::PyObservationPlan,
+        out: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let buffer = PyBuffer::<f64>::get(out).map_err(|_| {
+            PyValueError::new_err(
+                "the observation row must expose a writable float64 buffer protocol view",
+            )
+        })?;
+        if buffer.readonly() {
+            return Err(PyValueError::new_err(
+                "the observation row must be writable",
+            ));
+        }
+        if buffer.item_count() != plan.plan.len() {
+            return Err(PyValueError::new_err(format!(
+                "the observation row holds {} slots for {} planned fields",
+                buffer.item_count(),
+                plan.plan.len()
+            )));
+        }
+        match buffer.strides() {
+            [stride] if *stride == size_of::<f64>() as isize => {}
+            _ => {
+                return Err(PyValueError::new_err(
+                    "the observation row must be C-contiguous",
+                ));
+            }
+        }
+        // SAFETY: the buffer is writable, C-contiguous, holds the plan's
+        // field count, and the PyBuffer keeps the export alive for the
+        // synchronous write below.
+        let out_slice =
+            unsafe { slice::from_raw_parts_mut(buffer.buf_ptr().cast::<f64>(), plan.plan.len()) };
+        let dwelling = self.acquire()?;
+        dwelling
+            .observe_into(&plan.plan, out_slice)
+            .map_err(to_py_err)
+    }
 
-        let dwelling = Dwelling::from_config(config.clone()).map_err(to_py_err)?;
+    pub fn reset_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<()> {
+        // The reset reuses the blueprint: the shared parses are the same
+        // `Arc`s, the rng derives from the seed, and the settings carry
+        // the seed the config reports.
+        #[cfg(test)]
+        TEST_BUILD_COUNT.fetch_add(1, Ordering::SeqCst);
+        let mut config = self.config.clone();
+        config.settings.sim_config.master_seed = seed;
+
+        let dwelling = construct_detached(py, {
+            let blueprint = Arc::clone(&self.blueprint);
+            move || blueprint.build_with_seed(seed).map_err(to_py_err)
+        })
+        .map_err(|_| PyRuntimeError::new_err("reset_with_seed panicked"))?;
         self.dwelling = Mutex::new(dwelling);
         self.poisoned.store(false, Ordering::SeqCst);
         self.mutex_poison_events.store(0, Ordering::SeqCst);
         self.config = config;
         self.initialized = false;
-        self.initial_state = None;
         self.zone_keys = None;
+        *self.callback_cause.lock().expect("cause slot mutex") = None;
 
         self.initialize()
+    }
+
+    /// Reseeds the dwelling's random streams in place, the streams
+    /// construction assigns for `seed` with each at its start: the reset
+    /// that restores a warmed-up state is `load_state(snapshot)` and then
+    /// this — no re-construction, no second warm-up. The explicit full
+    /// rebuild stays `reset_with_seed`.
+    pub fn reseed(&mut self, seed: u64) -> PyResult<()> {
+        let mut dwelling = self.acquire()?;
+        dwelling.reseed(seed).map_err(to_py_err)
     }
 
     pub fn save_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -1668,12 +1949,8 @@ impl PyDwelling {
     fn __repr__(&self) -> String {
         format!(
             "Dwelling(bldg_id={}, initialized={})",
-            self.config.bldg_id, self.initialized
+            self.config.settings.bldg_id, self.initialized
         )
-    }
-
-    fn config(&self) -> PySimulationConfig {
-        self.sim_config.clone()
     }
 
     pub fn set_solar_override(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -1840,28 +2117,28 @@ impl PyDwelling {
     ///         ``Some``, the provided shape is used directly and inference
     ///         is skipped. When ``None`` (default), roof shape is inferred
     ///         from building metadata.
-    #[pyo3(signature = (target_kw, min_kw=2.0, max_kw=14.0, diffuse_fraction=None, *,
-        panel_watts=None, panel_area_m2=None, system_losses=None,
-        inverter_kw_ac=None, max_dc_ac_ratio=None, main_panel_ampacity=None,
-        main_breaker_ampacity=None, roof_shape=None))]
+    #[pyo3(signature = (*, target_w, min_w=2000.0, max_w=14000.0,
+        diffuse_fraction=None, panel_watts=None, panel_area_m2=None,
+        system_losses=None, inverter_ac_w=None, max_dc_ac_ratio=None,
+        main_panel_ampacity=None, main_breaker_ampacity=None, roof_shape=None))]
     // PyO3 maps this keyword signature 1:1 to the Python API.
     #[allow(clippy::too_many_arguments)]
     pub fn estimate_pv_capacity(
         &self,
-        target_kw: f64,
-        min_kw: f64,
-        max_kw: f64,
+        target_w: f64,
+        min_w: f64,
+        max_w: f64,
         diffuse_fraction: Option<f64>,
         panel_watts: Option<u32>,
         panel_area_m2: Option<f64>,
         system_losses: Option<f64>,
-        inverter_kw_ac: Option<f64>,
+        inverter_ac_w: Option<f64>,
         max_dc_ac_ratio: Option<f64>,
         main_panel_ampacity: Option<u32>,
         main_breaker_ampacity: Option<u32>,
         roof_shape: Option<crate::py_pv_sizing::PyRoofShape>,
     ) -> PyResult<crate::py_pv_sizing::PyPvSizingResult> {
-        let dwelling = self.acquire()?;
+        let mut dwelling = self.acquire()?;
         let (roof_shape, user_override) = match roof_shape {
             Some(py_shape) => {
                 tracing::debug!(
@@ -1880,13 +2157,13 @@ impl PyDwelling {
                 false,
             ),
         };
-        crate::py_pv_sizing::size_pv_from_dwelling(
+        let result = crate::py_pv_sizing::size_pv_from_dwelling(
             &dwelling.roof_info,
             roof_shape,
             crate::py_pv_sizing::PvSizingTargets {
-                target_kw,
-                min_kw,
-                max_kw,
+                target_w,
+                min_w,
+                max_w,
             },
             crate::py_pv_sizing::PvRoofSiting {
                 wall_azimuths: &dwelling.wall_azimuths,
@@ -1898,14 +2175,25 @@ impl PyDwelling {
                 system_losses,
                 panel_watts,
                 panel_area_m2,
-                inverter_kw_ac,
+                inverter_ac_w,
                 max_dc_ac_ratio,
                 main_panel_ampacity,
                 main_breaker_ampacity,
             },
             dwelling.pv_panel_defaults(),
         )
-        .map_err(pyo3::exceptions::PyValueError::new_err)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        if result.inner.main_panel_ampacity_missing {
+            // The sizing's missing-ampacity condition is this dwelling's
+            // own warning record (per run, every build): the sizing
+            // proceeded without the NEC backfeed check.
+            dwelling.warnings.push_warning(hares_types::Warning::new(
+                "pv_sizing",
+                "PV sizing proceeded without the electrical code check: no \
+                 main_panel_ampacity provided",
+            ));
+        }
+        Ok(result)
     }
 
     /// Attach an electric tariff to this dwelling for billing.
@@ -1917,7 +2205,7 @@ impl PyDwelling {
     ) -> PyResult<()> {
         let tz_str = timezone
             .map(|s| s.to_string())
-            .or_else(|| self.config.sim_config.civil_timezone.clone())
+            .or_else(|| self.config.settings.sim_config.civil_timezone.clone())
             .unwrap_or_else(|| "UTC".to_string());
         let tz: chrono_tz::Tz = tz_str
             .parse()
@@ -1931,14 +2219,6 @@ impl PyDwelling {
     /// Attach a gas tariff to this dwelling for metadata/reporting.
     pub fn set_gas_tariff(&mut self, tariff: crate::py_tariff::PyGasTariff) {
         self.gas_tariff = Some(tariff);
-    }
-
-    /// Emit the final partial billing period. Call after the last `step()`
-    /// when driving the simulation step-by-step. Idempotent.
-    pub fn finalize_billing(&self) -> PyResult<()> {
-        let mut dwelling = self.acquire()?;
-        dwelling.finalize_billing();
-        Ok(())
     }
 
     /// Returns accumulated billing period summaries.
@@ -1963,9 +2243,11 @@ impl PyDwelling {
             period_name: evaluator.current_period_name().to_string(),
             current_rate_usd_per_kwh: evaluator.current_price(),
             export_rate_usd_per_kwh: evaluator.current_export_price(),
-            cumulative_import_kwh: billing.cumulative_import_kwh(),
-            cumulative_export_kwh: billing.cumulative_export_kwh(),
-            peak_demand_kw: billing.peak_demand_kw(),
+            // The live billing fields are SI (J, W); the rates are tariff
+            // data and keep their per-kWh units.
+            cumulative_import_j: billing.cumulative_import_j(),
+            cumulative_export_j: billing.cumulative_export_j(),
+            peak_demand_w: billing.peak_demand_w(),
             cumulative_energy_cost_usd: billing.cumulative_energy_cost_usd(),
         }))
     }
@@ -1973,7 +2255,11 @@ impl PyDwelling {
     /// Drains and returns warning messages accumulated since the previous call.
     pub fn take_warnings(&self) -> PyResult<Vec<String>> {
         let mut dwelling = self.acquire()?;
-        Ok(dwelling.take_warnings())
+        Ok(dwelling
+            .take_warnings()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect())
     }
 
     /// Injects a warning message into the dwelling's warning buffer.
@@ -2035,9 +2321,12 @@ impl PyDwelling {
         // Islanded-imbalance accounting: residual load the island sources
         // could not cover / surplus generation the island could not absorb.
         // Both 0.0 during normal (grid-connected) operation.
-        dict.set_item("island_unserved_kw", dwelling.island_unserved_kw())?;
-        dict.set_item("island_excess_kw", dwelling.island_excess_kw())?;
-        dict.set_item("current_time", chrono_to_py_datetime(py, env.current_time)?)?;
+        dict.set_item("island_unserved_w", dwelling.island_unserved_w())?;
+        dict.set_item("island_excess_w", dwelling.island_excess_w())?;
+        dict.set_item(
+            "current_time",
+            naive_chrono_to_py_datetime(py, env.current_time.naive_local())?,
+        )?;
         let zones: Vec<Py<PyDict>> = env
             .zones
             .iter()
@@ -2064,47 +2353,64 @@ fn ev_driver_params(
     spec: &hares_equipment::ev::catalog::VehicleSpec,
     preset: &hares_equipment::ev::catalog::ArchetypePreset,
     seed_bytes: [u8; 32],
-    max_power: f64,
+    max_power_w: f64,
 ) -> hares_core::actors::EvDriverParams {
     hares_core::actors::EvDriverParams {
         strategy: preset.strategy.clone(),
         plug_in_policy: preset.plug_in_policy.clone(),
-        daily_drive_miles: preset.build_miles_schedule(seed_bytes),
+        daily_drive_distance_m: preset.build_distance_schedule(seed_bytes),
         departure_time: preset.build_departure_schedule(seed_bytes),
         trip_duration: preset.build_duration_schedule(seed_bytes),
         arrival_time: preset.build_arrival_schedule(seed_bytes),
         event_day_ratio: preset.event_day_ratio,
-        fuel_economy_kwh_per_mi: spec.fuel_economy_kwh_per_mi,
-        capacity_kwh: spec.capacity_kwh,
-        max_charge_kw: max_power,
-        average_speed_mph: 30.0,
-        range_anxiety_miles: 20.0,
+        // The catalogue's datasheet figures are kWh/mi and kWh; the
+        // driver's parameters are SI, converted once here with uom.
+        fuel_economy_j_per_m: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+            spec.fuel_economy_kwh_per_mi,
+        )
+        .get::<uom::si::energy::joule>()
+            / uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
+                .get::<uom::si::length::meter>(),
+        capacity_j: uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(spec.capacity_kwh)
+            .get::<uom::si::energy::joule>(),
+        max_charge_w: max_power_w,
+        average_speed_m_per_s: hares_core::actors::ev_driver::defaults::AVERAGE_SPEED_M_PER_S,
+        range_anxiety_distance_m: hares_core::actors::ev_driver::defaults::RANGE_ANXIETY_DISTANCE_M,
         away_charge_fraction: 0.0,
-        away_charge_power_kw: preset.away_charge_power_kw,
+        away_charge_power_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(
+            preset.away_charge_power_kw,
+        )
+        .get::<uom::si::power::watt>(),
     }
 }
 
 impl PyDwelling {
-    pub(crate) fn from_blueprint_build(dwelling: Dwelling, config: DwellingConfig) -> Self {
-        let sim_config = PySimulationConfig::from_sim_config(&config.sim_config);
+    pub(crate) fn from_blueprint_build(
+        dwelling: Dwelling,
+        config: DwellingConfig,
+        blueprint: Arc<DwellingBlueprint>,
+    ) -> Self {
         Self {
             dwelling: Mutex::new(dwelling),
             poisoned: AtomicBool::new(false),
             mutex_poison_events: std::sync::atomic::AtomicU64::new(0),
             config,
-            sim_config,
-            initial_state: None,
+            blueprint,
             initialized: false,
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
             gas_tariff: None,
+            callback_cause: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     /// Acquire the dwelling mutex after checking the poisoned flag.
     /// Returns `FatalDwellingError` if the dwelling is in a fatal error state.
     fn acquire(&self) -> PyResult<MutexGuard<'_, Dwelling>> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(reentry_refusal());
+        }
         if self.poisoned.load(Ordering::Acquire) {
             return Err(FatalDwellingError::new_err(
                 "dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
@@ -2124,6 +2430,9 @@ impl PyDwelling {
     /// Fatal errors are prefixed with [`FATAL_DWELLING_PREFIX`] so callers can
     /// distinguish permanent from transient failures.
     pub(crate) fn acquire_string(&self) -> Result<MutexGuard<'_, Dwelling>, String> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(crate::py_callback::REENTRY_MESSAGE.to_string());
+        }
         if self.poisoned.load(Ordering::Acquire) {
             return Err(format!(
                 "{}dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
@@ -2138,9 +2447,19 @@ impl PyDwelling {
         })
     }
 
+    /// Adds to the dwelling's run-total clamped-actions counter, the health
+    /// record the batch and single-dwelling clip paths share.
+    pub(crate) fn record_clamped_actions(&self, count: u64) -> PyResult<()> {
+        let mut dwelling = self.acquire()?;
+        dwelling.record_clamped_actions(count).map_err(to_py_err)
+    }
+
     /// GIL-free variant that preserves [`HaresError`] for proper Python exception mapping
     /// via [`to_py_err`].
     fn acquire_hares(&self) -> Result<MutexGuard<'_, Dwelling>, HaresError> {
+        if crate::py_callback::delivery_in_progress() {
+            return Err(reentry_hares_error());
+        }
         if self.poisoned.load(Ordering::Acquire) {
             return Err(HaresError::Dwelling(
                 "dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance".to_string(),
@@ -2196,14 +2515,6 @@ impl PyDwelling {
         Ok(eq
             .thermostat_band_class()
             .map(hares_types::ThermostatBandClass::range_c))
-    }
-
-    pub(crate) fn observation(&self) -> Result<Vec<f64>, String> {
-        let dwelling = self.acquire_string()?;
-        let telemetry = dwelling.telemetry().map_err(|e| e.to_string())?;
-        telemetry
-            .to_observation_vec(&["total_power_kw", "outdoor_temp", "outdoor_humidity_ratio"])
-            .map_err(|err| err.to_string())
     }
 
     /// Convert a Python equipment config object (Battery, PV, or EV) to a boxed Equipment.
@@ -2284,7 +2595,9 @@ impl PyTimestepsIter {
                     .saturating_mul(i64::try_from(self.next_step).unwrap_or(i64::MAX)),
             );
         self.next_step = self.next_step.saturating_add(1);
-        Ok(Some(chrono_to_py_datetime(py, ts)?))
+        // The timesteps iterator yields the steps' naive local wall clock,
+        // the value the matching row's Time column carries.
+        Ok(Some(naive_chrono_to_py_datetime(py, ts.naive_local())?))
     }
 
     fn __repr__(&self) -> String {
@@ -2295,419 +2608,178 @@ impl PyTimestepsIter {
     }
 }
 
-const KNOWN_KWARGS: &[&str] = &[
-    "config",
-    "start_time",
-    "time_res_s",
-    "duration_s",
-    "output_to_parquet",
-    "output_path",
-    "write_output",
-    "output_verbosity",
-    "output_chunk_size",
-    "master_seed",
-    "civil_timezone",
-    "setpoint_deadband_c",
-    "bldg_id",
-    "initialization_duration",
-    "defaults_path",
-    "resample_overrides",
-    "overrides",
-    "latitude",
-    "longitude",
-    "elevation_m",
-    "utc_offset_h",
-    "rotation",
-    "max_consecutive_step_failures",
-];
-
-/// Extract an explicit [`SiteLocationOverride`] from the `latitude`,
-/// `longitude`, `elevation_m`, and `utc_offset_h` kwargs.
-///
-/// Each is optional; any provided value overrides the HPXML/weather-derived
-/// value during site-location resolution. Values are validated for finiteness
-/// and physical range so a typo fails fast rather than silently producing
-/// wrong solar geometry.
-fn extract_site_location_override(
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<SiteLocationOverride> {
-    let get = |name: &str| -> PyResult<Option<f64>> {
-        kwargs
-            .and_then(|k| k.get_item(name).ok().flatten())
-            .map(|obj| obj.extract::<f64>())
-            .transpose()
-    };
-
-    let latitude_deg = get("latitude")?;
-    if let Some(lat) = latitude_deg
-        && (!lat.is_finite() || !(-90.0..=90.0).contains(&lat))
-    {
-        return Err(PyValueError::new_err(format!(
-            "latitude must be finite and within [-90, 90] degrees, got {lat}"
-        )));
+/// The typed callback error a dwelling accessor raises when a batch
+/// callback re-enters the dwelling from the delivery thread.
+fn reentry_hares_error() -> HaresError {
+    HaresError::Callback {
+        report: hares_io::output::callback::TIMESTEP_REPORT.to_string(),
+        message: crate::py_callback::REENTRY_MESSAGE.to_string(),
     }
-
-    let longitude_deg = get("longitude")?;
-    if let Some(lon) = longitude_deg
-        && (!lon.is_finite() || !(-180.0..=180.0).contains(&lon))
-    {
-        return Err(PyValueError::new_err(format!(
-            "longitude must be finite and within [-180, 180] degrees, got {lon}"
-        )));
-    }
-
-    let elevation_m = get("elevation_m")?;
-    if let Some(elev) = elevation_m
-        && (!elev.is_finite() || !(-500.0..=9000.0).contains(&elev))
-    {
-        return Err(PyValueError::new_err(format!(
-            "elevation_m must be finite and within [-500, 9000] m, got {elev}"
-        )));
-    }
-
-    let utc_offset_h = get("utc_offset_h")?;
-    if let Some(off) = utc_offset_h
-        && (!off.is_finite() || !(-14.0..=14.0).contains(&off))
-    {
-        return Err(PyValueError::new_err(format!(
-            "utc_offset_h must be finite and within [-14, 14] hours, got {off}"
-        )));
-    }
-
-    Ok(SiteLocationOverride {
-        latitude_deg,
-        longitude_deg,
-        elevation_m,
-        utc_offset_h,
-    })
 }
 
-pub(crate) fn build_config(
-    hpxml: String,
-    schedule: Option<String>,
-    weather: String,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<DwellingConfig> {
-    let kwargs = kwargs.cloned();
+/// The same refusal as [`reentry_hares_error`], mapped to the exception
+/// the typed callback error carries.
+fn reentry_refusal() -> PyErr {
+    to_py_err(reentry_hares_error())
+}
 
-    if let Some(ref k) = kwargs {
-        for key in k.keys() {
-            let key_str: String = key.extract()?;
-            if !KNOWN_KWARGS.contains(&key_str.as_str()) {
-                return Err(PyValueError::new_err(format!(
-                    "unknown keyword argument: '{key_str}'"
-                )));
-            }
-        }
+/// The shielding class's provenance label, in the form the read-back
+/// records (the class's own spelling).
+fn shielding_label(shielding: hares_physics::infiltration::ShieldingClass) -> String {
+    match shielding {
+        hares_physics::infiltration::ShieldingClass::Normal => "normal".to_string(),
+        hares_physics::infiltration::ShieldingClass::Exposed => "exposed".to_string(),
+        hares_physics::infiltration::ShieldingClass::WellShielded => "well-shielded".to_string(),
     }
+}
 
-    let py_config: Option<PySimulationConfig> = if let Some(k) = kwargs.as_ref() {
-        if let Ok(Some(value)) = k.get_item("config") {
-            Some(value.extract::<PySimulationConfig>()?)
-        } else {
-            None
+/// The boundary kind's spelling in the read-back dict: the plan's kind
+/// names, lowercased, the parser's `Other` kind carrying its own text.
+fn boundary_kind_label(kind: &hares_io::hpxml::BoundaryType) -> String {
+    match kind {
+        hares_io::hpxml::BoundaryType::Wall => "wall".to_string(),
+        hares_io::hpxml::BoundaryType::Roof => "roof".to_string(),
+        hares_io::hpxml::BoundaryType::Floor => "floor".to_string(),
+        hares_io::hpxml::BoundaryType::Window => "window".to_string(),
+        hares_io::hpxml::BoundaryType::Skylight => "skylight".to_string(),
+        hares_io::hpxml::BoundaryType::Door => "door".to_string(),
+        hares_io::hpxml::BoundaryType::FoundationWall => "foundation wall".to_string(),
+        hares_io::hpxml::BoundaryType::RimJoist => "rim joist".to_string(),
+        hares_io::hpxml::BoundaryType::Slab => "slab".to_string(),
+        hares_io::hpxml::BoundaryType::Other(text) => text.clone(),
+    }
+}
+
+/// The resolved-parameter read-back as a dict of SI floats and strings,
+/// the same values the Rust `resolved_model()` returns.
+fn resolved_model_to_py(py: Python<'_>, model: &hares_core::ResolvedModel) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+
+    let equipment = PyList::empty(py);
+    for eq in &model.equipment {
+        let entry = PyDict::new(py);
+        entry.set_item("name", &eq.name)?;
+        entry.set_item("id", eq.id.0)?;
+        entry.set_item("end_use", eq.end_use.as_str())?;
+        let parameters = PyList::empty(py);
+        for parameter in &eq.parameters {
+            let item = PyDict::new(py);
+            item.set_item("name", parameter.name)?;
+            item.set_item("value", parameter.value)?;
+            item.set_item("unit", parameter.unit.symbol())?;
+            parameters.append(item)?;
         }
-    } else {
-        None
-    };
+        entry.set_item("parameters", parameters)?;
+        entry.set_item(
+            "heating_setpoint",
+            eq.heating_setpoint
+                .as_ref()
+                .map(hares_io::SetpointSource::label),
+        )?;
+        entry.set_item(
+            "cooling_setpoint",
+            eq.cooling_setpoint
+                .as_ref()
+                .map(hares_io::SetpointSource::label),
+        )?;
+        equipment.append(entry)?;
+    }
+    dict.set_item("equipment", equipment)?;
 
-    let sim_config = if let Some(py_cfg) = py_config {
-        py_cfg.to_sim_config()?
-    } else {
-        let start_time = match kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("start_time").ok().flatten())
-            .map(|obj| extract_datetime(&obj))
-            .transpose()?
-        {
-            Some(dt) => dt,
-            None => default_start()?,
-        };
-
-        let time_res_s = match kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("time_res_s").ok().flatten())
-            .map(|obj| extract_seconds(&obj))
-            .transpose()?
-        {
-            Some(v) if v > 0 => v,
-            Some(_) => {
-                return Err(PyValueError::new_err("time_res_s must be positive"));
-            }
-            None => DEFAULT_STEP_S,
-        };
-        let time_res = Duration::try_seconds(time_res_s).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "time_res_s too large for chrono Duration: {time_res_s}"
-            ))
-        })?;
-
-        let duration_s = match kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("duration_s").ok().flatten())
-            .map(|obj| extract_seconds(&obj))
-            .transpose()?
-        {
-            Some(v) if v > 0 => v,
-            Some(_) => {
-                return Err(PyValueError::new_err("duration_s must be positive"));
-            }
-            None => DEFAULT_DURATION_S,
-        };
-        let duration = Duration::try_seconds(duration_s).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "duration_s too large for chrono Duration: {duration_s}"
-            ))
-        })?;
-
-        let output_to_parquet = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("output_to_parquet").ok().flatten())
-            .map(|obj| obj.extract::<bool>())
-            .transpose()?
-            .unwrap_or(false);
-
-        let output_path = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("output_path").ok().flatten())
-            .map(|obj| obj.extract::<String>().map(PathBuf::from))
-            .transpose()?;
-
-        let write_output = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("write_output").ok().flatten())
-            .map(|obj| obj.extract::<bool>())
-            .transpose()?
-            .unwrap_or(true);
-
-        let output_verbosity = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("output_verbosity").ok().flatten())
-            .map(|obj| obj.extract::<u8>())
-            .transpose()?
-            .unwrap_or(0);
-
-        let output_chunk_size = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("output_chunk_size").ok().flatten())
-            .map(|obj| obj.extract::<usize>())
-            .transpose()?
-            .unwrap_or(10_000);
-
-        let master_seed = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("master_seed").ok().flatten())
-            .map(|obj| obj.extract::<u64>())
-            .transpose()?
-            .unwrap_or(0);
-
-        let civil_timezone = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("civil_timezone").ok().flatten())
-            .map(|obj| obj.extract::<String>())
-            .transpose()?;
-
-        let setpoint_deadband_c = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("setpoint_deadband_c").ok().flatten())
-            .map(|obj| obj.extract::<f64>())
-            .transpose()?;
-
-        if let Some(db) = setpoint_deadband_c
-            && (!db.is_finite() || db < 0.0)
-        {
-            return Err(PyValueError::new_err(format!(
-                "setpoint_deadband_c must be finite and non-negative, got {db}"
-            )));
+    let boundaries = PyList::empty(py);
+    for boundary in &model.boundaries {
+        let entry = PyDict::new(py);
+        entry.set_item("id", &boundary.id)?;
+        entry.set_item("kind", boundary_kind_label(&boundary.kind))?;
+        entry.set_item("area_m2", boundary.area_m2)?;
+        entry.set_item("r_effective_m2k_w", boundary.r_effective_m2k_w)?;
+        entry.set_item("films_m2k_w", boundary.films_m2k_w)?;
+        entry.set_item("c_j_k", boundary.c_j_k)?;
+        entry.set_item("same_zone", boundary.same_zone)?;
+        entry.set_item("r_source", boundary.r_source.label())?;
+        let layers = PyList::empty(py);
+        for layer in &boundary.layers {
+            let item = PyDict::new(py);
+            item.set_item("r_m2k_w", layer.r_m2k_w)?;
+            item.set_item("c_j_m2k", layer.c_j_m2k)?;
+            layers.append(item)?;
         }
+        entry.set_item("layers", layers)?;
+        boundaries.append(entry)?;
+    }
+    dict.set_item("boundaries", boundaries)?;
 
-        let site_location = extract_site_location_override(kwargs.as_ref())?;
+    let windows = PyList::empty(py);
+    for window in &model.windows {
+        let entry = PyDict::new(py);
+        entry.set_item("id", &window.id)?;
+        entry.set_item("area_m2", window.area_m2)?;
+        entry.set_item("u_w_m2k", window.u_w_m2k)?;
+        entry.set_item("shgc", window.shgc)?;
+        windows.append(entry)?;
+    }
+    dict.set_item("windows", windows)?;
 
-        let rotation = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("rotation").ok().flatten())
-            .map(|obj| obj.extract::<String>())
-            .transpose()?;
-        if let Some(ref rot) = rotation {
-            parse_rotation_policy(rot)?;
-        }
-        let rotation_policy = rotation
-            .as_deref()
-            .map(parse_rotation_policy)
-            .transpose()?
-            .unwrap_or(hares_io::RotationPolicy::None);
+    let infiltration = PyDict::new(py);
+    infiltration.set_item("ach50", model.infiltration.ach50)?;
+    infiltration.set_item("ela_m2", model.infiltration.ela_m2)?;
+    infiltration.set_item("constant_ach", model.infiltration.constant_ach)?;
+    infiltration.set_item("height_m", model.infiltration.height_m)?;
+    infiltration.set_item("has_flue", model.infiltration.has_flue)?;
+    infiltration.set_item(
+        "shielding",
+        model.infiltration.shielding.map(shielding_label),
+    )?;
+    dict.set_item("infiltration", infiltration)?;
 
-        let max_consecutive_step_failures = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("max_consecutive_step_failures").ok().flatten())
-            .map(|obj| obj.extract::<u32>())
-            .transpose()?
-            .unwrap_or(hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES);
+    let site = PyDict::new(py);
+    site.set_item("latitude_deg", model.site.latitude_deg)?;
+    site.set_item("longitude_deg", model.site.longitude_deg)?;
+    site.set_item("elevation_m", model.site.elevation_m)?;
+    site.set_item("utc_offset_h", model.site.utc_offset_h)?;
+    dict.set_item("site", site)?;
 
-        if duration.num_milliseconds() % time_res.num_milliseconds() != 0 {
-            return Err(PyValueError::new_err(format!(
-                "duration ({}s) must be an exact multiple of time_res ({}s)",
-                duration.num_seconds(),
-                time_res.num_seconds(),
-            )));
-        }
+    // The run's clock: the first step's local wall clock, the site offset,
+    // the step and the simulated step count of the configured horizon - the
+    // number a caller checks a report's row count against. The same
+    // read-back `DwellingBlueprint.validate()` carries.
+    let clock = PyDict::new(py);
+    clock.set_item(
+        "start",
+        model.clock.start.format("%Y-%m-%dT%H:%M:%S").to_string(),
+    )?;
+    clock.set_item("utc_offset_s", model.clock.utc_offset_s)?;
+    clock.set_item("time_res_s", model.clock.time_res_s)?;
+    clock.set_item("steps", model.clock.steps)?;
+    dict.set_item("clock", clock)?;
 
-        SimulationConfig {
-            start_time,
-            duration,
-            time_res,
-            output_verbosity,
-            output_path,
-            write_output,
-            output_format: if output_to_parquet {
-                OutputFormat::Parquet
-            } else {
-                OutputFormat::Csv
-            },
-            output_chunk_size,
-            setpoint_deadband_c,
-            master_seed,
-            civil_timezone,
-            site_location,
-            retain_batches: true,
-            rotation: rotation_policy,
-            max_consecutive_step_failures,
-        }
-    };
+    Ok(dict.into_any().unbind())
+}
 
-    let bldg_id = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("bldg_id").ok().flatten())
-        .map(|obj| obj.extract::<i64>())
-        .transpose()?
-        .unwrap_or(0);
-
-    let initialization_duration = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("initialization_duration").ok().flatten())
-        .map(|obj| {
-            let secs = extract_seconds(&obj)?;
-            if secs < 0 {
-                return Err(PyValueError::new_err(
-                    "initialization_duration must be non-negative",
-                ));
-            }
-            Ok(secs)
-        })
-        .transpose()?
-        .and_then(|secs| {
-            if secs == 0 {
-                None
-            } else {
-                Some(std::time::Duration::from_secs(secs as u64))
+impl PyDwelling {
+    /// Maps a run's error to a Python exception, chaining the attached
+    /// callback's stored exception as `__cause__` on a typed callback
+    /// error: the adapter stored the callable's `PyErr` when it failed
+    /// the run, and the error that carries the failure out of the
+    /// dwelling chains it. The slot is read without consuming: the
+    /// engine's latch re-raises the ended run's error on every later
+    /// call (a `finish()` after the failing step or close), and each
+    /// re-raise chains the same original exception.
+    fn map_run_error(&self, err: HaresError) -> PyErr {
+        let py_err = to_py_err(err);
+        Python::attach(|py| {
+            let cause = self
+                .callback_cause
+                .lock()
+                .expect("cause slot mutex")
+                .as_ref()
+                .map(|cause| cause.clone_ref(py));
+            if let Some(cause) = cause {
+                let _ = py_err.value(py).setattr("__cause__", cause.value(py));
             }
         });
-
-    let defaults_path = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("defaults_path").ok().flatten())
-        .map(|obj| obj.extract::<String>())
-        .transpose()?
-        .map(PathBuf::from);
-
-    let resample_overrides: Option<ResampleOverrides> = {
-        let raw: Option<std::collections::HashMap<String, String>> = kwargs
-            .as_ref()
-            .and_then(|k| k.get_item("resample_overrides").ok().flatten())
-            .map(|obj| obj.extract())
-            .transpose()?;
-        raw.map(|map| {
-            let mut overrides = ResampleOverrides::default();
-            const KNOWN_FIELDS: &[&str] = &[
-                "dry_bulb",
-                "dew_point",
-                "rel_humidity",
-                "pressure",
-                "infrared",
-                "ground_temp",
-                "opaque_sky_cover",
-                "ghi",
-                "dni",
-                "dhi",
-                "wind_speed",
-                "wind_dir",
-            ];
-            macro_rules! set_field {
-                ($($field:ident),*) => {
-                    $(
-                        if let Some(v) = map.get(stringify!($field)) {
-                            overrides.$field = Some(parse_resample_method(stringify!($field), v)?);
-                        }
-                    )*
-                };
-            }
-            set_field!(
-                dry_bulb,
-                dew_point,
-                rel_humidity,
-                pressure,
-                infrared,
-                ground_temp,
-                opaque_sky_cover,
-                ghi,
-                dni,
-                dhi,
-                wind_speed,
-                wind_dir
-            );
-            let unknown: Vec<&str> = map
-                .keys()
-                .filter(|k| !KNOWN_FIELDS.contains(&k.as_str()))
-                .map(String::as_str)
-                .collect();
-            if !unknown.is_empty() {
-                return Err(PyValueError::new_err(format!(
-                    "unknown resample_overrides field(s): {}; valid fields: {}",
-                    unknown.join(", "),
-                    KNOWN_FIELDS.join(", "),
-                )));
-            }
-            Ok(overrides)
-        })
-        .transpose()?
-    };
-
-    let overrides: Option<serde_json::Value> = kwargs
-        .as_ref()
-        .and_then(|k| k.get_item("overrides").ok().flatten())
-        .map(|obj| python_to_json_value(&obj))
-        .transpose()?
-        // Python `None` is the idiomatic "not provided" — translate it to
-        // the Rust contract's `Option::None` (no overrides) rather than
-        // `Some(Value::Null)`, which the dwelling-assembly validator
-        // rejects as a misconfigured non-object payload. A JSON `null`
-        // nested INSIDE a provided dict keeps its meaning (a null override
-        // field, rejected per-key downstream).
-        .filter(|v| !v.is_null());
-
-    Ok(DwellingConfig {
-        hpxml_path: PathBuf::from(hpxml),
-        // `None` requests a schedule generated from the HPXML; a set path
-        // must be readable at construction.
-        schedule_path: schedule.map(PathBuf::from),
-        weather_path: PathBuf::from(weather),
-        defaults_path,
-        sim_config,
-        overrides,
-        bldg_id,
-        initialization_duration,
-        resample_overrides,
-        patches: None,
-    })
-}
-
-fn default_start() -> PyResult<DateTime<FixedOffset>> {
-    DateTime::parse_from_rfc3339(DEFAULT_START).map_err(|e| {
-        PyValueError::new_err(format!(
-            "internal error: default start time constant is invalid: {}",
-            e
-        ))
-    })
+        py_err
+    }
 }
 
 pub(crate) fn to_py_err(err: HaresError) -> PyErr {
@@ -2729,13 +2801,39 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::ThermostatBand { .. }
         | HaresError::SolarOverrideMissingSurface { .. }
         | HaresError::MissingInput { .. }
-        | HaresError::PreconditioningAxis { .. } => HaresConfigError::new_err(msg),
+        | HaresError::PreconditioningAxis { .. }
+        // A run that cannot be exported for exact replay is the caller's
+        // configuration mistake: the dwelling was changed in a way a
+        // replay cannot rebuild.
+        | HaresError::NotReplayable { .. } => HaresConfigError::new_err(msg),
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
+        }
+        // The policy violation carries the variant's fields as attributes,
+        // so a consumer that gates on health reads the event, the step,
+        // the source, the count and the limit off the exception it caught.
+        HaresError::HealthPolicyViolation {
+            event,
+            step_index,
+            origin,
+            count,
+            limit,
+        } => {
+            let py_err = HaresHealthPolicyError::new_err(msg);
+            Python::attach(|py| {
+                let value = py_err.value(py);
+                let _ = value.setattr("event", format!("{event:?}"));
+                let _ = value.setattr("step_index", step_index);
+                let _ = value.setattr("source", origin.as_str());
+                let _ = value.setattr("count", count);
+                let _ = value.setattr("limit", limit);
+            });
+            py_err
         }
         // Physics variant is DEPRECATED: zero production constructors remain in
         // the codebase (T-0144). Kept for serialization compatibility and future
         // hares-physics crate retrofitting (T-0145).
+        HaresError::Callback { .. } => HaresCallbackError::new_err(msg),
         HaresError::Physics(_)
         | HaresError::Control(_)
         | HaresError::Tariff(_)
@@ -2832,9 +2930,9 @@ fn snapshot_to_py(
                     })
                     .collect::<Vec<_>>(),
             )?;
-            pd.set_item("electrical_load_kw", ports.electrical_load_kw)?;
-            pd.set_item("electrical_gen_kw", ports.electrical_gen_kw)?;
-            pd.set_item("electrical_reactive_kvar", ports.electrical_reactive_kvar)?;
+            pd.set_item("electrical_load_w", ports.electrical_load_w)?;
+            pd.set_item("electrical_gen_w", ports.electrical_gen_w)?;
+            pd.set_item("electrical_reactive_var", ports.electrical_reactive_var)?;
             pd.set_item(
                 "fuel_consumption_w",
                 ports
@@ -2980,9 +3078,8 @@ mod tests {
     use pyo3::exceptions::PyValueError;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList};
 
-    use super::default_start;
     use super::pv_config_from_py;
-    use super::{DEFAULT_START, parse_solar_override_from_dict, parse_solar_override_from_list};
+    use super::{parse_solar_override_from_dict, parse_solar_override_from_list};
     use crate::py_equipment::PyPv;
     use crate::utils::extract_seconds;
     use crate::utils::{extract_datetime, parse_datetime_str};
@@ -3007,6 +3104,65 @@ mod tests {
 
             let simulation = super::to_py_err(rejected(HaresError::Control("taken".to_string())));
             assert!(simulation.is_instance_of::<super::HaresSimulationError>(py));
+        });
+    }
+
+    /// A callback error converts to the callback error class, a subclass
+    /// of the simulation error, naming the report in its message.
+    #[test]
+    fn callback_error_maps_to_python_error() {
+        use hares_types::HaresError;
+        Python::attach(|py| {
+            let py_err = super::to_py_err(HaresError::Callback {
+                report: "timestep".to_string(),
+                message: "the store is down".to_string(),
+            });
+            assert!(
+                py_err.is_instance_of::<super::HaresCallbackError>(py),
+                "the callback error maps to the callback error class, got: {py_err}"
+            );
+            assert!(py_err.is_instance_of::<super::HaresSimulationError>(py));
+            assert!(py_err.to_string().contains("timestep"));
+        });
+    }
+
+    /// A health policy violation converts to the health policy error class,
+    /// a subclass of the simulation error, whose attributes carry the
+    /// variant's fields.
+    #[test]
+    fn health_policy_violation_maps_to_python_error() {
+        use hares_types::{HaresError, HealthEvent};
+        Python::attach(|py| {
+            let violation = HaresError::HealthPolicyViolation {
+                event: HealthEvent::PortRollback,
+                step_index: Some(7),
+                origin: "PortEq".to_string(),
+                count: 1,
+                limit: 0,
+            };
+            let py_err = super::to_py_err(violation);
+            assert!(
+                py_err.is_instance_of::<super::HaresHealthPolicyError>(py),
+                "the violation maps to the health policy error, got: {py_err}"
+            );
+            assert!(py_err.is_instance_of::<super::HaresSimulationError>(py));
+            let value = py_err.value(py);
+            let attr = |name: &str| {
+                value
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("the exception carries a '{name}' attribute"))
+            };
+            assert_eq!(
+                attr("event").extract::<String>().expect("event is a str"),
+                "PortRollback"
+            );
+            assert_eq!(attr("step_index").extract::<u64>().expect("step_index"), 7);
+            assert_eq!(
+                attr("source").extract::<String>().expect("source is a str"),
+                "PortEq"
+            );
+            assert_eq!(attr("count").extract::<u64>().expect("count"), 1);
+            assert_eq!(attr("limit").extract::<u64>().expect("limit"), 0);
         });
     }
 
@@ -3228,20 +3384,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_default_start_is_valid_rfc3339() {
-        chrono::DateTime::parse_from_rfc3339(DEFAULT_START).expect("DEFAULT_START must be valid");
-    }
-
-    #[test]
-    fn test_default_start_returns_expected_value() {
-        let result = default_start().unwrap();
-        assert_eq!(
-            result.format("%Y-%m-%dT%H:%M:%S%z").to_string(),
-            "2019-01-01T00:00:00+0000"
-        );
-    }
-
     fn pv_env(tilt_deg: f64, azimuth_deg: f64) -> EnvironmentState {
         let surface_id =
             surface_id_for_orientation(tilt_deg, azimuth_deg, 5.0).expect("surface id");
@@ -3275,6 +3417,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: HashMap::new(),
@@ -3293,7 +3436,7 @@ mod tests {
     fn pypv_sam_lut_path_round_trips_into_typed_config() {
         let pv = PyPv {
             name: "PV LUT".to_string(),
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt: 30.0,
             azimuth: 180.0,
             sam_lut_path: Some("/tmp/example.parquet".to_string()),
@@ -3308,7 +3451,7 @@ mod tests {
     fn pypv_without_sam_lut_path_initializes_normally() {
         let pv = PyPv {
             name: "PV No LUT".to_string(),
-            capacity_kw: 5.0,
+            capacity_w: 5000.0,
             tilt: 30.0,
             azimuth: 180.0,
             sam_lut_path: None,
@@ -3327,33 +3470,35 @@ mod tests {
 
     #[test]
     fn pypv_invalid_sam_lut_path_fails_init() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let bad_lut_path = dir.path().join("bad_pv_lut.txt");
-        fs::write(&bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
-        let pv = PyPv {
-            name: "PV Bad LUT".to_string(),
-            capacity_kw: 5.0,
-            tilt: 30.0,
-            azimuth: 180.0,
-            sam_lut_path: Some(bad_lut_path.to_string_lossy().into_owned()),
-            soiling: None,
-        };
-        let config = pv_config_from_py(&pv).expect("PV config");
-        let env = pv_env(30.0, 180.0);
-        let registry = EquipmentRegistry::new();
-        let mut eq = registry
-            .create("PV", config.clone())
-            .expect("PV should be registered");
-        let err = eq
-            .init(&config, &env)
-            .expect_err("init should fail for invalid LUT extension/content");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unsupported PV SAM LUT format")
-                || msg.contains("failed to")
-                || msg.contains("missing one of required columns"),
-            "unexpected error: {msg}"
-        );
+        Python::attach(|_py| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let bad_lut_path = dir.path().join("bad_pv_lut.txt");
+            fs::write(&bad_lut_path, "not,a,valid,lut\n1,2,3,4").expect("write test file");
+            let pv = PyPv {
+                name: "PV Bad LUT".to_string(),
+                capacity_w: 5000.0,
+                tilt: 30.0,
+                azimuth: 180.0,
+                sam_lut_path: Some(bad_lut_path.display().to_string()),
+                soiling: None,
+            };
+            let config = pv_config_from_py(&pv).expect("PV config");
+            let env = pv_env(30.0, 180.0);
+            let registry = EquipmentRegistry::new();
+            let mut eq = registry
+                .create("PV", config.clone())
+                .expect("PV should be registered");
+            let err = eq
+                .init(&config, &env)
+                .expect_err("init should fail for invalid LUT extension/content");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unsupported PV SAM LUT format")
+                    || msg.contains("failed to")
+                    || msg.contains("missing one of required columns"),
+                "unexpected error: {msg}"
+            );
+        });
     }
 
     // --------------------------------------------------------------------
@@ -3792,9 +3937,9 @@ mod tests {
     }
 
     /// The seed path's away-charge default: `actor_registry` builds an
-    /// EvDriver whose `away_charge_power_kw` falls back to this when the
+    /// EvDriver whose `away_charge_power_w` falls back to this when the
     /// config carries no override.
-    const SEED_PATH_AWAY_CHARGE_POWER_KW: f64 = 6.6;
+    const SEED_PATH_AWAY_CHARGE_POWER_W: f64 = 6600.0;
 
     #[test]
     fn add_ev_with_driver_away_charge_power_matches_the_seed_path() {
@@ -3807,9 +3952,9 @@ mod tests {
 
         let spec = VehicleId::ChevyBoltEv.spec();
         for aid in EvArchetypeId::ALL {
-            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7.2);
+            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7200.0);
             assert_eq!(
-                params.away_charge_power_kw, SEED_PATH_AWAY_CHARGE_POWER_KW,
+                params.away_charge_power_w, SEED_PATH_AWAY_CHARGE_POWER_W,
                 "{aid}: the Python-built driver's away-charge power must be the seed path's default"
             );
         }
@@ -3824,11 +3969,11 @@ mod tests {
             spec,
             EvArchetypeId::DailyCommuterL2.preset(),
             [7u8; 32],
-            7.2,
+            7200.0,
         );
         params.away_charge_fraction = 0.3;
         params.event_day_ratio = 1.0;
-        params.daily_drive_miles = ScheduleSource::Constant(30.0);
+        params.daily_drive_distance_m = ScheduleSource::Constant(48_280.32);
         params.departure_time = ScheduleSource::Constant(0.0);
         params.trip_duration = ScheduleSource::Constant(600.0);
         params.arrival_time = None;
@@ -3851,8 +3996,8 @@ mod tests {
             let mut out: Vec<DispatchRequest> = Vec::new();
             actor.decide(&env, &mut out);
             for req in out {
-                if let ControlSignal::EvAwayCharge { power_kw } = req.signal {
-                    away_powers.push(power_kw);
+                if let ControlSignal::EvAwayCharge { power_w } = req.signal {
+                    away_powers.push(power_w);
                 }
             }
         }
@@ -3863,8 +4008,8 @@ mod tests {
         assert!(
             away_powers
                 .iter()
-                .all(|p| (*p - SEED_PATH_AWAY_CHARGE_POWER_KW).abs() < 1e-9),
-            "every away-charge dispatch must carry the seed path's 6.6 kW, got {away_powers:?}"
+                .all(|p| (*p - SEED_PATH_AWAY_CHARGE_POWER_W).abs() < 1e-9),
+            "every away-charge dispatch must carry the seed path's 6600 W, got {away_powers:?}"
         );
     }
 
@@ -3874,14 +4019,22 @@ mod tests {
 
         let spec = VehicleId::ChevyBoltEv.spec();
         let quotient = spec.capacity_kwh / spec.range_miles;
+        // The catalogue's kWh/mi and the driver's J/m: the same figure
+        // through the one uom conversion the builder performs.
+        let catalogue_j_per_m = uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(
+            spec.fuel_economy_kwh_per_mi,
+        )
+        .get::<uom::si::energy::joule>()
+            / uom::si::f64::Length::new::<uom::si::length::mile>(1.0)
+                .get::<uom::si::length::meter>();
         for aid in EvArchetypeId::ALL {
-            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7.2);
+            let params = super::ev_driver_params(spec, aid.preset(), [7u8; 32], 7200.0);
             assert_eq!(
-                params.fuel_economy_kwh_per_mi, spec.fuel_economy_kwh_per_mi,
+                params.fuel_economy_j_per_m, catalogue_j_per_m,
                 "{aid}: the Python-built driver's fuel economy must be the catalogue's"
             );
             assert_ne!(
-                params.fuel_economy_kwh_per_mi, quotient,
+                params.fuel_economy_j_per_m, quotient,
                 "{aid}: the catalogue figure must not be the capacity/range quotient"
             );
         }
@@ -3902,7 +4055,7 @@ mod profiling_summary_tests {
     use hares_core::Actor;
     use hares_types::EnvironmentState;
     use pyo3::Python;
-    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods};
+    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods, PyString};
 
     use super::{PyDwelling, to_py_err};
 
@@ -3912,9 +4065,14 @@ mod profiling_summary_tests {
         name: &'static str,
     }
 
+    use hares_types::TelemetryField;
+
     impl Actor for ProbeActor {
         fn name(&self) -> &str {
             self.name
+        }
+        fn output_variables(&self) -> &[TelemetryField] {
+            &[]
         }
 
         fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}
@@ -3926,27 +4084,42 @@ mod profiling_summary_tests {
             let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             root.push("../..");
             let fixture = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
-            let defaults = root.join("defaults");
+            let defaults = root.join("python/hares/defaults");
 
-            let kwargs = PyDict::new(py);
-            kwargs
-                .set_item("start_time", "2023-01-01T00:00:00-07:00")
-                .unwrap();
-            kwargs.set_item("duration_s", 96 * 3600_i64).unwrap();
-            kwargs.set_item("time_res_s", 3600_i64).unwrap();
-            kwargs
-                .set_item("defaults_path", defaults.to_string_lossy().into_owned())
-                .unwrap();
-            kwargs.set_item("bldg_id", 1_i64).unwrap();
-            kwargs.set_item("master_seed", 0_u64).unwrap();
-            kwargs.set_item("write_output", false).unwrap();
+            let sim_config = crate::py_config::PySimulationConfig::new(
+                "2023-01-01T00:00:00-07:00",
+                crate::py_config::WholeSeconds(96 * 3600),
+                crate::py_config::WholeSeconds(3600),
+                None,
+                false,
+                false,
+                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
+                0,
+                None,
+                None,
+                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
+                crate::py_config::PyWarmupArg::Absent,
+                "hour24",
+                "typical",
+                None,
+            )
+            .expect("the sim config builds");
 
             let mut dwelling = PyDwelling::from_hpxml(
                 &py.get_type::<PyDwelling>(),
-                fixture.join("building.xml").to_string_lossy().into_owned(),
-                Some(fixture.join("schedule.csv").to_string_lossy().into_owned()),
-                fixture.join("weather.epw").to_string_lossy().into_owned(),
-                Some(&kwargs),
+                PyString::new(py, fixture.join("building.xml").to_str().expect("utf8")).as_any(),
+                Some(
+                    PyString::new(py, fixture.join("schedule.csv").to_str().expect("utf8"))
+                        .as_any(),
+                ),
+                PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
+                sim_config,
+                1,
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
+                None,
+                None,
             )
             .expect("cz2a fixture must load");
 
@@ -4024,6 +4197,495 @@ mod profiling_summary_tests {
                     calls, &96,
                     "'{name}' declares no interests, so the filter must call decide() every step"
                 );
+            }
+        });
+    }
+
+    /// The Python summary's `finish_s` is None until the run's finalising
+    /// call has run and a float after it: a summary taken mid-run never
+    /// shows a zero that reads as a measurement.
+    #[test]
+    fn profiling_summary_reports_finish() {
+        Python::attach(|py| {
+            let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            root.push("../..");
+            let fixture = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
+            let defaults = root.join("python/hares/defaults");
+
+            let sim_config = crate::py_config::PySimulationConfig::new(
+                "2023-01-01T00:00:00-07:00",
+                crate::py_config::WholeSeconds(96 * 3600),
+                crate::py_config::WholeSeconds(3600),
+                None,
+                false,
+                false,
+                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
+                0,
+                None,
+                None,
+                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
+                crate::py_config::PyWarmupArg::Absent,
+                "hour24",
+                "typical",
+                None,
+            )
+            .expect("the sim config builds");
+
+            let mut dwelling = PyDwelling::from_hpxml(
+                &py.get_type::<PyDwelling>(),
+                PyString::new(py, fixture.join("building.xml").to_str().expect("utf8")).as_any(),
+                Some(
+                    PyString::new(py, fixture.join("schedule.csv").to_str().expect("utf8"))
+                        .as_any(),
+                ),
+                PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
+                sim_config,
+                1,
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
+                None,
+                None,
+            )
+            .expect("cz2a fixture must load");
+
+            dwelling.initialize().expect("initialize must succeed");
+            for _ in 0..96 {
+                dwelling.step(py).expect("cz2a fixture step must succeed");
+            }
+
+            let finish_key = |dwelling: &PyDwelling| {
+                let summary = dwelling
+                    .profiling_summary(py)
+                    .expect("a profiling build reports a summary");
+                summary
+                    .bind(py)
+                    .get_item("finish_s")
+                    .expect("get_item must not raise")
+            };
+            assert!(
+                finish_key(&dwelling).is_none(),
+                "the summary of an unfinalised run reports finish_s as None"
+            );
+
+            // The finalising call runs on the inner dwelling: the binding's
+            // own simulate() builds the results frame after finalising,
+            // which this test's interpreter need not carry. The subject is
+            // the timer the engine sets, read here through the Python
+            // summary.
+            {
+                let mut d = dwelling
+                    .acquire()
+                    .expect("fresh dwelling must not be poisoned");
+                d.simulate().expect("the finalising simulate completes");
+            }
+            let finish = finish_key(&dwelling)
+                .extract::<f64>()
+                .expect("finish_s is a float after the finalising call");
+            assert!(finish.is_finite(), "the measurement is a float: {finish}");
+        });
+    }
+}
+
+/// The construction GIL discipline: the four Python-facing constructors run
+/// the expensive parse+resolve detached, so parallel callers construct
+/// concurrently, and no Python-owned state is touched while released.
+#[cfg(test)]
+mod construction_gil_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    use arrow::array::{Float64Array, RecordBatch};
+    use pyo3::Python;
+    use pyo3::types::PyString;
+
+    use crate::py_blueprint::PyDwellingBlueprint;
+    use crate::py_config::{PySimulationConfig, WholeSeconds};
+    use crate::py_dwelling::{CONSTRUCT_GIL_STATE, PyDwelling};
+
+    const THREADS: usize = 4;
+    /// Timed repetitions per scenario; the minimum is compared, so a loaded
+    /// machine inflates both sides and the comparison stays about the
+    /// construction cost, not scheduler noise.
+    const ATTEMPTS: usize = 3;
+
+    fn fixture_paths() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
+        (
+            fixture.join("building.xml"),
+            fixture.join("schedule.csv"),
+            fixture.join("weather.epw"),
+            root.join("python/hares/defaults"),
+        )
+    }
+
+    fn sim_config_1h_900s() -> PySimulationConfig {
+        PySimulationConfig::new(
+            "2023-01-01T00:00:00-07:00",
+            WholeSeconds(3600),
+            WholeSeconds(900),
+            None,
+            false,
+            false,
+            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            None,
+            0,
+            None,
+            None,
+            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            None,
+            crate::py_config::PyWarmupArg::Absent,
+            "hour24",
+            "typical",
+            None,
+        )
+        .expect("the sim config builds")
+    }
+
+    fn construct_one() {
+        let (hpxml, schedule, weather, defaults) = fixture_paths();
+        Python::attach(|py| {
+            let cls = py.get_type::<PyDwelling>();
+            PyDwelling::from_hpxml(
+                &cls,
+                PyString::new(py, hpxml.to_str().expect("utf8")).as_any(),
+                Some(PyString::new(py, schedule.to_str().expect("utf8")).as_any()),
+                PyString::new(py, weather.to_str().expect("utf8")).as_any(),
+                sim_config_1h_900s(),
+                1,
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+        });
+    }
+
+    /// The concurrent-construction probe: N threads each constructing one
+    /// dwelling, against the wall time the same N constructions take
+    /// serially. While construction holds the GIL throughout, the threads
+    /// serialise and the parallel wall time is the serial one (the recorded
+    /// RED: 1.02x at the base); the assertion pins the speedup the release
+    /// buys, above scheduler noise.
+    #[test]
+    fn concurrent_construction_scales() {
+        // Warm the file cache once, untimed, so the probe times parse+resolve.
+        construct_one();
+
+        let mut serial_best = std::time::Duration::MAX;
+        for _ in 0..ATTEMPTS {
+            let start = Instant::now();
+            for _ in 0..THREADS {
+                construct_one();
+            }
+            serial_best = serial_best.min(start.elapsed());
+        }
+
+        let mut parallel_best = std::time::Duration::MAX;
+        for _ in 0..ATTEMPTS {
+            let start = Instant::now();
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    scope.spawn(construct_one);
+                }
+            });
+            parallel_best = parallel_best.min(start.elapsed());
+        }
+
+        let speedup = serial_best.as_secs_f64() / parallel_best.as_secs_f64();
+        eprintln!(
+            "concurrent construction: serial (best of {ATTEMPTS}) {serial_best:?}, \
+             parallel {THREADS} threads (best of {ATTEMPTS}) {parallel_best:?}, \
+             speedup {speedup:.2}x"
+        );
+        assert!(
+            speedup > 1.5,
+            "concurrent construction must beat the serial wall time while the \
+             GIL is released across the parse+resolve: serial {serial_best:?}, \
+             parallel {parallel_best:?}, speedup {speedup:.2}x"
+        );
+    }
+
+    /// The entry's acceptance test: each of the four construction entry
+    /// points runs through `construct_detached`, whose hook records the
+    /// GIL state it observes inside the construction; 0 is released. No
+    /// threads, no timing.
+    #[test]
+    fn construction_runs_detached() {
+        let (hpxml, schedule, weather, defaults) = fixture_paths();
+        let hpxml = hpxml.to_string_lossy().into_owned();
+        let schedule = schedule.to_string_lossy().into_owned();
+        let weather = weather.to_string_lossy().into_owned();
+        let defaults = defaults.to_string_lossy().into_owned();
+
+        Python::attach(|py| {
+            let recorded = || CONSTRUCT_GIL_STATE.load(Ordering::SeqCst);
+            let (hp, sc, we, de) = (
+                PyString::new(py, &hpxml),
+                PyString::new(py, &schedule),
+                PyString::new(py, &weather),
+                PyString::new(py, &defaults),
+            );
+
+            CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
+            let mut dwelling = PyDwelling::from_hpxml(
+                &py.get_type::<PyDwelling>(),
+                hp.as_any(),
+                Some(sc.as_any()),
+                we.as_any(),
+                sim_config_1h_900s(),
+                1,
+                Some(de.as_any()),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+            assert_eq!(
+                recorded(),
+                0,
+                "Dwelling.from_hpxml must construct with the GIL released"
+            );
+
+            CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
+            dwelling
+                .reset_with_seed(py, 7)
+                .expect("the reset must rebuild the dwelling");
+            assert_eq!(
+                recorded(),
+                0,
+                "reset_with_seed must construct with the GIL released"
+            );
+
+            CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
+            let mut blueprint = PyDwellingBlueprint::from_hpxml(
+                &py.get_type::<PyDwellingBlueprint>(),
+                hp.as_any(),
+                Some(sc.as_any()),
+                we.as_any(),
+                sim_config_1h_900s(),
+                1,
+                Some(de.as_any()),
+                None,
+                None,
+            )
+            .expect("the blueprint must construct");
+            assert_eq!(
+                recorded(),
+                0,
+                "DwellingBlueprint.from_hpxml must construct with the GIL released"
+            );
+
+            CONSTRUCT_GIL_STATE.store(-1, Ordering::SeqCst);
+            let _built = blueprint
+                .build(py)
+                .expect("the blueprint must build a dwelling");
+            assert_eq!(
+                recorded(),
+                0,
+                "DwellingBlueprint.build must build with the GIL released"
+            );
+        });
+    }
+
+    /// The reset the gym environments use restores the warmed-up state
+    /// and reseeds without rebuilding: `load_state(snapshot)` then
+    /// `reseed(7)` constructs nothing (the test-only build counter is
+    /// unchanged; `reset_with_seed` moves it by one, so the counter is
+    /// shown to count), the blueprint is the same object throughout, and
+    /// the restored dwelling's warm-up health is the snapshot's.
+    #[test]
+    fn gym_reset_builds_nothing_and_runs_no_warmup() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz5a_ev_charging");
+        Python::attach(|py| {
+            let sim_config = crate::py_config::PySimulationConfig::new(
+                "2023-01-01T00:00:00-07:00",
+                WholeSeconds(86_400),
+                WholeSeconds(900),
+                None,
+                false,
+                false,
+                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
+                0,
+                None,
+                None,
+                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
+                crate::py_config::PyWarmupArg::Absent,
+                "hour24",
+                "typical",
+                None,
+            )
+            .expect("the sim config builds");
+            let cls = py.get_type::<PyDwelling>();
+            let mut dwelling = PyDwelling::from_hpxml(
+                &cls,
+                PyString::new(py, fixture.join("building.xml").to_str().expect("utf8")).as_any(),
+                Some(
+                    PyString::new(py, fixture.join("schedule.csv").to_str().expect("utf8"))
+                        .as_any(),
+                ),
+                PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
+                sim_config,
+                1,
+                Some(
+                    PyString::new(
+                        py,
+                        root.join("python/hares/defaults").to_str().expect("utf8"),
+                    )
+                    .as_any(),
+                ),
+                None,
+                None,
+            )
+            .expect("the cz5a fixture must construct");
+            dwelling.initialize().expect("initialize");
+
+            let warmup_at_snapshot = {
+                let guard = dwelling.acquire().expect("not poisoned");
+                guard.health().warmup.clone()
+            };
+            let snapshot = dwelling
+                .save_state(py)
+                .expect("the warmed-up snapshot saves")
+                .unbind();
+
+            let builds_before = crate::py_dwelling::TEST_BUILD_COUNT.load(Ordering::SeqCst);
+            let blueprint_before = Arc::clone(&dwelling.blueprint);
+
+            // The reset sequence the environments use.
+            use pyo3::prelude::PyBytesMethods;
+            let snapshot_bytes: Vec<u8> = snapshot.bind(py).as_bytes().to_vec();
+            dwelling
+                .load_state(&snapshot_bytes)
+                .expect("the snapshot restores");
+            dwelling.reseed(7).expect("the reseed succeeds");
+
+            let blueprint_after = Arc::clone(&dwelling.blueprint);
+            assert!(
+                Arc::ptr_eq(&blueprint_before, &blueprint_after),
+                "the reset path must not rebuild: the blueprint is the same object"
+            );
+            assert_eq!(
+                crate::py_dwelling::TEST_BUILD_COUNT.load(Ordering::SeqCst),
+                builds_before,
+                "the reset path must construct nothing"
+            );
+            let warmup_after = {
+                let guard = dwelling.acquire().expect("not poisoned");
+                guard.health().warmup.clone()
+            };
+            assert_eq!(
+                warmup_after, warmup_at_snapshot,
+                "the reset keeps the warmed-up state: the warm-up health is the snapshot's"
+            );
+
+            // The counter is shown to count: the explicit full rebuild
+            // constructs once.
+            dwelling
+                .reset_with_seed(py, 7)
+                .expect("the explicit rebuild succeeds");
+            assert_eq!(
+                crate::py_dwelling::TEST_BUILD_COUNT.load(Ordering::SeqCst),
+                builds_before + 1,
+                "reset_with_seed is the one full re-construction"
+            );
+        });
+    }
+
+    /// The reset reuses the blueprint: the `Arc<DwellingBlueprint>` the
+    /// dwelling was built from is the same before and after
+    /// `reset_with_seed`, and the reset run's frame equals a fresh build
+    /// with that seed, so no input was re-parsed.
+    #[test]
+    fn reset_with_seed_reuses_blueprint() {
+        let (hpxml, schedule, weather, defaults) = fixture_paths();
+        Python::attach(|py| {
+            let (hpxml_bound, schedule_bound, weather_bound, defaults_bound) = (
+                PyString::new(py, hpxml.to_str().expect("utf8")),
+                PyString::new(py, schedule.to_str().expect("utf8")),
+                PyString::new(py, weather.to_str().expect("utf8")),
+                PyString::new(py, defaults.to_str().expect("utf8")),
+            );
+            let (hpxml, schedule, weather, defaults) = (
+                hpxml_bound.as_any(),
+                schedule_bound.as_any(),
+                weather_bound.as_any(),
+                defaults_bound.as_any(),
+            );
+            let cls = py.get_type::<PyDwelling>();
+            let mut dwelling = PyDwelling::from_hpxml(
+                &cls,
+                hpxml,
+                Some(schedule),
+                weather,
+                sim_config_1h_900s(),
+                1,
+                Some(defaults),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+            let blueprint_before = Arc::clone(&dwelling.blueprint);
+            dwelling
+                .reset_with_seed(py, 7)
+                .expect("the reset must rebuild the dwelling");
+            let blueprint_after = Arc::clone(&dwelling.blueprint);
+            assert!(
+                Arc::ptr_eq(&blueprint_before, &blueprint_after),
+                "reset_with_seed must reuse the blueprint, not re-parse"
+            );
+
+            // The reset run's frame equals a fresh build with that seed.
+            let mut fresh = PyDwelling::from_hpxml(
+                &cls,
+                hpxml,
+                Some(schedule),
+                weather,
+                sim_config_1h_900s(),
+                1,
+                Some(defaults),
+                None,
+                None,
+            )
+            .expect("the cz4a fixture must construct");
+            fresh.reset_with_seed(py, 7).expect("the fresh reset");
+            let reset_run = dwelling.simulate(py).expect("the reset dwelling runs");
+            let fresh_run = fresh.simulate(py).expect("the fresh dwelling runs");
+            let reset_batches: Vec<RecordBatch> = reset_run
+                .inner
+                .reports
+                .iter()
+                .flat_map(|report| report.batches().to_vec())
+                .collect();
+            let fresh_batches: Vec<RecordBatch> = fresh_run
+                .inner
+                .reports
+                .iter()
+                .flat_map(|report| report.batches().to_vec())
+                .collect();
+            assert_eq!(reset_batches.len(), fresh_batches.len(), "batch count");
+            for (x, y) in reset_batches.iter().zip(fresh_batches.iter()) {
+                assert_eq!(x.num_rows(), y.num_rows(), "row count");
+                for (cx, cy) in x.columns().iter().zip(y.columns()) {
+                    let (xa, ya) = (
+                        cx.as_any().downcast_ref::<Float64Array>(),
+                        cy.as_any().downcast_ref::<Float64Array>(),
+                    );
+                    if let (Some(xa), Some(ya)) = (xa, ya) {
+                        for row in 0..x.num_rows() {
+                            assert_eq!(
+                                xa.value(row).to_bits(),
+                                ya.value(row).to_bits(),
+                                "the reset run's frame must equal a fresh build's"
+                            );
+                        }
+                    }
+                }
             }
         });
     }

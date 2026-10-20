@@ -28,6 +28,8 @@ mod denver_offset;
 #[cfg(test)]
 mod tests {
     use super::denver_offset::denver_offset;
+    use hares_core::DwellingSettings;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -35,7 +37,7 @@ mod tests {
 
     use chrono::{Duration, TimeZone};
     use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
-    use hares_io::{EnvelopeComponentLoadsKwh, OutputFormat};
+    use hares_io::EnvelopeComponentLoadsKwh;
 
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
@@ -93,7 +95,7 @@ mod tests {
     /// on roof/walls is what separates the gross exterior flux from the net
     /// conducted load, so a summer day is the discriminating fixture. Returns
     /// the parsed output CSV columns plus the run-level envelope load metrics
-    /// (the streaming recorder path, `retain_batches = false`).
+    /// (the streaming recorder path: a file destination retains no batches).
     fn summer_24h_run() -> &'static (BTreeMap<String, Vec<f64>>, EnvelopeComponentLoadsKwh) {
         static RUN: OnceLock<(BTreeMap<String, Vec<f64>>, EnvelopeComponentLoadsKwh)> =
             OnceLock::new();
@@ -101,45 +103,65 @@ mod tests {
             // The run's output and its `_diagnostics.csv` sibling go in a
             // directory removed once the columns are parsed.
             let output_dir = tempfile::tempdir().expect("temp dir");
-            let output_path = output_dir.path().join("hares_opaque_loads_summer_24h.csv");
+            let csv_path = output_dir.path().join("hares_opaque_loads_summer_24h.csv");
             let denver = denver_offset();
             let config = DwellingConfig {
-                hpxml_path: examples_dir().join("BEopt_example.xml"),
-                schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
-                weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-                defaults_path: Some(project_root().join("defaults")),
-                sim_config: SimulationConfig {
-                    start_time: denver.with_ymd_and_hms(2019, 7, 15, 0, 0, 0).unwrap(),
-                    duration: Duration::hours(24),
-                    time_res: Duration::minutes(1),
-                    output_verbosity: 6,
-                    output_path: Some(output_path.clone()),
-                    write_output: true,
-                    output_format: OutputFormat::Csv,
-                    output_chunk_size: 1024,
-                    setpoint_deadband_c: None,
-                    master_seed: 42,
-                    civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    retain_batches: false,
-                    rotation: hares_io::RotationPolicy::None,
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                },
-                overrides: None,
-                bldg_id: 1,
-                initialization_duration: None,
-                resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-                patches: None,
+                hpxml: InputSource::Path(examples_dir().join("BEopt_example.xml")),
+                schedule: Some(InputSource::Path(
+                    examples_dir().join("BEopt_example_schedule.csv"),
+                )),
+                weather: WeatherInput::Path(
+                    // The OCHRE reference's zero-order hold of the weather,
+                    // prepared by the Python adapter's hold_weather and
+                    // committed: this test compares against OCHRE output, so it
+                    // reads the held file instead of asking the engine for an
+                    // override.
+                    project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
+                ),
+                defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+                settings: DwellingSettings::new(
+                    SimulationConfig {
+                        start_time: denver.with_ymd_and_hms(2019, 7, 15, 0, 0, 0).unwrap(),
+                        duration: Duration::hours(24),
+                        time_res: Duration::minutes(1),
+                        reports: vec![hares_io::ReportSpec {
+                            name: "frame".to_string(),
+                            selection: hares_io::Selection::Verbosity(6),
+                            frequency: hares_io::Frequency::default(),
+                            destination: hares_io::Destination::Csv {
+                                path: csv_path.clone(),
+                                overwrite: false,
+                            },
+                        }],
+                        diagnostics: false,
+                        metrics: true,
+                        output_chunk_size: 1024,
+                        setpoint_deadband_c: None,
+                        master_seed: 42,
+                        civil_timezone: None,
+                        site_location: hares_io::SiteLocationOverride::default(),
+                        max_consecutive_step_failures:
+                            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                        health_policy: hares_io::HealthPolicy::default(),
+                        first_hour_interpolation: Default::default(),
+                        weather_year: hares_io::WeatherYear::default(),
+                        warmup: hares_io::Warmup::Disabled,
+                    },
+                    None,
+                    1,
+                    None,
+                ),
             };
 
             let engine = SimulationEngine::new();
             let result = engine.run(config).expect("engine.run should succeed");
             let envelope_loads = result
                 .metrics
-                .envelope_loads_kwh
+                .as_ref()
+                .and_then(|m| m.envelope_loads_kwh.clone())
                 .expect("verbosity 6 must produce envelope-load metrics");
 
-            (parse_csv_columns(&output_path), envelope_loads)
+            (parse_csv_columns(&csv_path), envelope_loads)
         })
     }
 

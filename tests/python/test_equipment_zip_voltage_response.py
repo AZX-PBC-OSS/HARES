@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER, make_dwelling
+from hares import SimulationConfig
 
 # Physics-modeled (Rule R1) equipment on the base.xml fixture.
 PHYSICS_EQUIPMENT = [
@@ -233,7 +234,7 @@ class TestScheduleDataIntegrity:
         error must carry its cause (which value, which column) to the
         caller through the bindings.
         """
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         lines = Path(SCHEDULE).read_text().splitlines()
         column_name = lines[0].split(",")[3]
@@ -244,18 +245,7 @@ class TestScheduleDataIntegrity:
         bad_schedule.write_text("\n".join(lines) + "\n")
 
         with pytest.raises(Exception) as excinfo:
-            Dwelling.from_hpxml(
-                HPXML,
-                str(bad_schedule),
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=600,
-                time_res_s=60,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+            Dwelling.from_hpxml(HPXML, str(bad_schedule), WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60,master_seed=0))
         message = str(excinfo.value)
         assert "non-finite" in message, (
             f"the rejection must name the defect, got: {message}"
@@ -271,7 +261,7 @@ class TestZipDataIntegrity:
         """Corrupt ZIP coefficients must never reach the published dicts.
 
         The defaults sidecar (``zip_parameters.toml`` under the
-        user-supplied ``defaults_path``) is the reachable non-finite
+        user-supplied ``defaults``) is the reachable non-finite
         channel: TOML parses ``nan`` natively, the loader does no
         finiteness check, and the sum-based init validation passes NaN
         (NaN comparisons are false). The corrupt coefficient then flows
@@ -284,7 +274,7 @@ class TestZipDataIntegrity:
         """
         import re
 
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         defaults = tmp_path / "defaults"
         defaults.mkdir()
@@ -301,18 +291,7 @@ class TestZipDataIntegrity:
         zip_toml.write_text(corrupted)
 
         with pytest.raises(Exception) as excinfo:
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=600,
-                time_res_s=60,
-                defaults_path=str(defaults),
-                bldg_id=42,
-                master_seed=0,
-                write_output=False,
-            )
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(defaults), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60,master_seed=0))
         message = str(excinfo.value).lower()
         assert "non-finite" in message, (
             f"the rejection must name the defect, got: {excinfo.value}"
@@ -335,22 +314,10 @@ class TestZipDataIntegrity:
         every electric power value). A config typo must be rejected at the
         boundary with its cause, not deferred to a mid-simulation crash.
         """
-        from ochre_next import Dwelling
+        from hares import Dwelling
 
         with pytest.raises(Exception) as excinfo:
-            Dwelling.from_hpxml(
-                HPXML,
-                SCHEDULE,
-                WEATHER,
-                start_time="2019-01-01T00:00:00",
-                duration_s=600,
-                time_res_s=60,
-                defaults_path=str(HARES_DEFAULTS),
-                bldg_id=42,
-                master_seed=0,
-                overrides={"Indoor Lighting": {"zip": {"v0": 1e-320}}},
-                write_output=False,
-            )
+            Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, overrides={"Indoor Lighting": {"zip": {"v0": 1e-320}}}, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=600, time_res=60,master_seed=0))
         message = str(excinfo.value).lower()
         assert "v0" in message, (
             f"the rejection must name the offending field, got: {excinfo.value}"

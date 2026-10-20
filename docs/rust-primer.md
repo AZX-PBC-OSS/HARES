@@ -17,7 +17,7 @@ model outputs each timestep:
 ```rust
 pub enum PortContribution {
     Thermal  { zone: ZoneId, sensible_gain_w: f64, latent_gain_w: f64, ... },
-    Electrical { active_power_kw: f64, ... },
+    Electrical { active_power_w: f64, ... },
     Fuel     { fuel_type: FuelType, consumption_w: f64 },
     Fluid    { loop_id: LoopId, flow_rate_kg_s: f64, ... },
 }

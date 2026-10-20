@@ -230,11 +230,11 @@ pub(super) fn calculate_shr(
     db_in_c: f64,
     w_in: f64,
     p_kpa: f64,
-    q_kw: f64,
+    q_w: f64,
     flow_m3_s: f64,
     ao: f64,
 ) -> crate::Result<CoilResult> {
-    if w_in <= SHR_MIN_HUMIDITY_RATIO || q_kw <= 0.0 || flow_m3_s <= 0.0 {
+    if w_in <= SHR_MIN_HUMIDITY_RATIO || q_w <= 0.0 || flow_m3_s <= 0.0 {
         return Ok(CoilResult {
             shr: 1.0,
             adp_temp_c: db_in_c,
@@ -247,7 +247,7 @@ pub(super) fn calculate_shr(
     let bf = if mfr > 0.0 { (-ao / mfr).exp() } else { 0.0 };
 
     let h_in = moist_air_enthalpy(db_in_c, w_in);
-    let d_h = if mfr > 0.0 { q_kw * 1000.0 / mfr } else { 0.0 };
+    let d_h = if mfr > 0.0 { q_w / mfr } else { 0.0 };
     let h_adp = h_in - d_h / (1.0 - bf);
 
     let p_pa = p_kpa * 1000.0;
@@ -288,10 +288,9 @@ pub(super) fn calculate_shr(
     // with high latent load and small bypass factor) the enthalpy-based ADP
     // calculation can produce t_adp > db_in_c, yielding non-physical
     // supply-air reheat without external energy. Clamp to db_in_c and treat
-    // as fully dry coil (SHR = 1.0) — matching the guard in
-    // coil_bypass_factor (line ~383) and EnergyPlus WaterCoils.cc:383.
+    // as fully dry coil (SHR = 1.0), matching the guard in
+    // `coil_bypass_factor` and EnergyPlus WaterCoils.cc:383.
     //
-    // Ref: docs/reviews/hvac-config/hvaccfg-09-coil-physics-twet-convergence.md
     let adp_exceeds_dbt = t_adp > db_in_c;
     if adp_exceeds_dbt {
         t_adp = db_in_c;
@@ -331,11 +330,11 @@ pub(super) fn coil_ao_factor(
     db_in_c: f64,
     w_in: f64,
     p_kpa: f64,
-    q_kw: f64,
+    q_w: f64,
     flow_m3_s: f64,
     shr: f64,
 ) -> crate::Result<f64> {
-    let bf = coil_bypass_factor(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, shr)?;
+    let bf = coil_bypass_factor(db_in_c, w_in, p_kpa, q_w, flow_m3_s, shr)?;
     let mfr = calculate_mass_flow_rate(db_in_c, w_in, p_kpa, flow_m3_s);
     Ok(-bf.ln() * mfr)
 }
@@ -344,7 +343,7 @@ pub(super) fn coil_bypass_factor(
     db_in_c: f64,
     w_in: f64,
     p_kpa: f64,
-    q_kw: f64,
+    q_w: f64,
     flow_m3_s: f64,
     shr: f64,
 ) -> crate::Result<f64> {
@@ -353,7 +352,7 @@ pub(super) fn coil_bypass_factor(
         return Ok(BYPASS_FACTOR_FLOOR);
     }
 
-    let d_h = q_kw * 1000.0 / mfr;
+    let d_h = q_w / mfr;
     let h_in = moist_air_enthalpy(db_in_c, w_in);
     let h_tin_wout = h_in - (1.0 - shr) * d_h;
     let w_out = humidity_ratio_from_enthalpy_and_t_dry_bulb(h_tin_wout, db_in_c);
@@ -965,7 +964,7 @@ mod coil_psychrometric_tests {
     const W_IN: f64 = 0.011159; // psychrometric humidity ratio at T_DB=26.67°C, T_WB=19.44°C, P=101325 Pa (AHRI 210/240)
     const P_KPA: f64 = 101.325;
     // 3-ton unit
-    const Q_KW: f64 = 10.5505;
+    const Q_W: f64 = 10_550.5;
     const FLOW_M3S: f64 = 0.49554;
 
     // ------------------------------------------------------------------
@@ -975,7 +974,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn coil_bypass_factor_ahri_rated_shr_070() {
-        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.70).unwrap();
         assert!(
             (bf - 0.154).abs() < 0.005,
             "BF at SHR=0.70: expected 0.154 ± 0.005 (dry-air basis), got {bf:.5}"
@@ -988,7 +987,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn coil_bypass_factor_ahri_rated_shr_074() {
-        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.74).unwrap();
+        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.74).unwrap();
         assert!(
             (bf - 0.040).abs() < 0.005,
             "BF at SHR=0.74: expected 0.040 ± 0.005 (dry-air basis), got {bf:.5}"
@@ -1002,8 +1001,8 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn calculate_shr_round_trip_ahri_conditions() {
-        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
-        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, ao).unwrap();
+        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.70).unwrap();
+        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, ao).unwrap();
         assert!(
             (result.shr - 0.70).abs() < 0.002,
             "Round-trip SHR: expected 0.70 ± 0.002, got {:.5}",
@@ -1017,7 +1016,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn coil_ao_factor_ahri_rated() {
-        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
+        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.70).unwrap();
         assert!(
             (ao - 1.072).abs() < 0.02,
             "Ao at SHR=0.70: expected 1.072 ± 0.02 kg/s (dry-air basis), got {ao:.5}"
@@ -1030,7 +1029,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn calculate_shr_dry_coil_returns_one() {
-        let result = calculate_shr(T_DB, 1e-8, P_KPA, Q_KW, FLOW_M3S, 1.0).unwrap();
+        let result = calculate_shr(T_DB, 1e-8, P_KPA, Q_W, FLOW_M3S, 1.0).unwrap();
         assert_eq!(
             result.shr, 1.0,
             "SHR must be exactly 1.0 for W < SHR_MIN_HUMIDITY_RATIO"
@@ -1053,7 +1052,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn bypass_factor_floor_clamps_to_001() {
-        let bf = coil_bypass_factor(29.44, 0.014690, P_KPA, Q_KW, FLOW_M3S, 0.68).unwrap();
+        let bf = coil_bypass_factor(29.44, 0.014690, P_KPA, Q_W, FLOW_M3S, 0.68).unwrap();
         assert_eq!(
             bf, BYPASS_FACTOR_FLOOR,
             "High-humidity case must clamp to BYPASS_FACTOR_FLOOR (0.01), got {bf:.5}"
@@ -1065,8 +1064,8 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn calculate_shr_ahri_conditions_converges() {
-        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
-        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, ao);
+        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.70).unwrap();
+        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, ao);
         assert!(
             result.is_ok(),
             "calculate_shr must converge at AHRI conditions, got {:?}",
@@ -1080,7 +1079,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn bypass_factor_zero_mass_flow_returns_floor() {
-        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, 0.0, 0.70).unwrap();
+        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_W, 0.0, 0.70).unwrap();
         assert_eq!(
             bf, BYPASS_FACTOR_FLOOR,
             "Zero flow must return BYPASS_FACTOR_FLOOR (0.01), got {bf:.5}"
@@ -1099,8 +1098,8 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn calculate_shr_nominal_cooling() {
-        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70).unwrap();
-        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, ao).unwrap();
+        let ao = coil_ao_factor(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.70).unwrap();
+        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, ao).unwrap();
         assert!(
             result.shr >= 0.65 && result.shr <= 1.0,
             "nominal cooling SHR must be in [0.65, 1.0], got {:.5}",
@@ -1129,8 +1128,8 @@ mod coil_psychrometric_tests {
         let db_c: f64 = 29.44;
         let w_high: f64 = 0.01469; // > 0.014 kg/kg
         let shr_seed: f64 = 0.70;
-        let ao = coil_ao_factor(db_c, w_high, P_KPA, Q_KW, FLOW_M3S, shr_seed).unwrap();
-        let result = calculate_shr(db_c, w_high, P_KPA, Q_KW, FLOW_M3S, ao).unwrap();
+        let ao = coil_ao_factor(db_c, w_high, P_KPA, Q_W, FLOW_M3S, shr_seed).unwrap();
+        let result = calculate_shr(db_c, w_high, P_KPA, Q_W, FLOW_M3S, ao).unwrap();
         assert!(
             result.shr > 0.55 && result.shr < 0.8,
             "high-humidity SHR must be in [0.55, 0.8], got {:.5}",
@@ -1143,13 +1142,13 @@ mod coil_psychrometric_tests {
         db_in_c: f64,
         w_in: f64,
         p_kpa: f64,
-        q_kw: f64,
+        q_w: f64,
         flow_m3_s: f64,
         shr: f64,
     ) -> (f64, f64) {
-        let bf = coil_bypass_factor(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, shr).unwrap();
-        let ao = coil_ao_factor(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, shr).unwrap();
-        let result = calculate_shr(db_in_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+        let bf = coil_bypass_factor(db_in_c, w_in, p_kpa, q_w, flow_m3_s, shr).unwrap();
+        let ao = coil_ao_factor(db_in_c, w_in, p_kpa, q_w, flow_m3_s, shr).unwrap();
+        let result = calculate_shr(db_in_c, w_in, p_kpa, q_w, flow_m3_s, ao).unwrap();
         (bf, result.adp_temp_c)
     }
 
@@ -1159,7 +1158,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn adp_temperature_ahri_rated_shr_070() {
-        let (_, t_adp) = bypass_factor_with_adp(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.70);
+        let (_, t_adp) = bypass_factor_with_adp(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.70);
         assert!(
             (t_adp - 11.77).abs() < 0.1,
             "T_ADP at SHR=0.70: expected 11.77 ± 0.1°C, got {t_adp:.3}°C"
@@ -1172,7 +1171,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn adp_temperature_ahri_rated_shr_074() {
-        let (_, t_adp) = bypass_factor_with_adp(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.74);
+        let (_, t_adp) = bypass_factor_with_adp(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.74);
         assert!(
             (t_adp - 12.79).abs() < 0.1,
             "T_ADP at SHR=0.74: expected 12.79 ± 0.1°C, got {t_adp:.3}°C"
@@ -1187,7 +1186,7 @@ mod coil_psychrometric_tests {
     fn calculate_shr_non_convergence_returns_error() {
         // Ao=0 makes BF = exp(0) = 1.0, so d_h/(1-BF) = inf and h_adp = -inf.
         // The iterate root-finder receives NaN errors and cannot converge.
-        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.0);
+        let result = calculate_shr(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.0);
         assert!(
             result.is_err(),
             "pathological Ao=0.0 must fail to converge, got {:?}",
@@ -1201,7 +1200,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn bypass_factor_shr_one_uses_enthalpy_path() {
-        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 1.0).unwrap();
+        let bf = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 1.0).unwrap();
         assert!(
             (BYPASS_FACTOR_FLOOR..=1.0).contains(&bf),
             "SHR=1.0 BF must be in [{BYPASS_FACTOR_FLOOR}, 1.0], got {bf:.5}"
@@ -1217,7 +1216,7 @@ mod coil_psychrometric_tests {
     // ------------------------------------------------------------------
     #[test]
     fn coil_ao_factor_zero_flow() {
-        let result = coil_ao_factor(T_DB, W_IN, P_KPA, Q_KW, 0.0, 0.70);
+        let result = coil_ao_factor(T_DB, W_IN, P_KPA, Q_W, 0.0, 0.70);
         assert!(
             result.is_ok(),
             "coil_ao_factor with zero flow must not return Err, got {:?}",
@@ -1235,7 +1234,7 @@ mod coil_psychrometric_tests {
         );
         // Ao=0.0 drives BF=exp(0/mfr)=1.0 (no contact with coil), so calculate_shr
         // must return SHR=1.0 (no dehumidification) or return Err -- but must not panic.
-        let shr_result = calculate_shr(T_DB, W_IN, P_KPA, Q_KW, 0.0, ao);
+        let shr_result = calculate_shr(T_DB, W_IN, P_KPA, Q_W, 0.0, ao);
         if let Ok(result) = shr_result {
             assert_eq!(
                 result.shr, 1.0,
@@ -1262,7 +1261,7 @@ mod coil_psychrometric_tests {
         // must return BYPASS_FACTOR_FLOOR because the ADP converges to the dew
         // point, making db_in_c − t_adp < 0 for this high-SHR, high-capacity
         // combination -- triggering the `db_in_c - t_adp <= 0.0` guard at line 383.
-        let result = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_KW, FLOW_M3S, 0.9999);
+        let result = coil_bypass_factor(T_DB, W_IN, P_KPA, Q_W, FLOW_M3S, 0.9999);
         assert!(
             result.is_ok(),
             "coil_bypass_factor near-zero d_t must not return Err, got {:?}",
@@ -1280,10 +1279,8 @@ mod coil_psychrometric_tests {
     //
     // When the enthalpy-based ADP calculation produces t_adp > db_in_c
     // (possible with supersaturated entering air and a small d_h), the
-    // guard clamps t_adp to db_in_c and sets SHR = 1.0 — matching the
-    // guard in coil_bypass_factor (line ~383) and EnergyPlus WaterCoils.cc.
-    //
-    // Ref: docs/reviews/hvac-config/hvaccfg-09-coil-physics-twet-convergence.md Finding 3
+    // guard clamps t_adp to db_in_c and sets SHR = 1.0, matching the
+    // guard in `coil_bypass_factor` and EnergyPlus WaterCoils.cc.
     // ------------------------------------------------------------------
 
     /// Construct inputs that drive ADP above entering dry-bulb: supersaturated
@@ -1296,16 +1293,16 @@ mod coil_psychrometric_tests {
         let db_c: f64 = 30.0;
         let w_in: f64 = 0.04;
         let p_kpa: f64 = 101.325;
-        let q_kw: f64 = 1.0;
+        let q_w: f64 = 1000.0;
         let flow_m3_s: f64 = 1.0;
         let ao: f64 = 1.0;
-        (db_c, w_in, p_kpa, q_kw, flow_m3_s, ao)
+        (db_c, w_in, p_kpa, q_w, flow_m3_s, ao)
     }
 
     #[test]
     fn adp_exceeds_dbt_clamped_to_entering() {
-        let (db_c, w_in, p_kpa, q_kw, flow_m3_s, ao) = adp_exceeds_dbt_inputs();
-        let result = calculate_shr(db_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+        let (db_c, w_in, p_kpa, q_w, flow_m3_s, ao) = adp_exceeds_dbt_inputs();
+        let result = calculate_shr(db_c, w_in, p_kpa, q_w, flow_m3_s, ao).unwrap();
         assert!(
             result.supply_temp_c <= db_c + 1e-10,
             "supply temp {:.6} must not exceed entering dry-bulb {db_c}",
@@ -1320,8 +1317,8 @@ mod coil_psychrometric_tests {
 
     #[test]
     fn adp_clamp_sets_shr_to_one() {
-        let (db_c, w_in, p_kpa, q_kw, flow_m3_s, ao) = adp_exceeds_dbt_inputs();
-        let result = calculate_shr(db_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+        let (db_c, w_in, p_kpa, q_w, flow_m3_s, ao) = adp_exceeds_dbt_inputs();
+        let result = calculate_shr(db_c, w_in, p_kpa, q_w, flow_m3_s, ao).unwrap();
         assert_eq!(
             result.shr, 1.0,
             "clamped ADP must force SHR = 1.0 (dry coil), got {:.6}",
@@ -1340,9 +1337,9 @@ mod coil_psychrometric_tests {
         let p_kpa: f64 = 101.325;
         let flow_m3_s: f64 = 0.49554;
         // 3-ton rated capacity, compute Ao for consistency.
-        let q_kw: f64 = 10.5505;
-        let ao = coil_ao_factor(db_c, w_in, p_kpa, q_kw, flow_m3_s, 0.70).unwrap();
-        let result = calculate_shr(db_c, w_in, p_kpa, q_kw, flow_m3_s, ao).unwrap();
+        let q_w: f64 = 10_550.5;
+        let ao = coil_ao_factor(db_c, w_in, p_kpa, q_w, flow_m3_s, 0.70).unwrap();
+        let result = calculate_shr(db_c, w_in, p_kpa, q_w, flow_m3_s, ao).unwrap();
 
         assert!(
             result.shr > 0.5 && result.shr < 1.0,

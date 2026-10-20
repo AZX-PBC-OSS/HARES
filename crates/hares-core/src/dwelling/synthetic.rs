@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use chrono::{DateTime, Duration, FixedOffset};
-use hares_io::{Building, ColumnAggregation, ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
+use hares_io::{
+    Building, ColumnAggregation, ScheduleTimeSeries, SimulationConfig, WeatherMeta,
+    WeatherTimeSeries,
+};
 use hares_physics::check_specific_heat_plausible;
 use hares_physics::solar::{EOT_C0, EOT_C1, EOT_C2, EOT_C3, EOT_C4};
 use hares_types::HaresError;
@@ -18,7 +20,11 @@ use super::conversions::duration_to_u32_secs;
 pub(crate) struct SyntheticTomlConfig {
     #[serde(default)]
     pub(crate) building_id: Option<i64>,
-    pub(crate) simulation: SyntheticSimulationConfig,
+    /// The one `SimulationConfig` type: the `[simulation]` table
+    /// deserialises as it (its `time_res` and `duration` in seconds), the
+    /// same table the plain TOML path and the Python constructor build.
+    /// The warm-up is the table's `warmup` field.
+    pub(crate) simulation: SimulationConfig,
     pub(crate) geometry: SyntheticGeometryConfig,
     pub(crate) materials: SyntheticMaterialsConfig,
     pub(crate) hvac: SyntheticHvacConfig,
@@ -28,8 +34,6 @@ pub(crate) struct SyntheticTomlConfig {
     pub(crate) schedule: SyntheticScheduleConfig,
     #[serde(default)]
     pub(crate) overrides: Option<Value>,
-    #[serde(default)]
-    pub(crate) output: SyntheticOutputConfig,
     #[serde(default)]
     pub(crate) boundaries: Option<Vec<SyntheticBoundaryConfig>>,
     #[serde(default)]
@@ -63,10 +67,11 @@ pub(crate) struct SyntheticTomlConfig {
 /// Configuration for a stochastic event-based load (CookingRange) injected
 /// into a synthetic dwelling for reproducibility and smoke testing.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticEventLoadConfig {
-    /// Active power draw during an event [kW].
-    #[serde(default = "default_event_active_power_kw")]
-    pub(crate) active_power_kw: f64,
+    /// Active power draw during an event [W] (SI).
+    #[serde(default = "default_event_active_power_w")]
+    pub(crate) active_power_w: f64,
     /// Duration of each active event [s].
     #[serde(default = "default_event_active_duration_s")]
     pub(crate) active_duration_s: f64,
@@ -101,8 +106,8 @@ pub(crate) struct SyntheticEventLoadConfig {
     pub(crate) event_probability_schedule: Option<Vec<f64>>,
 }
 
-fn default_event_active_power_kw() -> f64 {
-    1.5
+fn default_event_active_power_w() -> f64 {
+    1500.0
 }
 fn default_event_active_duration_s() -> f64 {
     300.0
@@ -121,24 +126,16 @@ fn default_event_latent_fraction() -> f64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct SyntheticSimulationConfig {
-    pub(crate) start_time: DateTime<FixedOffset>,
-    pub(crate) time_res_s: i64,
-    pub(crate) duration_s: i64,
-    #[serde(default)]
-    pub(crate) initialization_duration_s: Option<u64>,
-    #[serde(default = "default_max_consecutive_step_failures")]
-    pub(crate) max_consecutive_step_failures: u32,
-}
-
-fn default_max_consecutive_step_failures() -> u32 {
-    hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticGeometryConfig {
     pub(crate) floor_area_m2: f64,
     pub(crate) zone_volume_m3: f64,
+    /// The bedroom count the dwelling states. Required: the dwelling build
+    /// reads it unconditionally (the water heater's tank volume and the
+    /// first-hour rating, the appliance energies; OCHRE reads the HPXML
+    /// field with a direct index and fails on absence, hpxml.py:263), so
+    /// the synthetic input states it like any other.
+    pub(crate) number_of_bedrooms: f64,
     #[serde(default)]
     pub(crate) mass_multiplier: Option<f64>,
 }
@@ -286,45 +283,6 @@ impl Default for SyntheticScheduleConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct SyntheticOutputConfig {
-    #[serde(default)]
-    pub(crate) output_verbosity: u8,
-    #[serde(default)]
-    pub(crate) output_path: Option<String>,
-    #[serde(default = "default_write_output")]
-    pub(crate) write_output: bool,
-    #[serde(default)]
-    pub(crate) output_format: hares_io::OutputFormat,
-    #[serde(default = "default_output_chunk_size")]
-    pub(crate) output_chunk_size: usize,
-    #[serde(default)]
-    pub(crate) master_seed: u64,
-    #[serde(default)]
-    pub(crate) retain_batches: bool,
-    #[serde(default)]
-    pub(crate) rotation: hares_io::RotationPolicy,
-}
-
-impl Default for SyntheticOutputConfig {
-    fn default() -> Self {
-        Self {
-            output_verbosity: 0,
-            output_path: None,
-            write_output: default_write_output(),
-            output_format: hares_io::OutputFormat::Csv,
-            output_chunk_size: default_output_chunk_size(),
-            master_seed: 0,
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-        }
-    }
-}
-
-fn default_write_output() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SyntheticBoundaryConfig {
     pub(crate) id: String,
     pub(crate) boundary_type: String,
@@ -444,10 +402,6 @@ fn default_pressure_kpa() -> f64 {
 
 fn default_schedule_value() -> f64 {
     1.0
-}
-
-fn default_output_chunk_size() -> usize {
-    10_000
 }
 
 fn parse_zone_type(s: &str) -> hares_io::hpxml::ZoneType {
@@ -948,7 +902,7 @@ pub(crate) fn build_synthetic_building(
             hares_io::hpxml::building::XmlNode {
                 name: "active_power_kw".to_string(),
                 attrs: HashMap::new(),
-                text: el.active_power_kw.to_string(),
+                text: el.active_power_w.to_string(),
                 children: Vec::new(),
             },
             hares_io::hpxml::building::XmlNode {
@@ -1084,7 +1038,30 @@ pub(crate) fn build_synthetic_building(
         name: "BuildingDetails".to_string(),
         attrs: HashMap::new(),
         text: String::new(),
-        children: details_children,
+        children: {
+            // The bedroom count the TOML states: the build reads it
+            // unconditionally (it sizes the water heater's tank and the
+            // appliance energies; OCHRE's hpxml.py:263 reads the HPXML
+            // field with a direct index), so the synthetic input carries
+            // it like any other required field.
+            details_children.push(hares_io::hpxml::building::XmlNode {
+                name: "BuildingSummary".to_string(),
+                attrs: HashMap::new(),
+                text: String::new(),
+                children: vec![hares_io::hpxml::building::XmlNode {
+                    name: "BuildingConstruction".to_string(),
+                    attrs: HashMap::new(),
+                    text: String::new(),
+                    children: vec![hares_io::hpxml::building::XmlNode {
+                        name: "NumberofBedrooms".to_string(),
+                        attrs: HashMap::new(),
+                        text: config.geometry.number_of_bedrooms.to_string(),
+                        children: Vec::new(),
+                    }],
+                }],
+            });
+            details_children
+        },
     };
 
     let mut boundaries: Vec<Boundary> = if let Some(boundary_configs) = &config.boundaries {
@@ -1545,8 +1522,10 @@ pub(crate) fn build_synthetic_building(
             .unwrap_or(hares_envelope::boundary_rc::TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT),
         hvac_deadband_c: config.hvac.deadband_c,
         climate_zone_iecc: None,
+        unavailable_periods: Vec::new(),
         details_xml,
         parse_warnings: Vec::new(),
+        eri_calculation_version: None,
     };
 
     // Post-construction debug assertions: verify ranges hold in the built object
@@ -1698,7 +1677,8 @@ pub(crate) fn build_synthetic_weather(
         elevation_m: 0.0,
         wf_allows_leap_years: true,
         source_step_secs: 3600,
-        midpoint_offset_secs: 0,
+        record_label: hares_io::RecordLabel::IntervalEnd,
+        data_period: hares_io::DataPeriod::complete_year(),
         has_embedded_location: true,
         station_wmo: None,
     };
@@ -1950,6 +1930,7 @@ pub(crate) fn build_synthetic_weather(
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
+        stamps: Vec::new(),
         dry_bulb_c,
         dew_point_c: vec![dew_point_c; n],
         rel_humidity_pct: vec![config.weather.rel_humidity_pct; n],
@@ -1987,8 +1968,10 @@ pub(crate) fn build_synthetic_schedule(
 ) -> Result<SyntheticScheduleResult> {
     use chrono::TimeDelta;
 
-    let step_secs = duration_to_u32_secs(Duration::seconds(config.simulation.time_res_s))?;
-    let total_steps = (config.simulation.duration_s / config.simulation.time_res_s).max(1) as usize;
+    let step_secs = duration_to_u32_secs(config.simulation.time_res)?;
+    let total_steps = (config.simulation.duration.num_seconds()
+        / config.simulation.time_res.num_seconds())
+    .max(1) as usize;
     let start = config.simulation.start_time;
 
     let mut timestamps = Vec::with_capacity(total_steps);
@@ -2137,10 +2120,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2218,10 +2201,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2267,10 +2250,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2319,10 +2302,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2367,10 +2350,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-06-21T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2425,10 +2408,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-07-21T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2476,9 +2459,12 @@ clear_sky_solar = false
         let content = r#"building_id = 600
 [simulation]
 start_time = "2024-07-21T19:00:00Z"
-time_res_s = 3600
-duration_s = 3600
+time_res = 3600
+duration = 3600
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 129.6
 mass_multiplier = 1.0
@@ -2493,18 +2479,11 @@ cooling_c = 27.0
 ach = 0.0
 [schedule]
 occupancy = 0.0
-occupants_present = false
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
-"#;
+occupants_present = false"#;
 
         fs::write(&toml_path, content).expect("write temp TOML");
 
-        let mut dwelling = Dwelling::from_toml_config_with_write_output(&toml_path, Some(false))
+        let mut dwelling = Dwelling::from_toml_config_with_reports(&toml_path, None)
             .expect("build dwelling from synthetic BESTEST-600 config");
 
         dwelling
@@ -2551,19 +2530,330 @@ master_seed = 0
     }
 
     #[test]
-    fn initialization_duration_s_parsed_from_toml() {
+    fn toplevel_initialization_duration_s_names_the_sim_config() {
+        let toml = r#"
+building_id = 1
+
+initialization_duration_s = 86400
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        // The top-level warm-up seconds are a removed key: the warm-up
+        // lives in the [simulation] table's warmup field.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("top_init.toml");
+        std::fs::write(&toml_path, toml).expect("write temp TOML");
+        let err = {
+            use crate::dwelling::Dwelling;
+            Dwelling::from_toml_config(&toml_path)
+                .map(|_| ())
+                .expect_err("a top-level initialization_duration_s is an error")
+        };
+        assert!(
+            err.to_string().contains("initialization_duration_s")
+                && err.to_string().contains("warmup"),
+            "the error names the key and SimulationConfig.warmup: {err}"
+        );
+    }
+
+    #[test]
+    fn synthetic_warmup_defaults_to_the_converging_warmup() {
         let toml = r#"
 building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
+time_res = 60
+duration = 3600
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            config.simulation.warmup,
+            hares_io::Warmup::Converge(hares_io::WarmupConfig::default()),
+            "an omitted warmup key means the default converging warm-up"
+        );
+    }
+
+    #[test]
+    fn synthetic_warmup_disabled_form() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+warmup = "disabled"
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            config.simulation.warmup,
+            hares_io::Warmup::Disabled,
+            "the disabled form parses to Warmup::Disabled"
+        );
+    }
+
+    #[test]
+    fn toplevel_negative_initialization_duration_s_names_the_removed_key() {
+        let toml = r#"
+building_id = 1
+
+initialization_duration_s = -1
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        // The removed-key check runs before deserialising, so even a value
+        // that never parsed cleanly is named as the removed key first.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("top_init_negative.toml");
+        std::fs::write(&toml_path, toml).expect("write temp TOML");
+        let err = {
+            use crate::dwelling::Dwelling;
+            Dwelling::from_toml_config(&toml_path)
+                .map(|_| ())
+                .expect_err(
+                    "a top-level initialization_duration_s is a removed key whatever its value",
+                )
+        };
+        assert!(
+            err.to_string().contains("initialization_duration_s"),
+            "the error names the removed key: {err}"
+        );
+    }
+
+    /// The BESTEST fixtures state their warm-up in the [simulation] table's
+    /// warmup field and the dwelling builds.
+    #[test]
+    fn bestest_fixture_warmup_builds() {
+        use crate::dwelling::Dwelling;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/bestest/600.toml");
+        let dwelling = Dwelling::from_toml_config(&fixture).expect("the fixture builds");
+        assert_eq!(
+            dwelling.sim_config.warmup,
+            hares_io::Warmup::Converge(hares_io::WarmupConfig::default()),
+            "the fixture's positive warm-up seconds became the default converging warm-up"
+        );
+    }
+
+    // Row 34: the [simulation] table deserialises as the one
+    // SimulationConfig, so an unknown key in it is a typed error naming the
+    // key, an [output] table is a removed key naming where its fields went,
+    // and the warmup seconds are a top-level dwelling key, never a
+    // [simulation] key.
+    /// One representative per `validate()` check class, run through
+    /// the synthetic TOML path: a synthetic file whose [simulation] table
+    /// fails only that check fails `Dwelling::from_toml_config` with the
+    /// same message `SimulationConfig::from_toml` gives for the same table.
+    #[test]
+    fn synthetic_toml_validate_fires_like_from_toml_per_check_class() {
+        use crate::dwelling::Dwelling;
+        use hares_io::SimulationConfig;
+        use std::fs;
+
+        // Each case: (name, the [simulation] table's text as the synthetic
+        // file carries it, the same config's keys as `from_toml` reads
+        // them). The site case spells its sub-table nested, as TOML
+        // requires under a table header.
+        let start = "start_time = \"2024-01-01T00:00:00Z\"";
+        let cases: &[(&str, String, String)] = &[
+            (
+                "zero duration",
+                format!("{start}\ntime_res = 60\nduration = 0\n"),
+                format!("{start}\ntime_res = 60\nduration = 0\n"),
+            ),
+            (
+                "zero time_res",
+                format!("{start}\ntime_res = 0\nduration = 3600\n"),
+                format!("{start}\ntime_res = 0\nduration = 3600\n"),
+            ),
+            (
+                "verbosity above 8",
+                format!(
+                    "{start}\ntime_res = 60\nduration = 3600\n\n[[simulation.reports]]\nname = \"frame\"\nselection = {{ verbosity = 9 }}\ndestination = \"memory\"\n"
+                ),
+                format!(
+                    "{start}\ntime_res = 60\nduration = 3600\n\n[[reports]]\nname = \"frame\"\nselection = {{ verbosity = 9 }}\ndestination = \"memory\"\n"
+                ),
+            ),
+            (
+                "misaligned duration",
+                format!("{start}\ntime_res = 900\nduration = 3601\n"),
+                format!("{start}\ntime_res = 900\nduration = 3601\n"),
+            ),
+            (
+                "negative deadband",
+                format!("{start}\ntime_res = 60\nduration = 3600\nsetpoint_deadband_c = -1.0\n"),
+                format!("{start}\ntime_res = 60\nduration = 3600\nsetpoint_deadband_c = -1.0\n"),
+            ),
+            (
+                "time_res above u32 seconds",
+                format!("{start}\ntime_res = 4294967296\nduration = 8589934592\n"),
+                format!("{start}\ntime_res = 4294967296\nduration = 8589934592\n"),
+            ),
+            (
+                "out-of-range latitude",
+                format!(
+                    "{start}\ntime_res = 60\nduration = 3600\n\n[simulation.site_location]\nlatitude_deg = 95.0\n"
+                ),
+                format!(
+                    "{start}\ntime_res = 60\nduration = 3600\n\n[site_location]\nlatitude_deg = 95.0\n"
+                ),
+            ),
+        ];
+        for (case, file_sim_table, from_toml_text) in cases {
+            let toml = format!(
+                "building_id = 1\n\n[simulation]\n{file_sim_table}\n\n[geometry]\nnumber_of_bedrooms = 3.0\nfloor_area_m2 = 48.0\nzone_volume_m3 = 129.6\n\n[materials]\nwall_r_value_m2_k_w = 2.0\n\n[hvac]\nequipment_name = \"None\"\n"
+            );
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("case.toml");
+            fs::write(&path, &toml).expect("write temp TOML");
+            let Err(err) = Dwelling::from_toml_config(&path) else {
+                panic!("{case}: the synthetic path must refuse an invalid config");
+            };
+            let toml_err = SimulationConfig::from_toml(from_toml_text)
+                .expect_err(&format!("{case}: from_toml refuses the same values"));
+            assert!(
+                err.to_string().contains(&toml_err.to_string()),
+                "{case}: one validation, one message; from_toml gives {toml_err}, \
+                 the synthetic path gives {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn synthetic_toml_rejects_unknown_key() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+time_res_secs = 60
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+"#;
+        let err = toml::from_str::<SyntheticTomlConfig>(toml)
+            .expect_err("an unknown [simulation] key is a typed error, not a silently ignored one");
+        let message = err.to_string();
+        assert!(
+            message.contains("time_res_secs"),
+            "the error must name the unknown key, got: {message}"
+        );
+    }
+
+    #[test]
+    fn synthetic_output_table_names_reports() {
+        use crate::dwelling::Dwelling;
+        use std::fs;
+
+        let toml = r#"building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[output]
+output_verbosity = 3
+"#;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("output_table.toml");
+        fs::write(&toml_path, toml).expect("write temp TOML");
+        let Err(err) = Dwelling::from_toml_config(&toml_path) else {
+            panic!("an [output] table is a removed key of the dwelling table");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("output") && message.contains("reports"),
+            "the error names the removed [output] table and the reports list, got: {message}"
+        );
+    }
+
+    #[test]
+    fn synthetic_simulation_initialization_duration_names_warmup() {
+        use crate::dwelling::Dwelling;
+        use std::fs;
+
+        let toml = r#"building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
 initialization_duration_s = 86400
 
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
-zone_volume_m3 = 120.0
+zone_volume_m3 = 129.6
 
 [materials]
 wall_r_value_m2_k_w = 2.0
@@ -2571,59 +2861,18 @@ wall_r_value_m2_k_w = 2.0
 [hvac]
 equipment_name = "None"
 "#;
-        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        assert_eq!(config.simulation.initialization_duration_s, Some(86400));
-    }
-
-    #[test]
-    fn initialization_duration_s_defaults_to_none() {
-        let toml = r#"
-building_id = 1
-
-[simulation]
-start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
-
-[geometry]
-floor_area_m2 = 48.0
-zone_volume_m3 = 120.0
-
-[materials]
-wall_r_value_m2_k_w = 2.0
-
-[hvac]
-equipment_name = "None"
-"#;
-        let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        assert_eq!(config.simulation.initialization_duration_s, None);
-    }
-
-    #[test]
-    fn initialization_duration_s_negative_rejected() {
-        let toml = r#"
-building_id = 1
-
-[simulation]
-start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
-initialization_duration_s = -1
-
-[geometry]
-floor_area_m2 = 48.0
-zone_volume_m3 = 120.0
-
-[materials]
-wall_r_value_m2_k_w = 2.0
-
-[hvac]
-equipment_name = "None"
-"#;
-        let result = toml::from_str::<SyntheticTomlConfig>(toml);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let toml_path = dir.path().join("sim_init.toml");
+        fs::write(&toml_path, toml).expect("write temp TOML");
+        let Err(err) = Dwelling::from_toml_config(&toml_path) else {
+            panic!(
+                "initialization_duration_s under [simulation] is a removed key naming SimulationConfig.warmup"
+            );
+        };
+        let message = err.to_string();
         assert!(
-            result.is_err(),
-            "negative initialization_duration_s must be rejected at parse time"
+            message.contains("initialization_duration_s") && message.contains("warmup"),
+            "the error names the removed key and SimulationConfig.warmup, got: {message}"
         );
     }
 
@@ -2636,10 +2885,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
-
+time_res = 60
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2674,10 +2923,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
-
+time_res = 60
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2716,10 +2965,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 3600
-
+time_res = 60
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2762,10 +3011,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2802,9 +3051,10 @@ dew_point_c = -25.0
 building_id = 1
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -2840,10 +3090,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2890,10 +3140,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2952,10 +3202,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -2991,10 +3241,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
-
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -3071,9 +3321,10 @@ seasonal_modulation = 0.4
 building_id = 1
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3156,9 +3407,10 @@ attached_to_wall_id = "wall-1"
 building_id = 600
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 129.6
 [materials]
@@ -3311,7 +3563,8 @@ attached_to_wall_id = "south-wall"
         ] {
             let toml = format!(
                 "building_id = 1\n[simulation]\nstart_time = \"2024-01-01T00:00:00Z\"\n\
-                 time_res_s = 3600\nduration_s = 3600\n[geometry]\nfloor_area_m2 = {floor_area}\n\
+                 time_res = 3600\nduration = 3600\n[geometry]\nnumber_of_bedrooms = 3.0\n\
+                 floor_area_m2 = {floor_area}\n\
                  zone_volume_m3 = {volume}\n[materials]\nwall_r_value_m2_k_w = 2.0\n[hvac]\n\
                  equipment_name = \"None\"\n"
             );
@@ -3328,9 +3581,10 @@ attached_to_wall_id = "south-wall"
 building_id = 1
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3372,9 +3626,10 @@ specific_heat_j_kg_k = 900.0
 building_id = 1
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3426,9 +3681,10 @@ specific_heat_j_kg_k = 900.0
 building_id = 1
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3514,9 +3770,10 @@ specific_heat_j_kg_k = 900.0
 building_id = 1
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 [materials]
@@ -3638,9 +3895,10 @@ equipment_name = "None"
 building_id = 1
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 86400
+time_res = 3600
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 100.0
 zone_volume_m3 = 300.0
 [materials]
@@ -3710,10 +3968,12 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -3733,12 +3993,6 @@ pressure_kpa = 101.325
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
@@ -3817,10 +4071,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -3958,10 +4212,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4051,10 +4305,12 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4074,12 +4330,6 @@ pressure_kpa = 101.325
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
@@ -4146,10 +4396,12 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4169,12 +4421,6 @@ dew_point_c = 5.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
@@ -4197,10 +4443,12 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4218,12 +4466,6 @@ dew_point_c = 5.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
@@ -4249,10 +4491,12 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4272,12 +4516,6 @@ dew_point_c = 5.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
@@ -4304,10 +4542,12 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4328,12 +4568,6 @@ dew_point_c = 5.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
@@ -4365,10 +4599,12 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = 86400
-
+time_res = 60
+duration = 86400
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4388,12 +4624,6 @@ dew_point_c = 5.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
@@ -4428,10 +4658,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4464,10 +4694,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4490,10 +4720,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4527,10 +4757,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4562,10 +4792,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4598,10 +4828,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4661,10 +4891,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4714,10 +4944,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4767,10 +4997,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4822,10 +5052,10 @@ building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 3600
-duration_s = 3600
-
+time_res = 3600
+duration = 3600
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -4902,5 +5132,102 @@ shgc = 0.7
                 );
             }
         }
+    }
+
+    /// `wall_area_m2` was a parsed-but-never-read geometry key kept "for
+    /// backward compatibility"; its removal means a geometry block that
+    /// still carries it is a typed error naming the key, not a silently
+    /// ignored one.
+    #[test]
+    fn synthetic_geometry_rejects_wall_area_m2() {
+        let toml = r#"
+building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 3600
+duration = 86400
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 120.0
+wall_area_m2 = 100.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[weather]
+outdoor_temp_c = 10.0
+diurnal_amplitude_c = 10.0
+"#;
+        let err = toml::from_str::<SyntheticTomlConfig>(toml)
+            .expect_err("a removed geometry key is an error naming the key");
+        assert!(
+            err.to_string().contains("wall_area_m2"),
+            "the error names the key, got: {err}"
+        );
+    }
+
+    /// The synthetic TOML's [event_load] table with the old power spelling
+    /// fails naming the replacement; an unknown key fails naming itself.
+    #[test]
+    fn synthetic_event_load_removed_key_names_its_replacement() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("synthetic_removed_key.toml");
+        std::fs::write(
+            &path,
+            r#"
+building_id = 1
+
+[simulation]
+start_time = "2023-06-01T00:00:00-07:00"
+duration = 3600
+time_res = 900
+
+[event_load]
+active_power_kw = 1.0
+"#,
+        )
+        .unwrap();
+        let err = {
+            use crate::dwelling::Dwelling;
+            Dwelling::from_toml_config(&path)
+                .map(|_| ())
+                .expect_err("the old key fails")
+        };
+        assert!(
+            err.to_string()
+                .contains("EventBasedLoad.active_power_w (W)"),
+            "the error must name the replacement, got: {err}"
+        );
+
+        std::fs::write(
+            &path,
+            r#"
+building_id = 1
+
+[simulation]
+start_time = "2023-06-01T00:00:00-07:00"
+duration = 3600
+time_res = 900
+
+[event_load]
+x = 1.0
+"#,
+        )
+        .unwrap();
+        let err = {
+            use crate::dwelling::Dwelling;
+            Dwelling::from_toml_config(&path)
+                .map(|_| ())
+                .expect_err("an unknown key fails")
+        };
+        assert!(
+            err.to_string().contains("unknown field `x`"),
+            "the error must name the key, got: {err}"
+        );
     }
 }

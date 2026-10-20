@@ -53,7 +53,10 @@ fn make_schedule(columns: &[(&str, &[f64])]) -> ScheduleTimeSeries {
 
 fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
     let mut parameters = Map::new();
-    parameters.insert("annual_electric_kwh".to_string(), Value::from(annual_kwh));
+    parameters.insert(
+        "annual_electric_j".to_string(),
+        Value::from(annual_kwh * 3.6e6),
+    );
     parameters.insert("sensible_gain_fraction".to_string(), Value::from(0.0));
     EquipmentSpec {
         instance_name: None,
@@ -66,6 +69,8 @@ fn make_spec(name: &str, annual_kwh: f64) -> EquipmentSpec {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 
@@ -137,6 +142,7 @@ fn base_env(payload: Vec<f64>) -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
@@ -193,7 +199,7 @@ fn equipment_without_any_schedule_source_is_an_error() {
     let err = inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(dir.path()),
+        Some(&hares_io::load_default_profiles(dir.path()).expect("the profiles load")),
         &DefaultsStore::empty(),
         &mut Vec::new(),
     )
@@ -256,8 +262,8 @@ fn io_injection_to_scheduled_load_step_column_source() {
     eq.step(&env, Duration::from_secs(60), &mut ports)
         .expect("scheduled load step should pass");
 
-    let expected_kw = schedule.columns[col_idx][0];
-    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
+    let expected_w = schedule.columns[col_idx][0];
+    assert!((ports.electrical.net_active_w() - expected_w).abs() < 1e-9);
 }
 
 #[test]
@@ -270,7 +276,7 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(defaults_dir.path()),
+        Some(&hares_io::load_default_profiles(defaults_dir.path()).expect("the profiles load")),
         &DefaultsStore::empty(),
         &mut Vec::new(),
     )
@@ -305,19 +311,19 @@ fn io_injection_to_scheduled_load_step_daily_profile_source() {
         .get("power_profile_month")
         .and_then(Value::as_array)
         .expect("month multipliers");
-    let max_kw = specs[0]
+    let max_w = specs[0]
         .parameters
-        .get("power_profile_max_kw")
+        .get("power_profile_max_w")
         .and_then(Value::as_f64)
-        .expect("max kw");
+        .expect("max W");
 
     let hour = env.current_time.hour() as usize;
     let month_idx = env.current_time.month0() as usize;
-    let expected_kw = weekday[hour].as_f64().expect("hourly fraction")
+    let expected_w = weekday[hour].as_f64().expect("hourly fraction")
         * month[month_idx].as_f64().expect("month fraction")
-        * max_kw;
+        * max_w;
 
-    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
+    assert!((ports.electrical.net_active_w() - expected_w).abs() < 1e-9);
 }
 
 #[test]
@@ -346,11 +352,11 @@ fn io_injection_to_scheduled_load_step_constant_source() {
         Some("constant")
     );
 
-    let expected_kw = specs[0]
+    let expected_w = specs[0]
         .parameters
-        .get("power_constant_kw")
+        .get("power_constant_w")
         .and_then(Value::as_f64)
-        .expect("power_constant_kw should be injected");
+        .expect("power_constant_w should be injected");
 
     let config = equipment_config_from_spec(&specs[0]);
     let mut eq = ScheduledLoad::new(config.clone(), EndUse::LIGHTING, "Ventilation Fan");
@@ -363,7 +369,7 @@ fn io_injection_to_scheduled_load_step_constant_source() {
     eq.step(&env, Duration::from_secs(60), &mut ports)
         .expect("scheduled load step should pass");
 
-    assert!((ports.electrical.net_active_w() - expected_kw * 1000.0).abs() < 1e-9);
+    assert!((ports.electrical.net_active_w() - expected_w).abs() < 1e-9);
 }
 
 #[test]
@@ -393,7 +399,7 @@ fn io_injection_to_event_load_step_uses_wrap_semantics() {
     let config = equipment_config_from_spec_with_extras(
         &specs[0],
         &[
-            ("active_power_kw", 1.5.into()),
+            ("active_power_w", 1500.0.into()),
             ("active_duration_s", 60.0.into()),
         ],
         &[],
@@ -473,20 +479,27 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
 "#;
 
     let building = parse_building(xml).expect("HPXML should parse");
-    let mut specs = resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new())
-        .expect("resolve_equipment should succeed");
+    let mut specs = resolve_equipment(
+        &building,
+        building.climate_zone_iecc.as_deref(),
+        None,
+        &DefaultsStore::empty(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("resolve_equipment should succeed");
 
     let ref_spec = specs.iter().find(|s| s.name == "Refrigerator").expect(
         "resolve_equipment should produce a Refrigerator spec from the HPXML Appliances section",
     );
-    // Confirm annual energy was parsed
+    // Confirm annual energy was parsed (held in joules)
     assert!(
         ref_spec
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64())
-            .is_some_and(|kwh| kwh > 0.0),
-        "Refrigerator spec must carry annual_electric_kwh > 0"
+            .is_some_and(|j| j > 0.0),
+        "Refrigerator spec must carry annual_electric_j > 0"
     );
 
     // The refrigerator schedule column uses a constant fraction of 1.0 for all hours.
@@ -522,10 +535,10 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
     eq.step(&env, Duration::from_secs(3600), &mut ports)
         .expect("ScheduledLoad step should succeed");
 
-    let electric_kw = ports.electrical.net_active_w();
+    let electric_w = ports.electrical.net_active_w();
     assert!(
-        electric_kw > 0.0,
-        "Refrigerator must draw positive electrical power; got {electric_kw} W"
+        electric_w > 0.0,
+        "Refrigerator must draw positive electrical power; got {electric_w} W"
     );
 
     // Refrigerators have 100% sensible gain fraction, so total_sensible_gain_w == electric_w.
@@ -538,8 +551,8 @@ fn hpxml_appliance_flows_into_scheduled_load_producing_nonzero_gain() {
         "Refrigerator must produce positive sensible heat gain; got {sensible_w} W"
     );
     assert!(
-        (sensible_w - electric_kw).abs() < 1e-6,
-        "Refrigerator total_sensible_gain_w ({sensible_w} W) should equal electric_w ({electric_kw} W)"
+        (sensible_w - electric_w).abs() < 1e-6,
+        "Refrigerator total_sensible_gain_w ({sensible_w} W) should equal electric_w ({electric_w} W)"
     );
 }
 
@@ -549,7 +562,7 @@ fn repo_defaults_dir() -> std::path::PathBuf {
         .expect("crates dir")
         .parent()
         .expect("repo root")
-        .join("defaults")
+        .join("python/hares/defaults")
 }
 
 /// HVAC with no HPXML-derived setpoints and no schedule setpoint column, run
@@ -584,6 +597,8 @@ fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         },
         EquipmentSpec {
             instance_name: None,
@@ -609,6 +624,8 @@ fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         },
     ];
 
@@ -616,7 +633,7 @@ fn hvac_without_setpoints_takes_the_os_hpxml_defaults() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(&defaults_dir),
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
         &DefaultsStore::empty(),
         &mut Vec::new(),
     )
@@ -719,7 +736,7 @@ fn daily_profile_produces_different_weekday_vs_weekend_power_at_noon() {
     inject_schedule_into_specs(
         &mut specs,
         &mut schedule,
-        Some(dir.path()),
+        Some(&hares_io::load_default_profiles(dir.path()).expect("the profiles load")),
         &DefaultsStore::empty(),
         &mut Vec::new(),
     )

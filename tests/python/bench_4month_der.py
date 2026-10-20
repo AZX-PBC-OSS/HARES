@@ -18,6 +18,8 @@ from __future__ import annotations
 import datetime as dt
 import sys
 import tempfile
+
+from hares import SimulationConfig
 import time
 from pathlib import Path
 
@@ -28,7 +30,7 @@ from ochre_units import register_removed_units
 ROOT = Path(__file__).resolve().parents[2]
 VENDOR_OCHRE = ROOT / "vendors" / "OCHRE"
 EXAMPLES = ROOT / "data" / "examples"
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 
 HPXML = str(EXAMPLES / "BEopt_example.xml")
 SCHEDULE = str(EXAMPLES / "BEopt_example_schedule.csv")
@@ -52,6 +54,8 @@ PV_INVERTER_EFFICIENCY = 96.0  # SAM expects percentage, not fraction
 
 BATTERY_CAPACITY_KWH = 10.0
 BATTERY_CAPACITY_KW = 5.0
+BATTERY_CAPACITY_J = BATTERY_CAPACITY_KWH * 3.6e6
+BATTERY_CAPACITY_W = BATTERY_CAPACITY_KW * 1000.0
 
 OCHRE_TO_HARES: dict[str, list[str]] = {
     "HVAC Heating Electric Power (kW)": [
@@ -143,27 +147,15 @@ def _run_ochre() -> tuple[dict[str, float], float, float]:
 
 def _run_hares(output_dir: Path) -> tuple[dict[str, float], float, float]:
     """Run HARES with PV + Battery for 120 days, writing its output into ``output_dir``."""
-    from ochre_next import Battery, Dwelling as HaresDwelling, PV
+    from hares import Battery, Dwelling as HaresDwelling, PV
 
     t0 = time.perf_counter()
-    dwelling = HaresDwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time=START_HARES,
-        time_res_s=TIME_RES_MIN * 60,
-        duration_s=DURATION_H * 3600,
-        output_verbosity=6,
-        defaults_path=str(HARES_DEFAULTS),
-        master_seed=42,
-        write_output=True,
-        output_path=str(output_dir / "hares_bench_4month_der.csv"),
-    )
+    dwelling = HaresDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), config=SimulationConfig(start_time=START_HARES, time_res=TIME_RES_MIN * 60, duration=DURATION_H * 3600, verbosity=6, master_seed=42, csv_path=str(output_dir / "hares_bench_4month_der.csv")))
     dwelling.initialize()
 
-    dwelling.add_pv(PV("PV", PV_CAPACITY_KW, PV_TILT_DEG, PV_AZIMUTH_HARES))
+    dwelling.add_pv(PV("PV", capacity_w=PV_CAPACITY_KW * 1000.0, tilt=PV_TILT_DEG, azimuth=PV_AZIMUTH_HARES))
     dwelling.add_battery(
-        Battery("Battery", capacity_kwh=BATTERY_CAPACITY_KWH, max_charge_kw=BATTERY_CAPACITY_KW, max_discharge_kw=BATTERY_CAPACITY_KW)
+        Battery("Battery", capacity_j=BATTERY_CAPACITY_J, max_charge_w=BATTERY_CAPACITY_W, max_discharge_w=BATTERY_CAPACITY_W)
     )
     dwelling.add_actor_by_name(
         "BatteryManagement",
@@ -173,7 +165,7 @@ def _run_hares(output_dir: Path) -> tuple[dict[str, float], float, float]:
     init_elapsed = time.perf_counter() - t0
 
     t1 = time.perf_counter()
-    df = dwelling.simulate()
+    df = dwelling.simulate().reports[0].table()
     sim_elapsed = time.perf_counter() - t1
 
     time_res_h = TIME_RES_MIN / 60.0

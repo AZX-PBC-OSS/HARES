@@ -311,6 +311,18 @@ impl StratifiedTank {
         self.total_volume_m3
     }
 
+    /// The water's stored thermal energy [J], relative to 0 °C: the sum
+    /// over nodes of mass times specific heat times temperature. The
+    /// zero reference cancels in every use (the failed-step rollback
+    /// counts the state's energy delta across the step).
+    pub fn stored_energy_j(&self) -> f64 {
+        self.node_temps_c
+            .iter()
+            .zip(&self.node_volumes_m3)
+            .map(|(&t_c, &v_m3)| water_density_kg_m3(t_c) * v_m3 * CP_LIQUID_WATER_J_KG_K * t_c)
+            .sum()
+    }
+
     /// Advance the tank by one time step with a raw (untempered) draw volume.
     ///
     /// `heat_injections` is a slice of `(node_index, power_w)` pairs representing
@@ -581,7 +593,7 @@ impl StratifiedTank {
     /// `step_tempered()` so that heating and draw are integrated in the
     /// same Euler step with correct outlet temperature and energy accounting.
     pub fn heat_node(&mut self, node: usize, power_w: f64, dt: Duration) -> Result<()> {
-        validate_finite("power_w", power_w)?;
+        validate_finite("power_kw", power_w)?;
         let seconds = dt.as_secs_f64();
         validate_nonnegative("dt_seconds", seconds)?;
         let volume_m3 = self.node_volume(node)?;
@@ -1080,6 +1092,58 @@ mod tests {
         // polynomial in water_density_kg_m3 introduces ~1e-6 float precision
         // error across the combined operations.
         assert!((tank.node_temps()[0] - expected).abs() < 1.0e-6);
+    }
+
+    /// The stored-energy reading's arithmetic: one node at a known
+    /// temperature reads density times volume times specific heat times
+    /// temperature, the same constants the node's own m·cp uses.
+    #[test]
+    fn stored_energy_reads_mass_times_specific_heat_times_temperature() {
+        let tank = StratifiedTank::new(StratifiedTankConfig {
+            n_nodes: 1,
+            height_m: 1.2,
+            diameter_m: 0.5,
+            ua_w_per_k: 0.0,
+            conductivity_w_m_k: 0.0,
+            initial_temp_c: 60.0,
+            element_nodes: [Some(0), None],
+            node_volumes_m3: None,
+            ua_end_cap_w_per_k: None,
+        })
+        .expect("tank");
+
+        let expected =
+            water_density_kg_m3(60.0) * tank.node_volumes_m3()[0] * CP_LIQUID_WATER_J_KG_K * 60.0;
+        assert_eq!(tank.stored_energy_j().to_bits(), expected.to_bits());
+    }
+
+    /// The failed-step window the dwelling's discarded-state-energy
+    /// counter measures: the standby/conduction pass mutates the node
+    /// temperatures before the per-injection validation can fail, so a
+    /// step that errors mid-way keeps a state mutation the rolled-back
+    /// port draw no longer accounts for. The stored-energy reading
+    /// across the failed step is the delta the counter counts.
+    #[test]
+    fn a_mid_step_failure_keeps_a_state_mutation_the_rolled_back_ports_cannot_account() {
+        let mut tank = test_tank_with_ua(2, 8.0);
+        let pre = tank.stored_energy_j();
+        let err = tank
+            .step(20.0, 0.0, 12.0, &[(0, f64::NAN)], Duration::from_secs(60))
+            .expect_err("a non-finite injection power fails the step");
+        assert!(
+            err.to_string().contains("heat_injection_power_w"),
+            "the failure is the injection validation, after standby: {err}"
+        );
+        let kept = tank.stored_energy_j();
+        assert!(
+            kept - pre != 0.0,
+            "the standby pass moved the tank's energy before the failure: \
+             {pre} J before, {kept} J kept"
+        );
+        assert!(
+            kept < pre,
+            "standby against a cooler ambient cools the tank: {pre} J before, {kept} J kept"
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12, <3.14"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -560,6 +560,140 @@ wheels = [
 ]
 
 [[package]]
+name = "hares-py"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy" },
+    { name = "polars" },
+    { name = "pyarrow" },
+    { name = "typing-extensions" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "maturin" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-timeout" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+]
+helics = [
+    { name = "helics" },
+]
+notebook = [
+    { name = "marimo" },
+    { name = "plotly" },
+]
+ochre = [
+    { name = "xmltodict" },
+]
+pybamm = [
+    { name = "pybamm" },
+]
+resstock = [
+    { name = "boto3" },
+    { name = "httpx" },
+]
+rl = [
+    { name = "gymnasium" },
+]
+sam = [
+    { name = "nrel-pysam" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "botocore-stubs" },
+    { name = "maturin" },
+    { name = "numpy" },
+    { name = "pandas-stubs" },
+    { name = "psychrolib" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-timeout" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+]
+ochre = [
+    { name = "boto3" },
+    { name = "click" },
+    { name = "fastparquet" },
+    { name = "matplotlib" },
+    { name = "nrel-pysam" },
+    { name = "numba" },
+    { name = "pandas" },
+    { name = "pint" },
+    { name = "psychrolib" },
+    { name = "pvlib" },
+    { name = "pyarrow" },
+    { name = "python-dateutil" },
+    { name = "pytz" },
+    { name = "rainflow" },
+    { name = "scipy" },
+    { name = "xmltodict" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", marker = "extra == 'resstock'", specifier = ">=1.43.107" },
+    { name = "gymnasium", marker = "extra == 'rl'", specifier = ">=1.3.0" },
+    { name = "helics", marker = "extra == 'helics'", specifier = ">=3.6.1,<4" },
+    { name = "httpx", marker = "extra == 'resstock'", specifier = ">=0.28.1" },
+    { name = "marimo", marker = "extra == 'notebook'", specifier = ">=0.25.1" },
+    { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.15.0" },
+    { name = "nrel-pysam", marker = "extra == 'sam'", specifier = ">=7.1.1.post1" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "plotly", marker = "extra == 'notebook'", specifier = ">=7.1.0" },
+    { name = "polars", specifier = ">=1.44.2" },
+    { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "pybamm", marker = "extra == 'pybamm'", specifier = ">=26.9.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1.0" },
+    { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.4.0" },
+    { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.8.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.10" },
+    { name = "typing-extensions", specifier = ">=4.16.0" },
+    { name = "xmltodict", marker = "extra == 'ochre'", specifier = ">=1.0.4" },
+]
+provides-extras = ["sam", "pybamm", "resstock", "helics", "rl", "notebook", "ochre", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "botocore-stubs", specifier = ">=1.43.67" },
+    { name = "maturin", specifier = ">=1.15.0" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "pandas-stubs", specifier = ">=3.0.5.260914" },
+    { name = "psychrolib", specifier = ">=2.5.0" },
+    { name = "pyright", specifier = ">=1.1.414" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "pytest-timeout", specifier = ">=2.4.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = ">=0.16.10" },
+]
+ochre = [
+    { name = "boto3", specifier = ">=1.43.107" },
+    { name = "click", specifier = ">=8.5.0" },
+    { name = "fastparquet", specifier = ">=2026.9.0" },
+    { name = "matplotlib", specifier = ">=3.11.2" },
+    { name = "nrel-pysam", specifier = ">=7.1.1.post1" },
+    { name = "numba", specifier = ">=0.68.0" },
+    { name = "pandas", specifier = ">=3.0.6" },
+    { name = "pint", specifier = ">=0.26.1" },
+    { name = "psychrolib", specifier = ">=2.5.0" },
+    { name = "pvlib", specifier = ">=0.16.1" },
+    { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "python-dateutil", specifier = ">=2.9.0.post0" },
+    { name = "pytz", specifier = ">=2026.4" },
+    { name = "rainflow", specifier = ">=3.2.0" },
+    { name = "scipy", specifier = ">=1.18.1" },
+    { name = "xmltodict", specifier = ">=1.0.4" },
+]
+
+[[package]]
 name = "helics"
 version = "3.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -975,140 +1109,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/41/ee/38e785e88a4045f6ad1d1f2808dcdfafdca48c760260c0587bf171e29fc9/numpy-2.5.3-cp313-cp313-win32.whl", hash = "sha256:1c80eabb4035ecf4ca9cd49cde8a9fdd69a729e63e6474887d1523ade7aa277f", size = 6129003, upload-time = "2026-09-06T16:25:23.664Z" },
     { url = "https://files.pythonhosted.org/packages/f3/ec/100f2b1794ede74a9b3d7ec6b9736927f56713414c1dfe19ab6c383494bf/numpy-2.5.3-cp313-cp313-win_amd64.whl", hash = "sha256:71cad2b2a7451ab79d8f5e71b453485b6775963d5cf794179144a7463fe6e8ec", size = 12560965, upload-time = "2026-09-06T16:25:26.602Z" },
     { url = "https://files.pythonhosted.org/packages/80/b1/7dc825ca94c12acebbce4c37caa5e198695eb31424bc579679f32b1bb49d/numpy-2.5.3-cp313-cp313-win_arm64.whl", hash = "sha256:8e4dd766076855b5ff7ea52fa5f07ce26286726e0f8bff446b7739d02e6ea204", size = 10482343, upload-time = "2026-09-06T16:25:29.772Z" },
-]
-
-[[package]]
-name = "ochre-next"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "numpy" },
-    { name = "polars" },
-    { name = "pyarrow" },
-    { name = "typing-extensions" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "maturin" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-timeout" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-]
-helics = [
-    { name = "helics" },
-]
-notebook = [
-    { name = "marimo" },
-    { name = "plotly" },
-]
-ochre = [
-    { name = "xmltodict" },
-]
-pybamm = [
-    { name = "pybamm" },
-]
-resstock = [
-    { name = "boto3" },
-    { name = "httpx" },
-]
-rl = [
-    { name = "gymnasium" },
-]
-sam = [
-    { name = "nrel-pysam" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "botocore-stubs" },
-    { name = "maturin" },
-    { name = "numpy" },
-    { name = "pandas-stubs" },
-    { name = "psychrolib" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-timeout" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-]
-ochre = [
-    { name = "boto3" },
-    { name = "click" },
-    { name = "fastparquet" },
-    { name = "matplotlib" },
-    { name = "nrel-pysam" },
-    { name = "numba" },
-    { name = "pandas" },
-    { name = "pint" },
-    { name = "psychrolib" },
-    { name = "pvlib" },
-    { name = "pyarrow" },
-    { name = "python-dateutil" },
-    { name = "pytz" },
-    { name = "rainflow" },
-    { name = "scipy" },
-    { name = "xmltodict" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "boto3", marker = "extra == 'resstock'", specifier = ">=1.43.107" },
-    { name = "gymnasium", marker = "extra == 'rl'", specifier = ">=1.3.0" },
-    { name = "helics", marker = "extra == 'helics'", specifier = ">=3.6.1,<4" },
-    { name = "httpx", marker = "extra == 'resstock'", specifier = ">=0.28.1" },
-    { name = "marimo", marker = "extra == 'notebook'", specifier = ">=0.25.1" },
-    { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.15.0" },
-    { name = "nrel-pysam", marker = "extra == 'sam'", specifier = ">=7.1.1.post1" },
-    { name = "numpy", specifier = ">=2.5.3" },
-    { name = "plotly", marker = "extra == 'notebook'", specifier = ">=7.1.0" },
-    { name = "polars", specifier = ">=1.44.2" },
-    { name = "pyarrow", specifier = ">=25.0.1" },
-    { name = "pybamm", marker = "extra == 'pybamm'", specifier = ">=26.9.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1.0" },
-    { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.4.0" },
-    { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.8.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.10" },
-    { name = "typing-extensions", specifier = ">=4.16.0" },
-    { name = "xmltodict", marker = "extra == 'ochre'", specifier = ">=1.0.4" },
-]
-provides-extras = ["sam", "pybamm", "resstock", "helics", "rl", "notebook", "ochre", "dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "botocore-stubs", specifier = ">=1.43.67" },
-    { name = "maturin", specifier = ">=1.15.0" },
-    { name = "numpy", specifier = ">=2.5.3" },
-    { name = "pandas-stubs", specifier = ">=3.0.5.260914" },
-    { name = "psychrolib", specifier = ">=2.5.0" },
-    { name = "pyright", specifier = ">=1.1.414" },
-    { name = "pytest", specifier = ">=9.1.1" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "pytest-timeout", specifier = ">=2.4.0" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.16.10" },
-]
-ochre = [
-    { name = "boto3", specifier = ">=1.43.107" },
-    { name = "click", specifier = ">=8.5.0" },
-    { name = "fastparquet", specifier = ">=2026.9.0" },
-    { name = "matplotlib", specifier = ">=3.11.2" },
-    { name = "nrel-pysam", specifier = ">=7.1.1.post1" },
-    { name = "numba", specifier = ">=0.68.0" },
-    { name = "pandas", specifier = ">=3.0.6" },
-    { name = "pint", specifier = ">=0.26.1" },
-    { name = "psychrolib", specifier = ">=2.5.0" },
-    { name = "pvlib", specifier = ">=0.16.1" },
-    { name = "pyarrow", specifier = ">=25.0.1" },
-    { name = "python-dateutil", specifier = ">=2.9.0.post0" },
-    { name = "pytz", specifier = ">=2026.4" },
-    { name = "rainflow", specifier = ">=3.2.0" },
-    { name = "scipy", specifier = ">=1.18.1" },
-    { name = "xmltodict", specifier = ">=1.0.4" },
 ]
 
 [[package]]

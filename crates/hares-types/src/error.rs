@@ -110,6 +110,96 @@ pub enum HaresError {
         key: String,
         reason: String,
     },
+    /// A report's batch callback failed: the run ends at the flush where
+    /// the callback raised, with the callback's own message carried in
+    /// `message`.
+    #[error("callback error for report '{report}': {message}")]
+    Callback { report: String, message: String },
+    /// A counted health event crossed the run's health policy limit for
+    /// it: the run ends naming the event, the step (None for an event
+    /// during warm-up or for the convergence check at its end), the source
+    /// (the equipment or actor that produced the event), the run-total
+    /// count and the limit it crossed. The source field is `origin`: a
+    /// thiserror field named `source` becomes the error chain's source,
+    /// which a name is not. The Display and the Python exception's
+    /// attribute name it `source`.
+    #[error(
+        "health policy: {event:?} from '{source}'{step_suffix}: count {count} exceeds the limit {limit}",
+        source = origin.as_str(),
+        step_suffix = step_index.map(|s| format!(" at step {s}")).unwrap_or_default()
+    )]
+    HealthPolicyViolation {
+        event: crate::HealthEvent,
+        step_index: Option<u64>,
+        origin: String,
+        count: u64,
+        limit: u64,
+    },
+    /// A finished run cannot be exported for exact replay: the dwelling
+    /// was changed in a way a replay cannot rebuild (each category
+    /// recorded once, in the order first seen). Naming every category
+    /// lets the caller fix them all in one pass.
+    #[error(
+        "the run is not replayable: {}",
+        blockers.iter().map(ReplayBlocker::as_str).collect::<Vec<_>>().join("; ")
+    )]
+    NotReplayable { blockers: Vec<ReplayBlocker> },
+}
+
+/// Why a run cannot be exported for exact replay: one category per way
+/// the dwelling was changed after its build, each recorded the first
+/// time it happened (`03-output-reporting.md` OR-16).
+///
+/// A warning the caller pushed in (`Dwelling::push_warning`, the
+/// injected-warning surface's producer) records no blocker: it changes
+/// no frame, metric or bill the export carries. A replayed run's
+/// warning record will not carry caller-pushed entries.
+#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplayBlocker {
+    /// A `DwellingBlueprintBuilder` mutator changed the parsed equipment
+    /// before the blueprint froze, so the run's equipment is not the
+    /// inputs' resolution a replay would rebuild.
+    #[error("the blueprint's parsed equipment was edited before the build")]
+    BlueprintEdited,
+    /// Equipment or its lookup tables changed after the build.
+    #[error("the dwelling's equipment changed after the build")]
+    EquipmentChanged,
+    /// An actor registered by the caller, or a custom domain solver the
+    /// caller installed (caller code the run steps with): a replay
+    /// rebuilds the auto-registered actors and installs no solver, not
+    /// the caller's.
+    #[error("a caller-registered actor is on the dwelling")]
+    CallerActor,
+    /// A control signal, dispatch, price signal, grid voltage or clamped
+    /// action count was pushed in by the caller (the gym's actions
+    /// included): inputs no export carries.
+    #[error("the run took caller-supplied inputs")]
+    ExternalInput,
+    /// The dwelling's state was restored from a checkpoint or snapshot,
+    /// or a caller drove its own warm-up: the run continues state no
+    /// export carries.
+    #[error("the dwelling's state was restored from outside the run")]
+    StateRestored,
+    /// A tariff replaced one attached earlier in the run: the switch
+    /// closed the outgoing period with the outgoing tariff's accruals
+    /// through the run's own steps, which no export carries.
+    #[error("the tariff was replaced after an earlier attach")]
+    TariffReplaced,
+}
+
+impl ReplayBlocker {
+    /// The category's name in error messages and exports.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BlueprintEdited => "blueprint edited",
+            Self::EquipmentChanged => "equipment changed",
+            Self::CallerActor => "caller actor",
+            Self::ExternalInput => "external input",
+            Self::StateRestored => "state restored",
+            Self::TariffReplaced => "tariff replaced",
+        }
+    }
 }
 
 fn rejected_equipment_warnings(warnings: &[String]) -> String {
@@ -188,6 +278,17 @@ mod tests {
                 field: "hysteresis_c".to_string(),
                 value_c: 0.0,
                 class: crate::ThermostatBandClass::Cycling,
+            },
+            HaresError::Callback {
+                report: "timestep".to_string(),
+                message: "the store is full".to_string(),
+            },
+            HaresError::HealthPolicyViolation {
+                event: crate::HealthEvent::PortRollback,
+                step_index: Some(7),
+                origin: "FlakyEq".to_string(),
+                count: 1,
+                limit: 0,
             },
         ];
         for err in errors {

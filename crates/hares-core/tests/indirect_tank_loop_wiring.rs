@@ -7,12 +7,13 @@
 //! the rebuild. Both tests read the pair's loop from the built dwelling's
 //! fluid port declarations.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_equipment::DHW_DEMAND_LOOP;
-use hares_io::OutputFormat;
 use hares_types::{LoopId, PortType};
 use tempfile::TempDir;
 
@@ -31,33 +32,33 @@ fn sim_config(duration: Duration) -> SimulationConfig {
             .unwrap(),
         duration,
         time_res: Duration::seconds(900),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
 fn dwelling_config(hpxml_path: PathBuf, sim: SimulationConfig) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(project_root().join("data/examples/BEopt_example_schedule.csv")),
-        weather_path: project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(
+            project_root().join("data/examples/BEopt_example_schedule.csv"),
+        )),
+        weather: WeatherInput::Path(
+            project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, None, 100, None),
     }
 }
 

@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from hares import SimulationConfig
 
 
 ROOT = Path(__file__).resolve().parents[2]
-HARES_DEFAULTS = ROOT / "defaults"
+HARES_DEFAULTS = ROOT / "python" / "hares" / "defaults"
 
 HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
@@ -17,20 +18,9 @@ SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
 @pytest.fixture(scope="module")
 def dwelling():
-    from ochre_next import Dwelling as PyDwelling
+    from hares import Dwelling as PyDwelling
 
-    dw = PyDwelling.from_hpxml(
-        HPXML,
-        SCHEDULE,
-        WEATHER,
-        start_time="2019-01-01T00:00:00",
-        duration_s=3600,
-        time_res_s=60,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42,
-        master_seed=0,
-        write_output=False,
-    )
+    dw = PyDwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=3600, time_res=60,master_seed=0))
     dw.initialize()
     return dw
 
@@ -52,18 +42,18 @@ class TestPyRepr:
 
 class TestBatteryRepr:
     def test_battery_repr(self):
-        from ochre_next import Battery
+        from hares import Battery
 
-        b = Battery(name="test_batt", capacity_kwh=10.0)
+        b = Battery(name="test_batt", capacity_j=36000000)
         r = repr(b)
         assert "Battery" in r
         assert "test_batt" in r
-        assert "10" in r
+        assert "36000000" in r
 
 
 class TestPvSoilingConfigRepr:
     def test_pv_soiling_config_repr(self):
-        from ochre_next import PvSoilingConfig
+        from hares import PvSoilingConfig
 
         c = PvSoilingConfig()
         r = repr(c)
@@ -75,9 +65,9 @@ class TestPvSoilingConfigRepr:
 
 class TestPvRepr:
     def test_pv_repr(self):
-        from ochre_next import PV
+        from hares import PV
 
-        pv = PV(name="test_pv", capacity_kw=5.0, tilt=30.0, azimuth=180.0)
+        pv = PV(name="test_pv", capacity_w=5000, tilt=30.0, azimuth=180.0)
         r = repr(pv)
         assert "PV" in r
         assert "test_pv" in r
@@ -88,10 +78,10 @@ class TestPvRepr:
 
 class TestEvRepr:
     def test_ev_repr(self):
-        from ochre_next import EV
+        from hares import EV
 
-        ev = EV(name="test_ev", capacity_kwh=75.0, max_charging_kw=11.0)
+        ev = EV(name="test_ev", capacity_j=270000000, max_charging_power_w=11000)
         r = repr(ev)
         assert "EV" in r
         assert "test_ev" in r
-        assert "75" in r
+        assert "270000000" in r

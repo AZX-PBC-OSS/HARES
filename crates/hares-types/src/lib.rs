@@ -4,6 +4,13 @@
 //! types that multiple sibling crates need without introducing circular deps:
 //! port contributions, environment state, control signals, equipment descriptors.
 
+// The `unit!` macro of `uom` expands calls to the crate's hidden
+// `unit_units!` macro, so the crate must be in the macro namespace the
+// documented `#[macro_use]` way (`si_units.rs` defines the `therm` and
+// `btu_it_per_hour` units with it).
+#[macro_use]
+extern crate uom;
+
 pub mod alloc_count;
 pub mod control_signal;
 pub mod domain_solver;
@@ -13,10 +20,15 @@ pub mod error;
 pub mod fluid;
 pub mod health;
 pub(crate) mod mode_flow_guard;
+pub mod output;
 pub mod panic_hook;
 pub mod ports;
+pub mod removed_keys;
+pub mod resolved;
 pub mod rng;
 pub mod schedule;
+pub mod schema;
+pub mod si_units;
 pub mod telemetry;
 pub mod telemetry_keys;
 pub mod text;
@@ -33,14 +45,15 @@ pub use equipment::*;
 pub use error::*;
 pub use fluid::*;
 pub use health::*;
+pub use output::*;
+pub use resolved::*;
+pub use schema::{
+    Bounds, DescribeFields, FieldMeta, FieldSchema, ValueType, describe, field_schema,
+};
 pub use warning::*;
 
 // `mode_flow_guard` itself stays crate-private: the consistency checks are
-// internal plumbing for `validate_core_contract`. Only the observability
-// counter is intended public API, so it is re-exported individually rather
-// than widening the module's visibility.
-#[cfg(feature = "observe")]
-pub use mode_flow_guard::mode_flow_inconsistency_counter;
+// internal plumbing for `validate_core_contract`.
 
 /// Crate-level result alias.
 pub type Result<T> = std::result::Result<T, HaresError>;
@@ -114,6 +127,7 @@ pub mod test_utils {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: crate::environment::UnavailablePeriodState::default(),
             domains: crate::domain_solver::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

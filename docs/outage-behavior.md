@@ -35,9 +35,15 @@ Island sources:
   idle during normal utility operation but still reports
   `island_source_available()` so the dwelling can form an island when the
   outage occurs.
-- **EV** — plugged in at home **and actively discharging** (V2L/V2G). A
-  merely plugged-in EV is not counted: most EVSEs cannot island a home, and
-  HARES only dispatches EV discharge on explicit negative setpoints.
+- **EV** — plugged in at home **and actually delivering V2L/V2G export**:
+  the previous step's delivered export is positive, the pack sits above
+  the commanded leg's effective discharge floor, and DR is not commanding
+  a full shed, the same shape as the battery's check. A merely
+  plugged-in EV is not counted (most EVSEs cannot island a home), and
+  neither is a commanded discharge the floor or a DR shed curtailed to
+  zero watts: an island held by a source that delivers nothing runs every
+  load on phantom power. Islanding takes effect one step after export
+  begins and collapses the first step delivery stops.
 - **PV is never an island source** — it is a grid-following inverter
   (IEEE 1547) and cannot form a bus on its own.
 
@@ -90,7 +96,7 @@ operation (the bus is at nominal voltage).
 | Ventilation (HRV/ERV/exhaust) | Fans off: no airflow, no recovery, 0 W | |
 | Scheduled loads (lighting, MELs, …) | 0 W, no gains | Gas scheduled loads are also zeroed — modern gas appliances need electricity (electronic ignition, controls) |
 | Event loads / wet appliances | 0 W, no gains; time and schedule state advance, phase/cycle timers run | Cycles that fall during the outage are missed, not deferred |
-| EV (charging) | Home charging + battery preconditioning stop; SOC holds; no vars (even on a commanded q-setpoint) | *Away* charging is off-site and unaffected by the home's outage |
+| EV (charging) | Home charging + battery preconditioning stop; SOC holds; no vars (even on a commanded q-setpoint) | *Away* charging is off-site and unaffected by the home's outage. While **islanded**, charging is clamped to the on-site generation surplus (see Meter behaviour) |
 | EV (V2L/V2G discharge) | **Not gated** — the EV is a source; while discharging it islands the home (one-step lag) | |
 | PV | **Inverter trips** (IEEE 1547 anti-islanding): no AC, no DC extraction, no vars | Keeps producing when the home is islanded by a grid-forming source; panel thermal/soiling states evolve either way |
 | Battery (charge) | Blocked — nothing on a dead bus to charge from | Standby electronics and cell heater also 0 W (they are AC loads). While **islanded**, charging is clamped to the on-site generation surplus (see Meter behaviour) |
@@ -112,11 +118,16 @@ operation (the bus is at nominal voltage).
     self-consumption is unaffected (it already charges only from surplus).
     Discharge is never clamped — thermal-stage loads step after the battery,
     and a discharge clamp would strand them.
+  - **EV charging is clamped to the same surplus**: the islanded charge leg
+    caps at the Stage-1 surplus exactly as the battery's target does, so an
+    11.5 kW EVSE on a smaller island charges at the surplus and the pack's
+    SOC credit never exceeds the energy the island's sources delivered.
+    Away charging is off-site and unaffected.
   - **Residual imbalance is accounted, not faked**: any remaining net flow at
     the service entrance during islanded operation is reported as
-    `island_unserved_kw` (load the island sources failed to cover — e.g.
+    `island_unserved_w` (load the island sources failed to cover — e.g.
     load beyond `max_discharge_kw`; the would-be phantom import) and
-    `island_excess_kw` (surplus generation the island could not absorb; the
+    `island_excess_w` (surplus generation the island could not absorb; the
     would-be phantom export) on `DwellingTelemetry` and in the Python
     telemetry/env dict. Both are 0.0 during normal grid-connected operation.
     Unserved load above 0.05 kW while islanded emits a rate-limited
@@ -128,10 +139,10 @@ operation (the bus is at nominal voltage).
 ## Observability
 
 - Rust: `EnvironmentState::grid` — `voltage_pu` (utility), `bus_voltage_pu()`,
-  `islanded()`; `DwellingTelemetry` — `island_unserved_kw`,
-  `island_excess_kw`.
+  `islanded()`; `DwellingTelemetry` — `island_unserved_w`,
+  `island_excess_w`.
 - Python (`Dwelling.get_env_dict()`): `grid_voltage_pu`, `grid_bus_voltage_pu`,
-  `grid_islanded`, `island_unserved_kw`, `island_excess_kw`. The same two
+  `grid_islanded`, `island_unserved_w`, `island_excess_w`. The same two
   island fields are also getters on the `Telemetry` object.
 - Python actors (`env["grid"]`): `voltage_pu`, `bus_voltage_pu`, `islanded`.
 

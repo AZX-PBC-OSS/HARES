@@ -56,7 +56,7 @@ impl PyTelemetry {
         out.set_item("names", &self.inner.equipment_names)?;
         out.set_item("modes", &self.inner.equipment_modes)?;
         out.set_item("soc", &self.inner.equipment_soc)?;
-        out.set_item("power_kw", &self.inner.equipment_power_kw)?;
+        out.set_item("power_w", &self.inner.equipment_power_w)?;
         Ok(out)
     }
 
@@ -92,28 +92,28 @@ impl PyTelemetry {
     }
 
     #[getter]
-    pub fn total_power_kw(&self) -> f64 {
-        self.inner.total_power_kw
+    pub fn total_power_w(&self) -> f64 {
+        self.inner.total_power_w
     }
 
     #[getter]
-    pub fn reactive_power_kvar(&self) -> f64 {
-        self.inner.reactive_power_kvar
+    pub fn reactive_power_var(&self) -> f64 {
+        self.inner.reactive_power_var
     }
 
-    /// Load [kW] the island sources failed to cover during islanded
+    /// Load [W] the island sources failed to cover during islanded
     /// operation (would-be phantom grid import). 0.0 when not islanded.
     #[getter]
-    pub fn island_unserved_kw(&self) -> f64 {
-        self.inner.island_unserved_kw
+    pub fn island_unserved_w(&self) -> f64 {
+        self.inner.island_unserved_w
     }
 
-    /// Surplus on-site generation [kW] the island could not absorb during
+    /// Surplus on-site generation [W] the island could not absorb during
     /// islanded operation (would-be phantom grid export). 0.0 when not
     /// islanded.
     #[getter]
-    pub fn island_excess_kw(&self) -> f64 {
-        self.inner.island_excess_kw
+    pub fn island_excess_w(&self) -> f64 {
+        self.inner.island_excess_w
     }
 
     fn __repr__(&self) -> String {
@@ -217,11 +217,11 @@ pub struct PyTariffTelemetry {
     #[pyo3(get)]
     pub export_rate_usd_per_kwh: f64,
     #[pyo3(get)]
-    pub cumulative_import_kwh: f64,
+    pub cumulative_import_j: f64,
     #[pyo3(get)]
-    pub cumulative_export_kwh: f64,
+    pub cumulative_export_j: f64,
     #[pyo3(get)]
-    pub peak_demand_kw: f64,
+    pub peak_demand_w: f64,
     #[pyo3(get)]
     pub cumulative_energy_cost_usd: f64,
 }
@@ -233,9 +233,9 @@ impl PyTariffTelemetry {
         d.set_item("period_name", &self.period_name)?;
         d.set_item("current_rate_usd_per_kwh", self.current_rate_usd_per_kwh)?;
         d.set_item("export_rate_usd_per_kwh", self.export_rate_usd_per_kwh)?;
-        d.set_item("cumulative_import_kwh", self.cumulative_import_kwh)?;
-        d.set_item("cumulative_export_kwh", self.cumulative_export_kwh)?;
-        d.set_item("peak_demand_kw", self.peak_demand_kw)?;
+        d.set_item("cumulative_import_j", self.cumulative_import_j)?;
+        d.set_item("cumulative_export_j", self.cumulative_export_j)?;
+        d.set_item("peak_demand_w", self.peak_demand_w)?;
         d.set_item(
             "cumulative_energy_cost_usd",
             self.cumulative_energy_cost_usd,
@@ -245,8 +245,8 @@ impl PyTariffTelemetry {
 
     fn __repr__(&self) -> String {
         format!(
-            "TariffTelemetry(period='{}', rate=${:.4}/kWh, import={:.2}kWh)",
-            self.period_name, self.current_rate_usd_per_kwh, self.cumulative_import_kwh,
+            "TariffTelemetry(period='{}', rate=${:.4}/kWh, import={:.2}J)",
+            self.period_name, self.current_rate_usd_per_kwh, self.cumulative_import_j,
         )
     }
 }

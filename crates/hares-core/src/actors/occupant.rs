@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     ControlCapabilities, ControlSignal, EndUse, EnvironmentState, EvConnectionState, HaresError,
-    OperatingMode, Telemetry,
+    OperatingMode, Telemetry, TelemetryField,
 };
 
 use crate::{Actor, ActorTarget};
@@ -70,7 +70,7 @@ pub struct EquipmentBehavior {
     /// Turn on equipment when returning home.
     pub on_when_home: bool,
     /// Override power setpoint when equipment is active.
-    pub power_setpoint_kw: Option<f64>,
+    pub power_setpoint_w: Option<f64>,
     /// Apply load fraction when equipment is active.
     pub load_fraction: Option<f64>,
 }
@@ -97,10 +97,10 @@ impl EquipmentBehavior {
     ///
     /// # Panics (debug only)
     ///
-    /// Panics if `kw` is negative.
-    pub fn with_power_setpoint(mut self, kw: f64) -> Self {
-        debug_assert!(kw >= 0.0, "power setpoint must be non-negative, got {kw}");
-        self.power_setpoint_kw = Some(kw);
+    /// Panics if `w` is negative.
+    pub fn with_power_setpoint(mut self, w: f64) -> Self {
+        debug_assert!(w >= 0.0, "power setpoint must be non-negative, got {w}");
+        self.power_setpoint_w = Some(w);
         self
     }
 
@@ -153,14 +153,30 @@ pub struct Occupant {
 }
 
 impl Occupant {
+    /// The declared telemetry: presence state, the step's dispatch count,
+    /// the running presence-change total and the step index.
+    pub const OUTPUT_VARIABLES: &'static [TelemetryField] = &[
+        TelemetryField::state_flag("away", "1 when the occupant's current presence is Away"),
+        TelemetryField::state_flag(
+            "transition",
+            "1 on the step the occupant's presence changed",
+        ),
+        TelemetryField::step_count("signals_count", "Dispatch requests emitted this step"),
+        TelemetryField::running_total(
+            "presence_changes",
+            hares_types::Unit::Count,
+            "Cumulative presence changes since init",
+        ),
+        TelemetryField::running_total(
+            "current_step",
+            hares_types::Unit::Count,
+            "The step index the actor last decided at",
+        ),
+    ];
+
     /// Creates a new Occupant actor with the given name.
     pub fn new(name: &str) -> Self {
-        let mut telemetry = Telemetry::with_capacity(5);
-        telemetry.insert("away", 0.0);
-        telemetry.insert("transition", 0.0);
-        telemetry.insert("signals_count", 0.0);
-        telemetry.insert("presence_changes", 0.0);
-        telemetry.insert("current_step", 0.0);
+        let telemetry = Telemetry::from_fields(Self::OUTPUT_VARIABLES);
         Self {
             name: Arc::from(name),
             presence_schedule: vec![Presence::Home],
@@ -224,7 +240,7 @@ impl Occupant {
                     ControlCapabilities::MODE_OVERRIDE
                 };
             }
-            if behavior.power_setpoint_kw.is_some() {
+            if behavior.power_setpoint_w.is_some() {
                 required |= ControlCapabilities::POWER_SETPOINT;
             }
             if behavior.load_fraction.is_some() && !is_ev {
@@ -249,23 +265,46 @@ impl Occupant {
         self
     }
 
-    /// Returns the current presence state.
+    /// Returns the current presence state, read at the actor's own step
+    /// counter.
+    ///
+    /// The clock path is [`Self::presence_at_clock_row`]: `decide` reads
+    /// presence at the environment's schedule row. This counter read is
+    /// the fallback for states built without an environment manager.
     ///
     /// # Panics (debug only)
     ///
     /// Panics if `current_step` exceeds the schedule length -- the schedule
     /// must cover the full simulation duration.
     pub fn current_presence(&self) -> Presence {
+        self.presence_at(self.current_step)
+    }
+
+    /// The presence at one schedule position.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics if `index` exceeds the schedule length -- the schedule must
+    /// cover the full simulation (the calendar's rows).
+    fn presence_at(&self, index: usize) -> Presence {
         debug_assert!(
-            self.current_step < self.presence_schedule.len(),
-            "presence schedule exhausted at step {} (schedule length {})",
-            self.current_step,
+            index < self.presence_schedule.len(),
+            "presence schedule exhausted at step {index} (schedule length {})",
             self.presence_schedule.len(),
         );
         self.presence_schedule
-            .get(self.current_step)
+            .get(index)
             .copied()
             .unwrap_or(Presence::Home)
+    }
+
+    /// The presence position this step reads: the environment's calendar
+    /// schedule row when the state carries one (the same row addressing
+    /// the occupancy column's values, so presence follows the clock
+    /// whatever ran before production - warm-up days, a checkpoint
+    /// restore), else the actor's own step counter.
+    fn presence_index(&self, env: &EnvironmentState) -> usize {
+        env.schedule_row.unwrap_or(self.current_step)
     }
 
     /// Returns true if the occupant is currently present.
@@ -276,8 +315,8 @@ impl Occupant {
     /// Advances the timestep counter.
     ///
     /// Called automatically by `decide()` -- no need to call manually.
-    fn advance_step(&mut self) {
-        self.previous_presence = self.current_presence();
+    fn advance_step(&mut self, presence: Presence) {
+        self.previous_presence = presence;
         self.current_step = self.current_step.saturating_add(1);
         #[cfg(debug_assertions)]
         {
@@ -298,7 +337,7 @@ impl Occupant {
     ///
     /// Mode signals (`off_when_away`, `on_when_home`) are event-driven -- they fire
     /// on transitions or while the triggering condition holds (away → Off each step).
-    /// Continuous controls (`power_setpoint_kw`, `load_fraction`) are re-sent every
+    /// Continuous controls (`power_setpoint_w`, `load_fraction`) are re-sent every
     /// step while present, keeping the equipment override active for the duration.
     fn dispatch_for_behavior(
         target: &DispatchTarget,
@@ -308,7 +347,7 @@ impl Occupant {
         out: &mut Vec<DispatchRequest>,
     ) {
         let has_continuous_control =
-            behavior.load_fraction.is_some() || behavior.power_setpoint_kw.is_some();
+            behavior.load_fraction.is_some() || behavior.power_setpoint_w.is_some();
         let has_mode_control = behavior.off_when_away || behavior.on_when_home;
         if !is_transition && !has_mode_control && !has_continuous_control {
             return;
@@ -398,12 +437,12 @@ fn push_power_setpoint_if(
     behavior: &EquipmentBehavior,
     out: &mut Vec<DispatchRequest>,
 ) {
-    if let Some(power_kw) = behavior.power_setpoint_kw {
+    if let Some(power_w) = behavior.power_setpoint_w {
         out.push(DispatchRequest {
             target: target.clone(),
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: power_kw,
-                reactive_power_kvar: None,
+                active_power_w: power_w,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -452,6 +491,10 @@ impl Actor for Occupant {
         &self.name
     }
 
+    fn output_variables(&self) -> &[TelemetryField] {
+        Self::OUTPUT_VARIABLES
+    }
+
     fn telemetry(&self) -> Option<&Telemetry> {
         Some(&self.telemetry)
     }
@@ -460,8 +503,9 @@ impl Actor for Occupant {
         &self.targets
     }
 
-    fn decide(&mut self, _env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
-        let current_presence = self.current_presence();
+    fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
+        let presence_index = self.presence_index(env);
+        let current_presence = self.presence_at(presence_index);
         let is_transition = current_presence != self.previous_presence;
 
         let before = out.len();
@@ -507,7 +551,7 @@ impl Actor for Occupant {
             );
         }
 
-        self.advance_step();
+        self.advance_step(current_presence);
     }
 
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {
@@ -562,7 +606,7 @@ mod tests {
         let behavior = EquipmentBehavior::none();
         assert!(!behavior.off_when_away);
         assert!(!behavior.on_when_home);
-        assert_eq!(behavior.power_setpoint_kw, None);
+        assert_eq!(behavior.power_setpoint_w, None);
         assert_eq!(behavior.load_fraction, None);
     }
 
@@ -571,12 +615,12 @@ mod tests {
         let behavior = EquipmentBehavior::none()
             .off_when_away()
             .on_when_home()
-            .with_power_setpoint(5.0)
+            .with_power_setpoint(5000.0)
             .with_load_fraction(0.8);
 
         assert!(behavior.off_when_away);
         assert!(behavior.on_when_home);
-        assert_eq!(behavior.power_setpoint_kw, Some(5.0));
+        assert_eq!(behavior.power_setpoint_w, Some(5000.0));
         assert_eq!(behavior.load_fraction, Some(0.8));
     }
 
@@ -623,6 +667,127 @@ mod tests {
 
         occupant.decide(&env, &mut requests);
         assert!(requests.is_empty());
+    }
+
+    /// Presence reads the environment's calendar schedule row, not the
+    /// actor's own step count: a counter rotated by whatever decided
+    /// before production (a warm-up day count's worth of decides, a
+    /// checkpoint restore) cannot rotate presence when the environment
+    /// names the row the step's calendar date reads. A state without a
+    /// schedule row falls back to the counter.
+    #[test]
+    fn presence_follows_the_environment_schedule_row_not_the_step_counter() {
+        // The calendar's presence: row 0 Away, row 1 Home, row 2 Away.
+        let schedule = vec![Presence::Away, Presence::Home, Presence::Away];
+        let mut occupant = Occupant::new("Test").with_presence_schedule(schedule);
+        // A warm-up day's worth of decides rotates the private counter
+        // past the schedule's end - the rotation the clock read replaces.
+        for _ in 0..10 {
+            occupant.advance_step(Presence::Home);
+        }
+        assert_eq!(occupant.current_step, 10);
+
+        let mut env = test_env().build();
+        let mut requests = Vec::new();
+        env.schedule_row = Some(1);
+        occupant.decide(&env, &mut requests);
+        assert_eq!(
+            occupant.telemetry.get("away"),
+            Some(0.0),
+            "the step's presence is row 1's Home, not the rotated counter's exhausted read"
+        );
+
+        let mut requests = Vec::new();
+        env.schedule_row = Some(0);
+        occupant.decide(&env, &mut requests);
+        assert_eq!(
+            occupant.telemetry.get("away"),
+            Some(1.0),
+            "the step's presence is row 0's Away"
+        );
+
+        // Without a schedule row the counter (the fallback) reads: a
+        // counter within the schedule's length reads its own row, the
+        // pre-clock behavior kept for states built without an
+        // environment manager.
+        let mut requests = Vec::new();
+        env.schedule_row = None;
+        occupant.current_step = 2;
+        occupant.decide(&env, &mut requests);
+        assert_eq!(
+            occupant.telemetry.get("away"),
+            Some(1.0),
+            "the fallback reads the counter's own row"
+        );
+    }
+
+    /// The warm-up boundary's save/restore round trip on the Occupant's
+    /// own snapshot: save, perturb, restore, and the state is back on
+    /// bits, the next decide reading the restored decision state. The
+    /// restore runs at the dwelling's warm-up boundary (the actor states
+    /// snapshotted before warm-up, loaded after), a path a test cannot
+    /// reach through the dwelling alone, so the pin is here: a snapshot
+    /// that loses a field or a restore that drops one fails on bits
+    /// independent of the restore's reachability.
+    #[test]
+    fn occupant_snapshot_round_trips_on_bits() {
+        // The schedule moves presence across the driven steps so every
+        // snapshot field leaves its construction value: the counter, the
+        // previous presence, the transition count.
+        let schedule = vec![
+            Presence::Home,
+            Presence::Away,
+            Presence::Home,
+            Presence::Away,
+        ];
+        let mut occupant = Occupant::new("Test").with_presence_schedule(schedule);
+        let env = test_env().build();
+        let mut requests = Vec::new();
+
+        // Two decides: step 2 read, previous presence Away (the second
+        // decide's transition), one presence change counted.
+        occupant.decide(&env, &mut requests);
+        occupant.decide(&env, &mut requests);
+        let saved = occupant.save_state().expect("the snapshot saves");
+
+        // Perturb: a third decide moves every field the snapshot carries.
+        occupant.decide(&env, &mut requests);
+        let perturbed = occupant.save_state().expect("the snapshot saves");
+        assert_ne!(
+            saved, perturbed,
+            "the perturbation must move the saved state for this round trip to mean anything"
+        );
+
+        // Restore, then re-save: the state comes back on bits.
+        occupant.load_state(&saved).expect("the snapshot restores");
+        let restored = occupant.save_state().expect("the snapshot saves");
+        assert_eq!(
+            saved, restored,
+            "the restore must put the saved state back on bits"
+        );
+
+        // The restored decision state is live: the next decide reads the
+        // restored counter's row (Home) against the restored previous
+        // presence (Away), so the transition fires, the count continues
+        // from the restored total, and the step channel reads the
+        // restored counter.
+        occupant.decide(&env, &mut requests);
+        assert_eq!(
+            occupant.telemetry.get("transition"),
+            Some(1.0),
+            "the next decide must see the restored previous presence (Away) against \
+             the restored counter's Home: a dropped restore reads no transition"
+        );
+        assert_eq!(
+            occupant.telemetry.get("current_step"),
+            Some(2.0),
+            "the decide must read the restored counter, not the perturbation's"
+        );
+        assert_eq!(
+            occupant.telemetry.get("presence_changes"),
+            Some(2.0),
+            "the transition count must continue from the restored total"
+        );
     }
 
     #[test]
@@ -757,7 +922,10 @@ mod tests {
         let schedule = vec![Presence::Home];
         let mut occupant = Occupant::new("Test")
             .with_presence_schedule(schedule)
-            .with_ev("MyEV", EquipmentBehavior::none().with_power_setpoint(7.2));
+            .with_ev(
+                "MyEV",
+                EquipmentBehavior::none().with_power_setpoint(7200.0),
+            );
 
         let env = test_env().build();
         let mut requests = Vec::new();
@@ -765,7 +933,7 @@ mod tests {
         occupant.decide(&env, &mut requests);
 
         let has_power_setpoint = requests.iter().any(|r| {
-            matches!(r.signal, ControlSignal::PowerSetpoint { active_power_kw, .. } if (active_power_kw - 7.2).abs() < 0.01)
+            matches!(r.signal, ControlSignal::PowerSetpoint { active_power_w, .. } if (active_power_w - 7200.0).abs() < 0.01)
         });
         assert!(has_power_setpoint, "expected PowerSetpoint signal for EV");
     }
@@ -936,7 +1104,10 @@ mod tests {
         let schedule = vec![Presence::Away];
         let mut occupant = Occupant::new("Test")
             .with_presence_schedule(schedule)
-            .with_lighting("Lights", EquipmentBehavior::none().with_power_setpoint(1.0))
+            .with_lighting(
+                "Lights",
+                EquipmentBehavior::none().with_power_setpoint(1000.0),
+            )
             .with_ev("MyEV", EquipmentBehavior::none());
 
         let env = test_env().build();
@@ -974,7 +1145,10 @@ mod tests {
         let schedule = vec![Presence::Home, Presence::Home];
         let mut occupant = Occupant::new("Test")
             .with_presence_schedule(schedule)
-            .with_lighting("Lights", EquipmentBehavior::none().with_power_setpoint(1.0));
+            .with_lighting(
+                "Lights",
+                EquipmentBehavior::none().with_power_setpoint(1000.0),
+            );
 
         let env = test_env().build();
         let mut requests = Vec::new();

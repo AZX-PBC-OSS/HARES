@@ -173,28 +173,39 @@ pub(crate) fn apply_infiltration_and_ventilation(
 
         // Natural ventilation is only applied to the indoor/conditioned zone.
         // Returns (q_total, q_stack_adj, q_wind_adj, cd) — all in m³/s except cd (dimensionless).
+        // An unavailable period's `NaturalVentilation` option sets the
+        // availability on its flagged steps whatever the period's type
+        // (OpenStudio-HPXML applies the option to the natural-ventilation
+        // availability schedule through the same period rules,
+        // `resources/airflow.rb:337, 570-597`, v1.12.0): `always
+        // unavailable` closes the step's natural ventilation, `always
+        // available` and `regular schedule` leave it.
         let nat_vent = if zone.id == config.indoor_zone_id {
-            config
-                .natural_ventilation
-                .as_ref()
-                .map(|nv| {
-                    natural_ventilation_flow_m3_s(NaturalVentilationInputs {
-                        open_area_m2: nv.open_area_m2,
-                        t_zone_c: zone.temperature_c,
-                        t_outdoor_c: t_out,
-                        t_base_c: nv.t_base_c,
-                        outdoor_humidity_ratio: w_out,
-                        max_outdoor_humidity_ratio: nv.max_outdoor_humidity_ratio,
-                        wind_speed_m_s: env.weather.wind_speed_m_s,
-                        zone_volume_m3: zone.volume_m3,
-                        opening_azimuth_deg: nv.opening_azimuth_deg,
-                        wind_direction_deg: env.weather.wind_dir_deg,
-                        dh_m: nv.dh_m,
-                        opening_type: nv.opening_type,
-                        zone_height_m: nv.zone_height_m,
+            if env.unavailable_periods.natural_ventilation == Some(false) {
+                (0.0, 0.0, 0.0, 0.0)
+            } else {
+                config
+                    .natural_ventilation
+                    .as_ref()
+                    .map(|nv| {
+                        natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+                            open_area_m2: nv.open_area_m2,
+                            t_zone_c: zone.temperature_c,
+                            t_outdoor_c: t_out,
+                            t_base_c: nv.t_base_c,
+                            outdoor_humidity_ratio: w_out,
+                            max_outdoor_humidity_ratio: nv.max_outdoor_humidity_ratio,
+                            wind_speed_m_s: env.weather.wind_speed_m_s,
+                            zone_volume_m3: zone.volume_m3,
+                            opening_azimuth_deg: nv.opening_azimuth_deg,
+                            wind_direction_deg: env.weather.wind_dir_deg,
+                            dh_m: nv.dh_m,
+                            opening_type: nv.opening_type,
+                            zone_height_m: nv.zone_height_m,
+                        })
                     })
-                })
-                .unwrap_or((0.0, 0.0, 0.0, 0.0))
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0))
+            }
         } else {
             (0.0, 0.0, 0.0, 0.0)
         };
@@ -380,6 +391,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: HashMap::new(),
             equipment_core: Default::default(),
@@ -1133,5 +1145,56 @@ mod tests {
             "Denver infiltration sensible conductance reduction: {reduction_pct:.1}% \
              (expected ~17%, outside [15, 20]%)"
         );
+    }
+    /// An unavailable period's `NaturalVentilation` option applies to the
+    /// step whatever the period's type: `always unavailable` closes the
+    /// step's natural ventilation flow, `always available` and `regular
+    /// schedule` leave it (OpenStudio-HPXML applies the option to the
+    /// natural-ventilation availability schedule through the same period
+    /// rules, `resources/airflow.rb:337, 570-597`, v1.12.0).
+    #[test]
+    fn natural_ventilation_option_applies_to_every_period() {
+        use crate::thermal_solver::config::NaturalVentilationConfig;
+        use hares_physics::infiltration::OpeningType;
+
+        let config = ThermalSolverConfig {
+            natural_ventilation: Some(NaturalVentilationConfig {
+                open_area_m2: 2.0,
+                dh_m: 1.0,
+                zone_height_m: 2.5,
+                opening_type: OpeningType::CrossVentilation,
+                t_base_c: NaturalVentilationConfig::DEFAULT_T_BASE_C,
+                max_outdoor_humidity_ratio:
+                    NaturalVentilationConfig::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
+                opening_azimuth_deg: NaturalVentilationConfig::DEFAULT_OPENING_AZIMUTH_DEG,
+            }),
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+        // A warm zone against a mild outdoor: the physics produces flow.
+        let mut env = make_env(15.0, 2.0, 25.0, 200.0);
+        let flow = |env: &EnvironmentState| {
+            let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+            let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+            apply_infiltration_and_ventilation(&config, env, false, &mut latent, &mut couplings)
+                .unwrap();
+            couplings[0].q_natural_vent_w
+        };
+        // The zone is warmer than the outdoor: the flow is a heat loss
+        // (negative W), nonzero while available.
+        let available = flow(&env);
+        assert!(
+            available < 0.0,
+            "the physics produces natural ventilation flow: {available}"
+        );
+
+        env.unavailable_periods.natural_ventilation = Some(false);
+        assert_eq!(flow(&env), 0.0, "always unavailable closes the step's flow");
+        env.unavailable_periods.natural_ventilation = Some(true);
+        assert!(
+            flow(&env) == available,
+            "always available leaves the flow on bits"
+        );
+        env.unavailable_periods.natural_ventilation = None;
+        assert!(flow(&env) == available, "regular schedule leaves the flow");
     }
 }

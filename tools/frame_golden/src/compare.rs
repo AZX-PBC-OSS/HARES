@@ -20,6 +20,7 @@ use crate::digest::{
 use crate::error::{FrameGoldenError, FrameGoldenResult};
 use crate::frames;
 use crate::golden::{GoldenDoc, first_metrics_differences};
+use crate::resolved::first_resolved_differences;
 
 /// Column selection for `compare` and `delta`: when set, only the listed
 /// columns are compared, and each must exist on both sides.
@@ -56,6 +57,19 @@ pub enum Difference {
     },
     MetricsField {
         field: String,
+        expected: String,
+        actual: String,
+    },
+    /// The resolved product's home count changed.
+    ResolvedHomes {
+        expected: usize,
+        actual: usize,
+    },
+    /// The resolved product's differing parameter: home index, the
+    /// equipment and parameter path, both rendered values.
+    ResolvedParameter {
+        home: usize,
+        detail: String,
         expected: String,
         actual: String,
     },
@@ -122,12 +136,17 @@ pub struct DeltaReport {
     pub columns: Vec<ColumnDelta>,
     /// Metrics fields that changed: field, reference value, actual value.
     pub metrics_changes: Vec<(String, String, String)>,
+    /// Resolved parameters that changed: the home, equipment and
+    /// parameter, reference value, actual value.
+    pub resolved_changes: Vec<(String, String, String)>,
     pub notes: Vec<String>,
 }
 
 impl DeltaReport {
     pub fn is_identical(&self) -> bool {
-        self.columns.is_empty() && self.metrics_changes.is_empty()
+        self.columns.is_empty()
+            && self.metrics_changes.is_empty()
+            && self.resolved_changes.is_empty()
     }
 }
 
@@ -159,6 +178,7 @@ pub fn compare_run(
         &fresh.frames,
         &fresh.metrics_rows,
         fresh.health.as_ref(),
+        &fresh.resolved,
         columns,
         frames_dir,
     )?;
@@ -188,6 +208,7 @@ pub fn delta_run(
         frames_dir,
         &fresh.frames,
         &fresh.metrics_rows,
+        &fresh.resolved,
         columns,
     )?;
     if golden.defaults_digest != fresh.defaults_digest {
@@ -250,12 +271,14 @@ fn selected_columns(
 /// When `frames_dir` holds full products whose digests equal the committed
 /// golden, the report also carries the first differing row with both
 /// values and bit patterns, plus per-column differing-cell counts.
+#[allow(clippy::too_many_arguments)]
 pub fn compare_products(
     name: &str,
     golden: &GoldenDoc,
     fresh_frames: &BTreeMap<String, crate::adapter::FrameProducts>,
     fresh_metrics: &[crate::golden::MetricsRow],
     fresh_health: Option<&serde_json::Value>,
+    fresh_resolved: &[crate::resolved::ResolvedHomeDoc],
     columns: &ColumnSelection,
     frames_dir: Option<&Path>,
 ) -> FrameGoldenResult<CompareReport> {
@@ -397,6 +420,30 @@ pub fn compare_products(
             actual: "present".to_string(),
         }),
         (None, None) => {}
+    }
+
+    // The resolved product, value by value: per home, every differing
+    // parameter named, on both sides' home count.
+    if golden.resolved.len() != fresh_resolved.len() {
+        report.differences.push(Difference::ResolvedHomes {
+            expected: golden.resolved.len(),
+            actual: fresh_resolved.len(),
+        });
+    } else {
+        for (home, (expected_home, actual_home)) in
+            golden.resolved.iter().zip(fresh_resolved).enumerate()
+        {
+            for (equipment, parameter, expected, actual) in
+                first_resolved_differences(expected_home, actual_home)
+            {
+                report.differences.push(Difference::ResolvedParameter {
+                    home,
+                    detail: format!("{equipment}: {parameter}"),
+                    expected,
+                    actual,
+                });
+            }
+        }
     }
 
     if let Some(dir) = frames_dir {
@@ -595,6 +642,7 @@ pub fn compare_frames_value_level(
         products_compared: Vec::new(),
         columns: Vec::new(),
         metrics_changes: Vec::new(),
+        resolved_changes: Vec::new(),
         notes: Vec::new(),
     };
     for (product, expected_batches) in expected {
@@ -821,6 +869,7 @@ pub fn delta_products(
     frames_dir: &Path,
     fresh_frames: &BTreeMap<String, crate::adapter::FrameProducts>,
     fresh_metrics: &[crate::golden::MetricsRow],
+    fresh_resolved: &[crate::resolved::ResolvedHomeDoc],
     columns: &ColumnSelection,
 ) -> FrameGoldenResult<DeltaReport> {
     if !frames_dir.exists() {
@@ -860,6 +909,27 @@ pub fn delta_products(
             golden.metrics.len(),
             fresh_metrics.len()
         ));
+    }
+    if golden.resolved.len() != fresh_resolved.len() {
+        report.notes.push(format!(
+            "resolved home count changed: {} -> {}",
+            golden.resolved.len(),
+            fresh_resolved.len()
+        ));
+    } else {
+        for (home, (golden_home, fresh_home)) in
+            golden.resolved.iter().zip(fresh_resolved).enumerate()
+        {
+            for (equipment, parameter, expected, actual) in
+                first_resolved_differences(golden_home, fresh_home)
+            {
+                report.resolved_changes.push((
+                    format!("home {home}: {equipment}: {parameter}"),
+                    expected,
+                    actual,
+                ));
+            }
+        }
     }
     Ok(report)
 }

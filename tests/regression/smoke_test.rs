@@ -25,9 +25,11 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use hares_core::DwellingSettings;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
+
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-    use hares_io::OutputFormat;
+    use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 
     /// Parse a CSV into column-name -> Vec<f64> map.
     /// Non-numeric cells (headers, timestamps) are silently skipped per-cell.
@@ -225,37 +227,58 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    fn beopt_config(duration_hours: i64, output_path: PathBuf) -> DwellingConfig {
+    fn beopt_config(duration_hours: i64, csv_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
-            hpxml_path: examples_dir().join("BEopt_example.xml"),
-            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
-            weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                // Match OCHRE smoke: May 5, 2019, 12:00 PM Denver (UTC-7)
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(duration_hours),
-                time_res: Duration::minutes(1),
-                output_verbosity: 3,
-                output_path: Some(output_path),
-                write_output: true,
-                output_format: OutputFormat::Csv,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: true,
-                rotation: hares_io::RotationPolicy::None,
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            },
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(examples_dir().join("BEopt_example.xml")),
+            schedule: Some(InputSource::Path(
+                examples_dir().join("BEopt_example_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(
+                examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    // Match OCHRE smoke: May 5, 2019, 12:00 PM Denver (UTC-7)
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(duration_hours),
+                    time_res: Duration::minutes(1),
+                    reports: vec![
+                        hares_io::ReportSpec {
+                            name: "frame".to_string(),
+                            selection: hares_io::Selection::Verbosity(3),
+                            frequency: hares_io::Frequency::default(),
+                            destination: hares_io::Destination::Memory,
+                        },
+                        hares_io::ReportSpec {
+                            name: "file".to_string(),
+                            selection: hares_io::Selection::Verbosity(3),
+                            frequency: hares_io::Frequency::default(),
+                            destination: hares_io::Destination::Csv {
+                                path: csv_path,
+                                overwrite: false,
+                            },
+                        },
+                    ],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
+                },
+                None,
+                1,
+                None,
+            ),
         }
     }
 
@@ -318,48 +341,42 @@ mod tests {
     #[test]
     fn smoke_beopt_1h() {
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("smoke_beopt_1h.csv");
+        let csv_path = output_dir.path().join("smoke_beopt_1h.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
-            .run(beopt_config(1, output_path.clone()))
+            .run(beopt_config(1, csv_path.clone()))
             .expect("engine.run should succeed");
 
-        // The engine may return a different resolved path
+        // The run's published file report, in `reports` order.
         let actual_output = result
-            .timeseries_path
-            .as_ref()
-            .cloned()
-            .unwrap_or(output_path.clone());
-        eprintln!("  output_path requested: {}", output_path.display());
+            .reports
+            .iter()
+            .find_map(|report| report.path().cloned())
+            .unwrap_or(csv_path.clone());
+        eprintln!("  csv_path requested: {}", csv_path.display());
         eprintln!("  timeseries_path returned: {}", actual_output.display());
-        eprintln!("  output_path exists: {}", output_path.exists());
+        eprintln!("  csv_path exists: {}", csv_path.exists());
         eprintln!("  timeseries_path exists: {}", actual_output.exists());
 
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "BEopt simulation failed: {:?}",
-            result.status
-        );
-
-        eprintln!(
-            "[smoke_beopt_1h] status={:?} elapsed={:?}",
-            result.status, result.elapsed
-        );
         eprintln!("  warnings:");
         for w in &result.warnings {
             eprintln!("    {w}");
         }
+        let metrics = result
+            .metrics
+            .as_ref()
+            .expect("a run with reports computes its metrics");
         eprintln!(
             "  total kWh (from metrics): {:.4}",
-            result.metrics.total_energy_kwh.net_energy_kwh
+            metrics.total_energy_kwh.net_energy_kwh
         );
 
         // Parse output CSV for per-equipment breakdown
         let csv_path = if actual_output.exists() {
             actual_output.clone()
         } else {
-            output_path.clone()
+            csv_path.clone()
         };
         if csv_path.exists() {
             let breakdown = parse_csv_power_kwh(&csv_path, 1.0);
@@ -380,9 +397,9 @@ mod tests {
             // (base loads + HVAC cycling or schedule-driven equipment). Zero
             // total energy indicates engine dispatch regression.
             assert!(
-                result.metrics.total_energy_kwh.net_energy_kwh > 0.0,
+                metrics.total_energy_kwh.net_energy_kwh > 0.0,
                 "total energy should be > 0 for a 1h BEopt run, got {}",
-                result.metrics.total_energy_kwh.net_energy_kwh
+                metrics.total_energy_kwh.net_energy_kwh
             );
 
             // Debug: dump heater stats from CSV
@@ -423,14 +440,14 @@ mod tests {
             // --- Physics-validated sanity checks ---
             assert_physics_bounds(
                 &csv_path,
-                result.metrics.total_energy_kwh.net_energy_kwh,
-                &result.metrics.total_energy_kwh.per_end_use,
+                metrics.total_energy_kwh.net_energy_kwh,
+                &metrics.total_energy_kwh.per_end_use,
                 1.0,
             );
         } else {
             eprintln!(
                 "  [no output CSV at {} or {}]",
-                output_path.display(),
+                csv_path.display(),
                 actual_output.display()
             );
         }
@@ -445,66 +462,82 @@ mod tests {
     #[test]
     fn smoke_resstock_1h_runs_to_completion() {
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("smoke_resstock_1h.csv");
+        let csv_path = output_dir.path().join("smoke_resstock_1h.csv");
 
         let engine = SimulationEngine::new();
         let config = DwellingConfig {
-            hpxml_path: examples_dir().join("bldg0112631-up00.xml"),
-            schedule_path: Some(examples_dir().join("bldg0112631_schedule.csv")),
-            weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                // Denver local noon (UTC-7) on May 5 2019 -- mild spring noon,
-                // neither heating nor cooling is expected to dominate.
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(1),
-                time_res: Duration::minutes(1),
-                output_verbosity: 3,
-                output_path: Some(output_path.clone()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: true,
-                rotation: hares_io::RotationPolicy::None,
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            },
-            overrides: None,
-            bldg_id: 2,
-            initialization_duration: None,
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(examples_dir().join("bldg0112631-up00.xml")),
+            schedule: Some(InputSource::Path(
+                examples_dir().join("bldg0112631_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(
+                examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    // Denver local noon (UTC-7) on May 5 2019 -- mild spring noon,
+                    // neither heating nor cooling is expected to dominate.
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(1),
+                    time_res: Duration::minutes(1),
+                    reports: vec![
+                        hares_io::ReportSpec {
+                            name: "frame".to_string(),
+                            selection: hares_io::Selection::Verbosity(3),
+                            frequency: hares_io::Frequency::default(),
+                            destination: hares_io::Destination::Memory,
+                        },
+                        hares_io::ReportSpec {
+                            name: "file".to_string(),
+                            selection: hares_io::Selection::Verbosity(3),
+                            frequency: hares_io::Frequency::default(),
+                            destination: hares_io::Destination::Csv {
+                                path: csv_path.clone(),
+                                overwrite: false,
+                            },
+                        },
+                    ],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
+                },
+                None,
+                2,
+                None,
+            ),
         };
         let result = engine.run(config).expect("engine.run should succeed");
 
         // --- 1. Engine runs to completion on the ResStock HPXML fixture. ---
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "ResStock simulation failed: {:?}",
-            result.status
-        );
+        let metrics = result
+            .metrics
+            .as_ref()
+            .expect("a run with reports computes its metrics");
 
         eprintln!(
-            "[smoke_resstock_1h] status={:?} elapsed={:?}",
-            result.status, result.elapsed
-        );
-        eprintln!(
-            "  total kWh: {:.4}",
-            result.metrics.total_energy_kwh.net_energy_kwh
+            "[smoke_resstock_1h] total kWh: {:.4}",
+            metrics.total_energy_kwh.net_energy_kwh
         );
 
         // --- 2. Output CSV is produced and non-empty. ---
         assert!(
-            output_path.exists(),
+            csv_path.exists(),
             "expected output CSV at {} (engine.run returned success but wrote nothing)",
-            output_path.display()
+            csv_path.display()
         );
-        let csv_contents = fs::read_to_string(&output_path).expect("read output CSV");
+        let csv_contents = fs::read_to_string(&csv_path).expect("read output CSV");
         let data_rows = csv_contents
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -515,7 +548,7 @@ mod tests {
             "output CSV has {data_rows} lines; expected header plus >=1 data row"
         );
 
-        let breakdown = parse_csv_power_kwh(&output_path, 1.0);
+        let breakdown = parse_csv_power_kwh(&csv_path, 1.0);
         eprintln!("\n  === ResStock per-equipment kWh (1h) ===");
         for (col, kwh) in &breakdown {
             if !col.contains("[mean_kW]") {
@@ -523,7 +556,7 @@ mod tests {
             }
         }
 
-        let data = parse_csv_columns(&output_path);
+        let data = parse_csv_columns(&csv_path);
 
         // --- 3. All power columns are finite; non-negative except the net
         //        electrical tie-in (which may go negative under PV/battery
@@ -561,7 +594,7 @@ mod tests {
         //        draw 0.3–5 kWh over a noon hour with base loads only. The band
         //        [0.1, 10] kWh/h covers every plausible occupancy level without
         //        masking real breakage. ---
-        let total_kwh = result.metrics.total_energy_kwh.net_energy_kwh;
+        let total_kwh = metrics.total_energy_kwh.net_energy_kwh;
         assert!(
             total_kwh.is_finite(),
             "total electric energy is non-finite: {total_kwh}"
@@ -604,7 +637,7 @@ mod tests {
         // --- 6. No per-end-use bucket reports negative energy over the window.
         //        Catches sign-flip regressions in aggregation that slip past
         //        the per-timestep check above. ---
-        for (end_use, &kwh) in &result.metrics.total_energy_kwh.per_end_use {
+        for (end_use, &kwh) in &metrics.total_energy_kwh.per_end_use {
             assert!(
                 kwh.is_finite(),
                 "Non-finite energy for end-use '{end_use}': {kwh}"
@@ -621,9 +654,9 @@ mod tests {
         // water heater non-negative (the fixture has a gas water heater so
         // the water-heater clause is a no-op here).
         assert_physics_bounds(
-            &output_path,
+            &csv_path,
             total_kwh,
-            &result.metrics.total_energy_kwh.per_end_use,
+            &metrics.total_energy_kwh.per_end_use,
             1.0,
         );
     }
@@ -686,21 +719,20 @@ mod tests {
     #[test]
     fn beopt_smoke_end_use_aggregates_by_category() {
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("beopt_enduse.csv");
+        let csv_path = output_dir.path().join("beopt_enduse.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
-            .run(beopt_config(1, output_path.clone()))
+            .run(beopt_config(1, csv_path.clone()))
             .expect("engine.run should succeed");
 
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "BEopt simulation failed: {:?}",
-            result.status
-        );
-
         // The BEopt fixture has an air-to-air heat pump → HVAC_HEATING equipment.
-        let per_end_use = &result.metrics.total_energy_kwh.per_end_use;
+        let per_end_use = &result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .total_energy_kwh
+            .per_end_use;
 
         assert!(
             per_end_use.contains_key("hvac_heating"),

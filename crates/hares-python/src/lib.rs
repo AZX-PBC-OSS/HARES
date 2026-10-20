@@ -1,10 +1,22 @@
 //! PyO3 bindings for the HARES simulation engine.
 
+// The unit-test binary installs the workspace's shared counting allocator
+// so the RL batch path's hand-run allocation measurements read real
+// per-thread counts; it applies to this crate's test build alone. Under
+// the profiling feature the dev-dependency `frame_golden`'s library
+// installs the same allocator, and a binary holds one.
+#[cfg(all(test, not(feature = "profiling")))]
+#[global_allocator]
+static TEST_ALLOCATOR: hares_types::alloc_count::CountingAllocator =
+    hares_types::alloc_count::CountingAllocator;
+
 use pyo3::prelude::*;
 
 mod conversions;
 mod py_actor;
 mod py_blueprint;
+mod py_callback;
+mod py_catalogue;
 mod py_config;
 mod py_control;
 mod py_dwelling;
@@ -13,36 +25,46 @@ mod py_equipment;
 mod py_fleet;
 mod py_gym;
 mod py_hvac;
+mod py_inputs;
 mod py_metrics;
 mod py_pv_sizing;
+mod py_report;
+mod py_result;
+mod py_schema;
 mod py_tariff;
 mod py_telemetry;
 mod py_water_heater;
 mod py_weather;
+mod py_weather_resample;
 mod utils;
 
-use py_actor::{PyActor, PyDRLevel, PyDispatchRequest, PyMode, PyPriority, PySignal};
-use py_config::{PyDwellingConfig, PySimulationConfig};
+use py_actor::{
+    PyActor, PyDRLevel, PyDispatchRequest, PyMode, PyOutputVariable, PyPriority, PySignal,
+};
+use py_config::{
+    PyDwellingConfig, PyHealthPolicy, PySimulationConfig, PySiteLocationOverride, PyWarmupConfig,
+};
 use py_control::PyControlSignal;
 use py_dwelling::{PyDwelling, PyTimestepsIter};
 use py_enums::{
-    PyAggregationResolution, PyBatteryChemistry, PyBatteryProductId, PyBmsAction, PyBmsMode,
-    PyBmsScheduleWindow, PyChargingLevel, PyChargingStrategy, PyControlCapabilities,
-    PyDepartureConstraint, PyDutyCycleComponent, PyEndUse, PyEvArchetypeId, PyEvConnectionState,
-    PyExecutionStage, PyExtrapolationStrategy, PyFluidType, PyFuelType, PyGridExportRule,
-    PyIdealCapacityMode, PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion,
-    PySimStatus, PyStormWatchTrigger, PyVehicleId, PyVehicleType,
+    PyBatteryChemistry, PyBatteryProductId, PyBmsAction, PyBmsMode, PyBmsScheduleWindow,
+    PyChargingLevel, PyChargingStrategy, PyControlCapabilities, PyDepartureConstraint,
+    PyDutyCycleComponent, PyEndUse, PyEvArchetypeId, PyEvConnectionState, PyExecutionStage,
+    PyExtrapolationStrategy, PyFluidType, PyFuelType, PyGridExportRule, PyIdealCapacityMode,
+    PyInverterPriority, PyLutType, PyPlugInPolicy, PyResStockVersion, PySimStatus,
+    PyStormWatchTrigger, PyVehicleId, PyVehicleType,
 };
 use py_equipment::{
     PyBattery, PyCoreOutput, PyEquipment, PyEquipmentDescriptor, PyEv, PyProtocolBridge, PyPv,
     PyPvSoilingConfig, PyTelemetryField,
 };
-use py_fleet::{PyFleet, PyFleetResults, PySteppableFleet};
+use py_fleet::{PyAlignment, PyCoverage, PyFleet, PyFleetReport, PyFleetResult, PySteppableFleet};
 use py_metrics::{
     PyEfficiencyMetrics, PyEnvelopeComponentLoadsKwh, PyGasEnergyMetrics, PyGridInteractionMetrics,
-    PyPeakPowerKw, PyRollingPeakKw, PySimulationMetrics, PyTotalEnergyKwh,
+    PyPeakPowerKw, PyRollingPeakKw, PyRunMetrics, PyTotalEnergyKwh,
 };
 use py_pv_sizing::{PyPvCandidate, PyPvSizingResult, PyRoofPlane, PyRoofShape, PyUsableRoofArea};
+use py_report::{PyDestination, PyFrequency, PyReportSpec, PySelection};
 use py_tariff::{
     PyElectricTariff, PyGasTariff, PyGasTariffBuilder, PyTariffBuilder, PyTariffEvaluator,
 };
@@ -52,9 +74,18 @@ use py_weather::PyWeatherTimeSeries;
 #[pymodule]
 fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDwelling>()?;
+    m.add_class::<py_gym::PyObservationPlan>()?;
+    m.add_class::<py_callback::PyBatchInfo>()?;
     m.add_class::<PyTimestepsIter>()?;
     m.add_class::<PySimulationConfig>()?;
+    m.add_class::<PyWarmupConfig>()?;
+    m.add_class::<PySiteLocationOverride>()?;
     m.add_class::<PyDwellingConfig>()?;
+    m.add_class::<PyReportSpec>()?;
+    m.add_class::<PySelection>()?;
+    m.add_class::<PyFrequency>()?;
+    m.add_class::<PyDestination>()?;
+    m.add_class::<PyAlignment>()?;
     m.add_class::<PyControlSignal>()?;
     m.add_class::<PyTelemetry>()?;
     m.add_class::<PyCoreOutput>()?;
@@ -64,6 +95,12 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<py_hvac::PyASHPHeater>()?;
     m.add_class::<PyBattery>()?;
     m.add_class::<py_blueprint::PyDwellingBlueprint>()?;
+    m.add_class::<py_blueprint::PyDwellingBlueprintRef>()?;
+    m.add_class::<py_blueprint::ParsedInputsRef>()?;
+    m.add_class::<py_inputs::PyParsedHpxml>()?;
+    m.add_class::<py_inputs::PyParsedWeather>()?;
+    m.add_class::<py_inputs::PyParsedSchedule>()?;
+    m.add_class::<py_inputs::PyParsedDefaults>()?;
     m.add_class::<py_hvac::PyElectricBaseboard>()?;
     m.add_class::<py_hvac::PyElectricBoiler>()?;
     m.add_class::<py_hvac::PyElectricFurnace>()?;
@@ -83,8 +120,12 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEquipmentDescriptor>()?;
     m.add_class::<PyFleet>()?;
     m.add_class::<PySteppableFleet>()?;
-    m.add_class::<PyFleetResults>()?;
+    m.add_class::<PyFleetReport>()?;
+    m.add_class::<PyFleetResult>()?;
+    m.add_class::<py_fleet::PyFleetTable>()?;
+    m.add_class::<PyCoverage>()?;
     m.add_class::<PyActor>()?;
+    m.add_class::<PyOutputVariable>()?;
     m.add_class::<PyDispatchRequest>()?;
     m.add_class::<PyMode>()?;
     m.add_class::<PyPriority>()?;
@@ -98,7 +139,6 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIdealCapacityMode>()?;
     m.add_class::<PyDutyCycleComponent>()?;
     m.add_class::<PySimStatus>()?;
-    m.add_class::<PyAggregationResolution>()?;
     m.add_class::<PyResStockVersion>()?;
     m.add_class::<PyControlCapabilities>()?;
     m.add_class::<PyLutType>()?;
@@ -118,7 +158,18 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStormWatchTrigger>()?;
     m.add_class::<PyDepartureConstraint>()?;
     m.add_class::<PyExtrapolationStrategy>()?;
-    m.add_class::<PySimulationMetrics>()?;
+    m.add_class::<PyRunMetrics>()?;
+    m.add_class::<py_catalogue::PyCatalogue>()?;
+    m.add_class::<py_catalogue::PyVariable>()?;
+    m.add_class::<py_result::PyRunResult>()?;
+    m.add_class::<py_result::PyReportResult>()?;
+    m.add_class::<py_result::PyRunHealth>()?;
+    m.add_class::<py_result::PyWarmupOutcome>()?;
+    m.add_class::<py_result::PyWarmupResiduals>()?;
+    m.add_class::<py_result::PyWarning>()?;
+    m.add_class::<py_result::PyBuildInfo>()?;
+    m.add_class::<py_result::PyProvenance>()?;
+    m.add_class::<py_result::PyEquipmentProvenance>()?;
     m.add_class::<PyTotalEnergyKwh>()?;
     m.add_class::<PyPeakPowerKw>()?;
     m.add_class::<PyRollingPeakKw>()?;
@@ -139,6 +190,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGasTariffBuilder>()?;
     m.add_class::<PyBillingPeriodSummary>()?;
     m.add_class::<PyTariffTelemetry>()?;
+    m.add_class::<PyHealthPolicy>()?;
 
     m.add(
         "HaresConfigError",
@@ -153,6 +205,14 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<py_dwelling::HaresSimulationError>(),
     )?;
     m.add(
+        "HaresCallbackError",
+        m.py().get_type::<py_dwelling::HaresCallbackError>(),
+    )?;
+    m.add(
+        "HaresHealthPolicyError",
+        m.py().get_type::<py_dwelling::HaresHealthPolicyError>(),
+    )?;
+    m.add(
         "FatalDwellingError",
         m.py().get_type::<py_dwelling::FatalDwellingError>(),
     )?;
@@ -162,6 +222,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "MAX_HVAC_THERMOSTAT_BAND_C",
         hares_types::MAX_HVAC_THERMOSTAT_BAND_C,
     )?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add(
         "MAX_TANK_THERMOSTAT_BAND_C",
         hares_types::MAX_TANK_THERMOSTAT_BAND_C,
@@ -172,6 +233,19 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PyMode", m.getattr("Mode")?)?;
 
     m.add_function(wrap_pyfunction!(py_gym::batch_step_py, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gym::clip_action_py, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gym::field_bounds_py, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gym::field_bounds_table_py, m)?)?;
+    m.add_function(wrap_pyfunction!(py_catalogue::metrics_from_table, m)?)?;
+    m.add_function(wrap_pyfunction!(py_result::build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(py_inputs::defaults_dir, m)?)?;
+    m.add_function(wrap_pyfunction!(py_schema::input_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(py_report::_selection_from_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_report::_frequency_from_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_report::_destination_from_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_report::_reportspec_from_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_weather_resample::resample_weather, m)?)?;
+    m.add_function(wrap_pyfunction!(py_result::replay, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_weather, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_epw, m)?)?;
     m.add_function(wrap_pyfunction!(py_weather::parse_psm3, m)?)?;

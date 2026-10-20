@@ -19,7 +19,7 @@
 ///   `drive_cancelled` counter.
 ///
 /// Verbosity floor: the SOC column is emitted only at
-/// `output_verbosity >= 3` (hares-io output columns); every current caller
+/// `verbosity >= 3` (hares-io output columns); every current caller
 /// runs verbosity 5. A below-3 caller fails on the `expect` below, which
 /// names the requirement rather than panicking on a mystery missing
 /// column.
@@ -36,7 +36,7 @@ pub fn ev_charge_days_and_peak_cancelled(
         .collect();
     let idx_soc = header.iter().position(|c| *c == "EV SOC (-)").expect(
         "output contains 'EV SOC (-)' — the SOC column requires \
-                 output_verbosity >= 3",
+                 verbosity >= 3",
     );
     let idx_cancelled = header
         .iter()

@@ -35,12 +35,15 @@ numpy = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 arrow = { workspace = true, features = ["ipc"] }
+pyo3-arrow = "0.19"
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+uom.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
+frame_golden = { path = "../../tools/frame_golden" }

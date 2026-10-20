@@ -61,13 +61,14 @@ impl From<&ControlSignal> for PriorityTier {
     /// |---------------|-------------------------------------------------------------------------|
     /// | Safety (3)    | (reserved — no signal maps here)                                        |
     /// | Grid (2)      | DemandResponse, CurtailmentPercent, ReactiveSetpoint, PowerFactorSetpoint, InverterPriorityMode, PowerLimit |
-    /// | UserOverride (1) | ThermalSetpoint, HumiditySetpoint, ModeOverride, ThermalSetpointDelta |
+    /// | UserOverride (1) | ThermalSetpoint, HumiditySetpoint, ModeOverride, ModeOverrideRelease, ThermalSetpointDelta |
     /// | Schedule (0)  | PowerSetpoint, SOCTarget, DutyCycle, LoadFraction, GridConnect, SelfConsumption, ProtocolNative, IdealCapacity, IdealCapacityModeOverride, EvPlugIn, EvDrive, EvAwayCharge, EvSetReadyBy, EventDelay, MaxCapacityFraction, NonHvacZoneInput |
     fn from(signal: &ControlSignal) -> Self {
         match signal {
             ControlSignal::ThermalSetpoint { .. }
             | ControlSignal::HumiditySetpoint { .. }
             | ControlSignal::ModeOverride { .. }
+            | ControlSignal::ModeOverrideRelease
             | ControlSignal::ThermalSetpointDelta { .. } => PriorityTier::UserOverride,
 
             ControlSignal::DemandResponse { .. }
@@ -100,17 +101,8 @@ impl From<&ControlSignal> for PriorityTier {
 /// Control dispatch target. Routing logic is implemented in `hares-core`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DispatchTarget {
-    ByName(#[serde(serialize_with = "ser_arc_str", deserialize_with = "de_arc_str")] Arc<str>),
+    ByName(Arc<str>),
     ByEndUse(EndUse),
-}
-
-fn ser_arc_str<S: serde::Serializer>(val: &Arc<str>, ser: S) -> Result<S::Ok, S::Error> {
-    ser.serialize_str(val)
-}
-
-fn de_arc_str<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Arc<str>, D::Error> {
-    let s: String = serde::Deserialize::deserialize(de)?;
-    Ok(Arc::from(s))
 }
 
 impl DispatchTarget {
@@ -312,7 +304,7 @@ mod tier_mapping_tests {
         let signals: [ControlSignal; 6] = [
             ControlSignal::demand_response(DRLevel::High, Some(3600.0)),
             ControlSignal::CurtailmentPercent { percent: 25.0 },
-            ControlSignal::ReactiveSetpoint { kvar: 10.0 },
+            ControlSignal::ReactiveSetpoint { var: 10.0 },
             ControlSignal::PowerFactorSetpoint { power_factor: 0.95 },
             ControlSignal::InverterPriorityMode {
                 priority: InverterPriority::Watt,
@@ -348,8 +340,8 @@ mod tier_mapping_tests {
             ControlSignal::EvPlugIn {
                 state: EvConnectionState::HomePluggedIn,
             },
-            ControlSignal::EvDrive { kwh: 5.0 },
-            ControlSignal::EvAwayCharge { power_kw: 11.5 },
+            ControlSignal::EvDrive { energy_j: 5.0e6 },
+            ControlSignal::EvAwayCharge { power_w: 11_500.0 },
             ControlSignal::EvSetReadyBy {
                 departure_hour: 7.0,
                 target_soc: 0.8,
@@ -384,7 +376,7 @@ mod tier_mapping_tests {
             ControlSignal::demand_response(DRLevel::High, Some(3600.0)),
             ControlSignal::protocol_native(ProtocolId(1), vec![]),
             ControlSignal::CurtailmentPercent { percent: 25.0 },
-            ControlSignal::ReactiveSetpoint { kvar: 10.0 },
+            ControlSignal::ReactiveSetpoint { var: 10.0 },
             ControlSignal::PowerFactorSetpoint { power_factor: 0.95 },
             ControlSignal::InverterPriorityMode {
                 priority: InverterPriority::Watt,
@@ -403,8 +395,8 @@ mod tier_mapping_tests {
             ControlSignal::EvPlugIn {
                 state: EvConnectionState::HomePluggedIn,
             },
-            ControlSignal::EvDrive { kwh: 5.0 },
-            ControlSignal::EvAwayCharge { power_kw: 11.5 },
+            ControlSignal::EvDrive { energy_j: 5.0e6 },
+            ControlSignal::EvAwayCharge { power_w: 11_500.0 },
             ControlSignal::EvSetReadyBy {
                 departure_hour: 7.0,
                 target_soc: 0.8,

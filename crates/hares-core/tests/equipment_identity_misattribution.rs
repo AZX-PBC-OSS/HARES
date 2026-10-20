@@ -6,6 +6,8 @@
 //! (the exact-membership `in_schema` predicate's blind spot), and the
 //! diagnostic content of the malformed-`equipment_id` rejection.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
@@ -13,7 +15,6 @@ use std::time::Duration as StdDuration;
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig};
 use hares_equipment::Equipment;
-use hares_io::OutputFormat;
 use hares_types::{
     ControlCapabilities, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, FuelType, HaresError, OperatingMode, PortSlots, Telemetry,
@@ -38,7 +39,7 @@ fn write_fixture_hpxml(dir: &Path) -> PathBuf {
 
 fn sim_config(
     duration: Duration,
-    output_path: Option<PathBuf>,
+    csv_path: Option<PathBuf>,
     verbosity: u8,
 ) -> hares_core::SimulationConfig {
     hares_core::SimulationConfig {
@@ -48,34 +49,42 @@ fn sim_config(
             .unwrap(),
         duration,
         time_res: Duration::seconds(900),
-        output_verbosity: verbosity,
-        write_output: output_path.is_some(),
-        output_path,
-        output_format: OutputFormat::Csv,
+        reports: csv_path
+            .into_iter()
+            .map(|path| hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(verbosity),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path,
+                    overwrite: false,
+                },
+            })
+            .collect(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
 fn dwelling_config(hpxml: &Path, sim: hares_core::SimulationConfig) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, None, 100, None),
     }
 }
 
@@ -100,11 +109,7 @@ impl InertProbe {
                 stage: hares_types::ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::empty(),
-                telemetry_fields: vec![TelemetryField {
-                    name: "probe".to_string(),
-                    unit: "-".to_string(),
-                    description: "identity probe".to_string(),
-                }],
+                telemetry_fields: vec![TelemetryField::ratio("probe", "identity probe")],
                 zone_type: None,
             },
             telemetry: Telemetry::with_capacity(1),
@@ -116,6 +121,10 @@ impl InertProbe {
 impl Equipment for InertProbe {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
     }
 
     fn rename(&mut self, name: String) {
@@ -210,11 +219,11 @@ fn column_stats(csv: &Path, column: &str, skip_rows: usize, take_rows: usize) ->
 fn midrun_added_equipment_cannot_claim_the_aggregate_total_column() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("aggregate_claim.csv");
+    let csv_path = tmp.path().join("aggregate_claim.csv");
 
     let mut dwelling = Dwelling::from_config(dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
     ))
     .expect("dwelling builds");
 
@@ -233,7 +242,7 @@ fn midrun_added_equipment_cannot_claim_the_aggregate_total_column() {
     // The streaming recorder flushes with the run; read both day windows
     // from the completed CSV (rows 1..96 = day 1, 97..192 = day 2).
     let (day1_mean, day1_max, day1_rows) =
-        column_stats(&output_path, "Total Electric Power (kW)", 1, 96);
+        column_stats(&csv_path, "Total Electric Power (kW)", 1, 96);
     assert_eq!(day1_rows, 96, "day 1 must have recorded 96 rows");
     assert!(
         day1_max > 0.1,
@@ -241,7 +250,7 @@ fn midrun_added_equipment_cannot_claim_the_aggregate_total_column() {
          the add (day-1 mean {day1_mean}, max {day1_max})"
     );
     let (day2_mean, day2_max, day2_rows) =
-        column_stats(&output_path, "Total Electric Power (kW)", 1 + 96, 96);
+        column_stats(&csv_path, "Total Electric Power (kW)", 1 + 96, 96);
     assert!(
         day2_rows >= 95,
         "day 2 must have recorded ~96 parseable rows, got {day2_rows}"
@@ -267,11 +276,11 @@ fn midrun_added_equipment_cannot_claim_the_aggregate_total_column() {
 fn prerecord_added_equipment_cannot_shadow_the_aggregate_total_column() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("aggregate_shadow.csv");
+    let csv_path = tmp.path().join("aggregate_shadow.csv");
 
     let mut dwelling = Dwelling::from_config(dwelling_config(
         &hpxml,
-        sim_config(Duration::days(1), Some(output_path.clone()), 1),
+        sim_config(Duration::days(1), Some(csv_path.clone()), 1),
     ))
     .expect("dwelling builds");
 
@@ -283,7 +292,7 @@ fn prerecord_added_equipment_cannot_shadow_the_aggregate_total_column() {
         .expect("add of an equipment named 'Total' before any recorded row must be accepted");
     dwelling.simulate().expect("day-1 simulate");
 
-    let (mean, max, rows) = column_stats(&output_path, "Total Electric Power (kW)", 1, 96);
+    let (mean, max, rows) = column_stats(&csv_path, "Total Electric Power (kW)", 1, 96);
     assert!(
         rows >= 95,
         "day 1 must have recorded ~96 parseable rows, got {rows}"
@@ -314,7 +323,7 @@ fn malformed_equipment_id_rejection_names_the_received_value() {
     let config = dwelling_config(&hpxml, sim_config(Duration::days(1), None, 0));
 
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     let mut spec = hares_io::EquipmentSpec {
         name: "Dehumidifier".to_string(),
         instance_name: None,
@@ -326,12 +335,15 @@ fn malformed_equipment_id_rejection_names_the_received_value() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     spec.parameters
         .insert("equipment_id".to_string(), serde_json::json!(-1));
     blueprint.add_equipment_spec(spec).expect("add spec");
 
-    let err = hares_core::dwelling::DwellingBlueprint::build(blueprint)
+    let err = blueprint
+        .build()
         .map(|_| ())
         .expect_err("a malformed explicit equipment_id must fail the build");
     let msg = err.to_string();
@@ -361,13 +373,14 @@ fn malformed_equipment_id_rejection_names_the_received_value() {
 fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("total_at_birth.csv");
+    let csv_path = tmp.path().join("total_at_birth.csv");
 
-    let mut blueprint = hares_core::dwelling::DwellingBlueprint::from_config(dwelling_config(
-        &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
-    ))
-    .expect("blueprint");
+    let mut blueprint =
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(dwelling_config(
+            &hpxml,
+            sim_config(Duration::days(2), Some(csv_path.clone()), 1),
+        ))
+        .expect("blueprint");
     let typed = hares_equipment::EquipmentConfig::with_payload(
         "Dehumidifier".to_string(),
         "Dehumidifier".to_string(),
@@ -389,9 +402,12 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         })
         .expect("add spec");
-    let mut dwelling = hares_core::dwelling::DwellingBlueprint::build(blueprint)
+    let mut dwelling = blueprint
+        .build()
         .expect("a dwelling with an equipment named 'Total' must build");
 
     // Precondition: the shadowing equipment is really in the vector.
@@ -407,7 +423,7 @@ fn equipment_named_total_at_build_time_never_silences_the_aggregate_total() {
     dwelling.simulate().expect("2-day simulate");
 
     for (label, skip) in [("day 1", 1), ("day 2", 1 + 96)] {
-        let (mean, max, rows) = column_stats(&output_path, "Total Electric Power (kW)", skip, 96);
+        let (mean, max, rows) = column_stats(&csv_path, "Total Electric Power (kW)", skip, 96);
         assert!(
             rows >= 95,
             "{label}: ~96 rows expected, got {rows} parseable"

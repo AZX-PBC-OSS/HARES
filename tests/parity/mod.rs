@@ -1,14 +1,15 @@
 mod corpus;
 mod tolerance;
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration as StdDuration;
 
 use arrow::array::{Array, Float64Array};
 use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
-use hares_core::{DwellingConfig, SimStatus, SimulationEngine};
+use hares_core::{DwellingConfig, SimulationEngine};
 use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
 use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -46,13 +47,22 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
     match (fixture_id, metric) {
         // cz5a_minisplit_gas_wh: the peak's residual is the pinned-start
         // recovery minute's maximum electric draw at the -19 C design
-        // temperature: HARES's heat pump draws 17.84 kW there and OCHRE's
-        // 14.81 kW, while the window's HVAC energies agree to 1.2 % (the
-        // fixture's orphan air distribution system is gone from both sides'
-        // inputs, so the old 33.6 % / 32.3 % residuals are closed at 1.2 %
-        // and 1.2 %, inside the default bands). Which side's maximum draw
-        // the reference tools support is not yet established; the defect
-        // ledger carries the open question.
+        // temperature: HARES draws 17.89 kW there and OCHRE's 14.81 kW,
+        // while the window's HVAC energies agree to 1.2 % (the fixture's
+        // orphan air distribution system is gone from both sides' inputs,
+        // so the old 33.6 % / 32.3 % residuals are closed at 1.2 % and
+        // 1.2 %, inside the default bands). The cause is established: the
+        // minute is ER-only on both sides, because the compressor locks
+        // out at OCHRE's 0 F default (-17.78 C, hpxml.py:947-951) above
+        // the window's -19.4 C. HARES's binary backup strip fires its
+        // full 17.58 kW rating for the minute plus ~0.3 kW fan; OCHRE's
+        // ER fills the ideal load 14.41 kW plus its 0.25 kW fan and the
+        // 0.15 kW pan heater (HVAC.py:1396-1407, 1427-1436, 1482-1497).
+        // EnergyPlus's unitary heat pump fires the full supplementary
+        // element as HARES does; OCHRE's ideal ER fill is its own
+        // continuous dispatch. The default stage table (D-020)'s only
+        // vote in this window is the fan's capacity-proportional flow
+        // (staging.rs:466): the window never operates the compressor.
         ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(21.5),
         // cz6b_resistance_res_wh: both models cycle the resistance element
         // at its rating from the same pinned start, but the two envelope
@@ -92,8 +102,6 @@ struct FixtureConfig {
     #[serde(default)]
     bldg_id: Option<i64>,
     #[serde(default)]
-    initialization_duration_seconds: Option<i64>,
-    #[serde(default)]
     property_parity: Option<PropertyParityExpectations>,
     /// EV fixture policy (see `ev_override`): models the vehicle the
     /// heaterless, thermally-unmodeled OCHRE reference models, and — for
@@ -105,6 +113,13 @@ struct FixtureConfig {
     /// `tests/python/generate_parity_reference.py`).
     #[serde(default)]
     ochre: Option<OchrePins>,
+    /// The fixture's equipment overrides, carried verbatim into the
+    /// dwelling config: the battery fixtures declare their control here
+    /// (`bms_mode = '"Manual"'`, the idle battery the OCHRE reference
+    /// models). Merged with the `[ev]` section's derived override, which
+    /// owns the `"Electric Vehicle"` key.
+    #[serde(default)]
+    overrides: Option<toml::Table>,
 }
 
 /// The generator's pins on OCHRE. `initial_temp_setpoint_c` is the indoor
@@ -269,17 +284,23 @@ fn parity_property_alignment_from_hpxml() -> Result<(), Box<dyn std::error::Erro
                 continue;
             }
         };
-        let equipment =
-            match resolve_equipment(&building, &DefaultsStore::empty(), None, &mut Vec::new()) {
-                Ok(specs) => specs,
-                Err(err) => {
-                    failures.push(format!(
-                        "fixture={} equipment resolution failed: {err}",
-                        fixture_id
-                    ));
-                    continue;
-                }
-            };
+        let equipment = match resolve_equipment(
+            &building,
+            building.climate_zone_iecc.as_deref(),
+            None,
+            &DefaultsStore::empty(),
+            None,
+            &mut Vec::new(),
+        ) {
+            Ok(specs) => specs,
+            Err(err) => {
+                failures.push(format!(
+                    "fixture={} equipment resolution failed: {err}",
+                    fixture_id
+                ));
+                continue;
+            }
+        };
         let equipment_names: Vec<String> = equipment.iter().map(|spec| spec.name.clone()).collect();
         let conditioned = building
             .zones
@@ -429,6 +450,44 @@ fn ev_override(
     })))
 }
 
+/// The dwelling config's override map: the fixture's `[overrides]` table
+/// with the `[ev]` section's derived override merged in. A key both claim
+/// is a fixture-authoring error: one equipment, one override source.
+fn dwelling_overrides(
+    config: &FixtureConfig,
+    building_xml: &Path,
+) -> Result<Option<serde_json::Value>, String> {
+    let ev = ev_override(config, building_xml)?;
+    let fixture_overrides = config.overrides.as_ref().map(|table| {
+        serde_json::to_value(table)
+            .unwrap_or_else(|err| panic!("the [overrides] table must serialize: {err}"))
+    });
+    match (fixture_overrides, ev) {
+        (None, None) => Ok(None),
+        (Some(map), None) | (None, Some(map)) => Ok(Some(map)),
+        (Some(mut fixture_map), Some(ev_map)) => {
+            let (Some(fixture_obj), Some(ev_obj)) =
+                (fixture_map.as_object_mut(), ev_map.as_object())
+            else {
+                return Err(format!(
+                    "the fixture [overrides] table and the [ev] section's \
+                     override must both be objects, got {fixture_map} and {ev_map}"
+                ));
+            };
+            for (key, value) in ev_obj {
+                if fixture_obj.insert(key.clone(), value.clone()).is_some() {
+                    return Err(format!(
+                        "the fixture [overrides] table names '{key}' and the \
+                         [ev] section derives an override for it too: one \
+                         equipment, one override source"
+                    ));
+                }
+            }
+            Ok(Some(fixture_map))
+        }
+    }
+}
+
 fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, String> {
     let config_contents = fs::read_to_string(&fixture.config_toml).map_err(|err| {
         format!(
@@ -441,32 +500,47 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     let mut sim_config = parse_simulation_config(&config_contents, &config)?;
     let output_dir =
         tempfile::tempdir().map_err(|err| format!("failed to create output directory: {err}"))?;
-    let output_path = output_dir.path().join(format!("{}.parquet", fixture.id));
-    sim_config.output_format = hares_io::OutputFormat::Parquet;
-    sim_config.output_path = Some(output_path.clone());
+    let csv_path = output_dir.path().join(format!("{}.parquet", fixture.id));
+    // The harness reads the run's parquet file: the fixture's report (its
+    // verbosity selection) redirected to the harness's own destination.
+    sim_config.reports = match sim_config.reports.first().cloned() {
+        Some(report) => vec![hares_io::ReportSpec {
+            destination: hares_io::Destination::Parquet {
+                path: csv_path.clone(),
+                overwrite: false,
+            },
+            ..report
+        }],
+        None => return Err("parity fixture config carries no report".to_string()),
+    };
 
-    let defaults_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults");
+    let defaults_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
     let dwelling_config = DwellingConfig {
-        hpxml_path: fixture.building_xml.clone(),
-        schedule_path: Some(fixture.schedule_csv.clone()),
-        weather_path: fixture.weather_epw.clone(),
-        sim_config,
-        defaults_path: Some(defaults_path),
-        // One-sided divergence, forced and documented: see
-        // `ev_override` — every EV fixture models the heaterless vehicle
-        // its OCHRE reference models, and charging fixtures (`[ev]`
-        // section) additionally pin the deterministic discharged-at-start
-        // scenario both simulators charge identically (the reference's
-        // event file pins the OCHRE side; initial SOC, a warm pack, and an
-        // Immediate strategy pin the HARES side).
-        overrides: ev_override(&config, &fixture.building_xml)?,
-        bldg_id: config.bldg_id.unwrap_or(1),
-        initialization_duration: config
-            .initialization_duration_seconds
-            .and_then(|seconds| u64::try_from(seconds).ok())
-            .map(StdDuration::from_secs),
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(fixture.building_xml.clone()),
+        schedule: Some(InputSource::Path(fixture.schedule_csv.clone())),
+        weather: WeatherInput::Path(
+            // The weather the engine reads is the case's hourly file held at the
+            // case's step by the Python adapter's OCHRE hold (committed beside
+            // the source): the OCHRE comparison's zero-order hold now lives in
+            // the adapter, not in an engine override.
+            fixture.weather_ochre_hold.clone(),
+        ),
+        defaults: DefaultsSource::directory(defaults_path),
+        settings: DwellingSettings::new(
+            sim_config,
+            // The fixture's `[overrides]` table (the battery fixtures declare
+            // their control there) with the EV override merged in: see
+            // `ev_override`. Every EV fixture models the heaterless vehicle
+            // its OCHRE reference models, and charging fixtures (`[ev]`
+            // section) additionally pin the deterministic discharged-at-start
+            // scenario both simulators charge identically (the reference's
+            // event file pins the OCHRE side; initial SOC, a warm pack, and an
+            // Immediate strategy pin the HARES side).
+            dwelling_overrides(&config, &fixture.building_xml)?,
+            config.bldg_id.unwrap_or(1),
+            None,
+        ),
     };
 
     // A pinned start must still be the temperature HARES starts from, or the
@@ -498,20 +572,19 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
         .map_err(|err| format!("simulation failed: {err}"))?;
 
     eprintln!(
-        "[parity] fixture={} status={:?} elapsed={:?} warnings={:?}",
-        fixture.id, outcome.status, outcome.elapsed, outcome.warnings
+        "[parity] fixture={} warnings={:?}",
+        fixture.id, outcome.warnings
     );
 
-    if matches!(outcome.status, SimStatus::Failed(_)) {
-        return Err(format!("simulation status failed: {:?}", outcome.status));
-    }
+    // The run's published file report, in `reports` order: the parity
+    // comparison reads the CSV the manifest's report wrote.
+    let timeseries_path = outcome
+        .reports
+        .iter()
+        .find_map(|report| report.path().cloned());
 
-    let actual_columns = read_parquet_columns(
-        outcome
-            .timeseries_path
-            .as_deref()
-            .unwrap_or(output_path.as_path()),
-    )?;
+    let actual_columns =
+        read_parquet_columns(timeseries_path.as_deref().unwrap_or(csv_path.as_path()))?;
     let reference_columns = read_parquet_columns(&fixture.reference_output_parquet)?;
     if let Some(pinned_c) = pinned_start_c {
         let reference_start_c = reference_columns
@@ -531,11 +604,7 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     // TEMP TRIAGE: keep the harness's HARES output for inspection.
     if let Some(keep) = std::env::var_os("PARITY_KEEP_OUTPUT") {
         let dst = Path::new(&keep).join(format!("hares-{}.parquet", fixture.id));
-        if let Some(src) = outcome
-            .timeseries_path
-            .as_deref()
-            .or(Some(output_path.as_path()))
-        {
+        if let Some(src) = timeseries_path.as_deref().or(Some(csv_path.as_path())) {
             let _ = fs::copy(src, &dst);
             eprintln!("[parity] kept {}", dst.display());
         }
@@ -927,6 +996,49 @@ fn count_mode_cycles(series: &[f64]) -> u64 {
 fn integrate_kw_series(series: &[f64]) -> f64 {
     const MINUTE_STEP_HOURS: f64 = 1.0 / 60.0;
     series.iter().sum::<f64>() * MINUTE_STEP_HOURS
+}
+
+#[cfg(test)]
+mod dwelling_overrides_tests {
+    use std::fs;
+
+    use super::{dwelling_overrides, parse_fixture_config};
+
+    /// The collision is pinned: a fixture whose `[overrides]` table names a
+    /// key the `[ev]` section's derived override also claims fails authoring
+    /// with the key and both sources named. Dropping the collision branch
+    /// in `dwelling_overrides` fails this test.
+    #[test]
+    fn overrides_and_ev_tables_claiming_one_key_fail_authoring() {
+        let config = parse_fixture_config(
+            "[overrides]\n\
+             \"Electric Vehicle\" = { \"heater_power_w\" = 0.0 }\n\
+             \n\
+             [ev]\n\
+             initial_soc = 0.5\n",
+        )
+        .expect("the fixture config must parse");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let building_xml = dir.path().join("building.xml");
+        fs::write(
+            &building_xml,
+            "<Building><PlugLoad><PlugLoadType>electric vehicle \
+             charging</PlugLoadType></PlugLoad></Building>",
+        )
+        .expect("the fixture building must write");
+
+        let err = dwelling_overrides(&config, &building_xml)
+            .expect_err("a key both tables claim is a fixture-authoring error");
+
+        assert!(
+            err.contains("Electric Vehicle"),
+            "the error must name the colliding key, got: {err}"
+        );
+        assert!(
+            err.contains("[overrides]") && err.contains("[ev]"),
+            "the error must name both override sources, got: {err}"
+        );
+    }
 }
 
 #[cfg(test)]

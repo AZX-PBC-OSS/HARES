@@ -5,24 +5,24 @@ use std::time::Duration;
 
 use chrono::Timelike;
 use hares_physics::constants::{UEF_TO_EF_GAS_INTERCEPT, UEF_TO_EF_GAS_SLOPE};
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError, HeatTransferDirection,
-    LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, telemetry_keys as tk,
+    LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
+    ScheduleSourceState, Telemetry, TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::schedule_helpers::{capture_schedule_source_state, restore_optional_source};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
-    tank_thermostat_update, weighted_average_tank_temp,
+    step_setpoint_c, tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 use crate::hvac::helpers::loop_id_from_config;
@@ -42,7 +42,7 @@ const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE storage WH defaul
 const DEFAULT_BURNER_INPUT_W: f64 = 11_000.0;
 const DEFAULT_BURNER_EFFICIENCY: f64 = 0.78;
 const DEFAULT_FLUE_LOSS_FRACTION: f64 = 0.10;
-const GAS_WH_CHECKPOINT_VERSION: u32 = 2;
+const GAS_WH_CHECKPOINT_VERSION: u32 = 3;
 // Standing pilot thermal power in watts (post-conversion heat delivered to the
 // tank or ambient). Typical standing pilot gas consumption is 200–800 BTU/h
 // (60–230 W thermal). 150 W is a reasonable midpoint for residential gas storage
@@ -85,7 +85,7 @@ struct GasWhState {
     fuel_input_w: f64,
     flue_loss_w: f64,
     fan_electric_w: f64,
-    reactive_power_kvar: f64,
+    reactive_power_var: f64,
     draw_flow_rate_kg_s: f64,
     pilot_fraction_to_tank: f64,
     // --- Demand response state ---
@@ -93,6 +93,11 @@ struct GasWhState {
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
     dr_duration_remaining_s: Option<f64>,
+    // --- Schedule-source positions (the draws and cursors a restore
+    // continues from) ---
+    draw_source_state: Option<ScheduleSourceState>,
+    mains_source_state: Option<ScheduleSourceState>,
+    appliance_draw_source_state: Option<ScheduleSourceState>,
 }
 
 pub struct GasWH {
@@ -119,6 +124,8 @@ pub struct GasWH {
     draw_flow_rate_kg_s: f64,
     draw_l_per_min_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
+    /// The wet appliances' untempered draw [kg/s], from its schedule column.
+    appliance_draw_source: Option<ScheduleSource>,
     flue_loss_fraction: f64,
     burner_efficiency_constant: f64,
     burner_efficiency_poly: Option<[f64; 3]>,
@@ -144,7 +151,7 @@ pub struct GasWH {
     // --- ZIP voltage model ---
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`)
     /// for the draft-inducer fan motor: real power stays bit-identical; Q
-    /// comes from `ZipLoad::reactive_kvar`.
+    /// comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
     // --- TMV tempered draw ---
     fixture_delivery_temp_c: f64,
@@ -159,6 +166,8 @@ impl GasWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let siting = Siting::from_constructor_config(&config);
+        // Pre-init placeholder: init requires the config's loop id (the
+        // allocator's assignment) and re-declares the ports from it.
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -227,6 +236,7 @@ impl GasWH {
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
+            appliance_draw_source: None,
             flue_loss_fraction: DEFAULT_FLUE_LOSS_FRACTION,
             burner_efficiency_constant: DEFAULT_BURNER_EFFICIENCY,
             burner_efficiency_poly: None,
@@ -250,8 +260,10 @@ impl GasWH {
         }
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the tank at 2 C, not off, so standby losses continue.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
     fn burner_efficiency(&self, part_load_ratio: f64) -> f64 {
@@ -265,7 +277,7 @@ impl GasWH {
         }
     }
 
-    fn should_fire(&self) -> bool {
+    fn should_fire(&self, env: &EnvironmentState) -> bool {
         if self.dr_load_fraction <= 0.0
             || matches!(self.mode_override, Some(OperatingMode::Off))
             || self.duty_cycle <= 0.0
@@ -275,7 +287,7 @@ impl GasWH {
         let lower_temp = self.tank.node_temps()[self.burner_node];
         hysteresis_call(
             lower_temp,
-            self.effective_setpoint_c(),
+            self.effective_setpoint_c(env),
             self.deadband_c,
             self.burner_on,
         )
@@ -301,7 +313,11 @@ impl GasWH {
         self.siting.resolve(config, c.zone_type.as_deref())?;
         self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
+        // The loop id is stated input (its wiring's or the loop allocator's
+        // assignment): an init without one cannot declare the supply loop,
+        // and loop 0 is the unassigned sentinel, not a loop.
+        self.loop_id =
+            crate::hvac::helpers::require_loop_id(c.loop_id, "Gas Water Heater", &config.name)?;
         self.ports = siting::storage_ports(&GAS_LEADING_PORTS, &self.siting, self.loop_id);
 
         let tank_volume_m3 = c.tank_volume_m3.unwrap_or(DEFAULT_TANK_VOLUME_M3);
@@ -359,13 +375,17 @@ impl GasWH {
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
+        self.appliance_draw_source = c
+            .appliance_draw_flow_rate_source
+            .clone()
+            .map(|s| s.into_runtime());
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
         self.hot_draw_temp_c = c.hot_draw_temp_c;
 
         self.flue_loss_fraction = c.flue_loss_fraction.unwrap_or(DEFAULT_FLUE_LOSS_FRACTION);
 
-        // Fallback chain for burner efficiency:
+        // Efficiency precedence for the burner:
         // 1. conversion_efficiency — the physically meaningful parameter (direct use).
         // 2. energy_factor — pre-2015 EF test procedure value (direct use).
         // 3. uniform_energy_factor — post-2015 UEF test procedure value;
@@ -375,7 +395,9 @@ impl GasWH {
         //    UEF values are systematically higher than EF; raw UEF used as
         //    burner efficiency overestimates efficiency by 1-3% for typical
         //    gas storage water heaters.
-        // 4. DEFAULT_BURNER_EFFICIENCY (0.78) — a plausible gas WH efficiency.
+        // A config with none of the three is a construction error: the
+        // built-in 0.78 it used to fall back to would silently re-rate the
+        // burner.
         let (efficiency, source) = if let Some(ce) = c.conversion_efficiency {
             (ce, 1.0)
         } else if let Some(ef) = c.energy_factor {
@@ -384,7 +406,13 @@ impl GasWH {
             let ef = UEF_TO_EF_GAS_SLOPE * uef + UEF_TO_EF_GAS_INTERCEPT;
             (ef * c.performance_adjustment.unwrap_or(1.0), 3.0)
         } else {
-            (DEFAULT_BURNER_EFFICIENCY, 0.0)
+            return Err(hares_types::HaresError::Equipment(format!(
+                "Gas Water Heater '{}': its config carries no efficiency field \
+                 (conversion_efficiency, energy_factor, or uniform_energy_factor); \
+                 the burner efficiency is a physical input and no default may \
+                 stand in for it",
+                config.name
+            )));
         };
 
         // source: 0=Default, 1=ConversionEfficiency, 2=EnergyFactor, 3=UniformEnergyFactor
@@ -440,6 +468,46 @@ impl Equipment for GasWH {
         GAS_WH_CHECKPOINT_VERSION
     }
 
+    fn reset_stochastic_state(&mut self) {
+        // The draw, mains and appliance sources at their seeds and
+        // cursors: the production phase reads them from the construction
+        // position, whatever the warm-up drew.
+        if let Some(source) = self.draw_l_per_min_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.mains_temp_c_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.appliance_draw_source.as_mut() {
+            source.reset();
+        }
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "heating_capacity_w",
+                self.burner_input_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "setpoint_c",
+                self.setpoint_c,
+                hares_types::Unit::Celsius,
+            ),
+            hares_types::ResolvedParameter::new(
+                "tank_volume_m3",
+                self.tank.total_volume_m3(),
+                hares_types::Unit::CubicMeter,
+            ),
+            hares_types::ResolvedParameter::new(
+                "ua_w_k",
+                self.tank.ua_w_per_k(),
+                hares_types::Unit::WattPerKelvin,
+            ),
+        ]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -490,7 +558,7 @@ impl Equipment for GasWH {
             self.burner_on = false;
             return OperatingMode::Off;
         }
-        self.burner_on = self.should_fire();
+        self.burner_on = self.should_fire(env);
         if self.burner_on {
             OperatingMode::Heating
         } else {
@@ -521,7 +589,7 @@ impl Equipment for GasWH {
             if effective_capacity_w > 0.0 {
                 let ideal_w = self.tank.ideal_capacity_for_node(
                     self.burner_node,
-                    self.effective_setpoint_c(),
+                    self.effective_setpoint_c(env),
                     ambient_c,
                     dt_s,
                 );
@@ -597,8 +665,22 @@ impl Equipment for GasWH {
             draw_l_per_min_source,
             mains_temp_c_source,
         )?;
-        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
+        // The wet appliances' untempered draw rides its own schedule column
+        // beside the tempered fixture draw: the full hot withdrawal, at the
+        // hot supply temperature, never mixed with cold mains.
+        let appliance_draw_kg_s = self
+            .appliance_draw_source
+            .as_mut()
+            .map(|source| {
+                source
+                    .value_at(env)
+                    .map_err(|err| {
+                        HaresError::Equipment(format!("{}: {err}", self.descriptor.name))
+                    })
+                    .map(|v| v.max(0.0))
+            })
+            .transpose()?;
+        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_draw_kg_s.unwrap_or(0.0);
         let hot_draw_temp_c = self.hot_draw_temp_c.unwrap_or(self.setpoint_c);
         let tmv = TemperedDrawConfig {
             tempered_draw_temp_c: self.fixture_delivery_temp_c,
@@ -607,7 +689,8 @@ impl Equipment for GasWH {
         };
         let tempered_flow_m3_s =
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
-        let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
+        let hot_flow_m3_s =
+            appliance_draw_kg_s.unwrap_or(0.0) / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
             TemperedDrawInputs {
                 ambient_temp_c: ambient_c,
@@ -653,13 +736,13 @@ impl Equipment for GasWH {
         };
         // Rule R1: Q from the already-computed fan power (never through the
         // real-power ZIP polynomial); fan motor pf 0.87 by class default.
-        let fan_reactive_kvar = self
+        let fan_reactive_var = self
             .zip
-            .reactive_kvar(power_w_to_kw(fan_electric_w), env.grid.bus_voltage_pu());
+            .reactive_var(fan_electric_w, env.grid.bus_voltage_pu());
         if fan_electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: fan_electric_w,
-                reactive_power_kvar: fan_reactive_kvar,
+                reactive_power_var: fan_reactive_var,
             })?;
         }
 
@@ -701,16 +784,14 @@ impl Equipment for GasWH {
             .set(tk::PILOT_HEAT_TO_WATER_W, pilot_heat_to_water_w);
         self.telemetry
             .set(tk::PILOT_HEAT_TO_AMBIENT_W, pilot_heat_to_ambient_w);
-        self.telemetry
-            .set(tk::PILOT_KW, power_w_to_kw(self.pilot_power_w));
-        self.telemetry
-            .set(tk::FUEL_INPUT_KW, power_w_to_kw(fuel_input_w));
+        self.telemetry.set(tk::PILOT_KW, self.pilot_power_w);
+        self.telemetry.set(tk::FUEL_INPUT_KW, fuel_input_w);
         self.telemetry.set(tk::FLUE_LOSS_W, flue_loss_w);
         self.telemetry
             .set(tk::SKIN_LOSS_W, skin_loss_to_surroundings_w);
         self.telemetry.set(tk::FAN_ELECTRIC_W, fan_electric_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, fan_reactive_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, fan_reactive_var);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
@@ -727,10 +808,8 @@ impl Equipment for GasWH {
         self.tank.update_node_telemetry(&mut self.telemetry);
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(
-                    power_w_to_kw(fan_electric_w).max(0.0),
-                )),
-                reactive_power_kvar: Some(fan_reactive_kvar),
+                electric_w: Some(ElectricPower::Consumption((fan_electric_w).max(0.0))),
+                reactive_power_var: Some(fan_reactive_var),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
@@ -772,6 +851,10 @@ impl Equipment for GasWH {
         Some(self.zip)
     }
 
+    fn stored_energy_j(&self) -> Option<f64> {
+        Some(self.tank.stored_energy_j())
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &GasWhState {
@@ -787,13 +870,25 @@ impl Equipment for GasWH {
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 flue_loss_w: self.telemetry.get(tk::FLUE_LOSS_W).unwrap_or(0.0),
                 fan_electric_w: self.telemetry.get(tk::FAN_ELECTRIC_W).unwrap_or(0.0),
-                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
+                reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
                 dr_load_fraction: self.dr_load_fraction,
                 dr_duration_remaining_s: self.dr_duration_remaining_s,
                 pilot_fraction_to_tank: self.pilot_fraction_to_tank,
+                draw_source_state: self
+                    .draw_l_per_min_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                mains_source_state: self
+                    .mains_temp_c_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                appliance_draw_source_state: self
+                    .appliance_draw_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
             },
             Self::checkpoint_version(),
             "GasWH",
@@ -818,6 +913,12 @@ impl Equipment for GasWH {
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
         self.tank.load_state(&decoded.tank_state)?;
         self.pilot_fraction_to_tank = decoded.pilot_fraction_to_tank;
+        restore_optional_source(&mut self.draw_l_per_min_source, decoded.draw_source_state)?;
+        restore_optional_source(&mut self.mains_temp_c_source, decoded.mains_source_state)?;
+        restore_optional_source(
+            &mut self.appliance_draw_source,
+            decoded.appliance_draw_source_state,
+        )?;
 
         self.telemetry
             .insert(tk::TANK_AVG_TEMP_C, decoded.tank_avg_temp_c);
@@ -827,15 +928,14 @@ impl Equipment for GasWH {
             .insert(tk::PILOT_POWER_W, decoded.pilot_power_w);
         self.telemetry
             .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
+        self.telemetry.insert(tk::PILOT_KW, decoded.pilot_power_w);
         self.telemetry
-            .insert(tk::PILOT_KW, power_w_to_kw(decoded.pilot_power_w));
-        self.telemetry
-            .insert(tk::FUEL_INPUT_KW, power_w_to_kw(decoded.fuel_input_w));
+            .insert(tk::FUEL_INPUT_KW, decoded.fuel_input_w);
         self.telemetry.insert(tk::FLUE_LOSS_W, decoded.flue_loss_w);
         self.telemetry
             .insert(tk::FAN_ELECTRIC_W, decoded.fan_electric_w);
         self.telemetry
-            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_var);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -846,7 +946,7 @@ impl Equipment for GasWH {
         self.telemetry.insert(tk::PILOT_HEAT_TO_AMBIENT_W, 0.0);
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the flows from the
-        // checkpointed `fan_electric_w`/`reactive_power_kvar`/
+        // checkpointed `fan_electric_w`/`reactive_power_var`/
         // `fuel_input_w`, the mode re-derived by the step's own rule
         // (burner dispatch → `resolve_idle` on the restored nonzero
         // flow). `CoreOutput::default()` (all fields `None`) violates the
@@ -862,10 +962,10 @@ impl Equipment for GasWH {
         .resolve_idle(has_nonzero_flow, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(
-                    power_w_to_kw(decoded.fan_electric_w).max(0.0),
+                electric_w: Some(ElectricPower::Consumption(
+                    (decoded.fan_electric_w).max(0.0),
                 )),
-                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                reactive_power_var: Some(decoded.reactive_power_var),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: decoded.fuel_input_w.max(0.0),
@@ -909,12 +1009,14 @@ impl Equipment for GasWH {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } if self.burner_input_w > 0.0 => {
-                let max_fraction =
-                    (power_kw_to_w(*max_power_kw) / self.burner_input_w).clamp(0.0, 1.0);
+            ControlSignal::PowerLimit { max_power_w, .. } if self.burner_input_w > 0.0 => {
+                let max_fraction = (max_power_w / self.burner_input_w).clamp(0.0, 1.0);
                 self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
@@ -986,108 +1088,78 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::TANK_AVG_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Volume-weighted average tank temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::BURNER_EFFICIENCY.to_string(),
-            unit: "fraction".to_string(),
-            description: "Resolved burner efficiency (conversion_efficiency, EF, or UEF-derived)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::BURNER_EFFICIENCY_SOURCE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Default, 1=ConversionEfficiency, 2=EnergyFactor, 3=UniformEnergyFactor"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::BURNER_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas burner thermal input power".to_string(),
-        },
-        TelemetryField {
-            name: tk::PILOT_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Pilot light fuel input power (continuous)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Total fuel consumption rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::PILOT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Pilot light fuel input power".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total fuel consumption rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::FLUE_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Heat loss to flue (excluded from zone thermal gains)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FAN_ELECTRIC_W.to_string(),
-            unit: "W".to_string(),
-            description: "Auxiliary electric fan draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Domestic hot water draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::UNMET_LOAD_W.to_string(),
-            unit: "W".to_string(),
-            description: "Unmet fixture load when tank below delivery temp".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::OUTLET_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Hot water outlet temperature delivered to fixture".to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::TANK_AVG_TEMP_C,
+            "Volume-weighted average tank temperature",
+        ),
+        TelemetryField::ratio_fraction(
+            tk::BURNER_EFFICIENCY,
+            "Resolved burner efficiency (conversion_efficiency, EF, or UEF-derived)",
+        ),
+        TelemetryField::code_code(
+            tk::BURNER_EFFICIENCY_SOURCE,
+            &[
+                "Default",
+                "ConversionEfficiency",
+                "EnergyFactor",
+                "UniformEnergyFactor",
+            ],
+            "0=Default, 1=ConversionEfficiency, 2=EnergyFactor, 3=UniformEnergyFactor",
+        ),
+        TelemetryField::power_w(tk::BURNER_POWER_W, "Gas burner thermal input power"),
+        TelemetryField::power_w(
+            tk::PILOT_POWER_W,
+            "Pilot light fuel input power (continuous)",
+        ),
+        TelemetryField::power_w(tk::FUEL_INPUT_W, "Total fuel consumption rate"),
+        TelemetryField::power_kw(tk::PILOT_KW, "Pilot light fuel input power"),
+        TelemetryField::power_kw(tk::FUEL_INPUT_KW, "Total fuel consumption rate"),
+        TelemetryField::power_w(
+            tk::FLUE_LOSS_W,
+            "Heat loss to flue (excluded from zone thermal gains)",
+        ),
+        TelemetryField::power_w(tk::FAN_ELECTRIC_W, "Auxiliary electric fan draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Domestic hot water draw flow rate",
+        ),
+        TelemetryField::power_w(
+            tk::UNMET_LOAD_W,
+            "Unmet fixture load when tank below delivery temp",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::OUTLET_TEMP_C,
+            "Hot water outlet temperature delivered to fixture",
+        ),
     ];
     for i in 0..n_nodes {
-        fields.push(TelemetryField {
-            name: tk::tank_node_key(i),
-            unit: "C".to_string(),
-            description: format!("Tank node {i} temperature"),
-        });
+        fields.push(TelemetryField::temp_c_owned(
+            tk::tank_node_key(i),
+            format!("Tank node {i} temperature"),
+        ));
     }
-    fields.push(TelemetryField {
-        name: tk::SKIN_LOSS_W.to_string(),
-        unit: "W".to_string(),
-        description:
-            "Tank jacket (skin) and pilot heat loss to the surrounding zone or ambient location"
-                .to_string(),
-    });
-    fields.push(TelemetryField {
-        name: tk::PILOT_HEAT_TO_WATER_W.to_string(),
-        unit: "W".to_string(),
-        description: "Pilot thermal power routed to tank water".to_string(),
-    });
-    fields.push(TelemetryField {
-        name: tk::PILOT_HEAT_TO_AMBIENT_W.to_string(),
-        unit: "W".to_string(),
-        description: "Pilot thermal power routed to ambient zone".to_string(),
-    });
+    fields.push(TelemetryField::power_w(
+        tk::SKIN_LOSS_W,
+        "Tank jacket (skin) and pilot heat loss to the surrounding zone or ambient location",
+    ));
+    fields.push(TelemetryField::power_w(
+        tk::PILOT_HEAT_TO_WATER_W,
+        "Pilot thermal power routed to tank water",
+    ));
+    fields.push(TelemetryField::power_w(
+        tk::PILOT_HEAT_TO_AMBIENT_W,
+        "Pilot thermal power routed to ambient zone",
+    ));
     fields
 }
 
@@ -1114,6 +1186,7 @@ mod tests {
         ZoneState, telemetry_keys as tk,
     };
 
+    use super::DEFAULT_BURNER_EFFICIENCY;
     use super::GasWH;
     use crate::{Equipment, EquipmentConfig};
     use hares_types::AmbientLocation;
@@ -1148,6 +1221,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1186,6 +1260,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(50.0),
                 flue_loss_fraction: Some(0.2),
                 skin_loss_fraction: None,
@@ -1194,7 +1269,7 @@ mod tests {
                 zone_type: None,
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
-                conversion_efficiency: None,
+                conversion_efficiency: Some(DEFAULT_BURNER_EFFICIENCY),
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
                 pilot_fraction_to_tank: None,
@@ -1288,6 +1363,33 @@ mod tests {
         );
     }
 
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the gas WH back to its own thermostat.
+    #[test]
+    fn mode_release_returns_the_burner_to_its_own_thermostat() {
+        use hares_types::{ControlSignal, OperatingMode};
+
+        let mut eq = GasWH::new(config());
+        eq.init(&config(), &env(21.0)).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        assert_eq!(eq.update_control(&env(21.0)), OperatingMode::Off);
+        assert!(!eq.burner_on, "the forced-off burner must not fire");
+
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        let mode = eq.update_control(&env(21.0));
+        assert_eq!(
+            mode,
+            OperatingMode::Heating,
+            "tank at 40°C is below the 50°C call edge: the release must let the burner fire again"
+        );
+        assert!(eq.burner_on);
+    }
+
     /// Reactive-power contract for the gas WH draft-inducer fan: the class
     /// row resolves to the FAN coefficients (pf 0.87), the REACTIVE
     /// capability is declared, and port/CoreOutput/telemetry agree. This
@@ -1315,10 +1417,10 @@ mod tests {
             "Rule R1: real side must be constant power"
         );
         // Q/P = tan(acos(0.87)) at nominal voltage (reactive base sums to 1).
-        let p_kw = 0.05;
-        let q = eq.zip.reactive_kvar(p_kw, 1.0);
+        let p_w = 0.05;
+        let q = eq.zip.reactive_var(p_w, 1.0);
         assert!(
-            (q - p_kw * 0.87_f64.acos().tan()).abs() < 1e-9,
+            (q - p_w * 0.87_f64.acos().tan()).abs() < 1e-9,
             "draft fan Q/P must match tan(acos(0.87)), got {q}"
         );
 
@@ -1327,14 +1429,14 @@ mod tests {
         let co_q = eq
             .core_output()
             .flows
-            .reactive_power_kvar
+            .reactive_power_var
             .expect("REACTIVE declared ⇒ CoreOutput Q must be Some");
         assert_eq!(
             co_q.to_bits(),
-            ports.electrical.reactive_power_kvar.to_bits()
+            ports.electrical.reactive_power_var.to_bits()
         );
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(co_q));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 
@@ -1370,11 +1472,11 @@ mod tests {
         assert_eq!(eq_fan.telemetry().get(tk::FAN_ELECTRIC_W), Some(fan_w));
         assert_eq!(p_fan.electrical.load_power_w, fan_w);
         // Q = P·tan(acos(0.87)) at nominal voltage (fan-motor class row).
-        let expected_q = (fan_w / 1000.0) * 0.87_f64.acos().tan();
+        let expected_q = fan_w * 0.87_f64.acos().tan();
         assert!(
-            (p_fan.electrical.reactive_power_kvar - expected_q).abs() < 1e-12,
+            (p_fan.electrical.reactive_power_var - expected_q).abs() < 1e-9,
             "fan reactive power must follow pf 0.87, got {}",
-            p_fan.electrical.reactive_power_kvar
+            p_fan.electrical.reactive_power_var
         );
 
         // The fan is a vented parasitic: no effect on tank heat or fuel.
@@ -1417,7 +1519,7 @@ mod tests {
         assert!(p.fuel.get(hares_types::FuelType::Gas) > 0.0);
         assert_eq!(eq.telemetry().get(tk::FAN_ELECTRIC_W), Some(0.0));
         assert_eq!(p.electrical.load_power_w, 0.0);
-        assert_eq!(p.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(p.electrical.reactive_power_var, 0.0);
 
         // Restoration: the fan draw returns with the firing burner.
         env.grid.voltage_pu = 1.0;
@@ -1575,8 +1677,12 @@ mod tests {
         restored.init(&config(), &env(21.0)).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a gas WH checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a gas WH checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -1597,11 +1703,75 @@ mod tests {
         assert_eq!(restored.tank.node_temps(), eq.tank.node_temps());
     }
 
+    /// The draw source's position rides in the checkpoint: a restore
+    /// continues the stochastic draw where the saved run left it, so the
+    /// restored run's next draw equals the saved run's next draw. A
+    /// checkpoint without the source state would rewind the draw to its
+    /// seed and read a different flow.
+    #[test]
+    fn checkpoint_restore_continues_the_stochastic_draw_source() {
+        use hares_types::{DayFilter, DistributionKind, ScheduleSourceConfig, TimeWindow};
+
+        let mut typed: crate::GasWaterHeaterConfig = config().typed().unwrap();
+        typed.draw_flow_rate_source = Some(ScheduleSourceConfig::TimeWindows {
+            windows: vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                0.02,
+                DistributionKind::LogNormal {
+                    mu: 0.0,
+                    sigma: 0.5,
+                },
+                Some(0.0),
+                None,
+            )],
+            default: Some(0.02),
+            seed: Some([7u8; 32]),
+        });
+        let wh_config =
+            EquipmentConfig::from_typed("GWH".to_string(), "Gas Water Heater".to_string(), typed)
+                .unwrap();
+        let step_env = env(21.0);
+        let mut wh = GasWH::new(wh_config.clone());
+        wh.init(&wh_config, &step_env).unwrap();
+
+        // Advance the stochastic draw a few steps, then checkpoint.
+        let mut p = ports();
+        for _ in 0..3 {
+            wh.step(&step_env, Duration::from_secs(60), &mut p).unwrap();
+        }
+        let saved = wh.save_state().unwrap();
+
+        // The saved run's next draw.
+        let mut p = ports();
+        wh.step(&step_env, Duration::from_secs(60), &mut p).unwrap();
+        let flow_after_save = wh
+            .telemetry()
+            .get(tk::DRAW_FLOW_RATE_KG_S)
+            .expect("draw flow");
+
+        // The restored run's next draw: the source continues, not rewinds.
+        wh.load_state(&saved).unwrap();
+        let mut p = ports();
+        wh.step(&step_env, Duration::from_secs(60), &mut p).unwrap();
+        let flow_restored = wh
+            .telemetry()
+            .get(tk::DRAW_FLOW_RATE_KG_S)
+            .expect("draw flow");
+        assert_eq!(
+            flow_restored.to_bits(),
+            flow_after_save.to_bits(),
+            "the restored run's next draw must be the saved run's next draw: the draw \
+             source's position rides in the checkpoint"
+        );
+    }
+
     /// Checkpoint round-trip: REACTIVE_POWER_KVAR telemetry must survive
     /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
     /// of ELECTRIC_KW and other per-step telemetry.
     #[test]
-    fn state_round_trip_preserves_reactive_power_kvar() {
+    fn state_round_trip_preserves_reactive_power_var() {
         let mut eq = GasWH::new(config());
         eq.init(&config(), &env(21.0)).unwrap();
 
@@ -1917,15 +2087,13 @@ mod tests {
         let mut p = ports();
         eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
 
-        let fuel_input_w = eq
-            .telemetry()
+        eq.telemetry()
             .get(tk::FUEL_INPUT_W)
             .expect("FUEL_INPUT_W must be present");
-        let pilot_kw = eq
-            .telemetry()
+        eq.telemetry()
             .get(tk::PILOT_KW)
             .expect("PILOT_KW must be present");
-        let fuel_input_kw = eq
+        let fuel_input_w = eq
             .telemetry()
             .get(tk::FUEL_INPUT_KW)
             .expect("FUEL_INPUT_KW must be present");
@@ -1935,22 +2103,20 @@ mod tests {
             "burner must be firing for this test to be meaningful"
         );
         assert!(
-            (fuel_input_kw - fuel_input_w / 1_000.0).abs() < 1e-9,
-            "fuel_input_kw {fuel_input_kw:.6} must equal fuel_input_w/1000 {:.6}",
-            fuel_input_w / 1_000.0
+            fuel_input_w > 0.0,
+            "the fuel input sub-meter must be nonzero; got {fuel_input_w}"
         );
         let pilot_w = eq
             .telemetry()
             .get(tk::PILOT_POWER_W)
             .expect("PILOT_POWER_W must be present");
         assert!(
-            (pilot_kw - pilot_w / 1_000.0).abs() < 1e-9,
-            "pilot_kw {pilot_kw:.6} must equal pilot_power_w/1000 {:.6}",
-            pilot_w / 1_000.0
+            pilot_w > 0.0,
+            "the pilot sub-meter must be nonzero; got {pilot_w}"
         );
         assert!(
-            pilot_kw <= fuel_input_kw,
-            "pilot_kw {pilot_kw:.6} must not exceed fuel_input_kw {fuel_input_kw:.6}"
+            pilot_w <= fuel_input_w,
+            "pilot_w {pilot_w:.6} must not exceed fuel_input_w {fuel_input_w:.6}"
         );
     }
 
@@ -2032,6 +2198,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(0.0),
                 flue_loss_fraction: Some(0.0),
                 skin_loss_fraction: None,
@@ -2089,6 +2256,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(0.0),
                 flue_loss_fraction: Some(flue_loss_fraction),
                 skin_loss_fraction: None,
@@ -2351,26 +2519,22 @@ mod tests {
     }
 
     #[test]
-    fn default_efficiency_source_is_zero() {
-        // When no efficiency inputs are provided, source should be 0 (Default).
+    fn gas_water_heater_without_efficiency_is_an_error() {
+        // When no efficiency input is provided, construction fails naming
+        // the water heater: the built-in 0.78 it used to fall back to would
+        // silently re-rate the burner.
         let cfg = config_with_extras(&[
             ("conversion_efficiency", None),
             ("energy_factor", None),
             ("uniform_energy_factor", None),
         ]);
         let mut eq = GasWH::new(cfg.clone());
-        eq.init(&cfg, &env(21.0)).unwrap();
-
+        let err = eq
+            .init(&cfg, &env(21.0))
+            .expect_err("a gas water heater with no efficiency field is a construction error");
         assert!(
-            (eq.burner_efficiency_constant - super::DEFAULT_BURNER_EFFICIENCY).abs() < 1e-9,
-            "fallback should use DEFAULT_BURNER_EFFICIENCY"
-        );
-        assert_eq!(
-            eq.telemetry()
-                .get(tk::BURNER_EFFICIENCY_SOURCE)
-                .unwrap_or(-1.0),
-            0.0,
-            "source must be 0 (Default)"
+            err.to_string().contains("GWH"),
+            "the error names the water heater, got: {err}"
         );
     }
 
@@ -2613,6 +2777,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(50.0),
                 flue_loss_fraction: Some(0.2),
                 skin_loss_fraction: None,
@@ -2621,7 +2786,7 @@ mod tests {
                 zone_type: Some(zone_type.to_string()),
                 first_hour_rating_m3: None,
                 jacket_r_value_m2_k_w: None,
-                conversion_efficiency: None,
+                conversion_efficiency: Some(DEFAULT_BURNER_EFFICIENCY),
                 fixture_delivery_temp_c: None,
                 hot_draw_temp_c: None,
                 pilot_fraction_to_tank: None,

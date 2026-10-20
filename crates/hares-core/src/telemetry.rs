@@ -1,11 +1,11 @@
 //! Dwelling telemetry payloads used by control and RL integrations.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::BTreeMap;
 
-use chrono::{DateTime, FixedOffset, Timelike};
-use hares_types::HaresError;
-use hares_types::normalize_ascii;
+use chrono::{DateTime, FixedOffset};
+use hares_types::{HaresError, ZoneId};
+
+use crate::observation::{ObservationPlan, ObservationSurface, telemetry_observe_into};
 
 /// Dense telemetry snapshot for one dwelling timestep.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,21 +17,21 @@ pub struct DwellingTelemetry {
     pub equipment_names: Vec<String>,
     pub equipment_modes: Vec<f64>,
     pub equipment_soc: Vec<f64>,
-    pub equipment_power_kw: Vec<f64>,
+    pub equipment_power_w: Vec<f64>,
     pub setpoint_heat_c: Vec<f64>,
     pub setpoint_cool_c: Vec<f64>,
     /// Per-zone energy balance residual (W) from the zone-air first-law check.
     /// One entry per zone in the same order as `zone_names`.
     pub energy_balance_residuals: Vec<f64>,
-    pub total_power_kw: f64,
-    pub reactive_power_kvar: f64,
-    /// Load (kW) the island sources failed to cover during islanded operation
+    pub total_power_w: f64,
+    pub reactive_power_var: f64,
+    /// Load (W) the island sources failed to cover during islanded operation
     /// (would-be phantom grid import). Always 0.0 when not islanded.
-    pub island_unserved_kw: f64,
-    /// Surplus on-site generation (kW) the island could not absorb during
+    pub island_unserved_w: f64,
+    /// Surplus on-site generation (W) the island could not absorb during
     /// islanded operation (would-be phantom grid export). Always 0.0 when not
     /// islanded.
-    pub island_excess_kw: f64,
+    pub island_excess_w: f64,
     pub outdoor_temp_c: f64,
     /// Outdoor humidity ratio [kg water / kg dry air], typically 0.001–0.030.
     pub outdoor_humidity_ratio: f64,
@@ -52,11 +52,19 @@ pub struct DwellingTelemetry {
     pub initialized: bool,
 }
 
-/// Throttle gate: warn once per process when actor_telemetry dot-notation resolution is used.
-static WARNED_ACTOR_TELEMETRY_DOT: AtomicBool = AtomicBool::new(false);
-
-/// Throttle gate: warn once per process when actor_telemetry bare-name resolution is used.
-static WARNED_ACTOR_TELEMETRY_BARE: AtomicBool = AtomicBool::new(false);
+/// Per-run warn-once gates for the observation dispatch's actor-telemetry
+/// fallbacks. The run's dwelling owns the state and the caller that owns
+/// the run's observation field list threads it through the dispatch, so
+/// the first dot-notation and bare-name fallback resolution in a run each
+/// warn once, and a fresh run (a dwelling rebuilt from its blueprint)
+/// starts with fresh gates instead of inheriting the previous run's.
+#[derive(Debug, Default, Clone)]
+pub struct ObservationWarnOnce {
+    /// The dot-notation fallback (`<actor>.<channel>`) warned this run.
+    pub(crate) dot: bool,
+    /// The bare-name fallback warned this run.
+    pub(crate) bare: bool,
+}
 
 impl DwellingTelemetry {
     /// Verifies that the per-equipment electric power sum matches the
@@ -67,167 +75,37 @@ impl DwellingTelemetry {
     /// with a typed error.
     pub fn verify_consistency(
         step: u64,
-        sum_equipment_power_kw: f64,
-        total_power_kw: f64,
+        sum_equipment_power_w: f64,
+        total_power_w: f64,
     ) -> Result<(), HaresError> {
-        let tolerance = 0.001_f64.max(1e-6 * total_power_kw.abs());
-        let diff = (sum_equipment_power_kw - total_power_kw).abs();
+        let tolerance = 0.001_f64.max(1e-6 * total_power_w.abs());
+        let diff = (sum_equipment_power_w - total_power_w).abs();
         if diff > tolerance {
             return Err(HaresError::InvalidState(format!(
                 "telemetry electrical consistency at step {step}: \
-                 sum(equipment_power_kw) {sum_equipment_power_kw:.6} kW does not match \
-                 total_power_kw {total_power_kw:.6} kW (diff {diff:.6} kW)"
+                 sum(equipment_power_w) {sum_equipment_power_w:.6} kW does not match \
+                 total_power_w {total_power_w:.6} kW (diff {diff:.6} kW)"
             )));
         }
         Ok(())
     }
 
     /// Selects named observation channels into a flat contiguous vector.
-    pub fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError> {
+    ///
+    /// `warned` is the run's own [`ObservationWarnOnce`] state, supplied by
+    /// the caller that owns the field list across the run; the fallback
+    /// resolutions consume it so each warns once per run.
+    pub fn observation_vec(
+        &self,
+        fields: &[&str],
+        warned: &mut ObservationWarnOnce,
+    ) -> Result<Vec<f64>, HaresError> {
         if !self.initialized {
             return Ok(vec![f64::NAN; fields.len()]);
         }
-        let mut out = Vec::with_capacity(fields.len());
-        let zone_index = index_map(&self.zone_names);
-        let equip_index = index_map(&self.equipment_names);
-
-        for &field in fields {
-            if field == "outdoor_temp" {
-                out.push(self.outdoor_temp_c);
-                continue;
-            }
-            if field == "outdoor_humidity_ratio" {
-                out.push(self.outdoor_humidity_ratio);
-                continue;
-            }
-            if field == "total_electric_kw" || field == "total_power_kw" {
-                out.push(self.total_power_kw);
-                continue;
-            }
-            if field == "reactive_power_kvar" {
-                out.push(self.reactive_power_kvar);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "zone_temp") {
-                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown zone in field `{field}`"))
-                })?;
-                out.push(self.zone_temperatures_c[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "setpoint_heat") {
-                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown zone in field `{field}`"))
-                })?;
-                out.push(self.setpoint_heat_c[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "setpoint_cool") {
-                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown zone in field `{field}`"))
-                })?;
-                out.push(self.setpoint_cool_c[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "zone_energy_balance") {
-                let idx = *zone_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown zone in field `{field}`"))
-                })?;
-                out.push(self.energy_balance_residuals[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "equipment_soc") {
-                let idx = *equip_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown equipment in field `{field}`"))
-                })?;
-                out.push(self.equipment_soc[idx]);
-                continue;
-            }
-            if let Some(name) = bracket_name(field, "equipment_power") {
-                let idx = *equip_index.get(&normalize_ascii(name)).ok_or_else(|| {
-                    HaresError::Control(format!("unknown equipment in field `{field}`"))
-                })?;
-                out.push(self.equipment_power_kw[idx]);
-                continue;
-            }
-
-            // Flat aliases used in architecture docs for single-instance cases.
-            if field == "battery_soc" {
-                let idx = single_instance_alias(&equip_index, "Battery", field)?;
-                out.push(self.equipment_soc[idx]);
-                continue;
-            }
-            if field == "ev_soc" {
-                let idx = single_instance_alias(&equip_index, "Electric Vehicle", field)?;
-                out.push(self.equipment_soc[idx]);
-                continue;
-            }
-
-            // Temporal encoding: sin/cos of fractional hour for diurnal RL patterns.
-            if field == "time_sin" {
-                let fhour = self.current_time.hour() as f64
-                    + self.current_time.minute() as f64 / 60.0
-                    + self.current_time.second() as f64 / 3600.0;
-                out.push((2.0 * std::f64::consts::PI * fhour / 24.0).sin());
-                continue;
-            }
-            if field == "time_cos" {
-                let fhour = self.current_time.hour() as f64
-                    + self.current_time.minute() as f64 / 60.0
-                    + self.current_time.second() as f64 / 3600.0;
-                out.push((2.0 * std::f64::consts::PI * fhour / 24.0).cos());
-                continue;
-            }
-
-            // Actor telemetry fallback: dot-separated <actor>.<channel>.
-            let mut found_in_actors = false;
-            if let Some((actor_name, channel_name)) = field.split_once('.')
-                // allowed: actor_telemetry keys are user-defined strings, not static tk:: constants
-                && let Some(channels) = self.actor_telemetry.get(actor_name)
-                && let Some(&value) = channels.get(channel_name)
-            {
-                if WARNED_ACTOR_TELEMETRY_DOT
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    tracing::warn!(
-                        field = field,
-                        actor_telemetry_key = channel_name,
-                        "resolving observation field via actor_telemetry (throttled to once per process)"
-                    );
-                }
-                out.push(value);
-                found_in_actors = true;
-            }
-            // Bare field name: search all actors in sorted-name order
-            // (BTreeMap), so duplicate channel names always resolve to the
-            // lexicographically-first actor's value.
-            if !found_in_actors {
-                for channels in self.actor_telemetry.values() {
-                    if let Some(&value) = channels.get(field) {
-                        if WARNED_ACTOR_TELEMETRY_BARE
-                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                            .is_ok()
-                        {
-                            tracing::warn!(
-                                field = field,
-                                "resolving observation field via actor_telemetry (bare name, throttled to once per process)"
-                            );
-                        }
-                        out.push(value);
-                        found_in_actors = true;
-                        break;
-                    }
-                }
-            }
-            if found_in_actors {
-                continue;
-            }
-
-            return Err(HaresError::Control(format!(
-                "unknown telemetry field key `{field}`"
-            )));
-        }
+        let plan = ObservationPlan::from_telemetry(self, fields, warned)?;
+        let mut out = vec![0.0; fields.len()];
+        telemetry_observe_into(self, &plan, &mut out)?;
 
         #[cfg(feature = "observe")]
         tracing::debug!(
@@ -238,42 +116,44 @@ impl DwellingTelemetry {
 
         Ok(out)
     }
-}
 
-fn index_map(names: &[String]) -> HashMap<String, usize> {
-    // normalize_ascii(s) = s.trim().to_ascii_lowercase() (hares-types/src/text.rs:11).
-    // Equivalent to Python's name.strip().lower() for ASCII input — HARES zone and
-    // equipment names are always ASCII, so the two index maps resolve identically.
-    names
-        .iter()
-        .enumerate()
-        .map(|(idx, name)| (normalize_ascii(name), idx))
-        .collect()
-}
-
-fn bracket_name<'a>(field: &'a str, key: &str) -> Option<&'a str> {
-    let prefix = format!("{key}[");
-    field
-        .strip_prefix(&prefix)
-        .and_then(|tail| tail.strip_suffix(']'))
-}
-
-fn single_instance_alias(
-    equip_index: &HashMap<String, usize>,
-    canonical_name: &str,
-    field: &str,
-) -> Result<usize, HaresError> {
-    if let Some(&idx) = equip_index.get(&normalize_ascii(canonical_name)) {
-        return Ok(idx);
+    /// A thin wrapper over the frozen observation plan: the fields resolve
+    /// once into an [`ObservationPlan`] and the same executor
+    /// `Dwelling::observe_into` runs on the live dwelling fills the vector
+    /// from this snapshot, so the two readers produce the same values on
+    /// bits by construction. A one-shot read: the fallback warnings consume
+    /// a throwaway run's warn gates.
+    pub fn to_observation_vec(&self, fields: &[&str]) -> Result<Vec<f64>, HaresError> {
+        self.observation_vec(fields, &mut ObservationWarnOnce::default())
     }
-    Err(HaresError::Control(format!(
-        "field `{field}` alias requires `{canonical_name}` equipment"
-    )))
+
+    /// The names the plan resolves against this snapshot: the zone names
+    /// in their (sorted) vector order with no zone ids of their own, the
+    /// equipment names and the actors' published channels in sorted-name
+    /// order.
+    pub(crate) fn observation_surface(&self) -> ObservationSurface {
+        ObservationSurface {
+            zone_names: self
+                .zone_names
+                .iter()
+                .map(|name| (name.clone(), ZoneId(0)))
+                .collect(),
+            equipment_names: self.equipment_names.clone(),
+            actors: self
+                .actor_telemetry
+                .iter()
+                .map(|(name, channels)| {
+                    (name.clone(), channels.keys().cloned().collect::<Vec<_>>())
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::DwellingTelemetry;
+    use super::ObservationWarnOnce;
     use chrono::{FixedOffset, TimeZone};
     use std::collections::BTreeMap;
 
@@ -290,14 +170,14 @@ mod tests {
             equipment_names: vec!["Battery".to_string()],
             equipment_modes: vec![1.0],
             equipment_soc: vec![0.5],
-            equipment_power_kw: vec![1.2],
+            equipment_power_w: vec![1.2],
             setpoint_heat_c: vec![20.0],
             setpoint_cool_c: vec![24.0],
             energy_balance_residuals: vec![0.0],
-            total_power_kw: 1.2,
-            reactive_power_kvar: 0.0,
-            island_unserved_kw: 0.0,
-            island_excess_kw: 0.0,
+            total_power_w: 1.2,
+            reactive_power_var: 0.0,
+            island_unserved_w: 0.0,
+            island_excess_w: 0.0,
             outdoor_temp_c: 10.0,
             outdoor_humidity_ratio: 0.008,
             actor_telemetry: BTreeMap::new(),
@@ -325,7 +205,7 @@ mod tests {
         let fields = &[
             "outdoor_temp",
             "zone_temp[Indoor]",
-            "total_power_kw",
+            "total_power_w",
             "equipment_soc[Battery]",
             "setpoint_heat[Indoor]",
         ];
@@ -339,8 +219,8 @@ mod tests {
         let base = &[
             "outdoor_temp",
             "outdoor_humidity_ratio",
-            "total_power_kw",
-            "reactive_power_kvar",
+            "total_power_w",
+            "reactive_power_var",
             "zone_temp[Indoor]",
             "setpoint_heat[Indoor]",
             "setpoint_cool[Indoor]",
@@ -360,8 +240,8 @@ mod tests {
     #[test]
     fn observation_vec_includes_reactive_power() {
         let mut t = sample();
-        t.reactive_power_kvar = 1.5;
-        let obs = t.to_observation_vec(&["reactive_power_kvar"]).unwrap();
+        t.reactive_power_var = 1.5;
+        let obs = t.to_observation_vec(&["reactive_power_var"]).unwrap();
         assert_eq!(obs, vec![1.5]);
     }
 
@@ -400,6 +280,35 @@ mod tests {
         let t = sample();
         let err = t.to_observation_vec(&["outdoor_rh"]).unwrap_err();
         assert!(err.to_string().contains("unknown telemetry field"));
+    }
+
+    #[test]
+    fn actor_telemetry_fallbacks_consume_their_own_run_state_only() {
+        let mut t = sample();
+        t.actor_telemetry.insert(
+            "hp".to_string(),
+            BTreeMap::from([("power".to_string(), 2.0)]),
+        );
+
+        let mut warned = ObservationWarnOnce::default();
+        t.observation_vec(&["hp.power"], &mut warned).unwrap();
+        assert!(
+            warned.dot,
+            "the dot fallback's first use in a run consumes the run's warn gate"
+        );
+        t.observation_vec(&["power"], &mut warned).unwrap();
+        assert!(
+            warned.bare,
+            "the bare fallback's first use in a run consumes its gate"
+        );
+
+        // A fresh state is a fresh run's: nothing is inherited.
+        let mut fresh = ObservationWarnOnce::default();
+        t.observation_vec(&["hp.power"], &mut fresh).unwrap();
+        assert!(
+            fresh.dot && !fresh.bare,
+            "a fresh run's state starts unconsumed"
+        );
     }
 
     #[test]
@@ -579,8 +488,8 @@ mod tests {
         let fields = &[
             "outdoor_temp",
             "outdoor_humidity_ratio",
-            "total_power_kw",
-            "reactive_power_kvar",
+            "total_power_w",
+            "reactive_power_var",
             "zone_temp[Indoor]",
             "setpoint_heat[Indoor]",
             "setpoint_cool[Indoor]",
@@ -603,7 +512,7 @@ mod tests {
     fn to_observation_vec_returns_valid_when_initialized() {
         let t = sample();
         assert!(t.initialized);
-        let fields = &["outdoor_temp", "zone_temp[Indoor]", "total_power_kw"];
+        let fields = &["outdoor_temp", "zone_temp[Indoor]", "total_power_w"];
         let obs = t.to_observation_vec(fields).unwrap();
         assert_eq!(obs.len(), fields.len());
         for &v in &obs {
@@ -633,9 +542,8 @@ mod tests {
     const SCALAR_OBSERVATION_KEYS: &[&str] = &[
         "outdoor_temp",
         "outdoor_humidity_ratio",
-        "total_power_kw",
-        "total_electric_kw",
-        "reactive_power_kvar",
+        "total_power_w",
+        "reactive_power_var",
     ];
 
     /// Bracket-based keys with a known zone.
@@ -660,7 +568,7 @@ mod tests {
         t.equipment_names = vec!["Battery".to_string(), "Electric Vehicle".to_string()];
         t.equipment_soc = vec![0.5, 0.8];
         t.equipment_modes = vec![1.0, 0.0];
-        t.equipment_power_kw = vec![1.2, 0.0];
+        t.equipment_power_w = vec![1.2, 0.0];
         t
     }
 
@@ -678,10 +586,10 @@ mod tests {
     }
 
     #[test]
-    fn reactive_power_kvar_is_observable() {
+    fn reactive_power_var_is_observable() {
         let mut t = sample();
-        t.reactive_power_kvar = 1.5;
-        let obs = t.to_observation_vec(&["reactive_power_kvar"]).unwrap();
+        t.reactive_power_var = 1.5;
+        let obs = t.to_observation_vec(&["reactive_power_var"]).unwrap();
         assert_eq!(obs.len(), 1);
         assert!((obs[0] - 1.5).abs() < f64::EPSILON);
     }

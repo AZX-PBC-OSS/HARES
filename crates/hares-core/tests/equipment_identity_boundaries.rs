@@ -6,6 +6,8 @@
 //! with another equipment's output columns, and the never-reused id
 //! counter's behaviour at the `u32::MAX` boundary.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
@@ -13,7 +15,6 @@ use std::time::Duration as StdDuration;
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig};
 use hares_equipment::Equipment;
-use hares_io::OutputFormat;
 use hares_types::{
     ControlCapabilities, CoreCapabilities, CoreOutput, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, FuelType, HaresError, OperatingMode, PortContribution,
@@ -39,7 +40,7 @@ fn write_fixture_hpxml(dir: &Path) -> PathBuf {
 
 fn sim_config(
     duration: Duration,
-    output_path: Option<PathBuf>,
+    csv_path: Option<PathBuf>,
     verbosity: u8,
 ) -> hares_core::SimulationConfig {
     hares_core::SimulationConfig {
@@ -49,34 +50,42 @@ fn sim_config(
             .unwrap(),
         duration,
         time_res: Duration::seconds(900),
-        output_verbosity: verbosity,
-        write_output: output_path.is_some(),
-        output_path,
-        output_format: OutputFormat::Csv,
+        reports: csv_path
+            .into_iter()
+            .map(|path| hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(verbosity),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path,
+                    overwrite: false,
+                },
+            })
+            .collect(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
 fn dwelling_config(hpxml: &Path, sim: hares_core::SimulationConfig) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, None, 100, None),
     }
 }
 
@@ -102,11 +111,7 @@ impl BoundaryProbe {
                 stage: hares_types::ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::empty(),
-                telemetry_fields: vec![TelemetryField {
-                    name: "probe".to_string(),
-                    unit: "-".to_string(),
-                    description: "identity boundary probe".to_string(),
-                }],
+                telemetry_fields: vec![TelemetryField::ratio("probe", "identity boundary probe")],
                 zone_type: None,
             },
             telemetry: Telemetry::with_capacity(1),
@@ -122,7 +127,8 @@ impl BoundaryProbe {
     fn with_electric_load(mut self, kw: f64) -> Self {
         self.electric_load_kw = kw;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC;
-        self.core_output.flows.electric_kw = Some(ElectricPower::Consumption(kw));
+        // The core flow is W (SI); the probe's kW intent converts once.
+        self.core_output.flows.electric_w = Some(ElectricPower::Consumption(kw * 1000.0));
         self
     }
 }
@@ -130,6 +136,10 @@ impl BoundaryProbe {
 impl Equipment for BoundaryProbe {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
     }
 
     fn rename(&mut self, name: String) {
@@ -166,7 +176,7 @@ impl Equipment for BoundaryProbe {
         if self.electric_load_kw > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: self.electric_load_kw * 1000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })?;
         }
         Ok(())
@@ -203,11 +213,11 @@ impl Equipment for BoundaryProbe {
 fn midrun_add_whose_name_prefix_matches_another_equipment_does_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("prefix_collision.csv");
+    let csv_path = tmp.path().join("prefix_collision.csv");
 
     let mut dwelling = Dwelling::from_config(dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path), 1),
+        sim_config(Duration::days(2), Some(csv_path), 1),
     ))
     .expect("dwelling builds");
 
@@ -364,7 +374,7 @@ fn malformed_explicit_equipment_id_fails_the_build_loudly() {
     let config = dwelling_config(&hpxml, sim_config(Duration::days(1), None, 0));
 
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     let typed = hares_equipment::EquipmentConfig::from_typed(
         "Dehumidifier".to_string(),
         "Dehumidifier".to_string(),
@@ -383,6 +393,8 @@ fn malformed_explicit_equipment_id_fails_the_build_loudly() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     spec.parameters
         .insert("equipment_id".to_string(), json!(-1));
@@ -416,11 +428,11 @@ fn malformed_explicit_equipment_id_fails_the_build_loudly() {
 fn midrun_readd_of_a_removed_name_reuses_its_frozen_columns() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("readd_columns.csv");
+    let csv_path = tmp.path().join("readd_columns.csv");
 
     let mut dwelling = Dwelling::from_config(dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
     ))
     .expect("dwelling builds");
 
@@ -442,7 +454,7 @@ fn midrun_readd_of_a_removed_name_reuses_its_frozen_columns() {
     // (no panic), and its values land in its own columns.
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -453,18 +465,18 @@ fn midrun_readd_of_a_removed_name_reuses_its_frozen_columns() {
         .iter()
         .position(|c| *c == "Clothes Washer Electric Power (kW)")
         .unwrap_or_else(|| panic!("washer column missing; header: {header:?}"));
-    let day2_kwh: f64 = contents
+    let day2_energy_j: f64 = contents
         .lines()
         .skip(1 + 96)
         .filter_map(|l| l.split(',').nth(washer_col))
         .filter_map(|v| v.trim().parse::<f64>().ok())
-        .map(|kw| kw * 0.25)
+        .map(|kw| kw * 0.25 * 3.6e6)
         .sum();
     assert!(
-        day2_kwh > 1.0,
+        day2_energy_j > 3.6e6,
         "the re-added name's frozen columns must carry its output (0.5 kW → \
          ≈12 kWh/day) — a quiet column means the re-add was misclassified as \
-         schema-unknown and its values silently dropped; got {day2_kwh} kWh"
+         schema-unknown and its values silently dropped; got {day2_energy_j} J"
     );
 }
 
@@ -484,7 +496,7 @@ fn malformed_equipment_id_in_the_typed_payload_fails_the_build_loudly() {
     let config = dwelling_config(&hpxml, sim_config(Duration::days(1), None, 0));
 
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     let typed = hares_equipment::EquipmentConfig::with_payload(
         "Dehumidifier".to_string(),
         "Dehumidifier".to_string(),
@@ -505,6 +517,8 @@ fn malformed_equipment_id_in_the_typed_payload_fails_the_build_loudly() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     blueprint.add_equipment_spec(spec).expect("add spec");
 
@@ -554,7 +568,7 @@ fn non_identity_init_failure_is_fatal_after_the_identity_checks() {
     let config = dwelling_config(&hpxml, sim_config(Duration::days(1), None, 0));
 
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     // A valid explicit id (passes the pre-init identity check) plus a
     // non-identity field init cannot accept (a string where an f64 is
     // required): construction defers the parse error to init, and the
@@ -579,6 +593,8 @@ fn non_identity_init_failure_is_fatal_after_the_identity_checks() {
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     };
     blueprint.add_equipment_spec(spec).expect("add spec");
 

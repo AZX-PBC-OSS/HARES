@@ -15,13 +15,14 @@ mod denver_offset;
 #[cfg(test)]
 mod tests {
     use super::denver_offset::denver_offset;
+    use hares_core::DwellingSettings;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
 
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-    use hares_io::OutputFormat;
+    use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 
     fn examples_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/examples")
@@ -35,37 +36,54 @@ mod tests {
         project_root().join("tests/fixtures/parity/beopt_smoke_1h")
     }
 
-    fn beopt_config(output_path: PathBuf) -> DwellingConfig {
+    fn beopt_config(csv_path: PathBuf) -> DwellingConfig {
         DwellingConfig {
-            hpxml_path: examples_dir().join("BEopt_example.xml"),
-            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
-            weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                // Denver local noon (UTC-7).
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(1),
-                time_res: Duration::minutes(1),
-                output_verbosity: 6, // envelope component breakdown
-                output_path: Some(output_path),
-                write_output: true,
-                output_format: OutputFormat::Csv,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            },
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(examples_dir().join("BEopt_example.xml")),
+            schedule: Some(InputSource::Path(
+                examples_dir().join("BEopt_example_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(
+                // The OCHRE reference's zero-order hold of the weather, prepared
+                // by the Python adapter's hold_weather and committed: this test
+                // compares against OCHRE output, so it reads the held file
+                // instead of asking the engine for an override.
+                project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
+            ),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    // Denver local noon (UTC-7).
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(1),
+                    time_res: Duration::minutes(1),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(6), // envelope component breakdown
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path,
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
+                },
+                None,
+                1,
+                None,
+            ),
         }
     }
 
@@ -374,24 +392,19 @@ mod tests {
     #[test]
     fn envelope_oracle_beopt_1h() {
         let output_dir = tempfile::tempdir().expect("temp dir");
-        let output_path = output_dir.path().join("hares_envelope_oracle_beopt.csv");
+        let csv_path = output_dir.path().join("hares_envelope_oracle_beopt.csv");
 
         let engine = SimulationEngine::new();
         let result = engine
-            .run(beopt_config(output_path.clone()))
+            .run(beopt_config(csv_path.clone()))
             .expect("engine.run should succeed");
 
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "simulation failed: {:?}",
-            result.status
-        );
+        let published = result
+            .reports
+            .iter()
+            .find_map(|report| report.path().cloned());
 
-        let actual_path = result
-            .timeseries_path
-            .as_ref()
-            .cloned()
-            .unwrap_or(output_path.clone());
+        let actual_path = published.unwrap_or(csv_path.clone());
 
         assert!(
             actual_path.exists(),
@@ -484,8 +497,10 @@ mod tests {
             "Window heat gain (indoor)",
             &OCHRE_WINDOW_HEAT_GAIN,
             col_mean(&hares, "Window Heat Gain - Indoor (W)"),
-            600.0,
-            "window U-factor, frame effects (OCHRE ballpark; observed +504 %)",
+            650.0,
+            "window U-factor, frame effects (OCHRE ballpark; observed +604 % after \
+             the EnergyPlus weather phase correction: the fixture's only hour is \
+             the run's first hour, which blends from the first day's hour-24 record)",
         ));
 
         // ASHRAE HoF Ch. 15 glazing transmission: window transmitted solar is
@@ -785,17 +800,23 @@ mod tests {
         // temperatures across validated simulation tools. Taking 2 °C as a
         // loose short-window MAE bound is conservative relative to that
         // published residual and catches a fundamental RC construction bug
-        // without demanding OCHRE parity.
+        // without demanding OCHRE parity. The fixture's only hour is the
+        // run's first hour, whose weather now blends from the first day's
+        // hour-24 record under the EnergyPlus rules while OCHRE holds the
+        // noon record: the driver difference adds to the model residual
+        // (measured 2.131 °C after the phase correction), so the bound
+        // carries it at 2.5 °C.
         if let Some(timeseries_mae) = checks
             .iter()
             .find(|c| c.name == "Indoor temp timeseries MAE")
             .map(|c| c.hares)
         {
             assert!(
-                timeseries_mae.is_finite() && timeseries_mae < 2.0,
-                "Indoor timeseries MAE {timeseries_mae:.3} °C exceeds 2 °C bound \
-                 (ASHRAE 140-2017 Table B8-3 annual-mean ±1 °C residual, doubled for \
-                 short-window cycling). HARES envelope construction likely regressed."
+                timeseries_mae.is_finite() && timeseries_mae < 2.5,
+                "Indoor timeseries MAE {timeseries_mae:.3} °C exceeds 2.5 °C bound \
+                 (the ASHRAE 140-2017 ±1 °C residual, doubled for short-window cycling, \
+                 plus this first-hour fixture's measured weather-driver difference). \
+                 HARES envelope construction likely regressed."
             );
         }
 
@@ -820,9 +841,9 @@ mod tests {
         use hares_types::ZoneId;
 
         let output_dir = tempfile::tempdir().expect("temp dir");
-        let output_path = output_dir.path().join("hares_per_equip_oracle.csv");
+        let csv_path = output_dir.path().join("hares_per_equip_oracle.csv");
 
-        let config = beopt_config(output_path.clone());
+        let config = beopt_config(csv_path.clone());
         let mut dwelling = Dwelling::from_config(config).expect("dwelling init");
         dwelling.enable_observer(60);
 

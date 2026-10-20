@@ -4,7 +4,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from ochre_next import Dwelling, DwellingConfig, Fleet, SimulationConfig
+from hares import Destination, Dwelling, DwellingConfig, Fleet, ReportSpec, Selection, SimulationConfig
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "data" / "examples"
@@ -15,8 +15,18 @@ WEATHER = str(EXAMPLES / "USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 
 @pytest.fixture(scope="session")
 def dwelling():
-    """Create a Dwelling from the committed BEopt example inputs."""
-    dw = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, write_output=False)
+    """Create a Dwelling from the committed BEopt example inputs, with the
+    memory report the frame-reading tests read."""
+    dw = Dwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        config=SimulationConfig(
+            start_time="2019-01-01T00:00:00",
+            duration=86400,
+            reports=[ReportSpec("frame", Selection.verbosity(0), Destination.memory())],
+        ),
+    )
     dw.initialize()
     return dw
 
@@ -24,7 +34,8 @@ def dwelling():
 @pytest.fixture(scope="session")
 def simulated_df(dwelling):
     """Run simulate() once and share the resulting DataFrame across tests."""
-    return dwelling.simulate()
+    result = dwelling.simulate()
+    return result.reports[0].table()
 
 
 # One ResStock 2025.1 fixture building (committed): HPXML + schedule + weather.
@@ -42,12 +53,15 @@ def fleet(tmp_path: Path):
         weather=str(BUILDING_WEATHER),
         config=SimulationConfig(
             start_time="2018-01-01T00:00:00-05:00",
-            duration_s=86400,
-            time_res_s=3600,
-            write_output=True,
-            output_path=str(tmp_path / "fleet_bldg0000002.csv"),
+            duration=86400,
+            time_res=3600,
+            reports=[
+                ReportSpec("frame", Selection.verbosity(0), Destination.memory()),
+                ReportSpec("file", Selection.verbosity(0), Destination.csv(str(tmp_path / "fleet_bldg0000002.csv"))),
+            ],
+            metrics=True,
         ),
-        defaults_path=str(ROOT / "defaults"),
+        defaults=str(ROOT / "python" / "hares" / "defaults"),
     )
     return Fleet.from_buildings([config])
 
@@ -57,27 +71,32 @@ def fleet(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_simulate_returns_dataframe(simulated_df):
-    """Verify that simulate() returns a non-empty polars DataFrame with columns."""
-    assert isinstance(simulated_df, pl.DataFrame)
-    assert simulated_df.width > 0, "DataFrame should have at least one column"
-    assert simulated_df.height > 0, "DataFrame should have at least one row"
+def test_simulate_returns_run_result(dwelling):
+    """simulate() returns the run's RunResult whose memory report's table
+    is a non-empty polars DataFrame with columns."""
+    result = dwelling.simulate()
+
+    assert isinstance(result.reports[0].table(), pl.DataFrame)
+    frame = result.reports[0].table()
+    assert frame.width > 0, "DataFrame should have at least one column"
+    assert frame.height > 0, "DataFrame should have at least one row"
 
 
-def test_results_before_simulate_returns_dataframe(dwelling):
-    """Verify results() returns DataFrame even before simulate() (empty batches fallback).
-
-    Note: uses a fresh dwelling (not the simulated one) to test the pre-simulate path.
-    """
-    fresh = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, write_output=False)
-    df = fresh.results()
-
-    assert isinstance(df, pl.DataFrame)
-    assert df.height == 0, "Results before simulate should be empty"
-    assert df.width > 0, (
-        "Schema should have columns even when no rows have been produced"
+def test_no_report_run_has_no_metrics_and_no_reports(dwelling):
+    """A run with no reports carries no reports and no metrics: the
+    RunResult's surface is empty by construction (nothing was recorded)."""
+    no_report = Dwelling.from_hpxml(
+        HPXML,
+        SCHEDULE,
+        WEATHER,
+        config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400),
     )
-    assert "Time" in df.columns, "Schema should include a Time column"
+    no_report.initialize()
+    result = no_report.simulate()
+
+    assert result.reports == []
+    assert result.metrics is None
+    assert result.warnings_dropped == 0
 
 
 def test_results_dataframe_columns_include_time_and_power(simulated_df):
@@ -105,10 +124,13 @@ def test_results_dataframe_has_time_column(simulated_df):
     assert "Time" in simulated_df.columns, "DataFrame should have Time column"
 
 
-def test_results_dataframe_time_is_string(simulated_df):
-    """Verify Time column is parsed as string (Arrow IPC preserves timestamp as string)."""
+def test_results_dataframe_time_is_datetime(simulated_df):
+    """Verify Time column is a naive-local millisecond Datetime (the Arrow
+    Timestamp type travels the IPC path intact)."""
     time_col = simulated_df.get_column("Time")
-    assert time_col.dtype == pl.String, "Time column is stored as string from Arrow IPC"
+    assert time_col.dtype == pl.Datetime("ms"), (
+        "Time column is a millisecond timestamp from Arrow IPC"
+    )
 
 
 def test_results_dataframe_has_expected_columns(simulated_df):
@@ -133,93 +155,111 @@ def test_results_column_dtypes(simulated_df):
 # ---------------------------------------------------------------------------
 
 
-def test_fleet_aggregate_timeseries_returns_dataframe(fleet):
-    """Verify fleet aggregate_timeseries returns polars DataFrame."""
-    results = fleet.simulate()
-    df = results.aggregate_timeseries
+def test_fleet_aggregate_returns_dataframe(fleet):
+    """Verify FleetResult.aggregate.table() returns polars DataFrame."""
+    from hares import FleetReport, Frequency
+
+    results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
+    df = results.aggregate.table()
 
     assert isinstance(df, pl.DataFrame)
 
 
-def test_fleet_aggregate_timeseries_shape(fleet):
-    """Verify aggregate DataFrame has the fixture's exact shape.
+def test_fleet_aggregate_shape(fleet):
+    """Verify the aggregate DataFrame has the fixture's exact shape.
 
     One day at 3600 s gives 24 hourly rows; the aggregate frame carries the
     6 reserved aggregate columns (Time, the three totals, outdoor and indoor
     temperature) for the one-building fleet.
     """
-    results = fleet.simulate()
-    df = results.aggregate_timeseries
+    from hares import FleetReport, Frequency
+
+    results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
+    df = results.aggregate.table()
 
     assert df.shape == (24, 6), (
         f"Aggregate DataFrame shape {df.shape} != (24, 6); columns: {df.columns}"
     )
 
 
-def test_fleet_aggregate_timeseries_has_time_column(fleet):
-    """Verify aggregate DataFrame has Time column."""
-    results = fleet.simulate()
-    df = results.aggregate_timeseries
+def test_fleet_aggregate_has_time_column(fleet):
+    """Verify the aggregate DataFrame has a Time column."""
+    from hares import FleetReport, Frequency
+
+    results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
+    df = results.aggregate.table()
 
     assert "Time" in df.columns, "Aggregate DataFrame should have Time column"
 
 
-def test_fleet_per_dwelling_metrics_returns_dataframe(fleet):
-    """Verify fleet per_dwelling_metrics returns polars DataFrame."""
-    results = fleet.simulate()
-    df = results.per_dwelling_metrics
+def test_fleet_homes_returns_dataframe(fleet):
+    """Verify FleetResult.homes.table() returns polars DataFrame."""
+    from hares import FleetReport, Frequency
+
+    results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
+    df = results.homes.table()
 
     assert isinstance(df, pl.DataFrame)
 
 
-def test_fleet_per_dwelling_metrics_schema(fleet):
-    """Verify per_dwelling_metrics has exactly the expected schema.
+def test_fleet_homes_schema(fleet):
+    """Verify FleetResult.homes has exactly the expected schema.
 
-    Exact set equality: the per-dwelling frame is pinned to (1, 5) elsewhere,
-    so a column added to or removed from the frame must update a pin.
+    Exact set equality: the homes frame is pinned to (1, 8) by the shape
+    test, so a column added to or removed from the frame must update a pin.
+    The fixture's config requests metrics, so the run metrics' columns ride
+    the homes table.
     """
-    results = fleet.simulate()
-    df = results.per_dwelling_metrics
+    from hares import FleetReport, Frequency
 
-    expected_columns = {
+    results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
+    df = results.homes.table()
+
+    expected_columns = [
+        "bldg_id",
+        "weight",
+        "status",
+        "reason",
+        "steps",
+        "periods_folded",
         "total_energy_kwh",
         "peak_power_kw",
-        "sample_weight",
-        "status",
-        "failed",
-    }
-    actual_columns = set(df.columns)
-    assert actual_columns == expected_columns, (
-        f"Column mismatch; missing: {expected_columns - actual_columns}, "
-        f"unexpected: {actual_columns - expected_columns}"
+    ]
+    assert df.columns == expected_columns, (
+        f"Column mismatch; expected: {expected_columns}, got: {df.columns}"
     )
 
 
-def test_fleet_per_dwelling_metrics_row_count(fleet):
-    """Verify the per-dwelling frame's exact shape and the weighting math.
+def test_fleet_homes_row_count(fleet):
+    """Verify the homes frame's exact shape and the weighting math.
 
     One building with no sample_weights gets the default weight 1.0, so the
-    per-dwelling metrics must equal the aggregate frame's electric series
+    home's run metrics must relate to the aggregate frame's electric series
     directly: its total energy is the summed power over the 1 h steps and its
     peak power is the series maximum.
     """
-    results = fleet.simulate()
-    df = results.per_dwelling_metrics
+    from hares import FleetReport, Frequency
 
-    assert df.shape == (1, 5), f"Per-dwelling DataFrame shape {df.shape} != (1, 5)"
+    results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
+    df = results.homes.table()
+
+    assert df.shape == (1, 8), f"Homes DataFrame shape {df.shape} != (1, 8)"
     row = df.row(0, named=True)
-    assert row["sample_weight"] == 1.0, (
-        f"One building with no sample_weights must weigh 1.0, got {row['sample_weight']}"
+    assert row["weight"] == 1.0, (
+        f"One building with no sample_weights must weigh 1.0, got {row['weight']}"
     )
+    assert row["status"] != "failed", "the fixture building runs"
+    assert row["periods_folded"] == 24, "the home folded every hourly period"
 
-    aggregate = results.aggregate_timeseries
+    aggregate = results.aggregate.table()
     electric_kw = aggregate["Total Electric Power (kW)"]
     assert row["total_energy_kwh"] == pytest.approx(
         float(electric_kw.sum()), rel=1e-12
     ), (
-        "total_energy_kwh must equal the weighted aggregate's summed electric "
+        "total_energy_kwh must equal the aggregate's summed electric "
         "power over the 1 h steps"
     )
     assert row["peak_power_kw"] == pytest.approx(float(electric_kw.max()), rel=1e-12), (
-        "peak_power_kw must equal the weighted aggregate's peak electric power"
+        "peak_power_kw must equal the aggregate's peak electric power"
     )
+

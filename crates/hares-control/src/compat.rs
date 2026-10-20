@@ -61,7 +61,11 @@ pub fn ochre_signal_to_control(
                 out.push(ControlSignal::thermal_setpoint(heat, cool, None));
             }
             KEY_POWER_SETPOINT_KW => {
-                out.push(ControlSignal::power_setpoint(*value, None));
+                // OCHRE's `P Setpoint` is kW; the signal is W (SI),
+                // converted once at the mapping.
+                let active_power_w = uom::si::f64::Power::new::<uom::si::power::kilowatt>(*value)
+                    .get::<uom::si::power::watt>();
+                out.push(ControlSignal::power_setpoint(active_power_w, None));
             }
             KEY_DUTY_CYCLE => {
                 out.push(ControlSignal::duty_cycle(*value, None, None));
@@ -126,8 +130,8 @@ mod tests {
         assert!(out.iter().any(|x| matches!(
             x,
             ControlSignal::PowerSetpoint {
-                active_power_kw: 3.5,
-                reactive_power_kvar: None,
+                active_power_w: 3500.0,
+                reactive_power_var: None,
                 ..
             }
         )));

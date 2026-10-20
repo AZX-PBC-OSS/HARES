@@ -37,12 +37,13 @@
 //!   defects together; real vehicles precondition while plugged in, and
 //!   OCHRE — the feature floor — has no cold-charge block at all).
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 use hares_equipment::{Equipment, EvConfig};
-use hares_io::OutputFormat;
 
 mod common;
 
@@ -86,25 +87,30 @@ fn inject_ev(hpxml: &str) -> String {
 /// weather format; rows run 01:00..00:00 with 00:00 belonging to the
 /// following date). A flat sub-freezing profile removes the daytime
 /// ambient rescue a diurnal cycle would provide, isolating the sustained
-/// cold-snap behavior.
+/// cold-snap behavior. A full year is written (8760 rows): the format's
+/// timestep detection divides the year's seconds by the record count, so
+/// a partial year parses as a bogus interval.
 fn write_constant_weather(dir: &std::path::Path, days: usize, temp_c: f64) -> PathBuf {
+    let _ = days;
     let path = dir.join("constant_weather.csv");
     let mut out = String::from(
         "date_time,Dry Bulb Temperature [°C],Relative Humidity [%],Wind Speed [m/s],Wind Direction [Deg],Global Horizontal Radiation [W/m2],Direct Normal Radiation [W/m2],Diffuse Horizontal Radiation [W/m2]\n",
     );
-    for day in 0..days {
-        // 2018-01-01 + `day` days, manual arithmetic (non-leap year; the
-        // scenarios stay within Jan/Feb).
-        let dom = 1 + day as u32;
-        let (month, day_of_month) = if dom <= 31 { (1, dom) } else { (2, dom - 31) };
+    for day in 0..365 {
+        use chrono::Datelike as _;
+        // 2018-01-01 + `day` days, by calendar arithmetic (2018 is not a
+        // leap year, so 365 days ends at 2018-12-31).
+        let date = chrono::NaiveDate::from_ymd_opt(2018, 1, 1)
+            .expect("date")
+            .checked_add_signed(chrono::Duration::days(day as i64))
+            .expect("a valid date");
+        let (month, day_of_month) = (date.month(), date.day());
         for hour in 0..24u32 {
             let (m, d, h) = if hour == 23 {
-                let nd = day_of_month + 1;
-                if month == 1 && nd > 31 {
-                    (2, 1, 0)
-                } else {
-                    (month, nd, 0)
-                }
+                let nd = date
+                    .checked_add_signed(chrono::Duration::days(1))
+                    .expect("a valid next date");
+                (nd.month(), nd.day(), 0)
             } else {
                 (month, day_of_month, hour + 1)
             };
@@ -131,9 +137,9 @@ fn probe_ev(
         "EV".to_string(),
         EvConfig {
             equipment_id: None,
-            capacity_kwh: 75.0,
+            capacity_j: 270000000.0,
             charging_level: Some("Level 2".to_string()),
-            max_charging_power_kw: 11.5,
+            max_charging_power_w: 11500.0,
             charging_efficiency: None,
             l1_current_a: None,
             l1_voltage_v: None,
@@ -151,19 +157,19 @@ fn probe_ev(
             cell_resistance_ohm: None,
             v2l_enabled: None,
             v2l_soc_reserve: None,
-            v2l_max_discharge_kw: None,
+            v2l_max_discharge_w: None,
             v2g_enabled: None,
             v2g_soc_reserve: None,
-            v2g_max_discharge_kw: None,
+            v2g_max_discharge_w: None,
             chemistry: None,
-            fuel_economy_kwh_per_mi: None,
+            fuel_economy_j_per_m: None,
             ready_soc: None,
             charging_strategy: None,
             plug_in_policy: None,
-            power_limit_kw: None,
+            power_limit_w: None,
             initial_connection_state: initial_connection_state.map(|s| s.to_string()),
             power_factor: None,
-            charger_capacity_kva: None,
+            charger_capacity_va: None,
             cc_cv_transition_soc: None,
             charging_priority: None,
             discharge_respects_deadline: true,
@@ -282,7 +288,9 @@ fn battery_heater_warms_pack_while_cold_derate_blocks_charging() {
     for _ in 0..16 {
         // 4 h of preconditioning at 1.5 kW.
         step_900s(&mut ev, &mut env);
-        billed_kwh += ev.telemetry().get("active_power_kw").unwrap_or(0.0) * STEP_HOURS;
+        // The telemetry key holds W (SI) under the kW reporting name:
+        // W × hours / 1000 = kWh.
+        billed_kwh += ev.telemetry().get("active_power_kw").unwrap_or(0.0) * STEP_HOURS / 1000.0;
     }
     let end_c = ev
         .telemetry()
@@ -363,7 +371,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
     let src = std::fs::read_to_string(fixture_dir().join("home.xml")).expect("fixture home.xml");
     let hpxml_path = tmp.path().join("bldg0000007_ev.xml");
     std::fs::write(&hpxml_path, inject_ev(&src)).expect("write injected HPXML");
-    let output_path = tmp.path().join("ev_cold_snap_45day.csv");
+    let csv_path = tmp.path().join("ev_cold_snap_45day.csv");
 
     let nightly = serde_json::json!({"Nightly": {
         "off_peak_start_hour": 22.0,
@@ -381,42 +389,40 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
             .unwrap(),
         duration: Duration::days(45),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: true,
-        output_path: Some(output_path.clone()),
-        output_format: OutputFormat::Csv,
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: csv_path.clone(),
+                overwrite: false,
+            },
+        }],
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
-    let result = SimulationEngine::new()
+    SimulationEngine::new()
         .run(config)
         .expect("engine.run should succeed");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
 
-    let (charge_days, cancelled_max) =
-        ev_charge_days_and_peak_cancelled(&output_path, STEPS_PER_DAY);
+    let (charge_days, cancelled_max) = ev_charge_days_and_peak_cancelled(&csv_path, STEPS_PER_DAY);
     assert!(
         charge_days >= 30,
         "Nightly(22:00-06:00, target 0.90) in a sustained -7 C cold snap must \
@@ -465,30 +471,34 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: false,
-        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
-        output_format: OutputFormat::Csv,
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: tmp.path().join("ev_regr_diag.csv"),
+                overwrite: false,
+            },
+        }],
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
     let err = SimulationEngine::new()
         .run(config)
@@ -523,7 +533,7 @@ fn l1_cold_night_still_accepts_charge_energy() {
         "EV".to_string(),
         EvConfig {
             charging_level: Some("Level 1".to_string()),
-            max_charging_power_kw: 1.4,
+            max_charging_power_w: 1400.0,
             ..typed_config_of(&base_cfg)
         },
     )
@@ -542,19 +552,19 @@ fn l1_cold_night_still_accepts_charge_energy() {
     // is measured through the pack's SOC — the charging-isolating
     // observable — and the port peak through the AC input.
     let soc_start = ev.telemetry().get("soc").unwrap_or(f64::NAN);
-    let mut port_peak_kw = 0.0_f64;
+    let mut port_peak_w = 0.0_f64;
     for _ in 0..32 {
         step_900s(&mut ev, &mut env);
-        let port_kw = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
-        port_peak_kw = port_peak_kw.max(port_kw);
+        let port_w = ev.telemetry().get("active_power_kw").unwrap_or(0.0);
+        port_peak_w = port_peak_w.max(port_w);
     }
     let soc_end = ev.telemetry().get("soc").unwrap_or(f64::NAN);
     let stored_kwh = (soc_end - soc_start) * 75.0;
 
     assert!(
-        port_peak_kw <= 1.8 + 1e-9,
+        port_peak_w <= 1800.0 + 1e-9,
         "the L1 circuit rating bounds the whole draw (charger + heater \
-         AC-equivalent), peaked at {port_peak_kw} kW"
+         AC-equivalent), peaked at {port_peak_w} W"
     );
     assert!(
         stored_kwh >= 4.0,
@@ -596,30 +606,34 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: false,
-        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
-        output_format: OutputFormat::Csv,
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: tmp.path().join("ev_regr_diag.csv"),
+                overwrite: false,
+            },
+        }],
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, Some(overrides), 100, None),
     };
     let err = SimulationEngine::new()
         .run(config)
@@ -664,30 +678,34 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
             .unwrap(),
         duration: Duration::days(2),
         time_res: Duration::seconds(900),
-        output_verbosity: 5,
-        write_output: false,
-        output_path: Some(tmp.path().join("ev_regr_diag.csv")),
-        output_format: OutputFormat::Csv,
+        reports: vec![hares_io::ReportSpec {
+            name: "frame".to_string(),
+            selection: hares_io::Selection::Verbosity(5),
+            frequency: hares_io::Frequency::default(),
+            destination: hares_io::Destination::Csv {
+                path: tmp.path().join("ev_regr_diag.csv"),
+                overwrite: false,
+            },
+        }],
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let base = DwellingConfig {
-        hpxml_path: hpxml_path.clone(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather,
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path.clone()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, None, 100, None),
     };
 
     // Control: the identical build with no overrides payload must succeed —
@@ -712,7 +730,10 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
         serde_json::json!(null),
     ] {
         let config = DwellingConfig {
-            overrides: Some(payload.clone()),
+            settings: DwellingSettings {
+                overrides: Some(payload.clone()),
+                ..base.settings.clone()
+            },
             ..base.clone()
         };
         let err = SimulationEngine::new().run(config).expect_err(

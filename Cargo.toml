@@ -50,7 +50,7 @@ parquet = "59"
 pyo3 = "0.29"
 uom = "0.38"
 rayon = "1.11"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 # Exact f64 round-tripping for every crate: without float_roundtrip
 # serde_json's parser is a few ULP off for long decimals, so a checkpoint
 # file or a golden would reload differently from the values that wrote it.

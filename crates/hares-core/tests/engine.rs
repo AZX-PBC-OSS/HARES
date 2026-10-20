@@ -1,9 +1,10 @@
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
-use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-use hares_io::OutputFormat;
+use hares_core::{DwellingConfig, SimulationConfig, SimulationEngine};
 use tempfile::TempDir;
 
 /// The test's own directory, removed on drop (panics included), holding the
@@ -32,12 +33,16 @@ impl Scratch {
 }
 
 fn build_schedule_csv() -> String {
+    // The columns the base fixture's event equipment and wet appliances run
+    // on: a schedule file without an appliance's power column is a
+    // construction error, and the washer and dishwasher draw their hot water
+    // through their hot-water columns.
     [
-        "Time,Clothes Washer (kW),HVAC Heating (C)",
-        "2021-01-01T00:00:00-07:00,0.10,20.0",
-        "2021-01-01T00:15:00-07:00,0.20,20.5",
-        "2021-01-01T00:30:00-07:00,0.30,21.0",
-        "2021-01-01T00:45:00-07:00,0.40,21.5",
+        "Time,occupants,clothes_washer,clothes_dryer,dishwasher,cooking_range,hot_water_clothes_washer,hot_water_dishwasher,heating_setpoint",
+        "2021-01-01T00:00:00-07:00,1.0,0.10,0.10,0.10,0.10,0.10,0.10,20.0",
+        "2021-01-01T00:15:00-07:00,1.0,0.20,0.20,0.20,0.20,0.20,0.20,20.5",
+        "2021-01-01T00:30:00-07:00,1.0,0.30,0.30,0.30,0.30,0.30,0.30,21.0",
+        "2021-01-01T00:45:00-07:00,1.0,0.40,0.40,0.40,0.40,0.40,0.40,21.5",
     ]
     .join("\n")
 }
@@ -116,18 +121,22 @@ fn fixture_hpxml_path() -> PathBuf {
 /// (no schedule column, no HPXML fractions) resolves its default profile
 /// there instead of erroring.
 fn repo_defaults_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults")
 }
 
-fn simulation_config(output_path: PathBuf) -> SimulationConfig {
-    simulation_config_with_flags(output_path, true, true)
+fn simulation_config(csv_path: PathBuf) -> SimulationConfig {
+    simulation_config_with_frame(csv_path, true)
 }
 
-fn simulation_config_with_flags(
-    output_path: PathBuf,
-    retain_batches: bool,
-    write_output: bool,
-) -> SimulationConfig {
+/// `with_frame` is the retained run (a memory report beside the csv file,
+/// the frame and the file both read back); without it the run streams to
+/// the file alone.
+fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> SimulationConfig {
+    let mut reports = Vec::new();
+    if with_frame {
+        reports.push(memory_report("frame", 0));
+    }
+    reports.push(csv_report("file", &csv_path, 0));
     SimulationConfig {
         start_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
@@ -135,112 +144,98 @@ fn simulation_config_with_flags(
             .unwrap(),
         duration: Duration::hours(1),
         time_res: Duration::minutes(1),
-        output_verbosity: 0,
-        output_path: Some(output_path),
-        write_output,
-        output_format: OutputFormat::Csv,
+        reports,
+        diagnostics: false,
+        metrics: true,
         output_chunk_size: 128,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
+    }
+}
+
+fn memory_report(name: &str, verbosity: u8) -> hares_io::ReportSpec {
+    hares_io::ReportSpec {
+        name: name.to_string(),
+        selection: hares_io::Selection::Verbosity(verbosity),
+        frequency: hares_io::Frequency::default(),
+        destination: hares_io::Destination::Memory,
+    }
+}
+
+fn csv_report(name: &str, path: &std::path::Path, verbosity: u8) -> hares_io::ReportSpec {
+    hares_io::ReportSpec {
+        name: name.to_string(),
+        selection: hares_io::Selection::Verbosity(verbosity),
+        frequency: hares_io::Frequency::default(),
+        destination: hares_io::Destination::Csv {
+            path: path.to_path_buf(),
+            overwrite: false,
+        },
     }
 }
 
 #[test]
-fn run_success_produces_metrics_elapsed_and_output_path() {
+fn run_success_produces_metrics_and_output_path() {
     let scratch = Scratch::with_inputs();
-    let output_path = scratch.path("output.csv");
+    let csv_path = scratch.path("output.csv");
 
     let config = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: simulation_config(output_path.clone()),
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(simulation_config(csv_path.clone()), None, 123, None),
     };
 
     let engine = SimulationEngine::new();
     let result = engine.run(config).expect("engine run should succeed");
 
-    assert!(matches!(
-        result.status,
-        SimStatus::Ok | SimStatus::Flagged(_)
-    ));
-    assert!(result.elapsed > std::time::Duration::ZERO);
-    assert!(result.metrics.total_energy_kwh.net_energy_kwh.is_finite());
-    assert!(result.metrics.total_energy_kwh.net_energy_kwh > 0.0);
+    let metrics = result.metrics.as_ref().expect("the run requested metrics");
+    assert!(metrics.total_energy_kwh.net_energy_kwh.is_finite());
+    assert!(metrics.total_energy_kwh.net_energy_kwh > 0.0);
+    assert!(metrics.peak_power_kw.rolling.peak_15min_kw.is_finite());
+
+    // The file report's published path is the csv report's target; the
+    // memory report retains the run's batches.
+    let file = result
+        .reports
+        .iter()
+        .find(|report| report.name == "file")
+        .expect("the csv report is in the result");
+    assert_eq!(file.path(), Some(&csv_path));
+    assert!(csv_path.exists());
+    let frame = result
+        .reports
+        .iter()
+        .find(|report| report.name == "frame")
+        .expect("the memory report is in the result");
     assert!(
-        result
-            .metrics
-            .peak_power_kw
-            .rolling
-            .peak_15min_kw
-            .is_finite()
+        !frame.batches().is_empty(),
+        "the frame report retains batches"
     );
-    assert!(result.timeseries.is_some());
-    assert!(!result.timeseries.unwrap().is_empty());
-    assert_eq!(result.timeseries_path, Some(output_path.clone()));
-    assert!(output_path.exists());
-}
-
-#[test]
-fn run_with_zero_duration_reports_zero_step() {
-    // The genuine zero-step edge case (duration == 0) stays distinguishable
-    // from the not-retained case.
-    let scratch = Scratch::with_inputs();
-
-    let mut sim_config = simulation_config(scratch.path("output.csv"));
-    sim_config.duration = Duration::zero();
-    sim_config.retain_batches = true;
-
-    let config = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config,
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
-    };
-
-    let engine = SimulationEngine::new();
-    let result = engine.run(config).expect("engine run should succeed");
-
-    match &result.status {
-        SimStatus::Flagged(reason) => assert!(
-            reason.contains("zero-step"),
-            "duration == 0 must be reported as zero-step, got: {reason}"
-        ),
-        other => panic!("expected Flagged status, got: {other:?}"),
-    }
 }
 
 #[test]
 fn run_returns_err_for_missing_hpxml_path() {
     let scratch = Scratch::with_inputs();
     let config = DwellingConfig {
-        hpxml_path: scratch.path("does-not-exist.xml"),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: simulation_config(scratch.path("output.csv")),
-        defaults_path: None,
-        overrides: None,
-        bldg_id: 1,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(scratch.path("does-not-exist.xml")),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            simulation_config(scratch.path("output.csv")),
+            None,
+            1,
+            None,
+        ),
     };
 
     let engine = SimulationEngine::new();
@@ -255,16 +250,16 @@ fn run_returns_err_for_missing_weather_path() {
     let engine = SimulationEngine::new();
     let scratch = Scratch::with_inputs();
     let weather_missing = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.path("does-not-exist.epw"),
-        sim_config: simulation_config(scratch.path("output.csv")),
-        defaults_path: None,
-        overrides: None,
-        bldg_id: 2,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.path("does-not-exist.epw")),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            simulation_config(scratch.path("output.csv")),
+            None,
+            2,
+            None,
+        ),
     };
     let weather_err = engine
         .run(weather_missing)
@@ -272,29 +267,25 @@ fn run_returns_err_for_missing_weather_path() {
     assert!(weather_err.to_string().contains("weather_path"));
 }
 
-/// A streaming run (retain_batches=false, the default configuration shape)
-/// must still produce real run metrics: they are collected incrementally at
+/// A file-only run (a csv report with no `Memory` report beside it) must
+/// still produce real run metrics: they are collected incrementally at
 /// flush time. The previous behavior returned zeroed metrics with a false
-/// "zero-step" flag for every non-retaining run.
+/// "zero-step" flag for every run that retained no batches.
 #[test]
 fn run_with_streaming_output_computes_metrics() {
     let scratch = Scratch::with_inputs();
 
     let build_config = |retain: bool| DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: simulation_config_with_flags(
-            scratch.path(&format!("retain_{retain}.csv")),
-            retain,
-            true,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            simulation_config_with_frame(scratch.path(&format!("retain_{retain}.csv")), retain),
+            None,
+            123,
+            None,
         ),
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
     };
 
     let engine = SimulationEngine::new();
@@ -306,33 +297,39 @@ fn run_with_streaming_output_computes_metrics() {
         .expect("streaming run should succeed");
 
     // Nothing is retained in memory on the streaming run -- the honest
-    // timeseries is empty -- but the metrics must be fully computed.
+    // report is empty -- but the metrics must be fully computed.
     assert!(
-        streamed.timeseries.as_ref().is_some_and(Vec::is_empty),
+        memory_batches(&streamed).is_empty(),
         "streaming run must not retain batches"
     );
+    let streamed_metrics = streamed
+        .metrics
+        .as_ref()
+        .expect("streaming run must compute metrics (None reports no computation)");
     assert_eq!(
-        streamed.metrics.simulation_duration_hours, 1.0,
+        streamed_metrics.simulation_duration_hours, 1.0,
         "streaming run must compute metrics (zeroed metrics report 0 hours)"
     );
     assert!(
-        streamed.metrics.total_energy_kwh.net_energy_kwh > 0.0,
+        streamed_metrics.total_energy_kwh.net_energy_kwh > 0.0,
         "streaming run must report real energy totals"
     );
-    assert!(
-        !matches!(&streamed.status, SimStatus::Flagged(msg)
-            if msg.contains("zero-step") || msg.contains("metrics unavailable")),
-        "a fully-recorded streaming run must not be flagged as zero-step or \
-         metrics-unavailable, got: {:?}",
-        streamed.status
-    );
 
-    // The incremental calculator sees the same batches in the same order as
-    // a post-hoc pass over retained batches, so both paths must agree.
+    // One path: every run's accumulator is fed per step from the row
+    // plan's producer slots, so a file-only run's metrics equal a
+    // memory-report run's, on bits.
     assert_eq!(
         streamed.metrics, retained.metrics,
-        "streaming (incremental) metrics must equal retained-batch metrics"
+        "a file-only run's metrics must equal a memory-report run's metrics"
     );
+}
+
+fn memory_batches(result: &hares_core::RunResult) -> Vec<arrow::record_batch::RecordBatch> {
+    result
+        .reports
+        .iter()
+        .flat_map(|report| report.batches().to_vec())
+        .collect()
 }
 
 /// Streaming (incremental recorder-fed) metrics must equal batch (retained-
@@ -345,21 +342,23 @@ fn run_with_streaming_output_computes_metrics() {
 fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
     let scratch = Scratch::with_inputs();
     let build_config = |retain: bool| DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: {
-            let output_path = scratch.path(&format!("retain_{retain}.csv"));
-            let mut cfg = simulation_config_with_flags(output_path, retain, true);
-            cfg.output_verbosity = 6;
-            cfg
-        },
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            {
+                let csv_path = scratch.path(&format!("retain_{retain}.csv"));
+                let mut cfg = simulation_config_with_frame(csv_path, retain);
+                for report in &mut cfg.reports {
+                    report.selection = hares_io::Selection::Verbosity(6);
+                }
+                cfg
+            },
+            None,
+            123,
+            None,
+        ),
     };
 
     let engine = SimulationEngine::new();
@@ -371,90 +370,91 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
         .expect("streaming run should succeed");
 
     // Envelope loads must be present and compared, not just energy totals.
+    let streamed_metrics = streamed
+        .metrics
+        .as_ref()
+        .expect("streaming run must compute metrics");
+    let retained_metrics = retained
+        .metrics
+        .as_ref()
+        .expect("retained run must compute metrics");
     assert!(
-        streamed.metrics.envelope_loads_kwh.is_some(),
+        streamed_metrics.envelope_loads_kwh.is_some(),
         "verbosity 6 must produce envelope-load columns"
     );
     assert_eq!(
-        streamed.metrics.envelope_loads_kwh, retained.metrics.envelope_loads_kwh,
+        streamed_metrics.envelope_loads_kwh, retained_metrics.envelope_loads_kwh,
         "streaming and batch envelope loads must agree exactly"
     );
     assert_eq!(
-        streamed.metrics, retained.metrics,
-        "streaming (incremental) metrics must equal retained-batch metrics \
-         field-for-field, including energy totals"
+        streamed_metrics, retained_metrics,
+        "the one path's metrics must agree field-for-field, including energy \
+         totals"
     );
 }
 
-/// A run with no timesteps must be flagged as a true zero-step run -- not
-/// reported as Ok with zeroed metrics.
+/// A zero-duration config is a validate error on the Rust construction path
+/// too: the same check from_toml runs, so a run with no timesteps cannot
+/// reach the engine through a built dwelling. The engine's zero-step flag
+/// stays as the finalization defense for a recorder that recorded no rows.
 #[test]
-fn run_with_zero_duration_flags_zero_step() {
+fn run_with_zero_duration_is_a_validate_error() {
     let scratch = Scratch::with_inputs();
 
-    let mut sim_config = simulation_config_with_flags(scratch.path("output.csv"), false, true);
+    let mut sim_config = simulation_config_with_frame(scratch.path("output.csv"), false);
     sim_config.duration = Duration::zero();
 
     let config = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config,
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(sim_config, None, 123, None),
     };
 
     let engine = SimulationEngine::new();
-    let result = engine
+    let err = engine
         .run(config)
-        .expect("zero-duration run should succeed");
-
+        .expect_err("a zero-duration config must not build a dwelling");
     assert!(
-        matches!(&result.status, SimStatus::Flagged(msg) if msg.contains("zero-step")),
-        "zero-duration run must be flagged as zero-step, got: {:?}",
-        result.status
-    );
-    assert_eq!(
-        result.metrics.simulation_duration_hours, 0.0,
-        "zero-step run must report zero duration"
+        err.to_string()
+            .contains("duration must be greater than zero"),
+        "the error is validate()'s, got: {err}"
     );
 }
 
-/// A run with output disabled has nothing to compute metrics from; the
-/// status must say so honestly instead of misreporting a zero-step run.
+/// A run that does not request metrics carries none: the absence of the
+/// request is the contract, not a defect to warn about. `RunResult.metrics`
+/// is `Some` exactly when `SimulationConfig.metrics` is requested.
 #[test]
-fn run_without_output_recorder_reports_metrics_unavailable() {
+fn run_without_metrics_request_returns_none_metrics() {
     let scratch = Scratch::with_inputs();
 
     let config = DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(scratch.schedule()),
-        weather_path: scratch.weather(),
-        sim_config: simulation_config_with_flags(scratch.path("output.csv"), false, false),
-        defaults_path: Some(repo_defaults_path()),
-        overrides: None,
-        bldg_id: 123,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(scratch.schedule())),
+        weather: WeatherInput::Path(scratch.weather()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                reports: Vec::new(),
+                metrics: false,
+                ..simulation_config(scratch.path("output.csv"))
+            },
+            None,
+            123,
+            None,
+        ),
     };
 
     let engine = SimulationEngine::new();
     let result = engine
         .run(config)
-        .expect("output-disabled run should succeed");
+        .expect("a run without the metrics request should succeed");
 
     assert!(
-        matches!(&result.status, SimStatus::Flagged(msg) if msg.contains("no output recorder")),
-        "output-disabled run must be flagged with the no-recorder reason, got: {:?}",
-        result.status
-    );
-    assert_eq!(
-        result.metrics.simulation_duration_hours, 0.0,
-        "output-disabled run has no metrics source"
+        result.metrics.is_none(),
+        "a run without the metrics request carries none, got: {:?}",
+        result.metrics.as_ref().map(|m| m.simulation_duration_hours)
     );
 }

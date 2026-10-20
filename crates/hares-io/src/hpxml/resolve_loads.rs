@@ -12,16 +12,26 @@ use super::HpxmlError;
 use super::building::{Building, XmlNode, ZoneType};
 use super::equipment::{EquipmentSpec, build_spec, build_typed_spec, canonical_instance_namer};
 use super::resolve_pool::resolve_pool_and_spa_loads;
+use super::wet_appliance::{
+    ClothesWasherInputs, DishwasherInputs, EriVersion, OccupancyInputs,
+    calc_clothes_washer_energy_gpd, calc_dishwasher_energy_gpd,
+};
 use super::xml_helpers::{
-    capitalize, child_bool, child_f64, child_load_kwh, child_load_therms, child_text, element_id,
-    parse_fuel, parse_schedule_extension_params,
+    capitalize, child_annual_energy_j, child_annual_fuel_energy_j, child_bool, child_f64,
+    child_text, element_id, parse_fuel, parse_schedule_extension_params,
 };
 use hares_physics::units as conv;
 
+use super::elements::*;
 use crate::defaults::DefaultsStore;
 
-/// OCHRE EV fuel economy: 1/325 * 1000 miles per kWh (for sedans).
-const EV_FUEL_ECONOMY: f64 = 1000.0 / 325.0;
+/// OCHRE EV fuel economy: 325 Wh per mile (for sedans), the parent's
+/// 1000/325 miles per kWh written in SI (J/m) with uom.
+fn ev_fuel_economy_j_per_m() -> f64 {
+    (uom::si::f64::Energy::new::<uom::si::energy::watt_hour>(325.0)
+        / uom::si::f64::Length::new::<uom::si::length::mile>(1.0))
+    .get::<uom::si::force::newton>()
+}
 /// Fraction of dryer energy exhausted to outdoors when the dryer is vented,
 /// and the sensible share of the rest, for every fuel and for the electric
 /// and fuel input alike: OpenStudio-HPXML v1.12.0
@@ -33,6 +43,38 @@ const DRYER_SENSIBLE_SHARE: f64 = 0.90;
 /// Source: OCHRE hpxml.py parse_clothes_dryer.
 const BTU_PER_KWH: f64 = 3412.0;
 
+/// The appliance kinds the resolver dispatches on, as the declared
+/// elements' identity: the loop's kinds name their elements, so the
+/// dispatch matches the kind and never a raw string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplianceTag {
+    ClothesWasher,
+    ClothesDryer,
+    Dishwasher,
+    Refrigerator,
+    Freezer,
+    CookingRange,
+    Microwave,
+    Dehumidifier,
+}
+
+impl ApplianceTag {
+    /// The declared element the kind's nodes carry: the loop reads the
+    /// nodes through it.
+    fn element(self) -> &'static super::elements::HpxmlElement {
+        match self {
+            Self::ClothesWasher => &CLOTHES_WASHER,
+            Self::ClothesDryer => &CLOTHES_DRYER,
+            Self::Dishwasher => &DISHWASHER,
+            Self::Refrigerator => &REFRIGERATOR,
+            Self::Freezer => &FREEZER,
+            Self::CookingRange => &COOKING_RANGE,
+            Self::Microwave => &MICROWAVE,
+            Self::Dehumidifier => &DEHUMIDIFIER,
+        }
+    }
+}
+
 /// ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default annual electric energy (kWh).
 pub(crate) const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 
@@ -42,26 +84,34 @@ pub(crate) const MICROWAVE_DEFAULT_ANNUAL_KWH: f64 = 100.0;
 /// type and feeds the adjusted count to every appliance energy formula
 /// (hpxml.py:1664). HARES applies the same adjustment: when
 /// `NumberofResidents` is present the adjusted count replaces the raw
-/// `NumberofBedrooms` entirely; when it is absent OCHRE cannot run at all,
-/// so HARES keeps the raw count, then the ANSI/RESNET 301-2014 Table
-/// 4.2.2(1) Reference Home default of 3 bedrooms.
-fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
+/// `NumberofBedrooms` entirely. `NumberofBedrooms` is required input:
+/// OCHRE reads it with a direct index and fails on absence (hpxml.py:263,
+/// `construction["NumberofBedrooms"]`), so an absent field is an error
+/// naming it, never a substituted count.
+fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> std::result::Result<f64, HpxmlError> {
     let n_bedrooms_raw = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "NumberofBedrooms",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_BEDROOMS,
         ])
         .and_then(|n| parse_trimmed_f64(&n.text))
-        .unwrap_or(3.0);
+        .ok_or_else(|| HpxmlError::MissingField {
+            path: "BuildingSummary/BuildingConstruction/NumberofBedrooms",
+            system_kind: "BuildingConstruction",
+            system_id: "Building".to_string(),
+            reason: "the appliance energy formulas are sized by the bedroom count; OCHRE \
+                     reads the field with a direct index and fails on absence \
+                     (hpxml.py:263), so no count may be substituted for it",
+        })?;
     let n_occupants = details
-        .path(&["BuildingSummary", "BuildingOccupancy", "NumberofResidents"])
+        .path(&[&BUILDING_SUMMARY, &BUILDING_OCCUPANCY, &NUMBEROF_RESIDENTS])
         .and_then(|n| parse_trimmed_f64(&n.text));
     let house_type = details
         .path(&[
-            "BuildingSummary",
-            "BuildingConstruction",
-            "ResidentialFacilityType",
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &RESIDENTIAL_FACILITY_TYPE,
         ])
         .map(|n| n.text.trim().to_ascii_lowercase());
     let adjusted = adjusted_bedroom_count(n_occupants, house_type.as_deref(), n_bedrooms_raw);
@@ -76,7 +126,7 @@ fn resolve_bedroom_count_for_appliances(details: &XmlNode) -> f64 {
         n_occupants = n_occupants.unwrap_or(f64::NAN),
         "appliance bedroom count resolved"
     );
-    adjusted
+    Ok(adjusted)
 }
 
 /// OCHRE hpxml.py:791-800: the adjusted bedroom count the reference applies
@@ -101,17 +151,278 @@ pub(super) fn adjusted_bedroom_count(
     }
 }
 
+/// The `extension/UsageMultiplier` of an appliance element, 1.0 when absent.
+fn usage_multiplier_of(node: &XmlNode) -> f64 {
+    node.child(&EXTENSION)
+        .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
+        .unwrap_or(1.0)
+}
+
+/// The occupancy inputs the OpenStudio-HPXML wet-appliance formulas read:
+/// the raw `NumberofResidents` (the operational branch's driver, whose zero
+/// value zeroes both appliances), the raw `NumberofBedrooms` with the
+/// parser's 3-bedroom fallback (the Addendum 81 asset branch's input), and
+/// whether the home is an apartment unit.
+/// The wet appliance's apportionment inputs (OpenStudio-HPXML
+/// hotwater_appliances.rb:474-487): `IsSharedAppliance` (defaulted false),
+/// the system the appliance rides (`AttachedToWaterHeatingSystem`) and
+/// whether it has its own hot-water distribution
+/// (`AttachedToHotWaterDistribution` present).
+fn insert_wet_appliance_apportionment(
+    node: &XmlNode,
+    tag: &str,
+    params: &mut Map<String, Value>,
+) -> Result<(), HpxmlError> {
+    let (path, system_kind): (&'static str, &'static str) = if tag == "Dishwasher" {
+        ("Dishwasher/IsSharedAppliance", "Dishwasher")
+    } else {
+        ("ClothesWasher/IsSharedAppliance", "Clothes Washer")
+    };
+    let is_shared = child_bool(node, &IS_SHARED_APPLIANCE, path, system_kind)?.unwrap_or(false);
+    params.insert("is_shared_appliance".to_string(), json!(is_shared));
+    if let Some(idref) = node
+        .child(&ATTACHED_TO_WATER_HEATING_SYSTEM)
+        .and_then(|c| c.attrs.get("idref").cloned())
+    {
+        params.insert("attached_water_heating_system_id".to_string(), json!(idref));
+    }
+    params.insert(
+        "attached_hot_water_distribution".to_string(),
+        json!(node.child(&ATTACHED_TO_HOT_WATER_DISTRIBUTION).is_some()),
+    );
+    Ok(())
+}
+
+fn wet_appliance_occupancy_inputs(details: &XmlNode) -> OccupancyInputs {
+    let n_occ = details
+        .path(&[&BUILDING_SUMMARY, &BUILDING_OCCUPANCY, &NUMBEROF_RESIDENTS])
+        .and_then(|n| parse_trimmed_f64(&n.text));
+    let nbeds = details
+        .path(&[
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &NUMBEROF_BEDROOMS,
+        ])
+        .and_then(|n| parse_trimmed_f64(&n.text))
+        .unwrap_or(3.0);
+    let is_apartment = details
+        .path(&[
+            &BUILDING_SUMMARY,
+            &BUILDING_CONSTRUCTION,
+            &RESIDENTIAL_FACILITY_TYPE,
+        ])
+        .map(|n| n.text.trim().to_ascii_lowercase())
+        .as_deref()
+        == Some("apartment unit");
+    OccupancyInputs {
+        n_occ,
+        nbeds,
+        is_apartment,
+        eri_version: EriVersion::latest(),
+    }
+}
+
+/// The ERI version the wet appliance equations branch on: the HPXML
+/// `SoftwareInfo/extension/ERICalculation/Version`, `latest` when the HPXML
+/// carries none (OpenStudio-HPXML `defaults.rb:31-34`). An unknown
+/// spelling is a validation error naming it.
+fn wet_appliance_eri_version(building: &Building) -> Result<EriVersion, HpxmlError> {
+    match &building.eri_calculation_version {
+        None => Ok(EriVersion::latest()),
+        Some(raw) => EriVersion::parse(raw.trim()),
+    }
+}
+
+/// The clothes washer's label inputs under OpenStudio-HPXML's
+/// all-or-nothing default rule (`resources/defaults.rb:4207-4230`): the
+/// whole set defaults together when `RatedAnnualkWh` is absent (the
+/// version's `get_clothes_washer_values`), and a provided
+/// `RatedAnnualkWh` means none of the label fields is defaulted — every
+/// one the branch's algebra reads must be on the HPXML, the input
+/// combination the reference's own algebra would otherwise crash on. The
+/// rule binds the fields the branch reads: the pre-2019 label algebra
+/// never reads `LabelUsage` (its cycles come from the bedrooms form), so
+/// it keeps the version's 999 'unused' default when the HPXML omits it.
+fn washer_label_inputs(
+    node: &XmlNode,
+    eri_version: EriVersion,
+) -> Result<WasherLabelInputs, HpxmlError> {
+    let system_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
+    let require = |element: &'static super::elements::HpxmlElement| -> Result<f64, HpxmlError> {
+        child_f64(node, element).ok_or_else(|| {
+            HpxmlError::Parse(
+                format!(
+                    "Clothes Washer `{system_id}`: the HPXML provides RatedAnnualkWh, so \
+                         no other label field is defaulted (defaults.rb:4207 defaults the \
+                         whole set together): {} is required",
+                    element.name
+                )
+                .into(),
+            )
+        })
+    };
+    if child_f64(node, &RATED_ANNUALK_WH).is_none() {
+        let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
+        return Ok(if modern {
+            WasherLabelInputs {
+                rated_annual_kwh: 400.0,
+                capacity_ft3: 3.0,
+                label_usage: 6.0,
+                label_electric_rate: 0.12,
+                label_gas_rate: 1.09,
+                label_annual_gas_cost: 27.0,
+            }
+        } else {
+            // get_clothes_washer_values, pre-2019A set.
+            WasherLabelInputs {
+                rated_annual_kwh: 704.0,
+                capacity_ft3: 2.874,
+                label_usage: 999.0,
+                label_electric_rate: 0.08,
+                label_gas_rate: 0.58,
+                label_annual_gas_cost: 23.0,
+            }
+        });
+    }
+    let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
+    Ok(WasherLabelInputs {
+        rated_annual_kwh: require(&RATED_ANNUALK_WH)?,
+        capacity_ft3: require(&CAPACITY)?,
+        label_usage: match child_f64(node, &LABEL_USAGE) {
+            Some(usage) => usage,
+            None if modern => require(&LABEL_USAGE)?,
+            // The pre-2019A algebra never reads it: the version's default.
+            None => 999.0,
+        },
+        label_electric_rate: require(&LABEL_ELECTRIC_RATE)?,
+        label_gas_rate: require(&LABEL_GAS_RATE)?,
+        label_annual_gas_cost: require(&LABEL_ANNUAL_GAS_COST)?,
+    })
+}
+
+/// The clothes washer's label inputs.
+struct WasherLabelInputs {
+    rated_annual_kwh: f64,
+    capacity_ft3: f64,
+    label_usage: f64,
+    label_electric_rate: f64,
+    label_gas_rate: f64,
+    label_annual_gas_cost: f64,
+}
+
+/// The dishwasher's label inputs under OpenStudio-HPXML's all-or-nothing
+/// default rule (`resources/defaults.rb:4305-4319`): the whole set defaults
+/// together when `PlaceSettingCapacity` is absent (the version's
+/// `get_dishwasher_values`), and a provided `PlaceSettingCapacity` means no
+/// label field is defaulted. With the place count on the HPXML, the rated
+/// annual kWh falls back to 215 / EnergyFactor (the reference's
+/// `calc_dishwasher_annual_kwh_from_ef`); neither present is the missing
+/// input the reference's own algebra would crash on. The rule binds the
+/// fields the branch reads: the pre-2019 energy-factor form reads no label
+/// field, so each keeps the version's 999 'unused' default when the HPXML
+/// omits it.
+fn dishwasher_label_inputs(
+    node: &XmlNode,
+    eri_version: EriVersion,
+) -> Result<DishwasherLabelInputs, HpxmlError> {
+    let system_id = element_id(node).unwrap_or_else(|| "unknown".to_string());
+    let energy_factor = child_f64(node, &ENERGY_FACTOR);
+    let modern = matches!(eri_version, EriVersion::Y2019To2022 | EriVersion::Latest);
+    let label_field = |element: &'static super::elements::HpxmlElement| -> Result<f64, HpxmlError> {
+        match child_f64(node, element) {
+            Some(value) => Ok(value),
+            // The pre-2019A algebra reads no label field: the version's
+            // 'unused' default.
+            None if !modern => Ok(999.0),
+            None => Err(HpxmlError::Parse(
+                format!(
+                    "Dishwasher `{system_id}`: the HPXML provides PlaceSettingCapacity, so \
+                         no other label field is defaulted (defaults.rb:4305 defaults the \
+                         whole set together): {} is required",
+                    element.name
+                )
+                .into(),
+            )),
+        }
+    };
+    if child_f64(node, &PLACE_SETTING_CAPACITY).is_none() {
+        return Ok(if modern {
+            DishwasherLabelInputs {
+                rated_annual_kwh: 467.0,
+                place_setting_capacity: 12.0,
+                energy_factor,
+                label_usage: 4.0,
+                label_electric_rate: 0.12,
+                label_gas_rate: 1.09,
+                label_annual_gas_cost: 33.12,
+            }
+        } else {
+            // get_dishwasher_values, pre-2019A set: the label fields are
+            // unused.
+            DishwasherLabelInputs {
+                rated_annual_kwh: 467.0,
+                place_setting_capacity: 12.0,
+                energy_factor,
+                label_usage: 999.0,
+                label_electric_rate: 999.0,
+                label_gas_rate: 999.0,
+                label_annual_gas_cost: 999.0,
+            }
+        });
+    }
+    let rated_annual_kwh = match child_f64(node, &RATED_ANNUALK_WH) {
+        Some(rated) => rated,
+        None if energy_factor.is_some() => 215.0 / energy_factor.expect("checked above"),
+        None => {
+            return Err(HpxmlError::Parse(
+                format!(
+                    "Dishwasher `{system_id}`: with PlaceSettingCapacity present, either \
+                     RatedAnnualkWh or EnergyFactor is required (the reference derives \
+                     the rated value as 215 / EnergyFactor) and neither is on the HPXML"
+                )
+                .into(),
+            ));
+        }
+    };
+    Ok(DishwasherLabelInputs {
+        rated_annual_kwh,
+        place_setting_capacity: child_f64(node, &PLACE_SETTING_CAPACITY)
+            .expect("PlaceSettingCapacity checked above"),
+        energy_factor,
+        label_usage: label_field(&LABEL_USAGE)?,
+        label_electric_rate: label_field(&LABEL_ELECTRIC_RATE)?,
+        label_gas_rate: label_field(&LABEL_GAS_RATE)?,
+        label_annual_gas_cost: label_field(&LABEL_ANNUAL_GAS_COST)?,
+    })
+}
+
+/// The dishwasher's label inputs.
+struct DishwasherLabelInputs {
+    rated_annual_kwh: f64,
+    place_setting_capacity: f64,
+    energy_factor: Option<f64>,
+    label_usage: f64,
+    label_electric_rate: f64,
+    label_gas_rate: f64,
+    label_annual_gas_cost: f64,
+}
+
 pub(super) fn resolve_scheduled_loads(
     building: &Building,
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) -> std::result::Result<(), HpxmlError> {
     let details = &building.details_xml;
+    // The wet appliances' shared occupancy and ERI-version inputs, resolved
+    // once: the ERI version comes from the HPXML header and can fail the
+    // parse, so it is read before any spec is built.
+    let mut occupancy_inputs = wet_appliance_occupancy_inputs(details);
+    occupancy_inputs.eri_version = wet_appliance_eri_version(building)?;
 
     // Occupancy
-    if let Some(occupancy) = details.path(&["BuildingSummary", "BuildingOccupancy"]) {
+    if let Some(occupancy) = details.path(&[&BUILDING_SUMMARY, &BUILDING_OCCUPANCY]) {
         let mut params = Map::new();
-        if let Some(n) = child_f64(occupancy, "NumberofResidents") {
+        if let Some(n) = child_f64(occupancy, &NUMBEROF_RESIDENTS) {
             params.insert("number_of_occupants".to_string(), json!(n));
             #[cfg(feature = "observe")]
             tracing::info!(
@@ -121,9 +432,9 @@ pub(super) fn resolve_scheduled_loads(
             );
         } else if let Some(n_bedrooms) = details
             .path(&[
-                "BuildingSummary",
-                "BuildingConstruction",
-                "NumberofBedrooms",
+                &BUILDING_SUMMARY,
+                &BUILDING_CONSTRUCTION,
+                &NUMBEROF_BEDROOMS,
             ])
             .and_then(|n| parse_trimmed_f64(&n.text))
         {
@@ -184,32 +495,33 @@ pub(super) fn resolve_scheduled_loads(
         }
     }
 
-    if let Some(appliances) = details.child("Appliances") {
-        let n_bedrooms = resolve_bedroom_count_for_appliances(details);
+    if let Some(appliances) = details.child(&APPLIANCES) {
+        let n_bedrooms = resolve_bedroom_count_for_appliances(details)?;
 
         // Pre-extract washer params for dryer energy calculation (OCHRE passes
         // the actual ClothesWasher to parse_clothes_dryer).
-        let washer_node = appliances.children_named("ClothesWasher").next();
+        let washer_node = appliances.children_named(&CLOTHES_WASHER).next();
         let washer_rated_kwh = washer_node
-            .and_then(|n| child_f64(n, "RatedAnnualkWh"))
+            .and_then(|n| child_f64(n, &RATED_ANNUALK_WH))
             .unwrap_or(400.0);
         let washer_imef = washer_node
-            .and_then(|n| child_f64(n, "IntegratedModifiedEnergyFactor"))
+            .and_then(|n| child_f64(n, &INTEGRATED_MODIFIED_ENERGY_FACTOR))
             .unwrap_or(1.0);
         let washer_capacity_ft3 = washer_node
-            .and_then(|n| child_f64(n, "Capacity"))
+            .and_then(|n| child_f64(n, &CAPACITY))
             .unwrap_or(3.0);
 
-        for (tag, name) in [
-            ("ClothesWasher", "Clothes Washer"),
-            ("ClothesDryer", "Clothes Dryer"),
-            ("Dishwasher", "Dishwasher"),
-            ("Refrigerator", "Refrigerator"),
-            ("Freezer", "Freezer"),
-            ("CookingRange", "Cooking Range"),
-            ("Microwave", "Microwave"),
-            ("Dehumidifier", "Dehumidifier"),
+        for (kind, name) in [
+            (ApplianceTag::ClothesWasher, "Clothes Washer"),
+            (ApplianceTag::ClothesDryer, "Clothes Dryer"),
+            (ApplianceTag::Dishwasher, "Dishwasher"),
+            (ApplianceTag::Refrigerator, "Refrigerator"),
+            (ApplianceTag::Freezer, "Freezer"),
+            (ApplianceTag::CookingRange, "Cooking Range"),
+            (ApplianceTag::Microwave, "Microwave"),
+            (ApplianceTag::Dehumidifier, "Dehumidifier"),
         ] {
+            let tag = kind.element();
             require_unique_appliance_ids(appliances, tag)?;
             let mut counter = 0u32;
             for node in appliances.children_named(tag) {
@@ -218,14 +530,14 @@ pub(super) fn resolve_scheduled_loads(
                 let mut fuel = FuelType::Electric;
                 // Default RatedAnnualkWh: washer=400, dishwasher=467, fridge=637+18*beds, freezer=319.8.
                 // OCHRE falls back to these when HPXML omits the element.
-                let default_kwh = match tag {
-                    "ClothesWasher" => Some(400.0),
-                    "Dishwasher" => Some(467.0),
-                    "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
-                    "Freezer" => Some(319.8),
-                    other => {
+                let default_kwh = match kind {
+                    ApplianceTag::ClothesWasher => Some(400.0),
+                    ApplianceTag::Dishwasher => Some(467.0),
+                    ApplianceTag::Refrigerator => Some(637.0 + 18.0 * n_bedrooms),
+                    ApplianceTag::Freezer => Some(319.8),
+                    _other => {
                         tracing::warn!(
-                            appliance_tag = other,
+                            appliance_tag = tag.name,
                             "No default RatedAnnualkWh for appliance type; energy will be zero if \
                              HPXML omits the element"
                         );
@@ -233,103 +545,100 @@ pub(super) fn resolve_scheduled_loads(
                     }
                 };
                 let rated_kwh = node
-                    .child("extension")
-                    .and_then(|ext| child_f64(ext, "AdjustedAnnualkWh"))
-                    .or_else(|| child_f64(node, "RatedAnnualkWh"))
+                    .child(&EXTENSION)
+                    .and_then(|ext| child_f64(ext, &ADJUSTED_ANNUALK_WH))
+                    .or_else(|| child_f64(node, &RATED_ANNUALK_WH))
                     .or(default_kwh);
                 if let Some(kwh) = rated_kwh {
-                    params.insert("annual_electric_kwh".to_string(), json!(kwh));
+                    // The HPXML element's RatedAnnualkWh is kWh; the raw key
+                    // is J: one conversion at the write.
+                    params.insert("annual_electric_j".to_string(), json!(kwh * 3.6e6));
                 }
-                if let Some(load_kwh) = child_load_kwh(node) {
-                    params.insert("annual_electric_kwh".to_string(), json!(load_kwh));
-                } else if let Some(load_therms) = child_load_therms(node) {
+                if let Some(load_j) = child_annual_energy_j(node) {
+                    params.insert("annual_electric_j".to_string(), json!(load_j));
+                } else if let Some(fuel_j) = child_annual_fuel_energy_j(node) {
                     fuel = FuelType::Gas;
-                    params.insert("annual_gas_therms".to_string(), json!(load_therms));
+                    params.insert("annual_gas_j".to_string(), json!(fuel_j));
                 }
-                if let Some(fuel_name) = child_text(node, "FuelType") {
+                if let Some(fuel_name) = child_text(node, &FUEL_TYPE) {
                     fuel = parse_fuel(Some(&fuel_name))?;
                 }
 
                 // Appliance-specific parameters
-                match tag {
-                    "ClothesWasher" => {
-                        if let Some(capacity_ft3) = child_f64(node, "Capacity") {
+                match kind {
+                    ApplianceTag::ClothesWasher => {
+                        if let Some(capacity_ft3) = child_f64(node, &CAPACITY) {
                             params.insert(
                                 "capacity_m3".to_string(),
                                 json!(conv::volume_ft3_to_m3(capacity_ft3)),
                             );
                         }
-                        if let Some(usage) = child_f64(node, "LabelUsage") {
+                        if let Some(usage) = child_f64(node, &LABEL_USAGE) {
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
                         }
-                        if let Some(imef) = child_f64(node, "IntegratedModifiedEnergyFactor") {
+                        if let Some(imef) = child_f64(node, &INTEGRATED_MODIFIED_ENERGY_FACTOR) {
                             params.insert("imef".to_string(), json!(imef));
                         }
-                        params.insert("hot_water_draw_volume_l".to_string(), json!(15.0));
 
-                        // Convert RatedAnnualkWh to actual annual energy (OCHRE hpxml.py:1243-1262).
-                        // RatedAnnualkWh is a test-cycle rating; actual usage depends on
-                        // household size, appliance capacity, and label usage cycles.
-                        if let Some(rated_kwh) =
-                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
-                        {
-                            let capacity_ft3 = params
-                                .get("capacity_m3")
-                                .and_then(|v| v.as_f64())
-                                .map(|m3| m3 / 0.028_316_8)
-                                .unwrap_or(3.0);
-                            let label_usage = params
-                                .get("label_usage_cycles_per_week")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(6.0);
-                            let multiplier = node
-                                .child("extension")
-                                .and_then(|e| child_f64(e, "UsageMultiplier"))
-                                .unwrap_or(1.0);
-
-                            const GAS_H20: f64 = 0.3914;
-                            const ELEC_H20: f64 = 0.0178;
-                            // Read per-appliance label rates from HPXML, fall back
-                            // to OCHRE defaults when absent.
-                            let gas_rate = child_f64(node, "LabelGasRate").unwrap_or(1.09);
-                            let gas_cost = child_f64(node, "LabelAnnualGasCost").unwrap_or(27.0);
-                            let electric_rate =
-                                child_f64(node, "LabelElectricRate").unwrap_or(0.12);
-
-                            let lcy = label_usage * 52.0;
-                            let scy = 164.0 + n_bedrooms * 46.5;
-                            let acy = scy * ((3.0 * 2.08 + 1.59) / (capacity_ft3 * 2.08 + 1.59));
-                            let cw_appl = (gas_cost * GAS_H20 / gas_rate
-                                - rated_kwh * electric_rate * ELEC_H20 / electric_rate)
-                                / (electric_rate * GAS_H20 / gas_rate - ELEC_H20);
-                            let actual_kwh = cw_appl / lcy * acy * multiplier;
-                            params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
+                        // OpenStudio-HPXML v1.12.0 calc_clothes_washer_energy_gpd
+                        // (hotwater_appliances.rb:824-888): the adjusted annual
+                        // energy and the daily hot-water volume, from the
+                        // cycles-per-year rule (operational in residents,
+                        // the version's asset form otherwise), the label
+                        // algebra and the rated value.
+                        let adjusted = child_annual_energy_j(node).or_else(|| {
+                            node.child(&EXTENSION)
+                                .and_then(|ext| child_f64(ext, &ADJUSTED_ANNUALK_WH))
+                        });
+                        let washer_label = washer_label_inputs(node, occupancy_inputs.eri_version)?;
+                        let inputs = ClothesWasherInputs {
+                            rated_annual_kwh: washer_label.rated_annual_kwh,
+                            capacity_ft3: washer_label.capacity_ft3,
+                            label_usage: washer_label.label_usage,
+                            label_electric_rate: washer_label.label_electric_rate,
+                            label_gas_rate: washer_label.label_gas_rate,
+                            label_annual_gas_cost: washer_label.label_annual_gas_cost,
+                            usage_multiplier: usage_multiplier_of(node),
+                            occupancy: occupancy_inputs,
+                        };
+                        let (annual_kwh, gpd) = calc_clothes_washer_energy_gpd(&inputs, adjusted);
+                        insert_wet_appliance_apportionment(node, "ClothesWasher", &mut params)?;
+                        tracing::debug!(
+                            appliance = "Clothes Washer",
+                            annual_electric_kwh = annual_kwh,
+                            daily_hot_water_m3 = conv::volume_gal_to_m3(gpd),
+                            "wet appliance hot water resolved (SI)",
+                        );
+                        if child_annual_fuel_energy_j(node).is_none() {
+                            // The washer calc's annual energy is kWh; the raw
+                            // key is J: one conversion at the write.
+                            params
+                                .insert("annual_electric_j".to_string(), json!(annual_kwh * 3.6e6));
                         }
+                        params.insert(
+                            "daily_hot_water_m3".to_string(),
+                            json!(conv::volume_gal_to_m3(gpd)),
+                        );
 
                         // Multi-phase cycle: fill, wash, rinse, spin.
-                        // Fill and wash/rinse phases draw hot water; spin does not.
                         params.insert("phase_len".to_string(), json!(4));
-                        params.insert("phase_0_power_kw".to_string(), json!(0.02));
+                        params.insert("phase_0_power_w".to_string(), json!(20.0));
                         params.insert("phase_0_duration_s".to_string(), json!(300.0));
-                        params.insert("phase_0_has_water_draw".to_string(), json!(true));
-                        params.insert("phase_1_power_kw".to_string(), json!(0.4));
+                        params.insert("phase_1_power_w".to_string(), json!(400.0));
                         params.insert("phase_1_duration_s".to_string(), json!(900.0));
-                        params.insert("phase_1_has_water_draw".to_string(), json!(true));
-                        params.insert("phase_2_power_kw".to_string(), json!(0.02));
+                        params.insert("phase_2_power_w".to_string(), json!(20.0));
                         params.insert("phase_2_duration_s".to_string(), json!(300.0));
-                        params.insert("phase_2_has_water_draw".to_string(), json!(true));
-                        params.insert("phase_3_power_kw".to_string(), json!(0.8));
+                        params.insert("phase_3_power_w".to_string(), json!(800.0));
                         params.insert("phase_3_duration_s".to_string(), json!(600.0));
-                        params.insert("phase_3_has_water_draw".to_string(), json!(false));
                     }
-                    "ClothesDryer" => {
-                        if let Some(cef) = child_f64(node, "CombinedEnergyFactor") {
+                    ApplianceTag::ClothesDryer => {
+                        if let Some(cef) = child_f64(node, &COMBINED_ENERGY_FACTOR) {
                             params.insert("combined_energy_factor".to_string(), json!(cef));
-                        } else if let Some(ef) = child_f64(node, "EnergyFactor") {
+                        } else if let Some(ef) = child_f64(node, &ENERGY_FACTOR) {
                             params.insert("energy_factor".to_string(), json!(ef));
                         }
                         let vented =
-                            child_bool(node, "Vented", "ClothesDryer/Vented", "Clothes Dryer")?
+                            child_bool(node, &VENTED, "ClothesDryer/Vented", "Clothes Dryer")?
                                 .unwrap_or(true);
                         // A fuel-fired dryer conveys its moisture and combustion
                         // products outside the building (IFGC 614.1).
@@ -357,8 +666,8 @@ pub(super) fn resolve_scheduled_loads(
                         // (OCHRE hpxml.py parse_clothes_dryer). Uses default washer values
                         // (RatedAnnualkWh=400, IMEF=1.0, Capacity=3.0 ft³) since washer params
                         // are not accessible here.
-                        if !params.contains_key("annual_electric_kwh")
-                            && !params.contains_key("annual_gas_therms")
+                        if !params.contains_key("annual_electric_j")
+                            && !params.contains_key("annual_gas_j")
                         {
                             let cef = params
                                 .get("combined_energy_factor")
@@ -371,8 +680,8 @@ pub(super) fn resolve_scheduled_loads(
                                 })
                                 .unwrap_or(3.01);
                             let multiplier = node
-                                .child("extension")
-                                .and_then(|e| child_f64(e, "UsageMultiplier"))
+                                .child(&EXTENSION)
+                                .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                                 .unwrap_or(1.0);
                             let washer_capacity = washer_capacity_ft3;
                             let rmc = (0.97 * (washer_capacity / washer_imef)
@@ -384,8 +693,8 @@ pub(super) fn resolve_scheduled_loads(
                             let base_kwh = (((rmc - 0.04) * 100.0) / 55.5) * (8.45 / cef) * acy;
                             if fuel == FuelType::Electric {
                                 params.insert(
-                                    "annual_electric_kwh".to_string(),
-                                    json!(base_kwh * multiplier),
+                                    "annual_electric_j".to_string(),
+                                    json!(base_kwh * multiplier * 3.6e6),
                                 );
                             } else {
                                 // Gas dryer: ~7% electric parasitic, ~93% gas combustion
@@ -395,113 +704,138 @@ pub(super) fn resolve_scheduled_loads(
                                     base_kwh * BTU_PER_KWH * (1.0 - 0.07) * (3.73 / 3.30)
                                         / 100_000.0
                                         * multiplier;
-                                params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
-                                params.insert("annual_gas_therms".to_string(), json!(annual_therm));
+                                // One conversion at the write: kWh to J,
+                                // therms through the HARES therm.
+                                params.insert(
+                                    "annual_electric_j".to_string(),
+                                    json!(annual_kwh * 3.6e6),
+                                );
+                                params.insert(
+                                    "annual_gas_j".to_string(),
+                                    json!(
+                                        uom::si::f64::Energy::new::<
+                                            hares_types::si_units::energy::therm,
+                                        >(annual_therm)
+                                        .get::<uom::si::energy::joule>()
+                                    ),
+                                );
                             }
                         }
                     }
-                    "Dishwasher" => {
-                        if let Some(cap) = child_f64(node, "PlaceSettingCapacity") {
+                    ApplianceTag::Dishwasher => {
+                        if let Some(cap) = child_f64(node, &PLACE_SETTING_CAPACITY) {
                             params.insert("place_setting_capacity".to_string(), json!(cap));
                         }
-                        if let Some(usage) = child_f64(node, "LabelUsage") {
+                        if let Some(usage) = child_f64(node, &LABEL_USAGE) {
                             params.insert("label_usage_cycles_per_week".to_string(), json!(usage));
                         }
-                        params.insert("hot_water_draw_volume_l".to_string(), json!(6.0));
 
-                        // Convert RatedAnnualkWh to actual annual energy (OCHRE hpxml.py:1336-1354).
-                        // RatedAnnualkWh is a test-cycle rating; actual usage depends on
-                        // household size, place-setting capacity, and label usage cycles.
-                        if let Some(rated_kwh) =
-                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
-                        {
-                            let capacity = params
-                                .get("place_setting_capacity")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(12.0);
-                            let label_usage = params
-                                .get("label_usage_cycles_per_week")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(4.0);
-                            let multiplier = node
-                                .child("extension")
-                                .and_then(|e| child_f64(e, "UsageMultiplier"))
-                                .unwrap_or(1.0);
-
-                            let gas_rate = child_f64(node, "LabelGasRate").unwrap_or(1.09);
-                            let gas_cost = child_f64(node, "LabelAnnualGasCost").unwrap_or(33.12);
-                            let electric_rate =
-                                child_f64(node, "LabelElectricRate").unwrap_or(0.12);
-
-                            let usage_annual = label_usage * 52.0;
-                            let kwh_per_cyc = ((gas_cost * 0.5497 / gas_rate
-                                - rated_kwh * electric_rate * 0.02504 / electric_rate)
-                                / (electric_rate * 0.5497 / gas_rate - 0.02504))
-                                / usage_annual;
-                            let dwcpy = (88.4 + 34.9 * n_bedrooms) * (12.0 / capacity);
-                            let actual_kwh = kwh_per_cyc * dwcpy * multiplier;
-                            params.insert("annual_electric_kwh".to_string(), json!(actual_kwh));
+                        // OpenStudio-HPXML v1.12.0 calc_dishwasher_energy_gpd
+                        // (hotwater_appliances.rb:607-675): the adjusted annual
+                        // energy and the daily hot-water volume, from the
+                        // cycles-per-year rule (operational in residents,
+                        // the version's asset form otherwise), the label
+                        // algebra and the rated value.
+                        let adjusted = child_annual_energy_j(node).or_else(|| {
+                            node.child(&EXTENSION)
+                                .and_then(|ext| child_f64(ext, &ADJUSTED_ANNUALK_WH))
+                        });
+                        let dishwasher_label =
+                            dishwasher_label_inputs(node, occupancy_inputs.eri_version)?;
+                        let inputs = DishwasherInputs {
+                            rated_annual_kwh: dishwasher_label.rated_annual_kwh,
+                            place_setting_capacity: dishwasher_label.place_setting_capacity,
+                            energy_factor: dishwasher_label.energy_factor,
+                            label_usage: dishwasher_label.label_usage,
+                            label_electric_rate: dishwasher_label.label_electric_rate,
+                            label_gas_rate: dishwasher_label.label_gas_rate,
+                            label_annual_gas_cost: dishwasher_label.label_annual_gas_cost,
+                            usage_multiplier: usage_multiplier_of(node),
+                            occupancy: occupancy_inputs,
+                        };
+                        let (annual_kwh, gpd) = calc_dishwasher_energy_gpd(&inputs, adjusted);
+                        insert_wet_appliance_apportionment(node, "Dishwasher", &mut params)?;
+                        tracing::debug!(
+                            appliance = "Dishwasher",
+                            annual_electric_kwh = annual_kwh,
+                            daily_hot_water_m3 = conv::volume_gal_to_m3(gpd),
+                            "wet appliance hot water resolved (SI)",
+                        );
+                        if child_annual_fuel_energy_j(node).is_none() {
+                            // The washer calc's annual energy is kWh; the raw
+                            // key is J: one conversion at the write.
+                            params
+                                .insert("annual_electric_j".to_string(), json!(annual_kwh * 3.6e6));
                         }
+                        params.insert(
+                            "daily_hot_water_m3".to_string(),
+                            json!(conv::volume_gal_to_m3(gpd)),
+                        );
 
                         // Multi-phase cycle: fill, wash, drain, dry.
-                        // Fill and wash phases draw hot water; drain and dry do not.
                         params.insert("phase_len".to_string(), json!(4));
-                        params.insert("phase_0_power_kw".to_string(), json!(0.05));
+                        params.insert("phase_0_power_w".to_string(), json!(50.0));
                         params.insert("phase_0_duration_s".to_string(), json!(120.0));
-                        params.insert("phase_0_has_water_draw".to_string(), json!(true));
-                        params.insert("phase_1_power_kw".to_string(), json!(0.6));
+                        params.insert("phase_1_power_w".to_string(), json!(600.0));
                         params.insert("phase_1_duration_s".to_string(), json!(1200.0));
-                        params.insert("phase_1_has_water_draw".to_string(), json!(true));
-                        params.insert("phase_2_power_kw".to_string(), json!(0.3));
+                        params.insert("phase_2_power_w".to_string(), json!(300.0));
                         params.insert("phase_2_duration_s".to_string(), json!(60.0));
-                        params.insert("phase_2_has_water_draw".to_string(), json!(false));
-                        params.insert("phase_3_power_kw".to_string(), json!(0.8));
+                        params.insert("phase_3_power_w".to_string(), json!(800.0));
                         params.insert("phase_3_duration_s".to_string(), json!(900.0));
-                        params.insert("phase_3_has_water_draw".to_string(), json!(false));
                     }
-                    "CookingRange"
-                        if !params.contains_key("annual_electric_kwh")
-                            && !params.contains_key("annual_gas_therms") =>
+                    ApplianceTag::CookingRange
+                        if !params.contains_key("annual_electric_j")
+                            && !params.contains_key("annual_gas_j") =>
                     {
                         // OCHRE hpxml.py parse_cooking_range:1451-1461.
                         let is_induction = child_bool(
                             node,
-                            "IsInduction",
+                            &IS_INDUCTION,
                             "CookingRange/IsInduction",
                             "Cooking Range",
                         )?
                         .unwrap_or(false);
                         let multiplier = node
-                            .child("extension")
-                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .child(&EXTENSION)
+                            .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                             .unwrap_or(1.0);
                         let burner_ef = if is_induction { 0.91_f64 } else { 1.0_f64 };
                         let oven_ef = 1.0_f64;
                         if fuel == FuelType::Electric {
                             let annual_kwh =
                                 burner_ef * oven_ef * (331.0 + 39.0 * n_bedrooms) * multiplier;
-                            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+                            params
+                                .insert("annual_electric_j".to_string(), json!(annual_kwh * 3.6e6));
                         } else {
                             let annual_kwh = (22.6 + 2.7 * n_bedrooms) * multiplier;
                             let annual_therm = oven_ef * (22.6 + 2.7 * n_bedrooms) * multiplier;
-                            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
-                            params.insert("annual_gas_therms".to_string(), json!(annual_therm));
+                            params
+                                .insert("annual_electric_j".to_string(), json!(annual_kwh * 3.6e6));
+                            params.insert(
+                                "annual_gas_j".to_string(),
+                                json!(uom::si::f64::Energy::new::<
+                                    hares_types::si_units::energy::therm,
+                                >(
+                                    annual_therm
+                                )
+                                .get::<uom::si::energy::joule>()),
+                            );
                         }
                     }
-                    "Microwave" if !params.contains_key("annual_electric_kwh") => {
+                    ApplianceTag::Microwave if !params.contains_key("annual_electric_j") => {
                         // ANSI/RESNET 301-2014 §4.2.2.5.2: microwave oven default.
                         // HPXML Microwave element typically carries RatedAnnualkWh or
                         // extension/AdjustedAnnualkWh; this arm applies the default only
                         // when neither is present.
                         let multiplier = node
-                            .child("extension")
-                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .child(&EXTENSION)
+                            .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                             .unwrap_or(1.0);
                         let annual_kwh = MICROWAVE_DEFAULT_ANNUAL_KWH * multiplier;
-                        params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+                        params.insert("annual_electric_j".to_string(), json!(annual_kwh * 3.6e6));
                     }
-                    "Dehumidifier" => {
-                        if let Some(cap_pints_day) = child_f64(node, "Capacity") {
+                    ApplianceTag::Dehumidifier => {
+                        if let Some(cap_pints_day) = child_f64(node, &CAPACITY) {
                             // HPXML §Dehumidifier/Capacity is in US liquid pints/day per the HPXML 4.x schema
                             // annotation. 1 US liquid pint = 0.473176473 L (exact, NIST Handbook 44).
                             params.insert(
@@ -509,18 +843,18 @@ pub(super) fn resolve_scheduled_loads(
                                 json!(cap_pints_day * 0.473_176_473),
                             );
                         }
-                        if let Some(ef) = child_f64(node, "EnergyFactor") {
+                        if let Some(ef) = child_f64(node, &ENERGY_FACTOR) {
                             params.insert("energy_factor".to_string(), json!(ef));
                         }
-                        if let Some(ief) = child_f64(node, "IntegratedEnergyFactor") {
+                        if let Some(ief) = child_f64(node, &INTEGRATED_ENERGY_FACTOR) {
                             params.insert("integrated_energy_factor".to_string(), json!(ief));
                         }
-                        if let Some(frac) = child_f64(node, "FractionDehumidificationLoadServed")
-                            .or_else(|| child_f64(node, "FractionLoadServed"))
+                        if let Some(frac) = child_f64(node, &FRACTION_DEHUMIDIFICATION_LOAD_SERVED)
+                            .or_else(|| child_f64(node, &FRACTION_LOAD_SERVED))
                         {
                             params.insert("fraction_served".to_string(), json!(frac));
                         }
-                        if let Some(setpoint) = child_f64(node, "DehumidistatSetpoint") {
+                        if let Some(setpoint) = child_f64(node, &DEHUMIDISTAT_SETPOINT) {
                             let target_rh = if setpoint > 1.0 {
                                 setpoint / 100.0
                             } else {
@@ -529,33 +863,29 @@ pub(super) fn resolve_scheduled_loads(
                             params.insert("target_rh".to_string(), json!(target_rh));
                         }
                     }
-                    "Refrigerator" => {
+                    ApplianceTag::Refrigerator => {
                         let multiplier = node
-                            .child("extension")
-                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .child(&EXTENSION)
+                            .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                             .unwrap_or(1.0);
-                        if let Some(kwh) =
-                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                        if let Some(kwh) = params.get("annual_electric_j").and_then(|v| v.as_f64())
                         {
-                            params
-                                .insert("annual_electric_kwh".to_string(), json!(kwh * multiplier));
+                            params.insert("annual_electric_j".to_string(), json!(kwh * multiplier));
                         }
                     }
-                    "Freezer" => {
+                    ApplianceTag::Freezer => {
                         let multiplier = node
-                            .child("extension")
-                            .and_then(|e| child_f64(e, "UsageMultiplier"))
+                            .child(&EXTENSION)
+                            .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                             .unwrap_or(1.0);
-                        if let Some(kwh) =
-                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                        if let Some(kwh) = params.get("annual_electric_j").and_then(|v| v.as_f64())
                         {
-                            params
-                                .insert("annual_electric_kwh".to_string(), json!(kwh * multiplier));
+                            params.insert("annual_electric_j".to_string(), json!(kwh * multiplier));
                         }
                     }
-                    other => {
+                    _other => {
                         tracing::warn!(
-                            appliance_tag = other,
+                            appliance_tag = tag.name,
                             "No appliance-specific parameter extraction for this tag; \
                              only generic fields will be parsed"
                         );
@@ -565,14 +895,13 @@ pub(super) fn resolve_scheduled_loads(
                 #[cfg(debug_assertions)]
                 {
                     let multiplier = node
-                        .child("extension")
-                        .and_then(|e| child_f64(e, "UsageMultiplier"))
+                        .child(&EXTENSION)
+                        .and_then(|e| child_f64(e, &USAGE_MULTIPLIER))
                         .unwrap_or(1.0);
                     if (multiplier - 1.0).abs() > f64::EPSILON
-                        && let Some(kwh) =
-                            params.get("annual_electric_kwh").and_then(|v| v.as_f64())
+                        && let Some(kwh) = params.get("annual_electric_j").and_then(|v| v.as_f64())
                     {
-                        let unscaled_default = match tag {
+                        let unscaled_default = match tag.name {
                             "Refrigerator" => Some(637.0 + 18.0 * n_bedrooms),
                             "Freezer" => Some(319.8),
                             _ => None,
@@ -581,7 +910,7 @@ pub(super) fn resolve_scheduled_loads(
                             && (kwh - default).abs() < 1e-6
                         {
                             tracing::warn!(
-                                appliance = tag,
+                                appliance = tag.name,
                                 multiplier = %multiplier,
                                 unscaled_default_kwh = default,
                                 "appliance default energy was not scaled by UsageMultiplier"
@@ -594,23 +923,23 @@ pub(super) fn resolve_scheduled_loads(
                     params.insert(k, v);
                 }
 
-                let is_non_primary_fridge = tag == "Refrigerator"
+                let is_non_primary_fridge = matches!(kind, ApplianceTag::Refrigerator)
                     && !child_bool(
                         node,
-                        "PrimaryIndicator",
+                        &PRIMARY_INDICATOR,
                         "Refrigerator/PrimaryIndicator",
                         "Refrigerator",
                     )?
                     .unwrap_or(true);
-                if tag != "Dehumidifier" {
-                    let location = child_text(node, "Location").unwrap_or_else(|| {
+                if !matches!(kind, ApplianceTag::Dehumidifier) {
+                    let location = child_text(node, &LOCATION).unwrap_or_else(|| {
                         default_appliance_location(
                             building,
-                            tag == "Freezer" || is_non_primary_fridge,
+                            matches!(kind, ApplianceTag::Freezer) || is_non_primary_fridge,
                         )
                         .to_string()
                     });
-                    match appliance_site(building, tag, node, &location)? {
+                    match appliance_site(building, tag.name, node, &location)? {
                         ApplianceSite::ConditionedSpace => {}
                         ApplianceSite::Zone(zone_id) => {
                             params.insert("zone_id".to_string(), json!(zone_id));
@@ -630,7 +959,7 @@ pub(super) fn resolve_scheduled_loads(
                 if is_non_primary_fridge {
                     spec.instance_name = Some(format!("{name} (Secondary)"));
                 }
-                if tag == "Dehumidifier" {
+                if matches!(kind, ApplianceTag::Dehumidifier) {
                     // HPXML's Dehumidifier schema has no Location element;
                     // OS-HPXML and HARES both model every dehumidifier in the
                     // one conditioned zone. A building with no conditioned
@@ -671,7 +1000,7 @@ pub(super) fn resolve_scheduled_loads(
         }
     }
 
-    if let Some(lighting) = details.child("Lighting") {
+    if let Some(lighting) = details.child(&LIGHTING) {
         let indoor_area_ft2 = conv::area_m2_to_ft2(conditioned_floor_area_m2(building));
         let foundation_area_ft2 = conv::area_m2_to_ft2(foundation_floor_area_m2(building));
         let garage_area_ft2 = conv::area_m2_to_ft2(garage_floor_area_m2(building));
@@ -681,11 +1010,11 @@ pub(super) fn resolve_scheduled_loads(
         // turn fixes the float-summation order behind "Total Electric Power".
         // Sorted-key iteration keeps run-to-run output bit-identical.
         let mut by_location: BTreeMap<String, LightingFractions> = BTreeMap::new();
-        for group in lighting.children_named("LightingGroup") {
-            let location = child_text(group, "Location")
+        for group in lighting.children_named(&LIGHTING_GROUP) {
+            let location = child_text(group, &LOCATION)
                 .unwrap_or_else(|| "interior".to_string())
                 .to_ascii_lowercase();
-            let frac = child_f64(group, "FractionofUnitsInLocation").unwrap_or(0.0);
+            let frac = child_f64(group, &FRACTIONOF_UNITS_IN_LOCATION).unwrap_or(0.0);
 
             let entry = by_location.entry(location).or_default();
             // A group whose energy is stated directly (a Load) needs no
@@ -720,8 +1049,8 @@ pub(super) fn resolve_scheduled_loads(
                 }
                 None => {}
             }
-            if let Some(kwh) = child_load_kwh(group) {
-                entry.explicit_kwh = Some(kwh);
+            if let Some(annual_j) = child_annual_energy_j(group) {
+                entry.explicit_j = Some(annual_j);
             }
         }
 
@@ -825,37 +1154,46 @@ pub(super) fn resolve_scheduled_loads(
                     schedule_params.push((key, value));
                 }
             }
-            let annual_kwh = fractions
-                .explicit_kwh
-                .unwrap_or_else(|| derive_lighting_annual_kwh(&location, area_ft2, &fractions))
-                * usage_multiplier;
+            let annual_j = match fractions.explicit_j {
+                // The explicit Load is read in joules (one conversion at the
+                // read): the multiplier applies in J directly.
+                Some(explicit_j) => explicit_j * usage_multiplier,
+                None => {
+                    derive_lighting_annual_kwh(&location, area_ft2, &fractions)
+                        * usage_multiplier
+                        * 3.6e6
+                }
+            };
 
             let mut params = Map::new();
-            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+            // One conversion at the write for the derived-kWh path; the
+            // explicit path arrives in joules already.
+            params.insert("annual_electric_j".to_string(), json!(annual_j));
             for (key, value) in schedule_params {
                 params.insert(key, value);
             }
             specs.push(build_spec(name, FuelType::Electric, params, defaults));
         }
 
-        if let Some(ceiling_fan) = lighting.child("CeilingFan") {
+        if let Some(ceiling_fan) = lighting.child(&CEILING_FAN) {
             let mut params = Map::new();
-            let n_bedrooms = resolve_bedroom_count_for_appliances(details);
-            let n_fans = child_f64(ceiling_fan, "Count").unwrap_or(n_bedrooms + 1.0);
+            let n_bedrooms = resolve_bedroom_count_for_appliances(details)?;
+            let n_fans = child_f64(ceiling_fan, &COUNT).unwrap_or(n_bedrooms + 1.0);
             let efficiency_cfm_per_w = ceiling_fan
-                .path(&["Airflow", "Efficiency"])
+                .path(&[&AIRFLOW, &EFFICIENCY])
                 .and_then(|n| parse_trimmed_f64(&n.text))
                 .unwrap_or(3000.0 / 42.6);
             let annual_kwh = n_fans * 3000.0 / efficiency_cfm_per_w * 10.5 * 365.0 / 1000.0;
             params.insert("count".to_string(), json!(n_fans));
-            params.insert("annual_electric_kwh".to_string(), json!(annual_kwh));
+            // One conversion at the write: the fan algebra is kWh.
+            params.insert("annual_electric_j".to_string(), json!(annual_kwh * 3.6e6));
             params.insert(
                 "month_multipliers".to_string(),
                 Value::Array(
-                    read_extension_month_multipliers(ceiling_fan.child("extension"), "")
+                    read_extension_month_multipliers(ceiling_fan.child(&EXTENSION), "")
                         .or_else(|| {
                             read_extension_month_multipliers(
-                                lighting.child("extension"),
+                                lighting.child(&EXTENSION),
                                 "CeilingFan",
                             )
                         })
@@ -874,27 +1212,42 @@ pub(super) fn resolve_scheduled_loads(
         }
     }
 
-    if let Some(misc_loads) = details.child("MiscLoads") {
-        for plug in misc_loads.children_named("PlugLoad") {
-            let load_type = child_text(plug, "PlugLoadType")
+    if let Some(misc_loads) = details.child(&MISC_LOADS) {
+        for plug in misc_loads.children_named(&PLUG_LOAD) {
+            let load_type = child_text(plug, &PLUG_LOAD_TYPE)
                 .unwrap_or_else(|| "other".to_string())
                 .to_ascii_lowercase();
             let (name, fuel) = match load_type.as_str() {
                 "tv other" => ("TV", FuelType::Electric),
                 "well pump" => ("Well Pump", FuelType::Electric),
                 "electric vehicle charging" => {
-                    if let Some(kwh) = child_load_kwh(plug) {
-                        // Splits the two EV size options from ResStock (matches OCHRE parse_ev)
-                        let range_miles = if kwh < 1500.0 { 100.0 } else { 250.0 };
-                        // OCHRE: capacity = range / EV_FUEL_ECONOMY where
-                        // EV_FUEL_ECONOMY = 1/325 * 1000 miles/kWh
-                        let battery_capacity_kwh = range_miles / EV_FUEL_ECONOMY;
-                        let max_charging_power_kw = if range_miles < 175.0 { 7.2 } else { 11.5 };
+                    if let Some(annual_j) = child_annual_energy_j(plug) {
+                        // Splits the two EV size options from ResStock (matches OCHRE parse_ev).
+                        // The read is J per year; the threshold is the parent's
+                        // 1500 kWh converted once with uom.
+                        let range_miles = if annual_j
+                            < uom::si::f64::Energy::new::<uom::si::energy::kilowatt_hour>(1500.0)
+                                .get::<uom::si::energy::joule>()
+                        {
+                            100.0
+                        } else {
+                            250.0
+                        };
+                        // OCHRE: capacity = range × fuel economy. The range
+                        // is held in m, the capacity in J, and the fuel
+                        // economy is 325 Wh per mile written in SI (J/m)
+                        // with uom (the parent's 1000/325 miles per kWh).
+                        let range_m =
+                            uom::si::f64::Length::new::<uom::si::length::mile>(range_miles)
+                                .get::<uom::si::length::meter>();
+                        let battery_capacity_j = range_m * ev_fuel_economy_j_per_m();
+                        let max_charging_power_w =
+                            if range_miles < 175.0 { 7200.0 } else { 11500.0 };
                         let cfg = EvConfig {
                             equipment_id: None,
-                            capacity_kwh: battery_capacity_kwh,
+                            capacity_j: battery_capacity_j,
                             charging_level: Some("Level 2".to_string()),
-                            max_charging_power_kw,
+                            max_charging_power_w,
                             charging_efficiency: None,
                             l1_current_a: None,
                             l1_voltage_v: None,
@@ -912,19 +1265,19 @@ pub(super) fn resolve_scheduled_loads(
                             cell_resistance_ohm: None,
                             v2l_enabled: None,
                             v2l_soc_reserve: None,
-                            v2l_max_discharge_kw: None,
+                            v2l_max_discharge_w: None,
                             v2g_enabled: None,
                             v2g_soc_reserve: None,
-                            v2g_max_discharge_kw: None,
+                            v2g_max_discharge_w: None,
                             chemistry: None,
-                            fuel_economy_kwh_per_mi: None,
+                            fuel_economy_j_per_m: None,
                             ready_soc: None,
                             charging_strategy: None,
                             plug_in_policy: None,
-                            power_limit_kw: None,
+                            power_limit_w: None,
                             initial_connection_state: None,
                             power_factor: None,
-                            charger_capacity_kva: None,
+                            charger_capacity_va: None,
                             cc_cv_transition_soc: None,
                             charging_priority: None,
                             discharge_respects_deadline: true,
@@ -948,8 +1301,8 @@ pub(super) fn resolve_scheduled_loads(
             };
 
             let mut params = Map::new();
-            if let Some(kwh) = child_load_kwh(plug) {
-                params.insert("annual_electric_kwh".to_string(), json!(kwh));
+            if let Some(kwh) = child_annual_energy_j(plug) {
+                params.insert("annual_electric_j".to_string(), json!(kwh));
             }
             for (k, v) in parse_schedule_extension_params(plug, "") {
                 params.insert(k, v);
@@ -957,8 +1310,8 @@ pub(super) fn resolve_scheduled_loads(
             specs.push(build_spec(name.to_string(), fuel, params, defaults));
         }
 
-        for fuel_load in misc_loads.children_named("FuelLoad") {
-            let load_type = child_text(fuel_load, "FuelLoadType")
+        for fuel_load in misc_loads.children_named(&FUEL_LOAD) {
+            let load_type = child_text(fuel_load, &FUEL_LOAD_TYPE)
                 .unwrap_or_else(|| "other".to_string())
                 .to_ascii_lowercase();
             let name = match load_type.as_str() {
@@ -976,8 +1329,8 @@ pub(super) fn resolve_scheduled_loads(
             .to_string();
 
             let mut params = Map::new();
-            if let Some(therms) = child_load_therms(fuel_load) {
-                params.insert("annual_gas_therms".to_string(), json!(therms));
+            if let Some(therms) = child_annual_fuel_energy_j(fuel_load) {
+                params.insert("annual_gas_j".to_string(), json!(therms));
             }
             for (k, v) in parse_schedule_extension_params(fuel_load, "") {
                 params.insert(k, v);
@@ -996,23 +1349,23 @@ pub(super) fn resolve_ventilation(
     defaults: &DefaultsStore,
     specs: &mut Vec<EquipmentSpec>,
 ) -> std::result::Result<(), super::HpxmlError> {
-    let Some(vent_fans) = details.path(&["Systems", "MechanicalVentilation", "VentilationFans"])
+    let Some(vent_fans) = details.path(&[&SYSTEMS, &MECHANICAL_VENTILATION, &VENTILATION_FANS])
     else {
         return Ok(());
     };
 
-    for fan in vent_fans.children_named("VentilationFan") {
+    for fan in vent_fans.children_named(&VENTILATION_FAN) {
         // Only include fans used for whole-building or seasonal cooling ventilation.
         let is_whole_building = child_bool(
             fan,
-            "UsedForWholeBuildingVentilation",
+            &USED_FOR_WHOLE_BUILDING_VENTILATION,
             "VentilationFan/UsedForWholeBuildingVentilation",
             "Ventilation Fan",
         )?
         .unwrap_or(false);
         let is_seasonal_cooling = child_bool(
             fan,
-            "UsedForSeasonalCoolingLoadReduction",
+            &USED_FOR_SEASONAL_COOLING_LOAD_REDUCTION,
             "VentilationFan/UsedForSeasonalCoolingLoadReduction",
             "Ventilation Fan",
         )?
@@ -1021,11 +1374,11 @@ pub(super) fn resolve_ventilation(
             continue;
         }
 
-        let flow_cfm = child_f64(fan, "RatedFlowRate");
-        let fan_type_str = child_text(fan, "FanType");
+        let flow_cfm = child_f64(fan, &RATED_FLOW_RATE);
+        let fan_type_str = child_text(fan, &FAN_TYPE);
         let fan_type_lower = fan_type_str.as_deref().unwrap_or("").to_ascii_lowercase();
         let flow_m3_s = flow_cfm.map(|cfm| cfm * hares_physics::constants::CFM_TO_M3_S);
-        let fan_power_w = if let Some(power_w) = child_f64(fan, "FanPower") {
+        let fan_power_w = if let Some(power_w) = child_f64(fan, &FAN_POWER) {
             Some(power_w)
         } else if let Some(cfm) = flow_cfm {
             // OCHRE default W/CFM by fan type when FanPower is absent.
@@ -1061,8 +1414,8 @@ pub(super) fn resolve_ventilation(
                 "hrv"
             }
         };
-        let sensible_re = child_f64(fan, "SensibleRecoveryEfficiency").unwrap_or(0.0);
-        let total_re = child_f64(fan, "TotalRecoveryEfficiency").unwrap_or(0.0);
+        let sensible_re = child_f64(fan, &SENSIBLE_RECOVERY_EFFICIENCY).unwrap_or(0.0);
+        let total_re = child_f64(fan, &TOTAL_RECOVERY_EFFICIENCY).unwrap_or(0.0);
         let latent_re = (total_re - sensible_re).max(0.0);
         let cfg = VentilationConfig {
             equipment_id: None,
@@ -1080,7 +1433,7 @@ pub(super) fn resolve_ventilation(
             defrost_time_increase_rate_per_k: None,
             ventilation_type: Some(ventilation_type.to_string()),
             balanced: Some(balanced),
-            hours_in_operation: child_f64(fan, "HoursInOperation"),
+            hours_in_operation: child_f64(fan, &HOURS_IN_OPERATION),
         };
         specs.push(build_typed_spec(
             "Ventilation Fan".to_string(),
@@ -1095,7 +1448,10 @@ pub(super) fn resolve_ventilation(
 /// Same-type appliances are told apart by their SystemIdentifier ids (their
 /// instance names number them by order), so when an HPXML lists more than
 /// one of a type, each must carry a unique id.
-fn require_unique_appliance_ids(appliances: &XmlNode, tag: &str) -> Result<(), HpxmlError> {
+fn require_unique_appliance_ids(
+    appliances: &XmlNode,
+    tag: &'static super::elements::HpxmlElement,
+) -> Result<(), HpxmlError> {
     let ids: Vec<Option<String>> = appliances.children_named(tag).map(element_id).collect();
     if ids.len() < 2 {
         return Ok(());
@@ -1105,16 +1461,21 @@ fn require_unique_appliance_ids(appliances: &XmlNode, tag: &str) -> Result<(), H
         let Some(id) = id else {
             return Err(HpxmlError::Parse(
                 format!(
-                    "{} {tag} elements need a SystemIdentifier id each to be told \
+                    "{} {} elements need a SystemIdentifier id each to be told \
                      apart, but one has none",
-                    ids.len()
+                    ids.len(),
+                    tag.name
                 )
                 .into(),
             ));
         };
         if !seen.insert(id) {
             return Err(HpxmlError::Parse(
-                format!("duplicate SystemIdentifier id '{id}' among {tag} elements").into(),
+                format!(
+                    "duplicate SystemIdentifier id '{id}' among {} elements",
+                    tag.name
+                )
+                .into(),
             ));
         }
     }
@@ -1310,7 +1671,7 @@ struct LightingFractions {
     led: f64,
     compact_fluorescent: f64,
     fluorescent_tube: f64,
-    explicit_kwh: Option<f64>,
+    explicit_j: Option<f64>,
 }
 
 fn derive_lighting_annual_kwh(location: &str, area_ft2: f64, fractions: &LightingFractions) -> f64 {
@@ -1342,25 +1703,29 @@ fn derive_lighting_annual_kwh(location: &str, area_ft2: f64, fractions: &Lightin
 }
 
 fn lighting_group_type(group: &XmlNode) -> Option<String> {
-    let ty = group.child("LightingType")?;
+    let ty = group.child(&LIGHTING_TYPE)?;
     ty.children.first().map(|n| n.name.to_ascii_lowercase())
 }
 
 fn read_extension_month_multipliers(ext: Option<&XmlNode>, prefix: &str) -> Option<Vec<f64>> {
     let ext = ext?;
-    let key = if prefix.is_empty() {
-        "MonthlyScheduleMultipliers".to_string()
-    } else {
-        format!("{prefix}MonthlyScheduleMultipliers")
-    };
-    let raw = ext.child(&key)?.text.trim();
+    fn month_child<'a>(ext: &'a XmlNode, prefix: &str) -> Option<&'a XmlNode> {
+        let name = if prefix.is_empty() {
+            MONTHLY_SCHEDULE_MULTIPLIERS.name.to_string()
+        } else {
+            format!("{prefix}{}", MONTHLY_SCHEDULE_MULTIPLIERS.name)
+        };
+        ext.children.iter().find(|n| n.name == name)
+    }
+    let raw = month_child(ext, prefix)?.text.trim().to_string();
+    let raw = raw.trim();
     let vals: Vec<f64> = raw.split(',').filter_map(parse_trimmed_f64).collect();
     if vals.len() == 12 {
         Some(vals)
     } else {
         if !vals.is_empty() {
             tracing::warn!(
-                key = %key,
+                key = %raw,
                 count = vals.len(),
                 "MonthlyScheduleMultipliers has unexpected number of values (expected 12); ignoring"
             );
@@ -1699,7 +2064,7 @@ mod tests {
                 ),
                 vec![conditioned_zone()],
                 "Cooking Range",
-                "annual_electric_kwh",
+                "annual_electric_j",
             )
         });
     }
@@ -1764,16 +2129,16 @@ mod tests {
           </extension>
         </Refrigerator>"#;
         let node = parse_xml_document(xml).expect("parse");
-        let ext = node.child("extension").unwrap();
-        let adjusted = child_f64(ext, "AdjustedAnnualkWh");
+        let ext = node.child(&EXTENSION).unwrap();
+        let adjusted = child_f64(ext, &ADJUSTED_ANNUALK_WH);
         assert_eq!(adjusted, Some(420.0));
-        let rated = child_f64(&node, "RatedAnnualkWh");
+        let rated = child_f64(&node, &RATED_ANNUALK_WH);
         assert_eq!(rated, Some(500.0));
         // The combined lookup should prefer adjusted.
         let result = node
-            .child("extension")
-            .and_then(|e| child_f64(e, "AdjustedAnnualkWh"))
-            .or_else(|| child_f64(&node, "RatedAnnualkWh"));
+            .child(&EXTENSION)
+            .and_then(|e| child_f64(e, &ADJUSTED_ANNUALK_WH))
+            .or_else(|| child_f64(&node, &RATED_ANNUALK_WH));
         assert_eq!(result, Some(420.0));
     }
 
@@ -1784,9 +2149,9 @@ mod tests {
         </Refrigerator>"#;
         let node = parse_xml_document(xml).expect("parse");
         let result = node
-            .child("extension")
-            .and_then(|e| child_f64(e, "AdjustedAnnualkWh"))
-            .or_else(|| child_f64(&node, "RatedAnnualkWh"));
+            .child(&EXTENSION)
+            .and_then(|e| child_f64(e, &ADJUSTED_ANNUALK_WH))
+            .or_else(|| child_f64(&node, &RATED_ANNUALK_WH));
         assert_eq!(result, Some(500.0));
     }
 
@@ -1802,7 +2167,10 @@ mod tests {
             </BuildingDetails>"#,
         )
         .expect("parse");
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), 4.0);
+        assert_eq!(
+            resolve_bedroom_count_for_appliances(&details).expect("bedroom count resolves"),
+            4.0
+        );
     }
 
     #[test]
@@ -1810,6 +2178,9 @@ mod tests {
         let details = parse_xml_document(
             r#"<BuildingDetails>
                 <BuildingSummary>
+                    <BuildingConstruction>
+                        <NumberofBedrooms>4</NumberofBedrooms>
+                    </BuildingConstruction>
                     <BuildingOccupancy>
                         <NumberofResidents>3</NumberofResidents>
                     </BuildingOccupancy>
@@ -1820,21 +2191,58 @@ mod tests {
         // OCHRE hpxml.py:794-797: occupants present, house type unknown in
         // this fragment, so the detached branch applies: -1.47 + 1.69*3.
         assert_eq!(
-            resolve_bedroom_count_for_appliances(&details),
+            resolve_bedroom_count_for_appliances(&details).expect("bedroom count resolves"),
             -1.47 + 1.69 * 3.0
         );
     }
 
     #[test]
-    fn bedroom_count_defaults_to_3_when_no_fields() {
+    fn bedroom_count_without_numberofbedrooms_errors_naming_the_field() {
+        // OCHRE reads NumberofBedrooms with a direct index and fails on
+        // absence (hpxml.py:263: `construction["NumberofBedrooms"]`): the
+        // field is required input and no count may be substituted for it.
         let details = parse_xml_document(
             r#"<BuildingDetails>
                 <BuildingSummary>
+                    <BuildingConstruction>
+                        <ConditionedFloorArea>2000</ConditionedFloorArea>
+                    </BuildingConstruction>
                 </BuildingSummary>
             </BuildingDetails>"#,
         )
         .expect("parse");
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), 3.0);
+        let err = resolve_bedroom_count_for_appliances(&details)
+            .expect_err("an absent NumberofBedrooms must fail the resolve");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("NumberofBedrooms"),
+            "the error names the required field: {shown}"
+        );
+    }
+
+    #[test]
+    fn an_appliance_resolve_without_numberofbedrooms_errors_naming_the_field() {
+        // The appliance energy formulas are sized by the bedroom count; a
+        // resolve over a building whose construction names no
+        // NumberofBedrooms fails naming the field instead of sizing the
+        // appliances from a stand-in count.
+        let details = parse_xml_document(
+            "<BuildingDetails><Appliances>\
+             <ClothesWasher><Location>living space</Location></ClothesWasher>\
+             </Appliances></BuildingDetails>",
+        )
+        .expect("parse appliance details");
+        let building = Building {
+            details_xml: details,
+            ..appliance_test_building("", vec![conditioned_zone()])
+        };
+        let mut specs = Vec::new();
+        let err = resolve_scheduled_loads(&building, &DefaultsStore::empty(), &mut specs)
+            .expect_err("an absent NumberofBedrooms must fail the appliance resolve");
+        assert!(
+            err.to_string().contains("NumberofBedrooms"),
+            "the error names the required field: {err}"
+        );
     }
 
     #[test]
@@ -1844,6 +2252,9 @@ mod tests {
         let details = parse_xml_document(
             r#"<BuildingDetails>
                 <BuildingSummary>
+                    <BuildingConstruction>
+                        <NumberofBedrooms>3</NumberofBedrooms>
+                    </BuildingConstruction>
                     <BuildingOccupancy>
                         <NumberofResidents>1</NumberofResidents>
                     </BuildingOccupancy>
@@ -1851,7 +2262,10 @@ mod tests {
             </BuildingDetails>"#,
         )
         .expect("parse");
-        assert_eq!(resolve_bedroom_count_for_appliances(&details), -1.47 + 1.69);
+        assert_eq!(
+            resolve_bedroom_count_for_appliances(&details).expect("bedroom count resolves"),
+            -1.47 + 1.69
+        );
     }
 
     #[test]
@@ -2364,10 +2778,10 @@ mod tests {
             .expect("Indoor Lighting spec");
         let annual = indoor
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64())
-            .expect("annual_electric_kwh");
-        assert!((annual - 1250.0).abs() < 1e-9, "annual: {annual}");
+            .expect("annual_electric_j");
+        assert!((annual - 1250.0 * 3.6e6).abs() < 1e-3, "annual: {annual}");
         assert!(
             !indoor.parameters.contains_key("usage_multiplier"),
             "usage multiplier must be folded into annual kWh, not left as a param"
@@ -2661,13 +3075,16 @@ mod tests {
             .iter()
             .find(|s| s.name == "Refrigerator")
             .expect("Refrigerator spec should exist");
-        let kwh = fridge
+        let annual_j = fridge
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64())
-            .expect("annual_electric_kwh should be present");
-        // Default for 3 bedrooms: 637.0 + 18.0 * 3.0 = 691.0. Scaled by 2.0 = 1382.0.
-        assert!((kwh - 1382.0).abs() < 0.01, "expected ~1382.0, got {kwh}");
+            .expect("annual_electric_j should be present");
+        // Default for 3 bedrooms: 637.0 + 18.0 * 3.0 = 691.0. Scaled by 2.0 = 1382.0 (in joules).
+        assert!(
+            (annual_j - 1382.0 * 3.6e6).abs() < 100.0,
+            "expected ~1382.0 kWh in joules, got {annual_j}"
+        );
     }
 
     #[test]
@@ -2709,13 +3126,16 @@ mod tests {
             .iter()
             .find(|s| s.name == "Freezer")
             .expect("Freezer spec should exist");
-        let kwh = freezer
+        let annual_j = freezer
             .parameters
-            .get("annual_electric_kwh")
+            .get("annual_electric_j")
             .and_then(|v| v.as_f64())
-            .expect("annual_electric_kwh should be present");
-        // Default = 319.8, scaled by 1.5 = 479.7.
-        assert!((kwh - 479.7).abs() < 0.01, "expected ~479.7, got {kwh}");
+            .expect("annual_electric_j should be present");
+        // Default = 319.8, scaled by 1.5 = 479.7 (in joules).
+        assert!(
+            (annual_j - 479.7 * 3.6e6).abs() < 100.0,
+            "expected ~479.7 kWh in joules, got {annual_j}"
+        );
     }
 
     #[test]
@@ -2790,7 +3210,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|s| {
                     s.parameters
-                        .get("annual_electric_kwh")
+                        .get("annual_electric_j")
                         .and_then(|v| v.as_f64())
                         .map(|kwh| (s.name, kwh))
                 })
@@ -2878,7 +3298,11 @@ mod tests {
 
     fn appliance_test_building(appliances: &str, zones: Vec<Zone>) -> Building {
         let details = parse_xml_document(&format!(
-            "<BuildingDetails><Appliances>{appliances}</Appliances></BuildingDetails>"
+            "<BuildingDetails>\
+             <BuildingSummary><BuildingConstruction>\
+             <NumberofBedrooms>3</NumberofBedrooms>\
+             </BuildingConstruction></BuildingSummary>\
+             <Appliances>{appliances}</Appliances></BuildingDetails>"
         ))
         .expect("parse appliance details");
         Building {
@@ -2921,8 +3345,10 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
+            unavailable_periods: Vec::new(),
             details_xml: details,
             parse_warnings: Vec::new(),
+            eri_calculation_version: None,
         }
     }
 
@@ -2943,7 +3369,7 @@ mod tests {
             .expect("resolve_scheduled_loads");
         let spec = specs
             .iter()
-            .find(|s| s.name == "Dehumidifier")
+            .find(|s| s.name == DEHUMIDIFIER.name)
             .expect("dehumidifier spec resolved");
         assert_eq!(
             dehumidifier_zone_id_from_spec(spec),
@@ -3006,31 +3432,35 @@ mod tests {
 
         // Dishwasher: kwh_per_cycle = ((33.12*0.5497/1.09 - 467*0.02504)
         //   / (0.12*0.5497/1.09 - 0.02504)) / (4*52) with the label defaults;
-        // dwcpy = (88.4 + 34.9*n_bedrooms) * (12/12) at n_bedrooms = 3.6.
+        // the cycles rule is OpenStudio-HPXML's operational form
+        // (scy = 91 + 30*n_occ = 181 at 3 residents), not the bedroom count.
         let kwh_per_cyc = ((33.12 * 0.5497 / 1.09 - 467.0 * 0.12 * 0.02504 / 0.12)
             / (0.12 * 0.5497 / 1.09 - 0.02504))
             / (4.0 * 52.0);
-        let expected = kwh_per_cyc * (88.4 + 34.9 * 3.6);
+        let expected = kwh_per_cyc * (91.0 + 30.0 * 3.0) * 3.6e6;
         let actual =
-            param(find("Dishwasher"), "annual_electric_kwh").expect("dishwasher annual kWh");
+            param(find("Dishwasher"), "annual_electric_j").expect("dishwasher annual energy");
         assert!(
-            (actual - expected).abs() < 1e-9,
-            "dishwasher annual energy {actual} != adjusted-count {expected}"
+            (actual - expected).abs() < 1e-3,
+            "dishwasher annual energy {actual} != resident-cycles {expected}"
         );
 
-        // Cooking range (electric): 331 + 39*n_bedrooms at 3.6.
-        let expected_range = 331.0 + 39.0 * 3.6;
-        let actual_range = param(find("Cooking Range"), "annual_electric_kwh").expect("range kWh");
+        // Cooking range (electric): 331 + 39*n_bedrooms at 3.6, the
+        // OCHRE-adjusted count the range's own formula keeps, in joules.
+        let expected_range = (331.0 + 39.0 * 3.6) * 3.6e6;
+        let actual_range =
+            param(find("Cooking Range"), "annual_electric_j").expect("range annual energy");
         assert!(
-            (actual_range - expected_range).abs() < 1e-9,
+            (actual_range - expected_range).abs() < 1e-3,
             "range annual energy {actual_range} != adjusted-count {expected_range}"
         );
 
-        // Refrigerator default: 637 + 18*n_bedrooms at 3.6.
-        let expected_fridge = 637.0 + 18.0 * 3.6;
-        let actual_fridge = param(find("Refrigerator"), "annual_electric_kwh").expect("fridge kWh");
+        // Refrigerator default: 637 + 18*n_bedrooms at 3.6, held in joules.
+        let expected_fridge = (637.0 + 18.0 * 3.6) * 3.6e6;
+        let actual_fridge =
+            param(find("Refrigerator"), "annual_electric_j").expect("fridge annual energy");
         assert!(
-            (actual_fridge - expected_fridge).abs() < 1e-9,
+            (actual_fridge - expected_fridge).abs() < 1e-3,
             "refrigerator default {actual_fridge} != adjusted-count {expected_fridge}"
         );
     }
@@ -3054,10 +3484,10 @@ mod tests {
             .iter()
             .find(|s| s.name == "Cooking Range")
             .expect("range");
-        let expected = 331.0 + 39.0 * (-0.68 + 1.09 * 3.0);
-        let actual = param(range, "annual_electric_kwh").expect("range kWh");
+        let expected = (331.0 + 39.0 * (-0.68 + 1.09 * 3.0)) * 3.6e6;
+        let actual = param(range, "annual_electric_j").expect("range annual energy");
         assert!(
-            (actual - expected).abs() < 1e-9,
+            (actual - expected).abs() < 1e-3,
             "range annual energy {actual} != attached adjustment {expected}"
         );
     }
@@ -3081,8 +3511,8 @@ mod tests {
             .find(|s| s.name == "Cooking Range")
             .expect("range");
         assert_eq!(
-            param(range, "annual_electric_kwh"),
-            Some(331.0 + 39.0 * 5.0)
+            param(range, "annual_electric_j"),
+            Some((331.0 + 39.0 * 5.0) * 3.6e6)
         );
     }
 

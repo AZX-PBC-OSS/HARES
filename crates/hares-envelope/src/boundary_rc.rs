@@ -447,6 +447,12 @@ pub struct BuildingRC {
     pub n_ext: usize,
     /// NodeId → thermal capacitance [J/K] for all internal nodes.
     pub node_capacitances: HashMap<NodeId, f64>,
+    /// The wired resistances [K/W] by node pair, either orientation: the
+    /// assembly's own record of what it wired, exact where the A-matrix
+    /// carries rounded reciprocals. Test-only: the same-zone fin chain's
+    /// read-back agreement probe sums these edges.
+    #[cfg(test)]
+    pub(crate) resistances: HashMap<(NodeId, NodeId), f64>,
 }
 
 // ── Interior LWR method ─────────────────────────────────────────────────────
@@ -662,8 +668,20 @@ pub fn assemble_building_rc(
 
     let mut initial_capacitances: HashMap<NodeId, f64> = HashMap::with_capacity(est_nodes);
 
-    // Insert zone air nodes (IDs 1..=n_zones).
+    // Insert zone air nodes (IDs 1..=n_zones). A zone capacitance that is
+    // zero, negative or non-finite is a construction error naming the zone,
+    // not a silent floor: the thermal-balance invariant's gate runs on
+    // all-zero terms and passes vacuously over a capacitance-less model,
+    // so a zone node without capacitance would silence exactly the check
+    // that catches it. The floor below stays for the values above it.
     for (zone_idx, cap) in zone_capacitances.iter().enumerate().take(n_zones) {
+        if !(cap.is_finite() && *cap > 0.0) {
+            return Err(format!(
+                "zone {zone_idx}: the zone air node's capacitance must be a \
+                 positive finite value, got {cap}; the thermal-balance \
+                 invariant cannot run on a capacitance-less zone node"
+            ));
+        }
         let node = NodeId((zone_idx + 1) as u32);
         initial_capacitances.insert(node, cap.max(MIN_CAPACITANCE_J_K));
     }
@@ -1364,6 +1382,22 @@ pub fn assemble_building_rc(
 
     let node_capacitances = rc.capacitances.clone();
 
+    // Insurance: every zone air node must leave the assembly carrying
+    // capacitance. The entries are floored at insertion above, so this
+    // fires only on an assembly defect (a node-ID collision overwriting or
+    // draining the zone entry), exactly the defect class that would
+    // otherwise turn the thermal-balance check's vacuous pass on.
+    for zone_idx in 0..n_zones {
+        let node = NodeId((zone_idx + 1) as u32);
+        if !node_capacitances.get(&node).is_some_and(|&c| c > 0.0) {
+            return Err(format!(
+                "zone {zone_idx}: the assembled RC model's zone air node \
+                 {node:?} carries no capacitance; the thermal-balance \
+                 invariant cannot run on a capacitance-less zone node"
+            ));
+        }
+    }
+
     // Only check when boundaries carry explicit material-layer definitions.
     // Fallback-R-only networks (no material layers, empty precomputed_rc)
     // legitimately produce zero boundary capacitance nodes (the single
@@ -1488,6 +1522,8 @@ pub fn assemble_building_rc(
             ground_cols,
             n_ext,
             node_capacitances,
+            #[cfg(test)]
+            resistances: rc.resistances.clone(),
         },
         diagnostics,
     ))
@@ -1777,25 +1813,36 @@ impl RcGraphState {
             }
         }
 
-        // Step 4: remove last resistor for same-zone boundaries.
+        // Step 4: for same-zone boundaries drop the cut-surface stub.
         //
         // The padding/averaging step (Step 2) produces N+1 resistors for N
-        // capacitors: the first resistor is the cut-surface half-resistance,
-        // the last is the interior-most half-resistance. For same-zone
-        // dead-end fins we remove the interior-most half-resistance so the
-        // zone air connects through the inter-layer resistance between the
-        // two innermost kept layers, consistent with the material-path
-        // topology where the cut-surface side faces the zone and the
-        // innermost layer is the dead end.
+        // capacitors: the first is the cut-surface half-resistance (the
+        // leading pad zero averaged with the first kept layer's resistance),
+        // the last is the zone-facing half-resistance (the trailing pad zero
+        // averaged with the innermost kept layer's resistance). The kept
+        // interior half is a dead-end fin: its cut surface is adiabatic, so
+        // the cut-surface half-resistance wires to nothing and is removed,
+        // while the zone-facing half-resistance stays and connects the
+        // innermost kept node to zone air through the Step 7 wiring with
+        // `res_offset = 0`. That is the material path's node-centered
+        // topology: every inter-layer pad-average is the node-centered
+        // half-layer sum, the cut side dead-ends, and the film rides the
+        // zone-facing edge.
         //
-        // This corrects a bug where res_list.remove(0) (removing the
-        // cut-surface half-resistance) was used instead of OCHRE's
-        // res_list = res_list[:-1] (envelope.py:336-337) which removes
-        // the last resistor. The previous code made the chain connect to
-        // zone air through the interior-most half-resistance, reversing
-        // the intended topology.
+        // Removing the last resistor instead kept the cut stub (wired
+        // between the two outermost kept nodes, as if the cut surface faced
+        // the next layer) and connected the zone through the innermost
+        // inter-layer average: the same total series resistance with every
+        // capacitor sitting one half-layer off, so steady state still
+        // converged while the fin's dynamics diverged from the material
+        // path (about a quarter of the coupling on a 4-layer probe).
+        // OCHRE's `res_list = res_list[:-1]` (envelope.py:336-337) removes
+        // the last resistor too, but only after its node and resistor lists
+        // are reversed, where the last resistor is the cut stub; HARES keeps
+        // the interior half unreversed (Step 1 above), so the stub is the
+        // first resistor.
         if params.same_zone && !res_list.is_empty() {
-            res_list.pop();
+            res_list.remove(0);
         }
 
         if nodes == 0 {
@@ -2906,17 +2953,19 @@ mod tests {
 
     // ── Step-response regression: full discretization + stepping path ───
     //
-    // The ticket's Tests section asks for an integration test that constructs
-    // same-zone networks via both paths, discretizes, simulates a zone-air
-    // temperature step, and asserts that the thermal mass responds with the
-    // correct time constant (interior film, not exterior). The static a_c
-    // inspection tests above verify the matrix entries; this test exercises
-    // the full RC assembly → discretization → time-stepping pipeline to catch
-    // any mismatch between the rate constants in a_c and how the discretizer/
-    // stepper actually applies them.
+    // The same-zone precomputed and material paths must assemble the same
+    // fin, not merely the same total series resistance: a resistor list
+    // shifted one index (the cut stub wired between the two outermost kept
+    // nodes, the zone-facing half-layer dropped) converges to the same
+    // steady state, where every topology with the same series R agrees,
+    // while the short-window dynamics diverge. The test steps both paths'
+    // interior-mass subsystem 5 minutes under a 1 K zone step on a
+    // 4-layer two-material stack and asserts the responses and the
+    // inner-node couplings agree to 1e-9, the window where the two
+    // wirings separate.
 
     #[test]
-    fn material_and_precomputed_same_zone_step_response_match() {
+    fn material_and_precomputed_same_zone_short_window_step_response_match() {
         use crate::state_space::{OutputMapping, StateSpaceModel};
 
         let zones = vec![ZoneInput {
@@ -2928,25 +2977,29 @@ mod tests {
             derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
                 .unwrap();
 
-        // Use low-density materials (density=50 < SPLIT_MIN_DENSITY=100) to avoid
-        // diurnal-criterion auto-splitting, matching the topology-test setup.
-        let thickness = 0.10;
-        let conductivity = 1.0;
-        let density = 50.0;
-        let cp = 900.0;
+        // Two materials, alternating, both below the diurnal-split density
+        // threshold (density <= 100) so the material path keeps 4 nodes.
+        // The precomputed rows carry the same per-layer R and C the
+        // material path derives (r = thickness / conductivity, framing
+        // factor None on both boundaries).
         let area = 20.0;
+        let mat_a = (0.10_f64, 0.4_f64, 50.0, 900.0);
+        let mat_b = (0.05_f64, 1.0_f64, 80.0, 1400.0);
+        let stack = [mat_a, mat_b, mat_a, mat_b];
 
-        let material_layers: Vec<LayerInput> = (0..4)
-            .map(|_| make_layer(thickness, conductivity, density, cp, 0.0))
+        let material_layers: Vec<LayerInput> = stack
+            .iter()
+            .map(|&(t, k, rho, cp)| make_layer(t, k, rho, cp, 0.0))
             .collect();
         let mat_boundary = make_boundary(area, 0, ExteriorTarget::Zone(0), material_layers, 2.5);
         let (rc_mat, _) =
             assemble_building_rc(&[mat_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
 
-        let precomputed: Vec<PrecomputedRCLayer> = (0..4)
-            .map(|_| PrecomputedRCLayer {
-                resistance_m2_k_w: thickness / conductivity,
-                capacitance_kj_m2_k: density * cp * thickness / 1000.0,
+        let precomputed: Vec<PrecomputedRCLayer> = stack
+            .iter()
+            .map(|&(t, k, rho, cp)| PrecomputedRCLayer {
+                resistance_m2_k_w: t / k,
+                capacitance_kj_m2_k: rho * cp * t / 1000.0,
             })
             .collect();
         let pre_boundary =
@@ -2983,6 +3036,18 @@ mod tests {
         let (a_mat, b_mat) = extract_mass_system(&rc_mat);
         let (a_pre, b_pre) = extract_mass_system(&rc_pre);
 
+        // Static discriminator: the innermost node's coupling to zone air
+        // must be the same conductance per capacitance on both paths. The
+        // shifted wiring hangs the zone connection off the innermost
+        // inter-layer average (about twice this coupling on this stack).
+        let tol = 1e-9;
+        assert!(
+            (b_mat[(0, 0)] - b_pre[(0, 0)]).abs() < tol,
+            "inner-to-zone coupling must match: mat={}, pre={}",
+            b_mat[(0, 0)],
+            b_pre[(0, 0)]
+        );
+
         let dt = 60.0;
         let mapping = OutputMapping {
             output_count: 2,
@@ -2995,60 +3060,133 @@ mod tests {
         let model_pre = StateSpaceModel::from_continuous(&a_pre, &b_pre, dt, &mapping)
             .expect("precomputed-path discretization");
 
-        // Step response: zone air temperature held at 1 K above initial mass temp.
+        // Step response: zone air temperature held at 1 K above initial mass
+        // temp. Five 60 s steps cover 5 minutes, well under one time
+        // constant of the fin, where the two resistor distributions still
+        // disagree when the wiring is off by an index.
         let u = DVector::from_row_slice(&[1.0]);
         let mut x_mat = DVector::zeros(2);
         let mut x_pre = DVector::zeros(2);
 
-        // 10 hours at 60 s — more than enough to approach steady state for
-        // an interior-partition time constant on the order of 15–30 minutes.
-        let n_steps = 600;
-        for _ in 0..n_steps {
+        for _ in 0..5 {
             x_mat = model_mat.step(&x_mat, &u);
             x_pre = model_pre.step(&x_pre, &u);
         }
 
-        // Steady state: all mass nodes approach zone air temperature.
-        let ss_tol = 0.01;
+        // Both paths must produce identical short-window responses.
         assert!(
-            (x_mat[0] - 1.0).abs() < ss_tol && (x_mat[1] - 1.0).abs() < ss_tol,
-            "material-path steady state must be zone temp: inner={}, outer={}",
-            x_mat[0],
-            x_mat[1]
-        );
-        assert!(
-            (x_pre[0] - 1.0).abs() < ss_tol && (x_pre[1] - 1.0).abs() < ss_tol,
-            "precomputed-path steady state must be zone temp: inner={}, outer={}",
-            x_pre[0],
-            x_pre[1]
-        );
-
-        // Both paths must produce identical step responses.
-        let match_tol = 1e-6;
-        assert!(
-            (x_mat[0] - x_pre[0]).abs() < match_tol && (x_mat[1] - x_pre[1]).abs() < match_tol,
-            "material and precomputed step responses must match: \
+            (x_mat[0] - x_pre[0]).abs() < tol && (x_mat[1] - x_pre[1]).abs() < tol,
+            "material and precomputed 5-minute step responses must match to {tol}: \
              mat=({}, {}), pre=({}, {})",
             x_mat[0],
             x_mat[1],
             x_pre[0],
             x_pre[1]
         );
+    }
 
-        // Regression guard: the inner-mass → zone-air conductance must use the
-        // interior film (~0.12 m²·K/W), not the exterior film (~0.03 m²·K/W).
-        // Using the exterior film produces a ~2× larger conductance, which would
-        // cause the mass to respond too quickly. Verify the actual coupling
-        // coefficient in B is well below what the buggy wiring would produce.
-        let c_expected = density * cp * thickness * area;
-        let r_buggy = R_FILM_EXTERIOR_M2_K_W / area + thickness / (2.0 * conductivity * area);
-        let g_iz_buggy = 1.0 / (r_buggy * c_expected);
-        assert!(
-            b_mat[(0, 0)] < g_iz_buggy * 0.9,
-            "inner→zone coupling {actual} must be well below exterior-film \
-             value {buggy}: using exterior film for same-zone is the bug",
-            actual = b_mat[(0, 0)],
-            buggy = g_iz_buggy
+    /// The assembled same-zone fin's chain is the fin rule the model
+    /// read-back applies: the kept layers' series minus the cut layer's
+    /// outer half-resistor, films included, on both build paths. The
+    /// layers use exact dyadic values (every operation below rounds
+    /// exactly), so the agreement is bit for bit: a wiring that drops the
+    /// other half-resistor, or wires the stub one index in, moves the
+    /// chain off these bits. Chain extraction walks the wired edges from
+    /// the cut-surface node to zone air.
+    #[test]
+    fn same_zone_fin_chain_matches_the_read_back_rule_on_bits() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+
+        // 4 kept-equivalent layers [A, B, A, B]; the same-zone split keeps
+        // [A, B]. R = thickness / conductivity exactly (0.25, 0.0625);
+        // film, area and both capacitances are dyadic too, so every
+        // operation below rounds exactly and bit agreement means bit
+        // agreement of the wiring, not of rounding luck.
+        let area = 16.0;
+        let mat_a = (0.25_f64, 1.0_f64, 40.0, 100.0);
+        let mat_b = (0.0625_f64, 1.0_f64, 40.0, 100.0);
+        let stack = [mat_a, mat_b, mat_a, mat_b];
+
+        let mut mat_boundary = make_boundary(
+            area,
+            0,
+            ExteriorTarget::Zone(0),
+            stack
+                .iter()
+                .map(|&(t, k, rho, cp)| make_layer(t, k, rho, cp, 0.0))
+                .collect(),
+            2.5,
+        );
+        mat_boundary.r_film_interior_m2_k_w = 0.125;
+        let (rc_mat, _) =
+            assemble_building_rc(&[mat_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        let precomputed: Vec<PrecomputedRCLayer> = stack
+            .iter()
+            .map(|&(t, k, rho, cp)| PrecomputedRCLayer {
+                resistance_m2_k_w: t / k,
+                capacitance_kj_m2_k: rho * cp * t / 1000.0,
+            })
+            .collect();
+        let mut pre_boundary =
+            make_precomputed_boundary(area, 0, ExteriorTarget::Zone(0), precomputed, 2.5);
+        pre_boundary.r_film_interior_m2_k_w = 0.125;
+        let (rc_pre, _) =
+            assemble_building_rc(&[pre_boundary], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+
+        // The kept layers' series minus the first kept layer's outer half,
+        // plus the one interior film: the fin rule, evaluated with the
+        // same dyadic values.
+        let kept_r = 0.25 + 0.0625;
+        let expected_chain = 0.125_f64 + (kept_r - 0.25 / 2.0);
+        assert_eq!(expected_chain, 0.3125);
+
+        let chain_per_area = |rc: &BuildingRC| -> f64 {
+            let info = &rc.layer_info[&0];
+            let zone_node = NodeId(1u32);
+            let edge_r = |a: NodeId, b: NodeId| -> f64 {
+                rc.resistances
+                    .get(&(a, b))
+                    .or_else(|| rc.resistances.get(&(b, a)))
+                    .copied()
+                    .unwrap_or_else(|| panic!("edge ({a:?}, {b:?}) must be wired"))
+            };
+            // The fin has one edge per kept-node boundary: cut node to
+            // inner node, inner node to zone air.
+            edge_r(info.outer_node, info.inner_node) + edge_r(info.inner_node, zone_node)
+        };
+
+        // The wired chain, per area, equals the rule on bits, both paths.
+        let mat_chain = chain_per_area(&rc_mat) * area;
+        assert_eq!(
+            mat_chain, expected_chain,
+            "material-path fin chain ({mat_chain}) must equal the read-back rule on bits"
+        );
+        let pre_chain = chain_per_area(&rc_pre) * area;
+        assert_eq!(
+            pre_chain, expected_chain,
+            "precomputed-path fin chain ({pre_chain}) must equal the read-back rule on bits"
+        );
+
+        // The two paths assemble the same fin: same chain, same node
+        // capacitances.
+        assert_eq!(mat_chain, pre_chain);
+        let info_mat = &rc_mat.layer_info[&0];
+        let info_pre = &rc_pre.layer_info[&0];
+        assert_eq!(
+            rc_mat.node_capacitances[&info_mat.inner_node],
+            rc_pre.node_capacitances[&info_pre.inner_node]
+        );
+        assert_eq!(
+            rc_mat.node_capacitances[&info_mat.outer_node],
+            rc_pre.node_capacitances[&info_pre.outer_node]
         );
     }
 
@@ -3272,6 +3410,42 @@ mod tests {
             #[cfg(feature = "observe")]
             used_default_r: false,
         }
+    }
+
+    /// A zone capacitance that is zero, negative or non-finite fails
+    /// construction naming the zone: the thermal-balance invariant's gate
+    /// runs on all-zero terms and passes vacuously over a capacitance-less
+    /// model, so a zone node without capacitance must not assemble. The
+    /// derived zone capacitances are always positive, so this guards the
+    /// direct-assembly callers.
+    #[test]
+    fn a_zone_capacitance_without_a_positive_value_fails_construction() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        let layers = vec![make_layer(0.10, 1.0, 50.0, 900.0, 0.0)];
+        let boundaries = vec![make_boundary(20.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
+
+        for bad in [0.0, -5.0, f64::NAN] {
+            let err = match assemble_building_rc(&boundaries, 1, &[bad], InteriorLwrMethod::ScriptF)
+            {
+                Err(err) => err,
+                Ok(_) => {
+                    panic!("a zero, negative or non-finite zone capacitance must fail construction")
+                }
+            };
+            assert!(err.contains("zone 0"), "the error names the zone: {err}");
+        }
+        // The derived capacitances still assemble.
+        assert!(
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).is_ok(),
+            "positive zone capacitances assemble"
+        );
     }
 
     #[test]

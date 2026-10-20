@@ -156,6 +156,70 @@ impl ThermalSetpoints {
         }
     }
 
+    /// `reconcile_for_deadband`, keeping the axis the config named: a
+    /// constant setpoint the config (an override's constant among them)
+    /// sets is a named axis and is never moved, so a deadband violation
+    /// opens on the unnamed axis alone. With no axis named this is
+    /// `reconcile_for_deadband` exactly. With both axes named there is no
+    /// axis to open the gap on, so a violation is the error the control
+    /// tier's both-named rule raises (`apply_thermal_setpoint_signal`):
+    /// named-constant sides never move, and silently re-centering them
+    /// would run a pair the config did not set.
+    ///
+    /// # Errors
+    ///
+    /// The both-named case whose cooling-heating gap is below the required
+    /// deadband: the error names both constants, the gap and the required
+    /// band, and the dwelling's init wrapper prefixes the equipment.
+    pub fn reconcile_for_deadband_keeping_named(
+        self,
+        hysteresis_c: f64,
+        heating_named: bool,
+        cooling_named: bool,
+    ) -> crate::Result<Self> {
+        let min_gap = 2.0 * hysteresis_c;
+        let gap = self.cooling_c - self.heating_c;
+        if gap >= min_gap {
+            return Ok(self);
+        }
+        match (heating_named, cooling_named) {
+            (true, true) => Err(HaresError::Equipment(format!(
+                "the heating setpoint {} °C and the cooling setpoint {} °C are both named \
+                 constants and their gap {gap} °C is below the required deadband \
+                 {min_gap} °C: named constants are never moved, so the pair cannot be \
+                 reconciled; widen the gap between them or leave one side unnamed",
+                self.heating_c, self.cooling_c
+            ))),
+            (true, false) => {
+                tracing::warn!(
+                    heating_setpoint_c = self.heating_c,
+                    original_cooling_c = self.cooling_c,
+                    new_cooling_c = self.heating_c + min_gap,
+                    "setpoints too close or inverted; the cooling setpoint moved to keep \
+                     the named heating setpoint with {min_gap} C separation"
+                );
+                Ok(Self {
+                    heating_c: self.heating_c,
+                    cooling_c: self.heating_c + min_gap,
+                })
+            }
+            (false, true) => {
+                tracing::warn!(
+                    original_heating_c = self.heating_c,
+                    cooling_setpoint_c = self.cooling_c,
+                    new_heating_c = self.cooling_c - min_gap,
+                    "setpoints too close or inverted; the heating setpoint moved to keep \
+                     the named cooling setpoint with {min_gap} C separation"
+                );
+                Ok(Self {
+                    heating_c: self.cooling_c - min_gap,
+                    cooling_c: self.cooling_c,
+                })
+            }
+            (false, false) => Ok(self.reconcile_for_deadband(hysteresis_c)),
+        }
+    }
+
     pub fn with_schedule_override(self, schedule: Option<ScheduleSetpoints>) -> Self {
         let Some(schedule) = schedule else {
             return self;
@@ -255,6 +319,18 @@ pub struct ThermostatFsm {
     /// Count of setpoint overrides whose unnamed axis was moved to keep the
     /// required deadband from the named one.
     pub setpoint_violation_count: u64,
+    /// Count of runtime steps whose resolved setpoint pair sat below the
+    /// required deadband: an override constant against the surviving
+    /// schedule tier, or two schedule columns, the collision the init's
+    /// static check cannot see. Warn-once per run beside the count; the
+    /// dwelling totals the count into the run health.
+    pub cross_tier_deadband_events: u64,
+    /// Whether the run's first cross-tier deadband collision already
+    /// raised its warning.
+    cross_tier_warned: bool,
+    /// The run's first collision's resolved pair, waiting for the owning
+    /// equipment to raise the warning with its name.
+    pending_cross_tier_warning: Option<(f64, f64, f64)>,
     /// The configured band, which the release form restores after a named
     /// signal set the band for an event.
     configured_hysteresis_c: f64,
@@ -265,6 +341,18 @@ pub struct ThermostatFsm {
 }
 
 impl ThermostatFsm {
+    /// Rewinds the thermostat's schedule setpoint sources to their seeds
+    /// and cursors: the warm-up boundary's call, so production reads them
+    /// from the construction position, whatever the warm-up drew.
+    pub fn reset_schedule_sources(&mut self) {
+        if let Some(source) = self.heating_setpoint_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.cooling_setpoint_source.as_mut() {
+            source.reset();
+        }
+    }
+
     /// The thermostat's turn-on/turn-off threshold temperatures per axis,
     /// the thresholds `update_mode_at` switches on (thermostat.rs:432-435).
     /// Returns `((heat_turn_on, heat_turn_off), (cool_turn_on, cool_turn_off))`.
@@ -321,6 +409,9 @@ impl ThermostatFsm {
             min_on_time_s: 0.0,
             min_off_time_s: 0.0,
             setpoint_violation_count: 0,
+            cross_tier_deadband_events: 0,
+            cross_tier_warned: false,
+            pending_cross_tier_warning: None,
             #[cfg(feature = "observe")]
             deadband_collision_count: 0,
         }
@@ -347,6 +438,48 @@ impl ThermostatFsm {
         self.static_setpoints
             .with_schedule_override(self.schedule_setpoints)
             .with_control_override(self.runtime_setpoints)
+    }
+
+    /// The runtime cross-tier deadband check: the resolved pair (the
+    /// override constants and the surviving schedule tier among them)
+    /// sat below the pair's required deadband, the collision the init's
+    /// static check cannot see because it reads the statics alone. The
+    /// required band follows the pair's provenance: a pair the control
+    /// tier installed was required to satisfy the band it set (the
+    /// hysteresis in force after `apply_thermal_setpoint_signal`), a pair
+    /// the config or the schedule resolves answers to the init's
+    /// `2 x hysteresis` rule. Every violating step counts; the run's
+    /// first also parks the pair for the owning equipment to raise as a
+    /// run warning naming both tiers.
+    fn note_cross_tier_deadband(&mut self, setpoints: &ThermalSetpoints) {
+        let hysteresis_c = self.thermostat.hysteresis_c;
+        let required_gap_c = if self.runtime_setpoints.is_some() {
+            hysteresis_c
+        } else {
+            2.0 * hysteresis_c
+        };
+        if setpoints.cooling_c - setpoints.heating_c >= required_gap_c {
+            return;
+        }
+        self.cross_tier_deadband_events = self.cross_tier_deadband_events.saturating_add(1);
+        if !self.cross_tier_warned {
+            self.cross_tier_warned = true;
+            self.pending_cross_tier_warning =
+                Some((setpoints.heating_c, setpoints.cooling_c, required_gap_c));
+        }
+    }
+
+    /// Takes the run's first cross-tier collision's resolved pair, if it
+    /// has not been taken: the owning equipment turns it into the run
+    /// warning with its own name.
+    pub fn take_cross_tier_warning(&mut self) -> Option<(f64, f64, f64)> {
+        self.pending_cross_tier_warning.take()
+    }
+
+    /// Takes and resets the cross-tier collision count: the per-step
+    /// delta the owner's `take_health_counts` hands the dwelling.
+    pub fn take_cross_tier_deadband_count(&mut self) -> u64 {
+        std::mem::take(&mut self.cross_tier_deadband_events)
     }
 
     /// Resolve the current setpoint from config-owned schedule data and inject
@@ -456,6 +589,7 @@ impl ThermostatFsm {
     ) -> crate::Result<ThermostatMode> {
         self.resolve_profile_setpoints(env)?;
         let setpoints = self.effective_setpoints();
+        self.note_cross_tier_deadband(&setpoints);
 
         tracing::debug!(
             zone_temp,
@@ -919,6 +1053,84 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn reconciliation_keeps_the_named_axis_and_opens_the_gap_on_the_other() {
+        // Heating named at 25 C against an unnamed cooling axis seeded at
+        // 25.5556: the cooling axis opens the gap, the named axis stays.
+        let kept = ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 25.5556,
+        }
+        .reconcile_for_deadband_keeping_named(1.0, true, false)
+        .expect("the one-named case reconciles");
+        assert_eq!(kept.heating_c, 25.0);
+        assert_eq!(kept.cooling_c, 27.0);
+
+        // Cooling named: the heating axis opens the gap.
+        let kept = ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 25.5556,
+        }
+        .reconcile_for_deadband_keeping_named(1.0, false, true)
+        .expect("the one-named case reconciles");
+        assert_eq!(kept.heating_c, 23.5556);
+        assert_eq!(kept.cooling_c, 25.5556);
+
+        // No axis named: the midpoint re-center, exactly
+        // `reconcile_for_deadband`'s behavior.
+        let recentred = ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 25.5556,
+        }
+        .reconcile_for_deadband_keeping_named(1.0, false, false)
+        .expect("the unnamed case re-centers");
+        assert_eq!(recentred, recentred.reconcile_for_deadband(1.0));
+
+        // A pair already outside the gap passes through untouched.
+        let wide = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        };
+        assert_eq!(
+            wide.reconcile_for_deadband_keeping_named(1.0, true, false)
+                .expect("a wide pair passes through"),
+            wide
+        );
+    }
+
+    /// Both axes named and the gap below the deadband: the error the
+    /// control tier's both-named rule raises, not a re-center. Named
+    /// constants never move, so there is no axis to open the gap on.
+    #[test]
+    fn a_both_named_deadband_violation_is_an_error_naming_both_constants() {
+        let err = ThermalSetpoints {
+            heating_c: 25.0,
+            cooling_c: 25.0,
+        }
+        .reconcile_for_deadband_keeping_named(1.0, true, true)
+        .expect_err("both named at a 0 C gap cannot reconcile");
+        let message = err.to_string();
+        assert!(
+            message.contains("25") && message.contains("heating") && message.contains("cooling"),
+            "the error names both constants: {message}"
+        );
+        assert!(
+            message.contains("2"),
+            "the error names the required deadband: {message}"
+        );
+
+        // A both-named pair inside the band reconciles to itself.
+        let wide = ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 24.0,
+        };
+        assert_eq!(
+            wide.reconcile_for_deadband_keeping_named(1.0, true, true)
+                .expect("a wide pair passes through"),
+            wide
+        );
+    }
+
+    #[test]
     fn release_form_hands_control_back_without_touching_anything_else() {
         // Base 22.5/23.5 as reconciled at init: 22/24, a gap of exactly
         // 2 x hysteresis.
@@ -1038,6 +1250,7 @@ pub(super) mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
@@ -1049,6 +1262,45 @@ pub(super) mod tests {
             price_signal: Default::default(),
             electrical: Default::default(),
         }
+    }
+
+    /// A pair the control tier installed answers to the band it set, not
+    /// to twice it: a ThermalSetpoint signal with a band installs a pair
+    /// one band wide and the runtime cross-tier check counts nothing. The
+    /// schedule-resolved pair answers to the init's 2 x hysteresis rule
+    /// and counts.
+    #[test]
+    fn the_cross_tier_check_reads_the_pair_provenance() {
+        let env = env_with_zone_temp(21.0);
+        let mut fsm = fsm_20_24();
+        // The band-setting signal: hysteresis 10 in force, the pair one
+        // band wide.
+        fsm.apply_thermal_setpoint_signal(&thermal_setpoint(Some(21.0), None, Some(10.0)))
+            .expect("the signal applies");
+        let mode = fsm.update_mode_at(&env, 21.0).expect("the mode updates");
+        assert_eq!(mode, ThermostatMode::Deadband);
+        assert_eq!(
+            fsm.cross_tier_deadband_events, 0,
+            "the signal's own pair answers to the band it set"
+        );
+
+        // The schedule-resolved pair at the configured hysteresis: the
+        // 2 x hysteresis rule, and the violation counts.
+        let mut fsm = fsm_20_24();
+        fsm.schedule_setpoints = Some(ScheduleSetpoints {
+            heating_c: Some(22.0),
+            cooling_c: Some(23.0),
+            ..ScheduleSetpoints::default()
+        });
+        fsm.update_mode_at(&env, 21.0).expect("the mode updates");
+        assert_eq!(
+            fsm.cross_tier_deadband_events, 1,
+            "the schedule's narrow pair counts"
+        );
+        let (heating, cooling, required) = fsm
+            .take_cross_tier_warning()
+            .expect("the first collision parks the pair");
+        assert_eq!((heating, cooling, required), (22.0, 23.0, 2.0));
     }
 
     #[test]

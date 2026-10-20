@@ -8,7 +8,8 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
-    PortDeclaration, PortSlots, ScheduleSource, Telemetry, TelemetryField, telemetry_keys as tk,
+    PortDeclaration, PortSlots, ScheduleSource, ScheduleSourceState, Telemetry, TelemetryField,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,12 +17,13 @@ use hares_physics::constants::{
     CP_LIQUID_WATER_J_KG_K, GALLONS_PER_MINUTE_TO_KG_PER_SECOND, UEF_TO_EF_GAS_INTERCEPT,
     UEF_TO_EF_GAS_SLOPE,
 };
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 
+use crate::schedule_helpers::{capture_schedule_source_state, restore_optional_source};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::Siting;
+use super::step_setpoint_c;
 use super::tank_thermostat_update;
 use super::wh_config::TanklessWaterHeaterConfig;
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
@@ -30,7 +32,7 @@ const DEFAULT_SETPOINT_C: f64 = 51.666_666_7;
 const DEFAULT_EF: f64 = 0.9;
 /// Default rated thermal capacity (W). OCHRE uses 20 kW for tankless.
 const DEFAULT_MAX_THERMAL_POWER_W: f64 = 20_000.0;
-const TANKLESS_WH_CHECKPOINT_VERSION: u32 = 2;
+const TANKLESS_WH_CHECKPOINT_VERSION: u32 = 3;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TanklessState {
     setpoint_c: f64,
@@ -40,13 +42,18 @@ struct TanklessState {
     thermal_output_w: f64,
     fuel_input_w: f64,
     parasitic_electric_w: f64,
-    reactive_power_kvar: f64,
+    reactive_power_var: f64,
     draw_flow_rate_kg_s: f64,
     // --- Demand response state ---
     dr_level: DRLevel,
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
     dr_duration_remaining_s: Option<f64>,
+    // --- Schedule-source positions (the draws and cursors a restore
+    // continues from) ---
+    draw_source_state: Option<ScheduleSourceState>,
+    mains_source_state: Option<ScheduleSourceState>,
+    appliance_draw_source_state: Option<ScheduleSourceState>,
 }
 
 pub struct TanklessWH {
@@ -80,6 +87,8 @@ pub struct TanklessWH {
     draw_flow_rate_kg_s: f64,
     draw_flow_rate_kg_s_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
+    /// The wet appliances' untempered draw [kg/s], from its schedule column.
+    appliance_draw_source: Option<ScheduleSource>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
     /// control electronics at unity power factor by class default (Q exactly
     /// zero, real power untouched).
@@ -144,6 +153,7 @@ impl TanklessWH {
             draw_flow_rate_kg_s: 0.0,
             draw_flow_rate_kg_s_source: None,
             mains_temp_c_source: None,
+            appliance_draw_source: None,
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -157,8 +167,10 @@ impl TanklessWH {
         }
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the delivery setpoint at 2 C for the step.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
     fn is_enabled(&self) -> bool {
@@ -272,12 +284,13 @@ impl TanklessWH {
         self.inlet_temp_c = if let Some(inlet_temp_c) = c.inlet_temp_c {
             inlet_temp_c
         } else if let Some(source_cfg) = c.mains_temp_c_source.clone() {
+            // A configured source's read failure is corrupt input, not the
+            // absence of a source: the error names the heater, the same
+            // contract the storage heaters' step reads follow.
             let mut source = source_cfg.into_runtime();
-            source
-                .value_at(env)
-                .ok()
-                .filter(|v| v.is_finite())
-                .unwrap_or(super::require_mains_temp_c(env, "Tankless Water Heater")?)
+            source.value_at(env).map_err(|err| {
+                HaresError::Equipment(format!("Tankless Water Heater '{}': {err}", config.name))
+            })?
         } else {
             super::require_mains_temp_c(env, "Tankless Water Heater")?
         };
@@ -285,6 +298,9 @@ impl TanklessWH {
         self.draw_flow_rate_kg_s_source =
             c.draw_flow_rate_source.map(|source| source.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.map(|source| source.into_runtime());
+        self.appliance_draw_source = c
+            .appliance_draw_flow_rate_source
+            .map(|source| source.into_runtime());
         self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.dr_setpoint_offset_c = 0.0;
@@ -302,6 +318,36 @@ impl TanklessWH {
 impl Equipment for TanklessWH {
     fn checkpoint_version() -> u32 {
         TANKLESS_WH_CHECKPOINT_VERSION
+    }
+
+    fn reset_stochastic_state(&mut self) {
+        // The draw, mains and appliance sources at their seeds and
+        // cursors: the production phase reads them from the construction
+        // position, whatever the warm-up drew.
+        if let Some(source) = self.draw_flow_rate_kg_s_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.mains_temp_c_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.appliance_draw_source.as_mut() {
+            source.reset();
+        }
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "heating_capacity_w",
+                self.rated_thermal_power_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "setpoint_c",
+                self.setpoint_c,
+                hares_types::Unit::Celsius,
+            ),
+        ]
     }
 
     fn descriptor(&self) -> &EquipmentDescriptor {
@@ -366,7 +412,7 @@ impl Equipment for TanklessWH {
         let duty =
             (self.duty_cycle * self.dr_load_fraction * self.ctrl_load_fraction).clamp(0.0, 1.0);
         // DR may offset setpoint; use effective setpoint for thermal calculation.
-        let setpoint_c = self.effective_setpoint_c();
+        let setpoint_c = self.effective_setpoint_c(env);
         let draw_flow_rate_kg_s_source = self.draw_flow_rate_kg_s_source.as_mut();
         let mains_temp_c_source = self.mains_temp_c_source.as_mut();
         let (inlet_temp_c, schedule_draw_kg_s) = super::resolve_storage_step_inputs(
@@ -386,8 +432,21 @@ impl Equipment for TanklessWH {
             None => self.rated_thermal_power_w,
         };
 
-        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = schedule_draw_kg_s + appliance_demand_kg_s;
+        // The wet appliances' untempered draw rides its own schedule column
+        // beside the tempered fixture draw.
+        let appliance_draw_kg_s = self
+            .appliance_draw_source
+            .as_mut()
+            .map(|source| {
+                source
+                    .value_at(env)
+                    .map_err(|err| {
+                        HaresError::Equipment(format!("{}: {err}", self.descriptor.name))
+                    })
+                    .map(|v| v.max(0.0))
+            })
+            .transpose()?;
+        let total_draw_kg_s = schedule_draw_kg_s + appliance_draw_kg_s.unwrap_or(0.0);
 
         let draw_volume_l =
             total_draw_kg_s * dt.as_secs_f64() / water_density_kg_m3(inlet_temp_c) * 1000.0;
@@ -434,16 +493,14 @@ impl Equipment for TanklessWH {
             // Rule R1: Q from the already-computed real power (never through
             // the real-power ZIP polynomial).
             let electric_w = fuel_input_w;
-            let reactive_kvar = self
-                .zip
-                .reactive_kvar(power_w_to_kw(electric_w), env.grid.bus_voltage_pu());
-            if electric_w > 0.0 || reactive_kvar != 0.0 {
+            let reactive_var = self.zip.reactive_var(electric_w, env.grid.bus_voltage_pu());
+            if electric_w > 0.0 || reactive_var != 0.0 {
                 ports.accumulate(&PortContribution::Electrical {
                     active_power_w: electric_w,
-                    reactive_power_kvar: reactive_kvar,
+                    reactive_power_var: reactive_var,
                 })?;
             }
-            (power_w_to_kw(electric_w).max(0.0), reactive_kvar)
+            ((electric_w).max(0.0), reactive_var)
         } else {
             if fuel_input_w > 0.0 {
                 ports.accumulate(&PortContribution::Fuel {
@@ -463,15 +520,15 @@ impl Equipment for TanklessWH {
             } else {
                 self.parasitic_power_w
             };
-            let parasitic_kvar = self
+            let parasitic_var = self
                 .zip
-                .reactive_kvar(power_w_to_kw(parasitic_w), env.grid.bus_voltage_pu());
+                .reactive_var(parasitic_w, env.grid.bus_voltage_pu());
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: parasitic_w,
-                reactive_power_kvar: parasitic_kvar,
+                reactive_power_var: parasitic_var,
             })?;
             parasitic_electric_w_reported = parasitic_w.max(0.0);
-            (power_w_to_kw(parasitic_w).max(0.0), parasitic_kvar)
+            ((parasitic_w).max(0.0), parasitic_var)
         };
 
         self.telemetry.set(tk::OUTLET_TEMP_C, outlet_temp_c);
@@ -494,8 +551,8 @@ impl Equipment for TanklessWH {
         );
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw_for_core)),
-                reactive_power_kvar: Some(reactive_kvar_for_core),
+                electric_w: Some(ElectricPower::Consumption(electric_kw_for_core)),
+                reactive_power_var: Some(reactive_kvar_for_core),
                 fuel_w: fuel_w_for_core,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -541,12 +598,24 @@ impl Equipment for TanklessWH {
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
-                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
+                reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
                 dr_load_fraction: self.dr_load_fraction,
                 dr_duration_remaining_s: self.dr_duration_remaining_s,
+                draw_source_state: self
+                    .draw_flow_rate_kg_s_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                mains_source_state: self
+                    .mains_temp_c_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                appliance_draw_source_state: self
+                    .appliance_draw_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
             },
             Self::checkpoint_version(),
             "TanklessWH",
@@ -567,6 +636,15 @@ impl Equipment for TanklessWH {
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        restore_optional_source(
+            &mut self.draw_flow_rate_kg_s_source,
+            decoded.draw_source_state,
+        )?;
+        restore_optional_source(&mut self.mains_temp_c_source, decoded.mains_source_state)?;
+        restore_optional_source(
+            &mut self.appliance_draw_source,
+            decoded.appliance_draw_source_state,
+        )?;
 
         self.telemetry
             .insert(tk::OUTLET_TEMP_C, decoded.outlet_temp_c);
@@ -577,7 +655,7 @@ impl Equipment for TanklessWH {
         self.telemetry
             .insert(tk::PARASITIC_ELECTRIC_W, decoded.parasitic_electric_w);
         self.telemetry
-            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_var);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -591,7 +669,7 @@ impl Equipment for TanklessWH {
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the flows from the
         // checkpointed `fuel_input_w`/`parasitic_electric_w`/
-        // `reactive_power_kvar` (the fuel-vs-electric arm the step itself
+        // `reactive_power_var` (the fuel-vs-electric arm the step itself
         // selects on `fuel_type`), the mode re-derived by the step's own
         // rule (`Heating.resolve_idle` on the restored nonzero flow).
         // `CoreOutput::default()` (all fields `None`) violates the
@@ -599,9 +677,9 @@ impl Equipment for TanklessWH {
         // restore contract is that a checkpoint restores a state
         // `validate_core_contract` accepts.
         let electric_kw_for_core = if self.fuel_type == FuelType::Electric {
-            power_w_to_kw(decoded.fuel_input_w).max(0.0)
+            (decoded.fuel_input_w).max(0.0)
         } else {
-            power_w_to_kw(decoded.parasitic_electric_w).max(0.0)
+            (decoded.parasitic_electric_w).max(0.0)
         };
         let fuel_w_for_core = (self.fuel_type != FuelType::Electric).then_some(FuelPower {
             fuel_type: self.fuel_type,
@@ -611,8 +689,8 @@ impl Equipment for TanklessWH {
         let restored_mode = OperatingMode::Heating.resolve_idle(has_nonzero_flow, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw_for_core)),
-                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_kw_for_core)),
+                reactive_power_var: Some(decoded.reactive_power_var),
                 fuel_w: fuel_w_for_core,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -658,14 +736,17 @@ impl Equipment for TanklessWH {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
-                // For gas units, max_power_kw caps fuel consumption; thermal limit
+            ControlSignal::PowerLimit { max_power_w, .. } => {
+                // For gas units, max_power_w caps fuel consumption; thermal limit
                 // = fuel_limit × efficiency. For electric units, it directly caps
                 // electrical input which equals thermal output / efficiency.
-                let limit_w = (power_kw_to_w(*max_power_kw) * self.efficiency_factor).max(0.0);
+                let limit_w = ((max_power_w) * self.efficiency_factor).max(0.0);
                 self.power_limit_w = Some(limit_w);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
@@ -729,42 +810,27 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::OUTLET_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Delivered outlet water temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Instantaneous thermal output".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Input fuel/electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::PARASITIC_ELECTRIC_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas ignition controller standby electric draw (gas units only)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Domestic hot water draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Off, 1=Heating".to_string(),
-        },
+        TelemetryField::temp_c(tk::OUTLET_TEMP_C, "Delivered outlet water temperature"),
+        TelemetryField::power_w(tk::THERMAL_OUTPUT_W, "Instantaneous thermal output"),
+        TelemetryField::power_w(tk::FUEL_INPUT_W, "Input fuel/electric power"),
+        TelemetryField::power_w(
+            tk::PARASITIC_ELECTRIC_W,
+            "Gas ignition controller standby electric draw (gas units only)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Domestic hot water draw flow rate",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "0=Off, 1=Heating",
+        ),
     ]
 }
 
@@ -816,6 +882,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -893,10 +960,10 @@ mod tests {
                 ports.electrical.load_power_w > 0.0,
                 "{ochre_class}: burner draw or parasitic controller must draw power"
             );
-            assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
-            assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+            assert_eq!(ports.electrical.reactive_power_var, 0.0);
+            assert_eq!(eq.core_output().flows.reactive_power_var, Some(0.0));
             assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
-            hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+            hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
                 .expect("core contract must hold with REACTIVE declared");
         }
     }
@@ -914,7 +981,7 @@ mod tests {
         TanklessWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             fuel_type: FuelType::Gas,
             energy_factor: Some(0.8),
             uniform_energy_factor: None,
@@ -926,6 +993,7 @@ mod tests {
             draw_flow_rate_kg_s: Some(0.2),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             avg_water_draw_l_per_day: None,
             zone_type: None,
             min_flow_kg_s: None,
@@ -1120,6 +1188,34 @@ mod tests {
         );
     }
 
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the tankless heater back to its own control and it fires on
+    /// the next draw.
+    #[test]
+    fn mode_release_returns_the_heater_to_its_own_control() {
+        use hares_types::{ControlSignal, OperatingMode};
+
+        let config = config();
+        let mut eq = TanklessWH::new(config.clone());
+        eq.init(&config, &env()).unwrap();
+
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+
+        let mut ports = PortSlots::from_declarations(eq.ports());
+        eq.step(&env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            eq.telemetry().get(tk::OUTLET_TEMP_C),
+            Some(50.0),
+            "the released heater must deliver its setpoint on a draw again"
+        );
+    }
+
     /// Checkpoint restore contract: a restored core output must satisfy the
     /// workspace's own `validate_core_contract` (presence rules and the
     /// mode/flow guard). Pre-fix, the restore published
@@ -1138,8 +1234,12 @@ mod tests {
         restored.init(&config(), &env()).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a tankless WH checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a tankless WH checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -1187,7 +1287,7 @@ mod tests {
     /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
     /// of PARASITIC_ELECTRIC_W and other per-step telemetry.
     #[test]
-    fn state_round_trip_preserves_reactive_power_kvar() {
+    fn state_round_trip_preserves_reactive_power_var() {
         let mut eq = TanklessWH::new(config());
         eq.init(&config(), &env()).unwrap();
 
@@ -1652,8 +1752,8 @@ mod tests {
 
         // Limit input power to 10 kW → thermal limit = 10,000 * 0.8 = 8,000 W
         eq.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 10.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 10.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
 
@@ -1683,11 +1783,11 @@ mod tests {
         let mut eq = TanklessWH::new(cfg.clone());
         eq.init(&cfg, &env()).unwrap();
 
-        // PowerLimit { max_power_kw: 5.0 } → thermal limit = 5,000 * 0.8 = 4,000 W.
+        // PowerLimit { max_power_w: 5.0 } → thermal limit = 5,000 * 0.8 = 4,000 W.
         // With flow=1.0 kg/s, delta_T demands exceed 4,000 W → over-capacity.
         eq.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 5.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 5000.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
 
@@ -1774,10 +1874,10 @@ mod tests {
         );
 
         // Electrical port must include at least the parasitic draw.
-        let parasitic_kw = 7.38 / 1_000.0;
+        let parasitic_w = 7.38 / 1_000.0;
         assert!(
-            ports.electrical.load_power_w >= parasitic_kw - 1e-9,
-            "gas electrical draw must include at least parasitic_power_w ({parasitic_kw:.6} kW), got {}",
+            ports.electrical.load_power_w >= parasitic_w - 1e-9,
+            "gas electrical draw must include at least parasitic_power_w ({parasitic_w:.6} kW), got {}",
             ports.electrical.load_power_w
         );
         // Fuel port must still have the burner consumption.
@@ -1833,8 +1933,8 @@ mod tests {
 
         // Apply PowerLimit → step → limit active
         eq.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 5.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 5000.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
         step_once(&mut eq);
@@ -1871,8 +1971,8 @@ mod tests {
 
         // Apply power limit, save, restore
         eq.apply_control(&ControlSignal::PowerLimit {
-            max_power_kw: 5.0,
-            ramp_rate_kw_per_s: None,
+            max_power_w: 5000.0,
+            ramp_rate_w_per_s: None,
         })
         .unwrap();
 
@@ -1945,6 +2045,7 @@ mod tests {
                     island_bus_voltage_pu: None,
                 },
                 schedule_row: None,
+                unavailable_periods: hares_types::UnavailablePeriodState::default(),
                 domains: hares_types::DomainSlots::default(),
                 equipment_telemetry: std::collections::HashMap::new(),
                 equipment_core: std::collections::HashMap::new(),

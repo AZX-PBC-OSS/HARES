@@ -971,40 +971,100 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 
 - **Quantity:** the speed stages (per-stage capacity and EIR) a
   mini-split heat pump heater gets when its input declares no stage list.
-- **Reference behavior:** OCHRE sizes an MSHP's stages from its
-  multispeed equipment database (`ochre/defaults/HVAC Multispeed
-  Parameters.csv`, the `MSHP Heater` rows): capacity ratios 0.40, 0.60,
-  0.80 and 1.20 of rated with a per-stage COP declining with speed
-  (5.14, 3.96, 3.77 and 3.42 at 9.5 HSPF). The rows are per-product
-  calibrations (their "Received From" column names the calibrated
-  building or BEopt), and the top stage exceeds rated.
-- **HARES behavior:** with no explicit `stage_heating_capacities_w`, an
-  MSHP generates four evenly spaced stages from
-  `min_compressor_fraction` (default 0.25) to 1.0 of rated:
-  0.25, 0.50, 0.75 and 1.00. The stage EIRs are flat at the rated EIR
-  (`eir_part_load_benefit` defaults to 0) unless the input provides
-  `stage_heating_eirs`, which are never overwritten.
-- **Justification:** the class is not established. EnergyPlus's
-  `Coil:Heating:DX:MultiSpeed` takes explicit stage capacities and has
-  no default spacing rule, so neither reference is an authority for the
-  no-input case: OCHRE's rows are product calibrations (one tops above
-  rated), HARES's even spacing is its own disclosed default. The
-  biquadratic temperature curves are a different mechanism and keep the
-  OCHRE CSV columns (D-014). The gap is a candidate cause beside the
-  mini-split fixture's open peak-power question in `tests/parity/mod.rs`
-  (the reference's peak draw sits near its 0.40-rated first stage);
-  the cause there is not yet established either.
-- **Measured impact:** the mini-split parity fixture
-  (`cz5a_minisplit_gas_wh`, a 36 kW MSHP with no stage list) runs with
-  HARES's 9/18/27/36 kW stages against OCHRE's 14.4/21.6/28.8/43.2 kW
-  ones, inside its parity bands; no golden fixture carries a mini-split
-  at all.
-- **Pinning tests:** `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
-  (`mshp_speed_stages_hardcoded_at_25_50_75_100pct`,
+- **Reference behavior:** OCHRE's no-input MSHP is definite: every
+  mini-split is 4-speed (`ochre/utils/hpxml.py:866-868`, "MSHP always
+  variable speed"), and the stage table comes from the multispeed CSV row
+  keyed on equipment name, rated efficiency and speed count, raised when
+  the row is missing (`ochre/Equipment/HVAC.py:774-786`): capacity ratios
+  0.40, 0.60, 0.80 and 1.20 of rated with per-stage COPs declining with
+  speed (at 9.2 HSPF: 5.14, 3.96, 3.53 and 3.11). The rows are per-product
+  calibrations (their "Received From" column names the calibrated building
+  or BEopt) but they are OCHRE's shipped default for every mini-split of
+  that efficiency: provenance, not applicability. The first stage's ratio
+  is the minimum modulating load: below it the unit runs speed 1 at a part
+  load ratio (`HVAC.py:1005-1008`); the separate `capacity_min` defaults
+  to 0 W (`HVAC.py:103`) and HPXML `MinimumCapacity` is never read.
+  Dispatch modulates continuously between adjacent stages with interpolated
+  per-stage EIRs (`HVAC.py:1005-1018`, `1029-1054`). EnergyPlus's
+  `Coil:Heating:DX:MultiSpeed` takes two to four explicit stage capacities
+  and COPs with no spacing default and linearly interpolates between
+  consecutive speeds to meet the load (Engineering Reference, coils.tex,
+  "Coil:Heating:DX:MultiSpeed"): it supports the modulation mechanism and is
+  silent on the no-input table.
+- **HARES behavior (since this fix):** the resolve layer applies the
+  shipped `defaults/HVAC Multispeed Parameters.csv` for every multi-speed
+  lookup, and every row OCHRE ships (`ASHP Cooler`, `ASHP Heater`,
+  `MSHP Cooler`, `MSHP Heater`) is OCHRE's, verbatim down to the
+  "Received From" provenance column, pinned line-for-line against the
+  vendored reference CSV. The shipped file had re-derived rows: the
+  `MSHP Heater` ratios renormalized to a 1.0 top (0.33333, 0.5, 0.66667,
+  1.0, commit `6debdf13`), capping the unit at rated where the
+  reference's top stage delivers 1.2 times rated; the `ASHP Heater`
+  4-speed ratios renormalized by 1/1.17 and the `MSHP Cooler` ratios by
+  1/1.2 with re-derived COPs on their 11.0 HSPF and 14.5 SEER rows
+  (commits `f0ea43ad`, `5e5a3e7e`). Those were broken windows: the
+  reference's data is the reference's data, and however much a
+  re-derivation might have merit it must not live silently in a defaults
+  file that carries OCHRE's values. The heater's no-stage fallback
+  generates OCHRE's ratios instead of the even family it generated before
+  (0.25, 0.50, 0.75, 1.00 at a flat EIR); the fallback keeps a flat EIR
+  (it has no CSV access; the resolve layer owns the per-stage COPs), and
+  `eir_part_load_benefit` or explicit `stage_heating_eirs` still win. A
+  declared `min_compressor_fraction` (HPXML `MinimumCapacity`) keeps the
+  even family from that fraction as the explicit override: declaredness
+  is explicit (an `Option` through the resolve path, not a sentinel
+  compare), so a declared 0.25 keeps the even family too. The fan's
+  specific power normalizes to the top stage's airflow (OCHRE's
+  `rated_flow_rate = max(flow_rate_list)`, `HVAC.py:145-150`), sized
+  after the stage table is final. The biquadratic temperature curves are
+  a different mechanism and keep the OCHRE CSV columns (D-014); the CSV's
+  Air Flow Ratio columns are unread on both sides (D-032).
+- **Out-of-scope rows:** every row OCHRE ships is restored and pinned.
+  The shipped CSV's remaining families (`Gas Furnace`, `Air Conditioner`,
+  `GSHP Cooler`, `GSHP Heater`) have no OCHRE row: they are HARES-only
+  data, unchanged by this fix, among them the `GSHP Heater` 4-speed rows
+  whose capacity ratios were scaled from the pre-restore renormalized
+  `ASHP Heater` ratios by the ground-loop premium.
+- **Justification:** class (b) at the data layer and the fallback. The
+  reference answers the no-input case (the CSV row, raise on miss) and
+  EnergyPlus declares stages explicitly; HARES's renormalized ratios,
+  re-derived rows and even-spacing family matched neither. The modulation
+  model is not the gap: HARES's variable-speed ideal path interpolates
+  stages the way OCHRE's ideal capacity does.
+- **Measured impact:** no bitwise golden carries a mini-split. The
+  mini-split parity fixture (`cz5a_minisplit_gas_wh`, HeatingCapacity
+  36000 Btu/h = 10.55 kW, HSPF 9.2, no stage list) resolves to OCHRE's
+  exact stage table (4.22, 6.33, 8.44 and 12.66 kW at EIRs 0.1945, 0.2525,
+  0.2833 and 0.3215); before the fix it ran the renormalized ratios (3.52,
+  5.28, 7.03 and 10.55 kW). Its parity metrics are unchanged within bands:
+  the reference window's outdoor temperature (-19.4 °C) sits below the 0 °F
+  compressor lockout both sides default to (`hpxml.py:947-951`), so the
+  window never operates the compressor and the stage table's only vote
+  there is the fan's capacity-proportional flow (`staging.rs:466`); the
+  peak residual is the ER dispatch difference established in
+  `tests/parity/mod.rs`.
+- **Pinning tests:** `crates/hares-io/tests/hvac_csv_tests.rs`
+  (`shipped_multispeed_rows_match_ochre_verbatim` fails when any row
+  OCHRE ships reverts to a re-derivation, provenance included;
+  `mshp_heater_rows_match_ochre_capacity_ratios_and_cops` covers all
+  seven `MSHP Heater` rows; `mshp_cooler_14_5_seer_row_is_ochres`),
+  `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
+  (`mshp_default_stages_follow_ochre_stage_table`,
+  `mshp_declared_min_compressor_fraction_25_keeps_even_family`,
+  `mshp_fan_power_normalizes_to_the_top_stage`,
   `mshp_eir_identical_across_all_stages`,
-  `mshp_stage_heating_eirs_preserved_when_is_mini_split`). The first two
-  fail when the default stages revert to the OCHRE CSV's ratios or its
-  per-stage COPs.
+  `mshp_stage_heating_eirs_preserved_when_is_mini_split`). The first three
+  fail when the shipped CSV's rows revert, when a declared 0.25 collapses
+  into the undeclared default, or when the fan sizing reverts to the
+  pre-expansion normalization.
+- **State:** FOLDED as `6785c32b`..`b0dcf2e6` on the head (2026-10-08,
+  branch `row/d020-mshp-stages` rebased onto the folded
+  `row/b17-hw-volume` chain): the CSV verbatim restore, the default
+  stage table, the declared cooler fan power and the byte pin all on
+  the head, this entry's number unchanged by the fold. The branch's
+  committed goldens predated the wet-appliance volume fold and were
+  re-captured at it (`282244b2`, `abb4ab95` on the branch, then
+  `b0dcf2e6`), the nine goldens identical at the fold gates.
 
 ## D-021: The HPWH's low-power compressor class is a continuous UEF transition
 
@@ -1042,7 +1102,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 
 - **Quantity:** which ZIP coefficient array drives real power and which
   drives reactive power at off-nominal bus voltage.
-- **Reference behavior:** OCHRE cross-wires them:
+- **Reference behavior:** OCHRE cross-wires them (the quoted names are
+  OCHRE's own Python, in its kW):
   `ochre/Equipment/Equipment.py:200-218` (`run_zip`) computes
   `reactive_kvar = electric_kw * pf_mult * zip_p.dot(v_quadratic)` and
   `electric_kw = electric_kw * zip_q.dot(v_quadratic)`, so the real
@@ -1133,8 +1194,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 - **Justification:** class (a). The capacitance scales the zone's
   thermal mass; a Denver site's air is about 17 percent thinner than
   the constant assumes. OCHRE's own infiltration code carries a TODO
-  against the same constant (docs/findings/air_density.md records the
-  investigation).
+  against the same constant.
 - **Measured impact:** a Denver site's capacitance is about 18 percent
   below the constant's (the standard pressure at 1.6 km elevation
   carries a density near 0.99 kg/m³ against 1.2041), so the golden
@@ -1163,9 +1223,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
 - **Justification:** class (a). EnergyPlus computes the full exterior
   long-wave balance for windows by iterating on the window's exterior
   surface temperature inside the surface heat balance loop; the
-  T_eff form is the same exchange on the RC network's terms
-  (docs/findings/bestest_rca.md, Root Cause #3, records the
-  investigation and its residual under-correction).
+  T_eff form is the same exchange on the RC network's terms.
 - **Measured impact:** clear-night attic and window cooling the
   free-float BESTEST cases see that OCHRE's windows cannot; the
   case-600/900 bands hold either way and the committed goldens are the
@@ -1313,22 +1371,38 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   algorithm's convection-only values (E+ `ConvectionCoefficients.cc`
   `CalcASHRAESimpleIntConvCoeff`: vertical 3.076, horizontal 4.040
   enhanced / 0.948 reduced, tilted 3.870 / 2.281), the direction taken
-  from the same interpolated typical zone temperatures OCHRE interpolates;
-  the per-step TARP correction (`FilmCoefficientModel::PerStepTarp`, the
-  default) then adds `delta_h = h_tarp - h_static` on top wherever TARP at
-  the actual difference exceeds the frozen value (stepping.rs
-  `apply_convection_forcing`).
+  from the same interpolated typical zone temperatures OCHRE interpolates.
+  Production pins `FilmCoefficientModel::AshraeSimple`
+  (`crates/hares-core/src/dwelling/solver_builder.rs:1248`), so the
+  per-step TARP correction is wired but not enabled in production
+  (`solver_builder.rs:1249-1252`, under T-0034/T-1922) and nothing adds
+  `delta_h = h_tarp - h_static` today; when the model is enabled, the
+  correction adds it on top wherever TARP at the actual difference
+  exceeds the frozen value (stepping.rs `apply_convection_forcing`).
+  The enum's `#[default]` derive sat on `PerStepTarp`
+  (`crates/hares-envelope/src/thermal_solver/config.rs:623-624`), a
+  library-level default the production wiring overrides: the derive was
+  live and consumed, so a consumer constructing the solver config
+  through `Default` re-enabled the model production disables, and the
+  enum's docstring still advertised the per-step form as the default
+  going forward. The branch carrying this entry re-points the derive at
+  `AshraeSimple`, the production state, and the docstring now describes
+  it; nothing moves with the re-pointing, because the correction needs
+  a non-empty `interior_convection_injections` and every `Default`
+  consumer in the tree passes an empty one.
 - **Justification:** on vertical surfaces the two frozen forms agree
-  (3.076 against TARP's 1.31·12.9^(1/3) = 3.0759, 0.003%), so the choice
+  (3.076 against TARP's 1.31·12.9^(1/3) = 3.0723, 0.12%), so the choice
   of baseline is invisible there. On horizontal and tilted surfaces the
   two frozen forms disagree by up to 2x (the reduced horizontal: 0.948
   against 1.782), and the correction only ever adds conductance, so the
   winter ceiling under an attic keeps the reduced static value where
-  OCHRE carries the larger frozen TARP value. The static film is the
+  OCHRE carries the larger frozen value. The static film is the
   A-matrix's linearization baseline, and the ASHRAE Simple table is a
   defensible baseline: it is EnergyPlus's own default inside convection
   algorithm when none is set (`DataHeatBalance.hh:613`,
-  `DataHeatBalance.hh:1842`), and with it the per-step correction
+  `DataHeatBalance.hh:1842`, the vendored pin's lines, `f7c103167a`, the
+  file unchanged from v26.2.0-IOFreeze; v24.2.0 has the
+  same defaults at `:588` and `:1780`), and with it the per-step correction
   stays live on the horizontal surfaces (it fires above ΔT ≈ 1.6 K in the
   reduced direction), where OCHRE's larger frozen value would suppress it
   entirely at typical surface-air differences. Re-aligning the baseline to
@@ -1343,15 +1417,177 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   TARP form in place of the ASHRAE Simple values moves the attic mean
   3.57 to 3.71 °C against OCHRE's 4.82 (the cold bias -1.25 to -1.11 °C),
   the attic MAE 1.30 to 1.14 °C, and the winter roof heat gain -277.7 to
-  -221.1 W against OCHRE's -239.6 W. The floor coupling's frozen films
-  therefore contribute at most about 0.14 °C of the conditioned-attic
-  winter cold bias and do not establish it; the record's residual stays
-  open with its cause unestablished. The committed goldens carry the
-  ASHRAE Simple baseline unchanged.
+  -221.1 W against OCHRE's -239.6 W; on the summer oracle the same move
+  is the attic mean 29.47 to 29.30 against OCHRE's 28.96 (the hot bias
+  +0.51 to +0.34 °C) with the MAE 0.899 to 0.563, and on the spring
+  oracle the MAE 0.791 to 0.589. Enabling the per-step TARP model
+  instead (the OS-HPXML-literal form, disabled in production) moves the
+  attic 0.03 °C and no further (the 2026-10-08 triage entry in
+  `.shipwright/initiatives/I-08/ledger/02-measurement.md`). The floor
+  coupling's frozen films therefore contribute at most about 0.14 °C of
+  the conditioned-attic winter cold bias on the two boundaries probed
+  (the deck's attic face and the attic floor; the slab's conditioned
+  face is in the same film class and was not probed) and do not
+  establish it; the record's residual stays open with its cause
+  unestablished. The committed goldens carry the ASHRAE Simple baseline
+  unchanged.
 - **Pinning tests:**
   `crates/hares-physics/src/film_coefficients.rs`
   (`the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`
   fails when the static films take OCHRE's frozen TARP values;
   `ashrae_simple_vertical_returns_3_076`,
   `ashrae_simple_horizontal_enhanced`, `ashrae_simple_horizontal_reduced`
-  fail when any frozen value moves).
+  fail when any frozen value moves), and `config.rs`'s
+  `the_enum_default_is_the_production_pin` fails if the derive default
+  re-points off the production pin.
+
+## D-032: The multispeed CSV's Air Flow Ratio columns are unread on both sides
+
+- **Quantity:** the per-stage fan flow of a multi-speed HVAC unit whose
+  stage table comes from the multispeed CSV (`HVAC Multispeed
+  Parameters.csv`): whether the CSV's `Air Flow Ratio` columns set it.
+- **Reference behavior:** OCHRE never reads the columns. The string
+  "Air Flow Ratio" appears nowhere in its Python; the multispeed loader's
+  comment claims it updates "capacity ratios, air flow ratio, EIR, SHR"
+  (`HVAC.py:790`) but the code updates only capacity, EIR and SHR
+  (`HVAC.py:792-795`). The dispatch derives every stage's flow rate from
+  the stage's capacity, `flow_rate_list = [cap / 1000 / rho_air /
+  cp_air / delta_t for cap in self.capacity_list]` for the dynamic units
+  a mini-split belongs to, `ratio * capacity` for the rest
+  (`HVAC.py:126-145`), and normalizes the fan power per unit flow by
+  `rated_flow_rate = max(flow_rate_list)`, so the top stage draws the
+  declared fan power ("Rated Auxiliary Power (W)", fed by HPXML
+  `FanPowerWatts`, `hpxml.py:900-911`).
+- **HARES behavior:** the columns are parsed into
+  `HvacMultispeedParameters.airflow_ratios` and unread, the same dead
+  data. The dispatch is capacity-proportional flow
+  (`airflow_m3_s_for_capacity_w`, `staging.rs:466`) and the fan's
+  specific power divides by the top stage's airflow, sized after the
+  stage table is final (the heater's and the cooler's inits), so the top
+  stage draws the declared fan power, OCHRE's normalization. Reading the
+  columns would
+  diverge from the reference's code: the MSHP Heater's CSV flow ratios
+  (0.55556, 0.66667, 0.77778, 1.0) disagree per stage with its capacity
+  ratios (0.4, 0.6, 0.8, 1.2), whose proportional flow the reference
+  actually dispatches.
+- **Justification:** class (a). The reference's loader comment
+  misdescribes its code; the code is the behavior, and HARES follows the
+  code. The columns stay dead data on both sides.
+- **Measured impact:** none through the multispeed dispatch: both sides'
+  per-stage flows are capacity-proportional and both sides' top stage
+  draws the declared fan power, so the CSV's flow ratios never enter
+  either model. The heater's no-stage fallback sized the fan before the
+  stage expansion, overdrawing the 1.2 top stage by 20%; the sizing now
+  runs after it.
+- **Pinning tests:** `crates/hares-equipment/src/hvac/heat_pump/heater.rs`
+  (`mshp_fan_power_normalizes_to_the_top_stage` fails when the fan sizing
+  reverts to the pre-expansion normalization), and the same pin on the
+  cooler's side,
+  `crates/hares-equipment/src/hvac/heat_pump/cooler.rs`
+  (`mshp_cooler_fan_power_normalizes_to_the_top_stage`), whose init applies
+  the identical normalization to the cooling stage table: a declared
+  cooler fan power that never reached the fan was a dropped input.
+
+## D-033: The HPXML "other" location family is one adiabatic zone
+
+- **Quantity:** the thermal treatment of HPXML locations naming another
+  unit or an unmodelled heated space: the "other" label family ("other
+  housing unit", "other heated space", and the rest).
+- **Reference behavior:** OS-HPXML v1.12.0 splits the family by label.
+  "Other housing unit" is one of `HPXML::conditioned_locations`
+  (hpxml.rb:12311-12316), so a surface facing it joins the one
+  conditioned space via `geometry.rb` `get_space_from_location`
+  (:1704-1716), and a skylight over such a surface seats there too (the
+  skylight rule reads the parent surface's conditioned-ness).
+  "Other heated space" is not a conditioned location: equipment placed
+  there reads a scheduled-space blend of the indoor and outdoor dry-bulb
+  (`geometry.rb` `get_temperature_scheduled_space_values`, D-027's
+  moisture treatment), its own unmodelled zone's state, not the
+  conditioned space's. OCHRE keeps no such split: every multifamily
+  label in the family is an adiabatic same-zone boundary
+  (`ochre/utils/hpxml.py:78`), rewritten to match its non-Adjacent
+  neighbor (`hpxml.py:96-97`).
+- **HARES behavior:** HARES follows OCHRE. `parse_zone_label` sends every
+  label containing "other" to `ZoneType::Adjacent` (the OCHRE adiabatic
+  reading), and `rewrite_adjacent_zone_pair` merges the Adjacent side of
+  a boundary into its non-Adjacent neighbor, so a wall to "other heated
+  space" acts as same-zone thermal mass and a surface to "other housing
+  unit" is treated conditioned only when its neighbor on the boundary is
+  (the rewrite landing it there, as the multifamily fixture's party
+  walls do). The skylight's conditioned-seating rule consequently reads
+  the REWRITTEN adjacency: its comment lists only the labels the OS-HPXML
+  list holds that survive the rewrite as conditioned, and no Adjacent
+  survives to it (the parse_boundaries invariant).
+- **Justification:** class (a) against OS-HPXML, taken deliberately:
+  OCHRE's single adiabatic zone for the family is its simplification of
+  OS-HPXML's per-label split, and OCHRE is the parity reference; HARES
+  reproduces its zone model (as D-015 reproduces its conditioned-space
+  merge) instead of the OS-HPXML rule OCHRE declines. The two labels'
+  outcomes differ (a skylight over "other heated space" seats conditioned
+  in HARES when the surface's other side is the conditioned space, where
+  OS-HPXML's rule refuses it); re-aligning to the per-label split would
+  move the multifamily physics and is not taken. Registered so the
+  conflation of the two references' vocabularies is on the ledger, not
+  only in site comments.
+- **Measured impact:** committed inputs carry the family
+  (`base-bldgtype-multifamily.xml`'s party walls name "other housing
+  unit"; resstock homes name it and "other heated space", the fleet's
+  bldg0000004/6/7 among them), and the committed goldens carry the
+  resulting physics unchanged.
+- **Pinning tests:** `crates/hares-io/src/hpxml/building.rs`'s rewrite
+  tests (the "other housing unit" adjacency pair collapsing to its
+  neighbor, the both-sides case to conditioned) pin the OCHRE rewrite
+  the treatment stands on.
+## D-034: Schedule addressing is cyclic past the table's span
+
+- **Quantity:** the environment's schedule table read past the table's own
+  span: what the run's last steps read when the address runs past the last
+  row, on both the generated and the CSV path (`compute_schedule_idx`).
+- **Reference behavior:** none; OCHRE drives schedules from Python datetime
+  objects and has no table-addressing convention to diverge from. The
+  convention at issue is HARES's own, inherited from the weather path.
+- **HARES behavior:** the address is CYCLIC. The civil address
+  `(365-day ordinal seconds) / step` past the table's span wraps modulo
+  `table_len` to the cycle's opening rows, the same modular indexing the
+  weather path documents ("Weather wraps annually via modular indexing
+  ... Schedule offset uses the same pattern without the midpoint shift",
+  docs/weather-pipeline.md) and the schedule-backed sources' own
+  `BoundaryPolicy::Wrap` policy offers at the equipment layer.
+- **Justification:** the wrap is the pinned convention, not an accident:
+  `schedule_index_wraps_after_schedule_length` and
+  `schedule_value_is_loaded_each_timestep` pin the modulo read past the
+  span from the repository's earliest snapshot, and the annual tables the
+  CSV path ships (8760 rows) never reach the wrap inside a year. The
+  alternative (clamping an out-of-span address to the table's LAST row,
+  "a schedule holds its end state") was assessed against the reviewer's
+  edge and rejected: it breaks the two pinned periodic-read tests, breaks
+  the weather path's documented shared pattern for no schedule-side
+  benefit (the annual CSVs the fixtures ship never leave the span), and
+  would make the weather and schedule conventions disagree.
+- **The edge (the reviewer's probe), as the convention's example:** a
+  five-day March run at 900 s over America/Denver's 2024 spring-forward
+  (`start_time = "2024-03-09T00:00:00-07:00"`, `civil_timezone =
+  "America/Denver"`). The generated table spans the run in fixed-offset
+  time; after the Mar 10 spring-forward the civil clock runs up to 3600 s
+  past the table's end, so the run's LAST FOUR steps' civil addresses
+  fall past the span and wrap to the cycle's opening rows: they read
+  January's rows (the Occupancy profile's 0.00833 night fraction), not
+  the end state the fixed-offset table's last row holds. The year-boundary
+  crossing (a Dec 31 run's Jan 1 step reading the Jan 1 profile) is the
+  same cyclic convention in span and is pinned separately
+  (`generated_schedule_dec31_wraps_to_the_jan1_profile`).
+- **Class:** (c). Architecture/convention: the read past the span is the
+  cycle's continuation, taken deliberately and shared with the weather
+  path; any re-alignment to a hold-the-end read must move the convention,
+  both paths, on the record.
+- **Measured impact:** none on the shipped fixtures (annual tables, runs
+  inside the span, the year-boundary case in span by the ordinal reset);
+  the DST tail edge affects only a run whose civil clock overflows a
+  run-spanning table, the March probe shape above.
+- **Pinning tests:**
+  `crates/hares-core/src/environment.rs`
+  `dst_run_tail_past_the_generated_tables_span_wraps_per_the_cyclic_convention`
+  (the probe shape's tail reading the cycle's opening rows),
+  `schedule_index_wraps_after_schedule_length`,
+  `schedule_value_is_loaded_each_timestep`,
+  `generated_schedule_dec31_wraps_to_the_jan1_profile`.

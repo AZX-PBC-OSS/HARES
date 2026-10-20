@@ -17,7 +17,7 @@ use crate::epw::{
     SkyTempModel, compute_sky_temp_c, doe2_ground_temp_from_monthly_avg, doe2_ground_temp_monthly,
     interpolate_ground_temp_c,
 };
-use crate::weather::{WeatherError, WeatherMeta, WeatherTimeSeries};
+use crate::weather::{RecordLabel, WeatherError, WeatherMeta, WeatherTimeSeries};
 
 /// Valid PSM3 timestep intervals in seconds.
 const VALID_STEP_SECS: [u32; 4] = [300, 900, 1800, 3600];
@@ -50,21 +50,45 @@ pub fn parse_psm3(path: impl AsRef<Path>) -> Result<WeatherTimeSeries, WeatherEr
     parse_psm3_str(&contents)
 }
 
-fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
-    let mut lines = contents.lines();
+/// Reads a PSM3 file's header metadata with no data row read: lines 1 and
+/// 2 (the field names and values), the same header the full parser builds
+/// its metadata from, for a caller that needs only the site's location
+/// (the fleet's alignment pre-pass). The timestep the data rows would
+/// detect carries the format's hourly default; the site-location
+/// resolution reads none of it.
+pub(crate) fn read_meta(path: &Path) -> Result<WeatherMeta, WeatherError> {
+    let names_line = crate::epw::read_first_line(path)?;
+    let file = fs::File::open(path).map_err(|source| WeatherError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let values_line = std::io::BufRead::lines(std::io::BufReader::new(file))
+        .nth(1)
+        .transpose()
+        .map_err(|source| WeatherError::Io {
+            path: path.display().to_string(),
+            source,
+        })?
+        .ok_or_else(|| WeatherError::Parse("missing PSM3 field values header (line 2)".into()))?;
+    parse_header_meta(&names_line, &values_line)
+}
 
-    // --- Line 1: field names ---
-    let names_line = lines
-        .next()
-        .ok_or_else(|| WeatherError::Parse("missing PSM3 field names header (line 1)".into()))?;
+/// The PSM3 header's metadata, read from the header lines themselves: the
+/// content twin of [`read_meta`] for an in-memory weather input.
+pub(crate) fn read_meta_str(
+    names_line: &str,
+    values_line: &str,
+) -> Result<WeatherMeta, WeatherError> {
+    parse_header_meta(names_line, values_line)
+}
+
+/// Parses the PSM3 header's two lines (field names, field values) into the
+/// metadata they carry: the same lines, lookups and defaults the full
+/// parser runs.
+fn parse_header_meta(names_line: &str, values_line: &str) -> Result<WeatherMeta, WeatherError> {
     // Strip UTF-8 BOM if present (Windows/Excel exports may prepend \xEF\xBB\xBF).
     let names_line = names_line.trim_start_matches('\u{FEFF}');
     let field_names: Vec<&str> = names_line.split(',').map(str::trim).collect();
-
-    // --- Line 2: field values ---
-    let values_line = lines
-        .next()
-        .ok_or_else(|| WeatherError::Parse("missing PSM3 field values header (line 2)".into()))?;
     let field_values: Vec<&str> = values_line.split(',').collect();
 
     if field_names.len() != field_values.len() {
@@ -100,6 +124,39 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         .map(str::trim)
         .filter(|c| !c.is_empty() && *c != "-")
         .map_or_else(|| "PSM3".to_string(), str::to_string);
+
+    Ok(WeatherMeta {
+        location,
+        latitude,
+        longitude,
+        timezone_offset_h,
+        elevation_m,
+        wf_allows_leap_years: true,
+        source_step_secs: 3600,
+        // PSM3 stamps every record at its interval's start: the hour
+        // field runs 0 to 23 and the record stamped h covers [h, h + 1 h).
+        record_label: RecordLabel::IntervalStart,
+        // The count check validates a complete year (365 or 366 days at
+        // the file's interval).
+        data_period: crate::weather::DataPeriod::complete_year(),
+        has_embedded_location: true,
+        station_wmo: None,
+    })
+}
+
+pub(crate) fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
+    crate::parse_counts::bump_weather();
+    let mut lines = contents.lines();
+
+    // --- Line 1: field names ---
+    let names_line = lines
+        .next()
+        .ok_or_else(|| WeatherError::Parse("missing PSM3 field names header (line 1)".into()))?;
+    // --- Line 2: field values ---
+    let values_line = lines
+        .next()
+        .ok_or_else(|| WeatherError::Parse("missing PSM3 field values header (line 2)".into()))?;
+    let meta = parse_header_meta(names_line, values_line)?;
 
     // --- Line 3: column names ---
     let header_line = lines
@@ -138,7 +195,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         None
     };
     let mut horizontal_infrared_w_m2 = Vec::with_capacity(n);
-    let mut timestamps: Vec<(u32, u32, u32)> = Vec::with_capacity(n); // (month, day, hour)
+    let mut timestamps: Vec<(i32, u32, u32, u32, u32)> = Vec::with_capacity(n); // (year, month, day, hour, minute)
 
     for (data_idx, line) in data_lines.iter().enumerate() {
         let row = data_idx + 1;
@@ -206,6 +263,8 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         let month = parse_data_u32(&fields, col_map.month, row, "Month")?;
         let day = parse_data_u32(&fields, col_map.day, row, "Day")?;
         let hour = parse_data_u32(&fields, col_map.hour, row, "Hour")?;
+        let minute = parse_data_u32(&fields, col_map.minute, row, "Minute")?;
+        let year = parse_data_i32(&fields, col_map.year, row, "Year")?;
 
         if let Some(idx) = col_map.surface_albedo {
             let val = parse_data_f64(&fields, idx, row, "Surface Albedo")?;
@@ -244,7 +303,7 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
         dhi_w_m2.push(dhi);
         wind_speed_m_s.push(ws);
         wind_dir_deg.push(wd);
-        timestamps.push((month, day, hour));
+        timestamps.push((year, month, day, hour, minute));
     }
 
     // Validate record count against expected year length.
@@ -277,11 +336,11 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     // directly from the sub-hourly data using the known timestep.
     let monthly_ground_temps = match compute_monthly_means_sub_hourly(&dry_bulb_c, &timestamps) {
         Some(monthly_avg) => doe2_ground_temp_from_monthly_avg(&monthly_avg),
-        None => doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year)?,
+        None => doe2_ground_temp_monthly(&dry_bulb_c, is_leap_year, 1)?,
     };
 
     let mut ground_temp_c = Vec::with_capacity(n);
-    for &(month, day, hour) in &timestamps {
+    for &(_year, month, day, hour, _minute) in &timestamps {
         ground_temp_c.push(interpolate_ground_temp_c(
             &monthly_ground_temps,
             month,
@@ -299,21 +358,25 @@ fn parse_psm3_str(contents: &str) -> Result<WeatherTimeSeries, WeatherError> {
     let liquid_precip_m = vec![0.0; n];
 
     let meta = WeatherMeta {
-        location,
-        latitude,
-        longitude,
-        timezone_offset_h,
-        elevation_m,
-        wf_allows_leap_years: true,
         source_step_secs: step_secs,
-        midpoint_offset_secs: 0,
-        has_embedded_location: true,
-        station_wmo: None,
+        ..meta
     };
 
     Ok(WeatherTimeSeries {
         meta,
         design_conditions: None,
+        stamps: timestamps
+            .iter()
+            .map(
+                |&(year, month, day, hour, minute)| crate::weather::RecordStamp {
+                    year,
+                    month: month as u8,
+                    day: day as u8,
+                    hour: hour as u8,
+                    minute: minute as u8,
+                },
+            )
+            .collect(),
         dry_bulb_c,
         dew_point_c,
         rel_humidity_pct,
@@ -465,12 +528,12 @@ fn validate_record_count(n: usize, step_secs: u32) -> Result<(), WeatherError> {
 /// Compute monthly average dry-bulb from sub-hourly data by grouping timestamps.
 fn compute_monthly_means_sub_hourly(
     dry_bulb_c: &[f64],
-    timestamps: &[(u32, u32, u32)],
+    timestamps: &[(i32, u32, u32, u32, u32)],
 ) -> Option<[f64; 12]> {
     let mut sums = [0.0f64; 12];
     let mut counts = [0u32; 12];
 
-    for (i, &(month, _, _)) in timestamps.iter().enumerate() {
+    for (i, &(_, month, _, _, _)) in timestamps.iter().enumerate() {
         let m = (month as usize).checked_sub(1)?;
         if m >= 12 {
             return None;
@@ -536,6 +599,23 @@ fn parse_data_u32(
     raw.trim().parse::<u32>().map_err(|_| {
         WeatherError::Parse(format!(
             "row {row}: failed to parse `{name}` as u32: `{}`",
+            raw.trim()
+        ))
+    })
+}
+
+fn parse_data_i32(
+    fields: &[&str],
+    idx: usize,
+    row: usize,
+    name: &str,
+) -> Result<i32, WeatherError> {
+    let raw = fields.get(idx).ok_or_else(|| {
+        WeatherError::Parse(format!("row {row}: missing field `{name}` at index {idx}"))
+    })?;
+    raw.trim().parse::<i32>().map_err(|_| {
+        WeatherError::Parse(format!(
+            "row {row}: failed to parse `{name}` as i32: `{}`",
             raw.trim()
         ))
     })
@@ -673,20 +753,27 @@ mod tests {
     }
 
     #[test]
-    fn psm3_downsample_to_hourly() {
+    fn psm3_subhourly_file_at_another_interval_is_an_error() {
         let csv = make_psm3_csv(15, false);
         let ts = parse_psm3_str(&csv).expect("should parse 15-min PSM3");
         assert_eq!(ts.len(), 35_040);
         assert_eq!(ts.meta.source_step_secs, 900);
 
-        let hourly = ts.resample(3600).expect("should downsample to hourly");
-        assert_eq!(hourly.len(), 8760);
-        assert_eq!(hourly.meta.source_step_secs, 3600);
-
-        // All temperature values are 20.0, so mean should be 20.0.
-        assert!((hourly.dry_bulb_c[0] - 20.0).abs() < 1e-12);
-        // GHI mean of 4x 100 = 100.
-        assert!((hourly.ghi_w_m2[0] - 100.0).abs() < 1e-12);
+        // A sub-hourly file's records are its timesteps: a step at any
+        // other interval is the construction error.
+        let err = ts
+            .resample(
+                3600,
+                crate::weather::FirstHour::default(),
+                chrono::NaiveDate::from_ymd_opt(2019, 1, 1)
+                    .expect("date")
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight"),
+                crate::weather::WeatherYear::Typical,
+            )
+            .expect_err("the interval mismatch is an error");
+        assert!(err.to_string().contains("900"), "{err}");
+        assert!(err.to_string().contains("3600"), "{err}");
     }
 
     #[test]

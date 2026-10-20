@@ -4,25 +4,25 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::Timelike;
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId,
-    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource, Telemetry,
-    TelemetryField, ThermalCategory, telemetry_keys as tk,
+    OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
+    ScheduleSourceState, Telemetry, TelemetryField, ThermalCategory, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::schedule_helpers::{capture_schedule_source_state, restore_optional_source};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::{self, Siting};
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
-    tank_thermostat_update, weighted_average_tank_temp,
+    step_setpoint_c, tank_thermostat_update, weighted_average_tank_temp,
 };
 use crate::config::{constructor_equipment_id, equipment_id_from_config};
 use crate::hvac::helpers::loop_id_from_config;
@@ -46,7 +46,7 @@ use super::{
 
 const DEFAULT_DEADBAND_C: f64 = 5.555_555_556; // 10°F (OCHRE default)
 const DEFAULT_ELEMENT_POWER_W: f64 = 4_500.0;
-const RESISTANCE_WH_CHECKPOINT_VERSION: u32 = 2;
+const RESISTANCE_WH_CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResistanceWhState {
@@ -63,14 +63,19 @@ struct ResistanceWhState {
     upper_element_power_w: f64,
     lower_element_power_w: f64,
     max_combined_power_w: Option<f64>,
-    electric_kw: f64,
-    reactive_power_kvar: f64,
+    electric_w: f64,
+    reactive_power_var: f64,
     draw_flow_rate_kg_s: f64,
     // --- Demand response state ---
     dr_level: DRLevel,
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
     dr_duration_remaining_s: Option<f64>,
+    // --- Schedule-source positions (the draws and cursors a restore
+    // continues from) ---
+    draw_source_state: Option<ScheduleSourceState>,
+    mains_source_state: Option<ScheduleSourceState>,
+    appliance_draw_source_state: Option<ScheduleSourceState>,
 }
 
 pub struct ResistanceWH {
@@ -102,8 +107,10 @@ pub struct ResistanceWH {
     draw_flow_rate_kg_s: f64,
     draw_l_per_min_source: Option<ScheduleSource>,
     mains_temp_c_source: Option<ScheduleSource>,
+    /// The wet appliances' untempered draw [kg/s], from its schedule column.
+    appliance_draw_source: Option<ScheduleSource>,
     /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// real power stays bit-identical; Q comes from `ZipLoad::reactive_kvar`.
+    /// real power stays bit-identical; Q comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
     // --- Setpoint ramp rate ---
     target_setpoint_c: f64,
@@ -149,6 +156,8 @@ impl ResistanceWH {
     #[must_use]
     pub fn new(config: EquipmentConfig) -> Self {
         let siting = Siting::from_constructor_config(&config);
+        // Pre-init placeholder: init requires the config's loop id (the
+        // allocator's assignment) and re-declares the ports from it.
         let loop_id = loop_id_from_config(&config, &["loop_id", "dhw_loop_id"]).unwrap_or_default();
         let n_nodes = parse_usize(config.get_f64("tank_nodes"))
             .unwrap_or(6)
@@ -223,6 +232,7 @@ impl ResistanceWH {
             draw_flow_rate_kg_s: 0.0,
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
+            appliance_draw_source: None,
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -240,16 +250,18 @@ impl ResistanceWH {
         }
     }
 
-    fn effective_setpoint_c(&self) -> f64 {
-        self.setpoint_c + self.dr_setpoint_offset_c
+    fn effective_setpoint_c(&self, env: &EnvironmentState) -> f64 {
+        // The freeze protection: a period zeroing the water_heater row
+        // holds the tank at 2 C, not off, so standby losses continue.
+        step_setpoint_c(env, self.setpoint_c + self.dr_setpoint_offset_c)
     }
 
-    fn thermostat_calls(&self) -> (bool, bool) {
+    fn thermostat_calls(&self, env: &EnvironmentState) -> (bool, bool) {
         let upper_temp = self.tank.node_temps()[self.upper_node];
         // OCHRE averages the lower node with the node directly above it (when n_nodes >= 3)
         // to reduce sensitivity to single-node temperature spikes.
         let lower_temp = self.lower_sensor_temp();
-        let effective_sp = self.effective_setpoint_c();
+        let effective_sp = self.effective_setpoint_c(env);
         let upper_call = hysteresis_call(
             upper_temp,
             effective_sp,
@@ -301,7 +313,14 @@ impl ResistanceWH {
         self.siting.resolve(config, c.zone_type.as_deref())?;
         self.descriptor.zone = self.siting.zone();
         self.descriptor.zone_type = c.zone_type.clone();
-        self.loop_id = c.loop_id.map(LoopId).unwrap_or(self.loop_id);
+        // The loop id is stated input (its wiring's or the loop allocator's
+        // assignment): an init without one cannot declare the supply loop,
+        // and loop 0 is the unassigned sentinel, not a loop.
+        self.loop_id = crate::hvac::helpers::require_loop_id(
+            c.loop_id,
+            "Electric Resistance Water Heater",
+            &config.name,
+        )?;
         self.ports =
             siting::storage_ports(&[PortDeclaration::electrical()], &self.siting, self.loop_id);
 
@@ -383,6 +402,10 @@ impl ResistanceWH {
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
         self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
         self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
+        self.appliance_draw_source = c
+            .appliance_draw_flow_rate_source
+            .clone()
+            .map(|s| s.into_runtime());
         self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.setpoint_ramp_rate_c_per_s =
@@ -416,6 +439,46 @@ impl ResistanceWH {
 impl Equipment for ResistanceWH {
     fn checkpoint_version() -> u32 {
         RESISTANCE_WH_CHECKPOINT_VERSION
+    }
+
+    fn reset_stochastic_state(&mut self) {
+        // The draw, mains and appliance sources at their seeds and
+        // cursors: the production phase reads them from the construction
+        // position, whatever the warm-up drew.
+        if let Some(source) = self.draw_l_per_min_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.mains_temp_c_source.as_mut() {
+            source.reset();
+        }
+        if let Some(source) = self.appliance_draw_source.as_mut() {
+            source.reset();
+        }
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "heating_capacity_w",
+                self.upper_element_power_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "setpoint_c",
+                self.setpoint_c,
+                hares_types::Unit::Celsius,
+            ),
+            hares_types::ResolvedParameter::new(
+                "tank_volume_m3",
+                self.tank.total_volume_m3(),
+                hares_types::Unit::CubicMeter,
+            ),
+            hares_types::ResolvedParameter::new(
+                "ua_w_k",
+                self.tank.ua_w_per_k(),
+                hares_types::Unit::WattPerKelvin,
+            ),
+        ]
     }
 
     fn descriptor(&self) -> &EquipmentDescriptor {
@@ -501,7 +564,7 @@ impl Equipment for ResistanceWH {
             return OperatingMode::Off;
         }
 
-        let (upper_call, lower_call) = self.thermostat_calls();
+        let (upper_call, lower_call) = self.thermostat_calls(env);
         match self.element_priority {
             ElementPriorityMode::MasterSlave => {
                 self.upper_element_on = upper_call;
@@ -617,8 +680,22 @@ impl Equipment for ResistanceWH {
             draw_l_per_min_source,
             mains_temp_c_source,
         )?;
-        let appliance_demand_kg_s = super::read_dhw_demand_kg_s(ports);
-        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_demand_kg_s;
+        // The wet appliances' untempered draw rides its own schedule column
+        // beside the tempered fixture draw: the full hot withdrawal, at the
+        // hot supply temperature, never mixed with cold mains.
+        let appliance_draw_kg_s = self
+            .appliance_draw_source
+            .as_mut()
+            .map(|source| {
+                source
+                    .value_at(env)
+                    .map_err(|err| {
+                        HaresError::Equipment(format!("{}: {err}", self.descriptor.name))
+                    })
+                    .map(|v| v.max(0.0))
+            })
+            .transpose()?;
+        let total_draw_kg_s = draw_flow_rate_kg_s + appliance_draw_kg_s.unwrap_or(0.0);
         // Use step_tempered: TMV mixes hot tank water with cold mains to deliver
         // at fixture_delivery_temp_c, reducing the actual hot-water withdrawal.
         let hot_draw_temp_c = self.hot_draw_temp_c.unwrap_or(self.setpoint_c);
@@ -629,7 +706,8 @@ impl Equipment for ResistanceWH {
         };
         let tempered_flow_m3_s =
             draw_flow_rate_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
-        let hot_flow_m3_s = appliance_demand_kg_s / water_density_kg_m3(self.tank.node_temps()[0]);
+        let hot_flow_m3_s =
+            appliance_draw_kg_s.unwrap_or(0.0) / water_density_kg_m3(self.tank.node_temps()[0]);
         let draw = self.tank.step_tempered(
             TemperedDrawInputs {
                 ambient_temp_c: ambient_c,
@@ -656,13 +734,13 @@ impl Equipment for ResistanceWH {
         // Rule R1: Q from the already-computed real power (never through the
         // real-power ZIP polynomial). pf = 1.0 (resistive element) yields
         // exactly 0.0 kVAR.
-        let reactive_power_kvar = self
+        let reactive_power_var = self
             .zip
-            .reactive_kvar(power_w_to_kw(electric_power_w), env.grid.bus_voltage_pu());
+            .reactive_var(electric_power_w, env.grid.bus_voltage_pu());
         if electric_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: electric_power_w,
-                reactive_power_kvar,
+                reactive_power_var,
             })?;
         }
 
@@ -699,13 +777,11 @@ impl Equipment for ResistanceWH {
         self.telemetry.set(tk::TANK_AVG_TEMP_C, avg_temp_c);
         self.telemetry.set(tk::UPPER_ELEMENT_POWER_W, upper_power_w);
         self.telemetry.set(tk::LOWER_ELEMENT_POWER_W, lower_power_w);
-        self.telemetry
-            .set(tk::ELECTRIC_KW, power_w_to_kw(electric_power_w));
-        self.telemetry
-            .set(tk::ELEMENT_KW, power_w_to_kw(electric_power_w));
+        self.telemetry.set(tk::ELECTRIC_KW, electric_power_w);
+        self.telemetry.set(tk::ELEMENT_KW, electric_power_w);
         self.telemetry.set(tk::ELECTRIC_POWER_W, electric_power_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
         self.telemetry.set(tk::UNMET_LOAD_W, draw.unmet_load_w);
         self.telemetry.set(tk::OUTLET_TEMP_C, draw.outlet_temp_c);
@@ -722,10 +798,8 @@ impl Equipment for ResistanceWH {
         self.tank.update_node_telemetry(&mut self.telemetry);
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(
-                    power_w_to_kw(electric_power_w).max(0.0),
-                )),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption((electric_power_w).max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -764,6 +838,10 @@ impl Equipment for ResistanceWH {
         Some(self.zip)
     }
 
+    fn stored_energy_j(&self) -> Option<f64> {
+        Some(self.tank.stored_energy_j())
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &ResistanceWhState {
@@ -780,13 +858,25 @@ impl Equipment for ResistanceWH {
                 upper_element_power_w: self.telemetry.get(tk::UPPER_ELEMENT_POWER_W).unwrap_or(0.0),
                 lower_element_power_w: self.telemetry.get(tk::LOWER_ELEMENT_POWER_W).unwrap_or(0.0),
                 max_combined_power_w: self.max_combined_power_w,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
-                reactive_power_kvar: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 draw_flow_rate_kg_s: self.telemetry.get(tk::DRAW_FLOW_RATE_KG_S).unwrap_or(0.0),
                 dr_level: self.dr_level,
                 dr_setpoint_offset_c: self.dr_setpoint_offset_c,
                 dr_load_fraction: self.dr_load_fraction,
                 dr_duration_remaining_s: self.dr_duration_remaining_s,
+                draw_source_state: self
+                    .draw_l_per_min_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                mains_source_state: self
+                    .mains_temp_c_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
+                appliance_draw_source_state: self
+                    .appliance_draw_source
+                    .as_ref()
+                    .map(capture_schedule_source_state),
             },
             Self::checkpoint_version(),
             "ResistanceWH",
@@ -813,6 +903,12 @@ impl Equipment for ResistanceWH {
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        restore_optional_source(&mut self.draw_l_per_min_source, decoded.draw_source_state)?;
+        restore_optional_source(&mut self.mains_temp_c_source, decoded.mains_source_state)?;
+        restore_optional_source(
+            &mut self.appliance_draw_source,
+            decoded.appliance_draw_source_state,
+        )?;
         self.tank.load_state(&decoded.tank_state)?;
 
         self.telemetry
@@ -821,12 +917,12 @@ impl Equipment for ResistanceWH {
             .insert(tk::UPPER_ELEMENT_POWER_W, decoded.upper_element_power_w);
         self.telemetry
             .insert(tk::LOWER_ELEMENT_POWER_W, decoded.lower_element_power_w);
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
-        self.telemetry.insert(tk::ELEMENT_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
+        self.telemetry.insert(tk::ELEMENT_KW, decoded.electric_w);
         self.telemetry
-            .insert(tk::ELECTRIC_POWER_W, power_kw_to_w(decoded.electric_kw));
+            .insert(tk::ELECTRIC_POWER_W, decoded.electric_w);
         self.telemetry
-            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_kvar);
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.reactive_power_var);
         self.telemetry
             .insert(tk::DRAW_FLOW_RATE_KG_S, decoded.draw_flow_rate_kg_s);
         self.telemetry.insert(
@@ -840,15 +936,15 @@ impl Equipment for ResistanceWH {
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal (the pair the step
         // published was guard-valid, and the checkpoint carries both
-        // faces): the flows from the checkpointed `electric_kw`/
-        // `reactive_power_kvar`, the mode re-derived by the step's own
+        // faces): the flows from the checkpointed `electric_w`/
+        // `reactive_power_var`, the mode re-derived by the step's own
         // rule (`update_control`'s element dispatch → `resolve_idle` on
         // the restored flow). `CoreOutput::default()` (all fields `None`)
         // violates the capability-presence rules for every field the
         // descriptor declares (ELECTRIC/REACTIVE/HAS_MODE) — the restore
         // contract is that a checkpoint restores a state the workspace's
         // own `validate_core_contract` accepts.
-        let has_nonzero_flow = decoded.electric_kw > 0.0;
+        let has_nonzero_flow = decoded.electric_w > 0.0;
         let restored_mode = if decoded.upper_element_on || decoded.lower_element_on {
             OperatingMode::Heating
         } else {
@@ -857,8 +953,8 @@ impl Equipment for ResistanceWH {
         .resolve_idle(has_nonzero_flow, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(decoded.reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(decoded.reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -904,14 +1000,17 @@ impl Equipment for ResistanceWH {
             ControlSignal::ModeOverride { mode } => {
                 self.mode_override = Some(*mode);
             }
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+            }
             ControlSignal::LoadFraction { fraction } => {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
-            ControlSignal::PowerLimit { max_power_kw, .. } => {
+            ControlSignal::PowerLimit { max_power_w, .. } => {
                 // Clamp element power to respect the limit by reducing ctrl_load_fraction.
                 let total_w = self.upper_element_power_w + self.lower_element_power_w;
                 if total_w > 0.0 {
-                    let max_fraction = (power_kw_to_w(*max_power_kw) / total_w).clamp(0.0, 1.0);
+                    let max_fraction = ((max_power_w) / total_w).clamp(0.0, 1.0);
                     self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
                 }
             }
@@ -982,75 +1081,48 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields(n_nodes: usize) -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::TANK_AVG_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Volume-weighted average tank temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::UPPER_ELEMENT_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Upper element electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::LOWER_ELEMENT_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Lower element electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Total electric draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELEMENT_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Heating element electric power".to_string(),
-        },
-        TelemetryField {
-            name: tk::ELECTRIC_POWER_W.to_string(),
-            unit: "W".to_string(),
-            description: "Total electric draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::DRAW_FLOW_RATE_KG_S.to_string(),
-            unit: "kg/s".to_string(),
-            description: "Domestic hot water draw flow rate".to_string(),
-        },
-        TelemetryField {
-            name: tk::UNMET_LOAD_W.to_string(),
-            unit: "W".to_string(),
-            description: "Unmet fixture load when tank below delivery temp".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::OUTLET_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Hot water outlet temperature delivered to fixture".to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::TANK_AVG_TEMP_C,
+            "Volume-weighted average tank temperature",
+        ),
+        TelemetryField::power_w(tk::UPPER_ELEMENT_POWER_W, "Upper element electric power"),
+        TelemetryField::power_w(tk::LOWER_ELEMENT_POWER_W, "Lower element electric power"),
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "Total electric draw"),
+        TelemetryField::power_kw(tk::ELEMENT_KW, "Heating element electric power"),
+        TelemetryField::power_w(tk::ELECTRIC_POWER_W, "Total electric draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DRAW_FLOW_RATE_KG_S,
+            hares_types::Unit::KilogramPerSecond,
+            "Domestic hot water draw flow rate",
+        ),
+        TelemetryField::power_w(
+            tk::UNMET_LOAD_W,
+            "Unmet fixture load when tank below delivery temp",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::OUTLET_TEMP_C,
+            "Hot water outlet temperature delivered to fixture",
+        ),
     ];
     for i in 0..n_nodes {
-        fields.push(TelemetryField {
-            name: tk::tank_node_key(i),
-            unit: "C".to_string(),
-            description: format!("Tank node {i} temperature"),
-        });
+        fields.push(TelemetryField::temp_c_owned(
+            tk::tank_node_key(i),
+            format!("Tank node {i} temperature"),
+        ));
     }
-    fields.push(TelemetryField {
-        name: tk::SKIN_LOSS_W.to_string(),
-        unit: "W".to_string(),
-        description: "Tank jacket (skin) heat loss to the surrounding zone or ambient location"
-            .to_string(),
-    });
+    fields.push(TelemetryField::power_w(
+        tk::SKIN_LOSS_W,
+        "Tank jacket (skin) heat loss to the surrounding zone or ambient location",
+    ));
     fields
 }
 
@@ -1098,6 +1170,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1168,6 +1241,7 @@ mod tests {
             draw_flow_rate_kg_s: Some(0.0),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -1339,10 +1413,10 @@ mod tests {
             ports.electrical.load_power_w > 0.0,
             "cold tank must draw element power"
         );
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
-        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
+        assert_eq!(eq.core_output().flows.reactive_power_var, Some(0.0));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("core contract must hold with REACTIVE declared");
     }
 
@@ -1616,7 +1690,7 @@ mod tests {
     /// save_state/load_state exactly (bit-for-bit), mirroring the persistence
     /// of ELECTRIC_KW and other per-step telemetry.
     #[test]
-    fn state_round_trip_preserves_reactive_power_kvar() {
+    fn state_round_trip_preserves_reactive_power_var() {
         let mut eq = ResistanceWH::new(config());
         eq.init(&config(), &env(21.0)).unwrap();
 
@@ -1837,6 +1911,44 @@ mod tests {
         assert!(!eq.lower_element_on);
     }
 
+    /// The freeze protection: an unavailable period zeroing the
+    /// `water_heater` row (a `Power Outage`) holds the step's control
+    /// setpoint at 2 C, not off: a tank the period catches below the
+    /// freeze setpoint fires (standby losses continue), and a warm tank
+    /// never fires through the period.
+    #[test]
+    fn unavailable_period_holds_the_water_heater_at_2c() {
+        let mut outage = env(21.0);
+        outage.unavailable_periods.power_outage = true;
+
+        // A tank below the freeze setpoint: the element fires at the 2 C
+        // control setpoint, where a forced off would leave it cold.
+        let cold_cfg = config_from_typed(ElectricResistanceWaterHeaterConfig {
+            initial_tank_temp_c: Some(-5.0),
+            ..typed_config()
+        });
+        let mut cold = ResistanceWH::new(cold_cfg.clone());
+        cold.init(&cold_cfg, &env(21.0)).expect("init");
+        assert_eq!(cold.effective_setpoint_c(&outage), 2.0);
+        assert_eq!(
+            cold.update_control(&outage),
+            hares_types::OperatingMode::Heating
+        );
+        // Without the period the same tank's control setpoint is the
+        // configured one.
+        assert_eq!(cold.effective_setpoint_c(&env(21.0)), 52.0);
+
+        // A warm tank never fires through the period: the 2 C control
+        // setpoint is below the tank.
+        let warm_cfg = config_from_typed(typed_config());
+        let mut warm = ResistanceWH::new(warm_cfg.clone());
+        warm.init(&warm_cfg, &env(21.0)).expect("init");
+        assert_eq!(
+            warm.update_control(&outage),
+            hares_types::OperatingMode::Off
+        );
+    }
+
     /// Stratified tank: lower node exceeds max_tank_temp_c but upper node is cool.
     /// Safety cutout must still trigger (checks max of all nodes).
     #[test]
@@ -2013,7 +2125,7 @@ mod tests {
             config_from_typed(ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,
@@ -2029,6 +2141,7 @@ mod tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
@@ -2087,22 +2200,22 @@ mod tests {
         eq.step(&env(21.0), Duration::from_secs(60), &mut p)
             .unwrap();
 
-        let electric_kw = eq
+        let electric_w = eq
             .telemetry()
             .get(tk::ELECTRIC_KW)
             .expect("ELECTRIC_KW must be present");
-        let element_kw = eq
+        let element_w = eq
             .telemetry()
             .get(tk::ELEMENT_KW)
             .expect("ELEMENT_KW must be present");
 
         assert!(
-            electric_kw > 0.0,
+            electric_w > 0.0,
             "WH must be heating for this test to be meaningful"
         );
         assert!(
-            (element_kw - electric_kw).abs() < 1e-9,
-            "element_kw {element_kw:.6} must equal electric_kw {electric_kw:.6}"
+            (element_w - electric_w).abs() < 1e-9,
+            "element_w {element_w:.6} must equal electric_w {electric_w:.6}"
         );
     }
 
@@ -2236,6 +2349,7 @@ mod element_priority_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -2259,7 +2373,7 @@ mod element_priority_tests {
             crate::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,
@@ -2275,6 +2389,7 @@ mod element_priority_tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
@@ -2457,6 +2572,35 @@ mod element_priority_tests {
         }
     }
 
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the resistance WH back to its own thermostat.
+    #[test]
+    fn mode_release_returns_the_elements_to_their_own_thermostat() {
+        for mode_str in ["MasterSlave", "Simultaneous"] {
+            let cfg = cold_config(mode_str);
+            let mut wh = ResistanceWH::new(cfg.clone());
+            wh.init(&cfg, &env_state()).unwrap();
+            wh.apply_control(&ControlSignal::ModeOverride {
+                mode: OperatingMode::Off,
+            })
+            .unwrap();
+            assert_eq!(wh.update_control(&env_state()), OperatingMode::Off);
+
+            wh.apply_control(&ControlSignal::ModeOverrideRelease)
+                .unwrap();
+            let mode = wh.update_control(&env_state());
+            assert_ne!(
+                mode,
+                OperatingMode::Off,
+                "the release must return the WH to its own thermostat ({mode_str})"
+            );
+            assert!(
+                wh.upper_element_on || wh.lower_element_on,
+                "a cold tank must fire an element after the release ({mode_str})"
+            );
+        }
+    }
+
     /// Verify state round-trip preserves the element_priority field.
     #[test]
     fn state_round_trip_preserves_element_priority() {
@@ -2585,7 +2729,7 @@ mod element_priority_tests {
         let cfg = crate::ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,
@@ -2601,6 +2745,7 @@ mod element_priority_tests {
             draw_flow_rate_kg_s: Some(0.0),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -2661,7 +2806,7 @@ mod element_priority_tests {
             let cfg = crate::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,
@@ -2677,6 +2822,7 @@ mod element_priority_tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
@@ -2728,7 +2874,7 @@ mod element_priority_tests {
         let cfg = crate::ElectricResistanceWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             tank_volume_m3: None,
             tank_height_m: None,
             energy_factor: None,
@@ -2744,6 +2890,7 @@ mod element_priority_tests {
             draw_flow_rate_kg_s: Some(0.0),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -2785,7 +2932,7 @@ mod element_priority_tests {
     /// REACTIVE | HAS_MODE`. `validate_core_contract`'s presence rules
     /// (`equipment.rs`: a declared capability with a `None` field is a
     /// hard error — `missing state.operating_mode`, `missing
-    /// flows.electric_kw`, `missing flows.reactive_power_kvar`) therefore
+    /// flows.electric_w`, `missing flows.reactive_power_var`) therefore
     /// reject the restored output. A checkpoint must restore a state the
     /// workspace's own contract validation accepts (the contract the EV
     /// var-support and Battery mid-charge restore fixes established);
@@ -2809,7 +2956,12 @@ mod element_priority_tests {
             .load_state(&checkpoint)
             .expect("restore checkpoint");
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output()).expect(
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect(
             "a restored checkpoint must satisfy the core contract (presence rules \
                  and mode/flow guard)",
         );
@@ -2847,6 +2999,7 @@ mod ambient_tests {
             draw_flow_rate_kg_s: Some(0.0),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             performance_adjustment: None,
             zone_type: None,
             first_hour_rating_m3: None,
@@ -2884,6 +3037,7 @@ mod ambient_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -3036,3 +3190,5 @@ mod ambient_tests {
         );
     }
 }
+// (appended by the unavailable-periods row: the freeze-protection unit
+// test lives below the test module's own tests)

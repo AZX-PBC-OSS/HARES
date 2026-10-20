@@ -64,6 +64,7 @@ fn make_env(zone_temp_c: f64, outdoor_temp_c: f64, _zone_wb_c: f64) -> Environme
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
@@ -141,7 +142,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 hysteresis_c: Some(1.0),
                 airflow_m3_s_per_w: None,
                 fraction_load_served: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 duct: DuctConfig::default(),
@@ -202,7 +203,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
@@ -304,14 +305,14 @@ fn hp_cooler_cfg(
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
                 ..Default::default()
             },
             stage_shrs: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             min_oat_cooling_c: 10.0,
         },
@@ -684,7 +685,7 @@ fn air_conditioner_sign_convention_and_shr_split() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_w() / 1000.0;
+    let electric_w = ports.electrical.net_active_w() / 1000.0;
 
     // Cooling removes heat → thermal contribution must be negative
     assert!(
@@ -695,21 +696,21 @@ fn air_conditioner_sign_convention_and_shr_split() {
 
     // Compressor draws positive electricity
     assert!(
-        electric_kw > 0.0,
-        "AC must draw positive electricity when cooling; got {electric_kw:.4} kW"
+        electric_w > 0.0,
+        "AC must draw positive electricity when cooling; got {electric_w:.4} kW"
     );
 
     // COP for a cooling unit: coil_cooling / compressor_electric.
     // Port sensible includes fan heat offset, so use telemetry coil output.
     let coil_cooling_w = eq.telemetry().get("sensible_cooling_w").unwrap_or(0.0)
         + eq.telemetry().get("latent_cooling_w").unwrap_or(0.0);
-    let compressor_kw = eq.telemetry().get("compressor_kw").unwrap_or(0.0);
-    let cooling_cop = coil_cooling_w / (compressor_kw * 1_000.0).max(f64::MIN_POSITIVE);
+    let compressor_w = eq.telemetry().get("compressor_kw").unwrap_or(0.0);
+    let cooling_cop = coil_cooling_w / compressor_w.max(f64::MIN_POSITIVE);
     // EER ≥ 10 BTU/(Wh) corresponds to COP ≥ 2.93; SEER 14 minimum corresponds to COP ≈ 4.1.
     assert!(
         cooling_cop > 2.0 && cooling_cop < 8.0,
         "AC cooling COP must be in [2.0, 8.0] at rated conditions; got {cooling_cop:.3} \
-         (coil={coil_cooling_w:.1} W, compressor={compressor_kw:.4} kW)"
+         (coil={coil_cooling_w:.1} W, compressor={compressor_w:.4} W)"
     );
 }
 
@@ -783,15 +784,15 @@ fn ashp_cooler_two_speed_runtime_is_partial_near_setpoint() {
         .telemetry()
         .get("runtime_fraction")
         .expect("runtime_fraction must exist");
-    let electric_kw = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let electric_w = eq.telemetry().get("electric_kw").expect("electric_w");
 
     assert!(
         rtf > 0.0 && rtf < 0.8,
         "two-speed ASHP cooler near setpoint must run at partial runtime, got rtf={rtf:.3}"
     );
     assert!(
-        electric_kw > 0.0,
-        "two-speed ASHP cooler must still draw power under partial runtime; got {electric_kw:.4} kW"
+        electric_w > 0.0,
+        "two-speed ASHP cooler must still draw power under partial runtime; got {electric_w:.4} kW"
     );
 }
 
@@ -807,7 +808,7 @@ fn minisplit_cooling_has_no_first_step_startup_penalty() {
     eq.update_control(&env);
     eq.step(&env, Duration::from_secs(60), &mut ports_first)
         .unwrap();
-    let kw_first = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let kw_first = eq.telemetry().get("electric_kw").expect("electric_w");
     let rtf_first = eq
         .telemetry()
         .get("runtime_fraction")
@@ -817,7 +818,7 @@ fn minisplit_cooling_has_no_first_step_startup_penalty() {
     eq.update_control(&env);
     eq.step(&env, Duration::from_secs(60), &mut ports_second)
         .unwrap();
-    let kw_second = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let kw_second = eq.telemetry().get("electric_kw").expect("electric_w");
     let rtf_second = eq
         .telemetry()
         .get("runtime_fraction")
@@ -855,15 +856,15 @@ fn minisplit_cooling_stage_match_runs_continuously() {
         .telemetry()
         .get("runtime_fraction")
         .expect("runtime_fraction must exist");
-    let electric_kw = eq.telemetry().get("electric_kw").expect("electric_kw");
+    let electric_w = eq.telemetry().get("electric_kw").expect("electric_w");
 
     assert!(
         (rtf - 1.0).abs() < 1e-9,
         "an exact 4-speed mini-split stage match must run continuously, got rtf={rtf:.3}"
     );
     assert!(
-        electric_kw > 0.0,
-        "variable-speed mini-split stage selection must still draw power, got {electric_kw:.4} kW"
+        electric_w > 0.0,
+        "variable-speed mini-split stage selection must still draw power, got {electric_w:.4} kW"
     );
 }
 
@@ -950,7 +951,7 @@ fn ashp_defrost_at_sub_freezing_outdoor_temp() {
     // Average COP must be physically plausible. The discrete model's Defrosting
     // steps have COP = 0 (no thermal output), but average COP over the full cycle
     // should be above 0.5.
-    let cop = avg_thermal_w / (avg_electric_kw * 1_000.0);
+    let cop = avg_thermal_w / avg_electric_kw;
     assert!(
         cop > 0.5,
         "ASHP average COP during defrost at 0°C must be > 0.5; \
@@ -1042,7 +1043,7 @@ fn make_ports_two_zones() -> PortSlots {
 #[derive(Debug, Clone, Copy)]
 struct HvacStepSnapshot {
     mode: OperatingMode,
-    electric_kw: f64,
+    electric_w: f64,
     sensible_w: f64,
     runtime_fraction: f64,
 }
@@ -1056,7 +1057,7 @@ fn hvac_step_snapshot(
     eq.step(env, Duration::from_secs(60), &mut ports).unwrap();
     HvacStepSnapshot {
         mode,
-        electric_kw: ports.electrical.net_active_w() / 1000.0,
+        electric_w: ports.electrical.net_active_w(),
         sensible_w: ports.thermal[0].sensible_gain_w,
         runtime_fraction: eq.telemetry().get("runtime_fraction").unwrap_or(0.0),
     }
@@ -1086,7 +1087,7 @@ fn two_speed_ac_config() -> EquipmentConfig {
             hysteresis_c: Some(1.0),
             airflow_m3_s_per_w: None,
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1137,7 +1138,7 @@ fn ashp_heating_at_extreme_cold() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_w() / 1000.0;
+    let electric_w = ports.electrical.net_active_w() / 1000.0;
 
     // Either the HP or backup resistance must deliver positive heat
     assert!(
@@ -1145,14 +1146,14 @@ fn ashp_heating_at_extreme_cold() {
         "ASHP (with backup) must deliver positive heat at -20°C; got {thermal_w:.3} W"
     );
     assert!(
-        electric_kw > 0.0,
-        "ASHP (with backup) must draw electricity at -20°C; got {electric_kw:.4} kW"
+        electric_w > 0.0,
+        "ASHP (with backup) must draw electricity at -20°C; got {electric_w:.4} kW"
     );
 
     eprintln!(
-        "[hvac_parity] extreme_cold: thermal={thermal_w:.1} W, electric={electric_kw:.4} kW, \
+        "[hvac_parity] extreme_cold: thermal={thermal_w:.1} W, electric={electric_w:.4} kW, \
          COP={:.3}",
-        thermal_w / (electric_kw * 1_000.0)
+        thermal_w / (electric_w * 1_000.0)
     );
 }
 
@@ -1190,7 +1191,7 @@ fn ac_deadband_no_output_when_zone_below_cooling_setpoint() {
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
     let thermal_w = ports.thermal[0].sensible_gain_w;
-    let electric_kw = ports.electrical.net_active_w() / 1000.0;
+    let electric_w = ports.electrical.net_active_w() / 1000.0;
 
     assert_ne!(
         mode,
@@ -1202,8 +1203,8 @@ fn ac_deadband_no_output_when_zone_below_cooling_setpoint() {
         "AC must deliver zero thermal output when off; got {thermal_w:.4} W"
     );
     assert!(
-        electric_kw.abs() < 0.001,
-        "AC must draw zero electricity when off; got {electric_kw:.6} kW"
+        electric_w.abs() < 0.001,
+        "AC must draw zero electricity when off; got {electric_w:.6} kW"
     );
 }
 
@@ -1254,7 +1255,7 @@ fn ashp_cop_drops_with_defrost() {
         }
         let avg_thermal_w = total_thermal_w / n_steps as f64;
         let avg_electric_kw = total_electric_kw / n_steps as f64;
-        let cop = avg_thermal_w / (avg_electric_kw * 1_000.0);
+        let cop = avg_thermal_w / avg_electric_kw;
         (cop, avg_thermal_w, avg_electric_kw)
     };
 
@@ -1471,8 +1472,7 @@ fn ac_sensible_plus_latent_equals_total() {
 
     // Fan heat partially offsets cooling at the port level:
     // port_sensible = -(sensible_cooling - fan_heat)
-    let fan_kw = eq.telemetry().get("fan_kw").unwrap_or(0.0);
-    let fan_heat_w = fan_kw * 1000.0;
+    let fan_heat_w = eq.telemetry().get("fan_kw").unwrap_or(0.0);
     let total_port_w = sensible_port_w.abs() + latent_port_w.abs();
 
     // Telemetry reports pre-fan-offset cooling (coil output only).
@@ -1860,10 +1860,10 @@ fn two_speed_ac_setpoint_matrix_transitions_from_high_to_low_stage() {
         low.runtime_fraction
     );
     assert!(
-        low.electric_kw < high.electric_kw,
+        low.electric_w < high.electric_w,
         "falling back to low stage must reduce electric draw: high={} kW low={} kW",
-        high.electric_kw,
-        low.electric_kw
+        high.electric_w,
+        low.electric_w
     );
     assert!(
         low.sensible_w.abs() < high.sensible_w.abs(),
@@ -1910,12 +1910,12 @@ fn two_speed_ac_stage_lockout_holds_low_speed_until_dwell_elapses() {
         );
     }
 
-    let low_stage_kw = snapshots[0].electric_kw;
-    let high_stage_kw = snapshots[5].electric_kw;
+    let low_stage_kw = snapshots[0].electric_w;
+    let high_stage_kw = snapshots[5].electric_w;
     assert!(
         snapshots[..5]
             .iter()
-            .all(|snap| (snap.electric_kw - low_stage_kw).abs() < 1e-9),
+            .all(|snap| (snap.electric_w - low_stage_kw).abs() < 1e-9),
         "electric draw must stay locked to the low stage before the 300 s dwell expires"
     );
     assert!(
@@ -1981,7 +1981,7 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                min_compressor_fraction: 0.25,
+                min_compressor_fraction: None,
                 eir_part_load_benefit: None,
                 er_stages: 1,
                 charge_defect_ratio: None,
@@ -2021,7 +2021,7 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
         OperatingMode::Off,
         "between the ER and HP lockouts neither heat source should be available"
     );
-    assert!(shoulder_step.electric_kw.abs() < 1e-6);
+    assert!(shoulder_step.electric_w.abs() < 1e-6);
     assert!(shoulder_step.sensible_w.abs() < 1e-6);
 
     let mut cold = registry.create("ASHP Heater", cfg.clone()).unwrap();
@@ -2034,4 +2034,254 @@ fn ashp_lockout_matrix_matches_outdoor_thresholds() {
         "below the ER lockout the backup element should carry the heating call"
     );
     assert!(cold_step.sensible_w > 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Defrost model consolidation: one model owns the penalty.
+//
+// The discrete frost cycle (DefrostCycleTracker) resolves the continuous
+// EnergyPlus ERM 26.1 on-demand model into explicit events. Its documented
+// contract (defrost.rs) is "the same average time-in-defrost as the
+// continuous model": the FSM's Defrosting fraction must equal the continuous
+// time fraction, and the continuous model's average multipliers must not be
+// applied on top of the FSM's phases.
+//
+// The probe conditions mirror the composed-run probe: an ASHP held at a
+// static operating point (constant environment, always calling, no fan, no
+// backup) for 48 h at 60 s steps, 1 C and RH 85 percent (humidity ratio
+// 0.003447), with a 10 h warm-up so the frost EWMA reaches steady state.
+// ---------------------------------------------------------------------------
+
+use hares_equipment::hvac::heat_pump::constants::DEFROST_CAPACITY_MULTIPLIER_BASE;
+
+/// Static winter environment at 1 C / RH 85 percent for the defrost probe.
+fn defrost_probe_env() -> EnvironmentState {
+    let mut env = make_env(18.0, 1.0, 0.3);
+    env.weather.outdoor_humidity_ratio = 0.003_447;
+    env.weather.outdoor_wet_bulb_c = 0.3;
+    env.time_res = chrono::Duration::seconds(10);
+    env
+}
+
+/// Full ASHP configuration for the defrost probe (10 kW, EIR 0.35, no backup).
+fn defrost_probe_config(defrost: DefrostConfig) -> EquipmentConfig {
+    EquipmentConfig::from_typed(
+        "defrost_probe".to_string(),
+        "ASHP Heater".to_string(),
+        HeatPumpHeaterConfig {
+            reject_unknown_keys: RejectUnknownKeys,
+            common: HeatPumpCommonConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                heating_capacity_w: Some(10_000.0),
+                heating_eir: Some(0.35),
+                backup_capacity_w: Some(0.0),
+                fraction_heating_load_served: Some(1.0),
+                cooling_capacity_w: Some(8_000.0),
+                cooling_eir: Some(0.35),
+                fraction_cooling_load_served: Some(1.0),
+                number_of_speeds: 1,
+                is_mini_split: false,
+                shr: Some(0.85),
+                fan_power_w: Some(0.0),
+                setpoint: HvacSetpointConfig {
+                    heating_setpoint_c: Some(21.0),
+                    cooling_setpoint_c: Some(27.0),
+                    ..Default::default()
+                },
+                er_stages: 1,
+                ..Default::default()
+            },
+            defrost,
+            ..Default::default()
+        },
+    )
+    .expect("typed ASHP config for the defrost probe")
+}
+
+struct DefrostProbeRun {
+    n_steps: usize,
+    n_warmup: usize,
+    n_defrosting: usize,
+    n_accumulating: usize,
+    /// Sum of the defrost capacity multiplier over Accumulating steps.
+    capmult_sum: f64,
+    /// Sum of the defrost extra power over Accumulating steps (W).
+    accumulating_extra_w: f64,
+    /// Sum of the defrost extra power over all measured steps (W).
+    total_extra_w: f64,
+    /// Sum of the delivered thermal output over all measured steps (W).
+    total_thermal_w: f64,
+    /// Sum of the defrost time fraction over Accumulating steps.
+    tf_sum: f64,
+    /// Sum of the defrost extra power over Defrosting steps (W).
+    defrosting_extra_w: f64,
+}
+
+impl DefrostProbeRun {
+    fn measured_steps(&self) -> usize {
+        self.n_steps - self.n_warmup
+    }
+}
+
+/// Run the defrost probe: 48 h at 10 s steps with a 100 min warm-up at a
+/// static operating point, accumulating the defrost telemetry after the
+/// warm-up. The 10 s timestep resolves the 210 s defrost event into 21 whole
+/// steps and keeps the trigger's step-boundary overshoot under half a
+/// percent of the duty; coarser steps quantize the event upward and wobble
+/// the realized duty by O(period/window).
+fn defrost_probe_run(defrost: DefrostConfig) -> DefrostProbeRun {
+    use hares_types::telemetry_keys as tk;
+
+    let env = defrost_probe_env();
+    let dt = Duration::from_secs(10);
+    let n_steps = 17_280_usize;
+    let n_warmup = 600_usize;
+
+    let registry = EquipmentRegistry::new();
+    let cfg = defrost_probe_config(defrost);
+    let mut eq = registry.create("ASHP Heater", cfg.clone()).unwrap();
+    eq.init(&cfg, &env).unwrap();
+
+    let mut run = DefrostProbeRun {
+        n_steps,
+        n_warmup,
+        n_defrosting: 0,
+        n_accumulating: 0,
+        capmult_sum: 0.0,
+        accumulating_extra_w: 0.0,
+        total_extra_w: 0.0,
+        total_thermal_w: 0.0,
+        tf_sum: 0.0,
+        defrosting_extra_w: 0.0,
+    };
+    for step_index in 0..n_steps {
+        let mut ports = make_ports();
+        eq.update_control(&env);
+        eq.step(&env, dt, &mut ports).unwrap();
+        if step_index < n_warmup {
+            continue;
+        }
+        let tel = eq.telemetry();
+        let state = tel.get(tk::DEFROST_CYCLE_STATE).unwrap_or(0.0);
+        let extra = tel.get(tk::DEFROST_EXTRA_POWER_W).unwrap_or(0.0);
+        run.total_extra_w += extra;
+        run.total_thermal_w += tel.get("thermal_output_w").unwrap_or(0.0);
+        if state == 1.0 {
+            run.n_defrosting += 1;
+            run.defrosting_extra_w += extra;
+        } else {
+            run.n_accumulating += 1;
+            run.capmult_sum += tel.get(tk::DEFROST_CAPACITY_MULTIPLIER).unwrap_or(1.0);
+            run.accumulating_extra_w += extra;
+            run.tf_sum += tel.get(tk::DEFROST_TIME_FRACTION).unwrap_or(0.0);
+        }
+    }
+    run
+}
+
+/// The FSM's Defrosting fraction must equal the continuous model's time
+/// fraction (the documented duty). The old trigger divided the cycle duration
+/// by the time fraction while frost accumulated at dt x tf per step, so the
+/// FSM under-fired its own documented duty by about 1/tf (duty tf^2, not tf).
+#[test]
+fn defrost_fsm_duty_matches_documented_time_fraction() {
+    let run = defrost_probe_run(DefrostConfig::default());
+    assert!(
+        run.n_defrosting > 0,
+        "the discrete frost cycle must fire at 1 C / RH 85 percent for this probe to be meaningful"
+    );
+    let f_disc = run.n_defrosting as f64 / run.measured_steps() as f64;
+    let tf_avg = run.tf_sum / run.n_accumulating as f64;
+    assert!(
+        (f_disc - tf_avg).abs() < 0.05 * tf_avg,
+        "the FSM duty {f_disc:.5} must match the documented duty (the continuous \
+         time fraction {tf_avg:.5}); a trigger that under-fires stacks a second \
+         duty factor on the continuous model's own",
+    );
+}
+
+/// On Accumulating steps no continuous-model multipliers may apply on top of
+/// the frost cycle: the capacity multiplier is the bare frost derate (the
+/// duty factor belongs to the FSM's events) and no average defrost power is
+/// metered (the defrost draw belongs to the events).
+#[test]
+fn defrost_accumulating_steps_apply_the_frost_derate_once() {
+    let run = defrost_probe_run(DefrostConfig::default());
+    assert!(
+        run.n_accumulating > 0,
+        "the probe must see Accumulating steps for this pin to be meaningful"
+    );
+    let capmult_avg = run.capmult_sum / run.n_accumulating as f64;
+    assert_eq!(
+        run.accumulating_extra_w, 0.0,
+        "Accumulating steps must meter no average defrost power; the defrost \
+         draw belongs to the FSM's events, not stacked under them"
+    );
+    assert!(
+        (capmult_avg - DEFROST_CAPACITY_MULTIPLIER_BASE).abs() < 1e-9,
+        "Accumulating steps must carry the bare frost derate \
+         {DEFROST_CAPACITY_MULTIPLIER_BASE} (the duty factor is the FSM's), \
+         got {capmult_avg:.5}"
+    );
+}
+
+/// The plan's accumulated-energy pin: with the discrete frost cycle enabled,
+/// 48 h at 0-2 C / RH 85 percent delivers the same total heating energy as
+/// the continuous model alone (within 1 percent), because the FSM resolves
+/// the continuous model's average penalty into events of the same cycle
+/// average instead of stacking a second duty factor under it.
+#[test]
+fn defrost_accumulated_energy_discrete_matches_continuous() {
+    let continuous = defrost_probe_run(DefrostConfig {
+        defrost_discrete_cycle: false,
+        ..DefrostConfig::default()
+    });
+    let discrete = defrost_probe_run(DefrostConfig::default());
+
+    assert!(
+        continuous.n_defrosting == 0,
+        "the continuous run's tracker must stay dormant"
+    );
+    assert!(
+        discrete.n_defrosting > 0,
+        "the discrete run's frost cycle must fire at 1 C / RH 85 percent"
+    );
+
+    let heat_ratio = discrete.total_thermal_w / continuous.total_thermal_w;
+    assert!(
+        (heat_ratio - 1.0).abs() < 0.01,
+        "the discrete cycle's delivered heat must match the continuous model \
+         alone within 1 percent, got a ratio of {heat_ratio:.4} \
+         (discrete {:.1} W vs continuous {:.1} W over {} steps)",
+        discrete.total_thermal_w,
+        continuous.total_thermal_w,
+        discrete.measured_steps()
+    );
+}
+
+/// The discrete run's defrost-electric integral must equal the continuous
+/// model's extra_power_w integral (within 1 percent): the event draw is the
+/// continuous average concentrated into the event window.
+#[test]
+fn defrost_discrete_defrost_electric_matches_continuous_integral() {
+    let continuous = defrost_probe_run(DefrostConfig {
+        defrost_discrete_cycle: false,
+        ..DefrostConfig::default()
+    });
+    let discrete = defrost_probe_run(DefrostConfig::default());
+
+    assert!(
+        continuous.total_extra_w > 0.0,
+        "the continuous model must meter defrost power at these conditions"
+    );
+    let ratio = discrete.total_extra_w / continuous.total_extra_w;
+    assert!(
+        (ratio - 1.0).abs() < 0.01,
+        "the discrete cycle's defrost-electric integral must match the continuous \
+         model's extra_power_w integral within 1 percent, got a ratio of {ratio:.4} \
+         (discrete {:.1} W vs continuous {:.1} W)",
+        discrete.total_extra_w,
+        continuous.total_extra_w
+    );
 }

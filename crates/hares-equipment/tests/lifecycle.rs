@@ -224,18 +224,18 @@ fn assert_equipment_lifecycle(
 }
 
 fn assert_core_output_contract(desc: &EquipmentDescriptor, co: &CoreOutput) {
-    validate_core_contract(desc, co)
+    validate_core_contract(desc, co, &mut Vec::new())
         .unwrap_or_else(|e| panic!("core contract failed for '{}': {e}", desc.name));
 
     let caps = desc.core_capabilities;
     assert_eq!(
-        co.flows.electric_kw.is_some(),
+        co.flows.electric_w.is_some(),
         caps.contains(CoreCapabilities::ELECTRIC),
         "electric core output presence must match capabilities for '{}'",
         desc.name
     );
     assert_eq!(
-        co.flows.reactive_power_kvar.is_some(),
+        co.flows.reactive_power_var.is_some(),
         caps.contains(CoreCapabilities::REACTIVE),
         "reactive core output presence must match capabilities for '{}'",
         desc.name
@@ -276,12 +276,18 @@ fn assert_core_output_contract(desc: &EquipmentDescriptor, co: &CoreOutput) {
         "setpoint_c core output presence must match capabilities for '{}'",
         desc.name
     );
-    assert_eq!(
-        co.performance.cop.is_some(),
-        caps.contains(CoreCapabilities::HAS_COP),
-        "cop core output presence must match capabilities for '{}'",
-        desc.name
-    );
+    // COP is None whenever the step had no compressor input (the cell
+    // null, B-6), so presence no longer mirrors the HAS_COP capability:
+    // the capability's rule is one-directional (undeclared never
+    // populated, enforced by the core contract) plus the value's
+    // plausibility when present.
+    if co.performance.cop.is_some() {
+        assert!(
+            caps.contains(CoreCapabilities::HAS_COP),
+            "cop populated without the HAS_COP capability for '{}'",
+            desc.name
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +327,7 @@ fn lifecycle_scheduled_load() {
             ("zone_id", 1.0),
             ("sensible_gain_fraction", 0.5),
             ("latent_gain_fraction", 0.1),
-            ("power_constant_kw", 1.5),
+            ("power_constant_w", 1500.0),
         ],
         &[("power_schedule_source", "constant")],
     );
@@ -357,9 +363,9 @@ fn lifecycle_battery() {
         BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 13.5,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 13.5 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -388,7 +394,7 @@ fn lifecycle_battery() {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         },
@@ -401,8 +407,8 @@ fn lifecycle_battery() {
     eq.init(&cfg, &env).expect("init must succeed");
 
     let valid = ControlSignal::PowerSetpoint {
-        active_power_kw: 2.0,
-        reactive_power_kvar: None,
+        active_power_w: 2.0000,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     };
@@ -456,8 +462,8 @@ fn lifecycle_gas_furnace() {
         deadband_c: Some(1.0),
     };
     let invalid = ControlSignal::PowerSetpoint {
-        active_power_kw: 5.0,
-        reactive_power_kvar: None,
+        active_power_w: 5.0000,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     };
@@ -487,7 +493,7 @@ fn scheduled_load_writes_positive_thermal_gain_to_port() {
             ("zone_id", 1.0),
             ("sensible_gain_fraction", 0.5),
             ("latent_gain_fraction", 0.1),
-            ("power_constant_kw", 1.5),
+            ("power_constant_w", 1500.0),
         ],
         &[("power_schedule_source", "constant")],
     );
@@ -550,7 +556,7 @@ fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured
         &[
             ("zone_id", 1.0),
             ("sensible_gain_fraction", 0.0),
-            ("power_constant_kw", 1.5),
+            ("power_constant_w", 1500.0),
         ],
         &[("power_schedule_source", "constant")],
     );
@@ -571,7 +577,7 @@ fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured
     let co = eq.core_output();
     assert_core_output_contract(eq.descriptor(), co);
     assert_eq!(
-        co.flows.reactive_power_kvar,
+        co.flows.reactive_power_var,
         Some(0.0),
         "reactive core output must remain present and zeroed when configured"
     );
@@ -666,6 +672,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 fluid_type: hares_types::FluidType::Water,
                 setpoint: HvacSetpointConfig::default(),
                 condensing: false,
+                ..Default::default()
             },
         ),
         "Electric Boiler" => typed_alias_config(
@@ -702,7 +709,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 hysteresis_c: None,
                 airflow_m3_s_per_w: None,
                 fraction_load_served: Some(1.0),
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 duct: DuctConfig::default(),
@@ -740,7 +747,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 ff_max: None,
                 plf_min: None,
                 plf_max: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 min_oat_compressor_cooling_c: None,
@@ -801,7 +808,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                         ff_max: None,
                         plf_min: None,
                         plf_max: None,
-                        min_compressor_fraction: 0.25,
+                        min_compressor_fraction: None,
                         eir_part_load_benefit: None,
                         er_stages: 1,
                         charge_defect_ratio: None,
@@ -855,14 +862,14 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                     ff_max: None,
                     plf_min: None,
                     plf_max: None,
-                    min_compressor_fraction: 0.25,
+                    min_compressor_fraction: None,
                     eir_part_load_benefit: None,
                     er_stages: 1,
                     charge_defect_ratio: None,
                     ..Default::default()
                 },
                 stage_shrs: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 min_oat_cooling_c: 10.0,
             },
@@ -883,7 +890,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 fan_power_w: None,
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 fuel_type: FuelType::Gas,
                 tank_volume_m3: None,
                 tank_height_m: None,
@@ -900,6 +907,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 draw_flow_rate_kg_s: None,
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 pilot_power_w: Some(0.0),
                 flue_loss_fraction: None,
                 skin_loss_fraction: None,
@@ -919,7 +927,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,
@@ -935,6 +943,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 draw_flow_rate_kg_s: None,
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
@@ -952,7 +961,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             TanklessWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 fuel_type: FuelType::Electric,
                 energy_factor: Some(0.95),
                 uniform_energy_factor: None,
@@ -964,6 +973,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 draw_flow_rate_kg_s: Some(0.2),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 avg_water_draw_l_per_day: None,
                 zone_type: None,
                 min_flow_kg_s: None,
@@ -975,7 +985,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             TanklessWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 fuel_type: FuelType::Gas,
                 energy_factor: Some(0.82),
                 uniform_energy_factor: None,
@@ -987,6 +997,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 draw_flow_rate_kg_s: Some(0.2),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 avg_water_draw_l_per_day: None,
                 zone_type: None,
                 min_flow_kg_s: None,
@@ -998,7 +1009,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             HeatPumpWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 cop: Some(2.5),
@@ -1012,6 +1023,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 tempering_valve_setpoint_c: None,
                 avg_water_draw_l_per_day: None,
                 draw_flow_rate_kg_s: None,
+                appliance_draw_flow_rate_source: None,
                 compressor_power_w: None,
                 backup_enable_offset_c: None,
                 min_ambient_temp_c: None,
@@ -1043,7 +1055,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             IndirectTankConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                boiler_loop_id: None,
+                boiler_loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 ua_w_per_k: None,
@@ -1057,6 +1069,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 avg_water_draw_l_per_day: None,
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
@@ -1071,9 +1084,9 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             BatteryConfig {
                 equipment_id: None,
                 zone_id: None,
-                capacity_kwh: 13.5,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                capacity_j: 13.5 * 3.6e6,
+                max_charge_w: 5000.0,
+                max_discharge_w: 5000.0,
                 n_series: None,
                 n_parallel: None,
                 ah_cell: None,
@@ -1102,7 +1115,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 bms_mode: None,
                 grid_export_rule: None,
                 power_factor: None,
-                inverter_capacity_kva: None,
+                inverter_capacity_va: None,
                 grid_forming: None,
                 min_dwell_steps: 0,
             },
@@ -1112,15 +1125,16 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             PvConfig {
                 equipment_id: None,
                 zone_id: None,
-                capacity_kw: 5.0,
+                capacity_w: 5000.0,
                 tilt_deg: Some(0.0),
                 azimuth_deg: Some(0.0),
+                attached_boundary_id: None,
                 module_type: None,
                 noct_c: None,
                 array_type: None,
                 system_losses_fraction: None,
                 inverter_efficiency: Some(0.96),
-                inverter_capacity_kw: Some(5.0),
+                inverter_capacity_w: Some(5000.0),
                 power_factor: Some(1.0),
                 surface_resolution_deg: Some(360.0),
                 sam_lut_path: None,
@@ -1132,9 +1146,9 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             class,
             EvConfig {
                 equipment_id: None,
-                capacity_kwh: 60.0,
+                capacity_j: 60.0 * 3.6e6,
                 charging_level: Some("L2".to_string()),
-                max_charging_power_kw: 7.2,
+                max_charging_power_w: 7200.0,
                 charging_efficiency: Some(0.9),
                 l1_current_a: None,
                 l1_voltage_v: None,
@@ -1152,19 +1166,19 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 cell_resistance_ohm: None,
                 v2l_enabled: None,
                 v2l_soc_reserve: None,
-                v2l_max_discharge_kw: None,
+                v2l_max_discharge_w: None,
                 v2g_enabled: None,
                 v2g_soc_reserve: None,
-                v2g_max_discharge_kw: None,
+                v2g_max_discharge_w: None,
                 chemistry: None,
-                fuel_economy_kwh_per_mi: None,
+                fuel_economy_j_per_m: None,
                 ready_soc: None,
                 charging_strategy: None,
                 plug_in_policy: None,
-                power_limit_kw: None,
+                power_limit_w: None,
                 initial_connection_state: None,
                 power_factor: None,
-                charger_capacity_kva: None,
+                charger_capacity_va: None,
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
@@ -1175,7 +1189,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             class,
             &[
                 ("zone_id", 1.0),
-                ("power_constant_kw", 3.6),
+                ("power_constant_w", 3600.0),
                 ("sensible_gain_fraction", 0.0),
                 ("latent_gain_fraction", 0.0),
             ],
@@ -1187,7 +1201,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                 equipment_id: None,
                 zone_id: None,
                 fuel_type: Some(FuelType::Gas),
-                rated_power_kw: 6.0,
+                rated_power_w: 6000.0,
                 eta_electric: Some(0.3),
                 eta_thermal: Some(0.0),
                 eta_jacket_water: None,
@@ -1215,11 +1229,11 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
                     },
                 ]),
                 efficiency_type: None,
-                delta_kw_per_s: Some(1.0),
-                capacity_min_kw: Some(0.0),
-                grid_import_limit_kw: Some(0.0),
-                export_limit_kw: Some(0.0),
-                loop_id: None,
+                delta_w_per_s: Some(1000.0),
+                capacity_min_w: Some(0.0),
+                grid_import_limit_w: Some(0.0),
+                export_limit_w: Some(0.0),
+                loop_id: Some(1),
                 flow_rate_kg_s: None,
                 supply_temp_c: None,
                 return_temp_c: None,
@@ -1314,7 +1328,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             class,
             &[
                 ("zone_id", 1.0),
-                ("active_power_kw", 1.0),
+                ("active_power_w", 1000.0),
                 ("sensible_gain_fraction", 0.0),
             ],
             &[("event_window_source", "constant")],
@@ -1325,7 +1339,7 @@ fn typed_config_for_class(class: &str) -> EquipmentConfig {
             class,
             &[
                 ("zone_id", 1.0),
-                ("power_constant_kw", 1.0),
+                ("power_constant_w", 1000.0),
                 ("sensible_gain_fraction", 0.3),
                 ("latent_gain_fraction", 0.1),
             ],
@@ -1378,8 +1392,8 @@ fn lifecycle_resistance_water_heater() {
             deadband_c: Some(2.0),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1404,8 +1418,8 @@ fn lifecycle_gas_water_heater() {
             deadband_c: Some(2.0),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1430,8 +1444,8 @@ fn lifecycle_heat_pump_water_heater() {
             deadband_c: Some(2.0),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1456,8 +1470,8 @@ fn lifecycle_tankless_water_heater() {
             deadband_c: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1482,8 +1496,8 @@ fn lifecycle_gas_tankless_water_heater() {
             deadband_c: None,
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1508,8 +1522,8 @@ fn lifecycle_indirect_tank() {
             deadband_c: Some(2.0),
         },
         ControlSignal::PowerSetpoint {
-            active_power_kw: 1.0,
-            reactive_power_kvar: None,
+            active_power_w: 1.0000,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         },
@@ -1540,12 +1554,12 @@ fn all_registered_equipment_core_output_matches_capabilities_and_ports() {
         if desc.core_capabilities.contains(CoreCapabilities::ELECTRIC) {
             let core_kw = co
                 .flows
-                .electric_kw
+                .electric_w
                 .expect("validated electric capability must have core electric output")
-                .net_consumption_kw();
+                .net_consumption_w();
             let port_w = ports.electrical.net_active_w();
             assert!(
-                (core_kw - port_w / 1_000.0).abs() < 0.001,
+                (core_kw - port_w).abs() < 1.0,
                 "core_output vs electrical ports mismatch for '{class}': core={core_kw}, ports={port_w}"
             );
         }
@@ -1643,7 +1657,7 @@ fn pv_capacitive_reactive_output_is_negative_in_core_output() {
     let env = env_with_pv_surface();
     eq.init(&cfg, &env).expect("init pv");
 
-    eq.apply_control(&ControlSignal::ReactiveSetpoint { kvar: -1.0 })
+    eq.apply_control(&ControlSignal::ReactiveSetpoint { var: -1.0 })
         .expect("reactive setpoint accepted");
     let mut ports = ports_for(eq.as_ref());
     eq.step(&env, Duration::from_secs(60), &mut ports)
@@ -1652,11 +1666,11 @@ fn pv_capacitive_reactive_output_is_negative_in_core_output() {
     let q = eq
         .core_output()
         .flows
-        .reactive_power_kvar
+        .reactive_power_var
         .expect("pv declares reactive capability");
     assert!(
         q < 0.0,
-        "capacitive setpoint must produce negative core reactive_power_kvar; got {q}"
+        "capacitive setpoint must produce negative core reactive_power_var; got {q}"
     );
 }
 
@@ -1730,11 +1744,11 @@ fn gshp_heater_pump_power_in_telemetry_and_ports() {
         .get(tk::PUMP_POWER_KW)
         .expect("PUMP_POWER_KW must be present in telemetry");
     assert!(
-        (0.04..=0.12).contains(&pump_telemetry),
-        "GSHP heater pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
+        (40.0..=120.0).contains(&pump_telemetry),
+        "GSHP heater pump power in telemetry must be 40–120 W for a typical ~60 m borehole; got {pump_telemetry:.4}"
     );
     assert!(
-        ports.electrical.load_power_w >= pump_telemetry * 1_000.0,
+        ports.electrical.load_power_w >= pump_telemetry,
         "electrical port load ({:.1} W) must be at least the pump contribution ({:.1} W)",
         ports.electrical.load_power_w,
         pump_telemetry * 1_000.0
@@ -1768,7 +1782,7 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
             ..Default::default()
         },
         stage_shrs: None,
-        crankcase_heater_kw: None,
+        crankcase_heater_w: None,
         crankcase_heater_threshold_c: None,
         min_oat_cooling_c: 10.0,
     };
@@ -1803,13 +1817,145 @@ fn gshp_cooler_pump_power_in_telemetry_and_ports() {
         .get(tk::PUMP_POWER_KW)
         .expect("PUMP_POWER_KW must be present in telemetry");
     assert!(
-        (0.04..=0.12).contains(&pump_telemetry),
-        "GSHP cooler pump power in telemetry must be 0.04–0.12 kW for typical ~60 m borehole; got {pump_telemetry:.4}"
+        (40.0..=120.0).contains(&pump_telemetry),
+        "GSHP cooler pump power in telemetry must be 40–120 W for a typical ~60 m borehole; got {pump_telemetry:.4}"
     );
     assert!(
-        ports.electrical.load_power_w >= pump_telemetry * 1_000.0,
+        ports.electrical.load_power_w >= pump_telemetry,
         "electrical port load ({:.1} W) must be at least the pump contribution ({:.1} W)",
         ports.electrical.load_power_w,
-        pump_telemetry * 1_000.0
+        pump_telemetry
     );
+}
+
+// ---------------------------------------------------------------------------
+// Resolved-parameter read-back (the resolved_parameters trait method)
+// ---------------------------------------------------------------------------
+
+/// The read-back names the plan's required-parameter table requires for
+/// the class, keyed by class name because the table's rows split the
+/// heating end use by kind (fuel, heat pump, electric resistance) and the
+/// water-heating row adds the tank parameters only tanks report. The
+/// table carries a row for every registered class and the test fails a
+/// class the table omits; the protocol bridge's row is empty because it
+/// forwards control payloads and its physics is the target equipment's.
+fn required_read_back(class: &str) -> Option<&'static [&'static str]> {
+    match class {
+        // HVAC cooling: capacity, EIR and SHR.
+        "Air Conditioner" | "Room AC" | "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler"
+        | "WSHP Cooler" => Some(&["rated_capacity_w", "rated_eir", "rated_shr"]),
+        // Heat pump heating: capacity and EIR.
+        "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater" | "GSHP Heater" | "WSHP Heater" => {
+            Some(&["rated_capacity_w", "rated_eir"])
+        }
+        // Fuel heating: capacity and AFUE.
+        "Gas Furnace" | "Gas Boiler" => Some(&["rated_capacity_w", "afue"]),
+        // Electric resistance heating: capacity and efficiency.
+        "Electric Furnace" | "Electric Baseboard" | "Electric Boiler" => {
+            Some(&["rated_capacity_w", "efficiency"])
+        }
+        // The ideal unit's back-calculated capacity is capped at the rated one.
+        "Ideal HVAC" => Some(&["rated_capacity_w"]),
+        // The dehumidifier: the rated removal, the energy factor and the
+        // load fraction its control serves.
+        "Dehumidifier" => Some(&[
+            "rated_water_removal_l_day",
+            "rated_energy_factor_l_kwh",
+            "fraction_load_served",
+        ]),
+        // Element-heated tanks: the water-heating row plus the tank adds.
+        "Gas Water Heater" | "Electric Resistance Water Heater" | "Resistance Water Heater" => {
+            Some(&[
+                "heating_capacity_w",
+                "setpoint_c",
+                "tank_volume_m3",
+                "ua_w_k",
+            ])
+        }
+        // Heat pump water heaters add the compressor's rated COP.
+        "Heat Pump Water Heater" | "HPWH" => Some(&[
+            "heating_capacity_w",
+            "setpoint_c",
+            "tank_volume_m3",
+            "ua_w_k",
+            "rated_cop",
+        ]),
+        // Tankless units have no tank.
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => {
+            Some(&["heating_capacity_w", "setpoint_c"])
+        }
+        // The indirect tank has no heating element of its own: the boiler
+        // loop heats it through a heat exchanger, whose UA is the capacity
+        // parameter its physics uses, reported beside the tank's.
+        "Indirect Tank" => Some(&["setpoint_c", "tank_volume_m3", "ua_w_k"]),
+        "PV" => Some(&["nameplate_w"]),
+        "Battery" => Some(&[
+            "energy_capacity_j",
+            "power_capacity_w",
+            "round_trip_efficiency",
+        ]),
+        "EV" | "Electric Vehicle" => Some(&["battery_capacity_j", "max_charging_power_w"]),
+        // The generators: the rated output the dispatch commits.
+        "Gas Generator" | "Gas Fuel Cell" => Some(&["rated_power_w"]),
+        // The scheduled loads: the usage multiplier scales their schedule.
+        // "Scheduled EV" is one of them (its physics is the charging
+        // schedule, not a pack model), so it requires the multiplier, not
+        // the EV row's pack parameters.
+        "Lighting" | "Gas Lighting" | "Indoor Lighting" | "Exterior Lighting"
+        | "Basement Lighting" | "Garage Lighting" | "Plug Loads" | "MELs" | "TV" | "Other"
+        | "Refrigerator" | "Freezer" | "Well Pump" | "Pool Pump" | "Pool Heater" | "Spa Pump"
+        | "Spa Heater" | "Gas Grill" | "Gas Fireplace" | "Ceiling Fan" | "Scheduled EV" => {
+            Some(&["usage_multiplier"])
+        }
+        // The event loads: the event window's power and duration.
+        "EventBasedLoad" | "Cooking Range" | "Microwave" => {
+            Some(&["active_power_w", "active_duration_s"])
+        }
+        // The wet appliances report their unit count (the draw is per unit).
+        "Clothes Washer" | "Dishwasher" | "Clothes Dryer" => Some(&["n_units"]),
+        // The ventilation units: the two fans and the flow rate the
+        // balanced exchange moves.
+        "Ventilation Fan" | "HRV" | "ERV" => Some(&[
+            "supply_fan_power_w",
+            "exhaust_fan_power_w",
+            "flow_rate_m3_s",
+        ]),
+        // The bridge forwards control payloads; its physics is the
+        // target equipment's, so it requires nothing here.
+        "Protocol Bridge" => Some(&[]),
+        _ => None,
+    }
+}
+
+/// Every registered class's built equipment reports every read-back name
+/// the plan's required-parameter table requires for it: the resolved
+/// parameters are readable for the whole registry, not hand-picked classes.
+#[test]
+fn every_equipment_class_reports_its_required_parameters() {
+    let registry = EquipmentRegistry::new();
+    for class in registry.known_names() {
+        let cfg = config_for_class(class);
+        let env = env_for_class(class);
+        let mut eq = registry
+            .create(class, cfg.clone())
+            .unwrap_or_else(|e| panic!("create failed for '{class}': {e}"));
+        eq.init(&cfg, &env)
+            .unwrap_or_else(|e| panic!("init failed for '{class}': {e}"));
+
+        let reported: Vec<&str> = eq.resolved_parameters().iter().map(|p| p.name).collect();
+        let required_names = required_read_back(class)
+            .unwrap_or_else(|| panic!("'{class}' is missing from the required-parameter table"));
+        for required in required_names {
+            assert!(
+                reported.contains(required),
+                "'{class}' must report '{required}' in its resolved parameters; got {reported:?}"
+            );
+        }
+        for name in reported {
+            assert!(
+                !name.is_empty(),
+                "'{class}' reported a parameter with an empty name"
+            );
+        }
+    }
 }

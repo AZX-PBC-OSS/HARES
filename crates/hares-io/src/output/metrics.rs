@@ -1,23 +1,43 @@
-//! Derived metrics and post-processing.
+//! Derived run metrics, computed only when the run requests them.
+//!
+//! One path: a fixed [`MetricsInputPlan`] (the columns the metrics read,
+//! resolved once against the run's producer surface, which the catalogue
+//! derives) is built at freeze, and the [`MetricsCalculator`] accumulator
+//! is fed per step from the row plan's producer slots. The state is exact
+//! at every step, and a run that does not request metrics builds no plan
+//! and no accumulator and pays nothing.
+//!
+//! The one accumulator has two feeds: the run feeds it per step from the
+//! row plan's producer slots, and [`metrics_from_table`] feeds it from
+//! any Timestep results table, its columns resolved through the
+//! catalogue. The two feeds run the same aggregations and produce the
+//! same values: a table the run itself recorded scores the run's metrics
+//! on bits.
+//!
+//! The table feed's exact-delta gate checks consecutive `Time` pairs
+//! only, so a table truncated at either end passes it: there is no
+//! start anchor. The caller owns the table's extent; the coverage year
+//! reads the first `Time` value.
 
 use std::collections::BTreeMap;
 
-use arrow::{
-    array::{Array, Float64Array},
-    datatypes::{DataType, Schema},
-    record_batch::RecordBatch,
-};
-use chrono::Datelike;
+use arrow::array::{Array, Float64Array, RecordBatch, TimestampMillisecondArray};
+use arrow::datatypes::DataType;
+use chrono::{DateTime, Datelike, Duration};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use hares_physics::constants::HOURS_PER_YEAR;
-use hares_physics::units::energy_therms_to_kwh;
+use hares_types::EndUse;
+use hares_types::Unit;
+use hares_types::si_units::energy::therm as therm_marker;
 use hares_types::telemetry_keys as tk;
-
-#[cfg(feature = "observe")]
-use crate::output::columns::ELECTRIC_POWER_SUFFIX;
+use uom::si::energy::{joule as joule_marker, kilowatt_hour as kilowatt_hour_marker};
+use uom::si::f64::Energy;
 
 use crate::SimulationConfig;
+use crate::output::catalogue::{Catalogue, time_field, variable_field};
+use crate::output::columns::ELECTRIC_POWER_SUFFIX;
 
 const TOTAL_ELECTRIC_POWER_KW: &str = "Total Electric Power (kW)";
 const TOTAL_GAS_POWER_THERMS: &str = "Total Gas Power (therms/hour)";
@@ -25,23 +45,45 @@ const GRID_ELECTRIC_POWER_KW: &str = "Grid Electric Power (kW)";
 const SETPOINT_DEADBAND_C: &str = "Setpoint Deadband (C)";
 const DEADBAND_C: &str = "Deadband (C)";
 
+/// The reduced tables' step-count column: a period row's step count. The
+/// catalogue declares no such variable, so the Timestep table check names
+/// this column when it finds one.
+const STEP_COUNT_COLUMN: &str = "Step Count";
+
 const EPSILON: f64 = 1e-9;
 
-/// Errors returned by [`MetricsCalculator::new`].
+/// Errors returned by [`MetricsInputPlan::build`],
+/// [`MetricsCalculator::new`] and [`metrics_from_table`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MetricsError {
+    #[error("metrics snapshot mismatch: {0}")]
+    Snapshot(String),
     #[error("time_res_secs must be greater than zero")]
     InvalidTimeResolution,
     #[error("required metrics column missing: {0}")]
     MissingRequiredColumn(String),
-    #[error("column `{column}` must have Float64 type")]
-    InvalidColumnType { column: String },
     #[error("metrics accumulator `{0}` is non-finite")]
     NonFiniteAccumulator(String),
+    #[error(
+        "table column `{column}` is {found}, contradicting the catalogue's {expected} declaration"
+    )]
+    ColumnTypeMismatch {
+        column: String,
+        expected: String,
+        found: String,
+    },
+    #[error("not a Timestep table: {0}")]
+    NonTimestepTable(String),
+    #[error("the table is empty: the metrics are computed from a Timestep results table's rows")]
+    EmptyTable,
+    #[error(
+        "table batches do not share one schema: batch {batch} differs from the first at column `{column}`"
+    )]
+    InconsistentBatches { batch: usize, column: String },
 }
 
 /// Total accumulated electric energy over the simulation period.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TotalEnergyKwh {
     /// Net electric energy at the meter — gross consumption minus gross PV
     /// generation (kWh). Positive = import, negative = export. The identity
@@ -63,9 +105,10 @@ pub struct TotalEnergyKwh {
 }
 
 /// Rolling-window peak demand metrics at standard demand intervals.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RollingPeakKw {
-    /// Peak 15-minute average demand (kW).
+    /// Peak 15-minute average demand (kW), converted once from the W
+    /// ring the calculator holds.
     pub peak_15min_kw: f64,
     /// Peak 30-minute average demand (kW).
     pub peak_30min_kw: f64,
@@ -74,7 +117,7 @@ pub struct RollingPeakKw {
 }
 
 /// Peak power metrics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PeakPowerKw {
     /// Peak instantaneous power by end-use key.
     pub per_end_use: BTreeMap<String, f64>,
@@ -83,16 +126,17 @@ pub struct PeakPowerKw {
 }
 
 /// Grid interaction demand metrics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GridInteractionMetrics {
-    /// Maximum grid import (positive draw) over the run.
+    /// Maximum grid import (positive draw) over the run (kW, converted
+    /// once from the W accumulator).
     pub peak_import_kw: f64,
-    /// Maximum grid export (positive feed-in) over the run.
+    /// Maximum grid export (positive feed-in) over the run (kW).
     pub peak_export_kw: f64,
 }
 
 /// Gas energy metrics, available when a gas power column is present.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GasEnergyMetrics {
     /// Total annual gas energy in therms.
     pub total_therms: f64,
@@ -113,7 +157,7 @@ pub struct GasEnergyMetrics {
 /// column rather than in any of these fields. The exception is
 /// [`Self::interior_lwr_kwh`], a gross exchange metric that is documented inline
 /// and must not be summed into a net balance.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct EnvelopeComponentLoadsKwh {
     /// Window transmitted + absorbed-inward solar gain.
     pub window_solar_kwh: f64,
@@ -154,7 +198,7 @@ pub struct EnvelopeComponentLoadsKwh {
 }
 
 /// Per-equipment efficiency metrics.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct EfficiencyMetrics {
     /// HVAC heating COP: total thermal output / total electrical input.
     /// `None` if no heating occurred.
@@ -171,7 +215,7 @@ pub struct EfficiencyMetrics {
 }
 
 /// Whether the simulation period covers a full calendar year.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SimulationCoverage {
     /// Full non-leap calendar year (8760 h).
     FullYear,
@@ -184,7 +228,7 @@ pub enum SimulationCoverage {
 }
 
 /// Whether the simulation metrics are fully reliable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Reliability {
     /// All power timesteps were finite — no accumulators were poisoned.
     Reliable,
@@ -203,7 +247,7 @@ impl Reliability {
 }
 
 /// Final simulation metrics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SimulationMetrics {
     pub total_energy_kwh: TotalEnergyKwh,
     pub peak_power_kw: PeakPowerKw,
@@ -235,7 +279,7 @@ pub struct SimulationMetrics {
 /// Extended metrics returned by [`MetricsCalculator::finish`], including gas tracking.
 ///
 /// Derefs to [`SimulationMetrics`] for backward-compatible field access.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FullSimulationMetrics {
     /// Core simulation metrics.
     pub metrics: SimulationMetrics,
@@ -272,7 +316,7 @@ impl FullSimulationMetrics {
 ///
 /// Stores recent power readings and tracks windowed averages for
 /// 15-minute, 30-minute, and 60-minute demand windows.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RollingPeakBuffer {
     /// Circular buffer of recent total grid power readings [kW].
     buffer: Vec<f64>,
@@ -287,9 +331,9 @@ struct RollingPeakBuffer {
     /// Number of steps that fit in a 60-minute window.
     window_60min: usize,
     /// Tracked peak averages.
-    peak_15min_kw: f64,
-    peak_30min_kw: f64,
-    peak_60min_kw: f64,
+    peak_15min_w: f64,
+    peak_30min_w: f64,
+    peak_60min_w: f64,
 }
 
 impl RollingPeakBuffer {
@@ -307,9 +351,9 @@ impl RollingPeakBuffer {
             window_15min,
             window_30min,
             window_60min,
-            peak_15min_kw: 0.0,
-            peak_30min_kw: 0.0,
-            peak_60min_kw: 0.0,
+            peak_15min_w: 0.0,
+            peak_30min_w: 0.0,
+            peak_60min_w: 0.0,
         }
     }
 
@@ -322,14 +366,14 @@ impl RollingPeakBuffer {
         let avg30 = self.window_average(self.window_30min);
         let avg60 = self.window_average(self.window_60min);
 
-        if avg15 > self.peak_15min_kw {
-            self.peak_15min_kw = avg15;
+        if avg15 > self.peak_15min_w {
+            self.peak_15min_w = avg15;
         }
-        if avg30 > self.peak_30min_kw {
-            self.peak_30min_kw = avg30;
+        if avg30 > self.peak_30min_w {
+            self.peak_30min_w = avg30;
         }
-        if avg60 > self.peak_60min_kw {
-            self.peak_60min_kw = avg60;
+        if avg60 > self.peak_60min_w {
+            self.peak_60min_w = avg60;
         }
     }
 
@@ -350,281 +394,711 @@ impl RollingPeakBuffer {
     }
 
     fn finish(&self) -> RollingPeakKw {
+        // The record keeps its kW reporting names, each converted once
+        // from the W ring.
         RollingPeakKw {
-            peak_15min_kw: self.peak_15min_kw.max(0.0),
-            peak_30min_kw: self.peak_30min_kw.max(0.0),
-            peak_60min_kw: self.peak_60min_kw.max(0.0),
+            peak_15min_kw: Unit::Kilowatt.from_si(self.peak_15min_w.max(0.0)),
+            peak_30min_kw: Unit::Kilowatt.from_si(self.peak_30min_w.max(0.0)),
+            peak_60min_kw: Unit::Kilowatt.from_si(self.peak_60min_w.max(0.0)),
         }
+    }
+
+    /// The buffer's full mutable state: the ring's contents and position,
+    /// the counts and the running peaks.
+    fn snapshot(&self) -> MetricsRollingPeakSnapshot {
+        MetricsRollingPeakSnapshot {
+            buffer: self.buffer.clone(),
+            head: self.head,
+            count: self.count,
+            peak_15min_w: self.peak_15min_w,
+            peak_30min_w: self.peak_30min_w,
+            peak_60min_w: self.peak_60min_w,
+        }
+    }
+
+    /// Restores the buffer's mutable state from its snapshot. The window
+    /// sizes are the receiver's own (derived from the time resolution),
+    /// and the snapshot's ring must have been built at the same
+    /// resolution: the plan comparison ahead of the restore pins the
+    /// calculator's identity, and a same-plan rebuild sizes the ring
+    /// identically. A snapshot whose ring was built at another resolution
+    /// is refused in both debug and release: restoring it would leave the
+    /// resumed run's peaks zeroed.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::Snapshot`] naming both lengths when the snapshot's
+    /// ring does not fit this buffer's resolution.
+    fn restore(&mut self, snapshot: MetricsRollingPeakSnapshot) -> Result<(), MetricsError> {
+        if snapshot.buffer.len() != self.buffer.len() {
+            return Err(MetricsError::Snapshot(format!(
+                "the checkpoint's rolling peak ring holds {} readings, \
+                 this run's time resolution needs {}",
+                snapshot.buffer.len(),
+                self.buffer.len()
+            )));
+        }
+        self.buffer.copy_from_slice(&snapshot.buffer);
+        self.head = snapshot.head % self.buffer.len().max(1);
+        self.count = snapshot.count.min(self.buffer.len());
+        self.peak_15min_w = snapshot.peak_15min_w;
+        self.peak_30min_w = snapshot.peak_30min_w;
+        self.peak_60min_w = snapshot.peak_60min_w;
+        Ok(())
     }
 }
 
-/// Streaming post-processing calculator that updates from flushed Arrow batches.
-#[derive(Debug)]
-pub struct MetricsCalculator {
-    timestep_h: f64,
-    total_electric_power_idx: usize,
-    total_gas_power_idx: Option<usize>,
-    grid_power_idx: usize,
-    pv_power_idx: Option<usize>,
+/// The metrics' fixed input plan: every column the metrics read, resolved
+/// once against the run's producer surface in producer-slot order. The
+/// run feed's surface is the row plan's full declared surface, every
+/// catalogue variable the producers can produce, whatever the reports
+/// select, so every metric computes identically at every verbosity and
+/// with no report at all. The table feed resolves against the table's own
+/// value columns instead. An input the surface carries no column for
+/// stays unresolvable (`None`): the metric that reads it reports its own
+/// absence, not a zero.
+#[derive(Debug, Clone)]
+pub struct MetricsInputPlan {
+    total_electric_power_slot: usize,
+    total_gas_power_slot: Option<usize>,
+    grid_power_slot: usize,
+    pv_power_slot: Option<usize>,
     end_use_columns: Vec<(String, usize)>,
     setpoints: Option<SetpointInputs>,
     hvac_capacity_pairs: Vec<(usize, usize)>,
 
-    // Envelope component gain column indices (optional -- verbosity >= 6)
-    window_solar_w_idx: Option<usize>,
-    infiltration_w_idx: Option<usize>,
-    interior_lwr_w_idx: Option<usize>,
-    internal_gains_w_idx: Option<usize>,
-    opaque_conduction_w_idx: Option<usize>,
-    window_conduction_w_idx: Option<usize>,
-    internal_mass_w_idx: Option<usize>,
-    forced_ventilation_w_idx: Option<usize>,
-    natural_ventilation_w_idx: Option<usize>,
-    duct_loss_w_idx: Option<usize>,
-    // HVAC thermal delivered columns (verbosity >= 4)
-    hvac_heating_delivered_w_idx: Option<usize>,
-    hvac_cooling_delivered_w_idx: Option<usize>,
-    // HVAC electric power columns (discovered from end-use naming)
-    hvac_heating_kw_idx: Option<usize>,
-    hvac_cooling_kw_idx: Option<usize>,
-    // Battery power column
-    battery_kw_idx: Option<usize>,
-
-    total_electric_energy_kwh: f64,
-    total_gas_energy_therms: f64,
-    total_consumption_kwh: f64,
-    total_pv_generation_kwh_abs: f64,
-    peak_import_kw: f64,
-    peak_export_kw: f64,
-    energy_by_end_use: BTreeMap<String, f64>,
-    peak_by_end_use: BTreeMap<String, f64>,
-    comfort_step_count: f64,
-    unmet_step_count: f64,
-    rolling_peak: RollingPeakBuffer,
-
-    // Envelope component load accumulators [W·h → kWh at finish]
-    envelope_window_solar_wh: f64,
-    envelope_opaque_conduction_wh: f64,
-    envelope_window_conduction_wh: f64,
-    envelope_internal_mass_wh: f64,
-    envelope_interior_lwr_wh: f64,
-    envelope_infiltration_wh: f64,
-    envelope_ventilation_wh: f64,
-    envelope_hvac_heating_wh: f64,
-    envelope_hvac_cooling_wh: f64,
-    envelope_internal_gains_wh: f64,
-    envelope_duct_loss_wh: f64,
-    has_envelope_columns: bool,
-
-    // Efficiency accumulators
-    hvac_heating_electric_wh: f64,
-    hvac_cooling_electric_wh: f64,
-    battery_energy_in_kwh: f64,
-    battery_energy_out_kwh: f64,
-
-    // Row counters for partial-setpoint diagnostics
-    total_row_count: u64,
-    setpoint_missing_row_count: u64,
-
-    // Stored config for duration validation and leap-year normalization in finish()
-    config: SimulationConfig,
-
-    // Non-finite power value tracking
-    nan_step_count: u64,
+    // Envelope component gain slots (optional -- verbosity >= 6)
+    window_solar_w_slot: Option<usize>,
+    infiltration_w_slot: Option<usize>,
+    interior_lwr_w_slot: Option<usize>,
+    internal_gains_w_slot: Option<usize>,
+    opaque_conduction_w_slot: Option<usize>,
+    window_conduction_w_slot: Option<usize>,
+    internal_mass_w_slot: Option<usize>,
+    forced_ventilation_w_slot: Option<usize>,
+    natural_ventilation_w_slot: Option<usize>,
+    duct_loss_w_slot: Option<usize>,
+    // HVAC thermal delivered slots (verbosity >= 4)
+    hvac_heating_delivered_w_slot: Option<usize>,
+    hvac_cooling_delivered_w_slot: Option<usize>,
+    // HVAC electric power and battery slots (discovered from end-use naming)
+    hvac_heating_kw_slot: Option<usize>,
+    hvac_cooling_kw_slot: Option<usize>,
+    battery_kw_slot: Option<usize>,
 
     #[cfg(feature = "observe")]
     end_use_equipment_counts: BTreeMap<String, usize>,
 }
 
-#[derive(Debug)]
-struct SetpointInputs {
-    heating_setpoint_idx: usize,
-    cooling_setpoint_idx: usize,
-    zone_temperature_indices: Vec<usize>,
-    deadband: DeadbandSource,
-}
-
-#[derive(Debug)]
-enum DeadbandSource {
-    Constant(f64),
-    Column(usize),
-}
-
-impl MetricsCalculator {
-    /// Build a streaming metrics calculator from output schema and simulation config.
-    pub fn new(
-        schema: &Schema,
-        time_res_secs: u32,
+impl MetricsInputPlan {
+    /// Builds the plan from the producer surface's variable names, in
+    /// producer-slot order, the simulation config, and the catalogue's
+    /// typed equipment end-use table.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::MissingRequiredColumn`] when the surface carries no
+    /// total electric power column (the metrics' one required input), and
+    /// when an HVAC aggregate column is missing while per-equipment columns
+    /// for that end use exist (schema drift: the aggregate metric would
+    /// silently read zero).
+    pub fn build(
+        available: &[String],
         config: &SimulationConfig,
+        equipment_end_uses: &[(String, EndUse)],
     ) -> Result<Self, MetricsError> {
-        if time_res_secs == 0 {
-            return Err(MetricsError::InvalidTimeResolution);
-        }
+        Self::build_from_names(available, config.setpoint_deadband_c, equipment_end_uses)
+    }
 
-        let total_electric_power_idx = required_float64_column(schema, TOTAL_ELECTRIC_POWER_KW)?;
-        let total_gas_power_idx = optional_float64_column(schema, &[TOTAL_GAS_POWER_THERMS])?;
-        let grid_power_idx = optional_float64_column(schema, &[GRID_ELECTRIC_POWER_KW])?
-            .unwrap_or(total_electric_power_idx);
-        let pv_power_idx = optional_float64_column(schema, &["PV End Use Electric Power (kW)"])?;
+    /// Builds the plan from column names, with the thermostat deadband
+    /// given directly: the table feed's constructor, carrying the config
+    /// field's value the caller read (`None` leaves the deadband column
+    /// the one source, as-in-run). The equipment end-use table is the
+    /// catalogue's (`Catalogue::equipment_end_uses`): the classification
+    /// of the per-equipment columns into end uses is the declaration's,
+    /// never the column name's.
+    ///
+    /// # Errors
+    ///
+    /// The same errors [`Self::build`] documents.
+    pub fn build_from_names(
+        available: &[String],
+        setpoint_deadband_c: Option<f64>,
+        equipment_end_uses: &[(String, EndUse)],
+    ) -> Result<Self, MetricsError> {
+        let total_electric_power_slot = required_slot(available, TOTAL_ELECTRIC_POWER_KW)?;
+        let total_gas_power_slot = optional_slot(available, &[TOTAL_GAS_POWER_THERMS])?;
+        let grid_power_slot = optional_slot(available, &[GRID_ELECTRIC_POWER_KW])?
+            .unwrap_or(total_electric_power_slot);
+        let pv_power_slot = optional_slot(available, &["PV End Use Electric Power (kW)"])?;
 
         let end_use_columns =
-            discover_end_use_columns(schema, total_electric_power_idx, grid_power_idx)?;
-        let setpoints = discover_setpoint_inputs(schema, config)?;
-        let hvac_capacity_pairs = discover_hvac_capacity_pairs(schema)?;
+            discover_end_use_slots(available, total_electric_power_slot, grid_power_slot)?;
+        let setpoints = discover_setpoint_inputs(available, setpoint_deadband_c)?;
+        let hvac_capacity_pairs = discover_hvac_capacity_pairs(available)?;
 
-        // Discover optional envelope component gain columns (verbosity >= 6).
-        let window_solar_w_idx =
-            optional_float64_column(schema, &["Window Transmitted Solar Gain (W)"])?;
-        let infiltration_w_idx =
-            optional_float64_column(schema, &["Infiltration Heat Gain - Indoor (W)"])?;
-        let interior_lwr_w_idx =
-            optional_float64_column(schema, &["Interior LWR Exchange - Indoor (W)"])?;
-        let internal_gains_w_idx =
-            optional_float64_column(schema, &["Internal Heat Gain - Indoor (W)"])?;
-        let opaque_conduction_w_idx =
-            optional_float64_column(schema, &["Opaque Surface Heat Gain - Indoor (W)"])?;
-        let window_conduction_w_idx =
-            optional_float64_column(schema, &["Window Heat Gain - Indoor (W)"])?;
-        let internal_mass_w_idx =
-            optional_float64_column(schema, &["Internal Mass Heat Gain - Indoor (W)"])?;
-        let forced_ventilation_w_idx =
-            optional_float64_column(schema, &["Forced Ventilation Heat Gain - Indoor (W)"])?;
-        let natural_ventilation_w_idx =
-            optional_float64_column(schema, &["Natural Ventilation Heat Gain - Indoor (W)"])?;
-        let duct_loss_w_idx =
-            optional_float64_column(schema, &["Duct Loss Heat Gain - Indoor (W)"])?;
+        // Optional envelope component gain columns (verbosity >= 6).
+        let window_solar_w_slot = optional_slot(available, &["Window Transmitted Solar Gain (W)"])?;
+        let infiltration_w_slot =
+            optional_slot(available, &["Infiltration Heat Gain - Indoor (W)"])?;
+        let interior_lwr_w_slot =
+            optional_slot(available, &["Interior LWR Exchange - Indoor (W)"])?;
+        let internal_gains_w_slot = optional_slot(available, &["Internal Heat Gain - Indoor (W)"])?;
+        let opaque_conduction_w_slot =
+            optional_slot(available, &["Opaque Surface Heat Gain - Indoor (W)"])?;
+        let window_conduction_w_slot =
+            optional_slot(available, &["Window Heat Gain - Indoor (W)"])?;
+        let internal_mass_w_slot =
+            optional_slot(available, &["Internal Mass Heat Gain - Indoor (W)"])?;
+        let forced_ventilation_w_slot =
+            optional_slot(available, &["Forced Ventilation Heat Gain - Indoor (W)"])?;
+        let natural_ventilation_w_slot =
+            optional_slot(available, &["Natural Ventilation Heat Gain - Indoor (W)"])?;
+        let duct_loss_w_slot = optional_slot(available, &["Duct Loss Heat Gain - Indoor (W)"])?;
 
-        // Discover HVAC thermal delivered columns (verbosity >= 4).
-        let hvac_heating_delivered_w_idx =
-            optional_float64_column(schema, &["HVAC Heating Delivered (W)"])?;
-        let hvac_cooling_delivered_w_idx =
-            optional_float64_column(schema, &["HVAC Cooling Delivered (W)"])?;
+        // HVAC thermal delivered columns (verbosity >= 4).
+        let hvac_heating_delivered_w_slot =
+            optional_slot(available, &["HVAC Heating Delivered (W)"])?;
+        let hvac_cooling_delivered_w_slot =
+            optional_slot(available, &["HVAC Cooling Delivered (W)"])?;
 
-        // Discover HVAC electric power and battery columns from end-use naming.
-        let hvac_heating_kw_idx =
-            optional_float64_column(schema, &["HVAC Heating End Use Electric Power (kW)"])?;
-        let hvac_cooling_kw_idx =
-            optional_float64_column(schema, &["HVAC Cooling End Use Electric Power (kW)"])?;
-        let battery_kw_idx =
-            optional_float64_column(schema, &["Battery End Use Electric Power (kW)"])?;
+        // HVAC electric power and battery columns from end-use naming.
+        let hvac_heating_kw_slot =
+            optional_slot(available, &["HVAC Heating End Use Electric Power (kW)"])?;
+        let hvac_cooling_kw_slot =
+            optional_slot(available, &["HVAC Cooling End Use Electric Power (kW)"])?;
+        let battery_kw_slot = optional_slot(available, &["Battery End Use Electric Power (kW)"])?;
 
         // A missing HVAC aggregate column while per-equipment columns for
         // that end use exist is schema drift: the aggregate metric would
-        // silently read zero.
+        // silently read zero. The equipment-for-end-use test reads the
+        // catalogue's typed end-use table, never the column names.
         {
-            let has_hvac_heating_equipment =
-                schema_has_equipment_for(schema, &hares_types::EndUse::HVAC_HEATING);
-            let has_hvac_cooling_equipment =
-                schema_has_equipment_for(schema, &hares_types::EndUse::HVAC_COOLING);
+            let has_hvac_heating_equipment = equipment_end_uses_have(
+                equipment_end_uses,
+                available,
+                &hares_types::EndUse::HVAC_HEATING,
+            );
+            let has_hvac_cooling_equipment = equipment_end_uses_have(
+                equipment_end_uses,
+                available,
+                &hares_types::EndUse::HVAC_COOLING,
+            );
 
-            if hvac_heating_kw_idx.is_none() && has_hvac_heating_equipment {
+            if hvac_heating_kw_slot.is_none() && has_hvac_heating_equipment {
                 return Err(MetricsError::MissingRequiredColumn(
                     "HVAC Heating End Use Electric Power (kW)".to_string(),
                 ));
             }
-            if hvac_cooling_kw_idx.is_none() && has_hvac_cooling_equipment {
+            if hvac_cooling_kw_slot.is_none() && has_hvac_cooling_equipment {
                 return Err(MetricsError::MissingRequiredColumn(
                     "HVAC Cooling End Use Electric Power (kW)".to_string(),
                 ));
             }
         }
 
+        Ok(Self {
+            total_electric_power_slot,
+            total_gas_power_slot,
+            grid_power_slot,
+            pv_power_slot,
+            end_use_columns,
+            setpoints,
+            hvac_capacity_pairs,
+            window_solar_w_slot,
+            infiltration_w_slot,
+            interior_lwr_w_slot,
+            internal_gains_w_slot,
+            opaque_conduction_w_slot,
+            window_conduction_w_slot,
+            internal_mass_w_slot,
+            forced_ventilation_w_slot,
+            natural_ventilation_w_slot,
+            duct_loss_w_slot,
+            hvac_heating_delivered_w_slot,
+            hvac_cooling_delivered_w_slot,
+            hvac_heating_kw_slot,
+            hvac_cooling_kw_slot,
+            battery_kw_slot,
+            #[cfg(feature = "observe")]
+            end_use_equipment_counts: compute_equipment_counts(equipment_end_uses, available),
+        })
+    }
+
+    /// The input plan's resolved slots, as the checkpoint section's plan
+    /// half; the counterpart a restore compares the rebuilt plan against.
+    #[must_use]
+    pub fn snapshot(&self) -> MetricsPlanSnapshot {
+        MetricsPlanSnapshot {
+            total_electric_power_slot: self.total_electric_power_slot,
+            total_gas_power_slot: self.total_gas_power_slot,
+            grid_power_slot: self.grid_power_slot,
+            pv_power_slot: self.pv_power_slot,
+            end_use_columns: self.end_use_columns.clone(),
+            setpoints: self
+                .setpoints
+                .as_ref()
+                .map(|setpoints| MetricsSetpointSnapshot {
+                    heating_setpoint_slot: setpoints.heating_setpoint_slot,
+                    cooling_setpoint_slot: setpoints.cooling_setpoint_slot,
+                    zone_temperature_slots: setpoints.zone_temperature_slots.clone(),
+                    deadband: match &setpoints.deadband {
+                        DeadbandSource::Constant(value) => {
+                            MetricsDeadbandSnapshot::Constant(*value)
+                        }
+                        DeadbandSource::Column(slot) => MetricsDeadbandSnapshot::Column(*slot),
+                    },
+                }),
+            hvac_capacity_pairs: self.hvac_capacity_pairs.clone(),
+            window_solar_w_slot: self.window_solar_w_slot,
+            infiltration_w_slot: self.infiltration_w_slot,
+            interior_lwr_w_slot: self.interior_lwr_w_slot,
+            internal_gains_w_slot: self.internal_gains_w_slot,
+            opaque_conduction_w_slot: self.opaque_conduction_w_slot,
+            window_conduction_w_slot: self.window_conduction_w_slot,
+            internal_mass_w_slot: self.internal_mass_w_slot,
+            forced_ventilation_w_slot: self.forced_ventilation_w_slot,
+            natural_ventilation_w_slot: self.natural_ventilation_w_slot,
+            duct_loss_w_slot: self.duct_loss_w_slot,
+            hvac_heating_delivered_w_slot: self.hvac_heating_delivered_w_slot,
+            hvac_cooling_delivered_w_slot: self.hvac_cooling_delivered_w_slot,
+            hvac_heating_kw_slot: self.hvac_heating_kw_slot,
+            hvac_cooling_kw_slot: self.hvac_cooling_kw_slot,
+            battery_kw_slot: self.battery_kw_slot,
+        }
+    }
+}
+
+/// The metrics input plan's resolved slots, as a checkpoint section: the
+/// plan a resumed run rebuilds must resolve exactly this, or the
+/// checkpoint's accumulators were fed from a different producer surface
+/// and its totals would mix two schemas' columns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsPlanSnapshot {
+    pub total_electric_power_slot: usize,
+    pub total_gas_power_slot: Option<usize>,
+    pub grid_power_slot: usize,
+    pub pv_power_slot: Option<usize>,
+    pub end_use_columns: Vec<(String, usize)>,
+    pub setpoints: Option<MetricsSetpointSnapshot>,
+    pub hvac_capacity_pairs: Vec<(usize, usize)>,
+    pub window_solar_w_slot: Option<usize>,
+    pub infiltration_w_slot: Option<usize>,
+    pub interior_lwr_w_slot: Option<usize>,
+    pub internal_gains_w_slot: Option<usize>,
+    pub opaque_conduction_w_slot: Option<usize>,
+    pub window_conduction_w_slot: Option<usize>,
+    pub internal_mass_w_slot: Option<usize>,
+    pub forced_ventilation_w_slot: Option<usize>,
+    pub natural_ventilation_w_slot: Option<usize>,
+    pub duct_loss_w_slot: Option<usize>,
+    pub hvac_heating_delivered_w_slot: Option<usize>,
+    pub hvac_cooling_delivered_w_slot: Option<usize>,
+    pub hvac_heating_kw_slot: Option<usize>,
+    pub hvac_cooling_kw_slot: Option<usize>,
+    pub battery_kw_slot: Option<usize>,
+}
+
+/// The setpoint inputs' resolved slots, as part of [`MetricsPlanSnapshot`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsSetpointSnapshot {
+    pub heating_setpoint_slot: usize,
+    pub cooling_setpoint_slot: usize,
+    pub zone_temperature_slots: Vec<usize>,
+    pub deadband: MetricsDeadbandSnapshot,
+}
+
+/// The deadband's source, as part of [`MetricsSetpointSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum MetricsDeadbandSnapshot {
+    Constant(f64),
+    Column(usize),
+}
+
+/// The metrics accumulator's mutable state, exact at the checkpoint step:
+/// the section a checkpoint restores so a resumed run's metrics finalize
+/// to the continuous run's, every float on bits.
+///
+/// A non-finite peak value is the one state the JSON cannot carry: the
+/// calculator's `peak_by_end_use` holds a `NEG_INFINITY` sentinel for
+/// every end use that has read no finite power yet, so peaks travel as
+/// `Option<f64>` with `None` for a non-finite value (the sentinel; no
+/// other non-finite can sit there, and a non-finite accumulator elsewhere
+/// fails the run).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsAccumulatorsSnapshot {
+    pub total_electric_energy_j: f64,
+    pub total_gas_energy_j: f64,
+    pub total_consumption_j: f64,
+    pub total_pv_generation_j_abs: f64,
+    pub peak_import_w: f64,
+    pub peak_export_w: f64,
+    pub energy_by_end_use: BTreeMap<String, f64>,
+    pub peak_by_end_use: BTreeMap<String, Option<f64>>,
+    pub comfort_step_count: f64,
+    pub unmet_step_count: f64,
+    pub rolling_peak: MetricsRollingPeakSnapshot,
+    pub envelope_window_solar_j: f64,
+    pub envelope_opaque_conduction_j: f64,
+    pub envelope_window_conduction_j: f64,
+    pub envelope_internal_mass_j: f64,
+    pub envelope_interior_lwr_j: f64,
+    pub envelope_infiltration_j: f64,
+    pub envelope_ventilation_j: f64,
+    pub envelope_hvac_heating_j: f64,
+    pub envelope_hvac_cooling_j: f64,
+    pub envelope_internal_gains_j: f64,
+    pub envelope_duct_loss_j: f64,
+    pub hvac_heating_electric_j: f64,
+    pub hvac_cooling_electric_j: f64,
+    pub battery_energy_in_j: f64,
+    pub battery_energy_out_j: f64,
+    pub total_row_count: u64,
+    pub setpoint_missing_row_count: u64,
+    pub nan_step_count: u64,
+}
+
+/// The rolling peak buffer's ring state, as part of
+/// [`MetricsAccumulatorsSnapshot`]. The window sizes are derived from the
+/// time resolution the fresh calculator is built with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsRollingPeakSnapshot {
+    pub buffer: Vec<f64>,
+    pub head: usize,
+    pub count: usize,
+    pub peak_15min_w: f64,
+    pub peak_30min_w: f64,
+    pub peak_60min_w: f64,
+}
+
+/// The run metrics' checkpoint section: the input plan's resolved slots
+/// and the accumulator state, present exactly when the run requested
+/// metrics. The time resolution travels with it: the input plan is
+/// resolution-free and two resolutions can size the rolling peak's ring
+/// identically, so the resolution is the one gate a plan-and-ring
+/// comparison cannot stand in for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricsSnapshot {
+    pub plan: MetricsPlanSnapshot,
+    pub accumulators: MetricsAccumulatorsSnapshot,
+    pub time_res_secs: u32,
+}
+
+/// Streaming post-processing calculator fed one row per step.
+#[derive(Debug, Clone)]
+pub struct MetricsCalculator {
+    timestep_h: f64,
+    timestep_s: f64,
+    time_res_secs: u32,
+    plan: MetricsInputPlan,
+
+    total_electric_energy_j: f64,
+    total_gas_energy_j: f64,
+    total_consumption_j: f64,
+    total_pv_generation_j_abs: f64,
+    peak_import_w: f64,
+    peak_export_w: f64,
+    energy_by_end_use: BTreeMap<String, f64>,
+    peak_by_end_use: BTreeMap<String, f64>,
+    comfort_step_count: f64,
+    unmet_step_count: f64,
+    rolling_peak: RollingPeakBuffer,
+
+    // Envelope component load accumulators [W -> J over the step]
+    envelope_window_solar_j: f64,
+    envelope_opaque_conduction_j: f64,
+    envelope_window_conduction_j: f64,
+    envelope_internal_mass_j: f64,
+    envelope_interior_lwr_j: f64,
+    envelope_infiltration_j: f64,
+    envelope_ventilation_j: f64,
+    envelope_hvac_heating_j: f64,
+    envelope_hvac_cooling_j: f64,
+    envelope_internal_gains_j: f64,
+    envelope_duct_loss_j: f64,
+    has_envelope_columns: bool,
+
+    // Efficiency accumulators
+    hvac_heating_electric_j: f64,
+    hvac_cooling_electric_j: f64,
+    battery_energy_in_j: f64,
+    battery_energy_out_j: f64,
+
+    // Row counters for partial-setpoint diagnostics
+    total_row_count: u64,
+    setpoint_missing_row_count: u64,
+
+    // The calendar year the coverage reads: the run's start time in-run,
+    // the table's first Time value for the table feed.
+    coverage_year: i32,
+
+    // Non-finite power value tracking
+    nan_step_count: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SetpointInputs {
+    heating_setpoint_slot: usize,
+    cooling_setpoint_slot: usize,
+    zone_temperature_slots: Vec<usize>,
+    deadband: DeadbandSource,
+}
+
+#[derive(Debug, Clone)]
+enum DeadbandSource {
+    Constant(f64),
+    Column(usize),
+}
+
+impl MetricsCalculator {
+    /// Build the metrics accumulator from a resolved input plan, the run's
+    /// config deciding the coverage year (the leap-year normalisation's
+    /// calendar year).
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::InvalidTimeResolution`] for a zero time resolution.
+    pub fn new(
+        plan: MetricsInputPlan,
+        time_res_secs: u32,
+        config: &SimulationConfig,
+    ) -> Result<Self, MetricsError> {
+        Self::for_coverage_year(plan, time_res_secs, config.start_time.year())
+    }
+
+    /// Build the accumulator with the coverage year given directly: the
+    /// table feed's constructor, the year of the table's first `Time`
+    /// value standing in for the run's start time.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::InvalidTimeResolution`] for a zero time resolution.
+    pub fn for_coverage_year(
+        plan: MetricsInputPlan,
+        time_res_secs: u32,
+        coverage_year: i32,
+    ) -> Result<Self, MetricsError> {
+        if time_res_secs == 0 {
+            return Err(MetricsError::InvalidTimeResolution);
+        }
+
         let timestep_h = f64::from(time_res_secs) / 3600.0;
-        let energy_by_end_use = end_use_columns
+        let timestep_s = f64::from(time_res_secs);
+        let energy_by_end_use = plan
+            .end_use_columns
             .iter()
             .map(|(name, _)| (name.clone(), 0.0))
             .collect();
-        let peak_by_end_use = end_use_columns
+        let peak_by_end_use = plan
+            .end_use_columns
             .iter()
             .map(|(name, _)| (name.clone(), f64::NEG_INFINITY))
             .collect();
         let rolling_peak = RollingPeakBuffer::new(timestep_h);
 
+        let has_envelope_columns = plan.window_solar_w_slot.is_some()
+            || plan.infiltration_w_slot.is_some()
+            || plan.interior_lwr_w_slot.is_some()
+            || plan.internal_gains_w_slot.is_some()
+            || plan.opaque_conduction_w_slot.is_some()
+            || plan.window_conduction_w_slot.is_some()
+            || plan.internal_mass_w_slot.is_some()
+            || plan.forced_ventilation_w_slot.is_some()
+            || plan.natural_ventilation_w_slot.is_some()
+            || plan.duct_loss_w_slot.is_some()
+            || plan.hvac_heating_delivered_w_slot.is_some()
+            || plan.hvac_cooling_delivered_w_slot.is_some();
+
         Ok(Self {
             timestep_h,
-            total_electric_power_idx,
-            total_gas_power_idx,
-            grid_power_idx,
-            pv_power_idx,
-            end_use_columns,
-            setpoints,
-            hvac_capacity_pairs,
-            window_solar_w_idx,
-            infiltration_w_idx,
-            interior_lwr_w_idx,
-            internal_gains_w_idx,
-            opaque_conduction_w_idx,
-            window_conduction_w_idx,
-            internal_mass_w_idx,
-            forced_ventilation_w_idx,
-            natural_ventilation_w_idx,
-            duct_loss_w_idx,
-            hvac_heating_delivered_w_idx,
-            hvac_cooling_delivered_w_idx,
-            hvac_heating_kw_idx,
-            hvac_cooling_kw_idx,
-            battery_kw_idx,
-            total_electric_energy_kwh: 0.0,
-            total_gas_energy_therms: 0.0,
-            total_consumption_kwh: 0.0,
-            total_pv_generation_kwh_abs: 0.0,
-            peak_import_kw: 0.0,
-            peak_export_kw: 0.0,
+            timestep_s,
+            time_res_secs,
+            plan,
+            total_electric_energy_j: 0.0,
+            total_gas_energy_j: 0.0,
+            total_consumption_j: 0.0,
+            total_pv_generation_j_abs: 0.0,
+            peak_import_w: 0.0,
+            peak_export_w: 0.0,
             energy_by_end_use,
             peak_by_end_use,
             comfort_step_count: 0.0,
             unmet_step_count: 0.0,
             rolling_peak,
-            envelope_window_solar_wh: 0.0,
-            envelope_opaque_conduction_wh: 0.0,
-            envelope_window_conduction_wh: 0.0,
-            envelope_internal_mass_wh: 0.0,
-            envelope_interior_lwr_wh: 0.0,
-            envelope_infiltration_wh: 0.0,
-            envelope_ventilation_wh: 0.0,
-            envelope_hvac_heating_wh: 0.0,
-            envelope_hvac_cooling_wh: 0.0,
-            envelope_internal_gains_wh: 0.0,
-            envelope_duct_loss_wh: 0.0,
-            has_envelope_columns: window_solar_w_idx.is_some()
-                || infiltration_w_idx.is_some()
-                || interior_lwr_w_idx.is_some()
-                || internal_gains_w_idx.is_some()
-                || opaque_conduction_w_idx.is_some()
-                || window_conduction_w_idx.is_some()
-                || internal_mass_w_idx.is_some()
-                || forced_ventilation_w_idx.is_some()
-                || natural_ventilation_w_idx.is_some()
-                || duct_loss_w_idx.is_some()
-                || hvac_heating_delivered_w_idx.is_some()
-                || hvac_cooling_delivered_w_idx.is_some(),
-            hvac_heating_electric_wh: 0.0,
-            hvac_cooling_electric_wh: 0.0,
-            battery_energy_in_kwh: 0.0,
-            battery_energy_out_kwh: 0.0,
+            envelope_window_solar_j: 0.0,
+            envelope_opaque_conduction_j: 0.0,
+            envelope_window_conduction_j: 0.0,
+            envelope_internal_mass_j: 0.0,
+            envelope_interior_lwr_j: 0.0,
+            envelope_infiltration_j: 0.0,
+            envelope_ventilation_j: 0.0,
+            envelope_hvac_heating_j: 0.0,
+            envelope_hvac_cooling_j: 0.0,
+            envelope_internal_gains_j: 0.0,
+            envelope_duct_loss_j: 0.0,
+            has_envelope_columns,
+            hvac_heating_electric_j: 0.0,
+            hvac_cooling_electric_j: 0.0,
+            battery_energy_in_j: 0.0,
+            battery_energy_out_j: 0.0,
             total_row_count: 0,
             setpoint_missing_row_count: 0,
-            config: config.clone(),
+            coverage_year,
             nan_step_count: 0,
-            #[cfg(feature = "observe")]
-            end_use_equipment_counts: compute_equipment_counts_from_schema(schema),
         })
     }
 
-    /// Set end-use equipment counts for observer diagnostics.
-    #[cfg(feature = "observe")]
-    pub fn set_end_use_equipment_counts(&mut self, counts: BTreeMap<String, usize>) {
-        self.end_use_equipment_counts = counts;
+    /// The rows fed so far: one per step of the run.
+    #[must_use]
+    pub fn rows_fed(&self) -> u64 {
+        self.total_row_count
     }
 
-    /// Read a power value from an Arrow array, returning `Some` for finite values
-    /// and `None` for null or non-finite (NaN/Inf) values, incrementing
-    /// [`nan_step_count`](Self::nan_step_count) on each skip.
-    fn guarded_power_value(&mut self, arr: &Float64Array, row: usize) -> Option<f64> {
-        if arr.is_null(row) {
-            return None;
+    /// The accumulator's full mutable state, exact at the current step,
+    /// with the input plan's resolved slots: the run metrics' checkpoint
+    /// section. The counterpart of [`Self::apply_snapshot`].
+    #[must_use]
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            plan: self.plan.snapshot(),
+            time_res_secs: self.time_res_secs,
+            accumulators: MetricsAccumulatorsSnapshot {
+                total_electric_energy_j: self.total_electric_energy_j,
+                total_gas_energy_j: self.total_gas_energy_j,
+                total_consumption_j: self.total_consumption_j,
+                total_pv_generation_j_abs: self.total_pv_generation_j_abs,
+                peak_import_w: self.peak_import_w,
+                peak_export_w: self.peak_export_w,
+                energy_by_end_use: self.energy_by_end_use.clone(),
+                peak_by_end_use: self
+                    .peak_by_end_use
+                    .iter()
+                    .map(|(name, peak)| (name.clone(), peak_finite(*peak)))
+                    .collect(),
+                comfort_step_count: self.comfort_step_count,
+                unmet_step_count: self.unmet_step_count,
+                rolling_peak: self.rolling_peak.snapshot(),
+                envelope_window_solar_j: self.envelope_window_solar_j,
+                envelope_opaque_conduction_j: self.envelope_opaque_conduction_j,
+                envelope_window_conduction_j: self.envelope_window_conduction_j,
+                envelope_internal_mass_j: self.envelope_internal_mass_j,
+                envelope_interior_lwr_j: self.envelope_interior_lwr_j,
+                envelope_infiltration_j: self.envelope_infiltration_j,
+                envelope_ventilation_j: self.envelope_ventilation_j,
+                envelope_hvac_heating_j: self.envelope_hvac_heating_j,
+                envelope_hvac_cooling_j: self.envelope_hvac_cooling_j,
+                envelope_internal_gains_j: self.envelope_internal_gains_j,
+                envelope_duct_loss_j: self.envelope_duct_loss_j,
+                hvac_heating_electric_j: self.hvac_heating_electric_j,
+                hvac_cooling_electric_j: self.hvac_cooling_electric_j,
+                battery_energy_in_j: self.battery_energy_in_j,
+                battery_energy_out_j: self.battery_energy_out_j,
+                total_row_count: self.total_row_count,
+                setpoint_missing_row_count: self.setpoint_missing_row_count,
+                nan_step_count: self.nan_step_count,
+            },
         }
-        let v = arr.value(row);
+    }
+
+    /// Restores the accumulator's mutable state from its checkpoint
+    /// section: the fresh calculator this run built keeps its own plan,
+    /// config and time resolution, and the checkpoint's plan must resolve
+    /// exactly the same slots — a mismatch means the checkpoint was fed
+    /// from a different producer surface, and the refusal names it.
+    ///
+    /// # Errors
+    ///
+    /// [`MetricsError::Snapshot`] when the checkpoint's input plan differs
+    /// from this run's.
+    pub fn apply_snapshot(&mut self, snapshot: &MetricsSnapshot) -> Result<(), MetricsError> {
+        if snapshot.plan != self.plan.snapshot() {
+            return Err(MetricsError::Snapshot(
+                "the checkpoint's metrics input plan does not resolve the same \
+                 producer slots this run's does"
+                    .to_string(),
+            ));
+        }
+        if snapshot.time_res_secs != self.time_res_secs {
+            return Err(MetricsError::Snapshot(format!(
+                "the checkpoint's metrics were written at time resolution {} s, \
+                 this run's is {} s",
+                snapshot.time_res_secs, self.time_res_secs
+            )));
+        }
+        let restored = &snapshot.accumulators;
+        // The rolling peak's ring is the backstop behind the resolution
+        // gate above: a section whose ring this resolution cannot produce
+        // refuses before anything changes, so the accumulators below take
+        // the checkpoint's state only once the whole section is known to
+        // fit.
+        self.rolling_peak.restore(restored.rolling_peak.clone())?;
+        self.total_electric_energy_j = restored.total_electric_energy_j;
+        self.total_gas_energy_j = restored.total_gas_energy_j;
+        self.total_consumption_j = restored.total_consumption_j;
+        self.total_pv_generation_j_abs = restored.total_pv_generation_j_abs;
+        self.peak_import_w = restored.peak_import_w;
+        self.peak_export_w = restored.peak_export_w;
+        self.energy_by_end_use = restored.energy_by_end_use.clone();
+        self.peak_by_end_use = restored
+            .peak_by_end_use
+            .iter()
+            .map(|(name, peak)| (name.clone(), peak_non_finite_or(*peak)))
+            .collect();
+        self.comfort_step_count = restored.comfort_step_count;
+        self.unmet_step_count = restored.unmet_step_count;
+        self.envelope_window_solar_j = restored.envelope_window_solar_j;
+        self.envelope_opaque_conduction_j = restored.envelope_opaque_conduction_j;
+        self.envelope_window_conduction_j = restored.envelope_window_conduction_j;
+        self.envelope_internal_mass_j = restored.envelope_internal_mass_j;
+        self.envelope_interior_lwr_j = restored.envelope_interior_lwr_j;
+        self.envelope_infiltration_j = restored.envelope_infiltration_j;
+        self.envelope_ventilation_j = restored.envelope_ventilation_j;
+        self.envelope_hvac_heating_j = restored.envelope_hvac_heating_j;
+        self.envelope_hvac_cooling_j = restored.envelope_hvac_cooling_j;
+        self.envelope_internal_gains_j = restored.envelope_internal_gains_j;
+        self.envelope_duct_loss_j = restored.envelope_duct_loss_j;
+        self.hvac_heating_electric_j = restored.hvac_heating_electric_j;
+        self.hvac_cooling_electric_j = restored.hvac_cooling_electric_j;
+        self.battery_energy_in_j = restored.battery_energy_in_j;
+        self.battery_energy_out_j = restored.battery_energy_out_j;
+        self.total_row_count = restored.total_row_count;
+        self.setpoint_missing_row_count = restored.setpoint_missing_row_count;
+        self.nan_step_count = restored.nan_step_count;
+        Ok(())
+    }
+
+    /// The input plan's resolved slots, without the accumulator state: the
+    /// half a restore validates against the checkpoint's section before
+    /// any state changes.
+    #[must_use]
+    pub fn plan_snapshot(&self) -> MetricsPlanSnapshot {
+        self.plan.snapshot()
+    }
+
+    /// The time resolution the calculator was built at, in seconds: what
+    /// a metrics snapshot carries, and what a restore refuses a mismatch
+    /// with (the input plan is resolution-free, and two distinct
+    /// resolutions can size the rolling peak's ring identically, so the
+    /// resolution itself is what the gate compares).
+    #[must_use]
+    pub fn time_res_secs(&self) -> u32 {
+        self.time_res_secs
+    }
+
+    /// The rolling peak ring's capacity, the length a snapshot's ring
+    /// must have at this resolution: a pre-mutation validator reads it to
+    /// refuse a corrupted section before any state changes (the restore's
+    /// own check refuses it too).
+    #[must_use]
+    pub fn rolling_peak_ring_len(&self) -> usize {
+        self.rolling_peak.buffer.len()
+    }
+
+    /// Read the total electric power slot's value, returning `Some` for
+    /// finite values and `None` for non-finite (NaN/Inf) values,
+    /// incrementing [`nan_step_count`](Self::nan_step_count) on each skip.
+    fn guarded_power_value(&mut self, row: &[f64]) -> Option<f64> {
+        let v = row[self.plan.total_electric_power_slot];
         if v.is_finite() {
             Some(v)
         } else {
@@ -633,331 +1107,267 @@ impl MetricsCalculator {
         }
     }
 
-    /// Update metrics from a single flushed batch.
-    ///
-    /// # Errors
-    /// A non-finite accumulator after the batch is a typed error in every
-    /// build profile: a NaN power value contaminated the totals.
-    pub fn accumulate(&mut self, batch: &RecordBatch) -> Result<(), MetricsError> {
-        if batch.num_rows() == 0 {
-            return Ok(());
-        }
-        self.total_row_count += batch.num_rows() as u64;
-
-        let total_arr = as_f64_array(batch, self.total_electric_power_idx);
-        let gas_arr = self.total_gas_power_idx.map(|idx| as_f64_array(batch, idx));
-        let grid_arr = as_f64_array(batch, self.grid_power_idx);
-        let pv_arr = self.pv_power_idx.map(|idx| as_f64_array(batch, idx));
-
-        let mut end_use_arrays = Vec::with_capacity(self.end_use_columns.len());
-        for (_, idx) in &self.end_use_columns {
-            end_use_arrays.push(as_f64_array(batch, *idx));
-        }
-
-        let setpoint_arrays = self.setpoints.as_ref().map(|inputs| {
-            let deadband_arr = match inputs.deadband {
-                DeadbandSource::Constant(_) => None,
-                DeadbandSource::Column(idx) => Some(as_f64_array(batch, idx)),
-            };
-
-            (
-                as_f64_array(batch, inputs.heating_setpoint_idx),
-                as_f64_array(batch, inputs.cooling_setpoint_idx),
-                inputs
-                    .zone_temperature_indices
-                    .iter()
-                    .map(|idx| as_f64_array(batch, *idx))
-                    .collect::<Vec<_>>(),
-                deadband_arr,
-            )
-        });
-
-        let hvac_pairs = self
+    /// Whether any HVAC capacity pair reads at capacity in this row: the
+    /// delivered output within the relative tolerance of the capacity.
+    /// Column units are watts (e.g. "HVAC Heating Delivered (W)").
+    fn hvac_at_capacity(&self, row: &[f64]) -> bool {
+        self.plan
             .hvac_capacity_pairs
             .iter()
-            .map(|(output_idx, capacity_idx)| {
-                (
-                    as_f64_array(batch, *output_idx),
-                    as_f64_array(batch, *capacity_idx),
-                )
+            .any(|(output_slot, capacity_slot)| {
+                match (
+                    value_at_slot(row, *output_slot),
+                    value_at_slot(row, *capacity_slot),
+                ) {
+                    (Some(output_w), Some(capacity_w)) if capacity_w.abs() > EPSILON => {
+                        let diff = (output_w.abs() - capacity_w.abs()).abs();
+                        diff / capacity_w.abs().max(1.0) < HVAC_CAPACITY_REL_TOL
+                    }
+                    _ => false,
+                }
             })
-            .collect::<Vec<_>>();
+    }
 
-        for row in 0..batch.num_rows() {
-            // Gross PV generation this row [kW] (PV column is negative when
-            // generating). Hoisted once per row: it feeds both the gross
-            // generation accumulator and the load-behind-the-meter figure.
-            let pv_gen_kw = pv_arr
-                .and_then(|arr| value_at(arr, row))
-                .filter(|pv| *pv < 0.0)
-                .map_or(0.0, f64::abs);
+    /// Update metrics from one step's producer row.
+    ///
+    /// # Errors
+    /// A non-finite accumulator after the row is a typed error in every
+    /// build profile: a NaN power value contaminated the totals.
+    pub fn accumulate_row(&mut self, row: &[f64]) -> Result<(), MetricsError> {
+        self.total_row_count += 1;
 
-            if let Some(total_kw) = self.guarded_power_value(total_arr, row) {
-                self.total_electric_energy_kwh += total_kw * self.timestep_h;
-                // Gross consumption is the load behind the meter: the net
-                // total plus self-consumed PV generation. Without this, an
-                // always-exporting PV home reports 0 consumption even while
-                // its loads run on self-consumed solar.
-                let load_kw = total_kw + pv_gen_kw;
-                if load_kw > 0.0 {
-                    self.total_consumption_kwh += load_kw * self.timestep_h;
-                }
-                // Gross PV generation accumulates on the same row
-                // eligibility as net and gross consumption (finite meter
-                // total): a non-finite total row is a sensor dropout the
-                // calculator explicitly skips, and counting PV on it while
-                // the other two skip breaks the documented identity
-                // net == gross_consumption − gross_pv and skews
-                // renewable_energy_fraction.
-                if pv_gen_kw > 0.0 {
-                    self.total_pv_generation_kwh_abs += pv_gen_kw * self.timestep_h;
-                }
+        // The row plan's producer slots hold the reporting unit of their
+        // column; each read converts to SI once here (the run feed's
+        // counterpart of the table feed's to_si), and the accumulators
+        // hold J and W.
+        //
+        // Gross PV generation this step (the PV column is negative when
+        // generating). Read once per row: it feeds both the gross
+        // generation accumulator and the load-behind-the-meter figure.
+        let pv_gen_w = self
+            .plan
+            .pv_power_slot
+            .and_then(|slot| value_at_slot(row, slot))
+            .map(|v| Unit::Kilowatt.to_si(v))
+            .filter(|pv| *pv < 0.0)
+            .map_or(0.0, f64::abs);
+
+        if let Some(total_w) = self
+            .guarded_power_value(row)
+            .map(|v| Unit::Kilowatt.to_si(v))
+        {
+            self.total_electric_energy_j += total_w * self.timestep_s;
+            // Gross consumption is the load behind the meter: the net
+            // total plus self-consumed PV generation. Without this, an
+            // always-exporting PV home reports 0 consumption even while
+            // its loads run on self-consumed solar.
+            let load_w = total_w + pv_gen_w;
+            if load_w > 0.0 {
+                self.total_consumption_j += load_w * self.timestep_s;
             }
-
-            if let Some(gas_therms_per_h) = gas_arr.and_then(|arr| value_at(arr, row)) {
-                self.total_gas_energy_therms += gas_therms_per_h * self.timestep_h;
+            // Gross PV generation accumulates on the same row
+            // eligibility as net and gross consumption (finite meter
+            // total): a non-finite total row is a sensor dropout the
+            // calculator explicitly skips, and counting PV on it while
+            // the other two skip breaks the documented identity
+            // net == gross_consumption − gross_pv and skews
+            // renewable_energy_fraction.
+            if pv_gen_w > 0.0 {
+                self.total_pv_generation_j_abs += pv_gen_w * self.timestep_s;
             }
+        }
 
-            if let Some(grid_kw) = value_at(grid_arr, row) {
-                if grid_kw > self.peak_import_kw {
-                    self.peak_import_kw = grid_kw;
-                }
-                let export_kw = (-grid_kw).max(0.0);
-                if export_kw > self.peak_export_kw {
-                    self.peak_export_kw = export_kw;
-                }
-                self.rolling_peak.push(grid_kw);
+        if let Some(gas_w) = self
+            .plan
+            .total_gas_power_slot
+            .and_then(|slot| value_at_slot(row, slot))
+            .map(|v| Unit::ThermPerHour.to_si(v))
+        {
+            self.total_gas_energy_j += gas_w * self.timestep_s;
+        }
+
+        if let Some(grid_w) =
+            value_at_slot(row, self.plan.grid_power_slot).map(|v| Unit::Kilowatt.to_si(v))
+        {
+            if grid_w > self.peak_import_w {
+                self.peak_import_w = grid_w;
             }
+            let export_w = (-grid_w).max(0.0);
+            if export_w > self.peak_export_w {
+                self.peak_export_w = export_w;
+            }
+            self.rolling_peak.push(grid_w);
+        }
 
-            for ((name, _), array) in self.end_use_columns.iter().zip(&end_use_arrays) {
-                if let Some(value_kw) = value_at(array, row) {
-                    if let Some(sum_kwh) = self.energy_by_end_use.get_mut(name) {
-                        *sum_kwh += value_kw * self.timestep_h;
+        for (name, slot) in &self.plan.end_use_columns {
+            if let Some(value_w) = value_at_slot(row, *slot).map(|v| Unit::Kilowatt.to_si(v)) {
+                if let Some(sum_j) = self.energy_by_end_use.get_mut(name) {
+                    *sum_j += value_w * self.timestep_s;
+                }
+                if let Some(peak_w) = self.peak_by_end_use.get_mut(name)
+                    && value_w > *peak_w
+                {
+                    *peak_w = value_w;
+                }
+            } else {
+                self.nan_step_count += 1;
+            }
+        }
+
+        if let Some(inputs) = &self.plan.setpoints {
+            let heating_c = value_at_slot(row, inputs.heating_setpoint_slot);
+            let cooling_c = value_at_slot(row, inputs.cooling_setpoint_slot);
+            let deadband_c = match &inputs.deadband {
+                DeadbandSource::Constant(value) => *value,
+                DeadbandSource::Column(slot) => value_at_slot(row, *slot).unwrap_or(0.0),
+            };
+
+            if let (Some(heating_c), Some(cooling_c)) = (heating_c, cooling_c) {
+                if deadband_c.is_finite() && deadband_c >= 0.0 {
+                    let lower_bound_c = heating_c - deadband_c / 2.0;
+                    let upper_bound_c = cooling_c + deadband_c / 2.0;
+                    let mut all_inside = true;
+                    let mut any_outside = false;
+                    for &zone_slot in &inputs.zone_temperature_slots {
+                        let Some(zone_c) = value_at_slot(row, zone_slot) else {
+                            all_inside = false;
+                            continue;
+                        };
+                        if zone_c < lower_bound_c || zone_c > upper_bound_c {
+                            all_inside = false;
+                            any_outside = true;
+                        }
                     }
-                    if let Some(peak_kw) = self.peak_by_end_use.get_mut(name)
-                        && value_kw > *peak_kw
-                    {
-                        *peak_kw = value_kw;
+                    if all_inside {
+                        self.comfort_step_count += 1.0;
                     }
-                } else if !array.is_null(row) {
-                    self.nan_step_count += 1;
-                }
-            }
 
-            if let (Some(inputs), Some((heating, cooling, zone_temps, deadband_arr))) =
-                (self.setpoints.as_ref(), setpoint_arrays.as_ref())
-            {
-                let heating_c = value_at(heating, row);
-                let cooling_c = value_at(cooling, row);
-                let deadband_c = match (&inputs.deadband, deadband_arr) {
-                    (DeadbandSource::Constant(value), _) => *value,
-                    (DeadbandSource::Column(_), Some(arr)) => value_at(arr, row).unwrap_or(0.0),
-                    (DeadbandSource::Column(_), None) => 0.0,
-                };
-
-                if let (Some(heating_c), Some(cooling_c)) = (heating_c, cooling_c) {
-                    if deadband_c.is_finite() && deadband_c >= 0.0 {
-                        let lower_bound_c = heating_c - deadband_c / 2.0;
-                        let upper_bound_c = cooling_c + deadband_c / 2.0;
-                        let mut all_inside = true;
-                        let mut any_outside = false;
-                        for zone_arr in zone_temps {
-                            let Some(zone_c) = value_at(zone_arr, row) else {
-                                all_inside = false;
-                                continue;
-                            };
-                            if zone_c < lower_bound_c || zone_c > upper_bound_c {
-                                all_inside = false;
-                                any_outside = true;
-                            }
-                        }
-                        if all_inside {
-                            self.comfort_step_count += 1.0;
-                        }
-
-                        if any_outside && is_hvac_at_capacity(&hvac_pairs, row) {
-                            self.unmet_step_count += 1.0;
-                        }
-                    } else {
-                        self.setpoint_missing_row_count += 1;
+                    if any_outside && self.hvac_at_capacity(row) {
+                        self.unmet_step_count += 1.0;
                     }
                 } else {
                     self.setpoint_missing_row_count += 1;
                 }
-            }
-
-            // Envelope component loads [W → Wh via timestep_h].
-            if let Some(idx) = self.window_solar_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_window_solar_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.infiltration_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_infiltration_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.interior_lwr_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_interior_lwr_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.internal_gains_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_internal_gains_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.opaque_conduction_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_opaque_conduction_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.window_conduction_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_window_conduction_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.internal_mass_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_internal_mass_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.forced_ventilation_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_ventilation_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.natural_ventilation_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_ventilation_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.duct_loss_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_duct_loss_wh += v * self.timestep_h;
-            }
-
-            // HVAC thermal delivered accumulation for COP and envelope loads.
-            if let Some(idx) = self.hvac_heating_delivered_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_hvac_heating_wh += v * self.timestep_h;
-            }
-            if let Some(idx) = self.hvac_cooling_delivered_w_idx
-                && let Some(v) = value_at(as_f64_array(batch, idx), row)
-            {
-                self.envelope_hvac_cooling_wh += v * self.timestep_h;
-            }
-
-            // HVAC electric power accumulation for COP.
-            if let Some(idx) = self.hvac_heating_kw_idx
-                && let Some(kw) = value_at(as_f64_array(batch, idx), row)
-                && kw > 0.0
-            {
-                self.hvac_heating_electric_wh += kw * 1000.0 * self.timestep_h;
-            }
-            if let Some(idx) = self.hvac_cooling_kw_idx
-                && let Some(kw) = value_at(as_f64_array(batch, idx), row)
-                && kw > 0.0
-            {
-                self.hvac_cooling_electric_wh += kw * 1000.0 * self.timestep_h;
-            }
-
-            // Battery energy tracking for round-trip efficiency.
-            if let Some(idx) = self.battery_kw_idx
-                && let Some(kw) = value_at(as_f64_array(batch, idx), row)
-            {
-                if kw > 0.0 {
-                    self.battery_energy_in_kwh += kw * self.timestep_h;
-                } else if kw < 0.0 {
-                    self.battery_energy_out_kwh += kw.abs() * self.timestep_h;
-                }
-            }
-
-            #[cfg(feature = "observe")]
-            if row == batch.num_rows() - 1 {
-                let mut parts: Vec<String> = Vec::new();
-                for (key, val) in &self.energy_by_end_use {
-                    parts.push(format!("{key}={val:.3}kWh"));
-                }
-                for (key, count) in &self.end_use_equipment_counts {
-                    parts.push(format!("n_{key}={count}"));
-                }
-                parts.push(format!(
-                    "hvac_heating_wh={:.1}",
-                    self.hvac_heating_electric_wh
-                ));
-                parts.push(format!(
-                    "hvac_cooling_wh={:.1}",
-                    self.hvac_cooling_electric_wh
-                ));
-                tracing::info!(
-                    end_use_diagnostics = %parts.join(", "),
-                    "end-use metrics at batch boundary"
-                );
+            } else {
+                self.setpoint_missing_row_count += 1;
             }
         }
 
-        #[cfg(feature = "observe")]
+        // Envelope component loads [W → J over the step].
+        if let Some(slot) = self.plan.window_solar_w_slot
+            && let Some(v) = value_at_slot(row, slot)
         {
-            if self.nan_step_count > 0 {
-                let nan_in = |arr: &Float64Array| {
-                    (0..batch.num_rows())
-                        .filter(|&i| !arr.is_null(i) && !arr.value(i).is_finite())
-                        .count() as u64
-                };
-                let batch_nan = nan_in(total_arr);
-                if batch_nan > 0 {
-                    tracing::debug!(
-                        batch_nan,
-                        total_skipped = self.nan_step_count,
-                        "non-finite values detected and skipped in total electric power column"
-                    );
-                }
-            }
+            self.envelope_window_solar_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.infiltration_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_infiltration_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.interior_lwr_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_interior_lwr_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.internal_gains_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_internal_gains_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.opaque_conduction_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_opaque_conduction_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.window_conduction_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_window_conduction_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.internal_mass_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_internal_mass_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.forced_ventilation_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_ventilation_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.natural_ventilation_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_ventilation_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.duct_loss_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_duct_loss_j += v * self.timestep_s;
         }
 
-        #[cfg(feature = "observe")]
+        // HVAC thermal delivered accumulation for COP and envelope loads.
+        if let Some(slot) = self.plan.hvac_heating_delivered_w_slot
+            && let Some(v) = value_at_slot(row, slot)
         {
-            if self.setpoints.is_some() && self.setpoint_missing_row_count > 0 {
-                tracing::debug!(
-                    rows_missing_setpoint_data = self.setpoint_missing_row_count,
-                    total_rows = self.total_row_count,
-                    fraction =
-                        self.setpoint_missing_row_count as f64 / self.total_row_count.max(1) as f64,
-                    "rows with missing/invalid setpoint data — comfort/unmet skipped, \
-                     envelope/HVAC/battery accumulation continued"
-                );
+            self.envelope_hvac_heating_j += v * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.hvac_cooling_delivered_w_slot
+            && let Some(v) = value_at_slot(row, slot)
+        {
+            self.envelope_hvac_cooling_j += v * self.timestep_s;
+        }
+
+        // HVAC electric power accumulation for COP.
+        if let Some(slot) = self.plan.hvac_heating_kw_slot
+            && let Some(w) = value_at_slot(row, slot).map(|v| Unit::Kilowatt.to_si(v))
+            && w > 0.0
+        {
+            self.hvac_heating_electric_j += w * self.timestep_s;
+        }
+        if let Some(slot) = self.plan.hvac_cooling_kw_slot
+            && let Some(w) = value_at_slot(row, slot).map(|v| Unit::Kilowatt.to_si(v))
+            && w > 0.0
+        {
+            self.hvac_cooling_electric_j += w * self.timestep_s;
+        }
+
+        // Battery energy tracking for round-trip efficiency.
+        if let Some(slot) = self.plan.battery_kw_slot
+            && let Some(w) = value_at_slot(row, slot).map(|v| Unit::Kilowatt.to_si(v))
+        {
+            if w > 0.0 {
+                self.battery_energy_in_j += w * self.timestep_s;
+            } else if w < 0.0 {
+                self.battery_energy_out_j += w.abs() * self.timestep_s;
             }
         }
 
         // A NaN in any accumulator means a NaN power value contaminated the
         // totals: a typed error in every build profile.
-        if self.total_electric_energy_kwh.is_nan() {
+        if self.total_electric_energy_j.is_nan() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_electric_energy_kwh".to_string(),
+                "total_electric_energy_j".to_string(),
             ));
         }
-        if self.total_consumption_kwh.is_nan() {
+        if self.total_consumption_j.is_nan() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_consumption_kwh".to_string(),
+                "total_consumption_j".to_string(),
             ));
         }
-        if self.total_gas_energy_therms.is_nan() {
+        if self.total_gas_energy_j.is_nan() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_gas_energy_therms".to_string(),
+                "total_gas_energy_j".to_string(),
             ));
         }
         if self.has_envelope_columns {
-            if self.envelope_hvac_heating_wh.is_nan() {
+            if self.envelope_hvac_heating_j.is_nan() {
                 return Err(MetricsError::NonFiniteAccumulator(
-                    "envelope_hvac_heating_wh".to_string(),
+                    "envelope_hvac_heating_j".to_string(),
                 ));
             }
-            if self.envelope_hvac_cooling_wh.is_nan() {
+            if self.envelope_hvac_cooling_j.is_nan() {
                 return Err(MetricsError::NonFiniteAccumulator(
-                    "envelope_hvac_cooling_wh".to_string(),
+                    "envelope_hvac_cooling_j".to_string(),
                 ));
             }
         }
@@ -971,6 +1381,19 @@ impl MetricsCalculator {
     /// every build profile: NaN/Inf propagation early prevents downstream
     /// corruption of visualisation and RL environment observation pipelines.
     pub fn finish(self) -> Result<FullSimulationMetrics, MetricsError> {
+        #[cfg(feature = "observe")]
+        self.log_end_use_diagnostics();
+        tracing::debug!(
+            end_uses = self.energy_by_end_use.len(),
+            gas = self.plan.total_gas_power_slot.is_some(),
+            pv = self.plan.pv_power_slot.is_some(),
+            setpoints = self.plan.setpoints.is_some(),
+            envelope_loads = self.has_envelope_columns,
+            hvac_power = self.plan.hvac_heating_kw_slot.is_some()
+                || self.plan.hvac_cooling_kw_slot.is_some(),
+            battery = self.plan.battery_kw_slot.is_some(),
+            "metric groups computed at finish"
+        );
         let mut peak_by_end_use = self.peak_by_end_use;
         for value in peak_by_end_use.values_mut() {
             if *value == f64::NEG_INFINITY {
@@ -978,18 +1401,18 @@ impl MetricsCalculator {
             }
         }
 
-        let renewable_energy_fraction = self.pv_power_idx.map(|_| {
-            if self.total_consumption_kwh <= 0.0 {
+        let renewable_energy_fraction = self.plan.pv_power_slot.map(|_| {
+            if self.total_consumption_j <= 0.0 {
                 0.0
             } else {
                 // Fraction of the gross load covered by PV. Not clamped: a
                 // net-positive home legitimately covers more than 100 % of
                 // its load, and clamping would report exactly that as 1.0.
-                self.total_pv_generation_kwh_abs / self.total_consumption_kwh
+                self.total_pv_generation_j_abs / self.total_consumption_j
             }
         });
 
-        let rows_with_partial_setpoint_data_fraction = self.setpoints.as_ref().map(|_| {
+        let rows_with_partial_setpoint_data_fraction = self.plan.setpoints.as_ref().map(|_| {
             if self.total_row_count > 0 {
                 self.setpoint_missing_row_count as f64 / self.total_row_count as f64
             } else {
@@ -1001,8 +1424,9 @@ impl MetricsCalculator {
         let actual_duration_h = self.total_row_count as f64 * self.timestep_h;
 
         // ASHRAE HoF 2021 Ch.15: standard (non-leap) year = 365 d = 8760 h;
-        // leap year = 366 d = 8784 h.
-        let year = self.config.start_time.year();
+        // leap year = 366 d = 8784 h. The calendar year is the run's start
+        // time in-run, the table's first Time value for the table feed.
+        let year = self.coverage_year;
         let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
 
         // Coverage: determined by accumulated row-hours vs a full calendar year.
@@ -1043,42 +1467,40 @@ impl MetricsCalculator {
         // Catching NaN/Inf propagation early prevents downstream corruption
         // of visualisation and RL environment observation pipelines: a typed
         // error in every build profile.
-        if self.total_electric_energy_kwh.is_nan() || !self.total_electric_energy_kwh.is_finite() {
+        if self.total_electric_energy_j.is_nan() || !self.total_electric_energy_j.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_electric_energy_kwh".to_string(),
+                "total_electric_energy_j".to_string(),
             ));
         }
-        if self.total_consumption_kwh.is_nan() || !self.total_consumption_kwh.is_finite() {
+        if self.total_consumption_j.is_nan() || !self.total_consumption_j.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_consumption_kwh".to_string(),
+                "total_consumption_j".to_string(),
             ));
         }
-        if self.total_gas_energy_therms.is_nan() || !self.total_gas_energy_therms.is_finite() {
+        if self.total_gas_energy_j.is_nan() || !self.total_gas_energy_j.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "total_gas_energy_therms".to_string(),
+                "total_gas_energy_j".to_string(),
             ));
         }
-        if self.peak_import_kw.is_nan() || !self.peak_import_kw.is_finite() {
+        if self.peak_import_w.is_nan() || !self.peak_import_w.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "peak_import_kw".to_string(),
+                "peak_import_w".to_string(),
             ));
         }
-        if self.peak_export_kw.is_nan() || !self.peak_export_kw.is_finite() {
+        if self.peak_export_w.is_nan() || !self.peak_export_w.is_finite() {
             return Err(MetricsError::NonFiniteAccumulator(
-                "peak_export_kw".to_string(),
+                "peak_export_w".to_string(),
             ));
         }
         if self.has_envelope_columns {
-            if self.envelope_hvac_heating_wh.is_nan() || !self.envelope_hvac_heating_wh.is_finite()
-            {
+            if self.envelope_hvac_heating_j.is_nan() || !self.envelope_hvac_heating_j.is_finite() {
                 return Err(MetricsError::NonFiniteAccumulator(
-                    "envelope_hvac_heating_wh".to_string(),
+                    "envelope_hvac_heating_j".to_string(),
                 ));
             }
-            if self.envelope_hvac_cooling_wh.is_nan() || !self.envelope_hvac_cooling_wh.is_finite()
-            {
+            if self.envelope_hvac_cooling_j.is_nan() || !self.envelope_hvac_cooling_j.is_finite() {
                 return Err(MetricsError::NonFiniteAccumulator(
-                    "envelope_hvac_cooling_wh".to_string(),
+                    "envelope_hvac_cooling_j".to_string(),
                 ));
             }
         }
@@ -1091,20 +1513,24 @@ impl MetricsCalculator {
         } else {
             1.0
         };
-        let total_electric_energy_kwh = self.total_electric_energy_kwh * leap_factor;
-        let total_consumption_kwh = self.total_consumption_kwh * leap_factor;
-        let total_pv_generation_kwh = self.total_pv_generation_kwh_abs * leap_factor;
-        let energy_by_end_use = self
+        let total_electric_energy_j = self.total_electric_energy_j * leap_factor;
+        let total_consumption_j = self.total_consumption_j * leap_factor;
+        let total_pv_generation_j = self.total_pv_generation_j_abs * leap_factor;
+        let energy_by_end_use_j: BTreeMap<String, f64> = self
             .energy_by_end_use
             .into_iter()
             .map(|(k, v)| (k, v * leap_factor))
             .collect();
 
-        let gas_energy = self.total_gas_power_idx.map(|_| {
-            let therms = self.total_gas_energy_therms * leap_factor;
+        let gas_energy = self.plan.total_gas_power_slot.map(|_| {
+            // The record keeps its therms/kWh reporting units, each
+            // converted once from the calculator's joule total.
+            let gas_j = self.total_gas_energy_j * leap_factor;
+            let therms = Energy::new::<joule_marker>(gas_j).get::<therm_marker>();
+            let kwh = Energy::new::<joule_marker>(gas_j).get::<kilowatt_hour_marker>();
             GasEnergyMetrics {
                 total_therms: therms,
-                total_kwh_equivalent: energy_therms_to_kwh(therms),
+                total_kwh_equivalent: kwh,
             }
         });
 
@@ -1127,10 +1553,21 @@ impl MetricsCalculator {
         Ok(FullSimulationMetrics {
             metrics: SimulationMetrics {
                 total_energy_kwh: TotalEnergyKwh {
-                    net_energy_kwh: total_electric_energy_kwh,
-                    gross_consumption_kwh: total_consumption_kwh,
-                    gross_pv_generation_kwh: total_pv_generation_kwh,
-                    per_end_use: energy_by_end_use,
+                    net_energy_kwh: Energy::new::<joule_marker>(total_electric_energy_j)
+                        .get::<kilowatt_hour_marker>(),
+                    gross_consumption_kwh: Energy::new::<joule_marker>(total_consumption_j)
+                        .get::<kilowatt_hour_marker>(),
+                    gross_pv_generation_kwh: Energy::new::<joule_marker>(total_pv_generation_j)
+                        .get::<kilowatt_hour_marker>(),
+                    per_end_use: energy_by_end_use_j
+                        .into_iter()
+                        .map(|(k, v_j)| {
+                            (
+                                k,
+                                Energy::new::<joule_marker>(v_j).get::<kilowatt_hour_marker>(),
+                            )
+                        })
+                        .collect(),
                     duration_hours: actual_duration_h,
                 },
                 peak_power_kw: PeakPowerKw {
@@ -1138,31 +1575,52 @@ impl MetricsCalculator {
                     rolling: self.rolling_peak.finish(),
                 },
                 comfort_hours: self
+                    .plan
                     .setpoints
                     .as_ref()
                     .map(|_| self.comfort_step_count * self.timestep_h),
                 unmet_load_hours: self
+                    .plan
                     .setpoints
                     .as_ref()
                     .map(|_| self.unmet_step_count * self.timestep_h),
                 renewable_energy_fraction,
                 grid_interaction_metrics: GridInteractionMetrics {
-                    peak_import_kw: self.peak_import_kw.max(0.0),
-                    peak_export_kw: self.peak_export_kw.max(0.0),
+                    peak_import_kw: Unit::Kilowatt.from_si(self.peak_import_w.max(0.0)),
+                    peak_export_kw: Unit::Kilowatt.from_si(self.peak_export_w.max(0.0)),
                 },
                 envelope_loads_kwh: if self.has_envelope_columns {
                     Some(EnvelopeComponentLoadsKwh {
-                        window_solar_kwh: self.envelope_window_solar_wh / 1000.0,
-                        window_conduction_kwh: self.envelope_window_conduction_wh / 1000.0,
-                        opaque_conduction_kwh: self.envelope_opaque_conduction_wh / 1000.0,
-                        internal_mass_kwh: self.envelope_internal_mass_wh / 1000.0,
-                        interior_lwr_kwh: self.envelope_interior_lwr_wh / 1000.0,
-                        infiltration_kwh: self.envelope_infiltration_wh / 1000.0,
-                        ventilation_kwh: self.envelope_ventilation_wh / 1000.0,
-                        hvac_heating_kwh: self.envelope_hvac_heating_wh / 1000.0,
-                        hvac_cooling_kwh: self.envelope_hvac_cooling_wh / 1000.0,
-                        internal_gains_kwh: self.envelope_internal_gains_wh / 1000.0,
-                        duct_loss_kwh: self.envelope_duct_loss_wh / 1000.0,
+                        window_solar_kwh: Energy::new::<joule_marker>(self.envelope_window_solar_j)
+                            .get::<kilowatt_hour_marker>(),
+                        window_conduction_kwh: Energy::new::<joule_marker>(
+                            self.envelope_window_conduction_j,
+                        )
+                        .get::<kilowatt_hour_marker>(),
+                        opaque_conduction_kwh: Energy::new::<joule_marker>(
+                            self.envelope_opaque_conduction_j,
+                        )
+                        .get::<kilowatt_hour_marker>(),
+                        internal_mass_kwh: Energy::new::<joule_marker>(
+                            self.envelope_internal_mass_j,
+                        )
+                        .get::<kilowatt_hour_marker>(),
+                        interior_lwr_kwh: Energy::new::<joule_marker>(self.envelope_interior_lwr_j)
+                            .get::<kilowatt_hour_marker>(),
+                        infiltration_kwh: Energy::new::<joule_marker>(self.envelope_infiltration_j)
+                            .get::<kilowatt_hour_marker>(),
+                        ventilation_kwh: Energy::new::<joule_marker>(self.envelope_ventilation_j)
+                            .get::<kilowatt_hour_marker>(),
+                        hvac_heating_kwh: Energy::new::<joule_marker>(self.envelope_hvac_heating_j)
+                            .get::<kilowatt_hour_marker>(),
+                        hvac_cooling_kwh: Energy::new::<joule_marker>(self.envelope_hvac_cooling_j)
+                            .get::<kilowatt_hour_marker>(),
+                        internal_gains_kwh: Energy::new::<joule_marker>(
+                            self.envelope_internal_gains_j,
+                        )
+                        .get::<kilowatt_hour_marker>(),
+                        duct_loss_kwh: Energy::new::<joule_marker>(self.envelope_duct_loss_j)
+                            .get::<kilowatt_hour_marker>(),
                     })
                 } else {
                     None
@@ -1173,26 +1631,26 @@ impl MetricsCalculator {
                     // output verbosity; when absent the thermal numerator is
                     // unknown (not zero), so COP must be None — reporting
                     // 0.0 would misstate a working heat pump's efficiency.
-                    hvac_heating_cop: if self.hvac_heating_delivered_w_idx.is_some()
-                        && self.hvac_heating_electric_wh > EPSILON
+                    hvac_heating_cop: if self.plan.hvac_heating_delivered_w_slot.is_some()
+                        && self.hvac_heating_electric_j > EPSILON
                     {
                         // Thermal output from envelope gains; electric input from telemetry column.
-                        let thermal = self.envelope_hvac_heating_wh.max(0.0);
-                        Some(thermal / self.hvac_heating_electric_wh)
+                        let thermal = self.envelope_hvac_heating_j.max(0.0);
+                        Some(thermal / self.hvac_heating_electric_j)
                     } else {
                         None
                     },
-                    hvac_cooling_cop: if self.hvac_cooling_delivered_w_idx.is_some()
-                        && self.hvac_cooling_electric_wh > EPSILON
+                    hvac_cooling_cop: if self.plan.hvac_cooling_delivered_w_slot.is_some()
+                        && self.hvac_cooling_electric_j > EPSILON
                     {
-                        let thermal = self.envelope_hvac_cooling_wh.abs();
-                        Some(thermal / self.hvac_cooling_electric_wh)
+                        let thermal = self.envelope_hvac_cooling_j.abs();
+                        Some(thermal / self.hvac_cooling_electric_j)
                     } else {
                         None
                     },
                     water_heater_cop: None, // requires WH-specific telemetry columns
-                    battery_round_trip_efficiency: if self.battery_energy_in_kwh > EPSILON {
-                        Some(self.battery_energy_out_kwh / self.battery_energy_in_kwh)
+                    battery_round_trip_efficiency: if self.battery_energy_in_j > EPSILON {
+                        Some(self.battery_energy_out_j / self.battery_energy_in_j)
                     } else {
                         None
                     },
@@ -1206,134 +1664,387 @@ impl MetricsCalculator {
             gas_energy,
         })
     }
+
+    /// One end-use diagnostics log per run, at finish (the per-batch
+    /// boundary log of the flushed-batch feed is gone with it).
+    #[cfg(feature = "observe")]
+    fn log_end_use_diagnostics(&self) {
+        let mut parts: Vec<String> = Vec::new();
+        for (key, val) in &self.energy_by_end_use {
+            parts.push(format!("{key}={val:.3}kWh"));
+        }
+        for (key, count) in &self.plan.end_use_equipment_counts {
+            parts.push(format!("n_{key}={count}"));
+        }
+        parts.push(format!(
+            "hvac_heating_j={:.1}",
+            self.hvac_heating_electric_j
+        ));
+        parts.push(format!(
+            "hvac_cooling_j={:.1}",
+            self.hvac_cooling_electric_j
+        ));
+        tracing::info!(
+            end_use_diagnostics = %parts.join(", "),
+            "end-use metrics at run finish"
+        );
+    }
 }
 
-fn discover_end_use_columns(
-    schema: &Schema,
-    total_electric_power_idx: usize,
-    grid_power_idx: usize,
+/// Renders naive local wall-clock milliseconds as the wall clock they
+/// carry: the reading the `Time` column's values name in errors.
+fn naive_local_clock(local_ms: i64) -> String {
+    DateTime::from_timestamp_millis(local_ms)
+        .map(|instant| instant.naive_utc().to_string())
+        .unwrap_or_else(|| format!("{local_ms} ms"))
+}
+
+/// Computes the run metrics from any results table: the same accumulator
+/// the run feeds per step, fed from the table instead.
+///
+/// The table is a `Timestep` table: a `Time` column of naive local
+/// wall-clock milliseconds and `Float64` columns, every consecutive pair
+/// of `Time` values exactly `time_res` apart and no `Step Count` column.
+/// A reduced table passed with the step resolution is an error naming the
+/// first offending pair of `Time` values (or the `Step Count` column), so
+/// an `Hourly` table passed with `time_res = 900` is an error, not wrong
+/// metrics. The columns resolve through the catalogue: a column whose
+/// Arrow type contradicts its declaration is an error naming it. An empty
+/// table is an error naming it.
+///
+/// What the run's calculator reads from its stored config comes from the
+/// table: the year of the first `Time` value decides the leap-year
+/// coverage, the duration is the row count times `time_res`, and
+/// `setpoint_deadband_c` is the config field's value. A metrics input
+/// variable absent from the table leaves the metric it feeds `None`, by
+/// the same rule as in-run (the total electric power column is required).
+/// A table the run itself recorded therefore scores the run's metrics on
+/// bits.
+///
+/// # Errors
+///
+/// [`MetricsError::EmptyTable`] for a table with no rows;
+/// [`MetricsError::NonTimestepTable`] for a `Step Count` column, a
+/// missing `Time` column, a null `Time` value, a `Time` value outside
+/// the calendar range, or a consecutive pair not exactly `time_res`
+/// apart;
+/// [`MetricsError::ColumnTypeMismatch`] for a column contradicting its
+/// catalogue declaration; [`MetricsError::InconsistentBatches`] for
+/// batches that do not share one schema;
+/// [`MetricsError::InvalidTimeResolution`] for a `time_res` that is not a
+/// whole number of positive seconds; and the plan build's and the
+/// accumulator's own errors (a missing required column, a non-finite
+/// accumulator).
+pub fn metrics_from_table(
+    table: &[RecordBatch],
+    catalogue: &Catalogue,
+    time_res: Duration,
+    setpoint_deadband_c: Option<f64>,
+) -> Result<FullSimulationMetrics, MetricsError> {
+    // The step resolution: a whole number of positive seconds, the rule
+    // the config's own validation runs.
+    let time_res_ms = time_res.num_milliseconds();
+    if time_res_ms <= 0 || time_res_ms % 1000 != 0 {
+        return Err(MetricsError::InvalidTimeResolution);
+    }
+    let time_res_secs =
+        u32::try_from(time_res.num_seconds()).map_err(|_| MetricsError::InvalidTimeResolution)?;
+
+    let total_rows: usize = table.iter().map(|batch| batch.num_rows()).sum();
+    if total_rows == 0 {
+        return Err(MetricsError::EmptyTable);
+    }
+
+    let time_label = time_field();
+    let schema = table[0].schema();
+    // One table, one layout: every batch carries the first batch's fields,
+    // in order, so one schema check covers the table.
+    for (index, batch) in table.iter().enumerate() {
+        let batch_schema = batch.schema();
+        let fields = batch_schema.fields();
+        if fields != schema.fields() {
+            let first_fields = schema.fields();
+            let column = (0..fields.len().max(first_fields.len()))
+                .find(|&i| fields.get(i) != first_fields.get(i))
+                .and_then(|i| fields.get(i).or(first_fields.get(i)))
+                .map(|field| field.name().clone())
+                .unwrap_or_default();
+            return Err(MetricsError::InconsistentBatches {
+                batch: index,
+                column,
+            });
+        }
+    }
+
+    // No `Step Count` column: a reduced table's rows are periods, not
+    // steps, and its step counts are not a timestep stream.
+    if schema
+        .fields()
+        .iter()
+        .any(|field| field.name() == STEP_COUNT_COLUMN)
+    {
+        return Err(MetricsError::NonTimestepTable(format!(
+            "the table carries a `{STEP_COUNT_COLUMN}` column: a reduced table's rows are \
+             periods, not steps"
+        )));
+    }
+
+    // Every column resolves through the catalogue: a column whose Arrow
+    // type contradicts its declaration is an error naming it. A column the
+    // catalogue declares nothing for has nothing to contradict, and no
+    // metrics input reads it.
+    for field in schema.fields() {
+        let declared: Option<DataType> = if field.name() == time_label.name() {
+            Some(time_label.data_type().clone())
+        } else {
+            catalogue
+                .resolve(field.name())
+                .map(|def| variable_field(def).data_type().clone())
+        };
+        let Some(declared) = declared else {
+            continue;
+        };
+        if field.data_type() != &declared {
+            return Err(MetricsError::ColumnTypeMismatch {
+                column: field.name().clone(),
+                expected: declared.to_string(),
+                found: field.data_type().to_string(),
+            });
+        }
+    }
+
+    // The `Time` column, wherever the schema puts it.
+    let time_index = schema
+        .fields()
+        .iter()
+        .position(|field| field.name() == time_label.name())
+        .ok_or_else(|| {
+            MetricsError::NonTimestepTable("the table carries no Time column".to_string())
+        })?;
+
+    // Consecutive `Time` values differ by exactly `time_res`, across the
+    // batch boundaries too: the first offending pair names the mismatch,
+    // a null slot names itself (the value buffer's raw 0-ms slot is not
+    // the row's reading).
+    let mut first_time_ms: Option<i64> = None;
+    let mut previous_ms: Option<i64> = None;
+    let mut rows_before = 0usize;
+    for batch in table {
+        let times = batch
+            .column(time_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .ok_or_else(|| MetricsError::ColumnTypeMismatch {
+                column: time_label.name().clone(),
+                expected: time_label.data_type().to_string(),
+                found: batch.schema().field(time_index).data_type().to_string(),
+            })?;
+        for row in 0..batch.num_rows() {
+            if times.is_null(row) {
+                return Err(MetricsError::NonTimestepTable(format!(
+                    "a null Time value at row {}",
+                    rows_before + row
+                )));
+            }
+            let current = times.value(row);
+            if first_time_ms.is_none() {
+                first_time_ms = Some(current);
+            }
+            if let Some(previous) = previous_ms
+                && current - previous != time_res_ms
+            {
+                return Err(MetricsError::NonTimestepTable(format!(
+                    "consecutive Time values {} and {} differ by {} ms, not the time \
+                     resolution's {time_res_ms} ms",
+                    naive_local_clock(previous),
+                    naive_local_clock(current),
+                    current - previous,
+                )));
+            }
+            previous_ms = Some(current);
+        }
+        rows_before += batch.num_rows();
+    }
+    let first_time_ms = first_time_ms.ok_or(MetricsError::EmptyTable)?;
+
+    // The calendar year the coverage reads: the first `Time` value's year.
+    let coverage_year = DateTime::from_timestamp_millis(first_time_ms)
+        .ok_or_else(|| {
+            MetricsError::NonTimestepTable(format!(
+                "the first Time value {first_time_ms} ms is outside the calendar range"
+            ))
+        })?
+        .naive_utc()
+        .year();
+
+    let value_indices: Vec<usize> = (0..schema.fields().len())
+        .filter(|index| *index != time_index)
+        .collect();
+    let names: Vec<String> = value_indices
+        .iter()
+        .map(|&index| schema.field(index).name().clone())
+        .collect();
+    let plan = MetricsInputPlan::build_from_names(
+        &names,
+        setpoint_deadband_c,
+        catalogue.equipment_end_uses(),
+    )?;
+    let mut calculator = MetricsCalculator::for_coverage_year(plan, time_res_secs, coverage_year)?;
+
+    // Every row, in table order, through the accumulator the run feeds
+    // per step: the same aggregation, the same values.
+    let mut row_buf: Vec<f64> = Vec::with_capacity(names.len());
+    for batch in table {
+        let mut value_columns = Vec::with_capacity(value_indices.len());
+        for (slot, &index) in value_indices.iter().enumerate() {
+            let column = batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| MetricsError::ColumnTypeMismatch {
+                    column: names[slot].clone(),
+                    expected: DataType::Float64.to_string(),
+                    found: batch.schema().field(index).data_type().to_string(),
+                })?;
+            value_columns.push(column);
+        }
+        for row in 0..batch.num_rows() {
+            row_buf.clear();
+            for column in &value_columns {
+                // A null carries no value: NaN routes it through the
+                // accumulator's non-finite guard, the skip a non-finite
+                // power value gets in-run. The engine's own tables carry
+                // no nulls.
+                row_buf.push(if column.is_null(row) {
+                    f64::NAN
+                } else {
+                    column.value(row)
+                });
+            }
+            calculator.accumulate_row(&row_buf)?;
+        }
+    }
+    calculator.finish()
+}
+
+fn discover_end_use_slots(
+    available: &[String],
+    total_electric_power_slot: usize,
+    grid_power_slot: usize,
 ) -> Result<Vec<(String, usize)>, MetricsError> {
     let mut columns = Vec::new();
-    for (idx, field) in schema.fields().iter().enumerate() {
-        if idx == total_electric_power_idx || idx == grid_power_idx {
+    for (slot, name) in available.iter().enumerate() {
+        if slot == total_electric_power_slot || slot == grid_power_slot {
             continue;
         }
-        let name = field.name().as_str();
         // Match end-use aggregate columns via the central naming API.
         // Columns use the form "{EndUse Display Name} End Use Electric Power (kW)".
         if let Some(end_use_key) =
             crate::output::columns::parse_end_use_electric_power_column_key(name)
         {
-            ensure_float64(schema, idx)?;
-            columns.push((end_use_key, idx));
+            columns.push((end_use_key, slot));
         }
     }
     Ok(columns)
 }
 
-/// Returns true if the schema contains at least one per-equipment electric
-/// power column that maps to the given `EndUse` category.
+/// Returns true if the catalogue's typed equipment end-use table pairs at
+/// least one equipment whose per-equipment electric power column the
+/// producer surface carries with the given `EndUse`.
 ///
 /// Used to gate the missing-aggregate-column error on the actual presence of
 /// equipment for that end-use category.
-pub(crate) fn schema_has_equipment_for(schema: &Schema, target: &hares_types::EndUse) -> bool {
-    for field in schema.fields() {
-        let name = field.name().as_str();
-        if name.ends_with(" Electric Power (kW)") {
-            let prefix = name
-                .strip_suffix(" Electric Power (kW)")
-                .unwrap_or(name)
-                .trim();
-            // Strip instance qualifier suffix (" #N") for multi-instance
-            // equipment columns (e.g. "ASHP Heater #1" -> "ASHP Heater").
-            let base = match prefix.rfind(" #") {
-                Some(pos) => &prefix[..pos],
-                None => prefix,
-            };
-            if crate::output::columns::equipment_name_to_end_use(base) == *target {
-                return true;
-            }
-        }
-    }
-    false
+#[cfg_attr(not(feature = "observe"), allow(dead_code))]
+pub(crate) fn equipment_end_uses_have(
+    equipment_end_uses: &[(String, EndUse)],
+    available: &[String],
+    target: &EndUse,
+) -> bool {
+    equipment_end_uses.iter().any(|(name, end_use)| {
+        end_use == target
+            && available
+                .iter()
+                .any(|column| column == &format!("{name} {ELECTRIC_POWER_SUFFIX}"))
+    })
 }
 
-/// Derives per-end-use equipment counts from the output schema.
-///
-/// Counts each per-equipment electric power column whose name maps to a
-/// recognised EndUse category, skipping aggregate columns (whose prefix is
-/// an EndUse display name rather than an equipment instance name).
+/// Derives per-end-use equipment counts from the catalogue's typed
+/// equipment end-use table, counting every equipment whose per-equipment
+/// electric power column the producer surface carries.
 #[cfg(feature = "observe")]
-fn compute_equipment_counts_from_schema(schema: &Schema) -> BTreeMap<String, usize> {
+fn compute_equipment_counts(
+    equipment_end_uses: &[(String, EndUse)],
+    available: &[String],
+) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
-    for field in schema.fields() {
-        let name = field.name().as_str();
-        if name.ends_with(ELECTRIC_POWER_SUFFIX) {
-            let prefix = name
-                .strip_suffix(ELECTRIC_POWER_SUFFIX)
-                .unwrap_or(name)
-                .trim();
-            let base = match prefix.rfind(" #") {
-                Some(pos) => &prefix[..pos],
-                None => prefix,
-            };
-            let end_use = crate::output::columns::equipment_name_to_end_use(base);
-            // Only count columns that represent real equipment instances:
-            // aggregate columns (e.g. "HVAC Heating") do not match
-            // equipment_name_to_end_use and return EndUse::OTHER.
-            if end_use != hares_types::EndUse::OTHER {
-                let display = crate::output::columns::end_use_display_name(&end_use);
-                if let Some(key) = crate::output::columns::display_name_to_end_use_key(display) {
-                    *counts.entry(key).or_insert(0) += 1;
-                }
-            }
+    for (name, end_use) in equipment_end_uses {
+        let column = format!("{name} {ELECTRIC_POWER_SUFFIX}");
+        if available.iter().any(|candidate| candidate == &column) {
+            *counts.entry(end_use.as_str().to_string()).or_insert(0) += 1;
         }
     }
     counts
 }
 
-fn discover_setpoint_inputs(
-    schema: &Schema,
-    config: &SimulationConfig,
-) -> Result<Option<SetpointInputs>, MetricsError> {
-    let heating_setpoint_idx = optional_float64_column(schema, &["HVAC Heating Setpoint (C)"])?;
-    let cooling_setpoint_idx = optional_float64_column(schema, &["HVAC Cooling Setpoint (C)"])?;
+/// The producer surface's position of a required metrics column.
+fn required_slot(available: &[String], name: &str) -> Result<usize, MetricsError> {
+    available
+        .iter()
+        .position(|candidate| candidate == name)
+        .ok_or_else(|| MetricsError::MissingRequiredColumn(name.to_owned()))
+}
 
-    let (Some(heating_setpoint_idx), Some(cooling_setpoint_idx)) =
-        (heating_setpoint_idx, cooling_setpoint_idx)
+fn optional_slot(available: &[String], candidates: &[&str]) -> Result<Option<usize>, MetricsError> {
+    for name in candidates {
+        if let Some(slot) = available.iter().position(|candidate| candidate == name) {
+            return Ok(Some(slot));
+        }
+    }
+    Ok(None)
+}
+
+fn discover_setpoint_inputs(
+    available: &[String],
+    config_deadband: Option<f64>,
+) -> Result<Option<SetpointInputs>, MetricsError> {
+    let heating_setpoint_slot = optional_slot(available, &["HVAC Heating Setpoint (C)"])?;
+    let cooling_setpoint_slot = optional_slot(available, &["HVAC Cooling Setpoint (C)"])?;
+
+    let (Some(heating_setpoint_slot), Some(cooling_setpoint_slot)) =
+        (heating_setpoint_slot, cooling_setpoint_slot)
     else {
         return Ok(None);
     };
 
-    let zone_temperature_indices = discover_conditioned_zone_temperatures(schema)?;
-    if zone_temperature_indices.is_empty() {
+    let zone_temperature_slots = discover_conditioned_zone_temperatures(available)?;
+    if zone_temperature_slots.is_empty() {
         return Ok(None);
     }
 
-    let deadband = if let Some(deadband_c) = config.setpoint_deadband_c {
+    let deadband = if let Some(deadband_c) = config_deadband {
         DeadbandSource::Constant(deadband_c)
-    } else if let Some(idx) = optional_float64_column(schema, &[SETPOINT_DEADBAND_C, DEADBAND_C])? {
-        DeadbandSource::Column(idx)
+    } else if let Some(slot) = optional_slot(available, &[SETPOINT_DEADBAND_C, DEADBAND_C])? {
+        DeadbandSource::Column(slot)
     } else {
         return Ok(None);
     };
 
     Ok(Some(SetpointInputs {
-        heating_setpoint_idx,
-        cooling_setpoint_idx,
-        zone_temperature_indices,
+        heating_setpoint_slot,
+        cooling_setpoint_slot,
+        zone_temperature_slots,
         deadband,
     }))
 }
 
-fn discover_conditioned_zone_temperatures(schema: &Schema) -> Result<Vec<usize>, MetricsError> {
+fn discover_conditioned_zone_temperatures(
+    available: &[String],
+) -> Result<Vec<usize>, MetricsError> {
     // OCHRE convention: "Temperature - Indoor (C)", "Temperature - {zone} (C)"
     let mut conditioned = Vec::new();
-    for (idx, field) in schema.fields().iter().enumerate() {
-        let name = field.name().as_str();
+    for (slot, name) in available.iter().enumerate() {
         if name == "Temperature - Indoor (C)" {
-            ensure_float64(schema, idx)?;
-            conditioned.push(idx);
+            conditioned.push(slot);
         }
     }
     if !conditioned.is_empty() {
@@ -1342,31 +2053,29 @@ fn discover_conditioned_zone_temperatures(schema: &Schema) -> Result<Vec<usize>,
 
     // Fallback: any "Temperature - {zone} (C)" column.
     let mut generic = Vec::new();
-    for (idx, field) in schema.fields().iter().enumerate() {
-        let name = field.name().as_str();
+    for (slot, name) in available.iter().enumerate() {
         if name.starts_with("Temperature - ") && name.ends_with(" (C)") {
-            ensure_float64(schema, idx)?;
-            generic.push(idx);
+            generic.push(slot);
         }
     }
     Ok(generic)
 }
 
-fn discover_hvac_capacity_pairs(schema: &Schema) -> Result<Vec<(usize, usize)>, MetricsError> {
+fn discover_hvac_capacity_pairs(available: &[String]) -> Result<Vec<(usize, usize)>, MetricsError> {
     let mut pairs = Vec::new();
     // Try heating pair.
-    if let (Some(output_idx), Some(capacity_idx)) = (
-        optional_float64_column(schema, &["HVAC Heating Delivered (W)"])?,
-        optional_float64_column(schema, &[tk::HVAC_HEATING_CAPACITY_W])?,
+    if let (Some(output_slot), Some(capacity_slot)) = (
+        optional_slot(available, &["HVAC Heating Delivered (W)"])?,
+        optional_slot(available, &[tk::HVAC_HEATING_CAPACITY_W])?,
     ) {
-        pairs.push((output_idx, capacity_idx));
+        pairs.push((output_slot, capacity_slot));
     }
     // Try cooling pair.
-    if let (Some(output_idx), Some(capacity_idx)) = (
-        optional_float64_column(schema, &["HVAC Cooling Delivered (W)"])?,
-        optional_float64_column(schema, &[tk::HVAC_COOLING_CAPACITY_W])?,
+    if let (Some(output_slot), Some(capacity_slot)) = (
+        optional_slot(available, &["HVAC Cooling Delivered (W)"])?,
+        optional_slot(available, &[tk::HVAC_COOLING_CAPACITY_W])?,
     ) {
-        pairs.push((output_idx, capacity_idx));
+        pairs.push((output_slot, capacity_slot));
     }
     Ok(pairs)
 }
@@ -1378,78 +2087,89 @@ fn discover_hvac_capacity_pairs(schema: &Schema) -> Result<Vec<(usize, usize)>, 
 /// HVAC capacities are unphysical.
 const HVAC_CAPACITY_REL_TOL: f64 = 1e-6;
 
-fn is_hvac_at_capacity(pairs: &[(&Float64Array, &Float64Array)], row: usize) -> bool {
-    // Column units are watts (e.g. "HVAC Heating Delivered (W)").
-    pairs.iter().any(
-        |(output, capacity)| match (value_at(output, row), value_at(capacity, row)) {
-            (Some(output_w), Some(capacity_w)) if capacity_w.abs() > EPSILON => {
-                let diff = (output_w.abs() - capacity_w.abs()).abs();
-                diff / capacity_w.abs().max(1.0) < HVAC_CAPACITY_REL_TOL
-            }
-            _ => false,
-        },
-    )
+/// Read a value from the producer row, returning `Some` for finite values
+/// and `None` for non-finite (NaN/Inf) values.
+fn value_at_slot(row: &[f64], slot: usize) -> Option<f64> {
+    let v = row[slot];
+    v.is_finite().then_some(v)
 }
 
-fn optional_float64_column(
-    schema: &Schema,
-    candidates: &[&str],
-) -> Result<Option<usize>, MetricsError> {
-    for name in candidates {
-        if let Some((idx, _)) = schema.column_with_name(name) {
-            ensure_float64(schema, idx)?;
-            return Ok(Some(idx));
-        }
-    }
-    Ok(None)
+/// A peak value as its snapshot form: `None` for a non-finite value (the
+/// `NEG_INFINITY` sentinel an end use holds before its first finite
+/// reading), `Some` for a finite one.
+fn peak_finite(peak: f64) -> Option<f64> {
+    peak.is_finite().then_some(peak)
 }
 
-fn required_float64_column(schema: &Schema, name: &str) -> Result<usize, MetricsError> {
-    let Some((idx, _)) = schema.column_with_name(name) else {
-        return Err(MetricsError::MissingRequiredColumn(name.to_owned()));
-    };
-    ensure_float64(schema, idx)?;
-    Ok(idx)
-}
-
-fn ensure_float64(schema: &Schema, idx: usize) -> Result<(), MetricsError> {
-    let field = schema.field(idx);
-    if !matches!(field.data_type(), DataType::Float64) {
-        return Err(MetricsError::InvalidColumnType {
-            column: field.name().to_owned(),
-        });
-    }
-    Ok(())
-}
-
-fn as_f64_array(batch: &RecordBatch, index: usize) -> &Float64Array {
-    batch
-        .column(index)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("schema type is validated at construction")
-}
-
-fn value_at(arr: &Float64Array, row: usize) -> Option<f64> {
-    if arr.is_null(row) {
-        return None;
-    }
-    let v = arr.value(row);
-    if !v.is_finite() {
-        return None;
-    }
-    Some(v)
+/// The peak value a snapshot's form restores to: the `NEG_INFINITY`
+/// sentinel back from `None`, the finite value from `Some`.
+fn peak_non_finite_or(peak: Option<f64>) -> f64 {
+    peak.unwrap_or(f64::NEG_INFINITY)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow::{
-        array::ArrayRef,
-        datatypes::{Field, Schema},
+        array::{ArrayRef, Float64Array},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
     };
     use chrono::{Duration, FixedOffset, TimeZone};
     use std::sync::Arc;
+
+    /// The calculator for a test schema: the input plan built from the
+    /// schema's own value-column names (a leading `Time` column skipped,
+    /// the union-schema convention), then fed rows extracted from batches.
+    fn calc_for(
+        schema: &Schema,
+        time_res_secs: u32,
+        config: &SimulationConfig,
+    ) -> MetricsCalculator {
+        let plan = plan_for(schema, config);
+        MetricsCalculator::new(plan, time_res_secs, config).expect("calculator builds")
+    }
+
+    fn plan_for(schema: &Schema, config: &SimulationConfig) -> MetricsInputPlan {
+        plan_for_with_equipment(schema, config, &[])
+    }
+
+    /// The plan builder over stated equipment end-use pairs (the
+    /// catalogue's typed table).
+    fn plan_for_with_equipment(
+        schema: &Schema,
+        config: &SimulationConfig,
+        equipment_end_uses: &[(String, hares_types::EndUse)],
+    ) -> MetricsInputPlan {
+        let names: Vec<String> = schema
+            .fields()
+            .iter()
+            .skip(usize::from(
+                schema.fields().first().is_some_and(|f| f.name() == "Time"),
+            ))
+            .map(|f| f.name().clone())
+            .collect();
+        MetricsInputPlan::build(&names, config, equipment_end_uses).expect("metrics plan builds")
+    }
+
+    /// Feeds every row of the batch, in order: the same values the
+    /// producer row carried, one `accumulate_row` per row.
+    fn accumulate(calc: &mut MetricsCalculator, batch: &RecordBatch) -> Result<(), MetricsError> {
+        for r in 0..batch.num_rows() {
+            let row: Vec<f64> = batch
+                .columns()
+                .iter()
+                .map(|c| {
+                    c.as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("f64 column")
+                        .value(r)
+                })
+                .collect();
+            calc.accumulate_row(&row)?;
+        }
+        Ok(())
+    }
 
     fn test_config(deadband: Option<f64>) -> SimulationConfig {
         SimulationConfig {
@@ -1460,18 +2180,19 @@ mod tests {
                 .unwrap(),
             duration: Duration::hours(1),
             time_res: Duration::hours(1),
-            output_verbosity: 0,
-            output_path: None,
-            write_output: false,
-            output_format: crate::OutputFormat::Csv,
+            reports: Vec::new(),
+            diagnostics: false,
+            metrics: false,
             output_chunk_size: 16,
             master_seed: 0,
             setpoint_deadband_c: deadband,
             civil_timezone: None,
             site_location: crate::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: crate::RotationPolicy::None,
             max_consecutive_step_failures: crate::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: crate::HealthPolicy::default(),
+            first_hour_interpolation: crate::FirstHour::default(),
+            weather_year: crate::WeatherYear::default(),
+            warmup: crate::Warmup::default(),
         }
     }
 
@@ -1491,18 +2212,19 @@ mod tests {
                 .unwrap(),
             duration: Duration::hours(total_hours),
             time_res: Duration::hours(1),
-            output_verbosity: 0,
-            output_path: None,
-            write_output: false,
-            output_format: crate::OutputFormat::Csv,
+            reports: Vec::new(),
+            diagnostics: false,
+            metrics: false,
             output_chunk_size: 16,
             master_seed: 0,
             setpoint_deadband_c: deadband,
             civil_timezone: None,
             site_location: crate::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: crate::RotationPolicy::None,
             max_consecutive_step_failures: crate::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: crate::HealthPolicy::default(),
+            first_hour_interpolation: crate::FirstHour::default(),
+            weather_year: crate::WeatherYear::default(),
+            warmup: crate::Warmup::default(),
         }
     }
 
@@ -1536,14 +2258,14 @@ mod tests {
             "HVAC Heating End Use Electric Power (kW)",
         ]);
         let config = test_config_full_year(2026, None);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+        let mut calc = calc_for(&schema, 3600, &config);
 
         let rows = 8_760;
         let batch = build_batch(vec![
             (TOTAL_ELECTRIC_POWER_KW, vec![1.0; rows]),
             ("HVAC Heating End Use Electric Power (kW)", vec![1.0; rows]),
         ]);
-        calc.accumulate(&batch).unwrap();
+        accumulate(&mut calc, &batch).unwrap();
         let metrics = calc.finish().unwrap();
 
         assert!((metrics.total_energy_kwh.net_energy_kwh - 8_760.0).abs() < 1e-9);
@@ -1556,7 +2278,7 @@ mod tests {
     fn peak_power_uses_max_across_batches() {
         let schema =
             schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "EV End Use Electric Power (kW)"]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         let b1 = build_batch(vec![
             (TOTAL_ELECTRIC_POWER_KW, vec![2.0, 4.0]),
@@ -1566,11 +2288,11 @@ mod tests {
             (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 5.0]),
             ("EV End Use Electric Power (kW)", vec![2.5, 6.2]),
         ]);
-        calc.accumulate(&b1).unwrap();
-        calc.accumulate(&b2).unwrap();
+        accumulate(&mut calc, &b1).unwrap();
+        accumulate(&mut calc, &b2).unwrap();
         let metrics = calc.finish().unwrap();
 
-        assert_eq!(metrics.peak_power_kw.per_end_use["ev"], 6.2);
+        assert_eq!(metrics.peak_power_kw.per_end_use["ev"], 6200.0);
     }
 
     #[test]
@@ -1583,7 +2305,7 @@ mod tests {
             "HVAC Heating Delivered (W)",
             tk::HVAC_HEATING_CAPACITY_W,
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(Some(1.0)));
 
         let batch = build_batch(vec![
             (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0, 1.0]),
@@ -1593,7 +2315,7 @@ mod tests {
             ("HVAC Heating Delivered (W)", vec![0.0, 0.0, 0.0]),
             (tk::HVAC_HEATING_CAPACITY_W, vec![4.0, 4.0, 4.0]),
         ]);
-        calc.accumulate(&batch).unwrap();
+        accumulate(&mut calc, &batch).unwrap();
         let metrics = calc.finish().unwrap();
 
         assert_eq!(metrics.comfort_hours, Some(3.0));
@@ -1603,11 +2325,11 @@ mod tests {
     #[test]
     fn verbosity_zero_schema_returns_none_for_gated_metrics() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![(
-            TOTAL_ELECTRIC_POWER_KW,
-            vec![1.0, 2.0],
-        )]))
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0, 2.0])]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -1619,11 +2341,14 @@ mod tests {
     fn renewable_fraction_uses_abs_for_negative_pv() {
         let schema =
             schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![4.0, 4.0]),
-            ("PV End Use Electric Power (kW)", vec![-2.0, -1.0]),
-        ]))
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![4.0, 4.0]),
+                ("PV End Use Electric Power (kW)", vec![-2.0, -1.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -1650,13 +2375,16 @@ mod tests {
     fn renewable_fraction_exceeds_one_for_net_exporter() {
         let schema =
             schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
         // Net meter −2 kW (exporting) while PV generates 5 kW: load behind
         // the meter is −2 + 5 = 3 kWh, PV is 5 kWh → fraction 5/3 > 1.0.
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![-2.0]),
-            ("PV End Use Electric Power (kW)", vec![-5.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![-2.0]),
+                ("PV End Use Electric Power (kW)", vec![-5.0]),
+            ]),
+        )
         .unwrap();
         let m = calc.finish().unwrap();
         assert_eq!(m.renewable_energy_fraction, Some(5.0 / 3.0));
@@ -1698,11 +2426,14 @@ mod tests {
 
             let schema =
                 schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
-            let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-            calc.accumulate(&build_batch(vec![
-                (TOTAL_ELECTRIC_POWER_KW, total.clone()),
-                ("PV End Use Electric Power (kW)", pv.clone()),
-            ]))
+            let mut calc = calc_for(&schema, 3600, &test_config(None));
+            accumulate(
+                &mut calc,
+                &build_batch(vec![
+                    (TOTAL_ELECTRIC_POWER_KW, total.clone()),
+                    ("PV End Use Electric Power (kW)", pv.clone()),
+                ]),
+            )
             .unwrap();
             let full = calc.finish().unwrap();
             let m = &full.total_energy_kwh;
@@ -1757,13 +2488,16 @@ mod tests {
     fn energy_identity_holds_across_non_finite_total_rows() {
         let schema =
             schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
         // Row 0: meter total non-finite (sensor dropout), PV generating 2 kW.
         // Row 1: healthy import row, no PV. PV is the only export source.
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 4.0]),
-            ("PV End Use Electric Power (kW)", vec![-2.0, 0.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 4.0]),
+                ("PV End Use Electric Power (kW)", vec![-2.0, 0.0]),
+            ]),
+        )
         .unwrap();
         let m = &calc.finish().unwrap().total_energy_kwh;
         let residual = m.net_energy_kwh - (m.gross_consumption_kwh - m.gross_pv_generation_kwh);
@@ -1782,7 +2516,7 @@ mod tests {
     #[test]
     fn renewable_fraction_none_without_pv_column() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
-        let calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let calc = calc_for(&schema, 3600, &test_config(None));
         let metrics = calc.finish().unwrap();
         assert_eq!(metrics.renewable_energy_fraction, None);
     }
@@ -1790,11 +2524,14 @@ mod tests {
     #[test]
     fn peak_export_is_zero_when_grid_never_negative() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, GRID_ELECTRIC_POWER_KW]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 2.0, 3.0]),
-            (GRID_ELECTRIC_POWER_KW, vec![0.0, 2.0, 1.5]),
-        ]))
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 2.0, 3.0]),
+                (GRID_ELECTRIC_POWER_KW, vec![0.0, 2.0, 1.5]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
         assert_eq!(metrics.grid_interaction_metrics.peak_export_kw, 0.0);
@@ -1812,17 +2549,20 @@ mod tests {
             "HVAC Heating Delivered (W)",
             tk::HVAC_HEATING_CAPACITY_W,
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0, 1.0]),
-            ("Temperature - Indoor (C)", vec![24.0, 22.0, 24.0]),
-            ("HVAC Heating Setpoint (C)", vec![21.0, 21.0, 21.0]),
-            ("HVAC Cooling Setpoint (C)", vec![22.0, 22.0, 22.0]),
-            ("Setpoint Deadband (C)", vec![1.0, 1.0, 1.0]),
-            ("HVAC Heating Delivered (W)", vec![3.0, 2.0, 3.0]),
-            (tk::HVAC_HEATING_CAPACITY_W, vec![3.0, 3.0, 3.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0, 1.0]),
+                ("Temperature - Indoor (C)", vec![24.0, 22.0, 24.0]),
+                ("HVAC Heating Setpoint (C)", vec![21.0, 21.0, 21.0]),
+                ("HVAC Cooling Setpoint (C)", vec![22.0, 22.0, 22.0]),
+                ("Setpoint Deadband (C)", vec![1.0, 1.0, 1.0]),
+                ("HVAC Heating Delivered (W)", vec![3.0, 2.0, 3.0]),
+                (tk::HVAC_HEATING_CAPACITY_W, vec![3.0, 3.0, 3.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -1832,7 +2572,8 @@ mod tests {
     #[test]
     fn constructor_requires_total_electric_power_column() {
         let schema = schema_from_columns(&["HVAC Heating End Use Electric Power (kW)"]);
-        let err = MetricsCalculator::new(&schema, 3600, &test_config(None)).unwrap_err();
+        let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+        let err = MetricsInputPlan::build(&names, &test_config(None), &[]).unwrap_err();
         assert_eq!(
             err,
             MetricsError::MissingRequiredColumn(TOTAL_ELECTRIC_POWER_KW.to_string())
@@ -1842,11 +2583,14 @@ mod tests {
     #[test]
     fn gas_energy_tracked_when_gas_column_present() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, TOTAL_GAS_POWER_THERMS]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0]),
-            (TOTAL_GAS_POWER_THERMS, vec![2.0, 3.0]),
-        ]))
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0]),
+                (TOTAL_GAS_POWER_THERMS, vec![2.0, 3.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -1856,14 +2600,16 @@ mod tests {
             .expect("gas energy should be present");
         assert!((gas.total_therms - 5.0).abs() < 1e-9);
         assert!((metrics.total_energy_kwh.net_energy_kwh - 2.0).abs() < 1e-9);
-        let expected_combined = 2.0 + energy_therms_to_kwh(5.0);
+        let expected_combined = 2.0
+            + Energy::new::<hares_types::si_units::energy::therm>(5.0)
+                .get::<kilowatt_hour_marker>();
         assert!((metrics.combined_total_energy_kwh() - expected_combined).abs() < 1e-6);
     }
 
     #[test]
     fn gas_energy_none_when_no_gas_column() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
-        let calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let calc = calc_for(&schema, 3600, &test_config(None));
         let metrics = calc.finish().unwrap();
         assert!(metrics.gas_energy.is_none());
         assert!((metrics.combined_total_energy_kwh() - 0.0).abs() < 1e-9);
@@ -1883,14 +2629,15 @@ mod tests {
             system_id: None,
             related_hvac_idref: None,
             primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
         }];
-        let schema = crate::output::build_schema(&specs, 1, &[]);
-        let result = MetricsCalculator::new(&schema, 3600, &test_config(None));
-        assert!(
-            result.is_ok(),
-            "MetricsCalculator should accept build_schema output: {:?}",
-            result.err()
-        );
+        let schema = crate::output::build_schema_for_specs(&specs, 1, &[]);
+        let result = plan_for(&schema, &test_config(None));
+        // The plan carries the resolved slots: assert it built and the
+        // calculator accepts it.
+        let _calc = MetricsCalculator::new(result, 3600, &test_config(None))
+            .expect("MetricsCalculator should accept a plan from build_schema output");
     }
 
     #[test]
@@ -1904,18 +2651,21 @@ mod tests {
             "HVAC Heating Delivered (W)",
             tk::HVAC_HEATING_CAPACITY_W,
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(Some(1.0)));
 
         let rows = 24;
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![2.0; rows]),
-            (TOTAL_GAS_POWER_THERMS, vec![0.5; rows]),
-            ("Temperature - Indoor (C)", vec![21.5; rows]),
-            ("HVAC Heating Setpoint (C)", vec![21.0; rows]),
-            ("HVAC Cooling Setpoint (C)", vec![23.0; rows]),
-            ("HVAC Heating Delivered (W)", vec![1.0; rows]),
-            (tk::HVAC_HEATING_CAPACITY_W, vec![5.0; rows]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![2.0; rows]),
+                (TOTAL_GAS_POWER_THERMS, vec![0.5; rows]),
+                ("Temperature - Indoor (C)", vec![21.5; rows]),
+                ("HVAC Heating Setpoint (C)", vec![21.0; rows]),
+                ("HVAC Cooling Setpoint (C)", vec![23.0; rows]),
+                ("HVAC Heating Delivered (W)", vec![1.0; rows]),
+                (tk::HVAC_HEATING_CAPACITY_W, vec![5.0; rows]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -1948,20 +2698,23 @@ mod tests {
             "HVAC Heating Delivered (W)",
             tk::HVAC_HEATING_CAPACITY_W,
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(Some(1.0)));
 
         // Row with output nearly equal to capacity at high wattage (50,000 W = 50 kW).
         // Difference = 0.00005 W → relative = 0.00005 / 50000 = 1e-9, well within 1e-6.
         let capacity = 50_000.0;
         let output = capacity - 0.00005;
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
-            ("Temperature - Indoor (C)", vec![25.0]), // outside cooling setpoint
-            ("HVAC Heating Setpoint (C)", vec![21.0]),
-            ("HVAC Cooling Setpoint (C)", vec![22.0]),
-            ("HVAC Heating Delivered (W)", vec![output]),
-            (tk::HVAC_HEATING_CAPACITY_W, vec![capacity]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
+                ("Temperature - Indoor (C)", vec![25.0]), // outside cooling setpoint
+                ("HVAC Heating Setpoint (C)", vec![21.0]),
+                ("HVAC Cooling Setpoint (C)", vec![22.0]),
+                ("HVAC Heating Delivered (W)", vec![output]),
+                (tk::HVAC_HEATING_CAPACITY_W, vec![capacity]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -1979,14 +2732,17 @@ mod tests {
             "HVAC Heating End Use Electric Power (kW)",
             "HVAC Heating Delivered (W)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // 10 kW thermal delivery, 2 kW electric → COP = 10000 Wh / 2000 Wh = 5.0
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![2.0, 2.0]),
-            ("HVAC Heating End Use Electric Power (kW)", vec![2.0, 2.0]),
-            ("HVAC Heating Delivered (W)", vec![10_000.0, 10_000.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![2.0, 2.0]),
+                ("HVAC Heating End Use Electric Power (kW)", vec![2.0, 2.0]),
+                ("HVAC Heating Delivered (W)", vec![10_000.0, 10_000.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2012,11 +2768,14 @@ mod tests {
             TOTAL_ELECTRIC_POWER_KW,
             "HVAC Heating End Use Electric Power (kW)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![2.0, 2.0]),
-            ("HVAC Heating End Use Electric Power (kW)", vec![2.0, 2.0]),
-        ]))
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![2.0, 2.0]),
+                ("HVAC Heating End Use Electric Power (kW)", vec![2.0, 2.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
         assert_eq!(
@@ -2032,14 +2791,17 @@ mod tests {
             "HVAC Cooling End Use Electric Power (kW)",
             "HVAC Cooling Delivered (W)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // -8000 W cooling (negative = heat removal), 2 kW electric → COP = 8000/2000 = 4.0
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![2.0]),
-            ("HVAC Cooling End Use Electric Power (kW)", vec![2.0]),
-            ("HVAC Cooling Delivered (W)", vec![-8_000.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![2.0]),
+                ("HVAC Cooling End Use Electric Power (kW)", vec![2.0]),
+                ("HVAC Cooling Delivered (W)", vec![-8_000.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2057,11 +2819,14 @@ mod tests {
     #[test]
     fn cop_none_when_no_electric_draw() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "HVAC Heating Delivered (W)"]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![0.0]),
-            ("HVAC Heating Delivered (W)", vec![5000.0]),
-        ]))
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![0.0]),
+                ("HVAC Heating Delivered (W)", vec![5000.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2074,13 +2839,16 @@ mod tests {
             TOTAL_ELECTRIC_POWER_KW,
             "Battery End Use Electric Power (kW)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // 10 kWh in, 9 kWh out → 90% round trip
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![10.0, -9.0]),
-            ("Battery End Use Electric Power (kW)", vec![10.0, -9.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![10.0, -9.0]),
+                ("Battery End Use Electric Power (kW)", vec![10.0, -9.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2099,14 +2867,17 @@ mod tests {
             "Forced Ventilation Heat Gain - Indoor (W)",
             "Natural Ventilation Heat Gain - Indoor (W)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // 500 W forced + 300 W natural = 800 W → 800 Wh → 0.8 kWh for 1 hour
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
-            ("Forced Ventilation Heat Gain - Indoor (W)", vec![500.0]),
-            ("Natural Ventilation Heat Gain - Indoor (W)", vec![300.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
+                ("Forced Ventilation Heat Gain - Indoor (W)", vec![500.0]),
+                ("Natural Ventilation Heat Gain - Indoor (W)", vec![300.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2137,22 +2908,25 @@ mod tests {
             "HVAC Heating Delivered (W)",
             "HVAC Cooling Delivered (W)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
-            ("Window Transmitted Solar Gain (W)", vec![1000.0]),
-            ("Opaque Surface Heat Gain - Indoor (W)", vec![200.0]),
-            ("Window Heat Gain - Indoor (W)", vec![150.0]),
-            ("Internal Mass Heat Gain - Indoor (W)", vec![25.0]),
-            ("Interior LWR Exchange - Indoor (W)", vec![50.0]),
-            ("Infiltration Heat Gain - Indoor (W)", vec![-100.0]),
-            ("Forced Ventilation Heat Gain - Indoor (W)", vec![-50.0]),
-            ("Internal Heat Gain - Indoor (W)", vec![300.0]),
-            ("Duct Loss Heat Gain - Indoor (W)", vec![75.0]),
-            ("HVAC Heating Delivered (W)", vec![5000.0]),
-            ("HVAC Cooling Delivered (W)", vec![-3000.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0]),
+                ("Window Transmitted Solar Gain (W)", vec![1000.0]),
+                ("Opaque Surface Heat Gain - Indoor (W)", vec![200.0]),
+                ("Window Heat Gain - Indoor (W)", vec![150.0]),
+                ("Internal Mass Heat Gain - Indoor (W)", vec![25.0]),
+                ("Interior LWR Exchange - Indoor (W)", vec![50.0]),
+                ("Infiltration Heat Gain - Indoor (W)", vec![-100.0]),
+                ("Forced Ventilation Heat Gain - Indoor (W)", vec![-50.0]),
+                ("Internal Heat Gain - Indoor (W)", vec![300.0]),
+                ("Duct Loss Heat Gain - Indoor (W)", vec![75.0]),
+                ("HVAC Heating Delivered (W)", vec![5000.0]),
+                ("HVAC Cooling Delivered (W)", vec![-3000.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
         let loads = metrics
@@ -2176,9 +2950,12 @@ mod tests {
     #[test]
     fn envelope_loads_none_without_any_envelope_columns() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0])]))
-            .unwrap();
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0])]),
+        )
+        .unwrap();
         let metrics = calc.finish().unwrap();
         assert!(metrics.metrics.envelope_loads_kwh.is_none());
     }
@@ -2198,7 +2975,7 @@ mod tests {
             "HVAC Heating End Use Electric Power (kW)",
             "Battery End Use Electric Power (kW)",
         ]);
-        let calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let calc = calc_for(&schema, 3600, &test_config(None));
         let metrics = calc.finish().unwrap();
 
         // energy_by_end_use should have "hvac_heating" and "battery" keys
@@ -2239,12 +3016,15 @@ mod tests {
             TOTAL_ELECTRIC_POWER_KW,
             "HVAC Heating End Use Electric Power (kW)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
         // Simulate two hours at constant 3 kW
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 3.0]),
-            ("HVAC Heating End Use Electric Power (kW)", vec![3.0, 3.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 3.0]),
+                ("HVAC Heating End Use Electric Power (kW)", vec![3.0, 3.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
         assert!(
@@ -2259,7 +3039,7 @@ mod tests {
 
     /// HVAC heating electric energy is populated when the aggregate column
     /// has positive values. Regression test for the hvac_heating_kw_idx
-    /// resolution and hvac_heating_electric_wh accumulation.
+    /// resolution and hvac_heating_electric_j accumulation.
     #[test]
     fn hvac_heating_electric_wh_populated_from_aggregate_column() {
         let schema = schema_from_columns(&[
@@ -2267,15 +3047,18 @@ mod tests {
             "HVAC Heating End Use Electric Power (kW)",
             "HVAC Heating Delivered (W)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 3.0]),
-            ("HVAC Heating End Use Electric Power (kW)", vec![2.0, 2.5]),
-            ("HVAC Heating Delivered (W)", vec![6000.0, 7000.0]),
-        ]))
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 3.0]),
+                ("HVAC Heating End Use Electric Power (kW)", vec![2.0, 2.5]),
+                ("HVAC Heating Delivered (W)", vec![6000.0, 7000.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
-        // hvac_heating_cop requires hvac_heating_electric_wh > 0
+        // hvac_heating_cop requires hvac_heating_electric_j > 0
         assert!(
             metrics.efficiency.hvac_heating_cop.is_some(),
             "hvac_heating_cop must be Some when HVAC Heating electric power > 0; \
@@ -2287,79 +3070,119 @@ mod tests {
         );
     }
 
-    // ── Equipment-count derivation from schema ─────────────────────────
+    // ── Equipment-count derivation from names ──────────────────────────
 
-    /// `schema_has_equipment_for` detects HVAC equipment columns in the
-    /// schema and correctly returns false when none are present.
+    fn names_of(schema: &Schema) -> Vec<String> {
+        schema.fields().iter().map(|f| f.name().clone()).collect()
+    }
+
+    /// `equipment_end_uses_have` detects HVAC equipment in the catalogue's
+    /// typed end-use table whose power column the producer surface
+    /// carries, and returns false when none is present.
     #[test]
-    fn schema_has_equipment_for_detects_hvac_columns() {
-        let hvac_schema = schema_from_columns(&[
+    fn equipment_end_uses_have_detects_hvac_columns() {
+        let hvac_names = names_of(&schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "ASHP Heater Electric Power (kW)",
             "HVAC Heating End Use Electric Power (kW)",
-        ]);
+        ]));
+        let hvac_table = vec![("ASHP Heater".to_string(), hares_types::EndUse::HVAC_HEATING)];
         assert!(
-            schema_has_equipment_for(&hvac_schema, &hares_types::EndUse::HVAC_HEATING),
+            equipment_end_uses_have(&hvac_table, &hvac_names, &hares_types::EndUse::HVAC_HEATING),
             "must detect ASHP Heater as HVAC_HEATING equipment"
         );
 
         // Battery is not HVAC.
-        let battery_schema = schema_from_columns(&[
+        let battery_names = names_of(&schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "Battery End Use Electric Power (kW)",
-        ]);
+        ]));
+        let battery_table = vec![("Battery".to_string(), hares_types::EndUse::BATTERY)];
         assert!(
-            !schema_has_equipment_for(&battery_schema, &hares_types::EndUse::HVAC_HEATING),
+            !equipment_end_uses_have(
+                &battery_table,
+                &battery_names,
+                &hares_types::EndUse::HVAC_HEATING
+            ),
             "must NOT detect Battery as HVAC_HEATING equipment"
         );
         assert!(
-            !schema_has_equipment_for(&battery_schema, &hares_types::EndUse::HVAC_COOLING),
+            !equipment_end_uses_have(
+                &battery_table,
+                &battery_names,
+                &hares_types::EndUse::HVAC_COOLING
+            ),
             "must NOT detect Battery as HVAC_COOLING equipment"
         );
 
-        // Empty schema has no equipment.
-        let empty = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        // An empty table has no equipment for any end use.
+        let empty: Vec<(String, hares_types::EndUse)> = Vec::new();
         assert!(
-            !schema_has_equipment_for(&empty, &hares_types::EndUse::HVAC_HEATING),
-            "empty schema must not report HVAC equipment"
+            !equipment_end_uses_have(&empty, &hvac_names, &hares_types::EndUse::HVAC_HEATING),
+            "an equipment-free table must not report HVAC equipment"
+        );
+
+        // A table entry whose power column the surface does not carry
+        // (the equipment did not reach the union schema) is not detected.
+        let absent_names = names_of(&schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]));
+        assert!(
+            !equipment_end_uses_have(
+                &hvac_table,
+                &absent_names,
+                &hares_types::EndUse::HVAC_HEATING
+            ),
+            "equipment whose power column the surface omits is not detected"
         );
     }
 
-    /// `schema_has_equipment_for` strips instance qualifiers (" #N") from
-    /// multi-instance equipment column names.
+    /// The typed table carries instance-qualified names as they are: the
+    /// instance-qualified columns are the equipment's own, with no name
+    /// prefix or qualifier ever parsed.
     #[test]
-    fn schema_has_equipment_for_strips_instance_qualifiers() {
-        let schema = schema_from_columns(&[
+    fn equipment_end_uses_have_detects_instance_qualified_equipment() {
+        let names = names_of(&schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "ASHP Heater #1 Electric Power (kW)",
             "ASHP Heater #2 Electric Power (kW)",
             "HVAC Heating End Use Electric Power (kW)",
-        ]);
+        ]));
+        let table = vec![
+            (
+                "ASHP Heater #1".to_string(),
+                hares_types::EndUse::HVAC_HEATING,
+            ),
+            (
+                "ASHP Heater #2".to_string(),
+                hares_types::EndUse::HVAC_HEATING,
+            ),
+        ];
         assert!(
-            schema_has_equipment_for(&schema, &hares_types::EndUse::HVAC_HEATING),
-            "must detect instance-qualified ASHP Heater columns as HVAC_HEATING"
+            equipment_end_uses_have(&table, &names, &hares_types::EndUse::HVAC_HEATING),
+            "must detect the instance-qualified ASHP Heater columns as HVAC_HEATING equipment"
         );
     }
 
-    /// `compute_equipment_counts_from_schema` counts per-equipment columns
-    /// grouped by EndUse category, skipping aggregate columns.
+    /// `compute_equipment_counts` counts the typed table's equipment whose
+    /// power column the producer surface carries, grouped by the declared
+    /// end use; the aggregate columns are nobody's equipment and nothing
+    /// is counted by a name string.
     #[test]
     #[cfg(feature = "observe")]
-    fn compute_equipment_counts_counts_equipment_excluding_aggregates() {
-        // Schema with 2 HVAC_HEATING equipment, 1 BATTERY equipment, and
-        // end-use aggregate columns ("{Display} End Use Electric Power (kW)").
-        // "Battery" is both an equipment name and an EndUse display name, so
-        // the battery aggregate exercises the case where an aggregate prefix
-        // could be mistaken for an equipment instance.
-        let schema = schema_from_columns(&[
+    fn compute_equipment_counts_counts_declared_equipment() {
+        let names = names_of(&schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "ASHP Heater Electric Power (kW)",
             "Gas Furnace Electric Power (kW)",
             "Battery Electric Power (kW)",
             "HVAC Heating End Use Electric Power (kW)",
             "Battery End Use Electric Power (kW)",
-        ]);
-        let counts = compute_equipment_counts_from_schema(&schema);
+        ]));
+        let table = vec![
+            ("ASHP Heater".to_string(), hares_types::EndUse::HVAC_HEATING),
+            ("Gas Furnace".to_string(), hares_types::EndUse::HVAC_HEATING),
+            ("Battery".to_string(), hares_types::EndUse::BATTERY),
+        ];
+        let counts = compute_equipment_counts(&table, &names);
         assert_eq!(
             counts.get("hvac_heating"),
             Some(&2),
@@ -2368,33 +3191,37 @@ mod tests {
         assert_eq!(
             counts.get("battery"),
             Some(&1),
-            "must count 1 Battery equipment; the Battery aggregate column must not be counted"
+            "must count 1 Battery equipment; the Battery aggregate column is nobody's equipment"
         );
-        // Aggregate columns (e.g. "HVAC Heating") must not be counted.
+        // Nothing is counted by its name string: the aggregate columns
+        // ("HVAC Heating", "Battery" prefixes) contribute no counts, and
+        // no OTHER bucket appears.
         assert!(
             !counts.contains_key("other"),
-            "aggregate columns must not be counted as OTHER: got keys {:?}",
+            "no name string may classify into OTHER: got keys {:?}",
             counts.keys().collect::<Vec<_>>()
         );
     }
 
-    /// `MetricsCalculator::new` populates `end_use_equipment_counts` from
-    /// the schema so observer diagnostics report non-zero equipment counts.
+    /// `MetricsInputPlan::build` populates `end_use_equipment_counts` from
+    /// the typed table so observer diagnostics report non-zero equipment
+    /// counts.
     #[test]
     #[cfg(feature = "observe")]
-    fn metrics_calculator_new_populates_equipment_counts() {
+    fn metrics_plan_build_populates_equipment_counts() {
         let schema = schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "ASHP Heater Electric Power (kW)",
             "HVAC Heating End Use Electric Power (kW)",
         ]);
-        let calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let table = vec![("ASHP Heater".to_string(), hares_types::EndUse::HVAC_HEATING)];
+        let plan = plan_for_with_equipment(&schema, &test_config(None), &table);
         assert!(
-            !calc.end_use_equipment_counts.is_empty(),
-            "end_use_equipment_counts must be populated from schema"
+            !plan.end_use_equipment_counts.is_empty(),
+            "end_use_equipment_counts must be populated from the typed table"
         );
         assert_eq!(
-            calc.end_use_equipment_counts.get("hvac_heating"),
+            plan.end_use_equipment_counts.get("hvac_heating"),
             Some(&1),
             "must count 1 HVAC_HEATING equipment"
         );
@@ -2403,29 +3230,28 @@ mod tests {
     // ── Non-finite value tests ─────────────────────────────────────
 
     #[test]
-    fn value_at_returns_none_for_non_finite() {
-        let arr = Float64Array::from(vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY]);
-        assert_eq!(value_at(&arr, 0), None);
-        assert_eq!(value_at(&arr, 1), None);
-        assert_eq!(value_at(&arr, 2), None);
+    fn value_at_slot_returns_none_for_non_finite() {
+        let row = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        assert_eq!(value_at_slot(&row, 0), None);
+        assert_eq!(value_at_slot(&row, 1), None);
+        assert_eq!(value_at_slot(&row, 2), None);
     }
 
     #[test]
-    fn value_at_returns_value_for_normal_finite_value() {
-        let arr = Float64Array::from(vec![42.0]);
-        assert_eq!(value_at(&arr, 0), Some(42.0));
+    fn value_at_slot_returns_value_for_normal_finite_value() {
+        assert_eq!(value_at_slot(&[42.0], 0), Some(42.0));
     }
 
     #[test]
     fn accumulate_ignores_nan_timestep() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // Row 0: NaN → skipped. Rows 1-2: valid → accumulated.
-        calc.accumulate(&build_batch(vec![(
-            TOTAL_ELECTRIC_POWER_KW,
-            vec![f64::NAN, 1.0, 3.0],
-        )]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 1.0, 3.0])]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2458,14 +3284,17 @@ mod tests {
             "HVAC Heating Delivered (W)",
             "HVAC Cooling Delivered (W)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // NaN in total electric power; HVAC columns are valid.
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 1.0]),
-            ("HVAC Heating Delivered (W)", vec![5000.0, 5000.0]),
-            ("HVAC Cooling Delivered (W)", vec![-3000.0, -3000.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 1.0]),
+                ("HVAC Heating Delivered (W)", vec![5000.0, 5000.0]),
+                ("HVAC Cooling Delivered (W)", vec![-3000.0, -3000.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2501,22 +3330,25 @@ mod tests {
             "HVAC Heating End Use Electric Power (kW)",
             "Battery End Use Electric Power (kW)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // Row 0: NaN in total, valid elsewhere
         // Row 1: all valid
         // Row 2: NaN in battery, valid elsewhere
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 2.0, 2.0]),
-            (
-                "HVAC Heating End Use Electric Power (kW)",
-                vec![1.0, 1.0, 1.0],
-            ),
-            (
-                "Battery End Use Electric Power (kW)",
-                vec![1.0, 1.0, f64::NAN],
-            ),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![f64::NAN, 2.0, 2.0]),
+                (
+                    "HVAC Heating End Use Electric Power (kW)",
+                    vec![1.0, 1.0, 1.0],
+                ),
+                (
+                    "Battery End Use Electric Power (kW)",
+                    vec![1.0, 1.0, f64::NAN],
+                ),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2549,19 +3381,22 @@ mod tests {
             TOTAL_ELECTRIC_POWER_KW,
             "HVAC Cooling End Use Electric Power (kW)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // Three rows: +Inf, valid, -Inf
-        calc.accumulate(&build_batch(vec![
-            (
-                TOTAL_ELECTRIC_POWER_KW,
-                vec![f64::INFINITY, 5.0, f64::NEG_INFINITY],
-            ),
-            (
-                "HVAC Cooling End Use Electric Power (kW)",
-                vec![2.0, 2.0, 2.0],
-            ),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (
+                    TOTAL_ELECTRIC_POWER_KW,
+                    vec![f64::INFINITY, 5.0, f64::NEG_INFINITY],
+                ),
+                (
+                    "HVAC Cooling End Use Electric Power (kW)",
+                    vec![2.0, 2.0, 2.0],
+                ),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2590,19 +3425,22 @@ mod tests {
             TOTAL_ELECTRIC_POWER_KW,
             "HVAC Heating End Use Electric Power (kW)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // Mixed: some finite, some NaN, some Inf
-        calc.accumulate(&build_batch(vec![
-            (
-                TOTAL_ELECTRIC_POWER_KW,
-                vec![10.0, f64::NAN, 20.0, f64::INFINITY, 30.0],
-            ),
-            (
-                "HVAC Heating End Use Electric Power (kW)",
-                vec![5.0, 5.0, f64::NAN, 5.0, 5.0],
-            ),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (
+                    TOTAL_ELECTRIC_POWER_KW,
+                    vec![10.0, f64::NAN, 20.0, f64::INFINITY, 30.0],
+                ),
+                (
+                    "HVAC Heating End Use Electric Power (kW)",
+                    vec![5.0, 5.0, f64::NAN, 5.0, 5.0],
+                ),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2632,11 +3470,11 @@ mod tests {
     #[test]
     fn all_finite_values_produces_reliable_metrics() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
-        calc.accumulate(&build_batch(vec![(
-            TOTAL_ELECTRIC_POWER_KW,
-            vec![1.0, 2.0, 3.0],
-        )]))
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
+        accumulate(
+            &mut calc,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0, 2.0, 3.0])]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2645,27 +3483,14 @@ mod tests {
         assert!(metrics.metrics_reliability.is_reliable());
     }
 
-    // ── Nullable-setpoint regression tests ──────────────────────────────
-    // These tests verify that missing setpoint values only skip
-    // comfort/unmet calculations, not envelope/HVAC/battery accumulation.
-    // See: docs/reviews/output/output-03-output-metrics-computation.md
-    // Finding 2.
-
-    fn build_nullable_batch(columns: Vec<(&str, Vec<Option<f64>>)>) -> RecordBatch {
-        let fields = columns
-            .iter()
-            .map(|(name, _)| Field::new(*name, DataType::Float64, true))
-            .collect::<Vec<_>>();
-        let arrays: Vec<ArrayRef> = columns
-            .into_iter()
-            .map(|(_, values)| Arc::new(Float64Array::from(values)) as ArrayRef)
-            .collect();
-        let schema = Arc::new(Schema::new(fields));
-        RecordBatch::try_new(schema, arrays).expect("record batch")
-    }
+    // ── Non-finite-setpoint regression tests ────────────────────────────
+    // These tests pin the contract that a missing setpoint value (a
+    // non-finite reading in the producer row) skips only the comfort and
+    // unmet-hours accumulation, not the envelope, HVAC or battery
+    // accumulation.
 
     #[test]
-    fn envelope_loads_accumulate_when_heating_setpoint_is_null() {
+    fn envelope_loads_accumulate_when_heating_setpoint_is_non_finite() {
         let schema = schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "Window Transmitted Solar Gain (W)",
@@ -2675,27 +3500,24 @@ mod tests {
             "HVAC Cooling Setpoint (C)",
             "Setpoint Deadband (C)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
-        // Row 0: heating setpoint is None → comfort/unmet skipped,
+        // Row 0: heating setpoint is non-finite → comfort/unmet skipped,
         //         envelope still accumulates.
         // Row 1: valid setpoints → comfort counted, envelope accumulates.
-        calc.accumulate(&build_nullable_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![Some(1.0), Some(1.0)]),
-            (
-                "Window Transmitted Solar Gain (W)",
-                vec![Some(1000.0), Some(500.0)],
-            ),
-            (
-                "Infiltration Heat Gain - Indoor (W)",
-                vec![Some(200.0), Some(300.0)],
-            ),
-            ("Temperature - Indoor (C)", vec![Some(21.5), Some(21.5)]),
-            // Row 0 heating setpoint = null
-            ("HVAC Heating Setpoint (C)", vec![None, Some(21.0)]),
-            ("HVAC Cooling Setpoint (C)", vec![Some(23.0), Some(23.0)]),
-            ("Setpoint Deadband (C)", vec![Some(1.0), Some(1.0)]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0]),
+                ("Window Transmitted Solar Gain (W)", vec![1000.0, 500.0]),
+                ("Infiltration Heat Gain - Indoor (W)", vec![200.0, 300.0]),
+                ("Temperature - Indoor (C)", vec![21.5, 21.5]),
+                // Row 0 heating setpoint = NaN
+                ("HVAC Heating Setpoint (C)", vec![f64::NAN, 21.0]),
+                ("HVAC Cooling Setpoint (C)", vec![23.0, 23.0]),
+                ("Setpoint Deadband (C)", vec![1.0, 1.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2734,7 +3556,7 @@ mod tests {
     }
 
     #[test]
-    fn hvac_thermal_accumulates_when_cooling_setpoint_is_null() {
+    fn hvac_thermal_accumulates_when_cooling_setpoint_is_non_finite() {
         let schema = schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "HVAC Heating Delivered (W)",
@@ -2743,26 +3565,23 @@ mod tests {
             "HVAC Heating Setpoint (C)",
             "HVAC Cooling Setpoint (C)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(Some(1.0)));
 
-        // Row 0: cooling setpoint is None → comfort/unmet skipped,
+        // Row 0: cooling setpoint is non-finite → comfort/unmet skipped,
         //         HVAC thermal delivered still accumulates.
         // Row 1: valid setpoints → comfort counted, accumulates.
-        calc.accumulate(&build_nullable_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![Some(1.0), Some(1.0)]),
-            (
-                "HVAC Heating Delivered (W)",
-                vec![Some(4000.0), Some(3000.0)],
-            ),
-            (
-                "HVAC Cooling Delivered (W)",
-                vec![Some(-2000.0), Some(-1000.0)],
-            ),
-            ("Temperature - Indoor (C)", vec![Some(21.5), Some(21.5)]),
-            ("HVAC Heating Setpoint (C)", vec![Some(21.0), Some(21.0)]),
-            // Row 0 cooling setpoint = null
-            ("HVAC Cooling Setpoint (C)", vec![None, Some(23.0)]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0]),
+                ("HVAC Heating Delivered (W)", vec![4000.0, 3000.0]),
+                ("HVAC Cooling Delivered (W)", vec![-2000.0, -1000.0]),
+                ("Temperature - Indoor (C)", vec![21.5, 21.5]),
+                ("HVAC Heating Setpoint (C)", vec![21.0, 21.0]),
+                // Row 0 cooling setpoint = NaN
+                ("HVAC Cooling Setpoint (C)", vec![f64::NAN, 23.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2796,7 +3615,7 @@ mod tests {
     }
 
     #[test]
-    fn battery_energy_accumulates_when_setpoints_are_null() {
+    fn battery_energy_accumulates_when_setpoints_are_non_finite() {
         let schema = schema_from_columns(&[
             TOTAL_ELECTRIC_POWER_KW,
             "Battery End Use Electric Power (kW)",
@@ -2804,22 +3623,22 @@ mod tests {
             "HVAC Heating Setpoint (C)",
             "HVAC Cooling Setpoint (C)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(Some(1.0))).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(Some(1.0)));
 
-        // Row 0: both setpoints are None → comfort/unmet skipped,
+        // Row 0: both setpoints are non-finite → comfort/unmet skipped,
         //         battery energy still accumulated.
         // Row 1: valid setpoints → comfort counted, battery accumulates.
-        calc.accumulate(&build_nullable_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![Some(10.0), Some(5.0)]),
-            (
-                "Battery End Use Electric Power (kW)",
-                vec![Some(10.0), Some(-5.0)],
-            ),
-            ("Temperature - Indoor (C)", vec![Some(21.5), Some(21.5)]),
-            // Both setpoints null for row 0
-            ("HVAC Heating Setpoint (C)", vec![None, Some(21.0)]),
-            ("HVAC Cooling Setpoint (C)", vec![None, Some(23.0)]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![10.0, 5.0]),
+                ("Battery End Use Electric Power (kW)", vec![10.0, -5.0]),
+                ("Temperature - Indoor (C)", vec![21.5, 21.5]),
+                // Both setpoints NaN for row 0
+                ("HVAC Heating Setpoint (C)", vec![f64::NAN, 21.0]),
+                ("HVAC Cooling Setpoint (C)", vec![f64::NAN, 23.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2856,27 +3675,24 @@ mod tests {
             "HVAC Cooling Setpoint (C)",
             "Setpoint Deadband (C)",
         ]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // Row 0: deadband is negative → invalid, comfort/unmet skipped,
         //         envelope and HVAC thermal still accumulate.
         // Row 1: deadband = 0.0 → valid (zero deadband), comfort counted.
-        calc.accumulate(&build_nullable_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![Some(1.0), Some(1.0)]),
-            (
-                "Window Transmitted Solar Gain (W)",
-                vec![Some(800.0), Some(400.0)],
-            ),
-            (
-                "HVAC Heating Delivered (W)",
-                vec![Some(2000.0), Some(1000.0)],
-            ),
-            ("Temperature - Indoor (C)", vec![Some(21.5), Some(21.5)]),
-            ("HVAC Heating Setpoint (C)", vec![Some(21.0), Some(21.0)]),
-            ("HVAC Cooling Setpoint (C)", vec![Some(23.0), Some(23.0)]),
-            // Row 0: negative deadband (invalid); Row 1: zero (valid)
-            ("Setpoint Deadband (C)", vec![Some(-1.0), Some(0.0)]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0]),
+                ("Window Transmitted Solar Gain (W)", vec![800.0, 400.0]),
+                ("HVAC Heating Delivered (W)", vec![2000.0, 1000.0]),
+                ("Temperature - Indoor (C)", vec![21.5, 21.5]),
+                ("HVAC Heating Setpoint (C)", vec![21.0, 21.0]),
+                ("HVAC Cooling Setpoint (C)", vec![23.0, 23.0]),
+                // Row 0: negative deadband (invalid); Row 1: zero (valid)
+                ("Setpoint Deadband (C)", vec![-1.0, 0.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -2920,14 +3736,14 @@ mod tests {
             "HVAC Heating End Use Electric Power (kW)",
         ]);
         let config = test_config_full_year(2024, None);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+        let mut calc = calc_for(&schema, 3600, &config);
 
         let rows = 8_784;
         let batch = build_batch(vec![
             (TOTAL_ELECTRIC_POWER_KW, vec![1.0; rows]),
             ("HVAC Heating End Use Electric Power (kW)", vec![1.0; rows]),
         ]);
-        calc.accumulate(&batch).unwrap();
+        accumulate(&mut calc, &batch).unwrap();
         let metrics = calc.finish().unwrap();
 
         // Normalized total should be 8760 kWh (not 8784).
@@ -2954,12 +3770,12 @@ mod tests {
     fn partial_year_is_reported_as_partial_coverage() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
         let config = test_config_full_year(2026, None);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+        let mut calc = calc_for(&schema, 3600, &config);
 
         // 4380 hours = half a year.
         let rows = 4_380;
         let batch = build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0; rows])]);
-        calc.accumulate(&batch).unwrap();
+        accumulate(&mut calc, &batch).unwrap();
         let metrics = calc.finish().unwrap();
 
         assert_eq!(metrics.coverage, SimulationCoverage::PartialYear);
@@ -2971,12 +3787,12 @@ mod tests {
     fn multi_year_is_reported_as_multi_coverage() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
         let config = test_config_full_year(2026, None);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+        let mut calc = calc_for(&schema, 3600, &config);
 
         // 17520 hours = 2 years.
         let rows = 17_520;
         let batch = build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0; rows])]);
-        calc.accumulate(&batch).unwrap();
+        accumulate(&mut calc, &batch).unwrap();
         let metrics = calc.finish().unwrap();
 
         assert_eq!(metrics.coverage, SimulationCoverage::MultiYear);
@@ -2992,7 +3808,7 @@ mod tests {
         // consistent time base.
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, TOTAL_GAS_POWER_THERMS]);
         let config = test_config_full_year(2024, None); // 2024 = leap year
-        let mut calc = MetricsCalculator::new(&schema, 3600, &config).expect("new");
+        let mut calc = calc_for(&schema, 3600, &config);
 
         let rows = 8_784;
         let batch = build_batch(vec![
@@ -3001,7 +3817,7 @@ mod tests {
             // normalized (× 8760/8784) → 8760 therms.
             (TOTAL_GAS_POWER_THERMS, vec![1.0; rows]),
         ]);
-        calc.accumulate(&batch).unwrap();
+        accumulate(&mut calc, &batch).unwrap();
         let metrics = calc.finish().unwrap();
 
         assert_eq!(metrics.coverage, SimulationCoverage::LeapYear);
@@ -3017,12 +3833,18 @@ mod tests {
             gas.total_therms
         );
         assert!(
-            (gas.total_kwh_equivalent - energy_therms_to_kwh(8_760.0)).abs() < 1e-3,
+            (gas.total_kwh_equivalent
+                - Energy::new::<hares_types::si_units::energy::therm>(8_760.0)
+                    .get::<kilowatt_hour_marker>())
+            .abs()
+                < 1e-3,
             "leap-year gas kwh equivalent should be normalized to 8760 therms"
         );
 
-        // Combined total: 8760 (electric) + energy_therms_to_kwh(8760) (gas)
-        let expected_combined = 8_760.0 + energy_therms_to_kwh(8_760.0);
+        // Combined total: 8760 (electric) + the 8760 therms in kWh (gas).
+        let expected_combined = 8_760.0
+            + Energy::new::<hares_types::si_units::energy::therm>(8_760.0)
+                .get::<kilowatt_hour_marker>();
         assert!(
             (metrics.combined_total_energy_kwh() - expected_combined).abs() < 1e-3,
             "combined_total_energy_kwh should sum normalized electric and gas"
@@ -3035,13 +3857,16 @@ mod tests {
     fn finish_separates_net_consumption_and_pv_generation() {
         let schema =
             schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // Mixed-sign power: 3 kW import, 2 kW import, -1 kW export (PV generation)
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 2.0, -1.0]),
-            ("PV End Use Electric Power (kW)", vec![0.0, 0.0, -1.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![3.0, 2.0, -1.0]),
+                ("PV End Use Electric Power (kW)", vec![0.0, 0.0, -1.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -3071,13 +3896,16 @@ mod tests {
         // must report gross_consumption > 0, gross_pv > 0, net ≈ 0
         let schema =
             schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
         // 5 kWh imported, 5 kWh exported via PV → net ≈ 0
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![5.0, -5.0]),
-            ("PV End Use Electric Power (kW)", vec![0.0, -5.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![5.0, -5.0]),
+                ("PV End Use Electric Power (kW)", vec![0.0, -5.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -3106,12 +3934,15 @@ mod tests {
         // All PV generation, no import → net is negative, gross_consumption = 0
         let schema =
             schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, "PV End Use Electric Power (kW)"]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![-1.0, -2.0]),
-            ("PV End Use Electric Power (kW)", vec![-1.0, -2.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![-1.0, -2.0]),
+                ("PV End Use Electric Power (kW)", vec![-1.0, -2.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
@@ -3136,20 +3967,247 @@ mod tests {
     #[test]
     fn combined_total_energy_kwh_includes_gas_when_present() {
         let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW, TOTAL_GAS_POWER_THERMS]);
-        let mut calc = MetricsCalculator::new(&schema, 3600, &test_config(None)).expect("new");
+        let mut calc = calc_for(&schema, 3600, &test_config(None));
 
-        calc.accumulate(&build_batch(vec![
-            (TOTAL_ELECTRIC_POWER_KW, vec![10.0]),
-            (TOTAL_GAS_POWER_THERMS, vec![5.0]),
-        ]))
+        accumulate(
+            &mut calc,
+            &build_batch(vec![
+                (TOTAL_ELECTRIC_POWER_KW, vec![10.0]),
+                (TOTAL_GAS_POWER_THERMS, vec![5.0]),
+            ]),
+        )
         .unwrap();
         let metrics = calc.finish().unwrap();
 
-        let expected = 10.0 + energy_therms_to_kwh(5.0);
+        let expected = 10.0
+            + Energy::new::<hares_types::si_units::energy::therm>(5.0)
+                .get::<kilowatt_hour_marker>();
         assert!(
             (metrics.combined_total_energy_kwh() - expected).abs() < 1e-6,
             "combined should be {expected}, got {}",
             metrics.combined_total_energy_kwh()
+        );
+    }
+
+    /// A metrics accumulator snapshot applied to a fresh calculator
+    /// continues the run bitwise: the fresh calculator feeds the same
+    /// post-snapshot rows as the original and both finish to metrics every
+    /// float of which carries the same bits.
+    #[test]
+    fn metrics_snapshot_restores_a_continuing_calculator_bitwise() {
+        let schema = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            TOTAL_GAS_POWER_THERMS,
+            "HVAC Heating End Use Electric Power (kW)",
+            "Temperature - Indoor (C)",
+        ]);
+        let config = test_config(None);
+        let mut continuous = calc_for(&schema, 900, &config);
+        let mut interrupted = calc_for(&schema, 900, &config);
+
+        let pre = build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![1.5, 2.5, 3.5, 0.25]),
+            (TOTAL_GAS_POWER_THERMS, vec![0.5, 0.5, 0.75, 0.0]),
+            (
+                "HVAC Heating End Use Electric Power (kW)",
+                vec![0.8, 1.2, 0.0, 0.0],
+            ),
+            ("Temperature - Indoor (C)", vec![21.0, 22.5, 19.0, 23.0]),
+        ]);
+        accumulate(&mut continuous, &pre).expect("feed");
+        accumulate(&mut interrupted, &pre).expect("feed");
+
+        // The checkpoint: the snapshot crosses JSON, the checkpoint's own
+        // encoding.
+        let snapshot = continuous.snapshot();
+        let json = serde_json::to_string(&snapshot).expect("serialize the snapshot");
+        let decoded: MetricsSnapshot = serde_json::from_str(&json).expect("decode the snapshot");
+        interrupted
+            .apply_snapshot(&decoded)
+            .expect("the snapshot applies");
+
+        let post = build_batch(vec![
+            (TOTAL_ELECTRIC_POWER_KW, vec![4.5, 5.5, 0.5, 2.05]),
+            (TOTAL_GAS_POWER_THERMS, vec![1.25, 0.0, 0.0, 0.5]),
+            (
+                "HVAC Heating End Use Electric Power (kW)",
+                vec![1.4, 1.6, 0.0, 0.2],
+            ),
+            ("Temperature - Indoor (C)", vec![20.0, 21.5, 22.0, 20.5]),
+        ]);
+        accumulate(&mut continuous, &post).expect("feed");
+        accumulate(&mut interrupted, &post).expect("feed");
+
+        let a = continuous.finish().expect("finish");
+        let b = interrupted.finish().expect("finish");
+        let bits = |m: &FullSimulationMetrics| {
+            serde_json::to_string(m).expect("the metrics encode (equal bits, equal bytes)")
+        };
+        assert_eq!(
+            bits(&a),
+            bits(&b),
+            "the resumed accumulator's metrics are bitwise the continuous run's"
+        );
+    }
+
+    /// A snapshot whose input plan was built against a different producer
+    /// surface is refused, naming the section.
+    #[test]
+    fn metrics_snapshot_rejects_a_foreign_plan() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        let mut calc = calc_for(&schema, 900, &config);
+        accumulate(
+            &mut calc,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![2.0])]),
+        )
+        .unwrap();
+        let snapshot = calc.snapshot();
+
+        let wide = schema_from_columns(&[
+            TOTAL_ELECTRIC_POWER_KW,
+            "HVAC Heating End Use Electric Power (kW)",
+        ]);
+        let mut other = calc_for(&wide, 900, &config);
+        let err = other
+            .apply_snapshot(&snapshot)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("metrics snapshot") && err.contains("input plan"),
+            "the refusal names the metrics section and its plan: {err}"
+        );
+    }
+
+    /// The rolling peak's window state (the ring buffer's position and
+    /// contents, the running peaks) restores, so a resumed run's 15/30/60
+    /// minute peaks are the continuous run's.
+    #[test]
+    fn metrics_snapshot_carries_the_rolling_peak_window() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        // 900 s steps: the 15-minute window holds 4 readings.
+        let mut continuous = calc_for(&schema, 900, &config);
+        let mut resumed = calc_for(&schema, 900, &config);
+
+        let pre = build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![3.0, 4.0, 5.0])]);
+        accumulate(&mut continuous, &pre).unwrap();
+        accumulate(&mut resumed, &pre).unwrap();
+
+        resumed
+            .apply_snapshot(&continuous.snapshot())
+            .expect("the snapshot applies");
+
+        let post = build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![1.0, 1.0, 2.0])]);
+        accumulate(&mut continuous, &post).unwrap();
+        accumulate(&mut resumed, &post).unwrap();
+
+        let a = continuous.finish().unwrap().metrics.peak_power_kw;
+        let b = resumed.finish().unwrap().metrics.peak_power_kw;
+        assert_eq!(
+            a.rolling.peak_15min_kw.to_bits(),
+            b.rolling.peak_15min_kw.to_bits(),
+            "the 15-minute rolling peak is bitwise the continuous run's"
+        );
+        assert_eq!(
+            a.rolling.peak_30min_kw.to_bits(),
+            b.rolling.peak_30min_kw.to_bits()
+        );
+        assert_eq!(
+            a.rolling.peak_60min_kw.to_bits(),
+            b.rolling.peak_60min_kw.to_bits()
+        );
+    }
+
+    /// A snapshot whose ring does not fit the receiver's resolution is
+    /// refused by the typed error naming both lengths, in debug and
+    /// release alike (a silent skip would leave the resumed run's rolling
+    /// peaks zeroed). The resolutions here agree: the ring check is the
+    /// restore's own backstop behind the resolution gate.
+    #[test]
+    fn metrics_snapshot_rejects_a_ring_that_does_not_fit() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        let mut source = calc_for(&schema, 900, &config);
+        accumulate(
+            &mut source,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![5.0])]),
+        )
+        .unwrap();
+        let mut snapshot = source.snapshot();
+        // A ring one reading longer than the 900 s resolution's 4: the
+        // resolution gate passes it, the ring's own check refuses.
+        snapshot.accumulators.rolling_peak.buffer.push(0.0);
+
+        let mut target = calc_for(&schema, 900, &config);
+        let err = target
+            .apply_snapshot(&snapshot)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("rolling peak ring")
+                && err.contains("holds 5 readings")
+                && err.contains("needs 4"),
+            "the refusal is the typed snapshot error naming both ring \
+             lengths: {err}"
+        );
+    }
+
+    /// A snapshot written at another time resolution is refused, naming
+    /// both resolutions: the input plan is resolution-free, so the
+    /// refusal is the carried resolution itself.
+    #[test]
+    fn metrics_snapshot_rejects_a_foreign_time_resolution_by_name() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        let mut source = calc_for(&schema, 900, &config);
+        accumulate(
+            &mut source,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![5.0])]),
+        )
+        .unwrap();
+        let snapshot = source.snapshot();
+
+        let mut target = calc_for(&schema, 300, &config);
+        let err = target
+            .apply_snapshot(&snapshot)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("time resolution 900 s") && err.contains("is 300 s"),
+            "the refusal names both resolutions: {err}"
+        );
+    }
+
+    /// Two resolutions whose rings collide (900 s and 1000 s both fill a
+    /// 4-reading ring) are still distinct: the snapshot carries the time
+    /// resolution and the restore refuses the other one, ring equality
+    /// notwithstanding (a blended ring would mix readings taken at
+    /// different intervals into the same windows).
+    #[test]
+    fn metrics_snapshot_rejects_a_resolution_its_ring_collides_with() {
+        let schema = schema_from_columns(&[TOTAL_ELECTRIC_POWER_KW]);
+        let config = test_config(None);
+        let mut source = calc_for(&schema, 900, &config);
+        accumulate(
+            &mut source,
+            &build_batch(vec![(TOTAL_ELECTRIC_POWER_KW, vec![5.0])]),
+        )
+        .unwrap();
+        let snapshot = source.snapshot();
+
+        let mut target = calc_for(&schema, 1000, &config);
+        let err = target
+            .apply_snapshot(&snapshot)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("time resolution 900 s") && err.contains("is 1000 s"),
+            "the refusal names both resolutions: {err}"
         );
     }
 }

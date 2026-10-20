@@ -55,7 +55,7 @@ impl ChargingPreference for SocGate {
             let gap = (self.target_soc - ctx.current_soc).max(0.0);
             PreferenceVote {
                 target_soc: Some(self.target_soc),
-                power_kw: None,
+                power_w: None,
                 departure_hour: None,
                 min_soc: None,
                 max_soc: None,
@@ -97,9 +97,9 @@ mod tests {
     fn make_ctx(env: &hares_types::EnvironmentState, soc: f64) -> DecisionContext<'_> {
         DecisionContext {
             current_soc: soc,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            max_discharge_kw: 5.0,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            max_discharge_w: 5000.0,
             env,
             current_minute: 720,
             next_departure_minute: None,
@@ -122,7 +122,7 @@ mod tests {
 
         match pref.constraint(&ctx) {
             Constraint::Override(vote) => {
-                assert!(vote.power_kw.is_none());
+                assert!(vote.power_w.is_none());
                 assert_eq!(vote.label, "soc_gate:above_upper_threshold");
             }
             Constraint::Inactive => panic!("expected Override"),
@@ -160,7 +160,7 @@ mod tests {
         let vote = pref.score(&ctx);
         assert_eq!(vote.label, "soc_gate:idle");
         assert!(vote.score.abs() < 1e-9);
-        assert!(vote.power_kw.is_none());
+        assert!(vote.power_w.is_none());
     }
 
     #[test]
@@ -313,10 +313,11 @@ mod tests {
             charging_allowed: false,
         };
 
-        // SOC 0.75, target 0.8: gap 0.05 on 60 kWh = 3 kWh;
-        // 3 / (7.2 * 0.9) h, rounded up to whole 1-minute steps.
+        // SOC 0.75, target 0.8: gap 0.05 on 60 kWh = 3 kWh = 1.08e7 J;
+        // 1.08e7 / (7200 * 0.9) s → hours, rounded up to whole 1-minute
+        // steps.
         let ctx = make_ctx(&env, 0.75);
-        let raw: f64 = 3.0 / (7.2 * 0.9);
+        let raw: f64 = 1.08e7 / (7200.0 * 0.9) / 3600.0;
         let step_hours: f64 = 1.0 / 60.0;
         let expected = (raw / step_hours).ceil() * step_hours;
         let hours = pref.needed_charge_hours(&ctx).unwrap();

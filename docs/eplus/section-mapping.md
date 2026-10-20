@@ -22,16 +22,6 @@ version (see `docs/development.md` for the version policy).
 
 > EnergyPlus Engineering Reference §3.5
 
-## Legacy § references in historical documents
-
-Historical HARES documents under `docs/tickets/`, `docs/reviews/`, and
-`docs/findings/` may contain EnergyPlus § references that were used
-before the version policy was established. These section numbers are
-**preserved for provenance** in those documents but should not be used
-as citations in new code, comments, or documentation.
-
----
-
 ## Mapping Table
 
 | Legacy § Ref | Common Topic | Correct E+ 26.1 Citation |

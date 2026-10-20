@@ -1,7 +1,7 @@
 """Tests for Python enum and bitflag bindings."""
 
 import pytest
-from ochre_next import (
+from hares import (
     EndUse,
     FuelType,
     OperatingMode,
@@ -11,7 +11,6 @@ from ochre_next import (
     InverterPriority,
     DutyCycleComponent,
     SimStatus,
-    AggregationResolution,
     ResStockVersion,
     ControlCapabilities,
     LutType,
@@ -239,18 +238,6 @@ class TestSimStatus:
             SimStatus.from_str("Invalid")
 
 
-class TestAggregationResolution:
-    def test_variants_accessible(self):
-        assert AggregationResolution.FifteenMin is not None
-        assert AggregationResolution.Hourly is not None
-
-    def test_from_str_round_trip(self):
-        assert (
-            AggregationResolution.from_str("15min") == AggregationResolution.FifteenMin
-        )
-        assert AggregationResolution.from_str("hourly") == AggregationResolution.Hourly
-
-
 class TestResStockVersion:
     def test_variants_accessible(self):
         assert ResStockVersion.V2024_1 is not None
@@ -428,8 +415,8 @@ class TestChargingStrategy:
             ChargingStrategy.pre_departure(0.95),
             ChargingStrategy.tou_aware(0.85),
             ChargingStrategy.v2h(0.8, 0.2),
-            ChargingStrategy.v2g(0.2, 7.6, 0.15),
-            ChargingStrategy.solar_surplus(1.4),
+            ChargingStrategy.v2g(min_soc=0.2, max_export_w=7600.0, price_threshold=0.15),
+            ChargingStrategy.solar_surplus(min_charge_rate_w=1400.0),
         ]
         for i, a in enumerate(strategies):
             for j, b in enumerate(strategies):
@@ -469,29 +456,29 @@ class TestChargingStrategy:
             ChargingStrategy.v2h(0.2, 0.8)
 
     def test_v2g_construction(self):
-        s = ChargingStrategy.v2g(0.2, 7.6, 0.15)
+        s = ChargingStrategy.v2g(min_soc=0.2, max_export_w=7600.0, price_threshold=0.15)
         assert "V2G" in str(s)
 
     def test_v2g_accepts_negative_price(self):
-        s = ChargingStrategy.v2g(0.2, 7.0, -0.05)
+        s = ChargingStrategy.v2g(min_soc=0.2, max_export_w=7000.0, price_threshold=-0.05)
         assert "V2G" in str(s)
 
     def test_v2g_rejects_invalid_kw(self):
         with pytest.raises(ValueError):
-            ChargingStrategy.v2g(0.2, -1.0, 0.15)
+            ChargingStrategy.v2g(min_soc=0.2, max_export_w=-1000.0, price_threshold=0.15)
         with pytest.raises(ValueError):
-            ChargingStrategy.v2g(0.2, float("nan"), 0.15)
+            ChargingStrategy.v2g(min_soc=0.2, max_export_w=float("nan"), price_threshold=0.15)
 
     def test_v2g_rejects_nan_price(self):
         with pytest.raises(ValueError):
-            ChargingStrategy.v2g(0.2, 7.0, float("nan"))
+            ChargingStrategy.v2g(min_soc=0.2, max_export_w=7000.0, price_threshold=float("nan"))
 
     def test_solar_surplus_construction(self):
-        s = ChargingStrategy.solar_surplus(1.4)
+        s = ChargingStrategy.solar_surplus(min_charge_rate_w=1400.0)
         assert "SolarSurplus" in str(s)
 
     def test_solar_surplus_rejects_invalid_kw(self):
         with pytest.raises(ValueError):
-            ChargingStrategy.solar_surplus(-1.0)
+            ChargingStrategy.solar_surplus(min_charge_rate_w=-1000.0)
         with pytest.raises(ValueError):
-            ChargingStrategy.solar_surplus(float("nan"))
+            ChargingStrategy.solar_surplus(min_charge_rate_w=float("nan"))

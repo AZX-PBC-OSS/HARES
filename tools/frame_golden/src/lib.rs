@@ -13,6 +13,7 @@ pub mod error;
 pub mod frames;
 pub mod golden;
 pub mod manifest;
+pub mod resolved;
 
 // Installed in the library so every binary linking it (the tool's binary
 // and its test binaries) counts allocations. Only under `-F profiling`:
@@ -34,3 +35,7 @@ pub use digest::{
 pub use error::{FrameGoldenError, FrameGoldenResult};
 pub use golden::{GoldenDoc, MetricField, MetricValue, MetricsRow};
 pub use manifest::{Feature, GoldenManifest, ManifestKind, running_features};
+pub use resolved::{
+    ResolvedEquipmentDoc, ResolvedHomeDoc, ResolvedParameterDoc, first_resolved_differences,
+    resolved_home_doc,
+};

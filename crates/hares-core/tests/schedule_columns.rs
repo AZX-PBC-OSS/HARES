@@ -5,12 +5,13 @@
 //! and stepped reports no warning with source `schedule` (and the
 //! `consumer_shape_900s` golden inputs report none at all).
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -35,7 +36,7 @@ fn prepare_defaults_tree(manifest_path: &Path) -> std::io::Result<(PathBuf, temp
         })
         .unwrap_or_default();
 
-    let repo_defaults = project_root().join("defaults");
+    let repo_defaults = project_root().join("python/hares/defaults");
     let temp = tempfile::TempDir::new()?;
     copy_tree_symlinked(&repo_defaults, temp.path())?;
     for (relative, replacement) in &replacements {
@@ -98,10 +99,9 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         start_time: DateTime::parse_from_rfc3339(start).expect("start_time parses"),
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(time_res_s),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: sim
@@ -110,9 +110,11 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
             .unwrap_or(0) as u64,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -156,16 +158,20 @@ fn built_consumer_shape_home() -> (Dwelling, tempfile::TempDir) {
         .unwrap_or(serde_json::Value::Null);
 
     let config = DwellingConfig {
-        hpxml_path: project_root().join(home["hpxml"].as_str().expect("hpxml path")),
-        schedule_path: Some(project_root().join(home["schedule"].as_str().expect("schedule path"))),
-        weather_path: project_root().join(home["weather"].as_str().expect("weather path")),
-        defaults_path: Some(defaults_dir),
-        sim_config: sim,
-        overrides: Some(overrides_json),
-        bldg_id: home["bldg_id"].as_integer().expect("bldg id"),
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(project_root().join(home["hpxml"].as_str().expect("hpxml path"))),
+        schedule: Some(InputSource::Path(
+            project_root().join(home["schedule"].as_str().expect("schedule path")),
+        )),
+        weather: WeatherInput::Path(
+            project_root().join(home["weather"].as_str().expect("weather path")),
+        ),
+        defaults: DefaultsSource::directory(defaults_dir),
+        settings: DwellingSettings::new(
+            sim,
+            Some(overrides_json),
+            home["bldg_id"].as_integer().expect("bldg id"),
+            None,
+        ),
     };
     let dwelling = Dwelling::from_config(config).expect("dwelling builds from the golden inputs");
     (dwelling, defaults_guard)
@@ -265,6 +271,7 @@ fn a_microwave_column_on_an_os_hpxml_building_counts_only_the_residual_mels() {
     let warnings: Vec<String> = dwelling
         .take_warnings()
         .into_iter()
+        .map(|warning| warning.to_string())
         .filter(|warning| warning.starts_with("schedule: "))
         .collect();
 
@@ -297,31 +304,28 @@ fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
             .unwrap(),
         duration: Duration::hours(1),
         time_res: Duration::seconds(900),
-        output_verbosity: 0,
-        write_output: false,
-        output_path: None,
-        output_format: OutputFormat::Csv,
+        reports: Vec::new(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     };
     let config = DwellingConfig {
-        hpxml_path: bldg.join("home.xml"),
-        schedule_path: Some(schedule_path.to_path_buf()),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G3400270_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides: None,
-        bldg_id: 176_775,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(bldg.join("home.xml")),
+        schedule: Some(InputSource::Path(schedule_path.to_path_buf())),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G3400270_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, None, 176_775, None),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds from bldg0176775");
     dwelling.step().expect("a step of the ResStock home runs");
@@ -334,6 +338,7 @@ fn bldg0176775_schedule_warnings(schedule_path: &Path) -> Vec<String> {
     bldg0176775_dwelling(schedule_path)
         .take_warnings()
         .into_iter()
+        .map(|warning| warning.to_string())
         .filter(|warning| warning.starts_with("schedule: "))
         .collect()
 }

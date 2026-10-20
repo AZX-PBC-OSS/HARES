@@ -49,8 +49,7 @@ fn unmet_heating_detected_when_zone_temp_below_setpoint_over_threshold() {
             &[Some(0)],
         );
     }
-    let mut writer: Option<Vec<u8>> = Some(Vec::new());
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string()], 60.0);
     assert_eq!(violations, 1, "should detect excessive unmet heating");
 }
 
@@ -69,8 +68,7 @@ fn unmet_cooling_detected_when_zone_temp_above_setpoint_over_threshold() {
             &[Some(0)],
         );
     }
-    let mut writer: Option<Vec<u8>> = Some(Vec::new());
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string()], 60.0);
     assert_eq!(violations, 1, "should detect excessive unmet cooling");
 }
 
@@ -89,8 +87,7 @@ fn unmet_hours_not_flagged_below_threshold() {
             &[Some(0)],
         );
     }
-    let mut writer: Option<Vec<u8>> = None;
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string()], 60.0);
     assert_eq!(violations, 0, "4% unmet should be below 5% threshold");
 }
 
@@ -121,8 +118,7 @@ fn short_cycling_detected_when_mode_changes_exceed_max_per_hour() {
             }
         }
     }
-    let mut writer: Option<Vec<u8>> = Some(Vec::new());
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string()], 60.0);
     assert_eq!(
         violations, 1,
         "should detect short cycling: 5 changes in 1h"
@@ -147,8 +143,7 @@ fn short_cycling_not_flagged_when_cycling_below_max() {
             &[Some(0)],
         );
     }
-    let mut writer: Option<Vec<u8>> = None;
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string()], 60.0);
     assert_eq!(
         violations, 0,
         "0 mode changes should not trigger short-cycling"
@@ -169,8 +164,7 @@ fn freezing_detected_in_conditioned_zone_when_temp_below_zero() {
             &[Some(0)],
         );
     }
-    let mut writer: Option<Vec<u8>> = Some(Vec::new());
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string()], 60.0);
     assert_eq!(violations, 1, "should detect freezing excursion");
 }
 
@@ -191,8 +185,7 @@ fn freezing_ignored_in_unconditioned_zone() {
             &[Some(0)],
         );
     }
-    let mut writer: Option<Vec<u8>> = None;
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Zone2".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Zone2".to_string()], 60.0);
     assert_eq!(
         violations, 0,
         "freezing in unconditioned zone should not be flagged"
@@ -214,12 +207,7 @@ fn simultaneous_heating_cooling_detected_per_zone() {
         ],
         &[Some(0), Some(0), None],
     );
-    let mut writer: Option<Vec<u8>> = Some(Vec::new());
-    let violations = accum.run_post_hoc_checks(
-        &mut writer,
-        &["Indoor".to_string(), "Zone2".to_string()],
-        60.0,
-    );
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string(), "Zone2".to_string()], 60.0);
     assert_eq!(
         violations, 1,
         "simultaneous heating+cooling in zone 1 should be detected"
@@ -241,12 +229,7 @@ fn simultaneous_heating_cooling_not_flagged_when_in_different_zones() {
         ],
         &[Some(0), Some(0), None],
     );
-    let mut writer: Option<Vec<u8>> = None;
-    let violations = accum.run_post_hoc_checks(
-        &mut writer,
-        &["Indoor".to_string(), "Zone2".to_string()],
-        60.0,
-    );
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string(), "Zone2".to_string()], 60.0);
     assert_eq!(
         violations, 0,
         "no simultaneous H/C when only heating is active"
@@ -285,8 +268,7 @@ fn multiple_violations_counted_independently() {
     // → 60 freezing steps > 0 → violation
     // → 5 mode changes in 60 steps (60s each = 1h) > 4 max → violation
     // → 3 violations total
-    let mut writer: Option<Vec<u8>> = Some(Vec::new());
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string()], 60.0);
     assert_eq!(violations, 3, "should detect all three violation types");
 }
 
@@ -302,39 +284,90 @@ fn no_violations_when_everything_is_in_range() {
             &[Some(0)],
         );
     }
-    let mut writer: Option<Vec<u8>> = Some(Vec::new());
-    let violations = accum.run_post_hoc_checks(&mut writer, &["Indoor".to_string()], 60.0);
+    let violations = accum.run_post_hoc_checks(&["Indoor".to_string()], 60.0);
     assert_eq!(violations, 0, "no violations when temps are all in range");
 }
 
 // ── Integration test: end-to-end wiring of post-hoc checks in Dwelling ───────
 
-/// Verifies that when an observer is enabled on a dwelling with HVAC equipment,
-/// the post-hoc diagnostic checks are wired into simulate() and produce summary
-/// output in the diagnostic CSV when output_verbosity >= 4.
-#[test]
-fn observer_enabled_simulation_appends_posthoc_summary_to_diagnostic_csv() {
-    use std::fs;
+/// A minimal tracing subscriber that counts the events whose message
+/// carries the needle, so a test can observe the post-hoc checks' findings.
+struct CountingSubscriber {
+    needle: &'static str,
+    count: std::sync::atomic::AtomicUsize,
+}
 
-    // The output and its `_diagnostics.csv` sibling go in a directory removed
-    // when the test ends.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let toml_path = dir.path().join("posthoc.toml");
-    let csv_path = dir.path().join("posthoc.csv");
+struct MessageVisitor(String);
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+}
+
+impl tracing::Subscriber for CountingSubscriber {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut visitor = MessageVisitor(String::new());
+        event.record(&mut visitor);
+        if visitor.0.contains(self.needle) {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn clone_span(&self, id: &tracing::span::Id) -> tracing::span::Id {
+        id.clone()
+    }
+}
+
+impl CountingSubscriber {
+    fn count(&self) -> usize {
+        self.count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Verifies the post-hoc checks' wiring: a run that requests the
+/// diagnostics runs the checks at end of run and their findings surface as
+/// tracing warnings, and the frame carries the diagnostics columns; a run
+/// without the request never runs them (and records no diagnostics
+/// variable).
+#[test]
+fn posthoc_checks_run_only_when_the_diagnostics_are_requested() {
+    use std::sync::Arc;
 
     // Synthetic TOML with a gas furnace in very cold weather.  The furnace
     // capacity is 5 kBtu/h (≈ 1.47 kW), outdoor temp is -20°C, and the
     // building has moderate insulation (R=2.8 m²K/W).  This combination
-    // should produce some unmet heating steps.
-    let content = format!(
-        r#"building_id = 4242
+    // produces unmet heating steps, which the check flags.
+    let run = |diagnostics: bool, dir: &tempfile::TempDir| {
+        let toml_path = dir.path().join("posthoc.toml");
+        let content = format!(
+            r#"building_id = 4242
 
 [simulation]
 start_time = "2024-01-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
+time_res = 60
+duration = 600
+diagnostics = {diagnostics}
+output_chunk_size = 1000
+master_seed = 0
 
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 4 }}
+destination = "memory"
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -357,58 +390,67 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 4
-output_format = "csv"
-output_chunk_size = 1000
-write_output = true
-output_path = "{}"
-master_seed = 0
 "#,
-        csv_path.display()
-    );
-    fs::write(&toml_path, content).expect("failed to write synthetic TOML");
+        );
+        std::fs::write(&toml_path, content).expect("failed to write synthetic TOML");
 
-    let mut dwelling =
-        hares_core::Dwelling::from_toml_config(&toml_path).expect("synthetic TOML must load");
+        let mut dwelling =
+            hares_core::Dwelling::from_toml_config(&toml_path).expect("synthetic TOML must load");
+        dwelling.enable_observer(100);
+        dwelling
+            .simulate()
+            .expect("simulation must complete without errors");
+        dwelling
+    };
 
-    // Enable observer so post-hoc checks are wired.
-    dwelling.enable_observer(100);
-
-    dwelling
-        .simulate()
-        .expect("simulation must complete without errors");
-
-    // Reconstruct diagnostic CSV path.
-    let stem = csv_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .expect("csv_path must have a file stem");
-    let diag_path = csv_path.with_file_name(format!("{stem}_diagnostics.csv"));
-
-    let diag_content =
-        fs::read_to_string(&diag_path).expect("diagnostic CSV must exist and be readable");
-
-    // The diagnostic CSV should contain at least one data row (per-step rows
-    // are always written when output_verbosity >= 4) AND
-    // at least one `# diag` comment line from the post-hoc checks.
-    let data_rows: Vec<&str> = diag_content
-        .lines()
-        .filter(|l| !l.starts_with('#') && !l.is_empty())
-        .skip(1) // skip header
-        .collect();
+    // The requested run: the checks run, their findings surface as
+    // warnings, and the frame carries the diagnostics columns.
+    let requested = tempfile::tempdir().expect("temp dir");
+    let subscriber = Arc::new(CountingSubscriber {
+        needle: "diagnostic:",
+        count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    {
+        let guard = tracing::subscriber::set_default(subscriber.clone());
+        let dwelling = run(true, &requested);
+        let columns = dwelling
+            .output_column_names()
+            .expect("the recorded output schema");
+        assert!(
+            columns.iter().any(|c| c == "zone1_temp_c"),
+            "the requested run records the diagnostics columns"
+        );
+        drop(dwelling);
+        drop(guard);
+    }
     assert!(
-        !data_rows.is_empty(),
-        "diagnostic CSV must contain at least one data row"
+        subscriber.count() > 0,
+        "the requested run's post-hoc checks must surface their findings as warnings"
     );
 
-    // Verify post-hoc check wiring: at minimum a `# diag` comment line exists
-    // (either violation lines OR the summary).
-    let has_diag_comment = diag_content.lines().any(|l| l.starts_with("# diag "));
-    assert!(
-        has_diag_comment,
-        "diagnostic CSV must contain at least one '# diag' comment line from post-hoc checks.\n\
-         CSV content:\n{diag_content}"
+    // The unrequested run: the checks never run, no diagnostics column is
+    // recorded.
+    let plain = tempfile::tempdir().expect("temp dir");
+    let subscriber = Arc::new(CountingSubscriber {
+        needle: "diagnostic:",
+        count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    {
+        let guard = tracing::subscriber::set_default(subscriber.clone());
+        let dwelling = run(false, &plain);
+        let columns = dwelling
+            .output_column_names()
+            .expect("the recorded output schema");
+        assert!(
+            !columns.iter().any(|c| c == "zone1_temp_c"),
+            "the unrequested run records no diagnostics column"
+        );
+        drop(dwelling);
+        drop(guard);
+    }
+    assert_eq!(
+        subscriber.count(),
+        0,
+        "the unrequested run's post-hoc checks must never run"
     );
 }

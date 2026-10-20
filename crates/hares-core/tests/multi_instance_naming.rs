@@ -21,10 +21,12 @@ fn write_minimal_toml(path: &Path) {
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
-time_res_s = 60
-duration_s = 600
-
+time_res = 60
+duration = 600
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -45,13 +47,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 0.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-write_output = false
-master_seed = 0
 "#;
     fs::write(path, content).expect("failed to write synthetic TOML");
 }
@@ -93,11 +88,10 @@ impl TelemetryRecordSpy {
             } else {
                 CoreCapabilities::ELECTRIC
             },
-            telemetry_fields: vec![TelemetryField {
-                name: tk::AC_POWER_KW.to_string(),
-                unit: "kW".to_string(),
-                description: "recorded curtailment fraction".to_string(),
-            }],
+            telemetry_fields: vec![TelemetryField::power_kw(
+                tk::AC_POWER_KW,
+                "recorded curtailment fraction",
+            )],
             zone_type: None,
         };
         let mut telemetry = Telemetry::with_capacity(1);
@@ -107,7 +101,7 @@ impl TelemetryRecordSpy {
             telemetry,
             core_output: CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Generation(0.0)),
+                    electric_w: Some(ElectricPower::Generation(0.0)),
                     ..Default::default()
                 },
                 state: CoreState {
@@ -123,6 +117,10 @@ impl TelemetryRecordSpy {
 impl Equipment for TelemetryRecordSpy {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
     }
 
     fn rename(&mut self, name: String) {
@@ -376,7 +374,7 @@ fn ambiguous_by_name_warns_and_delivers_nothing() {
     let warnings = dwelling.take_warnings();
     let has_ambig = warnings
         .iter()
-        .any(|w| w.contains("ambiguous") && w.contains("PV"));
+        .any(|w| w.message.contains("ambiguous") && w.message.contains("PV"));
     assert!(
         has_ambig,
         "expected ambiguity warning for ByName('PV'), got: {warnings:?}"
@@ -405,7 +403,7 @@ fn single_instance_by_name_still_matches_bare_name() {
 
     let warnings = dwelling.take_warnings();
     assert!(
-        !warnings.iter().any(|w| w.contains("ambiguous")),
+        !warnings.iter().any(|w| w.message.contains("ambiguous")),
         "single-instance ByName('PV') must not produce ambiguity warning, got: {warnings:?}"
     );
 }

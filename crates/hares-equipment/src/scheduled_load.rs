@@ -5,8 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Datelike;
-use hares_physics::constants::GAS_THERMS_PER_HOUR_TO_W;
-use hares_physics::units::power_kw_to_w;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
     CorePerformance, CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
@@ -24,33 +22,31 @@ use crate::schedule_helpers::{
     parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
-const KEY_GAS_SCHEDULE_IS_W: &str = "gas_schedule_is_w";
 const KEY_POWER_SCHEDULE_SOURCE: &str = "power_schedule_source";
 const KEY_POWER_SCHEDULE_COL: &str = "power_schedule_col";
-const KEY_POWER_PROFILE_MAX_KW: &str = "power_profile_max_kw";
+const KEY_POWER_PROFILE_MAX_W: &str = "power_profile_max_w";
 const KEY_POWER_PROFILE_WEEKDAY: &str = "power_profile_weekday";
 const KEY_POWER_PROFILE_WEEKEND: &str = "power_profile_weekend";
 const KEY_POWER_PROFILE_MONTH: &str = "power_profile_month";
-const KEY_POWER_CONSTANT_KW: &str = "power_constant_kw";
+const KEY_POWER_CONSTANT_W: &str = "power_constant_w";
 const KEY_GAS_SCHEDULE_SOURCE: &str = "gas_schedule_source";
 const KEY_GAS_SCHEDULE_COL: &str = "gas_schedule_col";
-const KEY_GAS_PROFILE_MAX: &str = "gas_profile_max";
+const KEY_GAS_PROFILE_MAX: &str = "gas_profile_max_w";
 const KEY_GAS_PROFILE_WEEKDAY: &str = "gas_profile_weekday";
 const KEY_GAS_PROFILE_WEEKEND: &str = "gas_profile_weekend";
 const KEY_GAS_PROFILE_MONTH: &str = "gas_profile_month";
-const KEY_GAS_CONSTANT: &str = "gas_constant";
+const KEY_GAS_CONSTANT: &str = "gas_constant_w";
 
 /// The schedule parameters a scheduled load reads, beside the ones every
 /// raw-parameter load reads ([`crate::raw_params::SCHEDULED_LOAD`]).
 pub(crate) const SCHEDULE_PARAMS: &[RawParam] = &[
-    RawParam::key(KEY_GAS_SCHEDULE_IS_W, ParamKind::Bool),
     RawParam::key(KEY_POWER_SCHEDULE_SOURCE, ParamKind::Text),
     RawParam::key(KEY_POWER_SCHEDULE_COL, ParamKind::Number),
-    RawParam::key(KEY_POWER_PROFILE_MAX_KW, ParamKind::Number),
+    RawParam::key(KEY_POWER_PROFILE_MAX_W, ParamKind::Number),
     RawParam::key(KEY_POWER_PROFILE_WEEKDAY, ParamKind::NumberList),
     RawParam::key(KEY_POWER_PROFILE_WEEKEND, ParamKind::NumberList),
     RawParam::key(KEY_POWER_PROFILE_MONTH, ParamKind::NumberList),
-    RawParam::key(KEY_POWER_CONSTANT_KW, ParamKind::Number),
+    RawParam::key(KEY_POWER_CONSTANT_W, ParamKind::Number),
     RawParam::key(KEY_GAS_SCHEDULE_SOURCE, ParamKind::Text),
     RawParam::key(KEY_GAS_SCHEDULE_COL, ParamKind::Number),
     RawParam::key(KEY_GAS_PROFILE_MAX, ParamKind::Number),
@@ -88,21 +84,6 @@ pub(crate) const CLASSES: &[(&str, EndUse)] = &[
     ("Garage Lighting", EndUse::LIGHTING),
 ];
 
-#[derive(Clone, Copy, Debug)]
-enum GasScheduleUnit {
-    Watts,
-    ThermsPerHour,
-}
-
-impl GasScheduleUnit {
-    fn consumption_w(self, value: f64) -> f64 {
-        match self {
-            Self::Watts => value,
-            Self::ThermsPerHour => value * GAS_THERMS_PER_HOUR_TO_W,
-        }
-    }
-}
-
 fn slice_to_24(src: &[f64]) -> [f64; 24] {
     let mut arr = [0.0; 24];
     let n = src.len().min(24);
@@ -119,9 +100,9 @@ fn slice_to_12(src: &[f64]) -> [f64; 12] {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct ScheduledLoadState {
-    last_non_zero_power_kw: f64,
+    last_non_zero_power_w: f64,
     last_non_zero_gas_w: f64,
-    last_reactive_power_kvar: f64,
+    last_reactive_power_var: f64,
     load_fraction: f64,
     mode_override: Option<OperatingMode>,
     power_source_state: ScheduleSourceState,
@@ -135,7 +116,6 @@ pub struct ScheduledLoad {
     telemetry: Telemetry,
     core_output: CoreOutput,
     gas_source: Option<ScheduleSource>,
-    gas_schedule_unit: GasScheduleUnit,
     gains: GainFractions,
     /// Full ZIP model (real + reactive) resolved via
     /// [`crate::config::resolve_zip`]; scheduled loads keep the full
@@ -145,7 +125,12 @@ pub struct ScheduledLoad {
     /// Per-month scale factors [0..11] applied after load_fraction, e.g. a
     /// ceiling fan off in winter (divergence D-013).
     month_multipliers: Option<[f64; 12]>,
-    last_non_zero_power_kw: f64,
+    /// The usage multiplier `init` applied to the schedule sources (the
+    /// config's `usage_multiplier`, default 1.0). Kept so the
+    /// resolved-parameter read-back reports the multiplier the physics
+    /// ran under, which the applied scaling no longer shows.
+    usage_multiplier: f64,
+    last_non_zero_power_w: f64,
     last_non_zero_gas_w: f64,
     load_fraction: f64,
     mode_override: Option<OperatingMode>,
@@ -185,14 +170,14 @@ impl ScheduledLoad {
             telemetry: default_telemetry(),
             core_output: CoreOutput::default(),
             gas_source: None,
-            gas_schedule_unit: GasScheduleUnit::ThermsPerHour,
             gains: GainFractions::default(),
             zip: hares_types::zip::ResolvedZip::governing(
                 hares_types::zip::zip_defaults_for_class(equipment_type)
                     .unwrap_or_else(hares_types::zip::ZipLoad::constant_power),
             ),
             month_multipliers: None,
-            last_non_zero_power_kw: 0.0,
+            usage_multiplier: 1.0,
+            last_non_zero_power_w: 0.0,
             last_non_zero_gas_w: 0.0,
             load_fraction: 1.0,
             mode_override: None,
@@ -218,13 +203,7 @@ impl ScheduledLoad {
         env: &EnvironmentState,
     ) -> crate::Result<()> {
         self.power_source = parse_power_schedule_source(config)?;
-        let (gas_source, gas_unit) = parse_optional_gas_schedule_source(config)?;
-        self.gas_source = gas_source;
-        self.gas_schedule_unit = if config.get_bool(KEY_GAS_SCHEDULE_IS_W).unwrap_or(false) {
-            GasScheduleUnit::Watts
-        } else {
-            gas_unit
-        };
+        self.gas_source = parse_optional_gas_schedule_source(config)?;
         self.gains = GainFractions::from_config(config, &self.descriptor.name)?;
         self.zip = crate::config::resolve_zip(config);
         crate::config::validate_zip_sums(&self.zip, &self.descriptor.name)?;
@@ -249,13 +228,14 @@ impl ScheduledLoad {
         let usage_multiplier = config
             .get_f64(crate::config::KEY_USAGE_MULTIPLIER)
             .unwrap_or(1.0);
+        self.usage_multiplier = usage_multiplier;
         if usage_multiplier != 1.0 {
             scale_schedule_source(&mut self.power_source, usage_multiplier);
             if let Some(gas_source) = &mut self.gas_source {
                 scale_schedule_source(gas_source, usage_multiplier);
             }
         }
-        self.last_non_zero_power_kw = 0.0;
+        self.last_non_zero_power_w = 0.0;
         self.last_non_zero_gas_w = 0.0;
         self.load_fraction = 1.0;
         self.mode_override = None;
@@ -295,6 +275,24 @@ impl ScheduledLoad {
 }
 
 impl Equipment for ScheduledLoad {
+    fn reset_stochastic_state(&mut self) {
+        // The schedule sources at their seeds and cursors: the production
+        // phase reads them from the construction position, whatever the
+        // warm-up drew.
+        self.power_source.reset();
+        if let Some(gas) = self.gas_source.as_mut() {
+            gas.reset();
+        }
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![hares_types::ResolvedParameter::new(
+            "usage_multiplier",
+            self.usage_multiplier,
+            hares_types::Unit::Dimensionless,
+        )]
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -316,7 +314,7 @@ impl Equipment for ScheduledLoad {
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
-        if self.last_non_zero_power_kw > 0.0 || self.last_non_zero_gas_w > 0.0 {
+        if self.last_non_zero_power_w > 0.0 || self.last_non_zero_gas_w > 0.0 {
             OperatingMode::Standby
         } else {
             OperatingMode::Off
@@ -334,8 +332,23 @@ impl Equipment for ScheduledLoad {
         // fireplaces with electronic ignition) need electricity to operate.
         // Islanded (battery/generator-backed) homes keep an energized bus and
         // are not affected. See docs/outage-behavior.md.
-        if !env.grid.bus_energized() {
-            self.last_non_zero_power_kw = 0.0;
+        let period_zeroed =
+            crate::unavailable_period_rows_for_equipment(self.descriptor.name.as_str())
+                .iter()
+                .any(|row| {
+                    row.zeroed_by
+                        .iter()
+                        .any(|kind| kind.zeroed(env.unavailable_periods))
+                });
+        if period_zeroed {
+            tracing::debug!(
+                load = %self.descriptor.name,
+                "the step's unavailable periods zero the load's table row: \
+                 the load's outputs are zero for the step"
+            );
+        }
+        if !env.grid.bus_energized() || period_zeroed {
+            self.last_non_zero_power_w = 0.0;
             self.last_non_zero_gas_w = 0.0;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -344,8 +357,8 @@ impl Equipment for ScheduledLoad {
             self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: self
+                    electric_w: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_var: self
                         .descriptor
                         .core_capabilities
                         .contains(CoreCapabilities::REACTIVE)
@@ -375,7 +388,7 @@ impl Equipment for ScheduledLoad {
 
         // Mode override Off forces zero output regardless of schedule.
         if self.mode_override == Some(OperatingMode::Off) {
-            self.last_non_zero_power_kw = 0.0;
+            self.last_non_zero_power_w = 0.0;
             self.last_non_zero_gas_w = 0.0;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -384,8 +397,8 @@ impl Equipment for ScheduledLoad {
             self.telemetry.set(tk::FUEL_INPUT_W, 0.0);
             self.core_output = CoreOutput {
                 flows: CoreFlows {
-                    electric_kw: Some(ElectricPower::Consumption(0.0)),
-                    reactive_power_kvar: self
+                    electric_w: Some(ElectricPower::Consumption(0.0)),
+                    reactive_power_var: self
                         .descriptor
                         .core_capabilities
                         .contains(CoreCapabilities::REACTIVE)
@@ -415,9 +428,9 @@ impl Equipment for ScheduledLoad {
 
         // PowerSetpoint overrides the schedule entirely for this step. The override
         // is cleared at the end of this step (per-step, not persistent).
-        let (electric_power_kw, reactive_power_kvar, gas_consumption_w) =
-            if let Some(override_kw) = self.power_setpoint_override.take() {
-                (override_kw, 0.0, 0.0)
+        let (electric_power_w, reactive_power_var, gas_consumption_w) =
+            if let Some(override_w) = self.power_setpoint_override.take() {
+                (override_w, 0.0, 0.0)
             } else {
                 // Apply the month multiplier (D-013). Negative schedule
                 // values are silently clamped to zero -- OCHRE treats them as "no load" rather
@@ -425,10 +438,10 @@ impl Equipment for ScheduledLoad {
                 // fill values.
                 let month_idx = env.current_time.month0() as usize;
                 let month_scale = self.month_multipliers.map(|m| m[month_idx]).unwrap_or(1.0);
-                let raw_schedule_kw = self.power_source.value_at(env)?;
+                let raw_schedule_w = self.power_source.value_at(env)?;
 
-                let scheduled_power_kw = if raw_schedule_kw > 0.0 {
-                    raw_schedule_kw * self.load_fraction * month_scale
+                let scheduled_power_w = if raw_schedule_w > 0.0 {
+                    raw_schedule_w * self.load_fraction * month_scale
                 } else {
                     0.0
                 };
@@ -440,41 +453,39 @@ impl Equipment for ScheduledLoad {
                 };
                 let gas_w = if gas_schedule_value > 0.0 {
                     // OCHRE ScheduledLoad.py:54-55: Load Fraction scales both electric AND gas.
-                    self.gas_schedule_unit
-                        .consumption_w(gas_schedule_value * self.load_fraction * month_scale)
+                    gas_schedule_value * self.load_fraction * month_scale
                 } else {
                     0.0
                 };
 
-                let (real_kw, reactive_kvar) = if scheduled_power_kw > 0.0 {
-                    self.zip
-                        .apply(scheduled_power_kw, env.grid.bus_voltage_pu())
+                let (real_w, reactive_var) = if scheduled_power_w > 0.0 {
+                    self.zip.apply(scheduled_power_w, env.grid.bus_voltage_pu())
                 } else {
                     (0.0, 0.0)
                 };
-                (real_kw, reactive_kvar, gas_w)
+                (real_w, reactive_var, gas_w)
             };
 
         #[cfg(feature = "observe")]
         {
             let tan_phi = self.zip.tan_phi();
             tracing::debug!(
-                scheduled_load_reactive_kvar = reactive_power_kvar,
-                scheduled_load_real_kw = electric_power_kw,
+                scheduled_load_reactive_var = reactive_power_var,
+                scheduled_load_real_w = electric_power_w,
                 scheduled_load_pf = self.zip.pf,
                 scheduled_load_tan_phi = tan_phi,
                 "scheduled load ZIP reactive power diagnostic",
             );
         }
 
-        if electric_power_kw > 0.0 {
+        if electric_power_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(electric_power_kw),
-                reactive_power_kvar,
+                active_power_w: (electric_power_w),
+                reactive_power_var,
             })?;
-            self.last_non_zero_power_kw = electric_power_kw;
+            self.last_non_zero_power_w = electric_power_w;
         } else {
-            self.last_non_zero_power_kw = 0.0;
+            self.last_non_zero_power_w = 0.0;
         }
 
         if gas_consumption_w > 0.0 {
@@ -487,27 +498,27 @@ impl Equipment for ScheduledLoad {
             self.last_non_zero_gas_w = 0.0;
         }
 
-        let total_gain_source_w = power_kw_to_w(electric_power_kw) + gas_consumption_w;
+        let total_gain_source_w = (electric_power_w) + gas_consumption_w;
         let gain = self.gains.of(total_gain_source_w);
         let total_sensible_w = total_gain_source_w * self.gains.sensible;
         let latent_gain_w = gain.latent_w;
         accumulate_zone_gain(ports, self.descriptor.zone, gain)?;
 
-        self.telemetry.set(tk::ELECTRIC_KW, electric_power_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_power_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry
             .set(tk::TOTAL_SENSIBLE_GAIN_W, total_sensible_w);
         self.telemetry.set(tk::LATENT_GAIN_W, latent_gain_w);
         self.telemetry.set(tk::FUEL_INPUT_W, gas_consumption_w);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_power_kw.max(0.0))),
-                reactive_power_kvar: self
+                electric_w: Some(ElectricPower::Consumption(electric_power_w.max(0.0))),
+                reactive_power_var: self
                     .descriptor
                     .core_capabilities
                     .contains(CoreCapabilities::REACTIVE)
-                    .then_some(reactive_power_kvar),
+                    .then_some(reactive_power_var),
                 fuel_w: self
                     .descriptor
                     .core_capabilities
@@ -543,12 +554,12 @@ impl Equipment for ScheduledLoad {
         Some(self.zip)
     }
 
-    fn expected_mean_power_kw(&self) -> Option<crate::ExpectedMeanPower> {
+    fn expected_mean_power_w(&self) -> Option<crate::ExpectedMeanPower> {
         // Gas-only loads draw no real electric power (the electric schedule
         // is all zeros), so their expected electric draw is exactly zero
         // rather than schedule-deferred.
         if self.descriptor.fuel == FuelType::Gas {
-            return Some(crate::ExpectedMeanPower::Kw(0.0));
+            return Some(crate::ExpectedMeanPower::W(0.0));
         }
         match &self.power_source {
             ScheduleSource::ColumnRef { col_idx, .. } => {
@@ -573,7 +584,7 @@ impl Equipment for ScheduledLoad {
                         let all_zero = m.iter().all(|v| *v == 0.0);
                         let all_one = m.iter().all(|v| *v == 1.0);
                         if all_zero {
-                            Some(crate::ExpectedMeanPower::Kw(0.0))
+                            Some(crate::ExpectedMeanPower::W(0.0))
                         } else if all_one {
                             Some(crate::ExpectedMeanPower::ScheduleColumn(*col_idx))
                         } else {
@@ -616,7 +627,7 @@ impl Equipment for ScheduledLoad {
                 // used for planning hints, not stepping); a non-finite mean
                 // must not be published as a weight-looking `Some` value.
                 if mean.is_finite() {
-                    Some(crate::ExpectedMeanPower::Kw(mean))
+                    Some(crate::ExpectedMeanPower::W(mean))
                 } else {
                     None
                 }
@@ -627,12 +638,9 @@ impl Equipment for ScheduledLoad {
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &ScheduledLoadState {
-                last_non_zero_power_kw: self.last_non_zero_power_kw,
+                last_non_zero_power_w: self.last_non_zero_power_w,
                 last_non_zero_gas_w: self.last_non_zero_gas_w,
-                last_reactive_power_kvar: self
-                    .telemetry
-                    .get(tk::REACTIVE_POWER_KVAR)
-                    .unwrap_or(0.0),
+                last_reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 load_fraction: self.load_fraction,
                 mode_override: self.mode_override,
                 power_source_state: capture_schedule_source_state(&self.power_source),
@@ -650,7 +658,7 @@ impl Equipment for ScheduledLoad {
             "ScheduledLoad",
             self.descriptor().id,
         )?;
-        self.last_non_zero_power_kw = decoded.last_non_zero_power_kw;
+        self.last_non_zero_power_w = decoded.last_non_zero_power_w;
         self.last_non_zero_gas_w = decoded.last_non_zero_gas_w;
         self.load_fraction = decoded.load_fraction;
         self.mode_override = decoded.mode_override;
@@ -678,15 +686,14 @@ impl Equipment for ScheduledLoad {
             (None, None) => {}
         }
         self.telemetry
-            .insert(tk::ELECTRIC_KW, self.last_non_zero_power_kw);
+            .insert(tk::ELECTRIC_KW, self.last_non_zero_power_w);
         self.telemetry
-            .insert(tk::REACTIVE_POWER_KVAR, decoded.last_reactive_power_kvar);
-        // last_non_zero_power_kw already holds the ZIP-adjusted kW value (set in step()),
+            .insert(tk::REACTIVE_POWER_KVAR, decoded.last_reactive_power_var);
+        // last_non_zero_power_w already holds the ZIP-adjusted kW value (set in step()),
         // so the thermal gain reconstruction below is accurate -- it does not need a
         // separate voltage correction. The same ZIP-adjusted wattage drives sensible/latent
         // heat gains regardless of what the voltage was at the time of last non-zero output.
-        let total_gain_source_w =
-            power_kw_to_w(self.last_non_zero_power_kw) + self.last_non_zero_gas_w;
+        let total_gain_source_w = (self.last_non_zero_power_w) + self.last_non_zero_gas_w;
         self.telemetry.insert(
             tk::TOTAL_SENSIBLE_GAIN_W,
             total_gain_source_w * self.gains.sensible,
@@ -697,14 +704,14 @@ impl Equipment for ScheduledLoad {
             .insert(tk::FUEL_INPUT_W, self.last_non_zero_gas_w);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(
-                    self.last_non_zero_power_kw.max(0.0),
+                electric_w: Some(ElectricPower::Consumption(
+                    self.last_non_zero_power_w.max(0.0),
                 )),
-                reactive_power_kvar: self
+                reactive_power_var: self
                     .descriptor
                     .core_capabilities
                     .contains(CoreCapabilities::REACTIVE)
-                    .then_some(decoded.last_reactive_power_kvar),
+                    .then_some(decoded.last_reactive_power_var),
                 fuel_w: self
                     .descriptor
                     .core_capabilities
@@ -738,15 +745,17 @@ impl Equipment for ScheduledLoad {
                 self.mode_override = Some(*mode);
                 Ok(())
             }
-            ControlSignal::PowerSetpoint {
-                active_power_kw, ..
-            } => {
-                if !active_power_kw.is_finite() {
+            ControlSignal::ModeOverrideRelease => {
+                self.mode_override = None;
+                Ok(())
+            }
+            ControlSignal::PowerSetpoint { active_power_w, .. } => {
+                if !active_power_w.is_finite() {
                     return Err(HaresError::Control(
-                        "ScheduledLoad PowerSetpoint active_power_kw must be finite".to_string(),
+                        "ScheduledLoad PowerSetpoint active_power_w must be finite".to_string(),
                     ));
                 }
-                self.power_setpoint_override = Some(active_power_kw.max(0.0));
+                self.power_setpoint_override = Some(active_power_w.max(0.0));
                 Ok(())
             }
             _ => Err(HaresError::Control(format!(
@@ -777,32 +786,20 @@ fn default_telemetry() -> Telemetry {
 
 fn scheduled_load_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "ZIP-adjusted active electrical power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "ZIP-adjusted reactive electrical power".to_string(),
-        },
-        TelemetryField {
-            name: tk::TOTAL_SENSIBLE_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Total sensible thermal gain (convective + radiant) to assigned zone"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::LATENT_GAIN_W.to_string(),
-            unit: "W".to_string(),
-            description: "Latent thermal gain to assigned zone".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas fuel consumption rate converted to watts".to_string(),
-        },
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "ZIP-adjusted active electrical power draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "ZIP-adjusted reactive electrical power",
+        ),
+        TelemetryField::power_w(
+            tk::TOTAL_SENSIBLE_GAIN_W,
+            "Total sensible thermal gain (convective + radiant) to assigned zone",
+        ),
+        TelemetryField::power_w(tk::LATENT_GAIN_W, "Latent thermal gain to assigned zone"),
+        TelemetryField::power_w(
+            tk::FUEL_INPUT_W,
+            "Gas fuel consumption rate converted to watts",
+        ),
     ]
 }
 
@@ -829,9 +826,12 @@ fn parse_power_schedule_source(config: &EquipmentConfig) -> crate::Result<Schedu
             })
         }
         "daily_profile" => {
-            let max_value = config.get_f64(KEY_POWER_PROFILE_MAX_KW).ok_or_else(|| {
+            // The raw key enters in W (SI); the source holds W (SI).
+            let max_value = config
+                .get_f64(KEY_POWER_PROFILE_MAX_W)
+                .ok_or_else(|| {
                 HaresError::Equipment(format!(
-                    "missing required key `{KEY_POWER_PROFILE_MAX_KW}` for daily_profile power schedule"
+                    "missing required key `{KEY_POWER_PROFILE_MAX_W}` for daily_profile power schedule"
                 ))
             })?;
             let weekday = config
@@ -866,9 +866,10 @@ fn parse_power_schedule_source(config: &EquipmentConfig) -> crate::Result<Schedu
             })
         }
         "constant" => {
-            let Some(v) = config.get_f64(KEY_POWER_CONSTANT_KW) else {
+            // The raw key enters in W (SI); the source holds W (SI).
+            let Some(v) = config.get_f64(KEY_POWER_CONSTANT_W) else {
                 return Err(HaresError::Equipment(format!(
-                    "missing required key `{KEY_POWER_CONSTANT_KW}` for constant power schedule"
+                    "missing required key `{KEY_POWER_CONSTANT_W}` for constant power schedule"
                 )));
             };
             Ok(ScheduleSource::Constant(v))
@@ -881,9 +882,9 @@ fn parse_power_schedule_source(config: &EquipmentConfig) -> crate::Result<Schedu
 
 fn parse_optional_gas_schedule_source(
     config: &EquipmentConfig,
-) -> crate::Result<(Option<ScheduleSource>, GasScheduleUnit)> {
+) -> crate::Result<Option<ScheduleSource>> {
     let Some(source) = config.get_str(KEY_GAS_SCHEDULE_SOURCE) else {
-        return Ok((None, GasScheduleUnit::ThermsPerHour));
+        return Ok(None);
     };
     let source = source.to_ascii_lowercase();
     let gas_source = match source.as_str() {
@@ -949,7 +950,7 @@ fn parse_optional_gas_schedule_source(
             )));
         }
     };
-    Ok((Some(gas_source), GasScheduleUnit::ThermsPerHour))
+    Ok(Some(gas_source))
 }
 
 fn scale_schedule_source(source: &mut ScheduleSource, scale: f64) {
@@ -1048,8 +1049,8 @@ mod tests {
     use hares_types::zip::{ResolvedZip, ZipLoad};
 
     use super::{
-        GAS_THERMS_PER_HOUR_TO_W, KEY_GAS_CONSTANT, KEY_GAS_SCHEDULE_IS_W, KEY_GAS_SCHEDULE_SOURCE,
-        KEY_POWER_CONSTANT_KW, KEY_POWER_SCHEDULE_COL, KEY_POWER_SCHEDULE_SOURCE, ScheduledLoad,
+        KEY_GAS_CONSTANT, KEY_GAS_SCHEDULE_SOURCE, KEY_POWER_CONSTANT_W, KEY_POWER_SCHEDULE_COL,
+        KEY_POWER_SCHEDULE_SOURCE, ScheduledLoad,
     };
     use crate::gain_fractions::{
         KEY_LATENT as KEY_LATENT_GAIN_FRACTION, KEY_RADIANT as KEY_RADIATIVE_GAIN_FRACTION,
@@ -1088,6 +1089,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1106,9 +1108,11 @@ mod tests {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        // The tests' schedule values are the kW working values they
+        // reason in; the raw key enters in W.
         raw.insert(
-            KEY_POWER_CONSTANT_KW.to_string(),
-            schedule.first().copied().unwrap_or(0.0).into(),
+            KEY_POWER_CONSTANT_W.to_string(),
+            (schedule.first().copied().unwrap_or(0.0) * 1000.0).into(),
         );
         raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 0.0.into());
         EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
@@ -1123,9 +1127,11 @@ mod tests {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        // The tests' schedule values are the kW working values they
+        // reason in; the raw key enters in W.
         raw.insert(
-            KEY_POWER_CONSTANT_KW.to_string(),
-            schedule.first().copied().unwrap_or(0.0).into(),
+            KEY_POWER_CONSTANT_W.to_string(),
+            (schedule.first().copied().unwrap_or(0.0) * 1000.0).into(),
         );
         for (k, v) in extras {
             raw.insert(k.to_string(), v.clone());
@@ -1136,9 +1142,11 @@ mod tests {
     fn config_no_zone(name: &str, ochre_class: &str, schedule: &[f64]) -> EquipmentConfig {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        // The tests' schedule values are the kW working values they
+        // reason in; the raw key enters in W.
         raw.insert(
-            KEY_POWER_CONSTANT_KW.to_string(),
-            schedule.first().copied().unwrap_or(0.0).into(),
+            KEY_POWER_CONSTANT_W.to_string(),
+            (schedule.first().copied().unwrap_or(0.0) * 1000.0).into(),
         );
         EquipmentConfig::raw(name.to_string(), ochre_class.to_string(), raw)
     }
@@ -1223,7 +1231,7 @@ mod tests {
             std::collections::HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
-        raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+        raw.insert(KEY_POWER_CONSTANT_W.to_string(), 1000.0.into());
         // NOTE: KEY_SENSIBLE_GAIN_FRACTION deliberately omitted.
         let config = crate::EquipmentConfig::raw("s".to_string(), "Lighting".to_string(), raw);
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -1241,7 +1249,7 @@ mod tests {
             std::collections::HashMap::new();
         raw.insert("zone_id".to_string(), 1.0.into());
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
-        raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+        raw.insert(KEY_POWER_CONSTANT_W.to_string(), 1000.0.into());
         raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.5.into());
 
         let config = crate::EquipmentConfig::raw("s".to_string(), "Lighting".to_string(), raw);
@@ -1333,8 +1341,8 @@ mod tests {
         let mut env = base_env();
         eq.init(&config, &env).unwrap();
         eq.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -1411,6 +1419,35 @@ mod tests {
         assert_eq!(ports.electrical.net_active_w(), 0.0);
     }
 
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the load back to its schedule.
+    #[test]
+    fn mode_release_returns_the_load_to_its_schedule() {
+        let config = config_with_schedule("s", "Lighting", &[5.0]);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Off,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(ports.electrical.net_active_w(), 0.0);
+
+        eq.apply_control(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        assert!(
+            (ports.electrical.net_active_w() - 5000.0).abs() < 10.0,
+            "the released load must follow its schedule again"
+        );
+    }
+
     #[test]
     fn voltage_outage_forces_zero_output() {
         let config = config_with_schedule("s", "Lighting", &[3.0]);
@@ -1485,7 +1522,7 @@ mod tests {
             &[
                 (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_GAS_SCHEDULE_SOURCE, "constant".into()),
-                (KEY_GAS_CONSTANT, 0.1.into()),
+                (KEY_GAS_CONSTANT, 1000.0.into()),
             ],
         );
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -1497,10 +1534,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert_eq!(
-            ports.fuel.get(FuelType::Gas),
-            0.1 * GAS_THERMS_PER_HOUR_TO_W
-        );
+        assert_eq!(ports.fuel.get(FuelType::Gas), 1000.0);
         assert!(ports.electrical.net_active_w() > 0.0);
     }
 
@@ -1514,7 +1548,6 @@ mod tests {
                 (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_GAS_SCHEDULE_SOURCE, "constant".into()),
                 (KEY_GAS_CONSTANT, 1000.0.into()),
-                (KEY_GAS_SCHEDULE_IS_W, true.into()),
             ],
         );
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
@@ -1610,7 +1643,8 @@ mod tests {
         env.domains.schedule.set_from(&DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![],
-            custom_payload: Some(vec![2.5, 7.25]),
+            // The schedule columns are W (SI): 2.5 kW, 7.25 kW.
+            custom_payload: Some(vec![2500.0, 7250.0]),
         });
         eq.init(&config, &env).unwrap();
 
@@ -1619,6 +1653,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        // The schedule domain's column values are W: 7.25 kW = 7250 W.
         assert!((ports.electrical.net_active_w() - 7250.0).abs() < 10.0);
     }
 
@@ -1753,7 +1788,7 @@ mod tests {
         let config = |name: &str| {
             let mut raw: HashMap<String, ConfigValue> = HashMap::new();
             raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
-            raw.insert(KEY_POWER_CONSTANT_KW.to_string(), 1.0.into());
+            raw.insert(KEY_POWER_CONSTANT_W.to_string(), 1000.0.into());
             raw.insert(KEY_SENSIBLE_GAIN_FRACTION.to_string(), 1.0.into());
             EquipmentConfig::raw(name.to_string(), name.to_string(), raw)
         };
@@ -1839,7 +1874,7 @@ mod tests {
             &[
                 (KEY_SENSIBLE_GAIN_FRACTION, 0.0.into()),
                 (KEY_GAS_SCHEDULE_SOURCE, "constant".into()),
-                (KEY_GAS_CONSTANT, 0.2.into()),
+                (KEY_GAS_CONSTANT, 1000.0.into()),
             ],
         );
         let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::COOKING, "Gas Grill");
@@ -1853,7 +1888,7 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        let expected_gas_w = 0.2 * 0.5 * GAS_THERMS_PER_HOUR_TO_W;
+        let expected_gas_w = 1000.0 * 0.5;
         assert!(
             (ports.fuel.get(FuelType::Gas) - expected_gas_w).abs() < 1e-6,
             "gas_w={} expected={expected_gas_w}",
@@ -1998,19 +2033,6 @@ mod tests {
         );
     }
 
-    /// GAS_THERMS_PER_HOUR_TO_W must be ~29,307 W/therm/hr.
-    /// 1 US therm = 100,000 BTU_IT; 1 BTU_IT = 1055.05585262 J.
-    /// 100_000 * 1055.05585262 / 3600 = 29_307.107... W.
-    #[test]
-    fn gas_therms_per_hour_to_w_matches_nist_definition() {
-        let btu_it_joules = 1_055.055_852_62;
-        let expected = 100_000.0 * btu_it_joules / 3600.0;
-        assert!(
-            (GAS_THERMS_PER_HOUR_TO_W - expected).abs() < 0.01,
-            "GAS_THERMS_PER_HOUR_TO_W={GAS_THERMS_PER_HOUR_TO_W} should be ~{expected}"
-        );
-    }
-
     trait TelemetryFieldExt {
         fn name_as_str(&self) -> &str;
     }
@@ -2022,9 +2044,9 @@ mod tests {
     }
 
     #[test]
-    fn reactive_zip_coefficients_produce_correct_kvar() {
+    fn reactive_zip_coefficients_produce_correct_var() {
         // zq=0, iq=0, pq=1 → reactive_base = 1.0 at any voltage.
-        // pf=0.8 → tan(acos(0.8)) = 0.75; reactive = real_kw * 0.75 * 1.0.
+        // pf=0.8 → tan(acos(0.8)) = 0.75; reactive = real_w * 0.75 * 1.0.
         let mut config = config_with_extras(
             "s",
             "Lighting",
@@ -2041,12 +2063,12 @@ mod tests {
             ..PortSlots::default()
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        // real_kw = 2.0 (all-P load at nominal voltage); reactive = 2.0 * 0.75 * 1.0 = 1.5
-        assert!((ports.electrical.reactive_power_kvar - 1.5).abs() < 1e-12);
+        // real_w = 2000 (all-P load at nominal voltage); reactive = 2000 * 0.75 * 1.0 = 1500 var
+        assert!((ports.electrical.reactive_power_var - 1500.0).abs() < 1e-9);
     }
 
     #[test]
-    fn reactive_zip_default_produces_zero_kvar() {
+    fn reactive_zip_default_produces_zero_var() {
         // A class with no ZIP defaults falls back to constant_power()
         // (pf=0.0 sentinel), so reactive_power=0. "TV" used to be the
         // example here, but it now has a class-table row (MELs values), so
@@ -2067,7 +2089,7 @@ mod tests {
 
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
     }
 
     #[test]
@@ -2091,19 +2113,19 @@ mod tests {
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         // At nominal voltage the MELs reactive base sums to ~1, so
         // Q ≈ P · tan(acos(0.8)).
-        let expected = 3.0 * 0.8_f64.acos().tan();
+        let expected = 3000.0 * 0.8_f64.acos().tan();
         assert!(
-            (ports.electrical.reactive_power_kvar - expected).abs() < 1e-9,
+            (ports.electrical.reactive_power_var - expected).abs() < 1e-6,
             "TV reactive = {}, expected ≈ {expected}",
-            ports.electrical.reactive_power_kvar
+            ports.electrical.reactive_power_var
         );
     }
 
     #[test]
     fn reactive_zip_voltage_sensitivity() {
         // zq=1, iq=0, pq=0 → reactive_base = v_norm².
-        // pf=0.9 → tan(acos(0.9)) ≈ 0.4843; reactive = real_kw * 0.4843 * v_norm².
-        // Pure-P real ZIP (zp=0, ip=0, pp=1) keeps real_kw independent of voltage.
+        // pf=0.9 → tan(acos(0.9)) ≈ 0.4843; reactive = real_w * 0.4843 * v_norm².
+        // Pure-P real ZIP (zp=0, ip=0, pp=1) keeps real_w independent of voltage.
         let mut config = config_with_extras(
             "s",
             "Lighting",
@@ -2119,13 +2141,13 @@ mod tests {
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         let v_norm = 0.9_f64;
-        // real_kw = 1.0 (pure-P real ZIP); reactive = 1.0 * tan(acos(0.9)) * v_norm²
+        // real_w = 1.0 (pure-P real ZIP); reactive = 1.0 * tan(acos(0.9)) * v_norm²
         let tan_phi = 0.9_f64.clamp(-1.0, 1.0).acos().tan();
-        let expected_kvar = tan_phi * v_norm * v_norm;
+        let expected_var = tan_phi * v_norm * v_norm * 1000.0;
         assert!(
-            (ports.electrical.reactive_power_kvar - expected_kvar).abs() < 1e-12,
-            "reactive={} expected={expected_kvar}",
-            ports.electrical.reactive_power_kvar
+            (ports.electrical.reactive_power_var - expected_var).abs() < 1e-9,
+            "reactive={} expected={expected_var}",
+            ports.electrical.reactive_power_var
         );
     }
 
@@ -2148,9 +2170,9 @@ mod tests {
         let mut ports = PortSlots::default();
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert!(
-            ports.electrical.reactive_power_kvar.abs() < 1e-12,
+            ports.electrical.reactive_power_var.abs() < 1e-12,
             "pf=1.0 should produce zero reactive power, got {}",
-            ports.electrical.reactive_power_kvar
+            ports.electrical.reactive_power_var
         );
     }
 
@@ -2159,16 +2181,16 @@ mod tests {
         // Regression: before the fix, pf=0.99 produced reactive ≈ 0.99× real
         // (a 7× overestimate). The correct ratio is tan(acos(0.99)) ≈ 0.1425.
         let zip = ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.99);
-        let p_kw = 4.0;
-        let (_real_kw, reactive_kvar) = zip.apply(p_kw, 1.0);
+        let p_w = 4.0;
+        let (_real_w, reactive_var) = zip.apply(p_w, 1.0);
         let tan_phi = 0.99_f64.clamp(-1.0, 1.0).acos().tan();
-        let expected_reactive = p_kw * tan_phi;
+        let expected_reactive = p_w * tan_phi;
         assert!(
-            (reactive_kvar - expected_reactive).abs() < 1e-12,
-            "pf=0.99: expected reactive {expected_reactive} ≈ 0.1425× real, got {reactive_kvar}"
+            (reactive_var - expected_reactive).abs() < 1e-12,
+            "pf=0.99: expected reactive {expected_reactive} ≈ 0.1425× real, got {reactive_var}"
         );
         // Confirm the bug is fixed: reactive should be ~14% of real, not ~99%.
-        let ratio = reactive_kvar / p_kw;
+        let ratio = reactive_var / p_w;
         assert!(
             ratio < 0.20,
             "pf=0.99: reactive/real ratio {ratio} should be < 0.20 (was 0.99 before fix)"
@@ -2189,10 +2211,10 @@ mod tests {
                 pq: 0.5,
                 pf: 1.0,
             };
-            let (_real_kw, reactive_kvar) = zip.apply(3.0, voltage_pu);
+            let (_real_w, reactive_var) = zip.apply(3.0, voltage_pu);
             assert!(
-                reactive_kvar.abs() < 1e-12,
-                "pf=1.0 at v={voltage_pu}: reactive should be 0, got {reactive_kvar}"
+                reactive_var.abs() < 1e-12,
+                "pf=1.0 at v={voltage_pu}: reactive should be 0, got {reactive_var}"
             );
         }
     }
@@ -2263,15 +2285,19 @@ mod tests {
                 let [z, i, p_coeff, zq, iq, pq, pf] = *row;
                 let v_norm = voltage_pu / 1.0;
                 let zip_multiplier = z * v_norm * v_norm + i * v_norm + p_coeff;
-                let expected_real_kw = schedule_kw * zip_multiplier;
+                // The W-world arithmetic, expression for expression with
+                // the ZIP apply: the helper's schedule value enters in kW
+                // and converts once (× 1000), the multiplier applies on the
+                // W value.
+                let expected_real_w = schedule_kw * 1000.0 * zip_multiplier;
                 let reactive_base = zq * v_norm * v_norm + iq * v_norm + pq;
                 let expected_reactive = if pf.abs() < 1e-9 {
                     0.0
                 } else {
                     let tan_phi = pf.clamp(-1.0, 1.0).acos().tan();
-                    expected_real_kw * tan_phi * reactive_base
+                    expected_real_w * tan_phi * reactive_base
                 };
-                let expected_active_w = hares_physics::units::power_kw_to_w(expected_real_kw);
+                let expected_active_w = expected_real_w;
 
                 assert_eq!(
                     ports.electrical.load_power_w.to_bits(),
@@ -2281,11 +2307,11 @@ mod tests {
                     ports.electrical.load_power_w
                 );
                 assert_eq!(
-                    ports.electrical.reactive_power_kvar.to_bits(),
+                    ports.electrical.reactive_power_var.to_bits(),
                     expected_reactive.to_bits(),
                     "{class} at v={voltage_pu}: reactive power diverged from legacy \
                      ({} vs {expected_reactive})",
-                    ports.electrical.reactive_power_kvar
+                    ports.electrical.reactive_power_var
                 );
             }
         }
@@ -2525,9 +2551,11 @@ mod tests {
     fn base_config_for_zone_test(name: &str, schedule: &[f64]) -> EquipmentConfig {
         let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
         raw.insert(KEY_POWER_SCHEDULE_SOURCE.to_string(), "constant".into());
+        // The tests' schedule values are the kW working values they
+        // reason in; the raw key enters in W.
         raw.insert(
-            KEY_POWER_CONSTANT_KW.to_string(),
-            schedule.first().copied().unwrap_or(0.0).into(),
+            KEY_POWER_CONSTANT_W.to_string(),
+            (schedule.first().copied().unwrap_or(0.0) * 1000.0).into(),
         );
         EquipmentConfig::raw(name.to_string(), name.to_string(), raw)
     }
@@ -2610,7 +2638,7 @@ mod tests {
     fn zip_reactive_power_emitted_to_telemetry() {
         // Iq=0.8 (pure current reactive term), pq=0.2, zq=0, pf=0.9 at nominal voltage v=1.0.
         // reactive_base = zq*v² + iq*v + pq = 0.0 + 0.8*1.0 + 0.2 = 1.0
-        // pf=0.9 → tan(acos(0.9)) ≈ 0.4843; reactive_kvar = real_kw * 0.4843 * reactive_base
+        // pf=0.9 → tan(acos(0.9)) ≈ 0.4843; reactive_var = real_w * 0.4843 * reactive_base
         let mut config = config_with_extras(
             "s",
             "Lighting",
@@ -2626,20 +2654,20 @@ mod tests {
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
 
         let tan_phi = 0.9_f64.clamp(-1.0, 1.0).acos().tan();
-        let expected_kvar = 2.0_f64 * tan_phi * (0.0 + 0.8 * 1.0 + 0.2);
-        let telemetry_kvar = eq
+        let expected_var = 2000.0_f64 * tan_phi * (0.0 + 0.8 * 1.0 + 0.2);
+        let telemetry_var = eq
             .telemetry()
             .get(tk::REACTIVE_POWER_KVAR)
-            .expect("reactive_power_kvar must be present in telemetry");
+            .expect("reactive_power_var must be present in telemetry");
         assert!(
-            (telemetry_kvar - expected_kvar).abs() < 1e-12,
-            "telemetry reactive_power_kvar={telemetry_kvar} expected={expected_kvar}"
+            (telemetry_var - expected_var).abs() < 1e-9,
+            "telemetry reactive_power_var={telemetry_var} expected={expected_var}"
         );
         // Confirm telemetry matches port accumulation.
         assert!(
-            (telemetry_kvar - ports.electrical.reactive_power_kvar).abs() < 1e-12,
-            "telemetry must match port accumulation: telemetry={telemetry_kvar} port={}",
-            ports.electrical.reactive_power_kvar
+            (telemetry_var - ports.electrical.reactive_power_var).abs() < 1e-9,
+            "telemetry must match port accumulation: telemetry={telemetry_var} port={}",
+            ports.electrical.reactive_power_var
         );
     }
 
@@ -2663,13 +2691,13 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
 
-        let telemetry_kvar = eq
+        let telemetry_var = eq
             .telemetry()
             .get(tk::REACTIVE_POWER_KVAR)
-            .expect("reactive_power_kvar must be present in telemetry even when zero");
+            .expect("reactive_power_var must be present in telemetry even when zero");
         assert_eq!(
-            telemetry_kvar, 0.0,
-            "reactive_power_kvar telemetry must be 0.0 when no ZIP coefficients configured"
+            telemetry_var, 0.0,
+            "reactive_power_var telemetry must be 0.0 when no ZIP coefficients configured"
         );
     }
 
@@ -2678,7 +2706,7 @@ mod tests {
         // A NaN schedule value is concretely reachable: the CSV loader
         // (`hares-io/src/schedule.rs`) parses with `str::parse::<f64>()`,
         // which accepts "nan", with no is_nan/is_finite check at that
-        // boundary. At the consumption site below, `raw_schedule_kw > 0.0`
+        // boundary. At the consumption site below, `raw_schedule_w > 0.0`
         // is false for NaN, so corrupted data silently becomes "no load" —
         // the dwelling under-reports consumption with no signal to the
         // caller, the same failure class the premise-ZIP NaN guard was
@@ -2705,7 +2733,7 @@ mod tests {
         // `step()` scales every draw by the runtime month multipliers
         // (`raw * load_fraction * month_scale`) regardless of whether the
         // power source is a constant or a schedule column. The constant
-        // arm of `expected_mean_power_kw` scales its published expectation
+        // arm of `expected_mean_power_w` scales its published expectation
         // by the mean multiplier; the column arm defers to
         // `ExpectedMeanPower::ScheduleColumn`, whose premise weight is the
         // *unscaled* column mean — the same published-expectation vs step
@@ -2733,7 +2761,8 @@ mod tests {
         env.domains.schedule.set_from(&DomainUpdate {
             domain_id: SCHEDULE_DOMAIN_ID,
             zone_temperatures_c: vec![],
-            custom_payload: Some(vec![2.5, 7.25]),
+            // The schedule columns are W (SI): 2.5 kW, 7.25 kW.
+            custom_payload: Some(vec![2500.0, 7250.0]),
         });
         eq.init(&config, &env).unwrap();
 
@@ -2750,9 +2779,9 @@ mod tests {
             "every month is zeroed; the column draw must be suppressed"
         );
 
-        match eq.expected_mean_power_kw() {
+        match eq.expected_mean_power_w() {
             None => {}
-            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
+            Some(crate::ExpectedMeanPower::W(kw)) => assert!(
                 kw.abs() < 1e-12,
                 "a load zeroed in every month has zero expected draw, got {kw}"
             ),
@@ -2785,7 +2814,7 @@ mod tests {
         let env = base_env();
         eq.init(&config, &env).unwrap();
 
-        match eq.expected_mean_power_kw() {
+        match eq.expected_mean_power_w() {
             Some(crate::ExpectedMeanPower::ScheduleColumn(1)) => {}
             other => panic!(
                 "identity multipliers change no draw; the column deferral \
@@ -2821,7 +2850,7 @@ mod tests {
         eq.init(&config, &env).unwrap();
 
         assert_eq!(
-            eq.expected_mean_power_kw(),
+            eq.expected_mean_power_w(),
             None,
             "partial month multipliers make a column load's expectation \
              unknowable without simulation; it must be None"
@@ -2879,12 +2908,12 @@ mod tests {
     #[test]
     fn expected_mean_power_accounts_for_month_multipliers() {
         // A load configured with runtime month multipliers draws
-        // `constant_kw * load_fraction * month_scale` each step (the
+        // `constant_w * load_fraction * month_scale` each step (the
         // scaling applied in `step()`), so its expected mean draw over a
         // uniform year is the constant scaled by the mean of the twelve
         // multipliers — the same convention `ScheduleSource::mean()` uses
         // for DailyProfile month averaging. The premise-level aggregation
-        // weights equipment by `expected_mean_power_kw()`: publishing the
+        // weights equipment by `expected_mean_power_w()`: publishing the
         // unscaled constant overstates a seasonal load's weight by the
         // inverse of the mean multiplier (12x here), silently skewing the
         // published premise ZIP toward that equipment's coefficients.
@@ -2930,11 +2959,12 @@ mod tests {
         assert_eq!(ports.electrical.net_active_w(), 2000.0);
 
         // The published expectation must describe that same load: 2 kW in
-        // one month of twelve is 2/12 kW on average, not 2 kW.
-        match eq.expected_mean_power_kw() {
-            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
-                (kw - 2.0 / 12.0).abs() < 1e-12,
-                "expected mean must be the month-scaled average 2/12 kW, got {kw}"
+        // one month of twelve is 2/12 kW on average, not 2 kW (the mean in
+        // W, SI).
+        match eq.expected_mean_power_w() {
+            Some(crate::ExpectedMeanPower::W(w)) => assert!(
+                (w - 2000.0 / 12.0).abs() < 1e-9,
+                "expected mean must be the month-scaled average 2000/12 W, got {w}"
             ),
             other => panic!(
                 "a month-scaled constant load has a computable expected draw, \
@@ -2948,7 +2978,7 @@ mod tests {
     #[test]
     fn month_multipliers_scale_a_daily_profile() {
         use super::{
-            KEY_POWER_PROFILE_MAX_KW, KEY_POWER_PROFILE_MONTH, KEY_POWER_PROFILE_WEEKDAY,
+            KEY_POWER_PROFILE_MAX_W, KEY_POWER_PROFILE_MONTH, KEY_POWER_PROFILE_WEEKDAY,
             KEY_POWER_PROFILE_WEEKEND,
         };
         use hares_types::EndUse;
@@ -2959,7 +2989,7 @@ mod tests {
             KEY_POWER_SCHEDULE_SOURCE.to_string(),
             "daily_profile".into(),
         );
-        raw.insert(KEY_POWER_PROFILE_MAX_KW.to_string(), 2.0.into());
+        raw.insert(KEY_POWER_PROFILE_MAX_W.to_string(), 2000.0.into());
         for key in [KEY_POWER_PROFILE_WEEKDAY, KEY_POWER_PROFILE_WEEKEND] {
             raw.insert(
                 key.to_string(),
@@ -2988,10 +3018,10 @@ mod tests {
             500.0,
             "March: 2 kW, times the profile's 0.5, times the multiplier's 0.5"
         );
-        match eq.expected_mean_power_kw() {
-            Some(crate::ExpectedMeanPower::Kw(kw)) => assert!(
-                (kw - 2.0 * 11.25 / 12.0).abs() < 1e-12,
-                "eleven months at 2 kW and March at 0.5 kW, got {kw}"
+        match eq.expected_mean_power_w() {
+            Some(crate::ExpectedMeanPower::W(w)) => assert!(
+                (w - 2000.0 * 11.25 / 12.0).abs() < 1e-9,
+                "eleven months at 2 kW and March at 0.5 kW, got {w}"
             ),
             other => panic!("a daily profile has a computable mean, got {other:?}"),
         }
@@ -3168,9 +3198,30 @@ mod tests {
         eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
         assert!((ports.electrical.net_active_w() - 2000.0).abs() < 10.0);
         assert!(
-            ports.electrical.reactive_power_kvar.abs() < 1e-12,
+            ports.electrical.reactive_power_var.abs() < 1e-12,
             "Lighting with pf=1.0 should produce zero reactive power, got {}",
-            ports.electrical.reactive_power_kvar
+            ports.electrical.reactive_power_var
+        );
+    }
+
+    #[test]
+    fn dbg_sl() {
+        let config = config_with_schedule("s", "Lighting", &[2.0]);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+        eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.5 })
+            .unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        eprintln!(
+            "DBG net={} telem={} sched_w={}",
+            ports.electrical.net_active_w(),
+            eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(-9.0),
+            eq.power_source.value_at(&env).unwrap_or(-9.0)
         );
     }
 }

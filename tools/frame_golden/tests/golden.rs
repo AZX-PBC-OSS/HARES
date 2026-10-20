@@ -15,8 +15,8 @@ use frame_golden::manifest::{GoldenManifest, repo_root};
 use hares_core::{RunHealth, WarmupOutcome};
 
 /// A one-day, hourly manifest against the cz4a parity fixture: 24 rows,
-/// master seed 0, no initialization (`initialization_duration_s = 0` runs
-/// no warm-up, as the Python binding's rule has it).
+/// master seed 0, the warm-up disabled (`warmup = "disabled"` runs no
+/// warm-up).
 ///
 /// The feature set names the running binary's own: these tests exercise
 /// capture stability and the round trip, not the feature gate, so the
@@ -31,21 +31,25 @@ fn one_day_manifest() -> String {
         r#"
 kind = "dwelling"
 features = [{features}]
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [simulation]
 start_time = "2023-01-01T00:00:00-07:00"
 duration = 86400
 time_res = 3600
-output_verbosity = 2
 master_seed = 0
+warmup = "disabled"
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = "memory"
 
 [[home]]
 bldg_id = 1
 hpxml = "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"
 schedule = "tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv"
 weather = "tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"
-initialization_duration_s = 0
 overrides = {{}}
 "#
     )
@@ -90,7 +94,7 @@ fn golden_json_is_byte_stable() {
         first.doc.features,
         frame_golden::manifest::running_features()
     );
-    assert_eq!(first.doc.defaults_dir, "defaults");
+    assert_eq!(first.doc.defaults_dir, "python/hares/defaults");
 }
 
 #[test]
@@ -142,9 +146,8 @@ fn capture_then_compare_round_trips() {
 
 /// A one-day, hourly manifest against the cz2a parity fixture, with the
 /// warm-up setting passed through: the acceptance tests for the manifest's
-/// `initialization_duration_s` rule run the same inputs with `0` and with
-/// a positive value.
-fn cz2a_one_day_manifest(initialization_duration_s: u64) -> String {
+/// `warmup` rule run the same inputs disabled and default.
+fn cz2a_one_day_manifest(warmup_line: &str) -> String {
     let features = frame_golden::manifest::running_features()
         .into_iter()
         .map(|f| format!("\"{f}\""))
@@ -154,55 +157,55 @@ fn cz2a_one_day_manifest(initialization_duration_s: u64) -> String {
         r#"
 kind = "dwelling"
 features = [{features}]
-defaults = "defaults"
+defaults = "python/hares/defaults"
 
 [simulation]
 start_time = "2023-01-01T00:00:00-07:00"
 duration = 86400
 time_res = 3600
-output_verbosity = 2
 master_seed = 0
+{warmup_line}
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = "memory"
 
 [[home]]
 bldg_id = 1
 hpxml = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/building.xml"
 schedule = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/schedule.csv"
 weather = "tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh/weather.epw"
-initialization_duration_s = {initialization_duration_s}
 overrides = {{}}
 "#
     )
 }
 
-fn run_cz2a_one_day(initialization_duration_s: u64) -> RunHealth {
+fn run_cz2a_one_day(warmup_line: &str) -> RunHealth {
     let dir = tempfile::tempdir().unwrap();
     let manifest_path = dir.path().join("cz2a_one_day.toml");
-    std::fs::write(
-        &manifest_path,
-        cz2a_one_day_manifest(initialization_duration_s),
-    )
-    .unwrap();
+    std::fs::write(&manifest_path, cz2a_one_day_manifest(warmup_line)).unwrap();
 
     let products = run_products(&manifest_path);
     serde_json::from_value(products.health.expect("dwelling run records health")).unwrap()
 }
 
 #[test]
-fn manifest_zero_initialization_duration_runs_no_warmup() {
-    let health = run_cz2a_one_day(0);
+fn manifest_disabled_warmup_runs_no_warmup() {
+    let health = run_cz2a_one_day("warmup = \"disabled\"");
     assert_eq!(
         health.warmup,
         WarmupOutcome::Disabled,
-        "initialization_duration_s = 0 must run no warm-up"
+        "warmup = \"disabled\" must run no warm-up"
     );
 }
 
 #[test]
-fn manifest_positive_initialization_duration_runs_warmup() {
-    let health = run_cz2a_one_day(86400);
+fn manifest_default_warmup_runs_warmup() {
+    let health = run_cz2a_one_day("");
     assert!(
         matches!(health.warmup, WarmupOutcome::Ran { .. }),
-        "a positive initialization_duration_s must run the warm-up: {:?}",
+        "the default warmup must run the warm-up: {:?}",
         health.warmup
     );
 }
@@ -225,7 +228,6 @@ bldg_id = 2
 hpxml = "tests/fixtures/resstock/2025.1/bldg0000002/home.xml"
 schedule = "tests/fixtures/resstock/2025.1/bldg0000002/in.schedules.csv"
 weather = "tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"
-initialization_duration_s = 0
 weight = {weight:.1}
 overrides = {{}}
 "#
@@ -235,15 +237,22 @@ overrides = {{}}
         r#"
 kind = "fleet"
 features = [{features}]
-defaults = "defaults"
-resolution = "hourly"
+defaults = "python/hares/defaults"
+
+[fleet]
+frequency = "hourly"
+selection = "verbosity-2"
 
 [simulation]
 start_time = "2018-01-01T00:00:00-05:00"
 duration = 86400
 time_res = 3600
-output_verbosity = 2
 master_seed = 0
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = "memory"
 {}
 {}
 "#,
@@ -253,35 +262,69 @@ master_seed = 0
 }
 
 #[test]
-fn fleet_manifest_weights_reach_the_weights_product() {
+fn fleet_manifest_weights_reach_the_covered_weight() {
     let dir = tempfile::tempdir().unwrap();
     let manifest_path = dir.path().join("fleet_weights.toml");
     std::fs::write(&manifest_path, weighted_fleet_manifest()).unwrap();
 
     let products = run_products(&manifest_path);
-    let weights = products
+    // The homes table: one row per home, in home order, each home's own
+    // manifest weight.
+    let homes = products
         .frames
-        .get("weights")
-        .expect("a fleet run produces a weights product");
-    let batch = weights
+        .get("homes")
+        .expect("a fleet run produces a homes product");
+    let batch = homes
         .batches
         .first()
-        .expect("the weights product has a batch");
+        .expect("the homes product has a batch");
     let bldg_ids = batch
         .column(0)
         .as_any()
         .downcast_ref::<Int64Array>()
         .expect("bldg_id is an Int64 column");
-    let sample_weights = batch
+    let weights = batch
         .column(1)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .expect("sample_weight is a Float64 column");
-    assert_eq!(bldg_ids.len(), 2, "one weights row per home");
+        .expect("weight is a Float64 column");
+    assert_eq!(bldg_ids.len(), 2, "one homes row per home");
     assert_eq!(bldg_ids.value(0), 2, "rows are in home order");
     assert_eq!(bldg_ids.value(1), 2, "rows are in home order");
-    assert_eq!(sample_weights.value(0), 1.0, "the first home's weight");
-    assert_eq!(sample_weights.value(1), 3.0, "the second home's weight");
+    assert_eq!(weights.value(0), 1.0, "the first home's weight");
+    assert_eq!(weights.value(1), 3.0, "the second home's weight");
+
+    // The covered weight: the weight behind the aggregate's cells, the
+    // same shape as the aggregate. The two homes declare one column set,
+    // so every cell carries both weights.
+    let covered = products
+        .frames
+        .get("covered_weight")
+        .expect("a fleet run produces a covered_weight product");
+    let covered_batch = covered
+        .batches
+        .first()
+        .expect("the covered weight has a batch");
+    let covered_weights = covered_batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("a covered weight cell is a Float64 column");
+    assert_eq!(
+        covered_batch.num_columns(),
+        products
+            .frames
+            .get("aggregate")
+            .and_then(|frame| frame.batches.first())
+            .map(|batch| batch.num_columns())
+            .expect("an aggregate product"),
+        "the covered weight carries the aggregate's columns"
+    );
+    assert_eq!(
+        covered_weights.value(0),
+        4.0,
+        "the cell's covered weight is both homes'"
+    );
 }
 
 /// Runs git in the fixture repository `dir` with an empty configuration of

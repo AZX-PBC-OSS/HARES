@@ -1,13 +1,128 @@
 //! Equipment registry for dynamic dispatch.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
-use hares_types::HaresError;
+use hares_types::{CoreCapabilities, EndUse, HaresError, TelemetryField};
 
+use crate::water_heater::wh_config::TanklessWaterHeaterConfig;
 use crate::{Equipment, EquipmentConfig};
 
 pub type EquipmentFactory =
     Box<dyn Fn(EquipmentConfig) -> Box<dyn Equipment> + Send + Sync + 'static>;
+
+/// The typed surface a registered class declares: its end use, its
+/// core-output capabilities and its declared telemetry.
+///
+/// Read by callers that hold a class name but no constructed equipment
+/// (the blueprint's end-use removal and the spec-shaped catalogue path);
+/// the live path reads the same values off the constructed descriptor.
+/// The capabilities are recorded at each class's default construction:
+/// only the fuel-independent bits (`HAS_SOC`, the setpoint, capacity,
+/// COP and speed flags) gate any column family, and the fuel bit itself
+/// comes from the spec's own fuel where it is consumed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassDeclaredSurface {
+    /// The class's declared end use.
+    pub end_use: EndUse,
+    /// The class's declared core-output capabilities.
+    pub core_capabilities: CoreCapabilities,
+    /// The class's declared telemetry fields (the heat-pump-heater
+    /// column family's gate is the pan heater power declaration).
+    pub telemetry: Vec<TelemetryField>,
+}
+
+/// The registered class's declared surface, read from the class's own
+/// constructor at its default configuration: the end use and the
+/// core-output capabilities the constructed descriptor carries. `None`
+/// for a name that is not a registered class.
+///
+/// There is no second table to drift: the declaration is the
+/// constructor's, and the surface is read from it (once per process,
+/// then cached). The two tankless classes require a typed fuel to
+/// construct and are read at the gas configuration their canonical
+/// resolvers write.
+pub fn class_declared_surface(class: &str) -> Option<ClassDeclaredSurface> {
+    static SURFACES: OnceLock<HashMap<String, ClassDeclaredSurface>> = OnceLock::new();
+    let surfaces = SURFACES.get_or_init(|| {
+        let registry = crate::EquipmentRegistry::new();
+        registry
+            .known_names()
+            .into_iter()
+            .filter_map(|class| {
+                let config = default_construction_config(class);
+                // An unconstructable class (the typed-error
+                // registrations) declares no surface.
+                registry.create(class, config).ok().map(|eq| {
+                    let d = eq.descriptor();
+                    (
+                        class.to_string(),
+                        ClassDeclaredSurface {
+                            end_use: d.end_use.clone(),
+                            core_capabilities: d.core_capabilities,
+                            telemetry: d.telemetry_fields.clone(),
+                        },
+                    )
+                })
+            })
+            .collect()
+    });
+    surfaces.get(class).cloned()
+}
+
+/// The default configuration a class constructs from: the raw default
+/// payload, except the two tankless classes, whose constructor requires
+/// a typed fuel (their canonical resolvers write gas).
+fn default_construction_config(class: &str) -> EquipmentConfig {
+    use crate::water_heater::wh_config::TanklessWaterHeaterConfig;
+    match class {
+        "Tankless Water Heater" | "Gas Tankless Water Heater" => {
+            let mut config = EquipmentConfig::from_typed(
+                class.to_string(),
+                "Tankless Water Heater".to_string(),
+                TanklessWaterHeaterConfig {
+                    fuel_type: hares_types::FuelType::Gas,
+                    ..tankless_field_defaults()
+                },
+            )
+            .expect("the tankless default config converts");
+            config.ochre_class = class.to_string();
+            config
+        }
+        _ => EquipmentConfig::with_payload(
+            class.to_string(),
+            class.to_string(),
+            crate::ConfigPayload::default(),
+        ),
+    }
+}
+
+/// The tankless config's fields are all `Option`s but the struct has no
+/// `Default` (its fuel is required); this is the all-`None` form whose
+/// quantities the constructor resolves.
+fn tankless_field_defaults() -> TanklessWaterHeaterConfig {
+    TanklessWaterHeaterConfig {
+        equipment_id: None,
+        zone_id: None,
+        loop_id: None,
+        fuel_type: hares_types::FuelType::Gas,
+        energy_factor: None,
+        uniform_energy_factor: None,
+        heating_capacity_w: None,
+        setpoint_c: None,
+        parasitic_power_w: None,
+        performance_adjustment: None,
+        inlet_temp_c: None,
+        draw_flow_rate_kg_s: None,
+        draw_flow_rate_source: None,
+        mains_temp_c_source: None,
+        appliance_draw_flow_rate_source: None,
+        avg_water_draw_l_per_day: None,
+        min_flow_gpm: None,
+        min_flow_kg_s: None,
+        zone_type: None,
+    }
+}
 
 /// Every built-in equipment type name registered by `EquipmentRegistry::new`.
 ///
@@ -337,6 +452,7 @@ mod tests {
             draw_flow_rate_kg_s: None,
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             avg_water_draw_l_per_day: None,
             zone_type: None,
             min_flow_kg_s: None,
@@ -372,6 +488,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -391,4 +508,229 @@ mod tests {
             "fuel_type must be Gas after typed init with fuel_type='Gas'"
         );
     }
+}
+
+/// The declared surface is the constructor's declaration: for every
+/// registered class, `class_declared_surface` reads the same end use,
+/// core capabilities and telemetry the constructed descriptor carries.
+/// There is no second table to drift.
+#[test]
+fn class_declared_surface_matches_the_constructed_descriptors() {
+    let registry = EquipmentRegistry::new();
+    for class in registry.known_names() {
+        let surface = class_declared_surface(class)
+            .unwrap_or_else(|| panic!("'{class}' declares no surface"));
+        let config = default_construction_config(class);
+        let eq = registry
+            .create(class, config)
+            .unwrap_or_else(|e| panic!("create failed for '{class}': {e}"));
+        let d = eq.descriptor();
+        assert_eq!(
+            surface.end_use, d.end_use,
+            "'{class}' declared end use must match the constructed descriptor"
+        );
+        assert_eq!(
+            surface.core_capabilities, d.core_capabilities,
+            "'{class}' declared capabilities must match the constructed descriptor"
+        );
+        assert_eq!(
+            surface.telemetry, d.telemetry_fields,
+            "'{class}' declared telemetry must match the constructed descriptor"
+        );
+    }
+    // An unknown class declares nothing.
+    assert_eq!(class_declared_surface("Television"), None);
+    assert_eq!(class_declared_surface("Water Heating"), None);
+}
+
+/// The config type a class's overrides are checked against (the
+/// removed-keys row's prefix): the same class-to-config mapping the
+/// registry's factories implement. `None` for a class whose config type
+/// declares no removed-key row, so its overrides carry none either.
+#[must_use]
+pub fn config_type_for_class(class: &str) -> Option<&'static str> {
+    match class {
+        "PV" => Some("PvConfig"),
+        "Battery" => Some("BatteryConfig"),
+        "EV" | "Electric Vehicle" | "Scheduled EV" => Some("EvConfig"),
+        "Gas Generator" | "Gas Fuel Cell" => Some("GeneratorConfig"),
+        "Air Conditioner" => Some("CentralAirConditionerConfig"),
+        "Room AC" => Some("RoomAcConfig"),
+        "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler" | "WSHP Cooler" => {
+            Some("HeatPumpCoolerConfig")
+        }
+        "EventBasedLoad" | "Cooking Range" | "Microwave" => Some("EventBasedLoad"),
+        "Clothes Washer" | "Dishwasher" | "Clothes Dryer" => Some("WetAppliance"),
+        "Lighting" | "Plug Loads" | "Other" | "Refrigerator" | "Freezer" | "MELs" | "TV"
+        | "Well Pump" | "Pool Pump" | "Pool Heater" | "Spa Pump" | "Spa Heater" | "Gas Grill"
+        | "Gas Fireplace" | "Gas Lighting" | "Ceiling Fan" | "Indoor Lighting"
+        | "Exterior Lighting" | "Basement Lighting" | "Garage Lighting" => Some("ScheduledLoad"),
+        _ => None,
+    }
+}
+
+/// One row of OpenStudio-HPXML's `unavailable_periods.csv` an equipment
+/// class answers to: the row's `Schedule Name` and the period kinds whose
+/// flag zeroes it (the row's 1s in the reference table,
+/// `resources/data/unavailable_periods.csv:1-40`, v1.12.0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnavailableRow {
+    pub schedule_name: &'static str,
+    pub zeroed_by: &'static [hares_types::UnavailableKind],
+}
+
+/// Every kind, spelled once per arm for the declarations below.
+const OUTAGE_ONLY: &[hares_types::UnavailableKind] = &[hares_types::UnavailableKind::PowerOutage];
+const VACANCY_OR_OUTAGE: &[hares_types::UnavailableKind] = &[
+    hares_types::UnavailableKind::Vacancy,
+    hares_types::UnavailableKind::PowerOutage,
+];
+const OUTAGE_OR_NO_HEATING: &[hares_types::UnavailableKind] = &[
+    hares_types::UnavailableKind::PowerOutage,
+    hares_types::UnavailableKind::NoSpaceHeating,
+];
+const OUTAGE_OR_NO_COOLING: &[hares_types::UnavailableKind] = &[
+    hares_types::UnavailableKind::PowerOutage,
+    hares_types::UnavailableKind::NoSpaceCooling,
+];
+
+/// The declaration's slice literal: promoted to `'static` at each arm.
+macro_rules! rows {
+    ($name:literal, $by:expr) => {
+        &[UnavailableRow {
+            schedule_name: $name,
+            zeroed_by: $by,
+        }][..]
+    };
+    ($first:literal, $second:literal, $by:expr) => {
+        &[
+            UnavailableRow {
+                schedule_name: $first,
+                zeroed_by: $by,
+            },
+            UnavailableRow {
+                schedule_name: $second,
+                zeroed_by: $by,
+            },
+        ][..]
+    };
+}
+
+const IDEAL_ROWS: &[UnavailableRow] = &[
+    UnavailableRow {
+        schedule_name: "space_heating",
+        zeroed_by: OUTAGE_OR_NO_HEATING,
+    },
+    UnavailableRow {
+        schedule_name: "space_cooling",
+        zeroed_by: OUTAGE_OR_NO_COOLING,
+    },
+];
+const NONE: &[UnavailableRow] = &[];
+
+/// The `unavailable_periods.csv` rows each equipment class answers to, or
+/// none: one exhaustive match over the canonical class names, so a new
+/// class must choose. A class answers a row when its operation follows
+/// the row's schedule (heating equipment `space_heating`, cooling
+/// equipment `space_cooling`, a heat pump each by mode, water heaters
+/// `water_heater`, refrigerators and freezers their rows, the
+/// dehumidifier, mechanical ventilation `house_fan`, kitchen and bath
+/// fans, batteries `battery_charging` and `battery_discharging`, EVs
+/// `electric_vehicle_charging` and `electric_vehicle_discharging`); PV
+/// and generators answer none and keep running through every period.
+#[must_use]
+pub fn unavailable_period_rows(class: &str) -> &'static [UnavailableRow] {
+    match class {
+        // HVAC heating equipment
+        "Gas Furnace" | "Electric Furnace" | "Electric Baseboard" | "Gas Boiler"
+        | "Electric Boiler" | "Heat Pump Heater" | "ASHP Heater" | "MSHP Heater"
+        | "GSHP Heater" | "WSHP Heater" => rows!("space_heating", OUTAGE_OR_NO_HEATING),
+        // HVAC cooling equipment
+        "Air Conditioner" | "Room AC" | "ASHP Cooler" | "MSHP Cooler" | "GSHP Cooler"
+        | "WSHP Cooler" => rows!("space_cooling", OUTAGE_OR_NO_COOLING),
+        // The ideal unit serves both axes by mode.
+        "Ideal HVAC" => IDEAL_ROWS,
+        "Dehumidifier" => rows!("dehumidifier", OUTAGE_ONLY),
+        // Water heaters: the setpoint holds 2 C through the period, so
+        // standby losses continue.
+        "Gas Water Heater"
+        | "Resistance Water Heater"
+        | "Electric Resistance Water Heater"
+        | "Tankless Water Heater"
+        | "Gas Tankless Water Heater"
+        | "Heat Pump Water Heater"
+        | "HPWH"
+        | "Indirect Tank" => rows!("water_heater", OUTAGE_ONLY),
+        "Battery" => rows!("battery_charging", "battery_discharging", OUTAGE_ONLY),
+        "EV" | "Electric Vehicle" | "Scheduled EV" => rows!(
+            "electric_vehicle_charging",
+            "electric_vehicle_discharging",
+            VACANCY_OR_OUTAGE
+        ),
+        // Mechanical ventilation answers the house fan's row.
+        "Ventilation Fan" | "HRV" | "ERV" => rows!("house_fan", OUTAGE_ONLY),
+        // Scheduled and event-based loads answer the row their schedule
+        // column names; a column that is no row of the table (basement
+        // lighting, the microwave) answers none, as the reference's own
+        // lookup warns.
+        "Refrigerator" => rows!("refrigerator", OUTAGE_ONLY),
+        "Freezer" => rows!("freezer", OUTAGE_ONLY),
+        "Clothes Washer" => rows!("clothes_washer", VACANCY_OR_OUTAGE),
+        "Clothes Dryer" => rows!("clothes_dryer", VACANCY_OR_OUTAGE),
+        "Dishwasher" => rows!("dishwasher", VACANCY_OR_OUTAGE),
+        "Cooking Range" => rows!("cooking_range", VACANCY_OR_OUTAGE),
+        "Lighting" | "Indoor Lighting" => rows!("lighting_interior", VACANCY_OR_OUTAGE),
+        "Exterior Lighting" => rows!("lighting_exterior", VACANCY_OR_OUTAGE),
+        "Garage Lighting" => rows!("lighting_garage", VACANCY_OR_OUTAGE),
+        "Ceiling Fan" => rows!("ceiling_fan", VACANCY_OR_OUTAGE),
+        "Plug Loads" | "Other" | "MELs" => rows!("plug_loads_other", VACANCY_OR_OUTAGE),
+        "TV" => rows!("plug_loads_tv", VACANCY_OR_OUTAGE),
+        "Well Pump" => rows!("plug_loads_well_pump", VACANCY_OR_OUTAGE),
+        "Pool Pump" => rows!("pool_pump", VACANCY_OR_OUTAGE),
+        "Pool Heater" => rows!("pool_heater", VACANCY_OR_OUTAGE),
+        "Spa Pump" => rows!("permanent_spa_pump", VACANCY_OR_OUTAGE),
+        "Spa Heater" => rows!("permanent_spa_heater", VACANCY_OR_OUTAGE),
+        "Gas Grill" => rows!("fuel_loads_grill", VACANCY_OR_OUTAGE),
+        "Gas Fireplace" => rows!("fuel_loads_fireplace", VACANCY_OR_OUTAGE),
+        "Gas Lighting" => rows!("fuel_loads_lighting", VACANCY_OR_OUTAGE),
+        // PV and generators are in no row and keep running; a protocol
+        // bridge is not an end use; the remaining loads' columns are no
+        // rows of the table.
+        "PV" | "Gas Generator" | "Gas Fuel Cell" | "Protocol Bridge" | "EventBasedLoad"
+        | "Microwave" | "Basement Lighting" => NONE,
+        _ => NONE,
+    }
+}
+
+/// The canonical classes whose declared rows the kind zeroes: the
+/// equipment the period gates.
+#[must_use]
+pub fn unavailable_period_gated_classes(kind: hares_types::UnavailableKind) -> Vec<&'static str> {
+    CANONICAL_EQUIPMENT_NAMES
+        .iter()
+        .filter(|class| {
+            unavailable_period_rows(class)
+                .iter()
+                .any(|row| row.zeroed_by.contains(&kind))
+        })
+        .copied()
+        .collect()
+}
+
+/// The rows an equipment answers to, by the equipment's own name: the
+/// canonical class name, or the multi-instance rename's "Class #2"
+/// spelling through its class.
+#[must_use]
+pub fn unavailable_period_rows_for_equipment(name: &str) -> &'static [UnavailableRow] {
+    let declared = unavailable_period_rows(name);
+    if !declared.is_empty() {
+        return declared;
+    }
+    if let Some((class, suffix)) = name.rsplit_once(" #")
+        && !suffix.is_empty()
+        && suffix.bytes().all(|b| b.is_ascii_digit())
+    {
+        return unavailable_period_rows(class);
+    }
+    declared
 }

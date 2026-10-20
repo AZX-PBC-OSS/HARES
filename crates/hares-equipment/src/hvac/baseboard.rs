@@ -6,15 +6,14 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    Warning,
 };
 use serde::{Deserialize, Serialize};
 
 use hares_types::telemetry_keys as tk;
-
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 use crate::hvac::heating_config::ElectricBaseboardConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
@@ -24,8 +23,8 @@ use super::{
     helpers::{
         apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
         apply_simple_mode_override_in_control, outage_forces_off, register_ebm_telemetry_keys,
-        served_zone_ports, step_equivalent_battery, update_heating_control, write_ebm_telemetry,
-        zone_id_from_config,
+        served_zone_ports, step_equivalent_battery, unavailable_period_forces_off,
+        update_heating_control, write_ebm_telemetry, zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
@@ -65,7 +64,7 @@ struct BaseboardState {
     thermostat_hysteresis_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
-    electric_kw: f64,
+    electric_w: f64,
     thermal_output_w: f64,
     mode_override: Option<OperatingMode>,
     dr_level: DRLevel,
@@ -119,6 +118,13 @@ impl ElectricBaseboard {
 }
 
 impl Equipment for ElectricBaseboard {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         BASEBOARD_CHECKPOINT_VERSION
     }
@@ -176,7 +182,9 @@ impl Equipment for ElectricBaseboard {
         // calls or overrides. Gated before override handling; islanded
         // (battery/generator-backed) homes keep an energized bus and are
         // not affected. See docs/outage-behavior.md.
-        if outage_forces_off(&mut self.hvac, env) {
+        if outage_forces_off(&mut self.hvac, env)
+            || unavailable_period_forces_off(&mut self.hvac, env, true, false)
+        {
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
         }
@@ -212,16 +220,14 @@ impl Equipment for ElectricBaseboard {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
-        let electric_kw = power_w_to_kw(thermal_output_w * self.eir);
-        let reactive_power_kvar = self
-            .zip
-            .reactive_kvar(electric_kw, env.grid.bus_voltage_pu());
+        let electric_w = thermal_output_w * self.eir;
+        let reactive_power_var = self.zip.reactive_var(electric_w, env.grid.bus_voltage_pu());
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
 
         if thermal_output_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar,
+                active_power_w: (electric_w),
+                reactive_power_var,
             })?;
             self.hvac.write_zone_thermal_contributions(
                 ports,
@@ -232,14 +238,14 @@ impl Equipment for ElectricBaseboard {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        let has_nonzero_flow = electric_kw > 0.0 || thermal_output_w != 0.0;
+        let has_nonzero_flow = electric_w > 0.0 || thermal_output_w != 0.0;
         self.operating_mode = self
             .operating_mode
             .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
 
-        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         // The runtime fraction and the part-load ratio coincide for a
         // resistance element: it delivers `duty` of rated for the whole step
@@ -254,8 +260,8 @@ impl Equipment for ElectricBaseboard {
         write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: Some(thermal_output_w),
                 sensible_cooling_w: None,
@@ -295,6 +301,17 @@ impl Equipment for ElectricBaseboard {
         Some(self.zip)
     }
 
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
+            ..Default::default()
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        self.hvac.take_warnings(out);
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &BaseboardState {
@@ -305,7 +322,7 @@ impl Equipment for ElectricBaseboard {
                 thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 mode_override: self.mode_override,
                 dr_level: self.dr_level,
@@ -333,14 +350,14 @@ impl Equipment for ElectricBaseboard {
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
         self.dr_level = decoded.dr_level;
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the flows from the
-        // checkpointed `electric_kw`/`thermal_output_w`, the mode from
+        // checkpointed `electric_w`/`thermal_output_w`, the mode from
         // the checkpointed `operating_mode` (the pair the step published
         // was guard-valid), the setpoint from the restored thermostat
         // state. The reactive ZIP power is not checkpointed and
@@ -352,8 +369,8 @@ impl Equipment for ElectricBaseboard {
         let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: Some(decoded.thermal_output_w),
                 sensible_cooling_w: None,
@@ -391,6 +408,26 @@ impl Equipment for ElectricBaseboard {
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "efficiency",
+                1.0 / self.eir,
+                hares_types::Unit::Fraction,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.eir,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
+    }
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
@@ -415,77 +452,52 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric baseboard active power draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Delivered sensible zone heat (baseboard bypasses ducts)".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Fraction of the step the element runs (equals the part-load ratio)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Delivered capacity as a fraction of rated".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: tk::HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active heating setpoint from thermostat schedule".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active cooling setpoint from thermostat schedule".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(tk::ELECTRIC_KW, "Electric baseboard active power draw"),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Delivered sensible zone heat (baseboard bypasses ducts)",
+        ),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Fraction of the step the element runs (equals the part-load ratio)",
+        )
+        .not_nullable(),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Delivered capacity as a fraction of rated",
+        ),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::temp_c(
+            tk::HEATING_SETPOINT_C,
+            "Active heating setpoint from thermostat schedule",
+        ),
+        TelemetryField::temp_c(
+            tk::COOLING_SETPOINT_C,
+            "Active cooling setpoint from thermostat schedule",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ]
 }
 
@@ -535,6 +547,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -699,8 +712,12 @@ mod tests {
         restored.init(&config(3_000.0), &env).unwrap();
         restored.load_state(&state).unwrap();
 
-        hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-            .expect("a baseboard checkpoint must restore a contract-valid output");
+        hares_types::validate_core_contract(
+            restored.descriptor(),
+            restored.core_output(),
+            &mut Vec::new(),
+        )
+        .expect("a baseboard checkpoint must restore a contract-valid output");
     }
 
     #[test]
@@ -725,7 +742,7 @@ mod tests {
             restored
                 .telemetry()
                 .get(hares_types::telemetry_keys::ELECTRIC_KW),
-            Some(3.0)
+            Some(3000.0)
         );
     }
 
@@ -886,6 +903,43 @@ mod tests {
         );
     }
 
+    /// A DR event's turn-off releases at the event's end: the mode release
+    /// hands the baseboard back to its own thermostat. The shared
+    /// simple-heating override arm covers the furnace and boiler classes
+    /// the same way.
+    #[test]
+    fn mode_release_returns_the_unit_to_its_own_thermostat() {
+        let cfg = config(3_000.0);
+        let mut eq = ElectricBaseboard::new(cfg.clone());
+        let env = env(18.0); // below setpoint → thermostat would heat
+        eq.init(&cfg, &env).unwrap();
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        assert_eq!(eq.update_control(&env), OperatingMode::Off);
+
+        eq.apply_control_unchecked(&ControlSignal::ModeOverrideRelease)
+            .unwrap();
+        let mode = eq.update_control(&env);
+        assert_eq!(
+            mode,
+            OperatingMode::Heating,
+            "the release must return the unit to its own thermostat"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            ports.thermal[0].sensible_gain_w > 0.0,
+            "the released unit must deliver per the thermostat again"
+        );
+    }
+
     #[test]
     fn demand_response_curtails_heating() {
         let cfg = config(3_000.0);
@@ -951,10 +1005,10 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert!(ports.electrical.load_power_w > 0.0);
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
-        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
+        assert_eq!(eq.core_output().flows.reactive_power_var, Some(0.0));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -989,7 +1043,7 @@ mod tests {
             Some(OperatingMode::Standby),
             "zero-capacity ideal dispatch must reconcile Heating→Standby"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -1036,7 +1090,7 @@ mod tests {
                 ports_nopf.electrical.load_power_w.to_bits(),
                 "step {i} (v={v}): real power diverged"
             );
-            assert_eq!(ports_nopf.electrical.reactive_power_kvar, 0.0);
+            assert_eq!(ports_nopf.electrical.reactive_power_var, 0.0);
         }
     }
 
@@ -1060,7 +1114,7 @@ mod tests {
         let mut eq = ElectricBaseboard::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
-        eq.hvac.config.zone_capacitance_kwh_per_k = 2.0;
+        eq.hvac.config.zone_capacitance_j_per_k = 7200000.0;
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

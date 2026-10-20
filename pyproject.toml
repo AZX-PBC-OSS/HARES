@@ -3,7 +3,7 @@ requires = ["maturin>=1.15.0"]
 build-backend = "maturin"
 
 [project]
-name = "ochre_next"
+name = "hares-py"
 version = "0.1.0"
 description = "HARES: High-performance Agent-based Residential Energy Simulation"
 requires-python = ">=3.12,<3.14"
@@ -78,26 +78,23 @@ default-groups = ["dev"]
 
 [tool.maturin]
 python-source = "python"
-module-name = "ochre_next._hares"
+module-name = "hares._hares"
 manifest-path = "crates/hares-python/Cargo.toml"
-include = [
-    {path = "defaults/**", format = ["sdist", "wheel"]},
-]
 
 [tool.pyright]
 # "standard" is the baseline for scripts/ and tests/. The shipped package
-# (python/ochre_next, the _hares.pyi stub included) runs at strict: pyright
+# (python/hares, the _hares.pyi stub included) runs at strict: pyright
 # has no per-environment typeCheckingMode, so the environment below lists
 # every rule strict promotes over standard, re-levelled to "error".
 typeCheckingMode = "standard"
 # The lowest supported Python (requires-python), so an import that exists
 # only in a later release fails the check instead of the 3.12 test run.
 pythonVersion = "3.12"
-include = ["python", "scripts", "tests", "typings"]
+include = ["python", "scripts", "tests", "typings", "notebooks"]
 exclude = ["tests/fixtures"]
 
 [[tool.pyright.executionEnvironments]]
-root = "python/ochre_next"
+root = "python/hares"
 strictListInference = true
 strictSetInference = true
 strictDictionaryInference = true
@@ -150,13 +147,19 @@ extraPaths = ["vendors/OCHRE", "scripts"]
 root = "scripts"
 extraPaths = ["vendors/OCHRE", "tests/python"]
 
+# The notebook resolves the vendored reference the same way its runtime does
+# (the vendored OCHRE on the import path) and shares the tests' helper modules.
+[[tool.pyright.executionEnvironments]]
+root = "notebooks"
+extraPaths = ["vendors/OCHRE", "tests/python"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 # The vendored OCHRE reference (vendors/OCHRE submodule, version 0.9.2) is the
 # `ochre` the parity tests import; the `ochre` dependency group installs its
 # dependencies only.
 pythonpath = ["vendors/OCHRE"]
-addopts = "-n auto -m 'not slow and not ochre'"
+addopts = "-n 4 -m 'not slow and not ochre'"
 # A passing test's tmp_path directory is removed; a failing test's is kept to
 # debug, and only for the last three sessions.
 tmp_path_retention_policy = "failed"

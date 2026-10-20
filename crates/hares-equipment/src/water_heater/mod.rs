@@ -68,29 +68,40 @@ pub(crate) const DEFAULT_CONDUCTIVITY_W_M_K: f64 = 0.6;
 pub(crate) const DEFAULT_TANK_VOLUME_M3: f64 = 0.189_270_589_2;
 pub(crate) const DEFAULT_MAX_TANK_TEMP_C: f64 = 60.0;
 
+/// The freeze-protection setpoint an unavailable period holds a water
+/// heater's tank at: OpenStudio-HPXML sets the water heater's setpoint to
+/// 2 C for the flagged steps of a period whose table row zeroes
+/// `water_heater` (`resources/schedules.rb:673-676`, the
+/// `WaterHeaterSetpoint` branch: "Temperature of tank < 2C indicates of
+/// possibility of freeze"; `:1452-1454` in the detailed-schedule path),
+/// and does not switch the heater off, so standby losses continue
+/// (`resources/waterheater.rb:18, 183-188, 2053`, v1.12.0).
+pub(crate) const FREEZE_PROTECTION_SETPOINT_C: f64 = 2.0;
+
+/// A water heater's control setpoint for the step: the equipment's own
+/// effective setpoint, or the freeze-protection 2 C when the step's
+/// unavailable periods zero the `water_heater` row.
+pub(crate) fn step_setpoint_c(env: &EnvironmentState, effective_setpoint_c: f64) -> f64 {
+    if env.unavailable_periods.zeroes_water_heater() {
+        FREEZE_PROTECTION_SETPOINT_C
+    } else {
+        effective_setpoint_c
+    }
+}
+
 #[cfg(test)]
 use hares_types::BoundaryPolicy;
 use hares_types::{
-    EnvironmentState, HaresError, LoopId, PortSlots, ScheduleSource, ThermostatBandClass,
+    EnvironmentState, HaresError, LoopId, ScheduleSource, ThermostatBandClass,
     thermal_setpoint_band_c, validate_thermostat_band_c,
 };
 
 use crate::EquipmentRegistry;
 
-/// Well-known LoopId for domestic hot-water demand from wet appliances.
-/// Wet appliances write demand flow rate here; water heaters read and add
-/// to their schedule-based draw.
+/// Well-known LoopId for the shared domestic hot-water channel: the loop the
+/// water heaters declare as their DHW demand/distribution port and the
+/// indirect tank writes its DHW delivery on.
 pub const DHW_DEMAND_LOOP: LoopId = LoopId(u16::MAX - 1);
-
-/// Read accumulated DHW demand [kg/s] from wet appliance fluid contributions.
-pub(crate) fn read_dhw_demand_kg_s(ports: &PortSlots) -> f64 {
-    ports
-        .fluid
-        .iter()
-        .find(|acc| acc.loop_id == DHW_DEMAND_LOOP)
-        .map(|acc| acc.total_flow_kg_s.max(0.0))
-        .unwrap_or(0.0)
-}
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
     resistance::register_with_registry(registry);
@@ -482,7 +493,7 @@ mod tests {
             crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,
@@ -498,6 +509,7 @@ mod tests {
                 draw_flow_rate_kg_s: None,
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                appliance_draw_flow_rate_source: None,
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
@@ -530,6 +542,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: Default::default(),
@@ -736,8 +749,8 @@ mod tests {
         assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
         assert_eq!(zip.pf, 0.97);
         for v in [0.9, 1.0, 1.1] {
-            let p_kw = 2.4;
-            assert_eq!(zip.apply(p_kw, v).0.to_bits(), p_kw.to_bits());
+            let p_w = 2.4;
+            assert_eq!(zip.apply(p_w, v).0.to_bits(), p_w.to_bits());
         }
     }
 
@@ -769,20 +782,16 @@ mod tests {
 
 #[cfg(test)]
 mod dhw_integration_tests {
-    use std::collections::HashMap;
     use std::time::Duration;
 
     use chrono::{Duration as ChronoDuration, FixedOffset, TimeZone};
     use hares_types::{
-        DomainUpdate, EnvironmentState, FluidNodeId, FluidType, GridState, HeatTransferDirection,
-        PortContribution, PortSlots, SCHEDULE_DOMAIN_ID, WeatherState, ZoneId, ZoneState,
+        BoundaryPolicy, DomainUpdate, EnvironmentState, GridState, PortSlots, SCHEDULE_DOMAIN_ID,
+        ScheduleSourceConfig, WeatherState, ZoneId, ZoneState,
     };
 
-    use super::DHW_DEMAND_LOOP;
-    use crate::event_load::WetAppliance;
     use crate::water_heater::resistance::ResistanceWH;
     use crate::{Equipment, EquipmentConfig};
-    use hares_types::rng::{RngStream, dwelling_seed};
 
     fn base_env() -> EnvironmentState {
         let mut env = EnvironmentState {
@@ -814,6 +823,7 @@ mod dhw_integration_tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -834,30 +844,16 @@ mod dhw_integration_tests {
         env
     }
 
-    fn washer_config_with_draw(draw_volume_l: f64) -> EquipmentConfig {
-        let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
-        raw.insert("zone_id".to_string(), 1.0.into());
-        raw.insert("event_window_schedule_col".to_string(), 0.0.into());
-        raw.insert("event_probability_schedule_col".to_string(), 1.0.into());
-        raw.insert("phase_len".to_string(), 1.0.into());
-        raw.insert("phase_0_power_kw".to_string(), 0.5.into());
-        raw.insert("phase_0_duration_s".to_string(), 1800.0.into()); // 30 min
-        raw.insert("phase_0_has_water_draw".to_string(), true.into());
-        raw.insert("n_units".to_string(), 1.0.into());
-        raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
-        raw.insert("hot_water_draw_volume_l".to_string(), draw_volume_l.into());
-        EquipmentConfig::raw("washer".to_string(), "Clothes Washer".to_string(), raw)
-            .with_rng_stream(RngStream::event_load(dwelling_seed(987, 11), "washer"))
-    }
-
-    fn wh_config() -> EquipmentConfig {
+    fn wh_config(appliance_draw_kg_s: f64) -> EquipmentConfig {
         EquipmentConfig::from_typed(
             "WH".to_string(),
             "Resistance Water Heater".to_string(),
             crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig {
                 equipment_id: None,
                 zone_id: Some(1),
-                loop_id: None,
+                // The loop id the loop allocator would assign: a water
+                // heater's supply loop is stated input, never the sentinel.
+                loop_id: Some(1),
                 tank_volume_m3: None,
                 tank_height_m: None,
                 energy_factor: None,
@@ -873,6 +869,16 @@ mod dhw_integration_tests {
                 draw_flow_rate_kg_s: Some(0.0),
                 draw_flow_rate_source: None,
                 mains_temp_c_source: None,
+                // The wet appliances' untempered draw arrives through its
+                // schedule source; a flat daily profile stands in for the
+                // normalized column here (the tagged `Constant` config does
+                // not round-trip through the typed payload).
+                appliance_draw_flow_rate_source: Some(ScheduleSourceConfig::DailyProfile {
+                    weekday: [1.0; 24],
+                    weekend: [1.0; 24],
+                    month_multipliers: [1.0; 12],
+                    max_value: appliance_draw_kg_s,
+                }),
                 performance_adjustment: None,
                 zone_type: None,
                 first_hour_rating_m3: None,
@@ -888,130 +894,16 @@ mod dhw_integration_tests {
         .unwrap()
     }
 
-    /// Merge port declarations from multiple equipment into shared PortSlots,
-    /// mimicking what the dwelling orchestrator does.
-    fn shared_ports(equipment: &[&dyn Equipment]) -> PortSlots {
-        let mut all_decls = Vec::new();
-        for eq in equipment {
-            all_decls.extend_from_slice(eq.ports());
-        }
-        PortSlots::from_declarations(&all_decls)
-    }
-
-    // ===================================================================
-    // WetAppliance DHW demand emission tests
-    // ===================================================================
-
-    #[test]
-    fn wet_appliance_with_draw_emits_fluid_demand_when_active() {
+    /// Run a resistance water heater for one step with the given untempered
+    /// appliance draw on its schedule source. Returns the average tank
+    /// temperature after the step.
+    fn wh_step_with_appliance_draw(appliance_draw_kg_s: f64) -> f64 {
         let env = base_env();
-        let config = washer_config_with_draw(15.0);
-        let mut washer = WetAppliance::new(config.clone(), "Clothes Washer");
-        washer.init(&config, &env).unwrap();
-
-        // Verify port declarations include a Fluid port on DHW_DEMAND_LOOP.
-        assert!(
-            washer
-                .ports()
-                .iter()
-                .any(|p| p.loop_id == Some(DHW_DEMAND_LOOP)),
-            "washer with draw must declare a DHW_DEMAND_LOOP fluid port"
-        );
-
-        let mut slots = PortSlots::from_declarations(washer.ports());
-        washer
-            .step(&env, Duration::from_secs(60), &mut slots)
-            .unwrap();
-
-        let dhw = slots
-            .fluid
-            .iter()
-            .find(|a| a.loop_id == DHW_DEMAND_LOOP)
-            .expect("DHW_DEMAND_LOOP accumulator must exist");
-        assert!(
-            dhw.total_flow_kg_s > 0.0,
-            "active washer with draw must emit positive fluid demand, got {}",
-            dhw.total_flow_kg_s,
-        );
-    }
-
-    #[test]
-    fn wet_appliance_with_zero_draw_emits_no_fluid() {
-        let env = base_env();
-        let config = washer_config_with_draw(0.0);
-        let mut dryer = WetAppliance::new(config.clone(), "Clothes Dryer");
-        dryer.init(&config, &env).unwrap();
-
-        // No DHW_DEMAND_LOOP port should be declared.
-        assert!(
-            !dryer
-                .ports()
-                .iter()
-                .any(|p| p.loop_id == Some(DHW_DEMAND_LOOP)),
-            "dryer with zero draw must NOT declare a DHW_DEMAND_LOOP fluid port"
-        );
-    }
-
-    #[test]
-    fn draw_rate_equals_volume_over_water_phase_duration() {
-        let env = base_env();
-        let draw_volume_l = 15.0;
-        let phase_duration_s = 1800.0; // single phase, 30 min
-        let config = washer_config_with_draw(draw_volume_l);
-        let mut washer = WetAppliance::new(config.clone(), "Clothes Washer");
-        washer.init(&config, &env).unwrap();
-
-        let mut slots = PortSlots::from_declarations(washer.ports());
-        washer
-            .step(&env, Duration::from_secs(60), &mut slots)
-            .unwrap();
-
-        let dhw = slots
-            .fluid
-            .iter()
-            .find(|a| a.loop_id == DHW_DEMAND_LOOP)
-            .unwrap();
-        let expected_kg_s = draw_volume_l / phase_duration_s;
-        assert!(
-            (dhw.total_flow_kg_s - expected_kg_s).abs() < 1e-9,
-            "draw rate must be volume/water phase duration = {expected_kg_s}, got {}",
-            dhw.total_flow_kg_s,
-        );
-    }
-
-    // ===================================================================
-    // Cross-equipment wiring: wet appliance demand → water heater
-    // ===================================================================
-
-    /// Run a resistance water heater for one step with the given pre-populated
-    /// DHW demand on the shared PortSlots. Returns the average tank temperature
-    /// after the step.
-    fn wh_step_with_demand(demand_kg_s: f64) -> f64 {
-        let env = base_env();
-        let cfg = wh_config();
+        let cfg = wh_config(appliance_draw_kg_s);
         let mut wh = ResistanceWH::new(cfg.clone());
         wh.init(&cfg, &env).unwrap();
 
-        // Build PortSlots that include the DHW_DEMAND_LOOP accumulator
-        // (as the dwelling would when both appliance and WH are present).
         let mut slots = PortSlots::from_declarations(wh.ports());
-
-        // Pre-populate the demand accumulator as if a wet appliance had stepped.
-        if demand_kg_s > 0.0 {
-            slots
-                .accumulate(&PortContribution::Fluid {
-                    loop_id: DHW_DEMAND_LOOP,
-                    flow_rate_kg_s: demand_kg_s,
-                    supply_temp_c: 0.0,
-                    return_temp_c: 0.0,
-                    fluid_type: FluidType::Water,
-                    thermal_power_w: None,
-                    node_id: FluidNodeId(0),
-                    direction: HeatTransferDirection::Source,
-                })
-                .unwrap();
-        }
-
         wh.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
         wh.telemetry().get("tank_avg_temp_c").unwrap()
@@ -1019,9 +911,9 @@ mod dhw_integration_tests {
 
     #[test]
     fn water_heater_with_appliance_demand_draws_more_than_without() {
-        let temp_no_demand = wh_step_with_demand(0.0);
+        let temp_no_demand = wh_step_with_appliance_draw(0.0);
         // 0.1 kg/s is a substantial draw (6 L/min).
-        let temp_with_demand = wh_step_with_demand(0.1);
+        let temp_with_demand = wh_step_with_appliance_draw(0.1);
 
         assert!(
             temp_with_demand < temp_no_demand,
@@ -1032,8 +924,8 @@ mod dhw_integration_tests {
 
     #[test]
     fn water_heater_draw_increases_with_larger_appliance_demand() {
-        let temp_small = wh_step_with_demand(0.01);
-        let temp_large = wh_step_with_demand(0.1);
+        let temp_small = wh_step_with_appliance_draw(0.01);
+        let temp_large = wh_step_with_appliance_draw(0.1);
 
         assert!(
             temp_large < temp_small,
@@ -1042,54 +934,24 @@ mod dhw_integration_tests {
         );
     }
 
-    /// Full end-to-end: step a WetAppliance, then step a ResistanceWH on the
-    /// same shared PortSlots. Verify the water heater's reported draw_flow_rate
-    /// includes the appliance demand.
+    /// The water heater's reported draw_flow_rate_kg_s includes the
+    /// untempered appliance draw from its schedule source, and the tank
+    /// cools with it.
     #[test]
-    fn end_to_end_wet_appliance_demand_reaches_water_heater() {
+    fn appliance_draw_from_the_schedule_source_reaches_the_water_heater() {
         let env = base_env();
-
-        // Set up washer with 15 L draw over a 1800 s cycle → 0.00833 kg/s.
-        let washer_cfg = washer_config_with_draw(15.0);
-        let mut washer = WetAppliance::new(washer_cfg.clone(), "Clothes Washer");
-        washer.init(&washer_cfg, &env).unwrap();
-
-        // Set up water heater with zero schedule draw.
-        let wh_cfg = wh_config();
+        let wh_cfg = wh_config(0.01);
         let mut wh = ResistanceWH::new(wh_cfg.clone());
         wh.init(&wh_cfg, &env).unwrap();
 
-        // Build shared PortSlots from both equipment (like the dwelling does).
-        let mut slots = shared_ports(&[&washer as &dyn Equipment, &wh as &dyn Equipment]);
-
-        // Step 1: washer runs (Independent stage, rank 0).
-        washer
-            .step(&env, Duration::from_secs(60), &mut slots)
-            .unwrap();
-
-        // Verify the washer emitted demand.
-        let demand_after_washer = slots
-            .fluid
-            .iter()
-            .find(|a| a.loop_id == DHW_DEMAND_LOOP)
-            .map(|a| a.total_flow_kg_s)
-            .unwrap_or(0.0);
-        assert!(
-            demand_after_washer > 0.0,
-            "washer must have emitted DHW demand, got {demand_after_washer}"
-        );
-
-        // Step 2: water heater runs (Thermal stage, rank 2) on same slots.
+        let mut slots = PortSlots::from_declarations(wh.ports());
         wh.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
-        // The water heater's telemetry draw_flow_rate_kg_s must include the
-        // appliance demand (WH has zero schedule draw, so all draw comes from
-        // the washer).
         let wh_draw = wh.telemetry().get("draw_flow_rate_kg_s").unwrap_or(0.0);
-        let expected_draw = 15.0 / 1800.0; // volume_l / cycle_duration_s
         assert!(
-            (wh_draw - expected_draw).abs() < 1e-6,
-            "water heater draw must equal washer demand ({expected_draw:.6}), got {wh_draw:.6}"
+            (wh_draw - 0.01).abs() < 1e-9,
+            "the water heater's draw must equal the appliance schedule source's \
+             0.01 kg/s, got {wh_draw}"
         );
 
         // Tank must have cooled from 52°C due to the cold-water draw.
@@ -1100,15 +962,18 @@ mod dhw_integration_tests {
         );
     }
 
-    /// Water heater schedule draw + appliance demand are additive.
+    /// Water heater schedule draw + appliance draw are additive, the schedule
+    /// part tempered and the appliance part untempered.
     #[test]
-    fn schedule_draw_and_appliance_demand_are_additive() {
+    fn schedule_draw_and_appliance_draw_are_additive() {
+        use crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig as WhCfg;
+
         let env = base_env();
 
-        // WH with schedule draw of 0.05 kg/s.
-        let base_cfg = wh_config();
-        let mut typed: crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig =
-            base_cfg.typed().expect("typed resistance config");
+        // WH with a schedule (fixture) draw of 0.05 kg/s and an appliance
+        // draw of 0.01 kg/s.
+        let base_cfg = wh_config(0.01);
+        let mut typed: WhCfg = base_cfg.typed().expect("typed resistance config");
         typed.draw_flow_rate_kg_s = Some(0.05);
         let wh_cfg = EquipmentConfig::from_typed(
             "WH".to_string(),
@@ -1122,20 +987,6 @@ mod dhw_integration_tests {
 
         let mut slots = PortSlots::from_declarations(wh.ports());
 
-        // Pre-populate 0.01 kg/s of appliance demand.
-        slots
-            .accumulate(&PortContribution::Fluid {
-                loop_id: DHW_DEMAND_LOOP,
-                flow_rate_kg_s: 0.01,
-                supply_temp_c: 0.0,
-                return_temp_c: 0.0,
-                fluid_type: FluidType::Water,
-                thermal_power_w: None,
-                node_id: FluidNodeId(0),
-                direction: HeatTransferDirection::Source,
-            })
-            .unwrap();
-
         wh.step(&env, Duration::from_secs(60), &mut slots).unwrap();
 
         let wh_draw = wh.telemetry().get("draw_flow_rate_kg_s").unwrap_or(0.0);
@@ -1145,6 +996,39 @@ mod dhw_integration_tests {
             "total draw must be schedule ({}) + appliance ({}) = {expected}, got {wh_draw}",
             0.05,
             0.01,
+        );
+    }
+
+    /// The appliance draw source's column reference reads the schedule
+    /// domain's payload, the channel every schedule-driven source reads.
+    #[test]
+    fn appliance_draw_column_source_reads_the_schedule_payload() {
+        use crate::water_heater::wh_config::ElectricResistanceWaterHeaterConfig as WhCfg;
+
+        let env = base_env();
+        let base_cfg = wh_config(0.0);
+        let mut typed: WhCfg = base_cfg.typed().expect("typed resistance config");
+        typed.appliance_draw_flow_rate_source = Some(ScheduleSourceConfig::ColumnRef {
+            col_idx: 1,
+            boundary: BoundaryPolicy::Clamp,
+        });
+        let wh_cfg = EquipmentConfig::from_typed(
+            "WH".to_string(),
+            "Resistance Water Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+
+        let mut wh = ResistanceWH::new(wh_cfg.clone());
+        wh.init(&wh_cfg, &env).unwrap();
+
+        // The payload's second column is 1.0: the draw reads it directly.
+        let mut slots = PortSlots::from_declarations(wh.ports());
+        wh.step(&env, Duration::from_secs(60), &mut slots).unwrap();
+        let wh_draw = wh.telemetry().get("draw_flow_rate_kg_s").unwrap_or(0.0);
+        assert!(
+            (wh_draw - 1.0).abs() < 1e-12,
+            "column draw read 1.0, got {wh_draw}"
         );
     }
 }

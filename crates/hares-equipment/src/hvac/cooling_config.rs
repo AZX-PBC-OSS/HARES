@@ -55,7 +55,7 @@ pub struct CentralAirConditionerConfig {
     pub fraction_load_served: Option<f64>,
     /// Crankcase heater rated power (kW).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crankcase_heater_kw: Option<f64>,
+    pub crankcase_heater_w: Option<f64>,
     /// Crankcase activation threshold (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_threshold_c: Option<f64>,
@@ -203,11 +203,11 @@ impl CentralAirConditionerConfig {
                 "CentralAirConditionerConfig: startup_cd must be >= 0".to_string(),
             ));
         }
-        if let Some(v) = self.crankcase_heater_kw
+        if let Some(v) = self.crankcase_heater_w
             && (!v.is_finite() || v < 0.0)
         {
             return Err(HaresError::Equipment(
-                "CentralAirConditionerConfig: crankcase_heater_kw must be finite and >= 0"
+                "CentralAirConditionerConfig: crankcase_heater_w must be finite and >= 0"
                     .to_string(),
             ));
         }
@@ -335,7 +335,7 @@ pub struct RoomAcConfig {
     pub startup_cd: Option<f64>,
     /// Crankcase heater rated power (kW).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crankcase_heater_kw: Option<f64>,
+    pub crankcase_heater_w: Option<f64>,
     /// Crankcase activation threshold (C).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crankcase_heater_threshold_c: Option<f64>,
@@ -404,11 +404,11 @@ impl RoomAcConfig {
                 "RoomAcConfig: startup_cd must be >= 0".to_string(),
             ));
         }
-        if let Some(v) = self.crankcase_heater_kw
+        if let Some(v) = self.crankcase_heater_w
             && (!v.is_finite() || v < 0.0)
         {
             return Err(HaresError::Equipment(
-                "RoomAcConfig: crankcase_heater_kw must be finite and >= 0".to_string(),
+                "RoomAcConfig: crankcase_heater_w must be finite and >= 0".to_string(),
             ));
         }
         if let Some(coeffs) = self.crankcase_capacity_curve_coeffs
@@ -595,6 +595,481 @@ impl DehumidifierConfig {
     }
 }
 
+/// The the central air conditioner's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for CentralAirConditionerConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating or cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eir",
+                hares_types::FieldMeta {
+                    description: Some("the electric input ratio (W/W)"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "shr",
+                hares_types::FieldMeta {
+                    description: Some("the sensible heat ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_speeds",
+                hares_types::FieldMeta {
+                    description: Some("the number of speed stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_capacities_w",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage capacities, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_eirs",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage energy input ratios"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_shrs",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage sensible heat ratios"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w_per_cfm",
+                hares_types::FieldMeta {
+                    description: Some("the fan power per cfm of airflow, W/cfm"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hysteresis_c",
+                hares_types::FieldMeta {
+                    description: Some("the cycling hysteresis band, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "airflow_m3_s_per_w",
+                hares_types::FieldMeta {
+                    description: Some("the explicit airflow per watt of capacity, m3/s/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fraction_load_served",
+                hares_types::FieldMeta {
+                    description: Some("the fraction of the load the equipment serves"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "crankcase_heater_w",
+                hares_types::FieldMeta {
+                    description: Some("the crankcase heater's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "crankcase_heater_threshold_c",
+                hares_types::FieldMeta {
+                    description: Some("the crankcase heater's outdoor threshold, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "crankcase_capacity_curve_coeffs",
+                hares_types::FieldMeta {
+                    description: Some("the crankcase heater's capacity curve coefficients"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "duct",
+                hares_types::FieldMeta {
+                    description: Some("the duct distribution configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "system_type",
+                hares_types::FieldMeta {
+                    description: Some("the system's type discriminator"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "startup_cd",
+                hares_types::FieldMeta {
+                    description: Some("the startup coefficient of performance degradation"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x1_min",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's indoor-temperature lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x1_max",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's indoor-temperature upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x2_min",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's outdoor-temperature lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x2_max",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's outdoor-temperature upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ff_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor curve's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ff_max",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor curve's upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_max",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "charge_defect_ratio",
+                hares_types::FieldMeta {
+                    description: Some("the refrigerant charge defect ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_oat_compressor_cooling_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the compressor's minimum outdoor temperature for cooling, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the room AC's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for RoomAcConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating or cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eir",
+                hares_types::FieldMeta {
+                    description: Some("the electric input ratio (W/W)"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hysteresis_c",
+                hares_types::FieldMeta {
+                    description: Some("the cycling hysteresis band, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "airflow_m3_s_per_w",
+                hares_types::FieldMeta {
+                    description: Some("the explicit airflow per watt of capacity, m3/s/W"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x1_min",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's indoor-temperature lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x1_max",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's indoor-temperature upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x2_min",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's outdoor-temperature lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "biquadratic_x2_max",
+                hares_types::FieldMeta {
+                    description: Some("the capacity curve's outdoor-temperature upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ff_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor curve's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ff_max",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor curve's upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_max",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's upper bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "shr",
+                hares_types::FieldMeta {
+                    description: Some("the sensible heat ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "startup_cd",
+                hares_types::FieldMeta {
+                    description: Some("the startup coefficient of performance degradation"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "crankcase_heater_w",
+                hares_types::FieldMeta {
+                    description: Some("the crankcase heater's power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "crankcase_heater_threshold_c",
+                hares_types::FieldMeta {
+                    description: Some("the crankcase heater's outdoor threshold, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "crankcase_capacity_curve_coeffs",
+                hares_types::FieldMeta {
+                    description: Some("the crankcase heater's capacity curve coefficients"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_oat_compressor_cooling_c",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the compressor's minimum outdoor temperature for cooling, Celsius",
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the dehumidifier's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for DehumidifierConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_liters_per_day",
+                hares_types::FieldMeta {
+                    description: Some("the dehumidifier's rated capacity, litres per day"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the unit's energy factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "integrated_energy_factor",
+                hares_types::FieldMeta {
+                    description: Some("the unit's integrated energy factor"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fraction_served",
+                hares_types::FieldMeta {
+                    description: Some("the fraction of the dehumidification load the unit serves"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "target_rh",
+                hares_types::FieldMeta {
+                    description: Some("the dehumidifier's target relative humidity"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "part_load_curve_coeffs",
+                hares_types::FieldMeta {
+                    description: Some("the part-load curve's coefficients"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "plf_min",
+                hares_types::FieldMeta {
+                    description: Some("the part-load factor's lower bound"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "off_cycle_parasitic_load_w",
+                hares_types::FieldMeta {
+                    description: Some("the off-cycle parasitic load, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "min_operating_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the unit's minimum operating temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_operating_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the unit's maximum operating temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,7 +1102,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: Some(crate::hvac::hvac_core::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
             fraction_load_served: Some(1.0),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig {
@@ -697,7 +1172,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -735,7 +1210,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -773,7 +1248,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -811,7 +1286,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -849,7 +1324,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -901,7 +1376,7 @@ mod tests {
                 hysteresis_c: None,
                 airflow_m3_s_per_w: None,
                 fraction_load_served: None,
-                crankcase_heater_kw: None,
+                crankcase_heater_w: None,
                 crankcase_heater_threshold_c: None,
                 crankcase_capacity_curve_coeffs: None,
                 duct: DuctConfig::default(),
@@ -961,7 +1436,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -993,7 +1468,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1021,7 +1496,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1051,7 +1526,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1081,7 +1556,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1110,7 +1585,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: Some(0.15),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1138,7 +1613,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1306,7 +1781,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             shr: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1334,7 +1809,7 @@ mod tests {
             plf_min: None,
             plf_max: None,
             shr: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,
@@ -1361,7 +1836,7 @@ mod tests {
             hysteresis_c: None,
             airflow_m3_s_per_w: None,
             fraction_load_served: None,
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             duct: DuctConfig::default(),
@@ -1405,7 +1880,7 @@ mod tests {
             plf_max: None,
             shr: None,
             startup_cd: Some(0.15),
-            crankcase_heater_kw: None,
+            crankcase_heater_w: None,
             crankcase_heater_threshold_c: None,
             crankcase_capacity_curve_coeffs: None,
             min_oat_compressor_cooling_c: None,

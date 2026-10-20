@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Duration;
 use hares_core::{DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
+
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 
 #[path = "../tests/support/fixture_start.rs"]
 mod fixture_start;
@@ -31,7 +33,7 @@ pub fn fixture_hpxml_path() -> PathBuf {
 /// The shipped defaults directory: the benchmark schedule has no lighting or
 /// plug-load columns, so those loads take their default profiles from here.
 pub fn repo_defaults_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults")
 }
 
 pub fn write_schedule_csv(path: &PathBuf) {
@@ -117,36 +119,45 @@ pub fn build_dwelling_config(
     bldg_id: i64,
     schedule_path: PathBuf,
     weather_path: PathBuf,
-    defaults_path: Option<PathBuf>,
+    defaults_path: PathBuf,
     duration: Duration,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path),
-        weather_path,
-        sim_config: SimulationConfig {
-            start_time: fixture_start::fixture_start(),
-            duration,
-            time_res: Duration::minutes(1),
-            output_verbosity: 0,
-            output_path: Some(numbered_path(dir, "hares-bench-output", "csv")),
-            write_output: true,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            retain_batches: false,
-            civil_timezone: None,
-            rotation: hares_io::RotationPolicy::default(),
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        defaults_path,
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(schedule_path)),
+        weather: WeatherInput::Path(weather_path),
+        defaults: DefaultsSource::directory(defaults_path),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: fixture_start::fixture_start(),
+                duration,
+                time_res: Duration::minutes(1),
+                reports: vec![hares_io::ReportSpec {
+                    name: "file".to_string(),
+                    selection: hares_io::Selection::Verbosity(0),
+                    frequency: hares_io::Frequency::default(),
+                    destination: hares_io::Destination::Csv {
+                        path: numbered_path(dir, "hares-bench-output", "csv"),
+                        overwrite: true,
+                    },
+                }],
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: hares_io::FirstHour::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            bldg_id,
+            None,
+        ),
     }
 }
 
@@ -156,10 +167,12 @@ pub fn synthetic_toml_case(path: &PathBuf, duration_s: i64) {
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = 60
-duration_s = {duration_s}
-
+time_res = 60
+duration = {duration_s}
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -179,12 +192,6 @@ pressure_kpa = 101.325
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
 "#
     );
     fs::write(path, toml).expect("failed to write synthetic TOML fixture");

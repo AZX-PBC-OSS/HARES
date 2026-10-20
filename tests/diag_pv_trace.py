@@ -6,8 +6,8 @@ sys.path.insert(0, 'python')
 import polars as pl
 import pandas as pd
 import numpy as np
-from ochre_next import Dwelling, PV
-from ochre_next.data import fetch_resstock_building
+from hares import Destination, Dwelling, PV, ReportSpec, Selection, SimulationConfig
+from hares.data import fetch_resstock_building
 
 bldg = fetch_resstock_building(1, version='2025.1')
 
@@ -267,15 +267,22 @@ print(f"\n--- Simulation Comparison ---")
 with tempfile.TemporaryDirectory() as output_dir:
     dw = Dwelling.from_hpxml(
         str(bldg.hpxml_path), str(bldg.schedule_path), str(bldg.weather_path),
-        defaults_path='vendor/HARES/defaults',
-        start_time='2021-07-01T12:00:00', duration_s=7200, time_res_s=900,
-        output_verbosity=4,
-        write_output=True,
-        output_path=str(Path(output_dir) / 'hares_diag_pv_trace.csv'),
+        SimulationConfig(
+            start_time='2021-07-01T12:00:00', duration=7200, time_res=900,
+            reports=[
+                ReportSpec("frame", Selection.verbosity(4), Destination.memory()),
+                ReportSpec(
+                    "diagnostics",
+                    Selection.verbosity(4),
+                    Destination.csv(str(Path(output_dir) / 'hares_diag_pv_trace.csv')),
+                ),
+            ],
+        ),
+        defaults='vendor/HARES/defaults',
     )
     dw.initialize()
-    dw.add_pv(PV("PV", capacity_kw=10.0, tilt=20.0, azimuth=180.0))
-    df = dw.simulate()
+    dw.add_pv(PV("PV", capacity_w=10000.0, tilt=20.0, azimuth=180.0))
+    df = dw.simulate().reports[0].table()
 print("Simulated PV output per timestep:")
 pv_min = df['PV Electric Power (kW)'].min()
 assert isinstance(pv_min, (int, float)), "PV power column must be numeric"

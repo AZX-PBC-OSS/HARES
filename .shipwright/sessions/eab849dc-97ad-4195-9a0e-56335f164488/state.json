@@ -1,0 +1,11 @@
+{
+  "id": "eab849dc-97ad-4195-9a0e-56335f164488",
+  "pid": 0,
+  "tool": "[v2:round-out-coverage] coverage-round",
+  "kind": "ralph:coverage-round",
+  "status": "running",
+  "spawnedAt": "2026-09-14T21:21:03.630Z",
+  "work": {
+    "initiativeId": "I-05"
+  }
+}

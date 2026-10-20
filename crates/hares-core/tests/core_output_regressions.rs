@@ -1,3 +1,5 @@
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use hares_core::actor::testing::TestEnvBuilder;
@@ -40,21 +42,26 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
 
     // The fixture configs carry no output settings, so the parsed config
     // defaults to writing to a working-directory-relative path; these tests
-    // read in-memory state, so the recorder is off.
+    // read in-memory state, so the reports are dropped: nothing is
+    // recorded.
     let mut sim_config = sim_config;
-    sim_config.write_output = false;
+    sim_config.reports = Vec::new();
+
+    // The fixture's `[overrides]` table, verbatim: the battery fixtures
+    // declare their control here (`bms_mode = '"Manual"'`, the idle
+    // battery the OCHRE reference models).
+    let overrides = config_value
+        .get("overrides")
+        .map(|table| serde_json::to_value(table).expect("overrides table serializes"));
 
     let config = DwellingConfig {
-        hpxml_path: root.join("building.xml"),
-        schedule_path: Some(root.join("schedule.csv")),
-        weather_path: root.join("weather.epw"),
-        defaults_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")),
-        sim_config,
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(root.join("building.xml")),
+        schedule: Some(InputSource::Path(root.join("schedule.csv"))),
+        weather: WeatherInput::Path(root.join("weather.epw")),
+        defaults: DefaultsSource::directory(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults"),
+        ),
+        settings: DwellingSettings::new(sim_config, overrides, bldg_id, None),
     };
 
     Dwelling::from_config(config).expect("fixture dwelling must load")
@@ -106,8 +113,8 @@ fn sum_signed_electric_kw(dwelling: &Dwelling) -> f64 {
         .map(|eq| {
             eq.core_output()
                 .flows
-                .electric_kw
-                .map_or(0.0, |power| power.signed_kw())
+                .electric_w
+                .map_or(0.0, |power| power.signed_w())
         })
         .sum()
 }
@@ -135,7 +142,7 @@ fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
         "telemetry equipment count must match equipment registry"
     );
     assert_eq!(
-        telemetry.equipment_power_kw.len(),
+        telemetry.equipment_power_w.len(),
         equipment.len(),
         "telemetry power vector length must match equipment registry"
     );
@@ -160,14 +167,14 @@ fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
         );
 
         let co = eq.core_output();
-        let electric_kw = co.flows.electric_kw.map_or(0.0, |power| power.signed_kw());
+        let electric_w = co.flows.electric_w.map_or(0.0, |power| power.signed_w());
         let soc = co.state.soc.map_or(0.0, |s| s.get());
         let operating_mode = co.state.operating_mode.map_or(0.0, |mode| mode.as_code());
         let fuel_w = co.flows.fuel_w.map_or(0.0, |fuel| fuel.consumption_w);
 
         approx_eq(
-            telemetry.equipment_power_kw[idx],
-            electric_kw,
+            telemetry.equipment_power_w[idx],
+            electric_w,
             "equipment power telemetry must mirror CoreOutput",
         );
         approx_eq(
@@ -181,19 +188,19 @@ fn assert_snapshot_aligned(dwelling: &Dwelling, step: &StepResult) {
             "equipment mode telemetry must mirror CoreOutput",
         );
 
-        core_electric_sum += electric_kw;
+        core_electric_sum += electric_w;
         core_fuel_sum += fuel_w;
     }
 
     approx_eq(
-        step.net_electric_power_kw,
+        step.net_electric_power_w,
         core_electric_sum,
         "step net electric power must equal the sum of equipment CoreOutput electric power",
     );
     approx_eq(
-        telemetry.total_power_kw,
+        telemetry.total_power_w,
         core_electric_sum,
-        "dwelling telemetry total_power_kw must equal the sum of equipment CoreOutput electric power",
+        "dwelling telemetry total_power_w must equal the sum of equipment CoreOutput electric power",
     );
     approx_eq(
         sum_signed_electric_kw(dwelling),
@@ -219,8 +226,8 @@ fn battery_core_output_matches_dwelling_aggregation() {
         .apply_control_validated(
             &battery_name,
             ControlSignal::PowerSetpoint {
-                active_power_kw: 3.0,
-                reactive_power_kvar: None,
+                active_power_w: 3.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             },
@@ -286,11 +293,11 @@ fn actors_observe_previous_equipment_core_snapshot() {
                 min_soc: 0.1,
                 max_soc: 0.8,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             grid_export_rule: GridExportRule::Unrestricted,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            max_charge_w: 5.0,
+            max_discharge_w: 5.0,
             price_schedule: None,
             steps_per_day: 24,
             min_dwell_steps: 0,
@@ -303,8 +310,8 @@ fn actors_observe_previous_equipment_core_snapshot() {
 
     let mut env = TestEnvBuilder::new()
         .with_electrical(ElectricalSummary {
-            pv_generation_kw: 5.0,
-            base_load_kw: 2.0,
+            pv_generation_w: 5.0,
+            base_load_w: 2.0,
             ..Default::default()
         })
         .build();

@@ -1,27 +1,29 @@
 //! Python bindings for fleet simulation.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use hares_fleet::aggregation::{AggregationResolution, aggregate};
-use hares_fleet::{DwellingBuildError, Fleet, FleetResults, SimError, SteppableFleet};
+use arrow::record_batch::RecordBatch;
+use hares_fleet::{Coverage, Fleet, FleetReport, FleetResult};
 use hares_io::ResStockVersion as IoResStockVersion;
 use pyo3::Python;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyType};
+use pyo3_arrow::PyTable;
 use tracing::warn;
 
-use crate::conversions::{
-    chrono_to_py_datetime, dwelling_metrics_to_polars_df, fleet_results_to_py,
-    record_batches_to_polars_df,
-};
-use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig};
+use crate::conversions::naive_chrono_to_py_datetime;
+use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig, PyHealthPolicy};
 use crate::py_control::PyControlSignal;
-use crate::py_enums::{PyAggregationResolution, PyResStockVersion};
+use crate::py_dwelling::HaresSimulationError;
+use crate::py_enums::PyResStockVersion;
+use crate::py_report::{PyFrequency, PySelection};
 use crate::py_telemetry::PyTelemetry;
+use crate::utils::check_unexpected_kwargs;
 
 fn parse_resstock_version(s: &str) -> PyResult<IoResStockVersion> {
     let normalized: String = s
@@ -40,17 +42,6 @@ fn parse_resstock_version(s: &str) -> PyResult<IoResStockVersion> {
     }
 }
 
-fn parse_aggregation_resolution(s: &str) -> PyResult<AggregationResolution> {
-    match s.to_lowercase().as_str() {
-        "15min" | "fifteenmin" | "fifteen_min" => Ok(AggregationResolution::FifteenMin),
-        "hourly" => Ok(AggregationResolution::Hourly),
-        _ => Err(PyValueError::new_err(format!(
-            "invalid AggregationResolution variant: {}",
-            s
-        ))),
-    }
-}
-
 fn extract_resstock_version(obj: Bound<'_, PyAny>) -> PyResult<Option<IoResStockVersion>> {
     if let Ok(v) = obj.extract::<PyResStockVersion>() {
         Ok(Some(IoResStockVersion::from(v)))
@@ -63,17 +54,86 @@ fn extract_resstock_version(obj: Bound<'_, PyAny>) -> PyResult<Option<IoResStock
     }
 }
 
-fn extract_aggregation_resolution(
-    obj: Bound<'_, PyAny>,
-) -> PyResult<Option<AggregationResolution>> {
-    if let Ok(v) = obj.extract::<PyAggregationResolution>() {
-        Ok(Some(AggregationResolution::from(v)))
-    } else if let Ok(s) = obj.extract::<String>() {
-        Ok(Some(parse_aggregation_resolution(&s)?))
-    } else {
-        Err(PyValueError::new_err(
-            "resolution must be an AggregationResolution enum or string",
-        ))
+/// The fleet's report request: the variable selection, the reporting
+/// frequency the fold reduces onto, and the fleet's health policy, which
+/// is applied to every home's run.
+///
+/// `FleetReport(selection, frequency, health_policy=HealthPolicy())`.
+#[pyclass(name = "FleetReport", from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyFleetReport(pub FleetReport);
+
+#[pymethods]
+impl PyFleetReport {
+    #[new]
+    #[pyo3(signature = (selection, frequency, health_policy=None))]
+    pub fn new(
+        selection: PySelection,
+        frequency: PyFrequency,
+        health_policy: Option<PyHealthPolicy>,
+    ) -> Self {
+        Self(FleetReport {
+            selection: selection.0,
+            frequency: frequency.0,
+            health_policy: health_policy.map(|policy| policy.0).unwrap_or_default(),
+        })
+    }
+
+    #[getter]
+    pub fn selection(&self) -> PySelection {
+        PySelection(self.0.selection.clone())
+    }
+
+    #[getter]
+    pub fn frequency(&self) -> PyFrequency {
+        PyFrequency(self.0.frequency)
+    }
+
+    #[getter]
+    pub fn health_policy(&self) -> PyHealthPolicy {
+        PyHealthPolicy(self.0.health_policy.clone())
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "FleetReport(selection={:?}, frequency={:?}, health_policy=...)",
+            self.0.selection, self.0.frequency,
+        )
+    }
+}
+
+/// The fleet's coverage weights, by home status.
+#[pyclass(name = "Coverage", from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct PyCoverage(pub Coverage);
+
+#[pymethods]
+impl PyCoverage {
+    #[getter]
+    pub fn weight_total(&self) -> f64 {
+        self.0.weight_total
+    }
+
+    #[getter]
+    pub fn weight_ok(&self) -> f64 {
+        self.0.weight_ok
+    }
+
+    #[getter]
+    pub fn weight_degraded(&self) -> f64 {
+        self.0.weight_degraded
+    }
+
+    #[getter]
+    pub fn weight_failed(&self) -> f64 {
+        self.0.weight_failed
+    }
+
+    pub fn __repr__(&self) -> String {
+        format!(
+            "Coverage(weight_total={}, weight_ok={}, weight_degraded={}, weight_failed={})",
+            self.0.weight_total, self.0.weight_ok, self.0.weight_degraded, self.0.weight_failed,
+        )
     }
 }
 
@@ -85,11 +145,12 @@ pub struct PyFleet {
 #[pymethods]
 impl PyFleet {
     #[classmethod]
-    #[pyo3(signature = (configs, sample_weights=None))]
+    #[pyo3(signature = (configs, sample_weights=None, *, alignment=None))]
     pub fn from_buildings(
         _cls: &Bound<'_, PyType>,
         configs: Vec<PyDwellingConfig>,
         sample_weights: Option<Vec<f64>>,
+        alignment: Option<PyAlignment>,
     ) -> PyResult<Self> {
         if configs.is_empty() {
             return Err(PyValueError::new_err(
@@ -102,7 +163,7 @@ impl PyFleet {
             .map(|c| c.to_dwelling_config())
             .collect::<PyResult<Vec<_>>>()?;
 
-        let fleet = Fleet::from_buildings(dwelling_configs);
+        let fleet = Fleet::from_buildings(dwelling_configs).map_err(to_py_err)?;
 
         // `with_sample_weights` validates both the length and each weight
         // (rejecting NaN/infinite/negative), so the Python layer defers to it
@@ -112,23 +173,48 @@ impl PyFleet {
         } else {
             fleet
         };
+        let fleet = match alignment {
+            Some(alignment) => fleet.with_alignment(alignment.0),
+            None => fleet,
+        };
 
         Ok(Self { fleet })
     }
 
+    /// Build a fleet from ResStock metadata and the unpacked buildings
+    /// directory. ``buildings_dir`` must hold one directory per building,
+    /// ``bldg<id:07>``, containing that building's ``home.xml`` and
+    /// ``in.schedules.csv``: the layout ``hares.data.resstock`` unpacks the
+    /// dataset zips to. The fleet never unpacks a zip; a building whose
+    /// directory or files are missing is an error naming the building and
+    /// the fix. Each building's weather file is resolved from the FIPS code
+    /// in its own HPXML (``WeatherStation/Name``) against ``weather_dir``;
+    /// a building whose weather file cannot be resolved or read is an
+    /// error, one error naming every failing building with its county.
+    ///
+    /// The release declares the weather-year rule: 2025.1 ships
+    /// actual-meteorological-year (AMY 2018) CSV files and runs the
+    /// weather file's own year; 2024.x ships typical (TMY3) EPW files and
+    /// needs ``typical_year`` (the run's calendar year; there is no
+    /// built-in year). Every home starts Jan 1 00:00 local standard time
+    /// at its own site's standard offset.
     #[classmethod]
-    #[pyo3(signature = (metadata_path, hpxml_dir, weather_dir, filter=None, resstock_version=None, duration_s=None, defaults_path=None))]
+    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, typical_year=None, duration_s=None, defaults_path=None, *, alignment=None, **unexpected))]
     #[allow(clippy::too_many_arguments)]
     pub fn from_resstock(
         _cls: &Bound<'_, PyType>,
         metadata_path: String,
-        hpxml_dir: String,
+        buildings_dir: String,
         weather_dir: String,
         filter: Option<&Bound<'_, PyDict>>,
         resstock_version: Option<Bound<'_, PyAny>>,
+        typical_year: Option<i32>,
         duration_s: Option<i64>,
         defaults_path: Option<String>,
+        alignment: Option<PyAlignment>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        check_unexpected_kwargs("from_resstock", unexpected)?;
         let parsed_filter = filter
             .map(dict_to_filter)
             .transpose()?
@@ -154,39 +240,50 @@ impl PyFleet {
             None => None,
         };
 
+        let defaults: std::path::PathBuf = match defaults_path.as_deref() {
+            Some(path) => std::path::PathBuf::from(path),
+            None => crate::py_inputs::packaged_defaults_dir(_cls.py()).map_err(to_py_err)?,
+        };
         let fleet = Fleet::from_resstock(
             Path::new(&metadata_path),
-            Path::new(&hpxml_dir),
+            Path::new(&buildings_dir),
             Path::new(&weather_dir),
             parsed_version,
+            typical_year,
             parsed_filter,
             duration,
-            defaults_path.as_deref().map(Path::new),
+            &defaults,
         )
         .map_err(to_py_err)?;
+        let fleet = match alignment {
+            Some(alignment) => fleet.with_alignment(alignment.0),
+            None => fleet,
+        };
 
         Ok(Self { fleet })
     }
 
-    #[pyo3(signature = (n_threads=None, resolution=None, raise_on_failure=None, progress=None))]
+    /// Simulates the fleet through the streaming ordered fold: the homes
+    /// run in consecutive chunks of the fleet's entry order, and each
+    /// finished chunk's homes fold into the running aggregate one at a
+    /// time in entry order before the next chunk starts. The global fold
+    /// order is the entry order for every chunk size and thread count.
+    #[pyo3(signature = (report, *, n_threads=None, chunk_size=64, raise_on_failure=None, progress=None))]
     pub fn simulate(
         &self,
         py: Python<'_>,
+        report: &PyFleetReport,
         n_threads: Option<isize>,
-        resolution: Option<Bound<'_, PyAny>>,
+        chunk_size: usize,
         raise_on_failure: Option<bool>,
         progress: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyFleetResults> {
+    ) -> PyResult<PyFleetResult> {
         let thread_count = normalize_thread_count(n_threads)?;
-        let resolution = match resolution {
-            Some(obj) => {
-                extract_aggregation_resolution(obj)?.unwrap_or(AggregationResolution::FifteenMin)
-            }
-            None => AggregationResolution::FifteenMin,
-        };
+        let chunk = NonZeroUsize::new(chunk_size)
+            .ok_or_else(|| PyValueError::new_err("chunk_size must be at least 1"))?;
         let raise_on_failure = raise_on_failure.unwrap_or(false);
 
-        let outcomes = if let Some(callback) = progress {
+        let result = if let Some(callback) = progress {
             // PyO3 `#[pymethods]` require `&self`, but `Fleet::set_progress` mutates
             // the fleet to install the callback. Cloning is the only way to attach
             // the progress callback without forcing `&mut self` on the Python API.
@@ -199,63 +296,37 @@ impl PyFleet {
                     }
                 });
             });
-            py.detach(|| fleet_clone.simulate(thread_count))
+            py.detach(|| fleet_clone.simulate(&report.0, thread_count, chunk))
         } else {
-            py.detach(|| self.fleet.simulate(thread_count))
+            py.detach(|| self.fleet.simulate(&report.0, thread_count, chunk))
         };
 
-        let outcomes = outcomes.into_iter().collect::<Vec<_>>();
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => return Err(fleet_error_to_py_err(py, err)?),
+        };
 
-        let mut success = Vec::with_capacity(outcomes.len());
-        let mut failures = Vec::new();
-
-        for outcome in outcomes {
-            match outcome {
-                Ok(ok) => success.push(ok),
-                Err(err) => {
-                    let bldg_id = match &err {
-                        SimError::Failed { bldg_id, .. } => *bldg_id,
-                        SimError::Engine { bldg_id, .. } => *bldg_id,
-                        SimError::Panic { bldg_id, .. } => *bldg_id,
-                        SimError::Skipped { bldg_id, .. } => *bldg_id,
-                        SimError::ThreadPoolBuild(_) => -1,
-                    };
-                    failures.push((bldg_id, err.to_string()));
-                }
+        if raise_on_failure {
+            let failed: Vec<String> = result
+                .homes
+                .iter()
+                .filter_map(|home| match &home.status {
+                    hares_fleet::HomeStatus::Failed(reason) => {
+                        Some(format!("home {}: {reason}", home.bldg_id))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !failed.is_empty() {
+                return Err(HaresSimulationError::new_err(format!(
+                    "fleet simulation failed for {} home(s): {}",
+                    failed.len(),
+                    failed.join("; ")
+                )));
             }
         }
 
-        if !failures.is_empty() && raise_on_failure {
-            let failure_msgs: Vec<_> = failures.iter().map(|(_, m)| m.clone()).collect();
-            return Err(PyValueError::new_err(format!(
-                "fleet simulation failed for {} dwelling(s): {}",
-                failures.len(),
-                failure_msgs.join("; ")
-            )));
-        }
-
-        if success.is_empty() && !failures.is_empty() {
-            return Err(PyValueError::new_err(
-                "all dwellings in the fleet failed to simulate",
-            ));
-        }
-
-        let aggregated = aggregate(&success, resolution)
-            .map_err(|e| PyValueError::new_err(format!("fleet aggregation failed: {e}")))?;
-
-        if aggregated.aggregate_timeseries.num_rows() == 0 && !success.is_empty() {
-            py.import("warnings")?.call_method1(
-                "warn",
-                ("Fleet aggregation produced an empty timeseries despite \
-                     successful dwellings. This may indicate column mismatches \
-                     across dwellings.",),
-            )?;
-        }
-
-        let mut results = fleet_results_to_py(aggregated);
-        results.failures = failures;
-        results.n_succeeded = success.len();
-        Ok(results)
+        Ok(PyFleetResult { result })
     }
 
     fn __len__(&self) -> usize {
@@ -267,73 +338,103 @@ impl PyFleet {
     }
 }
 
-impl From<PyAggregationResolution> for AggregationResolution {
-    fn from(py_res: PyAggregationResolution) -> Self {
-        match py_res {
-            PyAggregationResolution::FifteenMin => AggregationResolution::FifteenMin,
-            PyAggregationResolution::Hourly => AggregationResolution::Hourly,
-        }
-    }
-}
-
-#[pyclass(name = "FleetResults")]
-pub struct PyFleetResults {
-    pub(crate) results: FleetResults,
-    pub(crate) failures: Vec<(i64, String)>,
-    pub(crate) n_succeeded: usize,
-}
-
-impl PyFleetResults {
-    pub(crate) fn new(results: FleetResults) -> Self {
-        let n_succeeded = results.per_dwelling_metrics.len();
-        Self {
-            results,
-            failures: Vec::new(),
-            n_succeeded,
-        }
-    }
+/// One fleet result table: the aggregate, the covered weight behind it
+/// or the homes table, as the run delivered it.
+#[pyclass(frozen, name = "FleetTable")]
+pub struct PyFleetTable {
+    batch: RecordBatch,
 }
 
 #[pymethods]
-impl PyFleetResults {
-    #[getter]
-    pub fn per_dwelling_metrics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        dwelling_metrics_to_polars_df(py, &self.results.per_dwelling_metrics)
+impl PyFleetTable {
+    /// The table as an Arrow stream: pyo3-arrow's `Table` class, whose
+    /// repeatable `__arrow_c_stream__` any Arrow consumer (polars,
+    /// pyarrow, pandas through pyarrow) imports with the table's buffers
+    /// shared, no IPC serialize-and-parse round trip. The fleet's tables
+    /// are one batch, so `rechunk` changes nothing: either way the stream
+    /// carries the batch's own buffers.
+    #[pyo3(signature = (rechunk = true))]
+    pub fn arrow(&self, rechunk: bool) -> PyResult<PyTable> {
+        let _ = rechunk;
+        crate::conversions::batches_to_py_table(vec![self.batch.clone()])
     }
 
-    #[getter]
-    pub fn aggregate_timeseries(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        record_batches_to_polars_df(py, std::slice::from_ref(&self.results.aggregate_timeseries))
+    /// The table as a polars `DataFrame`, read from the `arrow()` export's
+    /// stream.
+    #[pyo3(signature = (rechunk = true))]
+    pub fn table<'py>(&self, py: Python<'py>, rechunk: bool) -> PyResult<Bound<'py, PyAny>> {
+        let table = Py::new(py, self.arrow(rechunk)?)?;
+        let polars = py.import("polars")?;
+        let df = polars.getattr("DataFrame")?.call1((table,))?;
+        Ok(df)
     }
+}
 
+/// The fleet's result: the aggregate, the covered weight behind it, the
+/// homes table and the coverage weights.
+#[pyclass(name = "FleetResult")]
+pub struct PyFleetResult {
+    pub(crate) result: FleetResult,
+}
+
+#[pymethods]
+impl PyFleetResult {
+    /// The weighted fleet timeseries as the run delivered it.
     #[getter]
-    pub fn failures(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let list = PyList::empty(py);
-        for (bldg_id, error) in &self.failures {
-            let dict = PyDict::new(py);
-            dict.set_item("bldg_id", *bldg_id)?;
-            dict.set_item("error", error)?;
-            list.append(dict)?;
+    pub fn aggregate(&self) -> PyFleetTable {
+        PyFleetTable {
+            batch: self.result.aggregate.clone(),
         }
-        Ok(list.into())
+    }
+
+    /// The weight behind each aggregate cell.
+    #[getter]
+    pub fn covered_weight(&self) -> PyFleetTable {
+        PyFleetTable {
+            batch: self.result.covered_weight.clone(),
+        }
+    }
+
+    /// One row per home, in entry order, with the run metrics' columns
+    /// when any home requested them.
+    #[getter]
+    pub fn homes(&self) -> PyFleetTable {
+        PyFleetTable {
+            batch: self.result.homes_table(),
+        }
+    }
+
+    #[getter]
+    pub fn coverage(&self) -> PyCoverage {
+        PyCoverage(self.result.coverage)
     }
 
     #[getter]
     pub fn n_succeeded(&self) -> usize {
-        self.n_succeeded
+        self.result.n_succeeded
     }
 
     #[getter]
     pub fn n_failed(&self) -> usize {
-        self.failures.len()
+        self.result
+            .homes
+            .iter()
+            .filter(|home| matches!(home.status, hares_fleet::HomeStatus::Failed(_)))
+            .count()
+    }
+
+    #[getter]
+    pub fn peak_live_home_results(&self) -> usize {
+        self.result.peak_live_home_results
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "PyFleetResults(per_dwelling_rows={}, aggregate_rows={}, failures={})",
-            self.results.per_dwelling_metrics.len(),
-            self.results.aggregate_timeseries.num_rows(),
-            self.failures.len()
+            "FleetResult(aggregate_rows={}, homes={}, n_succeeded={}, peak_live_home_results={})",
+            self.result.aggregate.num_rows(),
+            self.result.homes.len(),
+            self.result.n_succeeded,
+            self.result.peak_live_home_results,
         )
     }
 }
@@ -366,15 +467,91 @@ fn to_py_err<E: std::fmt::Display>(err: E) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
+/// The fleet error surface: `NoCoveredWeight` raises the simulation error
+/// with the counts in its message and the full homes table as the
+/// exception's `homes` attribute, read as `FleetResult.homes` is; every
+/// other fleet error is a `ValueError` with its display.
+fn fleet_error_to_py_err(py: Python<'_>, err: hares_fleet::fleet::FleetError) -> PyResult<PyErr> {
+    match &err {
+        hares_fleet::fleet::FleetError::NoCoveredWeight { homes, .. } => {
+            let message = err.to_string();
+            let table = crate::conversions::batches_to_py_table(vec![homes.clone()])?;
+            let py_table = Py::new(py, table)?;
+            let polars = py.import("polars")?;
+            let df = polars.getattr("DataFrame")?.call1((py_table,))?;
+            let py_err = HaresSimulationError::new_err(message);
+            py_err.value(py).setattr("homes", df)?;
+            Ok(py_err)
+        }
+        _ => Ok(to_py_err(err)),
+    }
+}
+
+/// The conversion function the SteppableFleet binding uses for a
+/// `FleetError`: `NoSuchHome` is the caller's bad index (`IndexError`), a
+/// failed telemetry snapshot is the simulation's failure
+/// (`HaresSimulationError` naming the home and the cause), and a step
+/// past the fleet's finished end is a `HaresSimulationError` naming the
+/// finished step count.
+fn steppable_error_to_py_err(err: hares_fleet::FleetError) -> PyErr {
+    match &err {
+        hares_fleet::FleetError::NoSuchHome { index, len } => {
+            PyIndexError::new_err(format!("dwelling_index {index} out of range (len={len})"))
+        }
+        hares_fleet::FleetError::Telemetry { .. }
+        | hares_fleet::FleetError::AlreadyFinished { .. } => {
+            HaresSimulationError::new_err(err.to_string())
+        }
+        other => PyValueError::new_err(other.to_string()),
+    }
+}
+
+/// The fleet's declared time alignment: the calendar the homes'
+/// reductions bucket onto and the rows the fleet's products align by.
+/// `Alignment.instant("-07:00")` buckets every home on the offset's
+/// period boundaries and labels the rows at the offset;
+/// `Alignment.local_clock()` aligns the rows by the naive local period
+/// start the homes share. A fleet with no declared alignment keeps the
+/// homes' own local calendars and fails when the homes span more than
+/// one UTC offset.
+#[pyclass(name = "Alignment", from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct PyAlignment(pub hares_fleet::Alignment);
+
+#[pymethods]
+impl PyAlignment {
+    #[classmethod]
+    pub fn instant(_cls: &Bound<'_, PyType>, offset: &str) -> PyResult<Self> {
+        let offset = offset.parse::<chrono::FixedOffset>().map_err(|err| {
+            PyValueError::new_err(format!("invalid UTC offset {offset:?}: {err}"))
+        })?;
+        Ok(Self(hares_fleet::Alignment::Instant(offset)))
+    }
+
+    #[classmethod]
+    pub fn local_clock(_cls: &Bound<'_, PyType>) -> Self {
+        Self(hares_fleet::Alignment::LocalClock)
+    }
+
+    pub fn __repr__(&self) -> String {
+        match self.0 {
+            hares_fleet::Alignment::Instant(offset) => {
+                format!("Alignment.instant({})", offset)
+            }
+            hares_fleet::Alignment::LocalClock => "Alignment.local_clock()".to_string(),
+        }
+    }
+}
+
 #[pyclass(name = "SteppableFleet")]
 pub struct PySteppableFleet {
-    fleet: Mutex<SteppableFleet>,
+    fleet: Mutex<hares_fleet::SteppableFleet>,
     poisoned: AtomicBool,
-    build_errors: Vec<DwellingBuildError>,
+    build_errors: Vec<hares_fleet::DwellingBuildError>,
 }
 
 impl PySteppableFleet {
-    fn acquire(&self) -> PyResult<std::sync::MutexGuard<'_, SteppableFleet>> {
+    fn acquire(&self) -> PyResult<std::sync::MutexGuard<'_, hares_fleet::SteppableFleet>> {
         if self.poisoned.load(Ordering::Acquire) {
             return Err(PyRuntimeError::new_err(
                 "steppable fleet is in a fatal error state (internal state corruption); \
@@ -408,7 +585,8 @@ impl PySteppableFleet {
             .collect::<PyResult<Vec<_>>>()?;
 
         let (fleet, build_errors) =
-            SteppableFleet::from_configs(dwelling_configs, thread_count).map_err(to_py_err)?;
+            hares_fleet::SteppableFleet::from_configs(dwelling_configs, thread_count)
+                .map_err(to_py_err)?;
         if !build_errors.is_empty() {
             warn!(
                 "SteppableFleet initialized with {} build failure(s)",
@@ -436,43 +614,59 @@ impl PySteppableFleet {
                  create a new SteppableFleet instance",
             ));
         }
-        let (step_results, bldg_ids, reactive_power_kvar) = py
+        enum StepOutcome {
+            Mutex(String),
+            Fleet(hares_fleet::FleetError),
+        }
+        let (step_results, bldg_ids, reactive_power_var) = py
             .detach(|| {
                 let mut fleet = self.fleet.lock().map_err(|e| {
-                    format!(
+                    StepOutcome::Mutex(format!(
                         "steppable fleet state is corrupted (internal panic: {e}); \
                          create a new SteppableFleet instance"
-                    )
+                    ))
                 })?;
-                let step_results = fleet.step();
-                let bldg_ids = (0..fleet.len())
-                    .map(|idx| fleet.bldg_id(idx).unwrap_or(-1))
+                let step_results = fleet.step().map_err(StepOutcome::Fleet)?;
+                // The building ids come from an infallible iterator over
+                // the homes; every home in the fleet has one.
+                let bldg_ids = fleet.bldg_ids();
+                let reactive_power_var = (0..fleet.len())
+                    .map(|idx| fleet.telemetry(idx).map(|t| t.reactive_power_var))
                     .collect::<Vec<_>>();
-                let reactive_power_kvar = (0..fleet.len())
-                    .map(|idx| fleet.telemetry(idx).map(|t| t.reactive_power_kvar))
-                    .collect::<Vec<_>>();
-                Ok::<_, String>((step_results, bldg_ids, reactive_power_kvar))
+                Ok::<_, StepOutcome>((step_results, bldg_ids, reactive_power_var))
             })
-            .map_err(|e| {
-                // If the closure returned an error string because the fleet mutex is
-                // poisoned, mark the fleet as dead so subsequent calls fail fast.
-                self.poisoned.store(true, Ordering::SeqCst);
-                PyRuntimeError::new_err(e)
+            .map_err(|outcome| match outcome {
+                StepOutcome::Mutex(message) => {
+                    // The fleet mutex is poisoned: mark the fleet as dead
+                    // so subsequent calls fail fast.
+                    self.poisoned.store(true, Ordering::SeqCst);
+                    PyRuntimeError::new_err(message)
+                }
+                StepOutcome::Fleet(err) => steppable_error_to_py_err(err),
             })?;
 
         let out = PyList::empty(py);
         for (idx, entry) in step_results.into_iter().enumerate() {
             let item = PyDict::new(py);
-            match entry {
-                Ok(step) => {
+            let outcome = match entry {
+                Ok(step) => match &reactive_power_var[idx] {
+                    Ok(reactive_power_var) => Ok((step, *reactive_power_var)),
+                    Err(err) => Err(err.to_string()),
+                },
+                Err(err) => Err(err.to_string()),
+            };
+            match outcome {
+                Ok((step, reactive)) => {
                     let result = PyDict::new(py);
-                    result.set_item("timestamp", chrono_to_py_datetime(py, step.timestamp)?)?;
-                    result.set_item("net_electric_power_kw", step.net_electric_power_kw)?;
+                    result.set_item(
+                        "timestamp",
+                        naive_chrono_to_py_datetime(py, step.timestamp)?,
+                    )?;
+                    result.set_item("net_electric_power_w", step.net_electric_power_w)?;
                     result.set_item("hvac_heating_w", step.hvac_heating_w)?;
                     result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
                     result.set_item("gas_power_w", step.gas_power_w)?;
-                    let reactive = reactive_power_kvar.get(idx).and_then(|v| *v).unwrap_or(0.0);
-                    result.set_item("reactive_power_kvar", reactive)?;
+                    result.set_item("reactive_power_var", reactive)?;
                     for (zone_id, temp_c) in &step.zone_temperatures_c {
                         let key = if zone_id.0 == 0 {
                             "Temperature - Indoor (C)".to_string()
@@ -485,17 +679,10 @@ impl PySteppableFleet {
                     item.set_item("bldg_id", bldg_ids[idx])?;
                     item.set_item("result", result)?;
                 }
-                Err(err) => {
+                Err(message) => {
                     item.set_item("ok", false)?;
-                    item.set_item("error", err.to_string())?;
-                    let bldg_id = match err {
-                        SimError::Failed { bldg_id, .. } => bldg_id,
-                        SimError::Engine { bldg_id, .. } => bldg_id,
-                        SimError::Panic { bldg_id, .. } => bldg_id,
-                        SimError::Skipped { bldg_id, .. } => bldg_id,
-                        SimError::ThreadPoolBuild(_) => -1,
-                    };
-                    item.set_item("bldg_id", bldg_id)?;
+                    item.set_item("error", message)?;
+                    item.set_item("bldg_id", bldg_ids[idx])?;
                 }
             }
             out.append(item)?;
@@ -518,19 +705,14 @@ impl PySteppableFleet {
 
     pub fn set_grid_voltage(&self, dwelling_index: usize, voltage_pu: f64) -> PyResult<()> {
         let mut fleet = self.acquire()?;
-        if dwelling_index >= fleet.len() {
-            return Err(PyIndexError::new_err(format!(
-                "dwelling_index {dwelling_index} out of range (len={})",
-                fleet.len()
-            )));
-        }
-        fleet.set_grid_voltage(dwelling_index, voltage_pu);
-        Ok(())
+        fleet
+            .set_grid_voltage(dwelling_index, voltage_pu)
+            .map_err(steppable_error_to_py_err)
     }
 
     pub fn set_grid_voltage_all(&self, voltage_pu: f64) -> PyResult<()> {
         let mut fleet = self.acquire()?;
-        fleet.set_grid_voltage_all(voltage_pu);
+        fleet.set_grid_voltage_all(voltage_pu).map_err(to_py_err)?;
         Ok(())
     }
 
@@ -541,14 +723,9 @@ impl PySteppableFleet {
         signal: &PyControlSignal,
     ) -> PyResult<()> {
         let mut fleet = self.acquire()?;
-        if dwelling_index >= fleet.len() {
-            return Err(PyIndexError::new_err(format!(
-                "dwelling_index {dwelling_index} out of range (len={})",
-                fleet.len()
-            )));
-        }
-        fleet.apply_control(dwelling_index, &name, signal.signal.clone());
-        Ok(())
+        fleet
+            .apply_control(dwelling_index, &name, signal.signal.clone())
+            .map_err(steppable_error_to_py_err)
     }
 
     pub fn telemetry(&self, dwelling_index: usize) -> PyResult<PyTelemetry> {
@@ -556,12 +733,7 @@ impl PySteppableFleet {
         fleet
             .telemetry(dwelling_index)
             .map(PyTelemetry::new)
-            .ok_or_else(|| {
-                PyIndexError::new_err(format!(
-                    "dwelling_index {dwelling_index} out of range (len={})",
-                    fleet.len()
-                ))
-            })
+            .map_err(steppable_error_to_py_err)
     }
 
     pub fn is_finished(&self) -> PyResult<bool> {
@@ -603,7 +775,21 @@ impl PySteppableFleet {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::num::NonZeroUsize;
+    use std::path::PathBuf;
+
+    use hares_core::{DwellingConfig, DwellingSettings};
+    use hares_io::{DefaultsSource, Frequency, InputSource, Selection, WeatherInput};
+    use pyo3::Python;
+    use pyo3::exceptions::PyIndexError;
+    use pyo3::types::PyTypeMethods;
+    use pyo3::types::{PyAnyMethods, PyCapsule};
+    use pyo3_arrow::PyTable;
+
+    use super::PyFleetResult;
+    use super::normalize_thread_count;
+    use super::steppable_error_to_py_err;
+    use crate::py_dwelling::HaresSimulationError;
 
     #[test]
     fn thread_normalization_matches_contract() {
@@ -614,5 +800,141 @@ mod tests {
         );
         assert_eq!(normalize_thread_count(Some(2)).expect("positive maps"), 2);
         assert!(normalize_thread_count(Some(-1)).is_err());
+    }
+
+    /// The one conversion function the binding uses maps `NoSuchHome` to
+    /// `IndexError` and a failed snapshot to `HaresSimulationError` whose
+    /// message names the building id and the snapshot error.
+    #[test]
+    fn fleet_error_maps_to_python_exception() {
+        Python::attach(|py| {
+            let no_such_home =
+                steppable_error_to_py_err(hares_fleet::FleetError::NoSuchHome { index: 3, len: 2 });
+            assert!(
+                no_such_home
+                    .get_type(py)
+                    .is_subclass_of::<PyIndexError>()
+                    .expect("subclass check"),
+                "NoSuchHome maps to IndexError, got: {no_such_home:?}"
+            );
+
+            let telemetry = steppable_error_to_py_err(hares_fleet::FleetError::Telemetry {
+                bldg_id: 7,
+                source: Box::<dyn std::error::Error + Send + Sync>::from(
+                    "the snapshot error".to_string(),
+                ),
+            });
+            assert!(
+                telemetry
+                    .get_type(py)
+                    .is_subclass_of::<HaresSimulationError>()
+                    .expect("subclass check"),
+                "Telemetry maps to HaresSimulationError, got: {telemetry:?}"
+            );
+            let message = telemetry.value(py).to_string();
+            assert!(
+                message.contains("7"),
+                "the message names the building id: {message}"
+            );
+            assert!(
+                message.contains("the snapshot error"),
+                "the message names the snapshot error: {message}"
+            );
+        });
+    }
+
+    /// The `fleet_same_offset_300s` manifest's homes, run at `Hourly`:
+    /// the fleet the capsule export's acceptance test reads.
+    fn fleet_same_offset_homes_hourly() -> hares_fleet::FleetResult {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = frame_golden::GoldenManifest::load(
+            &root.join("tests/fixtures/golden/fleet_same_offset_300s.toml"),
+        )
+        .expect("the manifest loads");
+        let sim = manifest
+            .simulation_config()
+            .expect("the manifest's sim config");
+        let configs: Vec<DwellingConfig> = manifest
+            .home
+            .iter()
+            .map(|home| DwellingConfig {
+                hpxml: InputSource::Path(frame_golden::manifest::repo_path(&root, &home.hpxml)),
+                schedule: Some(InputSource::Path(frame_golden::manifest::repo_path(
+                    &root,
+                    &home.schedule,
+                ))),
+                weather: WeatherInput::Path(frame_golden::manifest::repo_path(
+                    &root,
+                    &home.weather,
+                )),
+                defaults: DefaultsSource::directory(root.join(&manifest.defaults)),
+                settings: DwellingSettings::new(
+                    sim.clone(),
+                    Some(home.overrides.clone()),
+                    home.bldg_id,
+                    None,
+                ),
+            })
+            .collect();
+        let weights: Vec<f64> = manifest
+            .home
+            .iter()
+            .map(|home| home.weight.expect("a fleet home carries a weight"))
+            .collect();
+        let fleet = hares_fleet::Fleet::from_buildings(configs)
+            .expect("the fleet builds")
+            .with_sample_weights(weights)
+            .expect("the weights apply");
+        let report = hares_fleet::FleetReport {
+            selection: Selection::Verbosity(2),
+            frequency: Frequency::Hourly,
+            health_policy: hares_io::HealthPolicy::default(),
+        };
+        fleet
+            .simulate(&report, 1, NonZeroUsize::new(64).expect("64"))
+            .expect("the fleet runs")
+    }
+
+    /// The three fleet tables export through `__arrow_c_stream__` and
+    /// equal, imported back through pyo3-arrow's `from_arrow_pycapsule`,
+    /// the fleet result's batches, floats by bit pattern.
+    #[test]
+    fn fleet_tables_export_through_capsule() {
+        let result = fleet_same_offset_homes_hourly();
+        let aggregate = result.aggregate.clone();
+        let covered_weight = result.covered_weight.clone();
+        let homes = result.homes_table();
+
+        Python::attach(|py| {
+            let wrapper = pyo3::Py::new(py, PyFleetResult { result }).expect("the wrapper wraps");
+            let bound = wrapper.bind(py);
+            let tables = [
+                ("aggregate", aggregate),
+                ("covered_weight", covered_weight),
+                ("homes", homes),
+            ];
+            for (name, batch) in tables {
+                let table = match name {
+                    "aggregate" => bound.borrow().aggregate(),
+                    "covered_weight" => bound.borrow().covered_weight(),
+                    _ => bound.borrow().homes(),
+                };
+                let py_table = table.arrow(true).expect("the table exports");
+                let obj = pyo3::Py::new(py, py_table).expect("the table wraps");
+                let capsule = obj
+                    .bind(py)
+                    .call_method1("__arrow_c_stream__", (py.None(),))
+                    .expect("the table exposes __arrow_c_stream__");
+                let capsule = capsule
+                    .cast::<PyCapsule>()
+                    .expect("the stream is a capsule");
+                let imported = PyTable::from_arrow_pycapsule(capsule).expect("the capsule imports");
+                crate::conversions::assert_batches_bitwise_equal(
+                    name,
+                    &[batch],
+                    imported.batches(),
+                );
+            }
+        });
     }
 }

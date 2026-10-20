@@ -5,7 +5,7 @@ use hares_types::{
     EvConnectionState as RustEvConnectionState, IdealCapacityMode, InverterPriority, OperatingMode,
     ProtocolId,
 };
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyType};
 
@@ -14,9 +14,34 @@ use crate::py_enums::{
     PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
 };
 use crate::utils::{
-    dict_optional, dict_required, finite_f64_optional, finite_f64_required, validate_finite,
-    validate_non_negative, validate_range, validate_thermal_setpoint_band,
+    dict_optional, dict_required, finite_f64_optional, finite_f64_required,
+    unexpected_keyword_error, validate_finite, validate_non_negative, validate_range,
+    validate_thermal_setpoint_band,
 };
+
+/// The signal surfaces' removed-keyword check: the first offending keyword
+/// of the `ControlSignal` removed-keys scope is named, then the generic
+/// keyword scopes' refusal.
+pub(crate) fn check_signal_kwargs(
+    surface: &str,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let Some(kwargs) = kwargs else {
+        return Ok(());
+    };
+    let keys = kwargs.keys();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let key = keys.get_item(0)?;
+    let key_str: String = key.extract()?;
+    if let Some(replacement) = hares_io::removed_key(hares_io::KeyScope::ControlSignal, &key_str) {
+        return Err(PyTypeError::new_err(format!(
+            "signal keyword '{key_str}' was removed: {replacement}"
+        )));
+    }
+    Err(unexpected_keyword_error(surface, &key_str))
+}
 
 #[pyclass(name = "ControlSignal")]
 #[derive(Debug)]
@@ -27,19 +52,21 @@ pub struct PyControlSignal {
 #[pymethods]
 impl PyControlSignal {
     #[staticmethod]
-    #[pyo3(signature = (kw, reactive_kvar=None, min_soc=None, max_soc=None))]
+    #[pyo3(signature = (*, active_power_w, reactive_power_var=None, min_soc=None, max_soc=None, **kwargs))]
     pub fn power_setpoint(
-        kw: f64,
-        reactive_kvar: Option<f64>,
+        active_power_w: f64,
+        reactive_power_var: Option<f64>,
         min_soc: Option<f64>,
         max_soc: Option<f64>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        check_signal_kwargs("ControlSignal.power_setpoint", kwargs)?;
         // Signed per the core ControlSignal contract: positive = charge,
         // negative = discharge (V2G/V2H). Finiteness only — semantic
         // limits are the receiving equipment's to enforce.
-        validate_finite(kw, "active_power_kw")?;
-        if let Some(q) = reactive_kvar {
-            validate_finite(q, "reactive_power_kvar")?;
+        validate_finite(active_power_w, "active_power_w")?;
+        if let Some(q) = reactive_power_var {
+            validate_finite(q, "reactive_power_var")?;
         }
         // The SOC floor/ceiling are finiteness-only at this boundary —
         // semantic range checks are the receiving equipment's (the
@@ -53,8 +80,8 @@ impl PyControlSignal {
         }
         Ok(Self {
             signal: ControlSignal::PowerSetpoint {
-                active_power_kw: kw,
-                reactive_power_kvar: reactive_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             },
@@ -155,6 +182,15 @@ impl PyControlSignal {
         })
     }
 
+    /// The release form of `mode_override`: clears a stored mode override,
+    /// returning the unit to its own control.
+    #[staticmethod]
+    pub fn mode_override_release() -> Self {
+        Self {
+            signal: ControlSignal::ModeOverrideRelease,
+        }
+    }
+
     #[staticmethod]
     #[pyo3(signature = (level, duration_s=None))]
     pub fn demand_response(level: PyDRLevel, duration_s: Option<f64>) -> PyResult<Self> {
@@ -231,17 +267,22 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (max_power_kw, ramp_rate_kw_per_s=None))]
-    pub fn power_limit(max_power_kw: f64, ramp_rate_kw_per_s: Option<f64>) -> PyResult<Self> {
-        validate_non_negative(max_power_kw, "max_power_kw")?;
+    #[pyo3(signature = (*, max_power_w, ramp_rate_w_per_s=None, **kwargs))]
+    pub fn power_limit(
+        max_power_w: f64,
+        ramp_rate_w_per_s: Option<f64>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        check_signal_kwargs("ControlSignal.power_limit", kwargs)?;
+        validate_non_negative(max_power_w, "max_power_w")?;
         // Same boundary rationale as `thermal_setpoint` above.
-        if let Some(v) = ramp_rate_kw_per_s {
-            validate_finite(v, "ramp_rate_kw_per_s")?;
+        if let Some(v) = ramp_rate_w_per_s {
+            validate_finite(v, "ramp_rate_w_per_s")?;
         }
         Ok(Self {
             signal: ControlSignal::PowerLimit {
-                max_power_kw,
-                ramp_rate_kw_per_s,
+                max_power_w,
+                ramp_rate_w_per_s,
             },
         })
     }
@@ -293,12 +334,14 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    pub fn reactive_setpoint(kvar: f64) -> PyResult<Self> {
+    #[pyo3(signature = (*, var, **kwargs))]
+    pub fn reactive_setpoint(var: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        check_signal_kwargs("ControlSignal.reactive_setpoint", kwargs)?;
         // Signed per the core contract (negative = absorbing); finiteness
         // only — same boundary rationale as `thermal_setpoint` above.
-        validate_finite(kvar, "kvar")?;
+        validate_finite(var, "var")?;
         Ok(Self {
-            signal: ControlSignal::ReactiveSetpoint { kvar },
+            signal: ControlSignal::ReactiveSetpoint { var },
         })
     }
 
@@ -365,18 +408,22 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
-    pub fn ev_drive(kwh: f64) -> PyResult<Self> {
-        validate_non_negative(kwh, "kwh")?;
+    #[pyo3(signature = (*, energy_j, **kwargs))]
+    pub fn ev_drive(energy_j: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        check_signal_kwargs("ControlSignal.ev_drive", kwargs)?;
+        validate_non_negative(energy_j, "energy_j")?;
         Ok(Self {
-            signal: ControlSignal::EvDrive { kwh },
+            signal: ControlSignal::EvDrive { energy_j },
         })
     }
 
     #[staticmethod]
-    pub fn ev_away_charge(power_kw: f64) -> PyResult<Self> {
-        validate_non_negative(power_kw, "power_kw")?;
+    #[pyo3(signature = (*, power_w, **kwargs))]
+    pub fn ev_away_charge(power_w: f64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        check_signal_kwargs("ControlSignal.ev_away_charge", kwargs)?;
+        validate_non_negative(power_w, "power_w")?;
         Ok(Self {
-            signal: ControlSignal::EvAwayCharge { power_kw },
+            signal: ControlSignal::EvAwayCharge { power_w },
         })
     }
 
@@ -416,6 +463,19 @@ impl PyControlSignal {
 
     #[classmethod]
     pub fn from_dict(_cls: &Bound<'_, PyType>, d: &Bound<'_, PyDict>) -> PyResult<Self> {
+        // The dict keys are the signal surface: each is checked against
+        // the removed-keys table before the payload parses, so an old key
+        // names its replacement instead of failing as a missing field.
+        for key in d.keys() {
+            let key_str: String = key.extract()?;
+            if let Some(replacement) =
+                hares_io::removed_key(hares_io::KeyScope::ControlSignal, &key_str)
+            {
+                return Err(PyValueError::new_err(format!(
+                    "signal key '{key_str}' was removed: {replacement}"
+                )));
+            }
+        }
         let kind: String = dict_required(d, "type")?;
         let signal = match kind.as_str() {
             "ThermalSetpoint" => {
@@ -432,18 +492,19 @@ impl PyControlSignal {
             "ModeOverride" => ControlSignal::ModeOverride {
                 mode: parse_mode_or_enum(d, "mode")?,
             },
+            "ModeOverrideRelease" => ControlSignal::ModeOverrideRelease,
             "PowerSetpoint" => {
                 // Signed per the core contract (negative = discharge);
                 // finiteness only, same as the typed constructor.
-                let active_power_kw = finite_f64_required(d, "active_power_kw")?;
-                let reactive_power_kvar = finite_f64_optional(d, "reactive_power_kvar")?;
+                let active_power_w = finite_f64_required(d, "active_power_w")?;
+                let reactive_power_var = finite_f64_optional(d, "reactive_power_var")?;
                 // Same-named fields here are finiteness-only, matching
                 // the typed constructor (the SOCTarget arm below
                 // validates its own to [0, 1] because there the SOC *is*
                 // the command).
                 ControlSignal::PowerSetpoint {
-                    active_power_kw,
-                    reactive_power_kvar,
+                    active_power_w,
+                    reactive_power_var,
                     min_soc: finite_f64_optional(d, "min_soc")?,
                     max_soc: finite_f64_optional(d, "max_soc")?,
                 }
@@ -458,11 +519,11 @@ impl PyControlSignal {
                 solar_only_charging: dict_required(d, "solar_only_charging")?,
             },
             "PowerLimit" => {
-                let max_power_kw: f64 = dict_required(d, "max_power_kw")?;
-                validate_non_negative(max_power_kw, "max_power_kw")?;
+                let max_power_w: f64 = dict_required(d, "max_power_w")?;
+                validate_non_negative(max_power_w, "max_power_w")?;
                 ControlSignal::PowerLimit {
-                    max_power_kw,
-                    ramp_rate_kw_per_s: finite_f64_optional(d, "ramp_rate_kw_per_s")?,
+                    max_power_w,
+                    ramp_rate_w_per_s: finite_f64_optional(d, "ramp_rate_w_per_s")?,
                 }
             }
             "SOCTarget" => {
@@ -513,7 +574,7 @@ impl PyControlSignal {
                 ControlSignal::CurtailmentPercent { percent }
             }
             "ReactiveSetpoint" => ControlSignal::ReactiveSetpoint {
-                kvar: finite_f64_required(d, "kvar")?,
+                var: finite_f64_required(d, "var")?,
             },
             "PowerFactorSetpoint" => ControlSignal::PowerFactorSetpoint {
                 power_factor: finite_f64_required(d, "power_factor")?,
@@ -555,14 +616,14 @@ impl PyControlSignal {
                 ControlSignal::EvPlugIn { state }
             }
             "EvDrive" => {
-                let kwh: f64 = dict_required(d, "kwh")?;
-                validate_non_negative(kwh, "kwh")?;
-                ControlSignal::EvDrive { kwh }
+                let energy_j: f64 = dict_required(d, "energy_j")?;
+                validate_non_negative(energy_j, "energy_j")?;
+                ControlSignal::EvDrive { energy_j }
             }
             "EvAwayCharge" => {
-                let power_kw: f64 = dict_required(d, "power_kw")?;
-                validate_non_negative(power_kw, "power_kw")?;
-                ControlSignal::EvAwayCharge { power_kw }
+                let power_w: f64 = dict_required(d, "power_w")?;
+                validate_non_negative(power_w, "power_w")?;
+                ControlSignal::EvAwayCharge { power_w }
             }
             "EvSetReadyBy" => {
                 let target_soc: f64 = dict_required(d, "target_soc")?;
@@ -594,15 +655,15 @@ impl PyControlSignal {
         let dict = PyDict::new(py);
         match &self.signal {
             ControlSignal::PowerSetpoint {
-                active_power_kw,
-                reactive_power_kvar,
+                active_power_w,
+                reactive_power_var,
                 min_soc,
                 max_soc,
             } => {
                 dict.set_item("type", "PowerSetpoint")?;
-                dict.set_item("active_power_kw", active_power_kw)?;
-                if let Some(kvar) = reactive_power_kvar {
-                    dict.set_item("reactive_power_kvar", kvar)?;
+                dict.set_item("active_power_w", active_power_w)?;
+                if let Some(q) = reactive_power_var {
+                    dict.set_item("reactive_power_var", q)?;
                 }
                 if let Some(v) = min_soc {
                     dict.set_item("min_soc", v)?;
@@ -654,13 +715,13 @@ impl PyControlSignal {
                 }
             }
             ControlSignal::PowerLimit {
-                max_power_kw,
-                ramp_rate_kw_per_s,
+                max_power_w,
+                ramp_rate_w_per_s,
             } => {
                 dict.set_item("type", "PowerLimit")?;
-                dict.set_item("max_power_kw", max_power_kw)?;
-                if let Some(v) = ramp_rate_kw_per_s {
-                    dict.set_item("ramp_rate_kw_per_s", v)?;
+                dict.set_item("max_power_w", max_power_w)?;
+                if let Some(v) = ramp_rate_w_per_s {
+                    dict.set_item("ramp_rate_w_per_s", v)?;
                 }
             }
             ControlSignal::DutyCycle {
@@ -697,9 +758,9 @@ impl PyControlSignal {
                 dict.set_item("type", "CurtailmentPercent")?;
                 dict.set_item("percent", percent)?;
             }
-            ControlSignal::ReactiveSetpoint { kvar } => {
+            ControlSignal::ReactiveSetpoint { var } => {
                 dict.set_item("type", "ReactiveSetpoint")?;
-                dict.set_item("kvar", kvar)?;
+                dict.set_item("var", var)?;
             }
             ControlSignal::PowerFactorSetpoint { power_factor } => {
                 dict.set_item("type", "PowerFactorSetpoint")?;
@@ -751,6 +812,9 @@ impl PyControlSignal {
                 };
                 dict.set_item("mode", m_str)?;
             }
+            ControlSignal::ModeOverrideRelease => {
+                dict.set_item("type", "ModeOverrideRelease")?;
+            }
             ControlSignal::DemandResponse { level, duration_s } => {
                 dict.set_item("type", "DemandResponse")?;
                 let l_str = match level {
@@ -791,13 +855,13 @@ impl PyControlSignal {
                 dict.set_item("type", "EvPlugIn")?;
                 dict.set_item("state", format!("{state}"))?;
             }
-            ControlSignal::EvDrive { kwh } => {
+            ControlSignal::EvDrive { energy_j } => {
                 dict.set_item("type", "EvDrive")?;
-                dict.set_item("kwh", kwh)?;
+                dict.set_item("energy_j", energy_j)?;
             }
-            ControlSignal::EvAwayCharge { power_kw } => {
+            ControlSignal::EvAwayCharge { power_w } => {
                 dict.set_item("type", "EvAwayCharge")?;
-                dict.set_item("power_kw", power_kw)?;
+                dict.set_item("power_w", power_w)?;
             }
             ControlSignal::EvSetReadyBy {
                 departure_hour,
@@ -954,13 +1018,13 @@ mod tests {
     #[test]
     fn power_setpoint_accepts_negative_discharge() {
         // Signed per the core contract: negative = discharge.
-        let sig = PyControlSignal::power_setpoint(-1.0, None, None, None)
-            .expect("negative kw is a discharge command");
+        let sig = PyControlSignal::power_setpoint(-1000.0, None, None, None, None)
+            .expect("negative watts are a discharge command");
         assert!(matches!(
             sig.signal,
             ControlSignal::PowerSetpoint {
-                active_power_kw: -1.0,
-                reactive_power_kvar: None,
+                active_power_w: -1000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None
             }
@@ -969,8 +1033,8 @@ mod tests {
 
     #[test]
     fn power_setpoint_accepts_zero_and_positive() {
-        assert!(PyControlSignal::power_setpoint(0.0, None, None, None).is_ok());
-        assert!(PyControlSignal::power_setpoint(1.0, None, None, None).is_ok());
+        assert!(PyControlSignal::power_setpoint(0.0, None, None, None, None).is_ok());
+        assert!(PyControlSignal::power_setpoint(1000.0, None, None, None, None).is_ok());
     }
 
     #[test]
@@ -986,35 +1050,35 @@ mod tests {
 
     #[test]
     fn power_limit_rejects_negative() {
-        assert!(PyControlSignal::power_limit(-1.0, None).is_err());
+        assert!(PyControlSignal::power_limit(-1.0, None, None).is_err());
     }
 
     #[test]
     fn power_limit_accepts_zero_and_positive() {
-        assert!(PyControlSignal::power_limit(0.0, None).is_ok());
-        assert!(PyControlSignal::power_limit(5.0, None).is_ok());
+        assert!(PyControlSignal::power_limit(0.0, None, None).is_ok());
+        assert!(PyControlSignal::power_limit(5000.0, None, None).is_ok());
     }
 
     #[test]
-    fn ev_drive_rejects_negative_kwh() {
-        assert!(PyControlSignal::ev_drive(-1.0).is_err());
+    fn ev_drive_rejects_negative_energy() {
+        assert!(PyControlSignal::ev_drive(-1.0, None).is_err());
     }
 
     #[test]
     fn ev_drive_accepts_zero_and_positive() {
-        assert!(PyControlSignal::ev_drive(0.0).is_ok());
-        assert!(PyControlSignal::ev_drive(5.0).is_ok());
+        assert!(PyControlSignal::ev_drive(0.0, None).is_ok());
+        assert!(PyControlSignal::ev_drive(5.0e6, None).is_ok());
     }
 
     #[test]
     fn ev_away_charge_rejects_negative_power() {
-        assert!(PyControlSignal::ev_away_charge(-1.0).is_err());
+        assert!(PyControlSignal::ev_away_charge(-1.0, None).is_err());
     }
 
     #[test]
     fn ev_away_charge_accepts_zero_and_positive() {
-        assert!(PyControlSignal::ev_away_charge(0.0).is_ok());
-        assert!(PyControlSignal::ev_away_charge(11.5).is_ok());
+        assert!(PyControlSignal::ev_away_charge(0.0, None).is_ok());
+        assert!(PyControlSignal::ev_away_charge(11_500.0, None).is_ok());
     }
 
     // --- constructor validation: fraction [0, 1] ---
@@ -1121,7 +1185,7 @@ mod tests {
         test_requires_python(|py| {
             let d = PyDict::new(py);
             d.set_item("type", "PowerSetpoint").unwrap();
-            d.set_item("active_power_kw", -1.0_f64).unwrap();
+            d.set_item("active_power_w", -1000.0_f64).unwrap();
             let cls = py.get_type::<PyControlSignal>();
             assert!(PyControlSignal::from_dict(&cls, &d).is_ok());
         });
@@ -1132,7 +1196,7 @@ mod tests {
         test_requires_python(|py| {
             let d = PyDict::new(py);
             d.set_item("type", "PowerLimit").unwrap();
-            d.set_item("max_power_kw", -1.0_f64).unwrap();
+            d.set_item("max_power_w", -1.0_f64).unwrap();
             let cls = py.get_type::<PyControlSignal>();
             assert!(PyControlSignal::from_dict(&cls, &d).is_err());
         });
@@ -1198,7 +1262,7 @@ mod tests {
         test_requires_python(|py| {
             let d = PyDict::new(py);
             d.set_item("type", "EvDrive").unwrap();
-            d.set_item("kwh", -1.0_f64).unwrap();
+            d.set_item("energy_j", -1.0_f64).unwrap();
             let cls = py.get_type::<PyControlSignal>();
             assert!(PyControlSignal::from_dict(&cls, &d).is_err());
         });
@@ -1209,7 +1273,7 @@ mod tests {
         test_requires_python(|py| {
             let d = PyDict::new(py);
             d.set_item("type", "EvAwayCharge").unwrap();
-            d.set_item("power_kw", -1.0_f64).unwrap();
+            d.set_item("power_w", -1.0_f64).unwrap();
             let cls = py.get_type::<PyControlSignal>();
             assert!(PyControlSignal::from_dict(&cls, &d).is_err());
         });
@@ -1243,8 +1307,8 @@ mod tests {
         test_requires_python(|py| {
             let cls = py.get_type::<PyControlSignal>();
             let cases: [(&str, &[(&str, f64)]); 15] = [
-                ("PowerSetpoint", &[("active_power_kw", 0.0)]),
-                ("PowerLimit", &[("max_power_kw", 0.0)]),
+                ("PowerSetpoint", &[("active_power_w", 0.0)]),
+                ("PowerLimit", &[("max_power_w", 0.0)]),
                 ("SOCTarget", &[("target_soc", 0.0)]),
                 ("SOCTarget", &[("target_soc", 1.0)]),
                 ("DutyCycle", &[("on_fraction", 0.0)]),
@@ -1254,8 +1318,8 @@ mod tests {
                 ("CurtailmentPercent", &[("percent", 0.0)]),
                 ("CurtailmentPercent", &[("percent", 100.0)]),
                 ("IdealCapacity", &[("capacity_w", 0.0)]),
-                ("EvDrive", &[("kwh", 0.0)]),
-                ("EvAwayCharge", &[("power_kw", 0.0)]),
+                ("EvDrive", &[("energy_j", 0.0)]),
+                ("EvAwayCharge", &[("power_w", 0.0)]),
                 ("MaxCapacityFraction", &[("fraction", 0.0)]),
                 ("MaxCapacityFraction", &[("fraction", 1.0)]),
             ];
@@ -1278,7 +1342,7 @@ mod tests {
 
     #[test]
     fn power_setpoint_rejects_nan() {
-        assert!(PyControlSignal::power_setpoint(f64::NAN, None, None, None).is_err());
+        assert!(PyControlSignal::power_setpoint(f64::NAN, None, None, None, None).is_err());
     }
 
     #[test]
@@ -1288,17 +1352,17 @@ mod tests {
 
     #[test]
     fn power_limit_rejects_nan() {
-        assert!(PyControlSignal::power_limit(f64::NAN, None).is_err());
+        assert!(PyControlSignal::power_limit(f64::NAN, None, None).is_err());
     }
 
     #[test]
     fn ev_drive_rejects_nan() {
-        assert!(PyControlSignal::ev_drive(f64::NAN).is_err());
+        assert!(PyControlSignal::ev_drive(f64::NAN, None).is_err());
     }
 
     #[test]
     fn ev_away_charge_rejects_nan() {
-        assert!(PyControlSignal::ev_away_charge(f64::NAN).is_err());
+        assert!(PyControlSignal::ev_away_charge(f64::NAN, None).is_err());
     }
 
     // --- NaN rejection: range validators [0, 1] ---
@@ -1342,7 +1406,7 @@ mod tests {
         test_requires_python(|py| {
             let d = PyDict::new(py);
             d.set_item("type", "PowerSetpoint").unwrap();
-            d.set_item("active_power_kw", f64::NAN).unwrap();
+            d.set_item("active_power_w", f64::NAN).unwrap();
             let cls = py.get_type::<PyControlSignal>();
             assert!(PyControlSignal::from_dict(&cls, &d).is_err());
         });
@@ -1375,7 +1439,7 @@ mod tests {
         test_requires_python(|py| {
             let d = PyDict::new(py);
             d.set_item("type", "EvDrive").unwrap();
-            d.set_item("kwh", f64::NAN).unwrap();
+            d.set_item("energy_j", f64::NAN).unwrap();
             let cls = py.get_type::<PyControlSignal>();
             assert!(PyControlSignal::from_dict(&cls, &d).is_err());
         });

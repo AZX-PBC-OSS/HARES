@@ -411,13 +411,15 @@ struct ScanResult {
 /// identifiers from comments and string literals.
 ///
 /// `rel` is the file-relative path used for allowlist matching (empty string
-/// for unit tests where no allowlist applies).
+/// for unit tests where no allowlist applies). A file `syn` cannot parse is
+/// a failure naming it, never zero violations: the guard's silence must
+/// mean it read the file.
 fn scan_source(source: &str, rel: &str, all_rules: &[Rule]) -> ScanResult {
     let file = match syn::parse_file(source) {
         Ok(f) => f,
-        Err(_) => {
+        Err(err) => {
             return ScanResult {
-                violations: vec![],
+                violations: vec![format!("{rel}: syn cannot parse this file: {err}")],
                 suppressed_count: 0,
             };
         }
@@ -534,6 +536,187 @@ fn no_new_imperial_conversion_markers_in_equipment_src() {
         violations.join("\n")
     );
 }
+
+/// The unit-suffix rule: no identifier in the src of any workspace crate,
+/// `notebooks/` or `benches/` carries a unit segment the SI unit move
+/// renames away (`kw`, `kwh`, `kva`, `kvar`, `kvarh`, `therms`, `mi`,
+/// `miles`, `mph`). The rule's scan is the widened one: the whole src of
+/// every workspace crate plus the two directories outside any crate's
+/// `src` that read a renamed name. The per-file allowlist's every entry
+/// names the boundary that holds the names (a reporting name, an external
+/// unit column, a catalogue datasheet) or the commit that removes the
+/// file's remaining run-state or control names.
+#[test]
+fn no_unit_suffix_identifiers_outside_the_boundaries() {
+    let re = Regex::new(r"(?i)(?:^|_)(kw|kwh|kva|kvar|kvarh|therms|mi|miles|mph)(?:_|$)").unwrap();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|d| d.parent())
+        .expect("the crate sits two levels below the workspace root")
+        .to_path_buf();
+    let mut files = Vec::new();
+    for crate_dir in fs::read_dir(workspace_root.join("crates"))
+        .expect("read crates/")
+        .flatten()
+    {
+        collect_rs_files(&crate_dir.path().join("src"), &mut files);
+    }
+    collect_rs_files(&workspace_root.join("notebooks"), &mut files);
+    collect_rs_files(&workspace_root.join("benches"), &mut files);
+
+    let mut violations = Vec::new();
+    for file in &files {
+        let rel = file
+            .strip_prefix(&workspace_root)
+            .expect("strip prefix")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if UNIT_SUFFIX_ALLOWED.contains(&rel.as_str()) {
+            continue;
+        }
+        let content = fs::read_to_string(file).expect("read source file");
+        let parsed = match syn::parse_file(&content) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                violations.push(format!("{rel}: syn cannot parse this file: {err}"));
+                continue;
+            }
+        };
+        let mut collector = IdentifierCollector::default();
+        syn::visit::visit_file(&mut collector, &parsed);
+        let mut names: Vec<&String> = collector
+            .identifiers
+            .iter()
+            .filter(|ident| re.is_match(ident))
+            .collect();
+        names.sort();
+        for ident in names {
+            violations.push(format!(
+                "::error file={rel}::unit-suffix identifier '{ident}' \
+                 (kw|kwh|kva|kvar|kvarh|therms|mi|miles|mph segment)"
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "SI guard unit-suffix rule failed (every allowlist entry must name the \
+         boundary that holds the names or the commit that removes them):\n{}",
+        violations.join("\n")
+    );
+}
+
+/// The unit-suffix rule's per-file allowlist, root-relative.
+static UNIT_SUFFIX_ALLOWED: &[&str] = &[
+    //
+    // (boundaries; these entries stay)
+    "crates/hares-control/src/compat.rs",
+    "crates/hares-equipment/src/battery/catalog.rs",
+    "crates/hares-equipment/src/ev/catalog.rs",
+    "crates/hares-io/src/output/columns.rs",
+    "crates/hares-types/src/output.rs",
+    "crates/hares-types/src/telemetry_keys.rs",
+    // Every entry below names the boundary that holds the names: the run-state and control-layer names are gone (the SI moves), so what remains is a reporting name (a declared variable, a telemetry-key constant's use), an output record's own field, a datasheet unit, an external unit column or a test of one of those.
+    // (the files whose remaining unit-suffix names are the reporting names
+    // and output records the boundaries keep: the telemetry key constants'
+    // usage sites, the declared-variable declarations, and the
+    // reporting-unit record fields)
+    "crates/hares-equipment/src/battery/config.rs",
+    "crates/hares-equipment/src/battery/mod.rs",
+    "crates/hares-equipment/src/ev/config.rs",
+    "crates/hares-equipment/src/ev/mod.rs",
+    "crates/hares-equipment/src/ev/telemetry.rs",
+    "crates/hares-equipment/src/ev/tests.rs",
+    "crates/hares-equipment/src/event_load.rs",
+    "crates/hares-equipment/src/generator.rs",
+    "crates/hares-equipment/src/hvac/ac_config.rs",
+    "crates/hares-equipment/src/hvac/air_conditioner.rs",
+    "crates/hares-equipment/src/hvac/baseboard.rs",
+    "crates/hares-equipment/src/hvac/boiler.rs",
+    "crates/hares-equipment/src/hvac/dehumidifier.rs",
+    "crates/hares-equipment/src/hvac/equivalent_battery.rs",
+    "crates/hares-equipment/src/hvac/furnace.rs",
+    "crates/hares-equipment/src/hvac/heat_pump/constants.rs",
+    "crates/hares-equipment/src/hvac/heat_pump/cooler.rs",
+    "crates/hares-equipment/src/hvac/heat_pump/heater.rs",
+    "crates/hares-equipment/src/hvac/heat_pump/heater_config.rs",
+    "crates/hares-equipment/src/hvac/helpers.rs",
+    "crates/hares-equipment/src/hvac/ideal_hvac.rs",
+    "crates/hares-equipment/src/pv/lut.rs",
+    "crates/hares-equipment/src/pv/mod.rs",
+    "crates/hares-equipment/src/scheduled_load.rs",
+    "crates/hares-equipment/src/ventilation.rs",
+    "crates/hares-equipment/src/water_heater/gas.rs",
+    "crates/hares-equipment/src/water_heater/heat_pump_wh.rs",
+    "crates/hares-equipment/src/water_heater/indirect_tank.rs",
+    "crates/hares-equipment/src/water_heater/resistance.rs",
+    "crates/hares-equipment/src/water_heater/tankless.rs",
+    "crates/hares-core/src/checkpoint.rs",
+    "crates/hares-core/src/dwelling/conversions.rs",
+    "crates/hares-core/src/dwelling/mod.rs",
+    "crates/hares-core/src/dwelling/premise_zip.rs",
+    "crates/hares-core/src/dwelling/roster.rs",
+    "crates/hares-core/src/dwelling/synthetic.rs",
+    "crates/hares-core/src/invariants.rs",
+    "crates/hares-core/src/observation.rs",
+    "crates/hares-core/src/observer.rs",
+    "crates/hares-core/src/observer_capture.rs",
+    "crates/hares-core/src/result.rs",
+    "crates/hares-core/src/telemetry.rs",
+    "crates/hares-envelope/src/electrical_solver.rs",
+    "crates/hares-fleet/src/fold.rs",
+    "crates/hares-io/src/defaults.rs",
+    "crates/hares-io/src/hpxml/elements/table.rs",
+    "crates/hares-io/src/hpxml/equipment.rs",
+    "crates/hares-io/src/hpxml/mod.rs",
+    "crates/hares-io/src/hpxml/resolve_der.rs",
+    "crates/hares-io/src/hpxml/resolve_hvac.rs",
+    "crates/hares-io/src/hpxml/resolve_loads.rs",
+    "crates/hares-io/src/hpxml/resolve_pool.rs",
+    "crates/hares-io/src/hpxml/resolve_water_heater.rs",
+    "crates/hares-io/src/hpxml/wet_appliance.rs",
+    "crates/hares-io/src/hpxml/xml_helpers.rs",
+    "crates/hares-io/src/lib.rs",
+    "crates/hares-io/src/output/catalogue.rs",
+    "crates/hares-io/src/output/metrics.rs",
+    "crates/hares-io/src/output/mod.rs",
+    "crates/hares-io/src/output/reduce.rs",
+    "crates/hares-io/src/psm3.rs",
+    "crates/hares-io/src/schedule_resolve.rs",
+    "crates/hares-io/src/tmy3.rs",
+    "crates/hares-physics/src/constants.rs",
+    "crates/hares-physics/src/pump.rs",
+    "crates/hares-physics/src/pv_sizing.rs",
+    "crates/hares-physics/src/units.rs",
+    "crates/hares-python/src/py_catalogue.rs",
+    "crates/hares-python/src/py_dwelling.rs",
+    "crates/hares-python/src/py_equipment.rs",
+    "crates/hares-python/src/py_fleet.rs",
+    "crates/hares-python/src/py_metrics.rs",
+    "crates/hares-python/src/py_pv_sizing.rs",
+    "crates/hares-python/src/py_tariff.rs",
+    "crates/hares-python/src/py_telemetry.rs",
+    "crates/hares-tariff/src/billing.rs",
+    "crates/hares-tariff/src/evaluator.rs",
+    "crates/hares-tariff/src/snapshot.rs",
+    "crates/hares-tariff/src/types.rs",
+    "crates/hares-tariff/src/urdb.rs",
+    "crates/hares-types/src/environment.rs",
+    "crates/hares-types/src/equipment.rs",
+    "crates/hares-types/src/mode_flow_guard.rs",
+    "crates/hares-types/src/ports.rs",
+    "crates/hares-types/src/zip.rs",
+    //
+    // (reporting names: the actors' declared variables and the reporting
+    // keys they read - the boundary "Reporting names"; the identifier is
+    // the declaration helper's or the constant's name, the string under it
+    // is the declared reporting key. The files whose names the control
+    // layer's SI move renamed are gone from this list.)
+    "crates/hares-core/src/actors/bms.rs",
+    "crates/hares-core/src/actors/dr_compliance.rs",
+    "crates/hares-core/src/actors/ev_driver/mod.rs",
+];
 
 // ---------------------------------------------------------------------------
 // Unit tests — verify regex pattern correctness independent of source scan

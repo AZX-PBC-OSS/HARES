@@ -50,6 +50,7 @@ fn base_env() -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
@@ -68,9 +69,9 @@ fn base_battery_config() -> BatteryConfig {
     BatteryConfig {
         equipment_id: None,
         zone_id: None,
-        capacity_kwh: 13.5,
-        max_charge_kw: 5.0,
-        max_discharge_kw: 5.0,
+        capacity_j: 13.5 * 3.6e6,
+        max_charge_w: 5000.0,
+        max_discharge_w: 5000.0,
         n_series: None,
         n_parallel: None,
         ah_cell: None,
@@ -99,7 +100,7 @@ fn base_battery_config() -> BatteryConfig {
         bms_mode: None,
         grid_export_rule: None,
         power_factor: None,
-        inverter_capacity_kva: None,
+        inverter_capacity_va: None,
         grid_forming: None,
         min_dwell_steps: 0,
     }
@@ -143,8 +144,8 @@ fn charge_increases_soc() {
     let soc_before = bat.telemetry().get("soc").expect("soc telemetry");
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 3.0,
-        reactive_power_kvar: None,
+        active_power_w: 3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -175,8 +176,8 @@ fn discharge_decreases_soc() {
     let soc_before = bat.telemetry().get("soc").expect("soc telemetry");
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -3.0,
-        reactive_power_kvar: None,
+        active_power_w: -3000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -221,8 +222,8 @@ fn soc_clamped_at_min_max() {
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: -5.0,
-            reactive_power_kvar: None,
+            active_power_w: -5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -257,8 +258,8 @@ fn soc_clamped_at_min_max() {
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &env).expect("init");
         bat.apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -285,13 +286,13 @@ fn round_trip_efficiency_below_unity() {
     let env = base_env();
     let dt = Duration::from_secs(60);
     let n_steps = 30_u32;
-    let charge_kw = 3.0_f64;
+    let charge_w = 3000.0_f64;
 
     let soc_start = bat.telemetry().get("soc").expect("soc at start");
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: charge_kw,
-        reactive_power_kvar: None,
+        active_power_w: charge_w,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -309,8 +310,8 @@ fn round_trip_efficiency_below_unity() {
     }
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: -charge_kw,
-        reactive_power_kvar: None,
+        active_power_w: -charge_w,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -365,13 +366,13 @@ fn self_consumption_charges_when_exporting() {
     ports
         .accumulate(&PortContribution::Electrical {
             active_power_w: -5_000.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         })
         .expect("accumulate PV generation");
 
     bat.step(&env, dt, &mut ports).expect("step");
 
-    // The battery should have charged -- active_power_kw at the port is positive (load).
+    // The battery should have charged -- active_power_w at the port is positive (load).
     // The port net after both PV and battery contributions will still be negative, but
     // battery's own telemetry shows it absorbed power.
     let active_kw = bat
@@ -380,7 +381,7 @@ fn self_consumption_charges_when_exporting() {
         .expect("active_power_kw");
     assert!(
         active_kw > 0.0,
-        "Battery should charge (positive active_power_kw) when there is PV export: got {active_kw:.4}"
+        "Battery should charge (positive active_power_w) when there is PV export: got {active_kw:.4}"
     );
 }
 
@@ -402,20 +403,20 @@ fn self_consumption_discharges_when_importing() {
     ports
         .accumulate(&PortContribution::Electrical {
             active_power_w: 3_000.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         })
         .expect("accumulate load");
 
     bat.step(&env, dt, &mut ports).expect("step");
 
-    // Battery discharges -- active_power_kw in telemetry is negative (generation).
+    // Battery discharges -- active_power_w in telemetry is negative (generation).
     let active_kw = bat
         .telemetry()
         .get("active_power_kw")
         .expect("active_power_kw");
     assert!(
         active_kw < 0.0,
-        "Battery should discharge (negative active_power_kw) when there is net load: got {active_kw:.4}"
+        "Battery should discharge (negative active_power_w) when there is net load: got {active_kw:.4}"
     );
 }
 
@@ -427,13 +428,13 @@ fn inverter_efficiency_applied() {
     let mut bat = make_battery();
     let env = base_env();
     let dt = Duration::from_secs(3600); // One hour step for easy energy arithmetic.
-    let charge_kw = 2.0_f64;
+    let charge_w = 2000.0_f64;
     let inverter_eta = 0.97_f64;
     let charge_eta = inverter_eta.sqrt(); // per-direction efficiency from symmetric split
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: charge_kw,
-        reactive_power_kvar: None,
+        active_power_w: charge_w,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -445,11 +446,11 @@ fn inverter_efficiency_applied() {
     let soc_after = bat.telemetry().get("soc").expect("soc");
 
     // AC energy drawn from grid.
-    let ac_energy_kwh = charge_kw; // 2 kW × 1 h
+    let ac_energy_kwh = charge_w / 1000.0; // 2 kW × 1 h
     // DC energy into cells ≈ AC × charge_eta (ignoring ohmic losses for this assertion).
     let dc_energy_expected_kwh = ac_energy_kwh * charge_eta;
     let soc_gain = soc_after - soc_before;
-    // Energy stored = soc_gain × capacity_kwh. Ohmic losses reduce it slightly, so actual <= dc_expected.
+    // Energy stored = soc_gain × capacity_j. Ohmic losses reduce it slightly, so actual <= dc_expected.
     let energy_stored_kwh = soc_gain * 13.5;
     assert!(
         energy_stored_kwh <= dc_energy_expected_kwh + 1e-4,
@@ -473,15 +474,15 @@ fn inverter_efficiency_applied() {
 
 #[test]
 fn power_limits_respected() {
-    // Apply a setpoint far above max_charge_kw=5.0 kW and verify actual port power
+    // Apply a setpoint far above max_charge_w=5.0 kW and verify actual port power
     // is clamped to that hardware limit.
     let mut bat = make_battery();
     let env = base_env();
     let dt = Duration::from_secs(60);
 
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 100.0,
-        reactive_power_kvar: None,
+        active_power_w: 100000.0,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })
@@ -490,17 +491,17 @@ fn power_limits_respected() {
     let mut ports = PortSlots::default();
     bat.step(&env, dt, &mut ports).expect("step");
 
-    let active_kw = bat
+    let active_w = bat
         .telemetry()
         .get("active_power_kw")
         .expect("active_power_kw");
     assert!(
-        active_kw <= 5.0 + 1e-6,
-        "Active power must be clamped to max_charge_kw=5.0 kW: got {active_kw:.4}"
+        active_w <= 5000.0 + 1e-6,
+        "Active power must be clamped to the max_charge_w=5.0 kW hardware limit: got {active_w:.4}"
     );
     assert!(
-        active_kw > 0.0,
-        "Battery should be charging: got {active_kw:.4}"
+        active_w > 0.0,
+        "Battery should be charging: got {active_w:.4}"
     );
 }
 
@@ -508,7 +509,7 @@ fn power_limits_respected() {
 fn idle_no_power_flow() {
     // No control signal applied (self_consumption is re-enabled after init
     // but with no net load in ports, there is nothing to respond to).
-    // active_power_kw should be approximately zero (only standby_power_w=0 in test config).
+    // active_power_w should be approximately zero (only standby_power_w=0 in test config).
     let mut bat = make_battery();
     let env = base_env();
 
@@ -545,8 +546,8 @@ fn checkpoint_preserves_soc_and_mode() {
 
     // Charge for a while to move SOC away from initial 0.5.
     bat.apply_control(&ControlSignal::PowerSetpoint {
-        active_power_kw: 4.0,
-        reactive_power_kvar: None,
+        active_power_w: 4.0000,
+        reactive_power_var: None,
         min_soc: None,
         max_soc: None,
     })

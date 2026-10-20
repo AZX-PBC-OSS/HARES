@@ -182,6 +182,12 @@ impl ProtocolBridge {
 }
 
 impl Equipment for ProtocolBridge {
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        // The bridge forwards control payloads; the physics it runs is the
+        // target equipment's, so it carries no resolved parameters of its own.
+        Vec::new()
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -222,8 +228,8 @@ impl Equipment for ProtocolBridge {
             .set(tk::TOTAL_COMMANDS_PARSED, self.total_commands_parsed as f64);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: None,
-                reactive_power_kvar: None,
+                electric_w: None,
+                reactive_power_var: None,
                 fuel_w: None,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -374,38 +380,36 @@ fn default_telemetry() -> Telemetry {
 
 fn telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::PROTOCOL_ID.to_string(),
-            unit: "-".to_string(),
-            description: "ProtocolId of the most recent ProtocolNative dispatch".to_string(),
-        },
-        TelemetryField {
-            name: tk::PAYLOAD_SIZE_BYTES.to_string(),
-            unit: "bytes".to_string(),
-            description: "Size in bytes of the most recent ProtocolNative payload".to_string(),
-        },
-        TelemetryField {
-            name: tk::DISPATCH_COUNT.to_string(),
-            unit: "-".to_string(),
-            description: "Cumulative count of ProtocolNative dispatch events".to_string(),
-        },
-        TelemetryField {
-            name: tk::PARSED_COMMAND_COUNT.to_string(),
-            unit: "-".to_string(),
-            description: "Number of EquipmentCommands parsed from the most recent payload"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PARSE_ERROR_COUNT.to_string(),
-            unit: "-".to_string(),
-            description: "Cumulative count of handler parse failures".to_string(),
-        },
-        TelemetryField {
-            name: tk::TOTAL_COMMANDS_PARSED.to_string(),
-            unit: "-".to_string(),
-            description: "Cumulative count of equipment commands parsed across all payloads"
-                .to_string(),
-        },
+        TelemetryField::code_code(
+            tk::PROTOCOL_ID,
+            &["0", "1", "2", "3"],
+            "ProtocolId of the most recent ProtocolNative dispatch",
+        ),
+        TelemetryField::running_total(
+            tk::PAYLOAD_SIZE_BYTES,
+            hares_types::Unit::Byte,
+            "Size in bytes of the most recent ProtocolNative payload",
+        ),
+        TelemetryField::running_total(
+            tk::DISPATCH_COUNT,
+            hares_types::Unit::Dimensionless,
+            "Cumulative count of ProtocolNative dispatch events",
+        ),
+        TelemetryField::running_total(
+            tk::PARSED_COMMAND_COUNT,
+            hares_types::Unit::Dimensionless,
+            "Number of EquipmentCommands parsed from the most recent payload",
+        ),
+        TelemetryField::running_total(
+            tk::PARSE_ERROR_COUNT,
+            hares_types::Unit::Dimensionless,
+            "Cumulative count of handler parse failures",
+        ),
+        TelemetryField::running_total(
+            tk::TOTAL_COMMANDS_PARSED,
+            hares_types::Unit::Dimensionless,
+            "Cumulative count of equipment commands parsed across all payloads",
+        ),
     ]
 }
 
@@ -443,6 +447,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -502,7 +507,7 @@ mod tests {
         bridge.init(&minimal_config(), &env).unwrap();
 
         let payload: Vec<u8> = br#"[
-            {"target": "Battery-1", "signal": {"PowerSetpoint": {"active_power_kw": 5.0, "reactive_power_kvar": null}}},
+            {"target": "Battery-1", "signal": {"PowerSetpoint": {"active_power_w": 5000.0, "reactive_power_var": null}}},
             {"target": "HVAC-1", "signal": {"ModeOverride": {"mode": "Off"}}}
         ]"#
         .to_vec();
@@ -520,8 +525,8 @@ mod tests {
         assert_eq!(
             commands[0].signal,
             ControlSignal::PowerSetpoint {
-                active_power_kw: 5.0,
-                reactive_power_kvar: None,
+                active_power_w: 5000.0,
+                reactive_power_var: None,
                 min_soc: None,
                 max_soc: None,
             }
@@ -534,7 +539,7 @@ mod tests {
         let env = empty_env();
         bridge.init(&minimal_config(), &env).unwrap();
 
-        let payload = br#"[{"target": "Battery-1", "signal": {"PowerSetpoint": {"active_power_kw": 1.0, "reactive_power_kvar": null}}}]"#.to_vec();
+        let payload = br#"[{"target": "Battery-1", "signal": {"PowerSetpoint": {"active_power_w": 1000.0, "reactive_power_var": null}}}]"#.to_vec();
         bridge
             .apply_control(&ControlSignal::ProtocolNative {
                 protocol: ProtocolId(17),
@@ -602,8 +607,8 @@ mod tests {
         bridge.init(&minimal_config(), &env).unwrap();
 
         let signal = ControlSignal::PowerSetpoint {
-            active_power_kw: 5.0,
-            reactive_power_kvar: None,
+            active_power_w: 5000.0,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         };

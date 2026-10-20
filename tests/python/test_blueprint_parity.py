@@ -1,25 +1,16 @@
 """Verify DwellingBlueprint.from_hpxml().build() == Dwelling.from_hpxml()."""
 
 import pytest
-from ochre_next import Dwelling, DwellingBlueprint
+from hares import Dwelling, DwellingBlueprint
 from conftest import HPXML, SCHEDULE, WEATHER, HARES_DEFAULTS
+from hares import SimulationConfig
 
 
 def test_blueprint_parity_default():
-    dw1 = Dwelling.from_hpxml(
-        HPXML, SCHEDULE, WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42, duration_s=300, time_res_s=60,
-        write_output=False,
-    )
+    dw1 = Dwelling.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60,start_time="2019-01-01T00:00:00"))
     dw1.initialize()
 
-    bp = DwellingBlueprint.from_hpxml(
-        HPXML, SCHEDULE, WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42, duration_s=300, time_res_s=60,
-        write_output=False,
-    )
+    bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60,start_time="2019-01-01T00:00:00"))
     dw2 = bp.build()
     dw2.initialize()
 
@@ -30,16 +21,11 @@ def test_blueprint_parity_default():
         r2 = dw2.step()
         assert r1 is not None
         assert r2 is not None
-        assert abs(r1["net_electric_power_kw"] - r2["net_electric_power_kw"]) < 1e-6
+        assert abs(r1["net_electric_power_w"] - r2["net_electric_power_w"]) < 1e-6
 
 
 def test_blueprint_equipment_names():
-    bp = DwellingBlueprint.from_hpxml(
-        HPXML, SCHEDULE, WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42, duration_s=300, time_res_s=60,
-        write_output=False,
-    )
+    bp = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60,start_time="2019-01-01T00:00:00"))
     names = bp.equipment_names()
     assert isinstance(names, list)
     assert all(isinstance(n, str) for n in names)
@@ -48,23 +34,11 @@ def test_blueprint_equipment_names():
 
 def test_blueprint_build_deterministic():
     """Same blueprint built twice produces identical results."""
-    bp1 = DwellingBlueprint.from_hpxml(
-        HPXML, SCHEDULE, WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42, duration_s=300, time_res_s=60,
-        master_seed=42,
-        write_output=False,
-    )
+    bp1 = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, master_seed=42,start_time="2019-01-01T00:00:00"))
     dw1 = bp1.build()
     dw1.initialize()
 
-    bp2 = DwellingBlueprint.from_hpxml(
-        HPXML, SCHEDULE, WEATHER,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=42, duration_s=300, time_res_s=60,
-        master_seed=42,
-        write_output=False,
-    )
+    bp2 = DwellingBlueprint.from_hpxml(HPXML, SCHEDULE, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=42, config=SimulationConfig(duration=300, time_res=60, master_seed=42,start_time="2019-01-01T00:00:00"))
     dw2 = bp2.build()
     dw2.initialize()
 

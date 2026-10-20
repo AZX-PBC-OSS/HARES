@@ -16,7 +16,7 @@ use hares_core::actors::{
 };
 use hares_types::{
     BmsMode, ChargingStrategy, DRLevel, EnvironmentState, GridExportRule, PlugInPolicy,
-    ScheduleSource,
+    ScheduleSource, TelemetryField,
 };
 use rand::SeedableRng;
 
@@ -31,6 +31,9 @@ struct SpyActor {
 impl Actor for SpyActor {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn output_variables(&self) -> &[TelemetryField] {
+        &[]
     }
 
     fn decide(&mut self, _env: &EnvironmentState, _out: &mut Vec<DispatchRequest>) {}
@@ -143,8 +146,8 @@ fn bms_telemetry_reports_action_and_state() {
         BmsParams {
             bms_mode: BmsMode::Manual,
             grid_export_rule: GridExportRule::Unrestricted,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            max_charge_w: 5.0,
+            max_discharge_w: 5.0,
             price_schedule: None,
             steps_per_day: 1440,
             min_dwell_steps: 0,
@@ -222,18 +225,18 @@ fn ev_driver_telemetry_reports_soc_and_phase() {
         EvDriverParams {
             strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
             plug_in_policy: PlugInPolicy::Always,
-            daily_drive_miles: ScheduleSource::Constant(30.0),
+            daily_drive_distance_m: ScheduleSource::Constant(48_280.32),
             departure_time: ScheduleSource::Constant(480.0),
             trip_duration: ScheduleSource::Constant(600.0),
             arrival_time: None,
             event_day_ratio: 1.0,
-            fuel_economy_kwh_per_mi: 0.3,
-            capacity_kwh: 60.0,
-            max_charge_kw: 7.2,
-            average_speed_mph: 30.0,
-            range_anxiety_miles: 20.0,
+            fuel_economy_j_per_m: 671.0808876163206,
+            capacity_j: 216_000_000.0,
+            max_charge_w: 7200.0,
+            average_speed_m_per_s: 13.4112,
+            range_anxiety_distance_m: 32_186.88,
             away_charge_fraction: 0.0,
-            away_charge_power_kw: 0.0,
+            away_charge_power_w: 0.0,
         },
         ChaCha8Rng::from_seed([42u8; 32]),
     );
@@ -294,8 +297,8 @@ fn all_observable_actors_return_some_telemetry() {
             BmsParams {
                 bms_mode: BmsMode::Manual,
                 grid_export_rule: GridExportRule::Unrestricted,
-                max_charge_kw: 5.0,
-                max_discharge_kw: 5.0,
+                max_charge_w: 5.0,
+                max_discharge_w: 5.0,
                 price_schedule: None,
                 steps_per_day: 1440,
                 min_dwell_steps: 0,
@@ -319,18 +322,18 @@ fn all_observable_actors_return_some_telemetry() {
             EvDriverParams {
                 strategy: ChargingStrategy::Immediate { target_soc: 1.0 },
                 plug_in_policy: PlugInPolicy::Always,
-                daily_drive_miles: ScheduleSource::Constant(30.0),
+                daily_drive_distance_m: ScheduleSource::Constant(48_280.32),
                 departure_time: ScheduleSource::Constant(480.0),
                 trip_duration: ScheduleSource::Constant(600.0),
                 arrival_time: None,
                 event_day_ratio: 1.0,
-                fuel_economy_kwh_per_mi: 0.3,
-                capacity_kwh: 60.0,
-                max_charge_kw: 7.2,
-                average_speed_mph: 30.0,
-                range_anxiety_miles: 20.0,
+                fuel_economy_j_per_m: 671.0808876163206,
+                capacity_j: 216_000_000.0,
+                max_charge_w: 7200.0,
+                average_speed_m_per_s: 13.4112,
+                range_anxiety_distance_m: 32_186.88,
                 away_charge_fraction: 0.0,
-                away_charge_power_kw: 0.0,
+                away_charge_power_w: 0.0,
             },
             ChaCha8Rng::from_seed([42u8; 32]),
         );

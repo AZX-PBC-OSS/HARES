@@ -1,9 +1,10 @@
-"""PY-015: Final type stub audit for ochre_next public API."""
+"""Final type stub audit for the hares public API."""
 
 from __future__ import annotations
 
-import ochre_next
-import ochre_next._hares as _hares
+import hares
+import hares._hares as _hares
+from hares import SimulationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -15,25 +16,25 @@ class TestAllConsistency:
     """__all__ matches actual module exports -- no missing, no extra."""
 
     def test_all_names_are_importable(self) -> None:
-        for name in ochre_next.__all__:
-            assert hasattr(ochre_next, name), f"{name!r} in __all__ but not importable"
+        for name in hares.__all__:
+            assert hasattr(hares, name), f"{name!r} in __all__ but not importable"
 
     def test_no_py_prefixed_names_in_all(self) -> None:
-        leaked = [n for n in ochre_next.__all__ if n.startswith("Py")]
+        leaked = [n for n in hares.__all__ if n.startswith("Py")]
         assert leaked == [], f"Py-prefixed names leaked into __all__: {leaked}"
 
     def test_all_matches_module_exports(self) -> None:
         """Every name in __all__ resolves and every re-export is listed."""
-        declared = set(ochre_next.__all__)
+        declared = set(hares.__all__)
         # Verify declared names actually exist
         for name in declared:
-            assert hasattr(ochre_next, name), f"{name!r} declared but missing"
+            assert hasattr(hares, name), f"{name!r} declared but missing"
 
         # Verify public names imported from _hares are in __all__
         # (guards against silent re-exports that were forgotten)
         imported_from_hares = {
             name
-            for name in vars(ochre_next)
+            for name in vars(hares)
             if not name.startswith("_") and hasattr(_hares, name)
         }
         missing_from_all = imported_from_hares - declared
@@ -49,13 +50,15 @@ class TestAllConsistency:
 
 class TestDwellingInterface:
     def test_has_expected_classmethods(self) -> None:
-        assert callable(ochre_next.Dwelling.from_hpxml)
+        assert callable(hares.Dwelling.from_hpxml)
 
     def test_has_expected_instance_methods(self) -> None:
         expected = [
             "initialize",
             "timesteps",
             "simulate",
+            "finish",
+            "health",
             "step",
             "apply_control",
             "add_actor",
@@ -72,8 +75,6 @@ class TestDwellingInterface:
             "replace_equipment",
             "update_equipment",
             "validate_control",
-            "results",
-            "metrics",
             "reset_with_seed",
             "save_state",
             "load_state",
@@ -86,7 +87,7 @@ class TestDwellingInterface:
             "tariff_telemetry",
         ]
         for method in expected:
-            assert hasattr(ochre_next.Dwelling, method), (
+            assert hasattr(hares.Dwelling, method), (
                 f"Dwelling missing expected method: {method!r}"
             )
 
@@ -98,24 +99,24 @@ class TestDwellingInterface:
 
 class TestBatteryInterface:
     def test_is_constructable_with_required_args(self) -> None:
-        b = ochre_next.Battery(name="test-battery", capacity_kwh=10.0)
+        b = hares.Battery(name="test-battery", capacity_j=36000000)
         assert b.name == "test-battery"
-        assert b.capacity_kwh == 10.0
+        assert b.capacity_j == 36000000
 
     def test_optional_limits_default_to_none(self) -> None:
-        b = ochre_next.Battery(name="b", capacity_kwh=5.0)
-        assert b.max_charge_kw is None
-        assert b.max_discharge_kw is None
+        b = hares.Battery(name="b", capacity_j=18000000)
+        assert b.max_charge_w is None
+        assert b.max_discharge_w is None
 
     def test_limits_round_trip_when_provided(self) -> None:
-        b = ochre_next.Battery(
-            name="b", capacity_kwh=5.0, max_charge_kw=2.5, max_discharge_kw=3.0
+        b = hares.Battery(
+            name="b", capacity_j=18000000, max_charge_w=2500, max_discharge_w=3000
         )
-        assert b.max_charge_kw == 2.5
-        assert b.max_discharge_kw == 3.0
+        assert b.max_charge_w == 2500
+        assert b.max_discharge_w == 3000
 
     def test_repr_is_non_empty_string(self) -> None:
-        b = ochre_next.Battery(name="b", capacity_kwh=5.0)
+        b = hares.Battery(name="b", capacity_j=18000000)
         assert isinstance(repr(b), str) and repr(b)
 
 
@@ -126,27 +127,27 @@ class TestBatteryInterface:
 
 class TestControlSignalInterface:
     def test_thermal_setpoint_smoke(self) -> None:
-        sig = ochre_next.ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
+        sig = hares.ControlSignal.thermal_setpoint(heat_c=20.0, cool_c=24.0)
         assert sig is not None
 
     def test_power_setpoint_smoke(self) -> None:
-        sig = ochre_next.ControlSignal.power_setpoint(kw=3.0)
+        sig = hares.ControlSignal.power_setpoint(active_power_w=3000.0)
         assert sig is not None
 
     def test_to_dict_returns_dict(self) -> None:
-        sig = ochre_next.ControlSignal.thermal_setpoint(heat_c=20.0)
+        sig = hares.ControlSignal.thermal_setpoint(heat_c=20.0)
         d = sig.to_dict()
         assert isinstance(d, dict)
         assert d  # non-empty
 
     def test_from_dict_round_trip(self) -> None:
-        sig = ochre_next.ControlSignal.power_setpoint(kw=2.0)
+        sig = hares.ControlSignal.power_setpoint(active_power_w=2000.0)
         d = sig.to_dict()
-        sig2 = ochre_next.ControlSignal.from_dict(d)
+        sig2 = hares.ControlSignal.from_dict(d)
         assert sig2.to_dict() == d
 
     def test_repr_is_non_empty_string(self) -> None:
-        sig = ochre_next.ControlSignal.thermal_setpoint(heat_c=18.0)
+        sig = hares.ControlSignal.thermal_setpoint(heat_c=18.0)
         assert isinstance(repr(sig), str) and repr(sig)
 
     def test_has_expected_factory_methods(self) -> None:
@@ -165,6 +166,7 @@ class TestControlSignalInterface:
             "load_fraction",
             "mode_override",
             "mode_override_str",
+            "mode_override_release",
             "demand_response",
             "demand_response_str",
             "inverter_priority_mode",
@@ -173,7 +175,7 @@ class TestControlSignalInterface:
             "ideal_capacity_mode_override",
         ]
         for name in factories:
-            assert hasattr(ochre_next.ControlSignal, name), (
+            assert hasattr(hares.ControlSignal, name), (
                 f"ControlSignal missing factory: {name!r}"
             )
 
@@ -201,27 +203,27 @@ class TestEndUseEnum:
             "OTHER",
         ]
         for v in variants:
-            assert hasattr(ochre_next.EndUse, v), f"EndUse missing variant: {v!r}"
+            assert hasattr(hares.EndUse, v), f"EndUse missing variant: {v!r}"
 
     def test_hvac_heating_is_standard(self) -> None:
-        assert ochre_next.EndUse.HVAC_HEATING.is_standard()
+        assert hares.EndUse.HVAC_HEATING.is_standard()
 
     def test_custom_is_not_standard(self) -> None:
-        custom = ochre_next.EndUse.custom("my_load")
+        custom = hares.EndUse.custom("my_load")
         assert not custom.is_standard()
 
     def test_as_str_returns_string(self) -> None:
-        result = ochre_next.EndUse.HVAC_HEATING.as_str()
+        result = hares.EndUse.HVAC_HEATING.as_str()
         assert isinstance(result, str) and result
 
     def test_equality_and_hash(self) -> None:
-        a = ochre_next.EndUse.HVAC_HEATING
-        b = ochre_next.EndUse.HVAC_HEATING
+        a = hares.EndUse.HVAC_HEATING
+        b = hares.EndUse.HVAC_HEATING
         assert a == b
         assert hash(a) == hash(b)
 
     def test_different_variants_not_equal(self) -> None:
-        assert ochre_next.EndUse.HVAC_HEATING != ochre_next.EndUse.HVAC_COOLING
+        assert hares.EndUse.HVAC_HEATING != hares.EndUse.HVAC_COOLING
 
 
 # ---------------------------------------------------------------------------
@@ -231,22 +233,22 @@ class TestEndUseEnum:
 
 class TestFuelTypeEnum:
     def test_factory_constructors(self) -> None:
-        assert ochre_next.FuelType.electric() is not None
-        assert ochre_next.FuelType.gas() is not None
-        assert ochre_next.FuelType.propane() is not None
-        assert ochre_next.FuelType.oil() is not None
-        assert ochre_next.FuelType.no_fuel() is not None
+        assert hares.FuelType.electric() is not None
+        assert hares.FuelType.gas() is not None
+        assert hares.FuelType.propane() is not None
+        assert hares.FuelType.oil() is not None
+        assert hares.FuelType.no_fuel() is not None
 
     def test_equality(self) -> None:
-        assert ochre_next.FuelType.electric() == ochre_next.FuelType.electric()
-        assert ochre_next.FuelType.electric() != ochre_next.FuelType.gas()
+        assert hares.FuelType.electric() == hares.FuelType.electric()
+        assert hares.FuelType.electric() != hares.FuelType.gas()
 
     def test_from_str(self) -> None:
-        ft = ochre_next.FuelType.from_str("Electric")
-        assert ft == ochre_next.FuelType.electric()
+        ft = hares.FuelType.from_str("Electric")
+        assert ft == hares.FuelType.electric()
 
     def test_repr_and_str_are_strings(self) -> None:
-        ft = ochre_next.FuelType.electric()
+        ft = hares.FuelType.electric()
         assert isinstance(repr(ft), str)
         assert isinstance(str(ft), str)
 
@@ -258,16 +260,16 @@ class TestFuelTypeEnum:
 
 class TestModeEnum:
     def test_off_factory(self) -> None:
-        m = ochre_next.Mode.off()
+        m = hares.Mode.off()
         assert m is not None
 
     def test_equality(self) -> None:
-        assert ochre_next.Mode.off() == ochre_next.Mode.off()
-        assert ochre_next.Mode.off() != ochre_next.Mode.heating()
+        assert hares.Mode.off() == hares.Mode.off()
+        assert hares.Mode.off() != hares.Mode.heating()
 
     def test_operating_mode_alias(self) -> None:
         # OperatingMode must be the same class as Mode
-        assert ochre_next.OperatingMode is ochre_next.Mode
+        assert hares.OperatingMode is hares.Mode
 
     def test_factory_methods_present(self) -> None:
         factories = [
@@ -276,7 +278,7 @@ class TestModeEnum:
             "heating_hp_and_er", "heat_pump_wh", "backup_element",
         ]
         for name in factories:
-            assert hasattr(ochre_next.Mode, name), f"Mode missing factory: {name!r}"
+            assert hasattr(hares.Mode, name), f"Mode missing factory: {name!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -285,25 +287,26 @@ class TestModeEnum:
 
 
 class TestSimulationConfigInterface:
-    def test_default_construction(self) -> None:
-        cfg = ochre_next.SimulationConfig()
+    def test_construction(self) -> None:
+        cfg = hares.SimulationConfig(start_time="2024-01-01T00:00:00Z", duration=3600)
         assert cfg is not None
 
     def test_properties_readable_after_construction(self) -> None:
-        cfg = ochre_next.SimulationConfig(duration_s=3600, time_res_s=60)
-        assert cfg.duration_s == 3600
-        assert cfg.time_res_s == 60
+        cfg = hares.SimulationConfig(start_time="2024-01-01T00:00:00Z", duration=3600, time_res=60)
+        assert cfg.duration == 3600
+        assert cfg.time_res == 60
 
     def test_mutable_properties_are_settable(self) -> None:
-        cfg = ochre_next.SimulationConfig()
-        cfg.duration_s = 7200
-        assert cfg.duration_s == 7200
+        cfg = hares.SimulationConfig(start_time="2024-01-01T00:00:00Z", duration=3600)
+        cfg.duration = 7200
+        assert cfg.duration == 7200
 
     def test_repr_is_non_empty_string(self) -> None:
-        cfg = ochre_next.SimulationConfig()
+        cfg = hares.SimulationConfig(start_time="2024-01-01T00:00:00Z", duration=3600)
         assert isinstance(repr(cfg), str) and repr(cfg)
 
     def test_optional_properties_accept_none(self) -> None:
-        cfg = ochre_next.SimulationConfig(output_path=None, civil_timezone=None)
-        assert cfg.output_path is None
+        cfg = hares.SimulationConfig(
+            start_time="2024-01-01T00:00:00Z", duration=3600, civil_timezone=None
+        )
         assert cfg.civil_timezone is None

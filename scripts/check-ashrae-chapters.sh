@@ -3,17 +3,12 @@ set -euo pipefail
 
 # Validate ASHRAE HOF 2021 chapter citations against known topic-to-chapter
 # mappings. Flags citations where the chapter number is known to be wrong for
-# its claimed topic or edition.
-#
-# Ticket T-0311: ASHRAE HOF chapter numbers in docs/code were incorrect for
-# the claimed 2021 edition. This CI check prevents recurrence.
+# its claimed topic or edition. Each pattern pins the ASHRAE HoF 2021 chapter
+# the topic belongs in: TARP and natural convection in Ch. 4, residential
+# below-grade loads in Ch. 17, and the edition year present on every HOF
+# citation.
 #
 # The chapter index is maintained at docs/references/ashrae-hof-2021-chapters.md.
-#
-# docs/reviews/ is exempt — review documents may quote known-erroneous
-# citations as part of describing findings. Ticket docs are also exempt:
-# verification-audit sections within tickets may quote the original erroneous
-# text for provenance.
 
 FAILED=0
 TARGET_DIRS=("crates" "docs" "tests")
@@ -27,12 +22,9 @@ TARGET_DIRS=("crates" "docs" "tests")
 # exemptions stay pinned to the provenance material they exist for and
 # every production directory stays scanned.
 EXEMPT_PRUNE=(
-    -path 'docs/reviews'
-    -o -path 'docs/eplus'
-    -o -path 'docs/findings'
+    -path 'docs/eplus'
     -o -path 'docs/hpxml'
     -o -path 'docs/references'
-    -o -path 'docs/tickets'
     -o -path 'tests/fixtures/hpxml'
     -o -name vendors
 )

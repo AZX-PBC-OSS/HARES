@@ -1,0 +1,106 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.1, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/rich/src/HARES
+configfile: pyproject.toml
+testpaths: tests/python
+plugins: platformdirs-4.12.2, xdist-3.8.0, cov-7.1.0, anyio-4.15.1, timeout-2.4.0
+created: 14/14 workers
+14 workers [1384 items]
+
+........................................................................ [  5%]
+........................................................................ [ 10%]
+........................................................................ [ 15%]
+........................................................................ [ 20%]
+........................................................................ [ 26%]
+........................................................................ [ 31%]
+........................................................................ [ 36%]
+........................................................................ [ 41%]
+.............................ssssss..................................... [ 46%]
+........................................................................ [ 52%]
+........................................................................ [ 57%]
+........................................................................ [ 62%]
+........................................................................ [ 67%]
+........................................................................ [ 72%]
+........................................................................ [ 78%]
+........................................................................ [ 83%]
+........................................................................ [ 88%]
+........................................................................ [ 93%]
+........................................................................ [ 98%]
+................                                                         [100%]
+=============================== warnings summary ===============================
+tests/python/test_gym_env.py::test_reset_observation_contains_nan_for_uninitialized
+  /home/rich/src/HARES/tests/python/test_gym_env.py:727: UserWarning: Initial observation contains NaN for uninitialized fields — replace with 0.0 or mask before training.
+    obs, info = env.reset(seed=42)
+
+tests/python/test_gym_env.py::test_apply_action_clips_at_bounds
+  /home/rich/src/HARES/tests/python/test_gym_env.py:235: UserWarning: Initial observation contains NaN for uninitialized fields — replace with 0.0 or mask before training.
+    env.reset(seed=42)
+
+tests/python/test_gym_env.py::test_dwelling_gym_reset_seed_reproducible
+  /home/rich/src/HARES/tests/python/test_gym_env.py:70: UserWarning: Initial observation contains NaN for uninitialized fields — replace with 0.0 or mask before training.
+    env.reset(seed=42)
+
+tests/python/test_gym_env.py::test_vec_gym_reset_seed_batch_shape
+  /home/rich/src/HARES/tests/python/test_gym_env.py:158: UserWarning: Initial observation contains NaN for uninitialized fields — replace with 0.0 or mask before training.
+    obs, infos = env.reset(seed=123)
+
+tests/python/test_py_fleet.py::test_simulate_fault_tolerant_populates_failures
+  /home/rich/src/HARES/tests/python/test_py_fleet.py:440: UserWarning: Fleet aggregation produced an empty timeseries despite successful dwellings. This may indicate column mismatches across dwellings.
+    results = fleet.simulate(raise_on_failure=False)
+
+tests/python/test_resstock_data.py::TestFetchResStockBuilding::test_downloads_and_extracts
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:190: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
+
+tests/python/test_resstock_data.py::TestFetchResStockBuilding::test_returns_resstock_building_instance
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:215: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    result = fetch_resstock_building(5, version="2024.2", cache_dir=tmp_path)
+
+tests/python/test_resstock_data.py::TestFetchResStockBuilding::test_sample_weight_is_one
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:236: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    result = fetch_resstock_building(1, cache_dir=tmp_path)
+
+tests/python/test_resstock_data.py::TestFetchResStockBuilding::test_uses_cache_on_second_call
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:262: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    fetch_resstock_building(1, cache_dir=tmp_path)
+
+tests/python/test_resstock_data.py::TestFetchResStockBuilding::test_uses_cache_on_second_call
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:263: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    fetch_resstock_building(1, cache_dir=tmp_path)
+
+tests/python/test_resstock_data.py::TestFetchResStockBuilding::test_weather_override_skips_weather_download
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:284: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    result = fetch_resstock_building(
+
+tests/python/test_resstock_data.py::TestFetchResStockBuilding::test_weather_downloaded_from_hpxml
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:315: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
+
+tests/python/test_resstock_data.py::TestFetchResStockBuilding::test_upgrade_id_in_url
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:342: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    fetch_resstock_building(1, upgrade_id=3, cache_dir=tmp_path)
+
+tests/python/test_resstock_data.py::TestBuildingCacheIntegrity::test_corrupted_building_cache_detected_and_redownloaded
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:1630: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
+
+tests/python/test_resstock_data.py::TestBuildingCacheIntegrity::test_cached_building_reused_when_sidecars_valid
+  /home/rich/src/HARES/tests/python/test_resstock_data.py:1578: UserWarning: No metadata_path or sample_weight provided; sample_weight defaults to 1.0. Population-level aggregation of this building will not be correctly weighted.
+    result = fetch_resstock_building(1, version="2024.2", cache_dir=tmp_path)
+
+tests/python/test_rl_warning_surfacing.py::test_gym_env_surfaces_rejected_control_signal
+  /home/rich/src/HARES/tests/python/test_rl_warning_surfacing.py:144: UserWarning: Initial observation contains NaN for uninitialized fields — replace with 0.0 or mask before training.
+    env.reset(seed=42)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/python/test_observer_diagnostics.py:89: OCHRE not installed
+SKIPPED [1] tests/python/test_ochre_parity.py:190: OCHRE not installed
+SKIPPED [1] tests/python/test_thermal_trace.py:45: OCHRE not installed
+SKIPPED [1] tests/python/test_py_conversions.py:164: ResStock test fixtures not available
+SKIPPED [1] tests/python/test_py_conversions.py:172: ResStock test fixtures not available
+SKIPPED [1] tests/python/test_py_conversions.py:180: ResStock test fixtures not available
+SKIPPED [1] tests/python/test_py_conversions.py:188: ResStock test fixtures not available
+SKIPPED [1] tests/python/test_py_conversions.py:196: ResStock test fixtures not available
+SKIPPED [1] tests/python/test_py_conversions.py:214: ResStock test fixtures not available
+=========== 1378 passed, 9 skipped, 16 warnings in 139.76s (0:02:19) ===========

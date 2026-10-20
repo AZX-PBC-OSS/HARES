@@ -160,6 +160,7 @@ fn base_env() -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: HashMap::new(),
         current_time: FixedOffset::east_opt(0)

@@ -86,7 +86,10 @@ fn parse_window(d: &Bound<'_, PyDict>) -> PyResult<TimeWindow> {
     Ok(TimeWindow::new(day, start_minute, end_minute, 0.0))
 }
 
-fn json_value_to_py<'py>(py: Python<'py>, v: &serde_json::Value) -> PyResult<Py<pyo3::PyAny>> {
+pub(crate) fn json_value_to_py<'py>(
+    py: Python<'py>,
+    v: &serde_json::Value,
+) -> PyResult<Py<pyo3::PyAny>> {
     match v {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(b) => (*b).into_py_any(py),
@@ -246,9 +249,12 @@ impl PyTariffEvaluator {
         })
     }
 
+    /// The evaluator's step: the net electric power of the step in watts
+    /// (SI), the step's seconds, and the step's end time.
+    #[pyo3(signature = (*, net_power_w, dt_seconds, current_time))]
     fn step(
         &mut self,
-        net_power_kw: f64,
+        net_power_w: f64,
         dt_seconds: f64,
         current_time: &Bound<'_, pyo3::PyAny>,
     ) -> PyResult<Option<PyBillingPeriodSummary>> {
@@ -256,7 +262,7 @@ impl PyTariffEvaluator {
         let tz_dt = fixed_offset_to_tz(dt);
         Ok(self
             .evaluator
-            .step(net_power_kw, 0.0, dt_seconds, tz_dt)
+            .step(net_power_w, 0.0, dt_seconds, tz_dt)
             .map(|s| PyBillingPeriodSummary::from_rust(&s)))
     }
 
@@ -971,7 +977,7 @@ mod tests {
             )
             .unwrap();
 
-            let summaries = step_evaluator(py, &mut ev, &start, |_| 1.0, 3600, 8760).unwrap();
+            let summaries = step_evaluator(py, &mut ev, &start, |_| 1000.0, 3600, 8760).unwrap();
 
             let final_summary = ev
                 .finalize(end.bind(py).as_any())
@@ -1063,9 +1069,9 @@ mod tests {
                 &start,
                 |hour| {
                     if (16..21).contains(&(hour as u32)) {
-                        2.0
+                        2000.0
                     } else {
-                        1.0
+                        1000.0
                     }
                 },
                 3600,
@@ -1087,7 +1093,7 @@ mod tests {
                 .chain(std::iter::once(final_s.energy_charge_usd))
                 .sum();
 
-            // 19 off-peak hours * 1 kW + 5 peak hours * 2 kW = 29 kWh
+            // 19 off-peak hours * 1000 W + 5 peak hours * 2000 W = 29 kWh
             assert!(
                 (total_import - 29.0).abs() < 1e-6,
                 "expected 29 kWh, got {total_import}"

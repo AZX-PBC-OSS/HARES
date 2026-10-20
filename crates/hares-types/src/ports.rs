@@ -89,7 +89,7 @@ pub enum PortContribution {
     ShortWave { zone: ZoneId, shortwave_gain_w: f64 },
     Electrical {
         active_power_w: f64,
-        reactive_power_kvar: f64,
+        reactive_power_var: f64,
     },
     Fuel {
         fuel_type: FuelType,
@@ -378,7 +378,7 @@ impl ThermalAccumulator {
 /// Electrical contribution totals on the shared v1 bus.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct ElectricalAccumulator {
-    pub reactive_power_kvar: f64,
+    pub reactive_power_var: f64,
     pub load_power_w: f64,
     pub generation_power_w: f64,
     /// Total count of electrical contributions accumulated this timestep.
@@ -778,21 +778,21 @@ impl PortSlots {
             }
             PortContribution::Electrical {
                 active_power_w,
-                reactive_power_kvar,
+                reactive_power_var,
             } => {
                 // Defensive sign-convention validation: electrical power values
                 // must be finite. Non-finite (NaN, ±∞) values indicate an
                 // equipment bug upstream of the port boundary, so the write is
                 // a typed error in every build profile.
-                if !active_power_w.is_finite() || !reactive_power_kvar.is_finite() {
+                if !active_power_w.is_finite() || !reactive_power_var.is_finite() {
                     return Err(HaresError::Equipment(format!(
                         "non-finite electrical contribution: \
                          active_power_w={active_power_w}, \
-                         reactive_power_kvar={reactive_power_kvar}"
+                         reactive_power_var={reactive_power_var}"
                     )));
                 }
 
-                self.electrical.reactive_power_kvar += reactive_power_kvar;
+                self.electrical.reactive_power_var += reactive_power_var;
                 if *active_power_w >= 0.0 {
                     self.electrical.load_power_w += active_power_w;
                 } else {
@@ -1057,7 +1057,7 @@ mod tests {
             }],
             electrical: {
                 ElectricalAccumulator {
-                    reactive_power_kvar: 1.0,
+                    reactive_power_var: 1.0,
                     load_power_w: 4.0,
                     ..Default::default()
                 }
@@ -1102,7 +1102,7 @@ mod tests {
             slots.thermal[0].radiant_by_category, [0.0; THERMAL_CATEGORY_COUNT],
             "zero() must clear radiant per-category array"
         );
-        approx_eq(slots.electrical.reactive_power_kvar, 0.0);
+        approx_eq(slots.electrical.reactive_power_var, 0.0);
         approx_eq(slots.electrical.load_power_w, 0.0);
         approx_eq(slots.electrical.generation_power_w, 0.0);
         approx_eq(slots.fuel.get(FuelType::Electric), 0.0);
@@ -1119,7 +1119,7 @@ mod tests {
         let mut slots = PortSlots::default();
         let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: f64::NAN,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         });
         assert!(
             result.is_err(),
@@ -1128,7 +1128,7 @@ mod tests {
         let mut slots = PortSlots::default();
         let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: 1500.0,
-            reactive_power_kvar: f64::NAN,
+            reactive_power_var: f64::NAN,
         });
         assert!(
             result.is_err(),
@@ -1142,7 +1142,7 @@ mod tests {
         slots
             .accumulate(&PortContribution::Electrical {
                 active_power_w: -500.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .expect("a negative write seeds the generation side");
         // A positive write onto the generation side is impossible via the sign
@@ -1151,7 +1151,7 @@ mod tests {
         slots.electrical.generation_power_w = 10.0;
         let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: 1.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         });
         assert!(
             result.is_err(),
@@ -1513,17 +1513,17 @@ mod tests {
         slots
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 3000.0,
-                reactive_power_kvar: 0.4,
+                reactive_power_var: 0.4,
             })
             .unwrap();
         slots
             .accumulate(&PortContribution::Electrical {
                 active_power_w: -5000.0,
-                reactive_power_kvar: -0.1,
+                reactive_power_var: -0.1,
             })
             .unwrap();
         approx_eq(slots.electrical.net_active_w(), -2000.0);
-        approx_eq(slots.electrical.reactive_power_kvar, 0.3);
+        approx_eq(slots.electrical.reactive_power_var, 0.3);
         approx_eq(slots.electrical.load_power_w, 3000.0);
         approx_eq(slots.electrical.generation_power_w, -5000.0);
     }
@@ -1534,7 +1534,7 @@ mod tests {
         slots
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 3000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         approx_eq(slots.electrical.load_power_w, 3000.0);
@@ -1547,7 +1547,7 @@ mod tests {
         slots
             .accumulate(&PortContribution::Electrical {
                 active_power_w: -5000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         approx_eq(slots.electrical.load_power_w, 0.0);
@@ -1559,7 +1559,7 @@ mod tests {
         let mut slots = PortSlots::default();
         let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: f64::NAN,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         });
         assert!(
             result.is_err(),
@@ -1572,11 +1572,11 @@ mod tests {
         let mut slots = PortSlots::default();
         let result = slots.accumulate(&PortContribution::Electrical {
             active_power_w: 0.0,
-            reactive_power_kvar: f64::INFINITY,
+            reactive_power_var: f64::INFINITY,
         });
         assert!(
             result.is_err(),
-            "a non-finite reactive_power_kvar must be a typed error in every build profile"
+            "a non-finite reactive_power_var must be a typed error in every build profile"
         );
     }
 
@@ -1586,7 +1586,7 @@ mod tests {
         slots
             .accumulate(&PortContribution::Electrical {
                 active_power_w: 0.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })
             .unwrap();
         approx_eq(slots.electrical.load_power_w, 0.0);
@@ -1781,7 +1781,7 @@ mod tests {
         // Electrical with a 1.5 kW load → 1500 W active_power_w.
         let electrical = PortContribution::Electrical {
             active_power_w: 1500.0,
-            reactive_power_kvar: 0.0,
+            reactive_power_var: 0.0,
         };
         match electrical {
             PortContribution::Electrical { active_power_w, .. } => {

@@ -350,704 +350,23 @@ fn sky_temp_matches_clark_allen_for_low_ir_rows() {
 }
 
 // ===========================================================================
-// PCHIP interpolation and sub-hourly resampling tests
+// The EnergyPlus interpolation of an hourly file at a sub-hourly step:
+// every point field's linear last-hour interpolation, evaluated for the
+// step's end. Linear interpolation between two records stays between
+// them, so the bounds tests hold on the source records' own ranges.
 // ===========================================================================
 
-use hares_io::weather::{WeatherMeta, WeatherTimeSeries, pchip_resample};
-
-/// Per-field series values for [`make_series`]; build one with
-/// [`series_fields`] and override the fields under test.
-struct SeriesFields {
-    rel_humidity_pct: Vec<f64>,
-    opaque_sky_cover: Vec<f64>,
-    pressure_kpa: Vec<f64>,
-    ghi_w_m2: Vec<f64>,
-    dni_w_m2: Vec<f64>,
-    dhi_w_m2: Vec<f64>,
-    wind_speed_m_s: Vec<f64>,
-    wind_dir_deg: Vec<f64>,
-}
-
-/// Constant per-field defaults (RH 50%, sky cover 5%, 101.325 kPa, GHI 300,
-/// DNI 500, DHI 100, wind 3 m/s from 180°) for a series of `n` steps.
-fn series_fields(n: usize) -> SeriesFields {
-    SeriesFields {
-        rel_humidity_pct: vec![50.0; n],
-        opaque_sky_cover: vec![5.0; n],
-        pressure_kpa: vec![101.325; n],
-        ghi_w_m2: vec![300.0; n],
-        dni_w_m2: vec![500.0; n],
-        dhi_w_m2: vec![100.0; n],
-        wind_speed_m_s: vec![3.0; n],
-        wind_dir_deg: vec![180.0; n],
-    }
-}
-
-/// Build a `WeatherTimeSeries` with explicit per-field values for bound-testing.
-fn make_series(n: usize, fields: SeriesFields) -> WeatherTimeSeries {
-    let SeriesFields {
-        rel_humidity_pct,
-        opaque_sky_cover,
-        pressure_kpa,
-        ghi_w_m2,
-        dni_w_m2,
-        dhi_w_m2,
-        wind_speed_m_s,
-        wind_dir_deg,
-    } = fields;
-    WeatherTimeSeries {
-        meta: WeatherMeta {
-            location: "Test".to_string(),
-            latitude: 39.74,
-            longitude: -104.99,
-            timezone_offset_h: -7.0,
-            elevation_m: 1600.0,
-            wf_allows_leap_years: true,
-            source_step_secs: 3600,
-            midpoint_offset_secs: 0,
-            has_embedded_location: false,
-            station_wmo: None,
-        },
-        dry_bulb_c: vec![20.0; n],
-        dew_point_c: vec![10.0; n],
-        rel_humidity_pct,
-        pressure_kpa,
-        ghi_w_m2,
-        dni_w_m2,
-        dhi_w_m2,
-        wind_speed_m_s,
-        wind_dir_deg,
-        opaque_sky_cover,
-        horizontal_infrared_w_m2: vec![350.0; n],
-        sky_temp_c: vec![0.0; n],
-        ground_temp_c: vec![10.0; n],
-        liquid_precip_m: vec![0.0; n],
-        surface_albedo: None,
-        design_conditions: None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PCHIP correctness tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn pchip_passes_through_knot_values() {
-    let values = [10.0, 15.0, 12.0, 18.0, 14.0, 20.0, 16.0, 22.0];
-    let factor = 6;
-    let out = pchip_resample(&values, factor);
-    assert_eq!(out.len(), values.len() * factor);
-
-    for (k, &v) in values.iter().enumerate() {
-        let idx = k * factor;
-        assert!(
-            (out[idx] - v).abs() < 1e-10,
-            "knot {k} at index {idx}: expected {v}, got {}",
-            out[idx]
-        );
-    }
+/// The run start the resample tests read from: the file's own first
+/// midnight.
+fn test_start() -> chrono::NaiveDateTime {
+    chrono::NaiveDate::from_ymd_opt(1995, 1, 1)
+        .expect("date")
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight")
 }
 
 #[test]
-fn pchip_is_c1_continuous() {
-    // Verify first derivative is continuous at knot points via finite differences.
-    // Use Richardson extrapolation: compute one-sided derivatives at two step sizes
-    // and extrapolate to eliminate the O(h) truncation error, yielding O(h^2) accuracy.
-    let values = [5.0, 12.0, 8.0, 20.0, 15.0, 10.0, 18.0];
-    let factor = 1000;
-    let out = pchip_resample(&values, factor);
-    let h = 1.0 / factor as f64;
-
-    for k in 1..values.len() - 1 {
-        let idx = k * factor;
-        // Two-point one-sided differences at step h and 2h for Richardson extrapolation.
-        let d_left_h = (out[idx] - out[idx - 1]) / h;
-        let d_left_2h = (out[idx] - out[idx - 2]) / (2.0 * h);
-        let d_left = 2.0 * d_left_h - d_left_2h; // Richardson: cancels O(h) term
-
-        let d_right_h = (out[idx + 1] - out[idx]) / h;
-        let d_right_2h = (out[idx + 2] - out[idx]) / (2.0 * h);
-        let d_right = 2.0 * d_right_h - d_right_2h;
-
-        assert!(
-            (d_left - d_right).abs() < 1e-4,
-            "C1 discontinuity at knot {k}: left slope {d_left:.6}, right slope {d_right:.6}, \
-             diff {:.2e}",
-            (d_left - d_right).abs()
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Monotonicity / no-overshoot tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn pchip_preserves_monotonicity() {
-    let values = [10.0, 12.0, 15.0, 20.0, 26.0, 33.0];
-    let out = pchip_resample(&values, 12);
-
-    for w in out.windows(2) {
-        assert!(
-            w[1] >= w[0] - 1e-12,
-            "monotonicity violated: {:.10} followed by {:.10}",
-            w[0],
-            w[1]
-        );
-    }
-}
-
-#[test]
-fn pchip_no_overshoot_between_knots() {
-    let values = [5.0, 20.0, 8.0, 25.0, 3.0, 18.0];
-    let factor = 10;
-    let out = pchip_resample(&values, factor);
-
-    for k in 0..values.len() - 1 {
-        let lo = values[k].min(values[k + 1]);
-        let hi = values[k].max(values[k + 1]);
-        for j in 0..factor {
-            let idx = k * factor + j;
-            assert!(
-                out[idx] >= lo - 1e-10 && out[idx] <= hi + 1e-10,
-                "overshoot in interval [{k}, {}]: index {idx} value {:.10}, bounds [{lo}, {hi}]",
-                k + 1,
-                out[idx]
-            );
-        }
-    }
-}
-
-#[test]
-fn pchip_handles_flat_sections() {
-    let values = [20.0, 20.0, 20.0, 20.0, 20.0];
-    let out = pchip_resample(&values, 6);
-
-    for (i, &v) in out.iter().enumerate() {
-        assert!(
-            (v - 20.0).abs() < 1e-12,
-            "flat section: index {i} expected 20.0, got {v}"
-        );
-    }
-}
-
-#[test]
-fn pchip_handles_steep_gradient() {
-    let values = [10.0, 10.0, 30.0, 30.0];
-    let out = pchip_resample(&values, 10);
-
-    for (i, &v) in out.iter().enumerate() {
-        assert!(
-            (10.0 - 1e-10..=30.0 + 1e-10).contains(&v),
-            "steep gradient overshoot at index {i}: {v}"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Physical bounds (clamping) tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn rh_stays_bounded_after_interpolation() {
-    let rh = vec![98.0, 2.0, 98.0, 5.0, 95.0];
-    let n = rh.len();
-    let series = make_series(
-        n,
-        SeriesFields {
-            rel_humidity_pct: rh,
-            ..series_fields(n)
-        },
-    );
-    let resampled = series.resample(600).expect("resample should succeed");
-
-    for (i, &v) in resampled.rel_humidity_pct.iter().enumerate() {
-        assert!(
-            (0.0..=100.0).contains(&v),
-            "RH out of [0,100] at index {i}: {v}"
-        );
-    }
-}
-
-#[test]
-fn rh_non_monotonic_extrema_clamped() {
-    let rh = vec![0.0, 100.0, 0.0, 100.0, 0.0];
-    let n = rh.len();
-    let series = make_series(
-        n,
-        SeriesFields {
-            rel_humidity_pct: rh,
-            ..series_fields(n)
-        },
-    );
-    let resampled = series.resample(600).expect("resample should succeed");
-
-    for (i, &v) in resampled.rel_humidity_pct.iter().enumerate() {
-        assert!(
-            (0.0..=100.0).contains(&v),
-            "RH extrema out of [0,100] at index {i}: {v}"
-        );
-    }
-}
-
-#[test]
-fn sky_cover_stays_bounded_after_interpolation() {
-    let sky = vec![0.0, 10.0, 0.0, 10.0, 0.0];
-    let n = sky.len();
-    let series = make_series(
-        n,
-        SeriesFields {
-            opaque_sky_cover: sky,
-            ..series_fields(n)
-        },
-    );
-    let resampled = series.resample(600).expect("resample should succeed");
-
-    for (i, &v) in resampled.opaque_sky_cover.iter().enumerate() {
-        assert!(
-            (0.0..=10.0).contains(&v),
-            "sky cover out of [0,10] at index {i}: {v}"
-        );
-    }
-}
-
-#[test]
-fn pressure_stays_positive_after_interpolation() {
-    // Oscillating pressure to try to provoke negative undershoots.
-    let p = vec![101.0, 95.0, 105.0, 90.0, 100.0];
-    let n = p.len();
-    let series = make_series(
-        n,
-        SeriesFields {
-            pressure_kpa: p,
-            ..series_fields(n)
-        },
-    );
-    let resampled = series.resample(600).expect("resample should succeed");
-
-    for (i, &v) in resampled.pressure_kpa.iter().enumerate() {
-        assert!(v > 0.0, "pressure non-positive at index {i}: {v}");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Edge cases / degenerate input tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn pchip_handles_single_element() {
-    let out = pchip_resample(&[42.5], 6);
-    assert_eq!(out.len(), 6);
-    for (i, &v) in out.iter().enumerate() {
-        assert!(
-            (v - 42.5).abs() < 1e-15,
-            "single element: index {i} expected 42.5, got {v}"
-        );
-    }
-}
-
-#[test]
-fn pchip_handles_two_elements() {
-    let out = pchip_resample(&[10.0, 20.0], 4);
-    assert_eq!(out.len(), 8);
-    // First 4 samples: linear from 10 to 20 (exclusive of endpoint at index 4).
-    for (i, &v) in out.iter().enumerate().take(4) {
-        let expected = 10.0 + (i as f64) * 2.5;
-        assert!(
-            (v - expected).abs() < 1e-10,
-            "two-element linear at index {i}: expected {expected}, got {v}",
-        );
-    }
-    // Samples at index 4+ use flat extrapolation: all equal 20.0.
-    for (i, &v) in out.iter().enumerate().skip(4) {
-        assert!(
-            (v - 20.0).abs() < 1e-10,
-            "two-element flat extrapolation at index {i}: expected 20.0, got {v}",
-        );
-    }
-}
-
-#[test]
-fn pchip_handles_all_nan() {
-    let values = [f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN];
-    let out = pchip_resample(&values, 4);
-    assert_eq!(out.len(), 20);
-    for (i, &v) in out.iter().enumerate() {
-        assert!(
-            v.is_nan(),
-            "all-NaN input: index {i} should be NaN, got {v}"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ZOH preservation tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn solar_fields_use_zoh_by_default() {
-    // Solar fields (GHI, DNI, DHI) default to ZOH resampling to preserve
-    // the hourly energy integral. Every sub-step within an hour must equal
-    // the source hourly value.
-    let n = 5;
-    let ghi = vec![0.0, 200.0, 500.0, 300.0, 0.0];
-    let dni = vec![0.0, 400.0, 800.0, 600.0, 0.0];
-    let dhi = vec![0.0, 50.0, 120.0, 80.0, 0.0];
-    let series = make_series(
-        n,
-        SeriesFields {
-            ghi_w_m2: ghi.clone(),
-            dni_w_m2: dni.clone(),
-            dhi_w_m2: dhi.clone(),
-            ..series_fields(n)
-        },
-    );
-    let factor = 6; // 600s timestep
-    let resampled = series
-        .resample(3600 / factor as u32)
-        .expect("resample should succeed");
-
-    // Verify ZOH: every sub-step equals the source hourly value.
-    for (field_name, source, resampled_field) in [
-        ("GHI", &ghi, &resampled.ghi_w_m2),
-        ("DNI", &dni, &resampled.dni_w_m2),
-        ("DHI", &dhi, &resampled.dhi_w_m2),
-    ] {
-        for (k, &src_val) in source.iter().enumerate() {
-            for j in 0..factor {
-                let idx = k * factor + j;
-                assert!(
-                    (resampled_field[idx] - src_val).abs() < 1e-12,
-                    "{field_name} hour {k}, sub-step {j}: expected {src_val}, got {}",
-                    resampled_field[idx]
-                );
-            }
-        }
-    }
-}
-
-/// ZOH default preserves hourly energy integral at sunset boundary.
-///
-/// Sequence: [400, 0, 0] W/m² at 15-minute resolution (factor=4).
-/// With ZOH default, the first nighttime hour must have mean zero — no energy leak.
-#[test]
-fn zoh_default_preserves_hourly_energy_integral_at_sunset_boundary() {
-    let values = vec![400.0_f64, 0.0, 0.0];
-    let n = values.len();
-    let series = make_series(
-        n,
-        SeriesFields {
-            ghi_w_m2: values.clone(), // ghi
-            dni_w_m2: values.clone(), // dni
-            dhi_w_m2: values.clone(), // dhi
-            ..series_fields(n)
-        },
-    );
-    let factor: usize = 4; // 15-minute sub-steps
-    let resampled = series
-        .resample(3600 / factor as u32)
-        .expect("resample should succeed");
-    // Default for solar is ZOH — no override needed.
-
-    for (field_name, src, resampled_field) in [
-        ("GHI", &values, &resampled.ghi_w_m2),
-        ("DNI", &values, &resampled.dni_w_m2),
-        ("DHI", &values, &resampled.dhi_w_m2),
-    ] {
-        for (k, &src_val) in src.iter().enumerate() {
-            let hour_slice = &resampled_field[k * factor..(k + 1) * factor];
-            let mean = hour_slice.iter().sum::<f64>() / factor as f64;
-            assert!(
-                (mean - src_val).abs() < 1e-12,
-                "{field_name} hour {k}: ZOH mean {mean} != source {src_val}"
-            );
-        }
-    }
-}
-
-#[test]
-fn wind_speed_uses_zoh_wind_dir_uses_circular_linear() {
-    // Wind speed defaults to ZOH; wind direction defaults to CircularLinear.
-    let n = 5;
-    let ws = vec![1.0, 5.0, 3.0, 8.0, 2.0];
-    let wd = vec![90.0, 180.0, 270.0, 0.0, 45.0];
-    let series = make_series(
-        n,
-        SeriesFields {
-            wind_speed_m_s: ws.clone(),
-            wind_dir_deg: wd.clone(),
-            ..series_fields(n)
-        },
-    );
-    let factor = 4; // 900s timestep
-    let resampled = series
-        .resample(3600 / factor as u32)
-        .expect("resample should succeed");
-
-    // Wind speed: ZOH — each sub-step equals the source value.
-    for (k, &src_val) in ws.iter().enumerate() {
-        for j in 0..factor {
-            let idx = k * factor + j;
-            assert!(
-                (resampled.wind_speed_m_s[idx] - src_val).abs() < 1e-15,
-                "wind_speed ZOH violated at hour {k}, sub-step {j} (index {idx}): \
-                 expected {src_val}, got {}",
-                resampled.wind_speed_m_s[idx]
-            );
-        }
-    }
-
-    // Wind direction: CircularLinear — at the start of each segment (frac=0),
-    // the value equals the source value, but sub-hourly values vary.
-    for (k, &src_val) in wd.iter().enumerate() {
-        let start_idx = k * factor;
-        assert!(
-            (resampled.wind_dir_deg[start_idx] - src_val).abs() < 1e-12,
-            "wind_dir at start of hour {k}: expected {src_val}, got {}",
-            resampled.wind_dir_deg[start_idx]
-        );
-    }
-    // Verify wind_dir is NOT ZOH: at least some sub-hourly values differ.
-    let all_constant = wd.iter().enumerate().all(|(k, &src_val)| {
-        (0..factor).all(|j| (resampled.wind_dir_deg[k * factor + j] - src_val).abs() < 1e-12)
-    });
-    assert!(
-        !all_constant,
-        "wind_dir appears to use ZOH — expected CircularLinear interpolation"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Ticket 030 regression tests — solar upsampling energy conservation
-// ---------------------------------------------------------------------------
-
-/// Regression guard: triangular resampling at a sunset boundary DOES produce
-/// nonzero sub-hourly values in the nighttime hour.
-///
-/// Sequence: last sunlit hour (400 W/m²) followed by two nighttime hours (0).
-/// At 15-minute resolution (factor=4), the first nighttime hour receives
-/// sub-hourly values [200, 100, 0, 0] from the triangular formula, giving a
-/// mean of 75 W/m² — confirming the energy conservation violation in #030.
-/// (The ticket incorrectly states [100,0,0,0] / 25 W/m²; the correct values
-/// are [200,100,0,0] / 75 W/m² from the formula prev*(0.5-frac)+i*(0.5+frac).)
-#[test]
-fn triangular_sunset_boundary_bleeds_into_nighttime_hour() {
-    let values = vec![400.0_f64, 0.0, 0.0];
-    let n = values.len();
-    let series = make_series(
-        n,
-        SeriesFields {
-            ghi_w_m2: values.clone(), // ghi
-            dni_w_m2: values.clone(), // dni
-            dhi_w_m2: values.clone(), // dhi
-            ..series_fields(n)
-        },
-    );
-    let factor: usize = 4; // 15-minute sub-steps
-    // Explicit Triangular override — ZOH is now the default for solar fields.
-    use hares_io::{ResampleMethod, ResampleOverrides};
-    let overrides = ResampleOverrides {
-        ghi: Some(ResampleMethod::Triangular),
-        dni: Some(ResampleMethod::Triangular),
-        dhi: Some(ResampleMethod::Triangular),
-        ..Default::default()
-    };
-    let resampled = series
-        .resample_with(3600 / factor as u32, &overrides)
-        .expect("resample_with should succeed");
-
-    for (field_name, resampled_field) in [
-        ("GHI", &resampled.ghi_w_m2),
-        ("DNI", &resampled.dni_w_m2),
-        ("DHI", &resampled.dhi_w_m2),
-    ] {
-        let night_hour = &resampled_field[factor..2 * factor]; // hour index 1
-        let night_mean: f64 = night_hour.iter().sum::<f64>() / factor as f64;
-
-        // The mean is nonzero — triangular leaks energy across the day/night boundary.
-        // Exact expected: 75 W/m² = 400 * (0.5+0.25+0+0) / 4 = 400 * 3/16.
-        assert!(
-            night_mean > 1.0,
-            "{field_name} nighttime hour mean should be nonzero (energy leak), got {night_mean:.4}"
-        );
-
-        // Verify specific sub-hourly values:
-        // frac=0.00: prev(400)*0.5 + i(0)*0.5 = 200
-        // frac=0.25: prev(400)*0.25 + i(0)*0.75 = 100
-        // frac=0.50: i(0)*1.0 = 0
-        // frac=0.75: i(0)*0.75 + next(0)*0.25 = 0
-        let expected_night = [200.0_f64, 100.0, 0.0, 0.0];
-        for (j, (&got, &exp)) in night_hour.iter().zip(expected_night.iter()).enumerate() {
-            assert!(
-                (got - exp).abs() < 1e-10,
-                "{field_name} nighttime sub-step {j}: expected {exp}, got {got}"
-            );
-        }
-
-        // Confirm mean = 75, not 25 as the ticket incorrectly states
-        assert!(
-            (night_mean - 75.0).abs() < 1e-9,
-            "{field_name} nighttime mean expected 75.0 W/m² (= 400 × 3/16), got {night_mean}"
-        );
-    }
-}
-
-/// ZOH resampling preserves the hourly energy integral exactly.
-///
-/// Sequence: [400, 0, 0] W/m² at 15-minute resolution (factor=4).
-/// Every sub-hourly value in each hour must equal the source value exactly,
-/// so the mean of each hour equals the source value.
-#[test]
-fn zoh_preserves_hourly_energy_integral_at_sunset_boundary() {
-    let values = vec![400.0_f64, 0.0, 0.0];
-    let n = values.len();
-    let series = make_series(
-        n,
-        SeriesFields {
-            ghi_w_m2: values.clone(), // ghi
-            dni_w_m2: values.clone(), // dni
-            dhi_w_m2: values.clone(), // dhi
-            ..series_fields(n)
-        },
-    );
-
-    use hares_io::{ResampleMethod, ResampleOverrides};
-    let overrides = ResampleOverrides {
-        ghi: Some(ResampleMethod::Zoh),
-        dni: Some(ResampleMethod::Zoh),
-        dhi: Some(ResampleMethod::Zoh),
-        ..Default::default()
-    };
-    let factor: usize = 4; // 15-minute sub-steps
-    let resampled = series
-        .resample_with(3600 / factor as u32, &overrides)
-        .expect("resample_with should succeed");
-
-    for (field_name, src, resampled_field) in [
-        ("GHI", &values, &resampled.ghi_w_m2),
-        ("DNI", &values, &resampled.dni_w_m2),
-        ("DHI", &values, &resampled.dhi_w_m2),
-    ] {
-        for (k, &src_val) in src.iter().enumerate() {
-            let hour_slice = &resampled_field[k * factor..(k + 1) * factor];
-            let mean = hour_slice.iter().sum::<f64>() / factor as f64;
-            assert!(
-                (mean - src_val).abs() < 1e-9,
-                "{field_name} hour {k}: ZOH mean {mean} != source {src_val} (error > 1e-9)"
-            );
-            // Every sub-step must equal the source value exactly for ZOH.
-            for (j, &v) in hour_slice.iter().enumerate() {
-                assert!(
-                    (v - src_val).abs() < 1e-12,
-                    "{field_name} hour {k}, sub-step {j}: expected {src_val}, got {v}"
-                );
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Year boundary test
-// ---------------------------------------------------------------------------
-
-#[test]
-fn year_boundary_uses_flat_extrapolation() {
-    let values = [10.0, 15.0, 20.0, 25.0, 30.0];
-    let factor = 6;
-    let out = pchip_resample(&values, factor);
-
-    // The last knot value is 30.0. All sub-hourly samples in the final
-    // half-interval (beyond the last knot) should be flat at 30.0,
-    // not wrapping back toward the first knot.
-    let last_knot_idx = (values.len() - 1) * factor;
-    let last_knot_val = values[values.len() - 1];
-    for (i, &v) in out.iter().enumerate().skip(last_knot_idx) {
-        assert!(
-            (v - last_knot_val).abs() < 1e-10,
-            "year boundary: index {i} expected flat at {last_knot_val}, got {v}",
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// NaN propagation test
-// ---------------------------------------------------------------------------
-
-#[test]
-fn nan_in_source_propagates_through_pchip() {
-    let values = [10.0, 15.0, f64::NAN, 20.0, 25.0, 30.0, 35.0];
-    let factor = 4;
-    let out = pchip_resample(&values, factor);
-
-    // NaN at knot 2 contaminates via two mechanisms:
-    // 1. Hermite formula: interval [1,2] uses values[2]=NaN directly (h01 * NaN).
-    // 2. Secant slopes: delta[1]=NaN and delta[2]=NaN propagate into d[1..3].
-    // Both interval [1,2] and [2,3] must produce NaN output.
-    for j in 0..factor {
-        let idx_12 = factor + j;
-        assert!(
-            out[idx_12].is_nan(),
-            "interval [1,2] index {idx_12} should be NaN (values[2]=NaN in Hermite), got {}",
-            out[idx_12]
-        );
-        let idx_23 = 2 * factor + j;
-        assert!(
-            out[idx_23].is_nan(),
-            "interval [2,3] index {idx_23} should be NaN (NaN knot interval), got {}",
-            out[idx_23]
-        );
-    }
-
-    // Distant intervals must NOT be corrupted.
-    // Interval [4,5] recovers because d[4] and d[5] are derived from finite
-    // secants (delta[3]=5, delta[4]=5, delta[5]=5). d[3] is zeroed by the
-    // sign-check (delta[2]=NaN), but that only affects interval [3,4].
-    for j in 0..factor {
-        let idx = 4 * factor + j;
-        assert!(
-            out[idx].is_finite(),
-            "NaN corruption: distant interval index {idx} should be finite, got {}",
-            out[idx]
-        );
-    }
-}
-
-#[test]
-fn pchip_two_consecutive_nans_do_not_panic() {
-    // NaN at knots 2 and 3 → intervals touching them should be NaN,
-    // but distant intervals should recover to finite values.
-    let values = [10.0, 15.0, f64::NAN, f64::NAN, 20.0, 25.0];
-    let factor = 4;
-    let out = pchip_resample(&values, factor);
-    assert_eq!(out.len(), values.len() * factor);
-
-    // Interval [1,2] touches first NaN knot -- must be NaN.
-    for j in 0..factor {
-        let idx = factor + j;
-        assert!(
-            out[idx].is_nan(),
-            "interval [1,2] index {idx} should be NaN, got {}",
-            out[idx]
-        );
-    }
-
-    // Interval [4,5] is well past the NaN gap -- should recover.
-    for j in 0..factor {
-        let idx = 4 * factor + j;
-        assert!(
-            out[idx].is_finite(),
-            "interval [4,5] index {idx} should be finite after NaN gap, got {}",
-            out[idx]
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Real EPW fixture test
-// ---------------------------------------------------------------------------
-
-#[test]
-fn sub_hourly_resample_of_real_epw() {
+fn real_epw_interpolated_to_60s_stays_within_record_bounds() {
     use std::path::PathBuf;
 
     let epw_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1055,7 +374,12 @@ fn sub_hourly_resample_of_real_epw() {
 
     let weather = hares_io::parse_epw(&epw_path).expect("EPW should parse");
     let resampled = weather
-        .resample(60)
+        .resample(
+            60,
+            hares_io::FirstHour::default(),
+            test_start(),
+            hares_io::WeatherYear::Typical,
+        )
         .expect("resample to 60s should succeed");
 
     assert_eq!(
@@ -1065,90 +389,122 @@ fn sub_hourly_resample_of_real_epw() {
         8760 * 60
     );
 
-    for (i, &t) in resampled.dry_bulb_c.iter().enumerate() {
-        assert!(
-            !t.is_nan() && !t.is_infinite(),
-            "dry_bulb NaN/Inf at index {i}"
-        );
-        assert!(
-            t > -60.0 && t < 55.0,
-            "dry_bulb out of [-60, 55] at index {i}: {t}"
-        );
-    }
+    // Every point field's step value is a weighted average of two
+    // adjacent hourly records, so it lies between the file's own min and
+    // max for that field, within one part in a billion of float rounding
+    // (the weighted sum's two roundings can lift a value one ULP above
+    // the record bound; EnergyPlus's own weighted sum has the same).
+    let check_within = |name: &str, values: &[f64], source: &[f64]| {
+        let lo = source.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = source.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(lo <= hi, "{name}: the source records are empty");
+        for (i, &t) in values.iter().enumerate() {
+            assert!(
+                !t.is_nan() && !t.is_infinite(),
+                "{name} NaN/Inf at index {i}"
+            );
+            assert!(
+                lo - 1e-9 <= t && t <= hi + 1e-9,
+                "{name} out of the source records' range [{lo}, {hi}] at index {i}: {t}"
+            );
+        }
+    };
 
-    for (i, &rh) in resampled.rel_humidity_pct.iter().enumerate() {
-        assert!(
-            (0.0..=100.0).contains(&rh),
-            "RH out of [0, 100] at index {i}: {rh}"
-        );
-    }
-
-    for (i, &ghi) in resampled.ghi_w_m2.iter().enumerate() {
-        assert!(ghi >= 0.0, "GHI negative at index {i}: {ghi}");
-    }
-    for (i, &dni) in resampled.dni_w_m2.iter().enumerate() {
-        assert!(dni >= 0.0, "DNI negative at index {i}: {dni}");
-    }
-    for (i, &dhi) in resampled.dhi_w_m2.iter().enumerate() {
-        assert!(dhi >= 0.0, "DHI negative at index {i}: {dhi}");
-    }
-
-    // Precipitation integral preserved (ZOH-distributed, so sum should match).
-    // Tolerance 1e-6: ZOH resampling from 8760 to 525600 samples accumulates
-    // f64 rounding across ~60x more additions.
-    let orig_total: f64 = weather.liquid_precip_m.iter().sum();
-    let resampled_total: f64 = resampled.liquid_precip_m.iter().sum();
-    assert!(
-        (orig_total - resampled_total).abs() < 1e-6,
-        "precipitation integral not preserved: original {orig_total}, resampled {resampled_total}"
+    check_within("dry_bulb", &resampled.dry_bulb_c, &weather.dry_bulb_c);
+    check_within("dew_point", &resampled.dew_point_c, &weather.dew_point_c);
+    check_within(
+        "rel_humidity",
+        &resampled.rel_humidity_pct,
+        &weather.rel_humidity_pct,
     );
+    check_within("pressure", &resampled.pressure_kpa, &weather.pressure_kpa);
+    check_within(
+        "wind_speed",
+        &resampled.wind_speed_m_s,
+        &weather.wind_speed_m_s,
+    );
+    check_within(
+        "opaque_sky_cover",
+        &resampled.opaque_sky_cover,
+        &weather.opaque_sky_cover,
+    );
+    check_within(
+        "horizontal_infrared",
+        &resampled.horizontal_infrared_w_m2,
+        &weather.horizontal_infrared_w_m2,
+    );
+    check_within("ghi", &resampled.ghi_w_m2, &weather.ghi_w_m2);
+    check_within("dni", &resampled.dni_w_m2, &weather.dni_w_m2);
+    check_within("dhi", &resampled.dhi_w_m2, &weather.dhi_w_m2);
+
+    // Solar takes the midpoint interpolation: each step's value is a
+    // convex blend of three adjacent hourly records (the bounds check
+    // above covers them), and the step ending at the half hour (ts = 30
+    // of 60) reads its hour's record exactly.
+    for (hour, &source_ghi) in weather.ghi_w_m2.iter().enumerate() {
+        assert_eq!(
+            resampled.ghi_w_m2[hour * 60 + 29],
+            source_ghi,
+            "GHI hour {hour} at the half hour reads the hour's record"
+        );
+    }
+    for (hour, &source_dni) in weather.dni_w_m2.iter().enumerate() {
+        assert_eq!(
+            resampled.dni_w_m2[hour * 60 + 29],
+            source_dni,
+            "DNI hour {hour} at the half hour reads the hour's record"
+        );
+    }
+    for (hour, &source_dhi) in weather.dhi_w_m2.iter().enumerate() {
+        assert_eq!(
+            resampled.dhi_w_m2[hour * 60 + 29],
+            source_dhi,
+            "DHI hour {hour} at the half hour reads the hour's record"
+        );
+    }
+
+    // The precipitation's weighted depth divided by 60 sums over each
+    // hour to the weighted hourly depth: the sum of the weights over the
+    // hour's steps is one hour's worth of the last-hour blend, so the
+    // hour's steps sum to (prev * wp_sum + this * w_sum) / 60 where
+    // wp_sum + w_sum = 60. The full-year total is preserved when the
+    // file's first hour reads the first-day rule's record (whose sum is
+    // the same form). Compare the totals over hours 2.. to avoid the
+    // first hour's special record.
+    for hour in 1..8760 {
+        let hour_total: f64 = resampled.liquid_precip_m[hour * 60..(hour + 1) * 60]
+            .iter()
+            .sum();
+        let prev = weather.liquid_precip_m[hour - 1];
+        let this = weather.liquid_precip_m[hour];
+        let w_sum: f64 = (1..=60).map(|ts| ts as f64 / 60.0).sum();
+        let expected = (prev * (60.0 - w_sum) + this * w_sum) / 60.0;
+        assert!(
+            (hour_total - expected).abs() < 1e-9,
+            "hour {hour}: the steps' precipitation sum {hour_total} should be the \
+             weighted blend {expected}"
+        );
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Multi-resolution consistency test
-// ---------------------------------------------------------------------------
-
+/// A record's value is reached at the end of its hour: at the file's own
+/// step every step reads the record of the hour it ends in.
 #[test]
-fn pchip_consistent_across_timesteps() {
-    let values = [10.0, 18.0, 12.0, 22.0, 14.0, 20.0, 16.0, 24.0];
+fn hourly_step_reads_the_record_of_the_hour_it_ends() {
+    use std::path::PathBuf;
 
-    let out_60s = pchip_resample(&values, 60); // 60s  -> factor 60
-    let out_300s = pchip_resample(&values, 12); // 300s -> factor 12
-    let out_900s = pchip_resample(&values, 4); // 900s -> factor 4
-
-    // 300s points should appear in the 60s series at every 5th sample.
-    for (i, &v300) in out_300s.iter().enumerate() {
-        let idx_60 = i * 5;
-        if idx_60 < out_60s.len() {
-            assert!(
-                (out_60s[idx_60] - v300).abs() < 1e-10,
-                "300s[{i}] vs 60s[{idx_60}]: {v300} != {}",
-                out_60s[idx_60]
-            );
-        }
-    }
-
-    // 900s points should appear in the 60s series at every 15th sample.
-    for (i, &v900) in out_900s.iter().enumerate() {
-        let idx_60 = i * 15;
-        if idx_60 < out_60s.len() {
-            assert!(
-                (out_60s[idx_60] - v900).abs() < 1e-10,
-                "900s[{i}] vs 60s[{idx_60}]: {v900} != {}",
-                out_60s[idx_60]
-            );
-        }
-    }
-
-    // 900s points should appear in the 300s series at every 3rd sample.
-    for (i, &v900) in out_900s.iter().enumerate() {
-        let idx_300 = i * 3;
-        if idx_300 < out_300s.len() {
-            assert!(
-                (out_300s[idx_300] - v900).abs() < 1e-10,
-                "900s[{i}] vs 300s[{idx_300}]: {v900} != {}",
-                out_300s[idx_300]
-            );
-        }
-    }
+    let epw_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/weather/test_location.epw");
+    let weather = hares_io::parse_epw(&epw_path).expect("EPW should parse");
+    let resampled = weather
+        .resample(
+            3600,
+            hares_io::FirstHour::default(),
+            test_start(),
+            hares_io::WeatherYear::Typical,
+        )
+        .expect("resample to the hour should succeed");
+    assert_eq!(resampled.len(), weather.len());
+    assert_eq!(resampled.dry_bulb_c, weather.dry_bulb_c);
+    assert_eq!(resampled.ghi_w_m2, weather.ghi_w_m2);
 }

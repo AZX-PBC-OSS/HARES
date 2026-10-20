@@ -1,14 +1,13 @@
 //! Manifest acceptance tests: unknown keys are rejected, dwelling manifests
 //! need exactly one home, fleet manifests carry a weight on every home and
-//! a resolution while dwelling manifests reject both keys, a manifest's
-//! `[tariff]` table is dwelling-only with a parseable zone and a loadable
-//! tariff file, and compare-all selects manifests by exact feature set.
+//! a `[fleet]` table while dwelling manifests reject all three keys, a
+//! manifest's `[tariff]` table is dwelling-only with a parseable zone and
+//! a loadable tariff file, and compare-all selects manifests by exact
+//! feature set.
 
 use std::collections::BTreeMap;
 
-use frame_golden::manifest::{
-    GoldenManifest, ManifestResolution, running_features, select_manifests,
-};
+use frame_golden::manifest::{GoldenManifest, running_features, select_manifests};
 
 /// The flat tariff the golden fixtures point at, as JSON, for the
 /// `[tariff]` file tests to corrupt.
@@ -43,11 +42,13 @@ fn manifest_text(kind: &str, features: &str, homes: usize) -> String {
     text.push_str("start_time = \"2023-01-01T00:00:00-07:00\"\n");
     text.push_str("duration = 86400\n");
     text.push_str("time_res = 3600\n");
-    text.push_str("output_verbosity = 2\n");
     text.push_str("master_seed = 0\n");
+    text.push_str(
+        "\n[[simulation.reports]]\nname = \"frame\"\nselection = { verbosity = 2 }\ndestination = \"memory\"\n",
+    );
     for bldg_id in 1..=homes {
         text.push_str(&format!(
-            "\n[[home]]\nbldg_id = {bldg_id}\nhpxml = \"building.xml\"\nschedule = \"schedule.csv\"\nweather = \"weather.epw\"\ninitialization_duration_s = 0\noverrides = {{}}\n"
+            "\n[[home]]\nbldg_id = {bldg_id}\nhpxml = \"building.xml\"\nschedule = \"schedule.csv\"\nweather = \"weather.epw\"\noverrides = {{}}\n"
         ));
     }
     text
@@ -103,7 +104,12 @@ fn manifest_dwelling_kind_requires_exactly_one_home() {
     let one_home = manifest_text("dwelling", "[]", 1);
     assert!(GoldenManifest::parse(std::path::Path::new("fixture.toml"), &one_home).is_ok());
 
-    let fleet_one = manifest_text("fleet", "[]", 1);
+    let fleet_one = manifest_text("fleet", "[]", 1)
+        .replace("overrides = {}", "weight = 1.0\noverrides = {}")
+        .replace(
+            "defaults = \"defaults\"",
+            "defaults = \"defaults\"\n\n[fleet]\nfrequency = \"hourly\"\nselection = \"verbosity-2\"\n",
+        );
     let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &fleet_one)
         .expect_err("a fleet manifest with one home must be rejected");
     assert!(
@@ -115,19 +121,19 @@ fn manifest_dwelling_kind_requires_exactly_one_home() {
         .replace("overrides = {}", "weight = 1.0\noverrides = {}")
         .replace(
             "defaults = \"defaults\"",
-            "defaults = \"defaults\"\nresolution = \"hourly\"",
+            "defaults = \"defaults\"\n\n[fleet]\nfrequency = \"hourly\"\nselection = \"verbosity-2\"\n",
         );
     let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &fleet_two).unwrap();
     assert_eq!(manifest.home.len(), 2);
 }
 
 #[test]
-fn manifest_fleet_requires_weight_and_resolution() {
-    // A resolution but no weight on any home: the error names the missing
-    // field.
+fn manifest_fleet_requires_weight_and_fleet_table() {
+    // A [fleet] table but no weight on any home: the error names the
+    // missing field.
     let missing_weight = manifest_text("fleet", "[]", 2).replace(
         "defaults = \"defaults\"",
-        "defaults = \"defaults\"\nresolution = \"hourly\"",
+        "defaults = \"defaults\"\n\n[fleet]\nfrequency = \"hourly\"\nselection = \"verbosity-2\"\n",
     );
     let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &missing_weight)
         .expect_err("a fleet home without a weight must be rejected");
@@ -136,32 +142,38 @@ fn manifest_fleet_requires_weight_and_resolution() {
         "the error names the field: {error}"
     );
 
-    // Weights without a resolution: the error names the missing field.
-    let missing_resolution =
+    // Weights without a [fleet] table: the error names the missing table.
+    let missing_fleet =
         manifest_text("fleet", "[]", 2).replace("overrides = {}", "weight = 1.0\noverrides = {}");
-    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &missing_resolution)
-        .expect_err("a fleet manifest without a resolution must be rejected");
+    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &missing_fleet)
+        .expect_err("a fleet manifest without a [fleet] table must be rejected");
     assert!(
-        error.to_string().contains("resolution"),
-        "the error names the field: {error}"
+        error.to_string().contains("fleet"),
+        "the error names the table: {error}"
     );
 
-    // Both keys present: the manifest parses and keeps the resolution.
+    // Both present: the manifest parses and keeps the frequency.
     let full = missing_weight.replace("overrides = {}", "weight = 1.0\noverrides = {}");
     let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &full).unwrap();
-    assert_eq!(manifest.resolution, Some(ManifestResolution::Hourly));
+    assert_eq!(
+        manifest.fleet.as_ref().expect("validated").frequency,
+        hares_io::Frequency::Hourly
+    );
 
-    // The fifteen-minute spelling round-trips too.
-    let fifteen = full.replace("resolution = \"hourly\"", "resolution = \"fifteen_min\"");
-    let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &fifteen).unwrap();
-    assert_eq!(manifest.resolution, Some(ManifestResolution::FifteenMin));
+    // The minutes spelling round-trips too.
+    let minutes = full.replace("frequency = \"hourly\"", "frequency = { minutes = 15 }");
+    let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &minutes).unwrap();
+    assert_eq!(
+        manifest.fleet.as_ref().expect("validated").frequency,
+        hares_io::Frequency::Minutes(15.try_into().expect("15"))
+    );
 
-    // A resolution string outside the enum is rejected.
-    let unknown = full.replace("resolution = \"hourly\"", "resolution = \"monthly\"");
+    // A frequency string outside the enum is rejected.
+    let unknown = full.replace("frequency = \"hourly\"", "frequency = \"every_blue_moon\"");
     let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &unknown)
-        .expect_err("an unknown resolution string must be rejected");
+        .expect_err("an unknown frequency string must be rejected");
     assert!(
-        error.to_string().contains("monthly"),
+        error.to_string().contains("every_blue_moon"),
         "the error names the unknown string: {error}"
     );
 }
@@ -182,20 +194,16 @@ fn manifest_dwelling_rejects_fleet_keys() {
         "the error states the kind rule: {error}"
     );
 
-    let resolution = manifest_text("dwelling", "[]", 1).replace(
+    let fleet_table = manifest_text("dwelling", "[]", 1).replace(
         "defaults = \"defaults\"",
-        "defaults = \"defaults\"\nresolution = \"hourly\"",
+        "defaults = \"defaults\"\n\n[fleet]\nfrequency = \"hourly\"\nselection = \"verbosity-2\"\n",
     );
-    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &resolution)
-        .expect_err("a dwelling manifest carrying a resolution must be rejected");
+    let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &fleet_table)
+        .expect_err("a dwelling manifest carrying a [fleet] table must be rejected");
     let error = error.to_string();
     assert!(
-        error.contains("resolution"),
-        "the error names the field: {error}"
-    );
-    assert!(
         error.contains("fleet"),
-        "the error states the kind rule: {error}"
+        "the error names the table: {error}"
     );
 }
 
@@ -203,7 +211,10 @@ fn manifest_dwelling_rejects_fleet_keys() {
 fn manifest_tariff_rejected_for_fleet() {
     let fleet = format!(
         "{}\n[tariff]\nfile = \"tariff.json\"\nzone = \"America/Denver\"\n",
-        manifest_text("fleet", "[]", 2)
+        manifest_text("fleet", "[]", 2).replace(
+            "defaults = \"defaults\"",
+            "defaults = \"defaults\"\n\n[fleet]\nfrequency = \"hourly\"\nselection = \"verbosity-2\"\n",
+        )
     );
     let error = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &fleet)
         .expect_err("a fleet manifest with a [tariff] table must be rejected");

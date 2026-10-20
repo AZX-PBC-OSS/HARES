@@ -3,13 +3,13 @@
 The published ``helics`` wheel ships no py.typed marker, so pyright cannot
 resolve any of its attributes. This stub models the HELICS 3.6.x Python API
 surface HARES uses. Handle types are the structural protocols defined in
-``ochre_next.helics._types`` so values flow between the real bindings and
+``hares.helics._types`` so values flow between the real bindings and
 the HARES wrappers without casts.
 """
 
 from typing import Protocol
 
-from ochre_next.helics._types import (
+from hares.helics._types import (
     HelicsBrokerLike,
     HelicsCoreLike,
     HelicsFederateInfoLike,

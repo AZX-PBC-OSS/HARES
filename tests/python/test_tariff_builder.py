@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from conftest import make_dwelling
-from ochre_next import ElectricTariff, GasTariff, GasTariffBuilder, TariffBuilder
+from hares import ElectricTariff, GasTariff, GasTariffBuilder, TariffBuilder
 
 
 def _make_simple_tou_builder() -> TariffBuilder:
@@ -17,9 +17,11 @@ def _make_simple_tou_builder() -> TariffBuilder:
             [{"day": "weekdays", "start_hour": 16, "end_hour": 21}],
             "summer",
         )
+        # The coverage base: every hour the on-peak window leaves
+        # unmatched must still price, or the tariff fails validation.
         .add_tou_period(
             "off-peak",
-            [{"day": "any", "start_minute": 0, "end_minute": 960}],
+            [{"day": "any", "start_minute": 0, "end_minute": 1440}],
             "all",
         )
         .add_energy_rate("on-peak", "summer", 0.35)
@@ -121,6 +123,18 @@ class TestBuilderChaining:
         b = b.add_energy_rate("peak", "all", 0.30)
         assert isinstance(b, TariffBuilder)
 
+        # The coverage base: every hour the peak window leaves unmatched
+        # must still price, or the tariff fails validation.
+        b = b.add_tou_period(
+            "off-peak",
+            [{"day": "any", "start_hour": 0, "end_hour": 24}],
+            "all",
+        )
+        assert isinstance(b, TariffBuilder)
+
+        b = b.add_energy_rate("off-peak", "all", 0.10)
+        assert isinstance(b, TariffBuilder)
+
         b = b.add_demand_rate(10.0, "all")
         assert isinstance(b, TariffBuilder)
 
@@ -152,6 +166,14 @@ class TestBuilderChaining:
                 "all",
             )
             .add_energy_rate("peak", "all", 0.25)
+            # The coverage base: every hour the peak window leaves
+            # unmatched must still price, or the tariff fails validation.
+            .add_tou_period(
+                "off-peak",
+                [{"day": "any", "start_hour": 0, "end_hour": 24}],
+                "all",
+            )
+            .add_energy_rate("off-peak", "all", 0.10)
             .set_fixed_charges(monthly_usd=10.0)
             .build()
         )

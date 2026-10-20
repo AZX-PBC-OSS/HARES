@@ -17,7 +17,7 @@ import pytest
 
 from conftest import HARES_DEFAULTS, ROOT, WEATHER
 
-from ochre_next import (
+from hares import (
     ASHPHeater,
     Dwelling,
     DwellingBlueprint,
@@ -25,7 +25,8 @@ from ochre_next import (
     GasWaterHeater,
     TanklessWaterHeater,
 )
-from ochre_next._hares import HaresEquipmentError
+from hares._hares import HaresEquipmentError
+from hares import SimulationConfig
 
 SAMPLES = ROOT / "vendors/OCHRE/test/OS-HPXML Sample Files"
 GAS_BACKUP_SAMPLE = str(
@@ -37,18 +38,7 @@ START = "2023-01-15T10:00:00-07:00"
 
 
 def make_sample_dwelling(hpxml: str, **kw):
-    dw = Dwelling.from_hpxml(
-        hpxml,
-        None,
-        WEATHER,
-        start_time=START,
-        duration_s=timedelta(hours=24),
-        time_res_s=900,
-        defaults_path=str(HARES_DEFAULTS),
-        bldg_id=1,
-        write_output=False,
-        **kw,
-    )
+    dw = Dwelling.from_hpxml(hpxml, None, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=1, config=SimulationConfig(start_time=START, duration=timedelta(hours=24), time_res=900), **kw)
     dw.initialize()
     return dw
 
@@ -97,13 +87,13 @@ class TestKnownFieldOverrides:
         baseline.step()
         enlarged = make_sample_dwelling(
             str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml"),
-            overrides={"PV": {"capacity_kw": 9.0}},
+            overrides={"PV": {"capacity_w": 9000}},
         )
         enlarged.step()
 
         def pv_generation_magnitude_kw(dw) -> float:
             gens = [
-                eq.core_output.electric_kw
+                eq.core_output.electric_w
                 for eq in dw.equipment()
                 if eq.descriptor.name.startswith("PV")
             ]
@@ -134,17 +124,7 @@ class TestTypedSpecBuilderConstructions:
     BASE_SAMPLE = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 
     def make_blueprint(self, hpxml: str):
-        bp = DwellingBlueprint.from_hpxml(
-            hpxml,
-            None,
-            WEATHER,
-            start_time=START,
-            duration_s=timedelta(hours=24),
-            time_res_s=900,
-            defaults_path=str(HARES_DEFAULTS),
-            bldg_id=1,
-            write_output=False,
-        )
+        bp = DwellingBlueprint.from_hpxml(hpxml, None, WEATHER, defaults=str(HARES_DEFAULTS), bldg_id=1, config=SimulationConfig(start_time=START, duration=timedelta(hours=24), time_res=900))
         return bp
 
     def build_and_step(self, hpxml: str, equipment, replace: str | None = None) -> None:
@@ -163,6 +143,9 @@ class TestTypedSpecBuilderConstructions:
                 name="Gas Water Heater",
                 autosize=False,
                 tank_volume_m3=0.3,
+                # Required at init (no efficiency default may stand in for
+                # the burner).
+                uniform_energy_factor=0.9,
                 heating_capacity_w=4000.0,
                 avg_water_draw_l_per_day=200.0,
                 zone_id=1,

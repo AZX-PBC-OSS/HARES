@@ -62,12 +62,20 @@ macro_rules! delegate_equipment {
                 self.$inner.load_state(state)
             }
 
+            fn reset_stochastic_state(&mut self) {
+                self.$inner.reset_stochastic_state()
+            }
+
             fn apply_signal(&mut self, signal: &hares_types::ControlSignal) -> $crate::Result<()> {
                 self.$inner.apply_signal(signal)
             }
 
             fn take_health_counts(&mut self) -> hares_types::EquipmentHealthCounts {
                 self.$inner.take_health_counts()
+            }
+
+            fn drain_warnings(&mut self, out: &mut Vec<hares_types::Warning>) {
+                self.$inner.drain_warnings(out)
             }
 
             fn rename(&mut self, name: String) {
@@ -92,6 +100,10 @@ macro_rules! delegate_equipment {
 
             fn ideal_target(&self) -> Option<(hares_types::ZoneId, f64)> {
                 self.$inner.ideal_target()
+            }
+
+            fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+                self.$inner.resolved_parameters()
             }
 
             fn island_source_available(&self) -> bool {

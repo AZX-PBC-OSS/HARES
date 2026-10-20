@@ -18,11 +18,11 @@ layer raised it.
 import pytest
 
 from conftest import make_dwelling
-from ochre_next import Battery
+from hares import Battery
 
 
 def attach_hostile_battery(**kwargs):
-    battery = Battery("HostileBattery", 10.0, **kwargs)
+    battery = Battery("HostileBattery", capacity_j=36000000, **kwargs)
     dwelling = make_dwelling()
     dwelling.add_battery(battery)
 

@@ -9,7 +9,7 @@ fn defaults_envelope_dir() -> std::path::PathBuf {
         .unwrap()
         .parent()
         .unwrap()
-        .join("defaults")
+        .join("python/hares/defaults")
         .join("envelope")
 }
 

@@ -9,13 +9,16 @@ internal_gains_sensible_fraction = 1.0
 # This matches E+ v9.6 BESTEST test reference value.
 internal_gains_radiant_fraction = 0.3
 
+# The warm-up: the [simulation] table's warmup field, the default
+# converging warm-up (the EnergyPlus criteria).
 [simulation]
 start_time = "2024-01-01T00:00:00-07:00"
-time_res_s = 3600
-duration_s = 31536000
-initialization_duration_s = 1814400  # 21 days warmup (7× concrete τ≈3 days for 99.9% decay)
-
+time_res = 3600
+duration = 31536000
+output_chunk_size = 10000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 129.6
 mass_multiplier = 1.0
@@ -230,9 +233,3 @@ attached_to_wall_id = "south-wall"
 [schedule]
 occupancy = 0.0
 occupants_present = false
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 10000
-master_seed = 0

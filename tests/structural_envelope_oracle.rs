@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn beopt_boundary_inputs() {
         let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
-        let defaults_path = project_root().join("defaults");
+        let defaults_path = project_root().join("python/hares/defaults");
         let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
 
         let n_zones = building.zones.len();
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn beopt_rc_network_topology() {
         let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
-        let defaults_path = project_root().join("defaults");
+        let defaults_path = project_root().join("python/hares/defaults");
         let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
 
         let n_zones = building.zones.len();
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn beopt_boundary_ua_diagnostics() {
         let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
-        let defaults_path = project_root().join("defaults");
+        let defaults_path = project_root().join("python/hares/defaults");
         let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
 
         let n_zones = building.zones.len();
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn beopt_ua_parity() {
         let building = parse_hpxml(&beopt_xml_path()).expect("parse BEopt HPXML");
-        let defaults_path = project_root().join("defaults");
+        let defaults_path = project_root().join("python/hares/defaults");
         let defaults = DefaultsStore::load(&defaults_path).expect("load defaults");
 
         let n_zones = building.zones.len();
@@ -729,6 +729,14 @@ mod tests {
             capacitance_j_k: f64,
             n_rc_nodes: usize,
             count: usize,
+            // The opaque-R precedence (the numeric-fixes ledger's
+            // opaque-R precedence entry):
+            // whether any member declares an assembly R-value, and the
+            // group's expected UA under it: the declared members'
+            // R_total is (declared - convention films) + the boundary's
+            // own films, the undeclared members' is the row's.
+            any_declared_r: bool,
+            expected_ua_w_k: f64,
         }
         let mut hares_by_name: std::collections::HashMap<String, AggregatedBoundary> =
             std::collections::HashMap::new();
@@ -745,15 +753,19 @@ mod tests {
                     .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| format!("Unknown({})", bd.id));
-            let entry = hares_by_name.entry(name).or_insert(AggregatedBoundary {
-                ua_w_k: 0.0,
-                area_m2: 0.0,
-                r_film_int_sum: 0.0,
-                r_film_ext_sum: 0.0,
-                capacitance_j_k: 0.0,
-                n_rc_nodes: 0,
-                count: 0,
-            });
+            let entry = hares_by_name
+                .entry(name.clone())
+                .or_insert(AggregatedBoundary {
+                    ua_w_k: 0.0,
+                    area_m2: 0.0,
+                    r_film_int_sum: 0.0,
+                    r_film_ext_sum: 0.0,
+                    capacitance_j_k: 0.0,
+                    n_rc_nodes: 0,
+                    count: 0,
+                    any_declared_r: false,
+                    expected_ua_w_k: 0.0,
+                });
             entry.ua_w_k += diag_bd.ua_w_per_k;
             entry.area_m2 += diag_bd.area_m2;
             entry.r_film_int_sum += diag_bd.r_film_int_m2_k_w * diag_bd.area_m2;
@@ -761,6 +773,22 @@ mod tests {
             entry.capacitance_j_k += diag_bd.capacitance_j_k;
             entry.n_rc_nodes += diag_bd.n_rc_nodes;
             entry.count += 1;
+            let declared_ua = bd.assembly_r_value_m2_k_w.map(|declared| {
+                let films_conv = defaults
+                    .envelope_lut()
+                    .map(|lut| lut.convention_films(&name))
+                    .unwrap_or(0.0);
+                diag_bd.area_m2
+                    / ((declared - films_conv)
+                        + diag_bd.r_film_int_m2_k_w
+                        + diag_bd.r_film_ext_m2_k_w)
+            });
+            if let Some(ua) = declared_ua {
+                entry.any_declared_r = true;
+                entry.expected_ua_w_k += ua;
+            } else {
+                entry.expected_ua_w_k += diag_bd.ua_w_per_k;
+            }
         }
 
         // Compare each OCHRE reference boundary against HARES
@@ -872,7 +900,30 @@ mod tests {
             // UA: ASHRAE Simple film R values differ from OCHRE's TARP at
             // actual ΔT, so per-boundary UA diverges for non-vertical surfaces.
             // 15% tolerance for individual boundaries.
-            if o_ua >= 1.0 && ua_pct.abs() > 15.0 {
+            //
+            // The opaque-R precedence (the numeric-fixes ledger's opaque-R
+            // precedence entry) is
+            // a deliberate deviation from OCHRE (docs/PHYSICS_DECISIONS.md
+            // records it): a boundary group whose members declare an
+            // assembly R-value resolves to the declaration, not to the
+            // OCHRE row the reference records, so its UA is pinned to the
+            // declaration's expectation and the reference's row-as-is UA
+            // no longer binds.
+            if h.any_declared_r {
+                let expected_pct = pct(h.ua_w_k, h.expected_ua_w_k);
+                eprintln!(
+                    "    the declared-R precedence: group declares assembly R; UA pinned to
+                     the declaration's \
+                     expectation {:.2} W/K ({:+.1}%)",
+                    h.expected_ua_w_k, expected_pct
+                );
+                if expected_pct.abs() > 0.1 {
+                    failures.push(format!(
+                        "{name} UA (the declared-R expectation): {:.2} vs {:.2} ({:+.1}%)",
+                        h.ua_w_k, h.expected_ua_w_k, expected_pct
+                    ));
+                }
+            } else if o_ua >= 1.0 && ua_pct.abs() > 15.0 {
                 failures.push(format!(
                     "{name} UA: {:.2} vs {:.2} ({:+.1}%)",
                     h.ua_w_k, o_ua, ua_pct

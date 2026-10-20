@@ -4,7 +4,10 @@ use chrono::{DateTime, Datelike, Duration, TimeZone};
 use chrono_tz::Tz;
 use hares_types::{BillingCycle, HaresError, season_contains_month};
 
-use crate::snapshot::{BillingStateSnapshot, DemandWindowSnapshot, datetime_from_string};
+use crate::snapshot::{
+    BillingPeriodSummarySnapshot, BillingStateSnapshot, DemandWindowSnapshot, LocalInstant,
+    SnapshotError,
+};
 use crate::types::{RatchetConfig, TieredBlock};
 
 struct DemandWindow {
@@ -108,7 +111,7 @@ impl DemandWindow {
 #[derive(Clone, Copy, Debug)]
 pub struct BillingStep {
     /// Net metered power this step (kW) (export negative).
-    pub net_power_kw: f64,
+    pub net_power_w: f64,
     /// Step length (s).
     pub dt_seconds: f64,
     /// Import price this step [USD/kWh].
@@ -120,28 +123,34 @@ pub struct BillingStep {
     /// Demand-window TOU period index.
     pub demand_period_idx: u16,
     /// EV import energy this step (kWh), tracked separately for CPP events.
-    pub ev_import_kwh: f64,
+    pub ev_import_j: f64,
 }
 
 pub struct BillingState {
     pub(crate) period_start: DateTime<Tz>,
     pub(crate) period_end: DateTime<Tz>,
+    /// The anniversary anchor: the first period's start day of month,
+    /// carried unchanged across the closes, so every period end is the
+    /// anchor day clamped to its month's length and a clamped boundary
+    /// never drifts the chain. A mid-run attach keeps the run's own
+    /// anchor: the containing-period walk starts from it.
+    pub(crate) anchor_day: u32,
     /// When the tariff became active within the open period: the period
     /// start for a period opened at its own boundary, or the attach or
     /// switch instant for the containing period a tariff joins mid-way. A
     /// period whose `active_since` is later than its start bills its fixed
     /// and demand charges prorated to the active span.
     pub(crate) active_since: DateTime<Tz>,
-    pub(crate) cumulative_import_kwh: f64,
-    pub(crate) cumulative_export_kwh: f64,
+    pub(crate) cumulative_import_j: f64,
+    pub(crate) cumulative_export_j: f64,
     pub(crate) cumulative_energy_cost_usd: f64,
     pub(crate) cumulative_export_credit_usd: f64,
-    pub(crate) peak_demand_kw: f64,
+    pub(crate) peak_demand_w: f64,
     /// Per-period peak demand (indexed by period name table index from evaluator).
-    pub(crate) period_peak_demand_kw: Vec<f64>,
-    pub(crate) prior_peaks_kw: VecDeque<f64>,
+    pub(crate) period_peak_demand_w: Vec<f64>,
+    pub(crate) prior_peaks_w: VecDeque<f64>,
     /// Per-period prior peak history for TOU demand ratchet.
-    prior_period_peaks: Vec<VecDeque<f64>>,
+    prior_period_peaks_w: Vec<VecDeque<f64>>,
     demand_window: DemandWindow,
     billing_cycle: BillingCycle,
     max_prior_periods: usize,
@@ -153,7 +162,7 @@ pub struct BillingState {
     /// sub-hour timesteps.
     last_cpp_hour: Option<usize>,
     /// Cumulative EV kWh tracked for observer / billing transparency.
-    pub(crate) cumulative_ev_kwh: f64,
+    pub(crate) cumulative_ev_j: f64,
     /// Steps folded into the open period since it opened. A period that has
     /// folded no step holds nothing billable: a tariff replacement over such
     /// a period closes nothing.
@@ -174,6 +183,21 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 }
 
 fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> {
+    period_end_from_anchor(start, start.day(), cycle)
+}
+
+/// The period end for the period starting at `start` whose cycle's
+/// anniversary anchor is `anchor_day`: the anchor day of the month after
+/// `start`'s, clamped to that month's length, at midnight in the start's
+/// zone. The anchor is the first period's start day, carried unchanged
+/// across the closes, so a clamped boundary never drifts the chain: a
+/// December 31 start closes January 31, February 29, March 31, April 30.
+/// A custom cycle adds its days.
+fn period_end_from_anchor(
+    start: DateTime<Tz>,
+    anchor_day: u32,
+    cycle: BillingCycle,
+) -> DateTime<Tz> {
     match cycle {
         BillingCycle::Monthly => {
             let (year, month) = if start.month() == 12 {
@@ -182,7 +206,7 @@ fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> 
                 (start.year(), start.month() + 1)
             };
             let max_day = days_in_month(year, month);
-            let day = start.day().min(max_day);
+            let day = anchor_day.min(max_day);
             start
                 .timezone()
                 .with_ymd_and_hms(year, month, day, 0, 0, 0)
@@ -196,20 +220,23 @@ fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> DateTime<Tz> 
 /// The start of the billing period containing `t`, walking the cycle's
 /// boundaries from `anchor`.
 ///
-/// The walk follows the same [`compute_period_end`] chain the stepping
-/// evaluator closes on: for an attach strictly inside a period, the period
-/// a mid-run tariff joins is the one a from-start run holds open at `t`.
-/// At an exact boundary the walk opens the new period, while a from-start
-/// run folds the boundary step into the old one; one step's attribution
-/// differs by design, every kWh billed exactly once.
+/// The walk follows the same anchored [`compute_period_end`] chain the
+/// stepping evaluator closes on: for an attach strictly inside a period,
+/// the period a mid-run tariff joins is the one a from-start run holds
+/// open at `t`. At an exact boundary the walk opens the new period, and a
+/// from-start run books the boundary step to that new period too: its
+/// close fires on the fold whose end reaches the boundary, before the
+/// boundary step's own fold. Both routes agree; every kWh is billed
+/// exactly once.
 pub(crate) fn containing_period_start(
     anchor: DateTime<Tz>,
     t: DateTime<Tz>,
     cycle: BillingCycle,
 ) -> DateTime<Tz> {
+    let anchor_day = anchor.day();
     let mut start = anchor;
     loop {
-        let end = compute_period_end(start, cycle);
+        let end = period_end_from_anchor(start, anchor_day, cycle);
         // A degenerate cycle whose period end does not advance would loop
         // forever; treat such a period as its own container.
         if end <= start || end > t {
@@ -234,6 +261,7 @@ impl BillingState {
             1
         };
         let capacity = capacity.max(1);
+        let anchor_day = period_start.day();
         let period_end = compute_period_end(period_start, billing_cycle);
         let max_prior_periods = if max_lookback_months == 0 {
             0
@@ -249,15 +277,16 @@ impl BillingState {
         Self {
             period_start,
             period_end,
+            anchor_day,
             active_since: period_start,
-            cumulative_import_kwh: 0.0,
-            cumulative_export_kwh: 0.0,
+            cumulative_import_j: 0.0,
+            cumulative_export_j: 0.0,
             cumulative_energy_cost_usd: 0.0,
             cumulative_export_credit_usd: 0.0,
-            peak_demand_kw: 0.0,
-            period_peak_demand_kw: vec![0.0; num_tou_periods],
-            prior_peaks_kw: VecDeque::with_capacity(max_prior_periods),
-            prior_period_peaks: (0..num_tou_periods)
+            peak_demand_w: 0.0,
+            period_peak_demand_w: vec![0.0; num_tou_periods],
+            prior_peaks_w: VecDeque::with_capacity(max_prior_periods),
+            prior_period_peaks_w: (0..num_tou_periods)
                 .map(|_| VecDeque::with_capacity(max_prior_periods))
                 .collect(),
             demand_window: DemandWindow::new(capacity),
@@ -265,7 +294,7 @@ impl BillingState {
             max_prior_periods,
             running_cpp_event_hours: 0,
             last_cpp_hour: None,
-            cumulative_ev_kwh: 0.0,
+            cumulative_ev_j: 0.0,
             steps_in_period: 0,
         }
     }
@@ -275,31 +304,38 @@ impl BillingState {
     /// by value adds no allocation in the ~525k-call/year simulation loop.
     pub fn update(&mut self, step: BillingStep) {
         let BillingStep {
-            net_power_kw,
+            net_power_w,
             dt_seconds,
             import_price,
             export_price,
             period_idx,
             demand_period_idx,
-            ev_import_kwh,
+            ev_import_j,
         } = step;
-        let import_kwh = net_power_kw.max(0.0) * dt_seconds / 3600.0;
-        let export_kwh = (-net_power_kw).max(0.0) * dt_seconds / 3600.0;
-        self.cumulative_import_kwh += import_kwh;
-        self.cumulative_export_kwh += export_kwh;
+        use uom::si::energy::joule;
+        use uom::si::energy::kilowatt_hour;
+        use uom::si::f64::Energy;
+        // The state accumulates joules; the price converts once here (the
+        // tariff's rates are per kWh, external data).
+        let import_j = net_power_w.max(0.0) * dt_seconds;
+        let export_j = (-net_power_w).max(0.0) * dt_seconds;
+        self.cumulative_import_j += import_j;
+        self.cumulative_export_j += export_j;
+        let import_kwh = Energy::new::<joule>(import_j).get::<kilowatt_hour>();
+        let export_kwh = Energy::new::<joule>(export_j).get::<kilowatt_hour>();
         self.cumulative_energy_cost_usd += import_kwh * import_price;
         self.cumulative_export_credit_usd += export_kwh * export_price;
-        self.cumulative_ev_kwh += ev_import_kwh;
+        self.cumulative_ev_j += ev_import_j;
         self.steps_in_period += 1;
-        self.demand_window.push(net_power_kw.max(0.0));
+        self.demand_window.push(net_power_w.max(0.0));
         if let Some(avg) = self.demand_window.average_full() {
-            self.peak_demand_kw = self.peak_demand_kw.max(avg);
-            if let Some(slot) = self.period_peak_demand_kw.get_mut(period_idx as usize) {
+            self.peak_demand_w = self.peak_demand_w.max(avg);
+            if let Some(slot) = self.period_peak_demand_w.get_mut(period_idx as usize) {
                 *slot = slot.max(avg);
             }
             if demand_period_idx != period_idx
                 && let Some(slot) = self
-                    .period_peak_demand_kw
+                    .period_peak_demand_w
                     .get_mut(demand_period_idx as usize)
             {
                 *slot = slot.max(avg);
@@ -320,10 +356,10 @@ impl BillingState {
                 self.demand_window.samples.len()
             );
             debug_assert!(
-                self.period_peak_demand_kw.len() == self.prior_period_peaks.len(),
-                "period_peak_demand_kw len {} != prior_period_peaks len {}",
-                self.period_peak_demand_kw.len(),
-                self.prior_period_peaks.len()
+                self.period_peak_demand_w.len() == self.prior_period_peaks_w.len(),
+                "period_peak_demand_w len {} != prior_period_peaks_w len {}",
+                self.period_peak_demand_w.len(),
+                self.prior_period_peaks_w.len()
             );
         }
     }
@@ -336,16 +372,16 @@ impl BillingState {
         self.period_end
     }
 
-    pub fn cumulative_import_kwh(&self) -> f64 {
-        self.cumulative_import_kwh
+    pub fn cumulative_import_j(&self) -> f64 {
+        self.cumulative_import_j
     }
 
-    pub fn cumulative_export_kwh(&self) -> f64 {
-        self.cumulative_export_kwh
+    pub fn cumulative_export_j(&self) -> f64 {
+        self.cumulative_export_j
     }
 
-    pub fn peak_demand_kw(&self) -> f64 {
-        self.peak_demand_kw
+    pub fn peak_demand_w(&self) -> f64 {
+        self.peak_demand_w
     }
 
     pub fn cumulative_energy_cost_usd(&self) -> f64 {
@@ -356,8 +392,8 @@ impl BillingState {
         self.cumulative_export_credit_usd
     }
 
-    pub fn cumulative_ev_kwh(&self) -> f64 {
-        self.cumulative_ev_kwh
+    pub fn cumulative_ev_j(&self) -> f64 {
+        self.cumulative_ev_j
     }
 
     pub fn running_cpp_event_hours(&self) -> u32 {
@@ -396,11 +432,11 @@ impl BillingState {
 
     /// Coincident peak with a caller-supplied ratchet (used per demand rate).
     pub fn effective_peak_with_ratchet(&self, ratchet: &Option<RatchetConfig>) -> f64 {
-        apply_ratchet(self.peak_demand_kw, &self.prior_peaks_kw, ratchet)
+        apply_ratchet(self.peak_demand_w, &self.prior_peaks_w, ratchet)
     }
 
     pub fn peak_for_period(&self, period_idx: u16) -> f64 {
-        self.period_peak_demand_kw
+        self.period_peak_demand_w
             .get(period_idx as usize)
             .copied()
             .unwrap_or(0.0)
@@ -413,7 +449,7 @@ impl BillingState {
     ) -> f64 {
         let current = self.peak_for_period(period_idx);
         let priors = self
-            .prior_period_peaks
+            .prior_period_peaks_w
             .get(period_idx as usize)
             .map(|d| d as &VecDeque<f64>);
         match priors {
@@ -423,12 +459,12 @@ impl BillingState {
     }
 
     pub fn reset(&mut self, new_period_start: DateTime<Tz>) {
-        self.prior_peaks_kw.push_back(self.peak_demand_kw);
-        if self.prior_peaks_kw.len() > self.max_prior_periods {
-            self.prior_peaks_kw.pop_front();
+        self.prior_peaks_w.push_back(self.peak_demand_w);
+        if self.prior_peaks_w.len() > self.max_prior_periods {
+            self.prior_peaks_w.pop_front();
         }
-        for (i, peak) in self.period_peak_demand_kw.iter().enumerate() {
-            if let Some(deque) = self.prior_period_peaks.get_mut(i) {
+        for (i, peak) in self.period_peak_demand_w.iter().enumerate() {
+            if let Some(deque) = self.prior_period_peaks_w.get_mut(i) {
                 deque.push_back(*peak);
                 if deque.len() > self.max_prior_periods {
                     deque.pop_front();
@@ -436,16 +472,17 @@ impl BillingState {
             }
         }
         self.period_start = new_period_start;
-        self.period_end = compute_period_end(new_period_start, self.billing_cycle);
+        self.period_end =
+            period_end_from_anchor(new_period_start, self.anchor_day, self.billing_cycle);
         self.active_since = new_period_start;
-        self.cumulative_import_kwh = 0.0;
-        self.cumulative_export_kwh = 0.0;
+        self.cumulative_import_j = 0.0;
+        self.cumulative_export_j = 0.0;
         self.cumulative_energy_cost_usd = 0.0;
         self.cumulative_export_credit_usd = 0.0;
-        self.peak_demand_kw = 0.0;
-        self.period_peak_demand_kw.fill(0.0);
+        self.peak_demand_w = 0.0;
+        self.period_peak_demand_w.fill(0.0);
         self.demand_window.reset();
-        self.cumulative_ev_kwh = 0.0;
+        self.cumulative_ev_j = 0.0;
         self.steps_in_period = 0;
     }
 
@@ -453,18 +490,19 @@ impl BillingState {
     /// counterpart of [`BillingState::from_snapshot`].
     pub(crate) fn snapshot(&self) -> BillingStateSnapshot {
         BillingStateSnapshot {
-            period_start: self.period_start.to_rfc3339(),
-            period_end: self.period_end.to_rfc3339(),
-            active_since: self.active_since.to_rfc3339(),
-            cumulative_import_kwh: self.cumulative_import_kwh,
-            cumulative_export_kwh: self.cumulative_export_kwh,
+            period_start: LocalInstant::new(&self.period_start),
+            period_end: LocalInstant::new(&self.period_end),
+            anchor_day: self.anchor_day,
+            active_since: LocalInstant::new(&self.active_since),
+            cumulative_import_j: self.cumulative_import_j,
+            cumulative_export_j: self.cumulative_export_j,
             cumulative_energy_cost_usd: self.cumulative_energy_cost_usd,
             cumulative_export_credit_usd: self.cumulative_export_credit_usd,
-            peak_demand_kw: self.peak_demand_kw,
-            period_peak_demand_kw: self.period_peak_demand_kw.clone(),
-            prior_peaks_kw: self.prior_peaks_kw.iter().copied().collect(),
-            prior_period_peaks: self
-                .prior_period_peaks
+            peak_demand_w: self.peak_demand_w,
+            period_peak_demand_w: self.period_peak_demand_w.clone(),
+            prior_peaks_w: self.prior_peaks_w.iter().copied().collect(),
+            prior_period_peaks_w: self
+                .prior_period_peaks_w
                 .iter()
                 .map(|peaks| peaks.iter().copied().collect())
                 .collect(),
@@ -473,48 +511,49 @@ impl BillingState {
             max_prior_periods: self.max_prior_periods,
             running_cpp_event_hours: self.running_cpp_event_hours,
             last_cpp_hour: self.last_cpp_hour,
-            cumulative_ev_kwh: self.cumulative_ev_kwh,
+            cumulative_ev_j: self.cumulative_ev_j,
             steps_in_period: self.steps_in_period,
         }
     }
 
     /// Rebuilds a billing state from its snapshot. `tz` is the evaluator's
-    /// time zone; the snapshot's timestamps parse into it. `num_tou_periods`
-    /// is the live period name table's length: the per-period peak vectors
-    /// must match it, or the snapshot was written against a different
-    /// tariff and is rejected.
+    /// time zone; the snapshot's bounds resolve in it as local instants.
+    /// `num_tou_periods` is the live period name table's length: the
+    /// per-period peak vectors must match it, or the snapshot was written
+    /// against a different tariff and is rejected.
     pub(crate) fn from_snapshot(
         snapshot: BillingStateSnapshot,
         tz: Tz,
         num_tou_periods: usize,
     ) -> Result<Self, HaresError> {
-        let period_start = datetime_from_string(tz, "period_start", &snapshot.period_start)?;
-        let period_end = datetime_from_string(tz, "period_end", &snapshot.period_end)?;
-        let active_since = datetime_from_string(tz, "active_since", &snapshot.active_since)?;
-        if snapshot.period_peak_demand_kw.len() != num_tou_periods
-            || snapshot.prior_period_peaks.len() != num_tou_periods
+        let period_start = snapshot.period_start.resolve(tz)?;
+        let period_end = snapshot.period_end.resolve(tz)?;
+        let active_since = snapshot.active_since.resolve(tz)?;
+        if snapshot.period_peak_demand_w.len() != num_tou_periods
+            || snapshot.prior_period_peaks_w.len() != num_tou_periods
         {
             return Err(HaresError::Tariff(format!(
                 "tariff snapshot peak vectors ({} per-period peaks, {} ratchet histories) \
                  do not match the tariff's {} TOU periods",
-                snapshot.period_peak_demand_kw.len(),
-                snapshot.prior_period_peaks.len(),
+                snapshot.period_peak_demand_w.len(),
+                snapshot.prior_period_peaks_w.len(),
                 num_tou_periods
             )));
         }
         Ok(Self {
             period_start,
             period_end,
+            anchor_day: snapshot.anchor_day,
             active_since,
-            cumulative_import_kwh: snapshot.cumulative_import_kwh,
-            cumulative_export_kwh: snapshot.cumulative_export_kwh,
+            cumulative_import_j: snapshot.cumulative_import_j,
+            cumulative_export_j: snapshot.cumulative_export_j,
             cumulative_energy_cost_usd: snapshot.cumulative_energy_cost_usd,
             cumulative_export_credit_usd: snapshot.cumulative_export_credit_usd,
-            peak_demand_kw: snapshot.peak_demand_kw,
-            period_peak_demand_kw: snapshot.period_peak_demand_kw,
-            prior_peaks_kw: snapshot.prior_peaks_kw.into_iter().collect(),
-            prior_period_peaks: snapshot
-                .prior_period_peaks
+            peak_demand_w: snapshot.peak_demand_w,
+            period_peak_demand_w: snapshot.period_peak_demand_w,
+            prior_peaks_w: snapshot.prior_peaks_w.into_iter().collect(),
+            prior_period_peaks_w: snapshot
+                .prior_period_peaks_w
                 .into_iter()
                 .map(|peaks| peaks.into_iter().collect())
                 .collect(),
@@ -523,7 +562,7 @@ impl BillingState {
             max_prior_periods: snapshot.max_prior_periods,
             running_cpp_event_hours: snapshot.running_cpp_event_hours,
             last_cpp_hour: snapshot.last_cpp_hour,
-            cumulative_ev_kwh: snapshot.cumulative_ev_kwh,
+            cumulative_ev_j: snapshot.cumulative_ev_j,
             steps_in_period: snapshot.steps_in_period,
         })
     }
@@ -648,6 +687,64 @@ impl BillingPeriodSummary {
             total_export_kwh,
         }
     }
+
+    /// The closed period's summary as a checkpoint section; the
+    /// counterpart of [`BillingPeriodSummary::from_snapshot`].
+    #[must_use]
+    pub fn snapshot(&self) -> BillingPeriodSummarySnapshot {
+        BillingPeriodSummarySnapshot {
+            zone: self.period_start.timezone().name().to_string(),
+            period_start: LocalInstant::new(&self.period_start),
+            period_end: LocalInstant::new(&self.period_end),
+            energy_charge_usd: self.energy_charge_usd,
+            demand_charge_usd: self.demand_charge_usd,
+            fixed_charge_usd: self.fixed_charge_usd,
+            export_credit_usd: self.export_credit_usd,
+            net_bill_usd: self.net_bill_usd,
+            peak_demand_kw: self.peak_demand_kw,
+            total_import_kwh: self.total_import_kwh,
+            total_export_kwh: self.total_export_kwh,
+        }
+    }
+
+    /// Rebuilds a closed period's summary from its checkpoint section.
+    ///
+    /// The snapshot's zone must be `tz`, the zone of the evaluator the
+    /// summary restores beside: a summary written in another zone is
+    /// [`SnapshotError::ZoneMismatch`], a zone name that parses to no IANA
+    /// zone [`SnapshotError::UnknownZone`], and a bound whose wall clock
+    /// the zone skips [`SnapshotError::UnresolvedLocalInstant`].
+    ///
+    /// # Errors
+    ///
+    /// The three snapshot errors above.
+    pub fn from_snapshot(
+        snapshot: BillingPeriodSummarySnapshot,
+        tz: Tz,
+    ) -> Result<Self, SnapshotError> {
+        let zone: Tz = snapshot
+            .zone
+            .parse()
+            .map_err(|_| SnapshotError::UnknownZone(snapshot.zone.clone()))?;
+        if zone.name() != tz.name() {
+            return Err(SnapshotError::ZoneMismatch {
+                snapshot_zone: zone.name().to_string(),
+                live_zone: tz.name().to_string(),
+            });
+        }
+        Ok(Self {
+            period_start: snapshot.period_start.resolve(tz)?,
+            period_end: snapshot.period_end.resolve(tz)?,
+            energy_charge_usd: snapshot.energy_charge_usd,
+            demand_charge_usd: snapshot.demand_charge_usd,
+            fixed_charge_usd: snapshot.fixed_charge_usd,
+            export_credit_usd: snapshot.export_credit_usd,
+            net_bill_usd: snapshot.net_bill_usd,
+            peak_demand_kw: snapshot.peak_demand_kw,
+            total_import_kwh: snapshot.total_import_kwh,
+            total_export_kwh: snapshot.total_export_kwh,
+        })
+    }
 }
 
 fn apply_ratchet(
@@ -680,19 +777,19 @@ mod tests {
 
     /// A `BillingStep` on TOU period 0 with no EV import; the common test case.
     fn step(
-        net_power_kw: f64,
+        net_power_w: f64,
         dt_seconds: f64,
         import_price: f64,
         export_price: f64,
     ) -> BillingStep {
         BillingStep {
-            net_power_kw,
+            net_power_w,
             dt_seconds,
             import_price,
             export_price,
             period_idx: 0,
             demand_period_idx: 0,
-            ev_import_kwh: 0.0,
+            ev_import_j: 0.0,
         }
     }
 
@@ -719,21 +816,22 @@ mod tests {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0);
         // 15-min window with 5-min interval = 3 samples
-        // Push sequence: 2, 4, 6 -> avg 4.0, then 8, 10, 12 -> avg 10.0
-        for &kw in &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0] {
-            state.update(step(kw, 300.0, 0.0, 0.0));
+        // Push sequence: 2000, 4000, 6000 -> avg 4000, then 8000, 10000,
+        // 12000 -> avg 10000 (the window's samples are W).
+        for &w in &[2000.0, 4000.0, 6000.0, 8000.0, 10_000.0, 12_000.0] {
+            state.update(step(w, 300.0, 0.0, 0.0));
         }
-        assert!((state.peak_demand_kw - 10.0).abs() < 1e-10);
+        assert!((state.peak_demand_w - 10_000.0).abs() < 1e-10);
     }
 
     #[test]
     fn billing_state_energy_accumulation() {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0);
-        // Constant 1 kW for 1 hour (one step of 3600s)
-        state.update(step(1.0, 3600.0, 0.10, 0.0));
-        assert!((state.cumulative_import_kwh - 1.0).abs() < 1e-10);
-        assert!((state.cumulative_export_kwh).abs() < 1e-10);
+        // Constant 1 kW for 1 hour (one step of 3600s): 3.6e6 J, 0.10 $/kWh.
+        state.update(step(1000.0, 3600.0, 0.10, 0.0));
+        assert!((state.cumulative_import_j - 3.6e6).abs() < 1e-6);
+        assert!((state.cumulative_export_j).abs() < 1e-10);
         assert!((state.cumulative_energy_cost_usd - 0.10).abs() < 1e-10);
     }
 
@@ -741,10 +839,10 @@ mod tests {
     fn billing_state_export_accumulation() {
         let mut state =
             BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0);
-        // Constant -2 kW for 1 hour
-        state.update(step(-2.0, 3600.0, 0.10, 0.05));
-        assert!((state.cumulative_import_kwh).abs() < 1e-10);
-        assert!((state.cumulative_export_kwh - 2.0).abs() < 1e-10);
+        // Constant -2 kW for 1 hour: 7.2e6 J exported.
+        state.update(step(-2000.0, 3600.0, 0.10, 0.05));
+        assert!((state.cumulative_import_j).abs() < 1e-10);
+        assert!((state.cumulative_export_j - 7.2e6).abs() < 1e-6);
         assert!((state.cumulative_export_credit_usd - 0.10).abs() < 1e-10);
     }
 
@@ -767,17 +865,17 @@ mod tests {
             0,
         );
         state.update(step(5.0, 3600.0, 0.10, 0.0));
-        assert!(state.cumulative_import_kwh > 0.0);
-        assert!(state.peak_demand_kw > 0.0);
+        assert!(state.cumulative_import_j > 0.0);
+        assert!(state.peak_demand_w > 0.0);
 
         state.reset(make_dt(2025, 2, 1));
-        assert!((state.cumulative_import_kwh).abs() < 1e-10);
-        assert!((state.cumulative_export_kwh).abs() < 1e-10);
+        assert!((state.cumulative_import_j).abs() < 1e-10);
+        assert!((state.cumulative_export_j).abs() < 1e-10);
         assert!((state.cumulative_energy_cost_usd).abs() < 1e-10);
-        assert!((state.peak_demand_kw).abs() < 1e-10);
+        assert!((state.peak_demand_w).abs() < 1e-10);
         assert_eq!(state.period_start, make_dt(2025, 2, 1));
         assert_eq!(state.period_end, make_dt(2025, 3, 1));
-        assert_eq!(state.prior_peaks_kw.len(), 1);
+        assert_eq!(state.prior_peaks_w.len(), 1);
     }
 
     #[test]
@@ -795,7 +893,7 @@ mod tests {
             0,
         );
         // Simulate a high prior peak
-        state.prior_peaks_kw.push_back(10.0);
+        state.prior_peaks_w.push_back(10.0);
         // Current peak is only 2 kW
         state.update(step(2.0, 3600.0, 0.0, 0.0));
         let effective = state.effective_peak_with_ratchet(&Some(ratchet));
@@ -817,7 +915,7 @@ mod tests {
             ratchet.lookback_months.into(),
             0,
         );
-        state.prior_peaks_kw.push_back(5.0);
+        state.prior_peaks_w.push_back(5.0);
         for _ in 0..3 {
             state.update(step(10.0, 300.0, 0.0, 0.0));
         }
@@ -837,7 +935,7 @@ mod tests {
             0,
         );
         for month in 1..=13u32 {
-            state.peak_demand_kw = month as f64;
+            state.peak_demand_w = month as f64;
             let next_start = if month <= 11 {
                 make_dt(2025, month + 1, 1)
             } else {
@@ -845,9 +943,9 @@ mod tests {
             };
             state.reset(next_start);
         }
-        assert_eq!(state.prior_peaks_kw.len(), 12);
+        assert_eq!(state.prior_peaks_w.len(), 12);
         // Oldest (1.0) should have been evicted; front should be 2.0
-        assert!((state.prior_peaks_kw[0] - 2.0).abs() < 1e-10);
+        assert!((state.prior_peaks_w[0] - 2.0).abs() < 1e-10);
     }
 
     #[test]
@@ -866,7 +964,7 @@ mod tests {
         );
         // Add 6 months of peaks: [5, 10, 15, 20, 25, 30]
         for peak in [5.0, 10.0, 15.0, 20.0, 25.0, 30.0] {
-            state.prior_peaks_kw.push_back(peak);
+            state.prior_peaks_w.push_back(peak);
         }
         // Lookback 3 → considers [20.0, 25.0, 30.0], max = 30.0
         // Effective = max(2.0, 0.85 * 30.0) = 25.5
@@ -918,6 +1016,100 @@ mod tests {
         assert_eq!(end.day(), 29);
     }
 
+    // The anniversary anchor does not drift: each period end is the anchor
+    // day clamped to the month's length, carried across the closes, so a
+    // leap year whose billing starts on the 29th, 30th or 31st keeps its
+    // anchor after every clamped boundary.
+    #[test]
+    fn period_ends_keep_the_anchor_day_across_the_leap_year() {
+        for (start_day, expected) in [
+            (
+                29u32,
+                [
+                    (2024, 1u32, 29u32),
+                    (2024, 2, 29),
+                    (2024, 3, 29),
+                    (2024, 4, 29),
+                ],
+            ),
+            (
+                30,
+                [(2024, 1, 30), (2024, 2, 29), (2024, 3, 30), (2024, 4, 30)],
+            ),
+            (
+                31,
+                [(2024, 1, 31), (2024, 2, 29), (2024, 3, 31), (2024, 4, 30)],
+            ),
+        ] {
+            let mut state = BillingState::new(
+                New_York
+                    .with_ymd_and_hms(2023, 12, start_day, 0, 0, 0)
+                    .unwrap(),
+                BillingCycle::Monthly,
+                15,
+                3600,
+                0,
+                0,
+            );
+            for (year, month, day) in expected {
+                let expected_end = New_York
+                    .with_ymd_and_hms(year, month, day, 0, 0, 0)
+                    .unwrap();
+                assert_eq!(
+                    state.period_end, expected_end,
+                    "a December {start_day} start's chain closes on the anchor day clamped \
+                     to the month's length: expected {expected_end}, got {}",
+                    state.period_end
+                );
+                state.reset(state.period_end);
+            }
+        }
+    }
+
+    // The containing-period walk follows the anchored chain the closes
+    // follow: the anchor day is carried through the clamped boundaries, so
+    // a mid-run tariff joins the period a from-start run holds open.
+    #[test]
+    fn containing_period_walk_keeps_the_anchor_day() {
+        let anchor = New_York.with_ymd_and_hms(2023, 12, 31, 0, 0, 0).unwrap();
+        // Inside the second period, whose start is the clamped boundary.
+        assert_eq!(
+            containing_period_start(
+                anchor,
+                New_York.with_ymd_and_hms(2024, 3, 15, 0, 0, 0).unwrap(),
+                BillingCycle::Monthly
+            ),
+            New_York.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap()
+        );
+        // Inside the third: the anchor returned to the 31st after February.
+        assert_eq!(
+            containing_period_start(
+                anchor,
+                New_York.with_ymd_and_hms(2024, 4, 15, 0, 0, 0).unwrap(),
+                BillingCycle::Monthly
+            ),
+            New_York.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap()
+        );
+    }
+
+    // The anchor travels the checkpoint: a state standing on a clamped
+    // boundary restores with its anchor day, and its next close keeps the
+    // anchor instead of restarting from the clamped start's day.
+    #[test]
+    fn billing_state_snapshot_carries_the_anchor_day() {
+        let mut state =
+            BillingState::new(make_dt(2025, 1, 31), BillingCycle::Monthly, 15, 3600, 0, 0);
+        assert_eq!(state.period_end, make_dt(2025, 2, 28));
+        state.reset(state.period_end);
+
+        let snapshot = state.snapshot();
+        let mut restored =
+            BillingState::from_snapshot(snapshot, New_York, 0).expect("the billing state restores");
+        assert_eq!(restored.period_end, make_dt(2025, 3, 31));
+        restored.reset(restored.period_end);
+        assert_eq!(restored.period_end, make_dt(2025, 4, 30));
+    }
+
     // The containing-period walk follows the same boundary chain the closes
     // follow: a mid-run tariff joins exactly the period a from-start run
     // holds open at the attach instant.
@@ -956,7 +1148,7 @@ mod tests {
         );
     }
 
-    // H1: Per-period ratchet with populated prior_period_peaks applies correctly.
+    // H1: Per-period ratchet with populated prior_period_peaks_w applies correctly.
     #[test]
     fn billing_per_period_ratchet_applied() {
         let ratchet = RatchetConfig {
@@ -976,22 +1168,22 @@ mod tests {
         // Push three billing periods of history for period 1 via reset().
         // Period 1 peaks: 10.0, 15.0, 20.0 → max of last 3 = 20.0.
         for peak in [10.0_f64, 15.0, 20.0] {
-            state.period_peak_demand_kw[1] = peak;
+            state.period_peak_demand_w[1] = peak;
             let next = state.period_end;
             state.reset(next);
         }
 
         // Current period: push a single 5 kW reading (instant window, 1-sample average = 5.0).
         state.update(BillingStep {
-            net_power_kw: 5.0,
+            net_power_w: 5.0,
             dt_seconds: 3600.0,
             import_price: 0.0,
             export_price: 0.0,
             period_idx: 1,
             demand_period_idx: 1,
-            ev_import_kwh: 0.0,
+            ev_import_j: 0.0,
         });
-        assert!((state.period_peak_demand_kw[1] - 5.0).abs() < 1e-10);
+        assert!((state.period_peak_demand_w[1] - 5.0).abs() < 1e-10);
 
         // effective_peak_for_period(1) = max(5.0, 0.85 * 20.0) = max(5.0, 17.0) = 17.0
         let effective = state.effective_peak_for_period(1, &Some(ratchet));
@@ -1001,7 +1193,7 @@ mod tests {
         );
     }
 
-    // M4: BillingState with Custom(14) and lookback_months=11 caps prior_peaks_kw correctly.
+    // M4: BillingState with Custom(14) and lookback_months=11 caps prior_peaks_w correctly.
     #[test]
     fn billing_custom_cycle_ratchet_max_prior_periods() {
         let ratchet = RatchetConfig {
@@ -1021,18 +1213,18 @@ mod tests {
             0,
         );
 
-        // Simulate 30 billing periods; prior_peaks_kw must not exceed the cap.
+        // Simulate 30 billing periods; prior_peaks_w must not exceed the cap.
         for _ in 0..30 {
-            state.peak_demand_kw = 5.0;
+            state.peak_demand_w = 5.0;
             let next = state.period_end;
             state.reset(next);
         }
 
         assert_eq!(
-            state.prior_peaks_kw.len(),
+            state.prior_peaks_w.len(),
             expected_cap,
-            "prior_peaks_kw should be capped at {expected_cap}, got {}",
-            state.prior_peaks_kw.len()
+            "prior_peaks_w should be capped at {expected_cap}, got {}",
+            state.prior_peaks_w.len()
         );
     }
 
@@ -1220,9 +1412,9 @@ mod tests {
         // Push a spike in the first post-reset step (count=1, window not full).
         state.update(step(100.0, 300.0, 0.0, 0.0));
         assert!(
-            state.peak_demand_kw.abs() < 1e-10,
+            state.peak_demand_w.abs() < 1e-10,
             "spike in partial window should not set peak; got {}",
-            state.peak_demand_kw
+            state.peak_demand_w
         );
         // Push two more normal readings to fill the window.
         state.update(step(1.0, 300.0, 0.0, 0.0));
@@ -1230,7 +1422,7 @@ mod tests {
         // Window now contains [100, 1, 1] → avg = 34.0. The spike is part of the
         // full-window average, so peak reflects the 15-min sliding window average.
         // Window [100, 1, 1] → (100 + 1 + 1) / 3 = 34.0.
-        let peak = state.peak_demand_kw;
+        let peak = state.peak_demand_w;
         assert!(
             (peak - 34.0).abs() < 1e-10,
             "after window fills, peak should be 34.0; got {peak}"
@@ -1247,18 +1439,18 @@ mod tests {
             state.update(step(10.0, 300.0, 0.0, 0.0));
         }
         assert!(
-            (state.peak_demand_kw - 10.0).abs() < 1e-10,
+            (state.peak_demand_w - 10.0).abs() < 1e-10,
             "expected peak 10.0, got {}",
-            state.peak_demand_kw
+            state.peak_demand_w
         );
         // Push three more reads of 20 kW → window fills with [20,20,20], peak = 20.
         for _ in 0..3 {
             state.update(step(20.0, 300.0, 0.0, 0.0));
         }
         assert!(
-            (state.peak_demand_kw - 20.0).abs() < 1e-10,
+            (state.peak_demand_w - 20.0).abs() < 1e-10,
             "expected peak 20.0, got {}",
-            state.peak_demand_kw
+            state.peak_demand_w
         );
     }
 }

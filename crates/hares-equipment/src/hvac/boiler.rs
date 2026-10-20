@@ -6,10 +6,11 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
-    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
-    ExecutionStage, FluidDomainPayload, FluidNodeId, FluidType, FuelPower, FuelType, HaresError,
-    HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
-    Telemetry, TelemetryField, ThermalCategory,
+    CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
+    EquipmentHealthCounts, EquipmentId, ExecutionStage, FluidDomainPayload, FluidNodeId, FluidType,
+    FuelPower, FuelType, HaresError, HeatTransferDirection, LoopId, OperatingMode,
+    PortContribution, PortDeclaration, PortSlots, Telemetry, TelemetryField, ThermalCategory,
+    Warning,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,14 +24,14 @@ use super::{
     helpers::{
         apply_simple_heating_ideal_capacity_control, apply_simple_mode_override_and_dr,
         apply_simple_mode_override_in_control, lookup_zone, loop_id_from_config, outage_forces_off,
-        register_ebm_telemetry_keys, served_zone_ports, step_equivalent_battery,
-        update_heating_control, write_ebm_telemetry, zone_id_from_config,
+        register_ebm_telemetry_keys, require_loop_id, served_zone_ports, step_equivalent_battery,
+        unavailable_period_forces_off, update_heating_control, write_ebm_telemetry,
+        zone_id_from_config,
     },
 };
 use crate::config::constructor_equipment_id;
 
 use hares_physics::constants::cp_j_kg_k;
-use hares_physics::units::{power_kw_to_w, power_w_to_kw};
 
 /// Default condensing boiler outlet temperature [C] (150 F).
 /// ASHRAE HVAC Systems and Equipment Ch.32 "Boilers": condensing boilers
@@ -53,6 +54,11 @@ const DEFAULT_RETURN_TEMP_C: f64 = 70.0;
 
 /// Default gas boiler AFUE. DOE 10 CFR Part 430, federal minimum.
 const DEFAULT_GAS_BOILER_AFUE: f64 = 0.8;
+/// The flue's share of the combustion residual (the balance is the jacket
+/// share that heats the boiler's space). ASHRAE: a non-condensing boiler's
+/// jacket loses a few percent of the fuel input while the flue carries the
+/// balance of the ~20 percent residual.
+const DEFAULT_GAS_BOILER_FLUE_LOSS_FRACTION: f64 = 0.9;
 
 const DEFAULT_CONDENSING_EIR_COEFFS: [f64; 6] = [
     1.058_343_061,
@@ -89,7 +95,7 @@ pub struct ElectricBoiler {
     default_return_temp_c: f64,
     /// Hydronic circulation-pump electric draw [kW], from `fan_power_w`
     /// (same config surface as the gas boiler; 0.0 when unspecified).
-    pump_kw: f64,
+    pump_w: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
     /// Cached from last update_control; true when timestep >= 5 min
@@ -99,6 +105,24 @@ pub struct ElectricBoiler {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Whether the fluid domain has published a payload this run. The
+    /// absent-payload escape is bounded: silent before the first publish,
+    /// a counted degradation after it.
+    fluid_payload_seen: bool,
+    /// Absent-payload steps since the last health drain (after the first
+    /// publish; the count reaches the run's health through
+    /// `take_health_counts`).
+    fluid_payload_absences: u64,
+    /// Whether this run already warned on a late absent payload: the
+    /// first one carries the detail, the rest are counted silently in
+    /// the run's health (the once-per-run warning pattern), so a payload
+    /// starved for the rest of a year does not flood the run's warning
+    /// log and tracing with a line per step.
+    fluid_absence_warned: bool,
+    /// Warnings raised since the last drain (the late absent-payload
+    /// degradations; they reach the run's warning log through
+    /// `drain_warnings`).
+    warnings: Vec<Warning>,
     /// Rule R1 reactive-only ZIP for the primary component (resistive
     /// element, class default pf 1.0 → Q exactly zero); real power stays
     /// bit-identical.
@@ -122,8 +146,11 @@ pub struct GasBoiler {
     outlet_temp_c: f64,
     fuel_type: FuelType,
     eir_max: f64,
-    pump_kw: f64,
+    pump_w: f64,
     condensing: bool,
+    /// Share of the combustion residual leaving through the flue (outdoors);
+    /// the complement is the jacket share that heats the surrounding space.
+    flue_loss_fraction: f64,
     condensing_eir_coeffs: [f64; 6],
     non_condensing_eir_coeffs: [f64; 10],
     operating_mode: OperatingMode,
@@ -135,13 +162,27 @@ pub struct GasBoiler {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
+    /// Whether the fluid domain has published a payload this run: the
+    /// absent-payload escape is silent only before the first publish.
+    fluid_payload_seen: bool,
+    /// Absent-payload steps since the last health drain (after the first
+    /// publish).
+    fluid_payload_absences: u64,
+    /// Whether this run already warned on a late absent payload: the
+    /// first one carries the detail, the rest are counted silently in
+    /// the run's health (the once-per-run warning pattern).
+    fluid_absence_warned: bool,
+    /// Warnings raised since the last drain (the late absent-payload
+    /// degradations).
+    warnings: Vec<Warning>,
     /// Rule R1 reactive-only ZIP: circulation pump/aux pf 0.84;
-    /// Q comes from ZipLoad::reactive_kvar.
+    /// Q comes from ZipLoad::reactive_var.
     zip: hares_types::zip::ResolvedZip,
 }
 
-/// Version 2: the thermostat hysteresis is persisted.
-const BOILER_CHECKPOINT_VERSION: u32 = 2;
+/// Version 3: the fluid domain's first-publish marker is persisted (the
+/// absent-payload escape's bound survives a checkpoint resume).
+const BOILER_CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BoilerState {
@@ -153,7 +194,7 @@ struct BoilerState {
     thermostat_hysteresis_c: f64,
     operating_mode: OperatingMode,
     run_time_s: f64,
-    electric_kw: f64,
+    electric_w: f64,
     fuel_input_w: f64,
     thermal_output_w: f64,
     eir: f64,
@@ -161,6 +202,9 @@ struct BoilerState {
     return_temp_c: f64,
     mode_override: Option<OperatingMode>,
     dr_level: DRLevel,
+    /// The fluid domain has published a payload this run (bounds the
+    /// absent-payload escape across a checkpoint resume).
+    fluid_payload_seen: bool,
 }
 
 impl ElectricBoiler {
@@ -203,12 +247,16 @@ impl ElectricBoiler {
             fluid_type: FluidType::Water,
             flow_rate_kg_s: 0.0,
             default_return_temp_c: DEFAULT_RETURN_TEMP_C,
-            pump_kw: 0.0,
+            pump_w: 0.0,
             operating_mode: OperatingMode::Off,
             run_time_s: 0.0,
             use_ideal: false,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            fluid_payload_seen: false,
+            fluid_payload_absences: 0,
+            fluid_absence_warned: false,
+            warnings: Vec::new(),
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -218,6 +266,13 @@ impl ElectricBoiler {
 }
 
 impl Equipment for ElectricBoiler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         BOILER_CHECKPOINT_VERSION
     }
@@ -253,7 +308,7 @@ impl Equipment for ElectricBoiler {
             super::reactive::secondary_motor_zip(&self.zip, super::reactive::LOOP_PUMP_ZIP);
         self.rated_capacity_w = typed.capacity_w.max(0.0);
         self.eir = typed.eir;
-        self.pump_kw = power_w_to_kw(typed.fan_power_w.unwrap_or(0.0));
+        self.pump_w = typed.fan_power_w.unwrap_or(0.0);
         self.fluid_type = typed.fluid_type;
         self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
         self.default_return_temp_c = typed.return_temp_c;
@@ -281,6 +336,10 @@ impl Equipment for ElectricBoiler {
         }
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
+        self.fluid_payload_seen = false;
+        self.fluid_payload_absences = 0;
+        self.fluid_absence_warned = false;
+        self.warnings.clear();
         self.telemetry = electric_boiler_default_telemetry();
         register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
@@ -295,7 +354,9 @@ impl Equipment for ElectricBoiler {
         // calls or overrides. Gated before override handling; islanded
         // (battery/generator-backed) homes keep an energized bus and are
         // not affected. See docs/outage-behavior.md.
-        if outage_forces_off(&mut self.hvac, env) {
+        if outage_forces_off(&mut self.hvac, env)
+            || unavailable_period_forces_off(&mut self.hvac, env, true, false)
+        {
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
         }
@@ -331,19 +392,62 @@ impl Equipment for ElectricBoiler {
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * duty * sf;
-        let element_kw = power_w_to_kw(thermal_output_w * self.eir);
+        let element_w = thermal_output_w * self.eir;
         // Circulation pump runs whenever the boiler delivers heat (same
         // modeling as the gas boiler: contactor-switched, rated draw, not
         // modulated by PLR).
-        let pump_kw = if thermal_output_w > 0.0 {
-            self.pump_kw * sf
+        let pump_w = if thermal_output_w > 0.0 {
+            self.pump_w * sf
         } else {
             0.0
         };
-        let electric_kw = element_kw + pump_kw;
+        let electric_w = element_w + pump_w;
 
         let loop_id = bound_loop_id(self.loop_id, "Electric Boiler", &self.descriptor.name)?;
-        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
+        let payload_was_seen = self.fluid_payload_seen;
+        let return_temp_read = loop_return_temp_c(
+            env,
+            loop_id,
+            "Electric Boiler",
+            &self.descriptor.name,
+            &mut self.fluid_payload_seen,
+        )?;
+        let return_temp_c = match return_temp_read {
+            Some(temp) => temp,
+            None => {
+                // The fluid domain published no payload: the configured
+                // return temperature covers the step. Before the first
+                // publish that is the escape's whole contract (the first
+                // step runs before the envelope's first resolve); after
+                // it, the absence is a degradation: counted in the run's
+                // health, and warned once per run with the detail (the
+                // once-per-run pattern keeps a payload starved for the
+                // rest of a run from flooding the warning log and the
+                // tracing with a line per step).
+                if payload_was_seen {
+                    self.fluid_payload_absences += 1;
+                    if !self.fluid_absence_warned {
+                        self.fluid_absence_warned = true;
+                        let message = format!(
+                            "Electric Boiler '{}': the fluid domain published no payload \
+                             this step; the return temperature of loop {loop_id:?} reads \
+                             from the configured return temperature until the fluid \
+                             domain publishes again; further absent-payload steps are \
+                             counted silently in the run health's fluid_payload_absences",
+                            self.descriptor.name
+                        );
+                        tracing::warn!(
+                            equipment = %self.descriptor.name,
+                            loop_id = ?loop_id,
+                            "{message}"
+                        );
+                        self.warnings
+                            .push(Warning::new(self.descriptor.name.clone(), message));
+                    }
+                }
+                self.default_return_temp_c
+            }
+        };
         let cp_used = cp_j_kg_k(self.fluid_type);
         let supply_temp_c = if self.flow_rate_kg_s > 0.0 {
             return_temp_c + thermal_output_w / (self.flow_rate_kg_s * cp_used)
@@ -354,17 +458,15 @@ impl Equipment for ElectricBoiler {
         // Per-component reactive (see `hvac::reactive`): the resistance
         // element at the unit ZIP (pf 1.0 → Q ≡ 0), the circulation pump
         // motor at pf 0.84.
-        let reactive_power_kvar = self
-            .zip
-            .reactive_kvar(element_kw, env.grid.bus_voltage_pu())
+        let reactive_power_var = self.zip.reactive_var(element_w, env.grid.bus_voltage_pu())
             + self
                 .pump_zip
-                .reactive_kvar(pump_kw, env.grid.bus_voltage_pu());
+                .reactive_var(pump_w, env.grid.bus_voltage_pu());
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
-        if electric_kw > 0.0 {
+        if electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar,
+                active_power_w: (electric_w),
+                reactive_power_var,
             })?;
         }
 
@@ -388,10 +490,10 @@ impl Equipment for ElectricBoiler {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
-        self.telemetry.set(tk::PUMP_POWER_KW, pump_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_w);
+        self.telemetry.set(tk::PUMP_POWER_KW, pump_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         // The runtime fraction and the part-load ratio coincide for a
         // resistance element (EnergyPlus HeatingCoils.cc:1873: `ElecUseLoad
@@ -401,7 +503,7 @@ impl Equipment for ElectricBoiler {
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
-        let has_nonzero_flow = electric_kw > 0.0 || thermal_output_w != 0.0;
+        let has_nonzero_flow = electric_w > 0.0 || thermal_output_w != 0.0;
         self.operating_mode = self
             .operating_mode
             .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
@@ -414,8 +516,8 @@ impl Equipment for ElectricBoiler {
         write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: None,
                 thermal_output_w: Some(thermal_output_w),
                 sensible_cooling_w: None,
@@ -457,6 +559,19 @@ impl Equipment for ElectricBoiler {
         Some(self.zip)
     }
 
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            curve_index_clamps: 0,
+            fluid_payload_absences: std::mem::take(&mut self.fluid_payload_absences),
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
+        self.hvac.take_warnings(out);
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &BoilerState {
@@ -467,7 +582,7 @@ impl Equipment for ElectricBoiler {
                 thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 fuel_input_w: 0.0,
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 eir: self.eir,
@@ -475,6 +590,7 @@ impl Equipment for ElectricBoiler {
                 return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
                 mode_override: self.mode_override,
                 dr_level: self.dr_level,
+                fluid_payload_seen: self.fluid_payload_seen,
             },
             Self::checkpoint_version(),
             "ElectricBoiler",
@@ -499,8 +615,9 @@ impl Equipment for ElectricBoiler {
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
         self.dr_level = decoded.dr_level;
+        self.fluid_payload_seen = decoded.fluid_payload_seen;
 
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
         self.telemetry
@@ -511,7 +628,7 @@ impl Equipment for ElectricBoiler {
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the step's own literal: the flows from the
-        // checkpointed `electric_kw`/`thermal_output_w`, the mode from the
+        // checkpointed `electric_w`/`thermal_output_w`, the mode from the
         // checkpointed `operating_mode` (the pair the step published was
         // guard-valid, and the checkpoint carries both faces), the
         // setpoint from the restored thermostat state (the same
@@ -525,8 +642,8 @@ impl Equipment for ElectricBoiler {
         let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(0.0),
                 fuel_w: None,
                 thermal_output_w: Some(decoded.thermal_output_w),
                 sensible_cooling_w: None,
@@ -563,6 +680,26 @@ impl Equipment for ElectricBoiler {
         }
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            hares_types::ResolvedParameter::new(
+                "efficiency",
+                1.0 / self.eir,
+                hares_types::Unit::Fraction,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.eir,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
     }
 }
 
@@ -616,8 +753,9 @@ impl GasBoiler {
             outlet_temp_c: DEFAULT_CONDENSING_OUTLET_TEMP_C,
             fuel_type: FuelType::Gas,
             eir_max: 1.0 / DEFAULT_GAS_BOILER_AFUE,
-            pump_kw: 0.0,
+            pump_w: 0.0,
             condensing: false,
+            flue_loss_fraction: DEFAULT_GAS_BOILER_FLUE_LOSS_FRACTION,
             condensing_eir_coeffs: DEFAULT_CONDENSING_EIR_COEFFS,
             non_condensing_eir_coeffs: DEFAULT_NON_CONDENSING_EIR_COEFFS,
             operating_mode: OperatingMode::Off,
@@ -625,6 +763,10 @@ impl GasBoiler {
             use_ideal: false,
             mode_override: None,
             dr_level: DRLevel::Normal,
+            fluid_payload_seen: false,
+            fluid_payload_absences: 0,
+            fluid_absence_warned: false,
+            warnings: Vec::new(),
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
@@ -662,6 +804,13 @@ impl GasBoiler {
 }
 
 impl Equipment for GasBoiler {
+    fn reset_stochastic_state(&mut self) {
+        // The thermostat's schedule setpoint sources at their seeds and
+        // cursors: the warm-up boundary's call, so production reads them
+        // from the construction position.
+        self.hvac.reset_stochastic_state();
+    }
+
     fn checkpoint_version() -> u32 {
         BOILER_CHECKPOINT_VERSION
     }
@@ -692,13 +841,14 @@ impl Equipment for GasBoiler {
         self.fluid_type = typed.fluid_type;
         self.flow_rate_kg_s = typed.flow_rate_kg_s.max(0.0);
         self.default_return_temp_c = typed.return_temp_c;
-        self.pump_kw = power_w_to_kw(typed.fan_power_w.unwrap_or(0.0));
+        self.pump_w = typed.fan_power_w.unwrap_or(0.0);
         let fuel_efficiency = typed.afue;
         // Condensing mode inferred from AFUE > 0.90 (OCHRE convention).
         // The typed config also carries `condensing: bool` (set by resolver) for
         // explicit override and round-trip fidelity; the runtime computation from
         // AFUE guarantees correctness regardless of config source.
         self.condensing = typed.condensing || fuel_efficiency > 0.9;
+        self.flue_loss_fraction = typed.flue_loss_fraction;
         self.outlet_temp_c = if self.condensing {
             DEFAULT_CONDENSING_OUTLET_TEMP_C
         } else {
@@ -725,6 +875,10 @@ impl Equipment for GasBoiler {
         }
         self.operating_mode = OperatingMode::Off;
         self.run_time_s = 0.0;
+        self.fluid_payload_seen = false;
+        self.fluid_payload_absences = 0;
+        self.fluid_absence_warned = false;
+        self.warnings.clear();
         self.telemetry = gas_boiler_default_telemetry();
         register_ebm_telemetry_keys(&mut self.telemetry);
         self.core_output = CoreOutput::default();
@@ -739,7 +893,9 @@ impl Equipment for GasBoiler {
         // calls or overrides. Gated before override handling; islanded
         // (battery/generator-backed) homes keep an energized bus and are
         // not affected. See docs/outage-behavior.md.
-        if outage_forces_off(&mut self.hvac, env) {
+        if outage_forces_off(&mut self.hvac, env)
+            || unavailable_period_forces_off(&mut self.hvac, env, true, false)
+        {
             self.operating_mode = OperatingMode::Off;
             return OperatingMode::Off;
         }
@@ -776,7 +932,50 @@ impl Equipment for GasBoiler {
         let sf = self.hvac.config.space_fraction;
         let thermal_output_w = self.rated_capacity_w * plr * sf;
         let loop_id = bound_loop_id(self.loop_id, "Gas Boiler", &self.descriptor.name)?;
-        let return_temp_c = loop_return_temp_c(env, loop_id).unwrap_or(self.default_return_temp_c);
+        let payload_was_seen = self.fluid_payload_seen;
+        let return_temp_read = loop_return_temp_c(
+            env,
+            loop_id,
+            "Gas Boiler",
+            &self.descriptor.name,
+            &mut self.fluid_payload_seen,
+        )?;
+        let return_temp_c = match return_temp_read {
+            Some(temp) => temp,
+            None => {
+                // The fluid domain published no payload: the configured
+                // return temperature covers the step. Before the first
+                // publish that is the escape's whole contract (the first
+                // step runs before the envelope's first resolve); after
+                // it, the absence is a degradation: counted in the run's
+                // health, and warned once per run with the detail (the
+                // once-per-run pattern keeps a payload starved for the
+                // rest of a run from flooding the warning log and the
+                // tracing with a line per step).
+                if payload_was_seen {
+                    self.fluid_payload_absences += 1;
+                    if !self.fluid_absence_warned {
+                        self.fluid_absence_warned = true;
+                        let message = format!(
+                            "Gas Boiler '{}': the fluid domain published no payload \
+                             this step; the return temperature of loop {loop_id:?} reads \
+                             from the configured return temperature until the fluid \
+                             domain publishes again; further absent-payload steps are \
+                             counted silently in the run health's fluid_payload_absences",
+                            self.descriptor.name
+                        );
+                        tracing::warn!(
+                            equipment = %self.descriptor.name,
+                            loop_id = ?loop_id,
+                            "{message}"
+                        );
+                        self.warnings
+                            .push(Warning::new(self.descriptor.name.clone(), message));
+                    }
+                }
+                self.default_return_temp_c
+            }
+        };
         // Condensing EIR polynomial uses zone air temperature (OCHRE HVAC.py:651:
         // t_in = self.zone.temperature), not return water temperature.
         let zone_temp_c = lookup_zone(env, self.hvac.config.served_zone()?)?.temperature_c;
@@ -794,8 +993,8 @@ impl Equipment for GasBoiler {
             return_temp_c
         };
 
-        let electric_kw = if thermal_output_w > 0.0 {
-            self.pump_kw * sf
+        let electric_w = if thermal_output_w > 0.0 {
+            self.pump_w * sf
         } else {
             0.0
         };
@@ -807,13 +1006,11 @@ impl Equipment for GasBoiler {
                 consumption_w: fuel_input_w,
             })?;
         }
-        let reactive_power_kvar = self
-            .zip
-            .reactive_kvar(electric_kw, env.grid.bus_voltage_pu());
-        if electric_kw > 0.0 {
+        let reactive_power_var = self.zip.reactive_var(electric_w, env.grid.bus_voltage_pu());
+        if electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
-                active_power_w: power_kw_to_w(electric_kw),
-                reactive_power_kvar,
+                active_power_w: (electric_w),
+                reactive_power_var,
             })?;
         }
         if thermal_output_w > 0.0 {
@@ -835,10 +1032,20 @@ impl Equipment for GasBoiler {
             )?;
         }
 
-        // Jacket loss: fuel energy minus useful thermal output, plus pump electrical.
-        // For condensing boilers (EIR < 1), jacket loss is zero -- the extra output
-        // comes from latent heat recovery, not from the room.
-        let jacket_loss_w = (fuel_input_w + electric_kw * 1e3 - thermal_output_w).max(0.0);
+        // Combustion loss split: the residual (fuel input minus useful thermal
+        // output) leaves the cabinet through the flue (outdoors) and the
+        // jacket (the zone). Only the jacket share is zone heat; routing the
+        // whole residual to the zone would manufacture free heat from the
+        // flue. The pump's electric dissipation joins the jacket share. For
+        // condensing boilers (EIR < 1) the residual floors at zero -- the
+        // extra output comes from latent heat recovery, not from the room.
+        let (jacket_share_w, _flue_outdoor_w) = crate::combustion::combustion_loss_split(
+            fuel_input_w,
+            thermal_output_w,
+            self.flue_loss_fraction,
+            1.0 - self.flue_loss_fraction,
+        )?;
+        let jacket_loss_w = jacket_share_w + electric_w;
         if let Some(zone) = self.descriptor.zone
             && jacket_loss_w > 0.0
         {
@@ -854,9 +1061,9 @@ impl Equipment for GasBoiler {
             self.run_time_s += dt.as_secs_f64();
         }
 
-        self.telemetry.set(tk::ELECTRIC_KW, electric_kw);
+        self.telemetry.set(tk::ELECTRIC_KW, electric_w);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_power_kvar);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_power_var);
         self.telemetry.set(tk::FUEL_INPUT_W, fuel_input_w);
         self.telemetry.set(tk::THERMAL_OUTPUT_W, thermal_output_w);
         self.telemetry.set(tk::JACKET_LOSS_W, jacket_loss_w);
@@ -869,7 +1076,7 @@ impl Equipment for GasBoiler {
         self.telemetry.set(tk::BOILER_CP_USED_J_KG_K, cp_used);
         self.telemetry.set(tk::SUPPLY_TEMP_C, supply_temp_c);
         self.telemetry.set(tk::RETURN_TEMP_C, return_temp_c);
-        let has_nonzero_flow = electric_kw > 0.0 || fuel_input_w > 0.0 || thermal_output_w != 0.0;
+        let has_nonzero_flow = electric_w > 0.0 || fuel_input_w > 0.0 || thermal_output_w != 0.0;
         self.operating_mode = self
             .operating_mode
             .resolve_idle(has_nonzero_flow, Some(thermal_output_w));
@@ -882,8 +1089,8 @@ impl Equipment for GasBoiler {
         write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(electric_kw.max(0.0))),
-                reactive_power_kvar: Some(reactive_power_kvar),
+                electric_w: Some(ElectricPower::Consumption(electric_w.max(0.0))),
+                reactive_power_var: Some(reactive_power_var),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: fuel_input_w.max(0.0),
@@ -928,6 +1135,19 @@ impl Equipment for GasBoiler {
         Some(self.zip)
     }
 
+    fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        EquipmentHealthCounts {
+            curve_index_clamps: 0,
+            fluid_payload_absences: std::mem::take(&mut self.fluid_payload_absences),
+            cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
+        }
+    }
+
+    fn drain_warnings(&mut self, out: &mut Vec<Warning>) {
+        out.append(&mut self.warnings);
+        self.hvac.take_warnings(out);
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &BoilerState {
@@ -938,7 +1158,7 @@ impl Equipment for GasBoiler {
                 thermostat_hysteresis_c: self.hvac.thermostat_fsm.thermostat.hysteresis_c,
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
-                electric_kw: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 eir: self.telemetry.get(tk::EIR).unwrap_or(self.eir_max),
@@ -946,6 +1166,7 @@ impl Equipment for GasBoiler {
                 return_temp_c: self.telemetry.get(tk::RETURN_TEMP_C).unwrap_or(0.0),
                 mode_override: self.mode_override,
                 dr_level: self.dr_level,
+                fluid_payload_seen: self.fluid_payload_seen,
             },
             Self::checkpoint_version(),
             "GasBoiler",
@@ -970,8 +1191,9 @@ impl Equipment for GasBoiler {
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
         self.dr_level = decoded.dr_level;
+        self.fluid_payload_seen = decoded.fluid_payload_seen;
 
-        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_kw);
+        self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
             .insert(tk::FUEL_INPUT_W, decoded.fuel_input_w);
         self.telemetry
@@ -986,7 +1208,7 @@ impl Equipment for GasBoiler {
         // Rebuild the restore-instant output from the persisted step
         // values — mirroring the gas step's own literal (fuel arm
         // included): the flows from the checkpointed
-        // `electric_kw`/`thermal_output_w`/`fuel_input_w`, the mode from
+        // `electric_w`/`thermal_output_w`/`fuel_input_w`, the mode from
         // the checkpointed `operating_mode`, the setpoint from the
         // restored thermostat state. The reactive ZIP power is not
         // checkpointed and publishes as 0. Same restore contract as the
@@ -996,8 +1218,8 @@ impl Equipment for GasBoiler {
         let active_setpoint_c = self.hvac.effective_setpoints().heating_c;
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_kw: Some(ElectricPower::Consumption(decoded.electric_kw.max(0.0))),
-                reactive_power_kvar: Some(0.0),
+                electric_w: Some(ElectricPower::Consumption(decoded.electric_w.max(0.0))),
+                reactive_power_var: Some(0.0),
                 fuel_w: Some(FuelPower {
                     fuel_type: self.fuel_type,
                     consumption_w: decoded.fuel_input_w.max(0.0),
@@ -1038,6 +1260,28 @@ impl Equipment for GasBoiler {
         let setpoint = self.hvac.effective_setpoints().heating_c;
         self.hvac.config.zone_id.map(|zone| (zone, setpoint))
     }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        vec![
+            hares_types::ResolvedParameter::new(
+                "rated_capacity_w",
+                self.rated_capacity_w,
+                hares_types::Unit::Watt,
+            ),
+            // The stored form is the EIR (1/AFUE); both faces of the same
+            // resolved parameter, reported so a consumer reads either.
+            hares_types::ResolvedParameter::new(
+                "afue",
+                1.0 / self.eir_max,
+                hares_types::Unit::Fraction,
+            ),
+            hares_types::ResolvedParameter::new(
+                "rated_eir",
+                self.eir_max,
+                hares_types::Unit::Dimensionless,
+            ),
+        ]
+    }
 }
 
 pub fn register_with_registry(registry: &mut EquipmentRegistry) {
@@ -1065,17 +1309,6 @@ fn declared_fluid_port(loop_id: Option<LoopId>) -> PortDeclaration {
     }
 }
 
-/// The typed config's loop id, or the construction error naming the boiler.
-fn require_loop_id(loop_id: Option<u16>, kind: &str, name: &str) -> crate::Result<LoopId> {
-    loop_id.map(LoopId).ok_or_else(|| {
-        HaresError::Equipment(format!(
-            "{kind} '{name}': its config carries no fluid loop id. Every resolved \
-             boiler carries the loop id its wiring or loop allocation assigned, and \
-             a boiler without one cannot declare its hydronic loop"
-        ))
-    })
-}
-
 /// The loop `init` bound; stepping a boiler whose init did not bind one is
 /// an error rather than a step on a stand-in loop.
 fn bound_loop_id(loop_id: Option<LoopId>, kind: &str, name: &str) -> crate::Result<LoopId> {
@@ -1086,13 +1319,50 @@ fn bound_loop_id(loop_id: Option<LoopId>, kind: &str, name: &str) -> crate::Resu
     })
 }
 
-fn loop_return_temp_c(env: &EnvironmentState, loop_id: LoopId) -> Option<f64> {
-    let payload = env.domains.fluid.get()?.custom_payload.as_ref()?;
-    let states = FluidDomainPayload::decode(payload).ok()?;
+/// The bound loop's mean return temperature from the fluid domain's payload.
+///
+/// `payload_seen` tracks whether the fluid domain has published a payload
+/// this run and is set to true the moment a payload is present. A payload
+/// that does not decode, or a decoded payload that does not carry the bound
+/// loop, is an error naming the boiler and the loop: corrupt fluid state is
+/// not the absence of fluid state. The absence itself is the caller's
+/// `None`: silent before the first publish (the configured return
+/// temperature covers the first step, before the envelope's first resolve),
+/// a logged and counted degradation after it.
+fn loop_return_temp_c(
+    env: &EnvironmentState,
+    loop_id: LoopId,
+    kind: &str,
+    name: &str,
+    payload_seen: &mut bool,
+) -> crate::Result<Option<f64>> {
+    let Some(payload) = env
+        .domains
+        .fluid
+        .get()
+        .and_then(|d| d.custom_payload.as_ref())
+    else {
+        return Ok(None);
+    };
+    *payload_seen = true;
+    let states = FluidDomainPayload::decode(payload).map_err(|err| {
+        HaresError::Equipment(format!(
+            "{kind} '{name}': the fluid domain's payload does not decode, so the \
+             return temperature of loop {loop_id:?} cannot be read: {err}; corrupt \
+             fluid state is not the absence of fluid state"
+        ))
+    })?;
     states
         .into_iter()
         .find(|state| state.loop_id == loop_id)
-        .map(|state| state.mean_return_temp_c)
+        .map(|state| Some(state.mean_return_temp_c))
+        .ok_or_else(|| {
+            HaresError::Equipment(format!(
+                "{kind} '{name}': the decoded fluid state carries no loop \
+                 {loop_id:?}; the fluid domain must carry a state for every \
+                 declared loop"
+            ))
+        })
 }
 
 fn electric_boiler_default_telemetry() -> Telemetry {
@@ -1133,104 +1403,68 @@ fn gas_boiler_default_telemetry() -> Telemetry {
 
 fn setpoint_telemetry_fields() -> Vec<TelemetryField> {
     vec![
-        TelemetryField {
-            name: tk::HEATING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active heating setpoint from thermostat schedule".to_string(),
-        },
-        TelemetryField {
-            name: tk::COOLING_SETPOINT_C.to_string(),
-            unit: "C".to_string(),
-            description: "Active cooling setpoint from thermostat schedule".to_string(),
-        },
+        TelemetryField::temp_c(
+            tk::HEATING_SETPOINT_C,
+            "Active heating setpoint from thermostat schedule",
+        ),
+        TelemetryField::temp_c(
+            tk::COOLING_SETPOINT_C,
+            "Active cooling setpoint from thermostat schedule",
+        ),
     ]
 }
 
 fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Electric boiler active power draw (element + circulation pump)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::PUMP_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Hydronic circulation pump electric draw".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Fraction of the step the element runs (equals the part-load ratio)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Delivered capacity as a fraction of rated".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Thermal output transferred to hydronic loop".to_string(),
-        },
-        TelemetryField {
-            name: tk::BOILER_CP_USED_J_KG_K.to_string(),
-            unit: "J/(kg*K)".to_string(),
-            description: "Effective specific heat used in supply temperature calculation"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Fluid supply temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::RETURN_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Fluid return temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Electric boiler active power draw (element + circulation pump)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_kw(tk::PUMP_POWER_KW, "Hydronic circulation pump electric draw"),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Fraction of the step the element runs (equals the part-load ratio)",
+        )
+        .not_nullable(),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Delivered capacity as a fraction of rated",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Thermal output transferred to hydronic loop",
+        ),
+        TelemetryField::flow_mean(
+            tk::BOILER_CP_USED_J_KG_K,
+            hares_types::Unit::JoulePerKilogramKelvin,
+            "Effective specific heat used in supply temperature calculation",
+        ),
+        TelemetryField::temp_c(tk::SUPPLY_TEMP_C, "Fluid supply temperature"),
+        TelemetryField::temp_c(tk::RETURN_TEMP_C, "Fluid return temperature"),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -1238,98 +1472,63 @@ fn electric_boiler_telemetry_fields() -> Vec<TelemetryField> {
 
 fn gas_boiler_telemetry_fields() -> Vec<TelemetryField> {
     let mut fields = vec![
-        TelemetryField {
-            name: tk::ELECTRIC_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "Gas boiler auxiliary electrical draw (pump/fan)".to_string(),
-        },
-        TelemetryField {
-            name: tk::REACTIVE_POWER_KVAR.to_string(),
-            unit: "kVAR".to_string(),
-            description: "Reactive power (positive = inductive/lagging)".to_string(),
-        },
-        TelemetryField {
-            name: tk::FUEL_INPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Gas boiler fuel input power".to_string(),
-        },
-        TelemetryField {
-            name: tk::RUNTIME_FRACTION.to_string(),
-            unit: "-".to_string(),
-            description: "Fraction of the step the burner runs (equals the part-load ratio)"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::PART_LOAD_RATIO.to_string(),
-            unit: "-".to_string(),
-            description: "Delivered capacity as a fraction of rated".to_string(),
-        },
-        TelemetryField {
-            name: tk::THERMAL_OUTPUT_W.to_string(),
-            unit: "W".to_string(),
-            description: "Thermal output transferred to hydronic loop".to_string(),
-        },
-        TelemetryField {
-            name: tk::JACKET_LOSS_W.to_string(),
-            unit: "W".to_string(),
-            description: "Jacket heat loss to zone (fuel_input - thermal_output)".to_string(),
-        },
-        TelemetryField {
-            name: tk::EIR.to_string(),
-            unit: "-".to_string(),
-            description: "Instantaneous energy-input ratio after polynomial adjustment".to_string(),
-        },
-        TelemetryField {
-            name: tk::BOILER_CP_USED_J_KG_K.to_string(),
-            unit: "J/(kg*K)".to_string(),
-            description: "Effective specific heat used in supply temperature calculation"
-                .to_string(),
-        },
-        TelemetryField {
-            name: tk::SUPPLY_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Fluid supply temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::RETURN_TEMP_C.to_string(),
-            unit: "C".to_string(),
-            description: "Fluid return temperature".to_string(),
-        },
-        TelemetryField {
-            name: tk::OPERATING_MODE.to_string(),
-            unit: "enum".to_string(),
-            description: "Operating mode code: 0=Off, 1=Heating".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_EFFICIENCY.to_string(),
-            unit: "-".to_string(),
-            description: "EBM efficiency (COP = 1/EIR)".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_BASELINE_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM baseline power to hold setpoint".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM current energy state".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MIN_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM minimum energy at turn-on threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_ENERGY_KWH.to_string(),
-            unit: "kWh".to_string(),
-            description: "EBM maximum energy at turn-off threshold".to_string(),
-        },
-        TelemetryField {
-            name: hares_types::telemetry_keys::EBM_MAX_POWER_KW.to_string(),
-            unit: "kW".to_string(),
-            description: "EBM maximum electrical power".to_string(),
-        },
+        TelemetryField::power_kw(
+            tk::ELECTRIC_KW,
+            "Gas boiler auxiliary electrical draw (pump/fan)",
+        ),
+        TelemetryField::power_kvar(
+            tk::REACTIVE_POWER_KVAR,
+            "Reactive power (positive = inductive/lagging)",
+        ),
+        TelemetryField::power_w(tk::FUEL_INPUT_W, "Gas boiler fuel input power"),
+        TelemetryField::ratio(
+            tk::RUNTIME_FRACTION,
+            "Fraction of the step the burner runs (equals the part-load ratio)",
+        )
+        .not_nullable(),
+        TelemetryField::ratio(
+            tk::PART_LOAD_RATIO,
+            "Delivered capacity as a fraction of rated",
+        ),
+        TelemetryField::power_w(
+            tk::THERMAL_OUTPUT_W,
+            "Thermal output transferred to hydronic loop",
+        ),
+        TelemetryField::power_w(
+            tk::JACKET_LOSS_W,
+            "Jacket heat loss to zone (fuel_input - thermal_output)",
+        ),
+        TelemetryField::ratio(
+            tk::EIR,
+            "Instantaneous energy-input ratio after polynomial adjustment",
+        ),
+        TelemetryField::flow_mean(
+            tk::BOILER_CP_USED_J_KG_K,
+            hares_types::Unit::JoulePerKilogramKelvin,
+            "Effective specific heat used in supply temperature calculation",
+        ),
+        TelemetryField::temp_c(tk::SUPPLY_TEMP_C, "Fluid supply temperature"),
+        TelemetryField::temp_c(tk::RETURN_TEMP_C, "Fluid return temperature"),
+        TelemetryField::code_code(
+            tk::OPERATING_MODE,
+            hares_types::MODE_LABELS,
+            "Operating mode code: 0=Off, 1=Heating",
+        ),
+        TelemetryField::ratio(tk::EBM_EFFICIENCY, "EBM efficiency (COP = 1/EIR)"),
+        TelemetryField::power_kw(
+            tk::EBM_BASELINE_POWER_KW,
+            "EBM baseline power to hold setpoint",
+        ),
+        TelemetryField::stock_kwh(tk::EBM_ENERGY_KWH, "EBM current energy state"),
+        TelemetryField::stock_kwh(
+            tk::EBM_MIN_ENERGY_KWH,
+            "EBM minimum energy at turn-on threshold",
+        ),
+        TelemetryField::stock_kwh(
+            tk::EBM_MAX_ENERGY_KWH,
+            "EBM maximum energy at turn-off threshold",
+        ),
+        TelemetryField::power_kw(tk::EBM_MAX_POWER_KW, "EBM maximum electrical power"),
     ];
     fields.extend(setpoint_telemetry_fields());
     fields
@@ -1348,7 +1547,8 @@ mod tests {
     };
 
     use super::{
-        DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_NON_CONDENSING_EIR_COEFFS, ElectricBoiler, GasBoiler,
+        DEFAULT_CONDENSING_EIR_COEFFS, DEFAULT_GAS_BOILER_FLUE_LOSS_FRACTION,
+        DEFAULT_NON_CONDENSING_EIR_COEFFS, DEFAULT_RETURN_TEMP_C, ElectricBoiler, GasBoiler,
     };
 
     /// The per-fluid cp table must be positive and finite for every fluid
@@ -1397,6 +1597,7 @@ mod tests {
                 island_bus_voltage_pu: None,
             },
             schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             domains: hares_types::DomainSlots::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),
@@ -1762,6 +1963,255 @@ mod tests {
         );
     }
 
+    /// A fluid payload that does not decode fails the step naming the boiler
+    /// and the loop: corrupt fluid state is not the absence of fluid state
+    /// (whose first step runs on the configured return temperature).
+    #[test]
+    fn a_fluid_payload_that_does_not_decode_fails_the_step() {
+        let cfg = gb_config(10_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let mut env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+
+        env.domains.fluid.set_from(&DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            // A length that is not a multiple of the 7-wide state row: the
+            // decode cannot read it.
+            custom_payload: Some(vec![1.0, 0.0, 2.0]),
+        });
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        let err = eq
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .expect_err("a corrupt fluid payload must fail the step");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("Gas Boiler") && shown.contains("does not decode"),
+            "the error names the boiler and the unreadable payload: {shown}"
+        );
+
+        // A decoded payload that does not carry the bound loop fails the
+        // same way: a bound loop the fluid domain does not carry is a wiring
+        // defect, not a step on the configured return temperature.
+        env.domains.fluid.set_from(&DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
+                loop_id: LoopId(2),
+                fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
+                net_power_w: 0.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 40.0,
+            }]),
+        });
+        let err = eq
+            .step(&env, Duration::from_secs(60), &mut ports)
+            .expect_err("a missing loop state must fail the step");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("LoopId(1)") && shown.contains("no loop"),
+            "the error names the missing loop: {shown}"
+        );
+    }
+
+    /// The first step's absent payload stays silent: before the fluid
+    /// domain's first publish the boiler's configured return temperature
+    /// covers the step, with no warning and no health event.
+    #[test]
+    fn the_first_step_absent_payload_runs_on_the_configured_return_temperature() {
+        let cfg = gb_config(10_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+
+        // No fluid payload at all: the slot was never written.
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("the first step's absent payload runs on the configured return temp");
+        let configured = eq.telemetry().get(tk::RETURN_TEMP_C).unwrap();
+        assert_eq!(
+            configured, DEFAULT_RETURN_TEMP_C,
+            "the absent payload's return temperature is the configured one"
+        );
+
+        let mut warnings = Vec::new();
+        eq.drain_warnings(&mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "the first step's absence stays silent: {warnings:?}"
+        );
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(
+            counts.fluid_payload_absences, 0,
+            "the first step's absence is not a health event"
+        );
+    }
+
+    /// A fluid payload that goes absent after the fluid domain has
+    /// published once is the established degradation: the step still runs
+    /// on the configured return temperature, and the absence is a logged
+    /// warning counted in the run's health. An unbounded silent escape
+    /// would substitute the configured temperature for any step's missing
+    /// payload without a trace.
+    #[test]
+    fn an_absent_payload_after_the_first_publish_warns_and_counts() {
+        let cfg = gb_config(10_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let mut env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+
+        let payload = DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
+                net_power_w: 0.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 40.0,
+            }]),
+        };
+
+        // Step 1: the fluid domain publishes; the return temperature is the
+        // payload's.
+        env.domains.fluid.set_from(&payload);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("the published payload decodes");
+        assert_eq!(eq.telemetry().get(tk::RETURN_TEMP_C).unwrap(), 40.0);
+
+        // Step 2: the payload goes absent after the publish. The step still
+        // runs on the configured return temperature, and the absence is
+        // counted.
+        env.domains.fluid.clear();
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("the absent payload degrades to the configured return temp");
+        assert_eq!(
+            eq.telemetry().get(tk::RETURN_TEMP_C).unwrap(),
+            DEFAULT_RETURN_TEMP_C,
+            "the configured return temperature covers the absent payload"
+        );
+
+        let mut warnings = Vec::new();
+        eq.drain_warnings(&mut warnings);
+        assert_eq!(warnings.len(), 1, "the late absence warns: {warnings:?}");
+        assert!(
+            warnings[0].message.contains("Gas Boiler 'GB'")
+                && warnings[0].message.contains("LoopId(1)"),
+            "the warning names the boiler and the loop: {:?}",
+            warnings[0].message
+        );
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(
+            counts.fluid_payload_absences, 1,
+            "the late absence is counted in the run's health"
+        );
+
+        // The count is take-semantics: a clean step reports none.
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(counts.fluid_payload_absences, 0);
+    }
+
+    /// A run whose payload stays absent warns once and counts every
+    /// absent step: the first absence carries the detail, the rest are
+    /// counted silently in the run's health, so a payload starved for a
+    /// year of steps cannot flood the run's warning log with a line per
+    /// step.
+    #[test]
+    fn repeated_absent_payloads_warn_once_and_count_every_step() {
+        let cfg = gb_config(10_000.0, 0.95);
+        let mut eq = GasBoiler::new(cfg.clone());
+        let mut env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.hvac.runtime.duty_cycle = 0.5;
+        eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
+
+        let payload = DomainUpdate {
+            domain_id: FLUID,
+            zone_temperatures_c: vec![],
+            custom_payload: FluidDomainPayload::encode(&[FluidLoopState {
+                loop_id: LoopId(1),
+                fluid_type: FluidType::Water,
+                heating_power_w: 0.0,
+                cooling_power_w: 0.0,
+                net_power_w: 0.0,
+                mean_supply_temp_c: 45.0,
+                mean_return_temp_c: 40.0,
+            }]),
+        };
+
+        // The fluid domain publishes once; the marker flips true.
+        env.domains.fluid.set_from(&payload);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports)
+            .expect("the published payload decodes");
+
+        // Ten absent-payload steps: every one counted, exactly one warned.
+        env.domains.fluid.clear();
+        for _ in 0..10 {
+            eq.step(&env, Duration::from_secs(60), &mut ports)
+                .expect("the absent payload degrades to the configured return temp");
+        }
+        let counts = Equipment::take_health_counts(&mut eq);
+        assert_eq!(
+            counts.fluid_payload_absences, 10,
+            "every absent-payload step is counted in the run's health"
+        );
+        let mut warnings = Vec::new();
+        eq.drain_warnings(&mut warnings);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the absent payload warns once per run, not once per step: {warnings:?}"
+        );
+        assert!(
+            warnings[0]
+                .message
+                .contains("counted silently in the run health's fluid_payload_absences"),
+            "the warning names where the silent counts surface: {:?}",
+            warnings[0].message
+        );
+    }
+
     #[test]
     fn condensing_is_more_efficient_than_non_condensing_at_partial_load() {
         // AFUE 0.95 → condensing; AFUE 0.8 → non-condensing.
@@ -1832,8 +2282,12 @@ mod tests {
             let mut restored = ElectricBoiler::new(cfg);
             restored.init(&eb_config(10_000.0, 0.80), &env).unwrap();
             restored.load_state(&state).unwrap();
-            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-                .expect("an electric boiler checkpoint must restore a contract-valid output");
+            hares_types::validate_core_contract(
+                restored.descriptor(),
+                restored.core_output(),
+                &mut Vec::new(),
+            )
+            .expect("an electric boiler checkpoint must restore a contract-valid output");
         }
         // Gas boiler face (the fuel arm).
         {
@@ -1855,8 +2309,12 @@ mod tests {
             let mut restored = GasBoiler::new(cfg);
             restored.init(&gb_config(10_000.0, 0.80), &env).unwrap();
             restored.load_state(&state).unwrap();
-            hares_types::validate_core_contract(restored.descriptor(), restored.core_output())
-                .expect("a gas boiler checkpoint must restore a contract-valid output");
+            hares_types::validate_core_contract(
+                restored.descriptor(),
+                restored.core_output(),
+                &mut Vec::new(),
+            )
+            .expect("a gas boiler checkpoint must restore a contract-valid output");
         }
     }
 
@@ -1941,7 +2399,10 @@ mod tests {
 
     #[test]
     fn gas_boiler_jacket_loss_writes_to_thermal_port_and_conserves_energy() {
-        // Non-condensing boiler at 80% AFUE: jacket loss = fuel_input - thermal_output.
+        // Non-condensing boiler at 80% AFUE: the combustion residual
+        // (fuel_input - thermal_output) splits by the flue/jacket shares; the
+        // zone's JacketLoss is the jacket share only (the flue share leaves
+        // outdoors).
         let cfg = gb_config(10_000.0, 0.80);
         let mut eq = GasBoiler::new(cfg.clone());
         let env = env(18.0);
@@ -1971,11 +2432,13 @@ mod tests {
             "fuel_input_w={fuel_input_w} should exceed thermal_output_w={thermal_output_w}"
         );
 
-        // Energy conservation: jacket_loss = fuel_input - thermal_output.
-        let expected_jacket = fuel_input_w - thermal_output_w;
+        // Energy conservation: the jacket gets its share of the combustion
+        // residual (default flue 0.9 -> jacket 0.1; no pump here).
+        let loss_w = fuel_input_w - thermal_output_w;
+        let expected_jacket = (1.0 - DEFAULT_GAS_BOILER_FLUE_LOSS_FRACTION) * loss_w;
         assert!(
             (jacket_loss_w - expected_jacket).abs() < 1e-6,
-            "jacket_loss_w={jacket_loss_w} != fuel_input_w - thermal_output_w={expected_jacket}"
+            "jacket_loss_w={jacket_loss_w} != the jacket share of the residual {expected_jacket}"
         );
 
         // Jacket loss appears in the zone thermal port under JacketLoss category.
@@ -1986,8 +2449,8 @@ mod tests {
             "thermal port jacket loss={zone_jacket} != telemetry jacket_loss_w={jacket_loss_w}"
         );
 
-        // Total sensible gain equals thermal output + jacket loss:
-        // both the useful heat and the waste heat end up in the zone.
+        // Total sensible gain equals thermal output + jacket share: the flue
+        // share does not reach the zone.
         let total_sensible = ports.thermal[0].sensible_gain_w;
         let expected_total = thermal_output_w + jacket_loss_w;
         assert!(
@@ -2540,10 +3003,10 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert!(ports.electrical.load_power_w > 0.0);
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
-        assert_eq!(eq.core_output().flows.reactive_power_kvar, Some(0.0));
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
+        assert_eq!(eq.core_output().flows.reactive_power_var, Some(0.0));
         assert_eq!(eq.telemetry().get(tk::REACTIVE_POWER_KVAR), Some(0.0));
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2553,7 +3016,7 @@ mod tests {
         let mut eq = GasBoiler::new(config.clone());
         let mut env = env(18.0);
         eq.init(&config, &env).unwrap();
-        eq.pump_kw = 0.1;
+        eq.pump_w = 0.1;
         eq.hvac.runtime.duty_cycle = 0.5;
         eq.hvac.thermostat_fsm.mode = super::ThermostatMode::Heating;
         env.domains.fluid.set_from(&DomainUpdate {
@@ -2588,15 +3051,15 @@ mod tests {
         };
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
-        let p_kw = ports.electrical.net_active_w() / 1000.0;
-        let q = ports.electrical.reactive_power_kvar;
-        let expected = p_kw * pf.acos().tan();
+        let p_w = ports.electrical.net_active_w();
+        let q = ports.electrical.reactive_power_var;
+        let expected = p_w * pf.acos().tan();
         assert!(
             (q - expected).abs() < 1e-9,
             "Q/P must equal tan(acos({pf})): {q} vs {expected}"
         );
 
-        let co_q = eq.core_output().flows.reactive_power_kvar.expect("Some");
+        let co_q = eq.core_output().flows.reactive_power_var.expect("Some");
         assert_eq!(
             co_q.to_bits(),
             q.to_bits(),
@@ -2610,7 +3073,7 @@ mod tests {
             q.to_bits(),
             "telemetry Q must match port Q"
         );
-        hares_types::validate_core_contract(eq.descriptor(), eq.core_output())
+        hares_types::validate_core_contract(eq.descriptor(), eq.core_output(), &mut Vec::new())
             .expect("validate_core_contract");
     }
 
@@ -2660,22 +3123,22 @@ mod tests {
             (p_w - expected_w).abs() < 1e-6,
             "electric boiler draw must include the pump: {p_w} W vs expected {expected_w} W"
         );
-        let pump_kw = eq.telemetry().get(tk::PUMP_POWER_KW).unwrap();
+        let pump_w = eq.telemetry().get(tk::PUMP_POWER_KW).unwrap();
         assert!(
-            (pump_kw - PUMP_W / 1000.0).abs() < 1e-12,
-            "PUMP_POWER_KW sub-meter must report the pump draw; got {pump_kw}"
+            (pump_w - PUMP_W).abs() < 1e-6,
+            "PUMP_POWER_KW sub-meter must report the pump draw in W; got {pump_w}"
         );
 
         // Reactive: element Q ≡ 0 (pf 1.0), pump at the loop-pump component
         // (pf 0.84, reactive polynomial sums to 1.0 at nominal voltage).
-        let q = ports.electrical.reactive_power_kvar;
-        let expected_q = pump_kw * 0.84_f64.acos().tan();
+        let q = ports.electrical.reactive_power_var;
+        let expected_q = pump_w * 0.84_f64.acos().tan();
         assert!(
             (q - expected_q).abs() < 1e-9,
             "Q must come from the pump component alone: {q} vs {expected_q}"
         );
         assert_eq!(
-            eq.core_output().flows.reactive_power_kvar.map(f64::to_bits),
+            eq.core_output().flows.reactive_power_var.map(f64::to_bits),
             Some(q.to_bits()),
             "CoreOutput Q must match port Q"
         );
@@ -2702,7 +3165,7 @@ mod tests {
             .unwrap();
         assert_eq!(off_ports.electrical.load_power_w, 0.0);
         assert_eq!(eq.telemetry().get(tk::PUMP_POWER_KW), Some(0.0));
-        assert_eq!(off_ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(off_ports.electrical.reactive_power_var, 0.0);
     }
 
     #[test]
@@ -2737,9 +3200,9 @@ mod tests {
         eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
 
         assert_eq!(ports.electrical.load_power_w, 0.0);
-        assert_eq!(ports.electrical.reactive_power_kvar, 0.0);
+        assert_eq!(ports.electrical.reactive_power_var, 0.0);
         assert_eq!(
-            eq.core_output().flows.reactive_power_kvar,
+            eq.core_output().flows.reactive_power_var,
             Some(0.0),
             "off equipment must report Some(0.0)"
         );
@@ -2754,7 +3217,7 @@ mod tests {
         let mut eq = GasBoiler::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
-        eq.hvac.config.zone_capacitance_kwh_per_k = 2.0;
+        eq.hvac.config.zone_capacitance_j_per_k = 7200000.0;
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -2786,7 +3249,7 @@ mod tests {
         let mut eq = ElectricBoiler::new(cfg.clone());
         let env = env(18.0);
         eq.init(&cfg, &env).unwrap();
-        eq.hvac.config.zone_capacitance_kwh_per_k = 2.0;
+        eq.hvac.config.zone_capacitance_j_per_k = 7200000.0;
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],

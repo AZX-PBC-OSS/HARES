@@ -1,9 +1,11 @@
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, Duration, NaiveDate, Timelike};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::{OutputFormat, SimulationConfig};
+use hares_io::SimulationConfig;
 
 #[path = "../../../tests/support/fixture_start.rs"]
 mod fixture_start;
@@ -94,10 +96,12 @@ fn furnace_without_heating_capacity_hpxml() -> &'static str {
       <BuildingSummary>
         <Site>
           <SiteType>suburban</SiteType>
+          <ShieldingofHome>normal</ShieldingofHome>
           <Latitude>39.74</Latitude>
           <Longitude>-104.99</Longitude>
         </Site>
         <BuildingConstruction>
+          <NumberofBedrooms>3</NumberofBedrooms>
           <ConditionedFloorArea units="ft2">2000</ConditionedFloorArea>
           <ConditionedBuildingVolume units="ft3">16000</ConditionedBuildingVolume>
           <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
@@ -173,37 +177,37 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
     let hpxml_path = write_file(dir.path(), "home.xml", hpxml_xml);
     let schedule_path = write_file(dir.path(), "schedule.csv", &build_minimal_schedule());
     let weather_path = write_file(dir.path(), "weather.epw", &build_minimal_epw());
-    let output_path = dir.path().join("output.csv");
 
     let start_time = fixture_start::fixture_start();
 
     let config = DwellingConfig {
-        hpxml_path,
-        schedule_path: Some(schedule_path),
-        weather_path,
-        defaults_path: Some(hares_core::shipped_defaults_dir()),
-        sim_config: SimulationConfig {
-            start_time,
-            duration: Duration::hours(1),
-            time_res: Duration::minutes(1),
-            output_verbosity: 0,
-            output_path: Some(output_path),
-            write_output: false,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 128,
-            setpoint_deadband_c: None,
-            master_seed: 0,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: false,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id: 42,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(hpxml_path),
+        schedule: Some(InputSource::Path(schedule_path)),
+        weather: WeatherInput::Path(weather_path),
+        defaults: DefaultsSource::directory(hares_core::shipped_defaults_dir()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time,
+                duration: Duration::hours(1),
+                time_res: Duration::minutes(1),
+                reports: Vec::new(),
+                diagnostics: false,
+                metrics: false,
+                output_chunk_size: 128,
+                setpoint_deadband_c: None,
+                master_seed: 0,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            42,
+            None,
+        ),
     };
 
     Dwelling::from_config(config).expect(
@@ -241,7 +245,7 @@ fn from_config_autosizing_populates_heating_capacity() {
         .expect("first step must succeed after autosizing");
 
     assert!(
-        step_result.net_electric_power_kw.is_finite(),
+        step_result.net_electric_power_w.is_finite(),
         "Step result net electric power should be finite"
     );
 }

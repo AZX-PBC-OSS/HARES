@@ -1,3 +1,5 @@
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use hares_control::PriorityTier;
@@ -22,23 +24,20 @@ fn load_fixture(fixture_name: &str) -> Dwelling {
     let sim_toml = toml::to_string(sim_table).expect("simulation table must serialize");
     let mut sim_config =
         SimulationConfig::from_toml(&sim_toml).expect("simulation config must parse");
-    sim_config.write_output = false;
+    sim_config.reports = Vec::new();
     let bldg_id = config_value
         .get("bldg_id")
         .and_then(|value| value.as_integer())
         .unwrap_or(1);
 
     let config = DwellingConfig {
-        hpxml_path: root.join("building.xml"),
-        schedule_path: Some(root.join("schedule.csv")),
-        weather_path: root.join("weather.epw"),
-        defaults_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")),
-        sim_config,
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        resample_overrides: None,
-        patches: None,
+        hpxml: InputSource::Path(root.join("building.xml")),
+        schedule: Some(InputSource::Path(root.join("schedule.csv"))),
+        weather: WeatherInput::Path(root.join("weather.epw")),
+        defaults: DefaultsSource::directory(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults"),
+        ),
+        settings: DwellingSettings::new(sim_config, None, bldg_id, None),
     };
 
     Dwelling::from_config(config).expect("fixture dwelling must load")

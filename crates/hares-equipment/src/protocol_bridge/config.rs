@@ -79,3 +79,32 @@ impl ProtocolBridgeConfig {
         self.registered_protocols.is_empty() || self.registered_protocols.contains(&protocol_id)
     }
 }
+
+/// The the protocol bridge's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for ProtocolBridgeConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "registered_protocols",
+                hares_types::FieldMeta {
+                    description: Some("the protocols the bridge registers"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "handlers",
+                hares_types::FieldMeta {
+                    description: Some("the bridge's protocol handlers"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}

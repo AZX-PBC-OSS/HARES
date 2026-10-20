@@ -76,6 +76,7 @@ fn base_env() -> EnvironmentState {
             island_bus_voltage_pu: None,
         },
         schedule_row: None,
+        unavailable_periods: hares_types::UnavailablePeriodState::default(),
         domains: hares_types::DomainSlots::default(),
         equipment_telemetry: std::collections::HashMap::new(),
         equipment_core: Default::default(),
@@ -325,15 +326,17 @@ fn oracle_pv_24h_constant_irradiance() {
         PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw,
+            capacity_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+                .get::<uom::si::power::watt>(),
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
+            attached_boundary_id: None,
             module_type: Some("Standard".to_string()),
             noct_c: Some(noct_c),
             array_type: None,
             system_losses_fraction: Some(system_losses),
             inverter_efficiency: Some(inverter_eff),
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: None,
@@ -492,15 +495,17 @@ fn oracle_pv_24h_lut_parity() {
         PvConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kw,
+            capacity_w: uom::si::f64::Power::new::<uom::si::power::kilowatt>(capacity_kw)
+                .get::<uom::si::power::watt>(),
             tilt_deg: Some(30.0),
             azimuth_deg: Some(180.0),
+            attached_boundary_id: None,
             module_type: Some("Standard".to_string()),
             noct_c: Some(noct_c),
             array_type: None,
             system_losses_fraction: Some(system_losses),
             inverter_efficiency: Some(inverter_eff),
-            inverter_capacity_kw: None,
+            inverter_capacity_w: None,
             power_factor: None,
             surface_resolution_deg: None,
             sam_lut_path: Some(lut_path.to_string_lossy().into_owned()),
@@ -542,9 +547,9 @@ fn oracle_battery_self_discharge_24h() {
         BatteryConfig {
             equipment_id: None,
             zone_id: None,
-            capacity_kwh: 13.5,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            capacity_j: 13.5 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
             n_series: None,
             n_parallel: None,
             ah_cell: None,
@@ -573,7 +578,7 @@ fn oracle_battery_self_discharge_24h() {
             bms_mode: None,
             grid_export_rule: None,
             power_factor: None,
-            inverter_capacity_kva: None,
+            inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
         },
@@ -613,7 +618,7 @@ fn oracle_battery_self_discharge_24h() {
 #[test]
 fn oracle_generator_24h_constant_load() {
     let rated_kw = 10.0;
-    let setpoint_kw = 5.0;
+    let setpoint_w = 5000.0;
     let eta_electric = 0.30;
 
     let cfg = EquipmentConfig::from_typed(
@@ -623,7 +628,7 @@ fn oracle_generator_24h_constant_load() {
             equipment_id: None,
             zone_id: None,
             fuel_type: Some(FuelType::Gas),
-            rated_power_kw: rated_kw,
+            rated_power_w: rated_kw * 1000.0,
             eta_electric: Some(eta_electric),
             eta_thermal: Some(0.0),
             eta_jacket_water: None,
@@ -631,11 +636,11 @@ fn oracle_generator_24h_constant_load() {
             eta_exhaust: None,
             efficiency_type: Some("constant".to_string()),
             efficiency_curve_points: None,
-            delta_kw_per_s: Some(100.0),
-            capacity_min_kw: None,
-            grid_import_limit_kw: None,
-            export_limit_kw: None,
-            loop_id: None,
+            delta_w_per_s: Some(100000.0),
+            capacity_min_w: None,
+            grid_import_limit_w: None,
+            export_limit_w: None,
+            loop_id: Some(1),
             flow_rate_kg_s: None,
             supply_temp_c: None,
             return_temp_c: None,
@@ -661,8 +666,8 @@ fn oracle_generator_24h_constant_load() {
 
     generator
         .apply_control(&ControlSignal::PowerSetpoint {
-            active_power_kw: setpoint_kw,
-            reactive_power_kvar: None,
+            active_power_w: setpoint_w,
+            reactive_power_var: None,
             min_soc: None,
             max_soc: None,
         })
@@ -684,8 +689,8 @@ fn oracle_generator_24h_constant_load() {
     let total_gen_kwh = total_gen_kw_s / 3_600.0;
 
     // Analytical: gen = power * 24h, fuel = power_W / efficiency * 24h
-    let expected_gen_kwh = setpoint_kw * HOURS_24;
-    let expected_fuel_kwh = (setpoint_kw * 1_000.0) / eta_electric * HOURS_24 / 1_000.0;
+    let expected_gen_kwh = (setpoint_w / 1_000.0) * HOURS_24;
+    let expected_fuel_kwh = setpoint_w / eta_electric * HOURS_24 / 1_000.0;
 
     assert_within_pct(total_gen_kwh, expected_gen_kwh, 1.0, "generator output");
     assert_within_pct(total_fuel_kwh, expected_fuel_kwh, 1.0, "generator fuel");
@@ -710,7 +715,7 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
             fan_power_w: None,
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             fuel_type: FuelType::Gas,
             tank_volume_m3: Some(tank_volume_m3),
             tank_height_m: None,
@@ -727,6 +732,7 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
             draw_flow_rate_kg_s: Some(0.0),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             pilot_power_w: Some(0.0),
             flue_loss_fraction: Some(0.0),
             skin_loss_fraction: Some(0.0),
@@ -735,7 +741,9 @@ fn oracle_gas_wh_standby_ua_decay_24h() {
             zone_type: None,
             first_hour_rating_m3: None,
             jacket_r_value_m2_k_w: None,
-            conversion_efficiency: None,
+            // Required at init (no default may stand in for it); the burner
+            // never fires in this standby oracle, so the value is inert here.
+            conversion_efficiency: Some(0.78),
             fixture_delivery_temp_c: None,
             hot_draw_temp_c: None,
             pilot_fraction_to_tank: None,
@@ -795,7 +803,7 @@ fn oracle_tankless_wh_24h_constant_draw() {
         TanklessWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
-            loop_id: None,
+            loop_id: Some(1),
             fuel_type: FuelType::Gas,
             energy_factor: Some(efficiency),
             uniform_energy_factor: None,
@@ -807,6 +815,7 @@ fn oracle_tankless_wh_24h_constant_draw() {
             draw_flow_rate_kg_s: Some(draw_kg_s),
             draw_flow_rate_source: None,
             mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
             avg_water_draw_l_per_day: None,
             zone_type: None,
             min_flow_kg_s: None,

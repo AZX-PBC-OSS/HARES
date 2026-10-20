@@ -61,11 +61,13 @@ def test_finite_thermostat_param_still_attaches_and_simulates(tmp_path) -> None:
     # scheduled heating setpoint is 20 °C, below the 21 °C override.
     def heating_delivered_w_sum(tag: str, params: dict[str, object] | None) -> float:
         dwelling = make_dwelling(
-            output_verbosity=5, output_path=str(tmp_path / f"{tag}.csv"), write_output=True
+            verbosity=5, csv_path=str(tmp_path / f"{tag}.csv")
         )
         if params is not None:
             dwelling.add_actor_by_name("IdealThermostat", "Thermostat", params)
-        return float(dwelling.simulate()["HVAC Heating Delivered (W)"].sum())
+        return float(
+            dwelling.simulate().reports[0].table()["HVAC Heating Delivered (W)"].sum()
+        )
 
     scheduled = heating_delivered_w_sum("scheduled", None)
     overridden = heating_delivered_w_sum("overridden", {"target": HEATING, "heating_c": 21.0})
@@ -107,7 +109,7 @@ def test_finite_list_element_param_still_attaches_and_simulates(tmp_path) -> Non
     simulates (the channel the non-finite variant must be rejected from,
     not silently stored into).
     """
-    dwelling = make_dwelling(output_verbosity=5, output_path=str(tmp_path / "dwelling_42.csv"))
+    dwelling = make_dwelling(verbosity=5, csv_path=str(tmp_path / "dwelling_42.csv"))
     dwelling.add_actor_by_name(
         "Occupant",
         "Occupant",
@@ -116,7 +118,7 @@ def test_finite_list_element_param_still_attaches_and_simulates(tmp_path) -> Non
         # an unrelated loud error the landed occupant runtime raises).
         {"occupancy_column": [1.0, 0.0] * 6},
     )
-    df = dwelling.simulate()
+    df = dwelling.simulate().reports[0].table()
     assert df is not None and len(df) > 0, "the finite occupancy column must simulate"
 
 
@@ -153,7 +155,7 @@ def test_a_preconditioning_event_its_unit_cannot_serve_is_a_config_error() -> No
     registration as a `HaresConfigError` that names both setpoints in
     plain words, and the dwelling keeps no actor for it.
     """
-    from ochre_next._hares import HaresConfigError
+    from hares._hares import HaresConfigError
 
     dwelling = make_dwelling()
     heater = next(

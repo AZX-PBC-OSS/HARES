@@ -52,6 +52,10 @@ dwelling_*.parquet
 # committed so the parity suite actually runs in CI instead of vacuously
 # passing with all fixtures skipped.
 !tests/fixtures/parity/**/*.parquet
+# ...and NOT the ResStock fleet fixture metadata: the golden fleet fixtures
+# build from it, so it is committed (three rows extracted from the release
+# metadata, see tests/fixtures/golden/resstock_2025_fleet.toml).
+!tests/fixtures/resstock/**/*.parquet
 
 # Worktrees
 .worktrees/
@@ -62,11 +66,10 @@ conditioned_oracle
 
 .shipwright
 
-docs/eplus/
+docs/eplus/*
+!docs/eplus/section-mapping.md
 docs/hpxml/
 
 .verify*
-
-docs/reviews/_logs/
 
 .workstrees/

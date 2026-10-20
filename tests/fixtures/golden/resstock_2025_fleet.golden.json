@@ -1,0 +1,1306 @@
+{
+  "kind": "resstock_fleet",
+  "features": [],
+  "defaults_dir": "python/hares/defaults",
+  "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
+  "git_head": "44deba5c38080234880f4a628be48f02aa5ee0ab",
+  "git_dirty": true,
+  "metrics": [],
+  "products": {
+    "aggregate": {
+      "num_rows": 48,
+      "schema": [
+        {
+          "name": "Time",
+          "arrow_type": "Timestamp(ms)",
+          "nullable": false
+        },
+        {
+          "name": "Total Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Total Gas Power (therms/hour)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Total Reactive Power (kVAR)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Outdoor Dry Bulb (C)",
+          "arrow_type": "Float64",
+          "nullable": true
+        },
+        {
+          "name": "Temperature - Indoor (C)",
+          "arrow_type": "Float64",
+          "nullable": true
+        },
+        {
+          "name": "Electric Baseboard Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Room AC Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Heat Pump Water Heater Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Clothes Washer Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Clothes Dryer Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Dishwasher Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Refrigerator Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Cooking Range Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Exterior Lighting Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Indoor Lighting Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "TV Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "MELs Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "HVAC Heating End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "HVAC Cooling End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Water Heating End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Other End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Refrigeration End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Lighting End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Plug Loads End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Unmet HVAC Load (C)",
+          "arrow_type": "Float64",
+          "nullable": true
+        },
+        {
+          "name": "Temperature - Ground (C)",
+          "arrow_type": "Float64",
+          "nullable": true
+        }
+      ],
+      "columns": [
+        {
+          "name": "Time",
+          "digest": "7e59087a1023051d5066656b4390d20bc0d97349a10eb326c5155d5bccddb149",
+          "blocks": [
+            "7e59087a1023051d5066656b4390d20bc0d97349a10eb326c5155d5bccddb149"
+          ]
+        },
+        {
+          "name": "Total Electric Power (kW)",
+          "digest": "92e89b44dc1b1a5c9eed8ac14a866baac3825c063aba7c83a6c0114f6550ba84",
+          "blocks": [
+            "92e89b44dc1b1a5c9eed8ac14a866baac3825c063aba7c83a6c0114f6550ba84"
+          ]
+        },
+        {
+          "name": "Total Gas Power (therms/hour)",
+          "digest": "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e",
+          "blocks": [
+            "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e"
+          ]
+        },
+        {
+          "name": "Total Reactive Power (kVAR)",
+          "digest": "64f801389c0a24b5c382c7304238b88481ca731b9289f433931095588732eece",
+          "blocks": [
+            "64f801389c0a24b5c382c7304238b88481ca731b9289f433931095588732eece"
+          ]
+        },
+        {
+          "name": "Outdoor Dry Bulb (C)",
+          "digest": "ce4c4770faa5abe8f7c23e658ba17696727d0ab7c048ac94a88fe7fde80255f6",
+          "blocks": [
+            "ce4c4770faa5abe8f7c23e658ba17696727d0ab7c048ac94a88fe7fde80255f6"
+          ]
+        },
+        {
+          "name": "Temperature - Indoor (C)",
+          "digest": "686dc9eed03771deef8f77af9e028345f2812eedd9296cd90aa7ec917d26a29f",
+          "blocks": [
+            "686dc9eed03771deef8f77af9e028345f2812eedd9296cd90aa7ec917d26a29f"
+          ]
+        },
+        {
+          "name": "Electric Baseboard Electric Power (kW)",
+          "digest": "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e",
+          "blocks": [
+            "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e"
+          ]
+        },
+        {
+          "name": "Room AC Electric Power (kW)",
+          "digest": "42732906548dbd633a0913299ef1c6616c3feb5b6e89d84bd4ad2590ee834fef",
+          "blocks": [
+            "42732906548dbd633a0913299ef1c6616c3feb5b6e89d84bd4ad2590ee834fef"
+          ]
+        },
+        {
+          "name": "Heat Pump Water Heater Electric Power (kW)",
+          "digest": "7f1ccac9fb60f8a8ddd209fb52feaf7b23024faf446d009bc99a61e657f996c4",
+          "blocks": [
+            "7f1ccac9fb60f8a8ddd209fb52feaf7b23024faf446d009bc99a61e657f996c4"
+          ]
+        },
+        {
+          "name": "Clothes Washer Electric Power (kW)",
+          "digest": "f45b56d3c771cc75549541c8998a1983b630957f74c4817add6308ed60e5ba4a",
+          "blocks": [
+            "f45b56d3c771cc75549541c8998a1983b630957f74c4817add6308ed60e5ba4a"
+          ]
+        },
+        {
+          "name": "Clothes Dryer Electric Power (kW)",
+          "digest": "4de3154dead74654f011137873327d04a4cf0529441749590bbb52dd71ccb3b8",
+          "blocks": [
+            "4de3154dead74654f011137873327d04a4cf0529441749590bbb52dd71ccb3b8"
+          ]
+        },
+        {
+          "name": "Dishwasher Electric Power (kW)",
+          "digest": "f47d9549bf51d02a45db6408cf137cd25737539630dc8f48c7f7cada8a68a040",
+          "blocks": [
+            "f47d9549bf51d02a45db6408cf137cd25737539630dc8f48c7f7cada8a68a040"
+          ]
+        },
+        {
+          "name": "Refrigerator Electric Power (kW)",
+          "digest": "f1dddbbc29f5c66befdb33ea03fbca473b2abb0853f1670072338144ed670bd0",
+          "blocks": [
+            "f1dddbbc29f5c66befdb33ea03fbca473b2abb0853f1670072338144ed670bd0"
+          ]
+        },
+        {
+          "name": "Cooking Range Electric Power (kW)",
+          "digest": "c4bff18f5e82278e523f24807ff985d977660c36ddf238785e8d61d35f8a8849",
+          "blocks": [
+            "c4bff18f5e82278e523f24807ff985d977660c36ddf238785e8d61d35f8a8849"
+          ]
+        },
+        {
+          "name": "Exterior Lighting Electric Power (kW)",
+          "digest": "394c2f38865078fa9dfd48f4090b5d2f18d9ce87f305d671df2c1b5ec7df20ea",
+          "blocks": [
+            "394c2f38865078fa9dfd48f4090b5d2f18d9ce87f305d671df2c1b5ec7df20ea"
+          ]
+        },
+        {
+          "name": "Indoor Lighting Electric Power (kW)",
+          "digest": "160a27c31451297472fdee814225d80c66fed6dde1bb7d483cd7c6b10dad9069",
+          "blocks": [
+            "160a27c31451297472fdee814225d80c66fed6dde1bb7d483cd7c6b10dad9069"
+          ]
+        },
+        {
+          "name": "TV Electric Power (kW)",
+          "digest": "745a5b9386c270dd3674bc594784c237002e76e474e233589ebf74457e5af497",
+          "blocks": [
+            "745a5b9386c270dd3674bc594784c237002e76e474e233589ebf74457e5af497"
+          ]
+        },
+        {
+          "name": "MELs Electric Power (kW)",
+          "digest": "706e2533abf7f11336529bc7ba6b5da38d555b88f24a83e83c26d488f5ef63b3",
+          "blocks": [
+            "706e2533abf7f11336529bc7ba6b5da38d555b88f24a83e83c26d488f5ef63b3"
+          ]
+        },
+        {
+          "name": "HVAC Heating End Use Electric Power (kW)",
+          "digest": "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e",
+          "blocks": [
+            "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e"
+          ]
+        },
+        {
+          "name": "HVAC Cooling End Use Electric Power (kW)",
+          "digest": "42732906548dbd633a0913299ef1c6616c3feb5b6e89d84bd4ad2590ee834fef",
+          "blocks": [
+            "42732906548dbd633a0913299ef1c6616c3feb5b6e89d84bd4ad2590ee834fef"
+          ]
+        },
+        {
+          "name": "Water Heating End Use Electric Power (kW)",
+          "digest": "7f1ccac9fb60f8a8ddd209fb52feaf7b23024faf446d009bc99a61e657f996c4",
+          "blocks": [
+            "7f1ccac9fb60f8a8ddd209fb52feaf7b23024faf446d009bc99a61e657f996c4"
+          ]
+        },
+        {
+          "name": "Other End Use Electric Power (kW)",
+          "digest": "da42368f1966cf1174e381776bbe389138b79e19a1026ebab1fd72e3fda56d79",
+          "blocks": [
+            "da42368f1966cf1174e381776bbe389138b79e19a1026ebab1fd72e3fda56d79"
+          ]
+        },
+        {
+          "name": "Refrigeration End Use Electric Power (kW)",
+          "digest": "f1dddbbc29f5c66befdb33ea03fbca473b2abb0853f1670072338144ed670bd0",
+          "blocks": [
+            "f1dddbbc29f5c66befdb33ea03fbca473b2abb0853f1670072338144ed670bd0"
+          ]
+        },
+        {
+          "name": "Lighting End Use Electric Power (kW)",
+          "digest": "736f2ff7dd500b8136bfbb64b0ad0967abcedec48ab24cc96829787ba864854f",
+          "blocks": [
+            "736f2ff7dd500b8136bfbb64b0ad0967abcedec48ab24cc96829787ba864854f"
+          ]
+        },
+        {
+          "name": "Plug Loads End Use Electric Power (kW)",
+          "digest": "b32c42a30714146afe1494e943a8af82dd1ef1a10579300ab9b77bb16d6e8465",
+          "blocks": [
+            "b32c42a30714146afe1494e943a8af82dd1ef1a10579300ab9b77bb16d6e8465"
+          ]
+        },
+        {
+          "name": "Unmet HVAC Load (C)",
+          "digest": "aa5d4a93a18a877fd1839669095f0f8b7946d0198a40e16b66c7f60c73dc7538",
+          "blocks": [
+            "aa5d4a93a18a877fd1839669095f0f8b7946d0198a40e16b66c7f60c73dc7538"
+          ]
+        },
+        {
+          "name": "Temperature - Ground (C)",
+          "digest": "3bf077b94cc0c1f35218751ab10b7ee7af8b1764cdf8e24eade73d57be69bd99",
+          "blocks": [
+            "3bf077b94cc0c1f35218751ab10b7ee7af8b1764cdf8e24eade73d57be69bd99"
+          ]
+        }
+      ]
+    },
+    "covered_weight": {
+      "num_rows": 48,
+      "schema": [
+        {
+          "name": "Time",
+          "arrow_type": "Timestamp(ms)",
+          "nullable": false
+        },
+        {
+          "name": "Total Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Total Gas Power (therms/hour)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Total Reactive Power (kVAR)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Outdoor Dry Bulb (C)",
+          "arrow_type": "Float64",
+          "nullable": true
+        },
+        {
+          "name": "Temperature - Indoor (C)",
+          "arrow_type": "Float64",
+          "nullable": true
+        },
+        {
+          "name": "Electric Baseboard Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Room AC Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Heat Pump Water Heater Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Clothes Washer Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Clothes Dryer Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Dishwasher Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Refrigerator Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Cooking Range Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Exterior Lighting Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Indoor Lighting Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "TV Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "MELs Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "HVAC Heating End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "HVAC Cooling End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Water Heating End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Other End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Refrigeration End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Lighting End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Plug Loads End Use Electric Power (kW)",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "Unmet HVAC Load (C)",
+          "arrow_type": "Float64",
+          "nullable": true
+        },
+        {
+          "name": "Temperature - Ground (C)",
+          "arrow_type": "Float64",
+          "nullable": true
+        }
+      ],
+      "columns": [
+        {
+          "name": "Time",
+          "digest": "7e59087a1023051d5066656b4390d20bc0d97349a10eb326c5155d5bccddb149",
+          "blocks": [
+            "7e59087a1023051d5066656b4390d20bc0d97349a10eb326c5155d5bccddb149"
+          ]
+        },
+        {
+          "name": "Total Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Total Gas Power (therms/hour)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Total Reactive Power (kVAR)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Outdoor Dry Bulb (C)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Temperature - Indoor (C)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Electric Baseboard Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Room AC Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Heat Pump Water Heater Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Clothes Washer Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Clothes Dryer Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Dishwasher Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Refrigerator Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Cooking Range Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Exterior Lighting Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Indoor Lighting Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "TV Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "MELs Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "HVAC Heating End Use Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "HVAC Cooling End Use Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Water Heating End Use Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Other End Use Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Refrigeration End Use Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Lighting End Use Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Plug Loads End Use Electric Power (kW)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        },
+        {
+          "name": "Unmet HVAC Load (C)",
+          "digest": "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e",
+          "blocks": [
+            "2d92eb70ef48df623e0505f4be6e84c47599b9a59f102af237e9c5e8bba2086e"
+          ]
+        },
+        {
+          "name": "Temperature - Ground (C)",
+          "digest": "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a",
+          "blocks": [
+            "954f02c9ce4096c938abdd2906a33088073d4327a17c3a3644bf49fbff7b012a"
+          ]
+        }
+      ]
+    },
+    "fleet_report": {
+      "num_rows": 1,
+      "schema": [
+        {
+          "name": "buildings_parsed",
+          "arrow_type": "Int64",
+          "nullable": false
+        },
+        {
+          "name": "dwellings_built",
+          "arrow_type": "Int64",
+          "nullable": false
+        },
+        {
+          "name": "weather_resolved",
+          "arrow_type": "Int64",
+          "nullable": false
+        },
+        {
+          "name": "weather_failed",
+          "arrow_type": "Int64",
+          "nullable": false
+        }
+      ],
+      "columns": [
+        {
+          "name": "buildings_parsed",
+          "digest": "e60dcba9c652b544bf3cedaec7717c107cced114bab8dddb58e6d5a0bae36572",
+          "blocks": [
+            "e60dcba9c652b544bf3cedaec7717c107cced114bab8dddb58e6d5a0bae36572"
+          ]
+        },
+        {
+          "name": "dwellings_built",
+          "digest": "e60dcba9c652b544bf3cedaec7717c107cced114bab8dddb58e6d5a0bae36572",
+          "blocks": [
+            "e60dcba9c652b544bf3cedaec7717c107cced114bab8dddb58e6d5a0bae36572"
+          ]
+        },
+        {
+          "name": "weather_resolved",
+          "digest": "e60dcba9c652b544bf3cedaec7717c107cced114bab8dddb58e6d5a0bae36572",
+          "blocks": [
+            "e60dcba9c652b544bf3cedaec7717c107cced114bab8dddb58e6d5a0bae36572"
+          ]
+        },
+        {
+          "name": "weather_failed",
+          "digest": "a536aa3cede6ea3c1f3e0357c3c60e0f216a8c89b853df13b29daa8f85065dfb",
+          "blocks": [
+            "a536aa3cede6ea3c1f3e0357c3c60e0f216a8c89b853df13b29daa8f85065dfb"
+          ]
+        }
+      ]
+    },
+    "homes": {
+      "num_rows": 3,
+      "schema": [
+        {
+          "name": "bldg_id",
+          "arrow_type": "Int64",
+          "nullable": false
+        },
+        {
+          "name": "weight",
+          "arrow_type": "Float64",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "arrow_type": "Utf8",
+          "nullable": false
+        },
+        {
+          "name": "reason",
+          "arrow_type": "Utf8",
+          "nullable": true
+        },
+        {
+          "name": "steps",
+          "arrow_type": "Int64",
+          "nullable": false
+        },
+        {
+          "name": "periods_folded",
+          "arrow_type": "Int64",
+          "nullable": false
+        }
+      ],
+      "columns": [
+        {
+          "name": "bldg_id",
+          "digest": "41463b4742780cb3a464bd6aad253c5890d70291194bf9e56d5212910ea41e5d",
+          "blocks": [
+            "41463b4742780cb3a464bd6aad253c5890d70291194bf9e56d5212910ea41e5d"
+          ]
+        },
+        {
+          "name": "weight",
+          "digest": "0d72043e9bbdfda94bbe41babc331e925194517a9e4207d7d778510a93cc3f5f",
+          "blocks": [
+            "0d72043e9bbdfda94bbe41babc331e925194517a9e4207d7d778510a93cc3f5f"
+          ]
+        },
+        {
+          "name": "status",
+          "digest": "53bc130729e9eda3be177e03bb47466ac0ebe25ab353489fffbd5645c352d725",
+          "blocks": [
+            "53bc130729e9eda3be177e03bb47466ac0ebe25ab353489fffbd5645c352d725"
+          ]
+        },
+        {
+          "name": "reason",
+          "digest": "0d30be880477963f75f2cc9351e1766f29649db4ed71876b4d1688e3a66f2d5a",
+          "blocks": [
+            "0d30be880477963f75f2cc9351e1766f29649db4ed71876b4d1688e3a66f2d5a"
+          ]
+        },
+        {
+          "name": "steps",
+          "digest": "b8b3bf62fe0ecdd0eb754998657aa41cc86d264fe52bad4dc16b775b869214e5",
+          "blocks": [
+            "b8b3bf62fe0ecdd0eb754998657aa41cc86d264fe52bad4dc16b775b869214e5"
+          ]
+        },
+        {
+          "name": "periods_folded",
+          "digest": "cb0d54f9bd2dcb587e7fd6c02e6d5e6952989eec7c1a7ee46cdfda21d70326de",
+          "blocks": [
+            "cb0d54f9bd2dcb587e7fd6c02e6d5e6952989eec7c1a7ee46cdfda21d70326de"
+          ]
+        }
+      ]
+    }
+  },
+  "resolved": [
+    [
+      {
+        "name": "Electric Baseboard",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x407ddb4b232ed931"
+          },
+          {
+            "name": "efficiency",
+            "unit": "fraction",
+            "bits": "0x3ff0000000000000"
+          },
+          {
+            "name": "rated_eir",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Room AC",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x409165820af57c6e"
+          },
+          {
+            "name": "rated_eir",
+            "unit": "-",
+            "bits": "0x3fd232b5f1104b24"
+          },
+          {
+            "name": "rated_shr",
+            "unit": "fraction",
+            "bits": "0x3fe4cccccccccccd"
+          }
+        ]
+      },
+      {
+        "name": "Heat Pump Water Heater",
+        "parameters": [
+          {
+            "name": "heating_capacity_w",
+            "unit": "W",
+            "bits": "0x409af40000000000"
+          },
+          {
+            "name": "setpoint_c",
+            "unit": "C",
+            "bits": "0x4049d55555555555"
+          },
+          {
+            "name": "tank_volume_m3",
+            "unit": "m3",
+            "bits": "0x3fc5cdd12eb1435a"
+          },
+          {
+            "name": "ua_w_k",
+            "unit": "W/K",
+            "bits": "0x3ffe62b73dba0ce6"
+          },
+          {
+            "name": "rated_cop",
+            "unit": "-",
+            "bits": "0x40103566a6ffbdf9"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Washer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Dryer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Dishwasher",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fee666666666666"
+          }
+        ]
+      },
+      {
+        "name": "Cooking Range",
+        "parameters": [
+          {
+            "name": "active_power_w",
+            "unit": "W",
+            "bits": "0x408f400000000000"
+          },
+          {
+            "name": "active_duration_s",
+            "unit": "s",
+            "bits": "0x408c200000000000"
+          }
+        ]
+      },
+      {
+        "name": "Exterior Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Indoor Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "TV",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fdd1eb851eb851f"
+          }
+        ]
+      },
+      {
+        "name": "MELs",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fdd1eb851eb851f"
+          }
+        ]
+      }
+    ],
+    [
+      {
+        "name": "Electric Boiler",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x4090c73fe5e9536b"
+          },
+          {
+            "name": "efficiency",
+            "unit": "fraction",
+            "bits": "0x3ff0000000000000"
+          },
+          {
+            "name": "rated_eir",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Electric Resistance Water Heater",
+        "parameters": [
+          {
+            "name": "heating_capacity_w",
+            "unit": "W",
+            "bits": "0x40ab57b59d96ff35"
+          },
+          {
+            "name": "setpoint_c",
+            "unit": "C",
+            "bits": "0x4049d55555555555"
+          },
+          {
+            "name": "tank_volume_m3",
+            "unit": "m3",
+            "bits": "0x3fba2a2e3807ea6c"
+          },
+          {
+            "name": "ua_w_k",
+            "unit": "W/K",
+            "bits": "0x3ff29df971aa77ab"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Washer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Dryer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Dishwasher",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Cooking Range",
+        "parameters": [
+          {
+            "name": "active_power_w",
+            "unit": "W",
+            "bits": "0x408f400000000000"
+          },
+          {
+            "name": "active_duration_s",
+            "unit": "s",
+            "bits": "0x408c200000000000"
+          }
+        ]
+      },
+      {
+        "name": "Exterior Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Indoor Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "TV",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fed1eb851eb851f"
+          }
+        ]
+      },
+      {
+        "name": "MELs",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3fed1eb851eb851f"
+          }
+        ]
+      }
+    ],
+    [
+      {
+        "name": "Gas Furnace",
+        "parameters": [
+          {
+            "name": "rated_capacity_w",
+            "unit": "W",
+            "bits": "0x40c345ff7cdc8a04"
+          },
+          {
+            "name": "afue",
+            "unit": "fraction",
+            "bits": "0x3fe999999999999a"
+          }
+        ]
+      },
+      {
+        "name": "Gas Water Heater",
+        "parameters": [
+          {
+            "name": "heating_capacity_w",
+            "unit": "W",
+            "bits": "0x40c5c059af3a14cf"
+          },
+          {
+            "name": "setpoint_c",
+            "unit": "C",
+            "bits": "0x4049d55555555555"
+          },
+          {
+            "name": "tank_volume_m3",
+            "unit": "m3",
+            "bits": "0x3fc26988d2188884"
+          },
+          {
+            "name": "ua_w_k",
+            "unit": "W/K",
+            "bits": "0x4010b285a7a01c58"
+          }
+        ]
+      },
+      {
+        "name": "PV",
+        "parameters": [
+          {
+            "name": "nameplate_w",
+            "unit": "W",
+            "bits": "0x40c57c0000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Washer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Clothes Dryer",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Dishwasher",
+        "parameters": [
+          {
+            "name": "n_units",
+            "unit": "count",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator #1",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0cccccccccccd"
+          }
+        ]
+      },
+      {
+        "name": "Refrigerator #2",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ffc28f5c28f5c29"
+          }
+        ]
+      },
+      {
+        "name": "Freezer",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff23d70a3d70a3d"
+          }
+        ]
+      },
+      {
+        "name": "Cooking Range",
+        "parameters": [
+          {
+            "name": "active_power_w",
+            "unit": "W",
+            "bits": "0x408f400000000000"
+          },
+          {
+            "name": "active_duration_s",
+            "unit": "s",
+            "bits": "0x408c200000000000"
+          }
+        ]
+      },
+      {
+        "name": "Exterior Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Garage Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Indoor Lighting",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "Ceiling Fan",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ff0000000000000"
+          }
+        ]
+      },
+      {
+        "name": "TV",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ffe147ae147ae14"
+          }
+        ]
+      },
+      {
+        "name": "MELs",
+        "parameters": [
+          {
+            "name": "usage_multiplier",
+            "unit": "-",
+            "bits": "0x3ffe147ae147ae14"
+          }
+        ]
+      }
+    ]
+  ],
+  "health": null
+}

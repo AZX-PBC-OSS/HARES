@@ -15,7 +15,7 @@ mod tests {
     const NARROW_FIELDS: &[&str] = &[
         "outdoor_temp",
         "zone_temp[Indoor]",
-        "total_power_kw",
+        "total_power_w",
         "equipment_power[Electric Furnace]",
         "setpoint_heat[Indoor]",
     ];
@@ -26,10 +26,12 @@ mod tests {
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = {time_res_s}
-duration_s = {duration_s}
-
+time_res = {time_res_s}
+duration = {duration_s}
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -52,13 +54,6 @@ ach = 0.0
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
-write_output = false
 "#
         )
     }
@@ -67,7 +62,7 @@ write_output = false
         let dir = tempfile::tempdir().expect("create TOML directory");
         let path = dir.path().join("dwelling.toml");
         fs::write(&path, synthetic_toml(duration_s, time_res_s)).expect("write TOML");
-        Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("create dwelling")
+        Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("create dwelling")
     }
 
     #[test]
@@ -85,7 +80,10 @@ write_output = false
                     dwelling
                         .telemetry()
                         .unwrap()
-                        .to_observation_vec(NARROW_FIELDS)
+                        .observation_vec(
+                            NARROW_FIELDS,
+                            &mut hares_core::ObservationWarnOnce::default(),
+                        )
                         .expect("observation")
                 })
                 .collect();
@@ -114,7 +112,12 @@ write_output = false
         dwellings.par_iter_mut().for_each(|dwelling| {
             let _ = dwelling.step().expect("step");
             let t = dwelling.telemetry().unwrap();
-            let obs = t.to_observation_vec(NARROW_FIELDS).expect("obs");
+            let obs = t
+                .observation_vec(
+                    NARROW_FIELDS,
+                    &mut hares_core::ObservationWarnOnce::default(),
+                )
+                .expect("obs");
             assert_eq!(
                 obs.len(),
                 NARROW_FIELDS.len(),

@@ -606,21 +606,26 @@ pub struct StateSpaceWiring {
 
 /// Interior convective film coefficient model selection.
 ///
-/// Controls whether the interior convective coefficient is frozen at init time
-/// (ASHRAE Simple, backward-compatible) or recomputed per timestep from the
-/// TARP natural convection model (default going forward).
+/// Controls whether the interior convective coefficient is frozen at init
+/// time (`AshraeSimple`, the enum default and the value production pins in
+/// `solver_builder`) or recomputed per timestep from the TARP natural
+/// convection model (`PerStepTarp`, wired but disabled in production under
+/// the registered constraint that blocks it at the 60 s step).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilmCoefficientModel {
-    /// Frozen ASHRAE Simple values by surface orientation only (backward compatible).
-    /// h_conv does not depend on surface-to-air ΔT. Same values as EnergyPlus
+    /// Frozen ASHRAE Simple values by surface orientation only (the enum
+    /// default, and production's pinned model). h_conv does not depend on
+    /// surface-to-air ΔT. Same values as EnergyPlus
     /// `CalcASHRAESimpleIntConvCoeff` and OCHRE's init-time calculation.
+    #[default]
     AshraeSimple,
-    /// Per-step TARP natural convection via [`hares_physics::film_coefficients::tarp_h_natural`] (EnergyPlus default).
+    /// Per-step TARP natural convection via
+    /// [`hares_physics::film_coefficients::tarp_h_natural`] (EnergyPlus's
+    /// default inside convection algorithm).
     /// h_conv ∝ |ΔT|^(1/3), evaluated each timestep from T_surface and T_zone,
     /// injected as explicit forcing rather than a static A-matrix conductance.
     ///
     /// Reference: Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, Eqs. 90-92.
-    #[default]
     PerStepTarp,
 }
 
@@ -685,16 +690,19 @@ pub struct ThermalSolverConfig {
     pub interior_lwr_method: crate::boundary_rc::InteriorLwrMethod,
     /// Interior convective film coefficient model.
     ///
-    /// `PerStepTarp` (default): recomputes h_conv from actual surface-to-zone
-    /// ΔT each timestep using the TARP natural convection model. The convective
-    /// flux is injected as explicit forcing, keeping the A-matrix static.
-    /// `AshraeSimple`: frozen init-time coefficients by surface orientation
-    /// (backward compatible with prior HARES and OCHRE behavior).
+    /// `AshraeSimple` (the enum default, and the value production pins in
+    /// `solver_builder`): frozen init-time coefficients by surface
+    /// orientation. `PerStepTarp`: recomputes h_conv from actual
+    /// surface-to-zone ΔT each timestep using the TARP natural convection
+    /// model, the convective flux injected as explicit forcing so the
+    /// A-matrix stays static. Wired but disabled in production; enable it by
+    /// naming the variant explicitly.
     pub film_coefficient_model: FilmCoefficientModel,
     /// Per-boundary interior convection injection metadata.
     ///
-    /// Populated when `film_coefficient_model == PerStepTarp` and the boundary
-    /// has RC nodes. Empty vec when using `AshraeSimple` (backward compat).
+    /// Populated by `solver_builder` for every interior-facing boundary with
+    /// RC nodes; the per-step correction reads it only when
+    /// `film_coefficient_model == PerStepTarp`.
     pub interior_convection_injections: Vec<InteriorConvectionInjection>,
     /// Maximum number of consecutive solver non-convergence events before the
     /// solver falls back to the last-good capacity value for a zone.
@@ -1174,6 +1182,16 @@ pub struct WindowSolarDiag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_enum_default_is_the_production_pin() {
+        // The library default must not re-enable the model production
+        // disables: production pins AshraeSimple in solver_builder.
+        assert_eq!(
+            FilmCoefficientModel::default(),
+            FilmCoefficientModel::AshraeSimple
+        );
+    }
 
     fn valid_exterior_surface(
         surface_id: u32,

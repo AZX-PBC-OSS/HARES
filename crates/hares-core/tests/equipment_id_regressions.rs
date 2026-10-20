@@ -26,6 +26,8 @@
 //!    slow (roughly 0.13 SOC per driving day), so short-horizon tests pass
 //!    while the long run still fails.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -33,10 +35,9 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::actors::{BatteryManagementActor, BmsParams};
-use hares_core::{Dwelling, DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
+use hares_core::{Dwelling, DwellingConfig, SimulationConfig, SimulationEngine};
 use hares_equipment::config::ConfigValue;
 use hares_equipment::{Equipment, EquipmentConfig, EquipmentRegistry};
-use hares_io::OutputFormat;
 use hares_types::{
     BmsMode, ControlCapabilities, CoreCapabilities, CoreOutput, ElectricPower, EndUse,
     EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule,
@@ -89,7 +90,7 @@ fn write_fixture_hpxml(dir: &Path) -> PathBuf {
     path
 }
 
-fn sim_config(duration: Duration, output_path: Option<PathBuf>, verbosity: u8) -> SimulationConfig {
+fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> SimulationConfig {
     SimulationConfig {
         start_time: FixedOffset::west_opt(10 * 3600)
             .expect("UTC-10 offset is valid")
@@ -97,18 +98,30 @@ fn sim_config(duration: Duration, output_path: Option<PathBuf>, verbosity: u8) -
             .unwrap(),
         duration,
         time_res: Duration::seconds(900),
-        output_verbosity: verbosity,
-        write_output: output_path.is_some(),
-        output_path,
-        output_format: OutputFormat::Csv,
+        reports: csv_path
+            .into_iter()
+            .map(|path| hares_io::ReportSpec {
+                name: "frame".to_string(),
+                selection: hares_io::Selection::Verbosity(verbosity),
+                frequency: hares_io::Frequency::default(),
+                destination: hares_io::Destination::Csv {
+                    path,
+                    overwrite: false,
+                },
+            })
+            .collect(),
+        diagnostics: false,
+        metrics: false,
         output_chunk_size: 1024,
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
-        retain_batches: false,
-        rotation: hares_io::RotationPolicy::None,
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_io::HealthPolicy::default(),
+        first_hour_interpolation: Default::default(),
+        weather_year: hares_io::WeatherYear::default(),
+        warmup: hares_io::Warmup::Disabled,
     }
 }
 
@@ -118,17 +131,13 @@ fn dwelling_config(
     overrides: Option<serde_json::Value>,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: hpxml.to_path_buf(),
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: project_root()
-            .join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim,
-        overrides,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml.to_path_buf()),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(
+            project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
+        ),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(sim, overrides, 100, None),
     }
 }
 
@@ -163,7 +172,7 @@ fn equipment_core_has_one_entry_per_equipment() {
 fn nightly_strategy_keeps_ev_charged_over_long_horizon() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("ev_nightly_45day.csv");
+    let csv_path = tmp.path().join("ev_nightly_45day.csv");
 
     // Nightly charging strategy: charge to 90% between 22:00 and 06:00.
     let nightly = serde_json::json!({"Nightly": {
@@ -177,19 +186,14 @@ fn nightly_strategy_keeps_ev_charged_over_long_horizon() {
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(45), Some(output_path.clone()), 5),
+        sim_config(Duration::days(45), Some(csv_path.clone()), 5),
         Some(overrides),
     );
-    let result = SimulationEngine::new()
+    SimulationEngine::new()
         .run(config)
         .expect("engine.run should succeed");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
 
-    let (charge_days, cancelled_max) = summarize_ev_run(&output_path);
+    let (charge_days, cancelled_max) = summarize_ev_run(&csv_path);
 
     // With working SOC observation the pack is topped to 0.90 (67.5 kWh of
     // 75 kWh) every night against a ~9.8 kWh daily trip, so a real charging
@@ -303,16 +307,16 @@ fn fixture_dwelling_config(
     };
     (
         DwellingConfig {
-            hpxml_path,
-            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-            weather_path: weather_for(bldg_dir),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: sim_config(Duration::hours(1), None, 0),
-            overrides,
-            bldg_id: 100,
-            initialization_duration: None,
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(hpxml_path),
+            schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+            weather: WeatherInput::Path(weather_for(bldg_dir)),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                sim_config(Duration::hours(1), None, 0),
+                overrides,
+                100,
+                None,
+            ),
         },
         tmp,
     )
@@ -353,11 +357,7 @@ impl IdentityProbeEquipment {
                 stage: ExecutionStage::Independent,
                 control_capabilities: ControlCapabilities::empty(),
                 core_capabilities: CoreCapabilities::empty(),
-                telemetry_fields: vec![TelemetryField {
-                    name: "probe".to_string(),
-                    unit: "-".to_string(),
-                    description: "identity probe".to_string(),
-                }],
+                telemetry_fields: vec![TelemetryField::ratio("probe", "identity probe")],
                 zone_type: None,
             },
             telemetry: Telemetry::with_capacity(1),
@@ -382,11 +382,12 @@ impl IdentityProbeEquipment {
     }
 
     /// A constant electric load: claimed in the core output and deposited
-    /// as the matching electrical port contribution each step.
+    /// as the matching electrical port contribution each step. The load is
+    /// given in kW (the caller's convenience) and applied in W.
     fn with_electric_load(mut self, kw: f64) -> Self {
         self.electric_load_kw = kw;
         self.descriptor.core_capabilities = CoreCapabilities::ELECTRIC;
-        self.core_output.flows.electric_kw = Some(ElectricPower::Consumption(kw));
+        self.core_output.flows.electric_w = Some(ElectricPower::Consumption(kw * 1000.0));
         self
     }
 
@@ -416,6 +417,10 @@ impl IdentityProbeEquipment {
 impl Equipment for IdentityProbeEquipment {
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
     }
 
     fn rename(&mut self, name: String) {
@@ -467,7 +472,7 @@ impl Equipment for IdentityProbeEquipment {
         if self.electric_load_kw > 0.0 {
             ports.accumulate(&hares_types::PortContribution::Electrical {
                 active_power_w: self.electric_load_kw * 1000.0,
-                reactive_power_kvar: 0.0,
+                reactive_power_var: 0.0,
             })?;
         }
         Ok(())
@@ -686,6 +691,8 @@ fn dehumidifier_spec(instance: &str, equipment_id: u32) -> hares_io::EquipmentSp
         system_id: None,
         related_hvac_idref: None,
         primary_role: None,
+        heating_setpoint_source: None,
+        cooling_setpoint_source: None,
     }
 }
 
@@ -698,7 +705,7 @@ fn assembly_rejects_duplicate_explicit_equipment_ids() {
     let hpxml = write_fixture_hpxml(tmp.path());
     let config = dwelling_config(&hpxml, sim_config(Duration::hours(1), None, 0), None);
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     blueprint
         .add_equipment_spec(dehumidifier_spec("Humid Fighter A", 5000))
         .expect("add spec");
@@ -729,7 +736,7 @@ fn assembly_rejects_unassigned_equipment_id_zero() {
     let hpxml = write_fixture_hpxml(tmp.path());
     let config = dwelling_config(&hpxml, sim_config(Duration::hours(1), None, 0), None);
     let mut blueprint =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint");
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint");
     blueprint
         .add_equipment_spec(dehumidifier_spec("Humid Fighter Zero", 0))
         .expect("add spec");
@@ -846,7 +853,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
     let hpxml = tmp.path().join("fixture_battery.xml");
     std::fs::write(&hpxml, inject_battery(&src)).expect("write battery-injected HPXML");
 
-    let output_path = tmp.path().join("battery_observation.csv");
+    let csv_path = tmp.path().join("battery_observation.csv");
     // Self-consumption BMS mode (the battery's default is Manual, which
     // seeds no actor): the override reaches the typed config through the
     // named-equipment override channel, the same path the Python API uses.
@@ -854,31 +861,26 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
         "min_soc": 0.1,
         "max_soc": 1.0,
         "solar_only_charging": false,
-        "surplus_deadband_kw": 0.0,
+        "surplus_deadband_w": 0.0,
     }});
     let overrides = serde_json::json!({
         "Battery": { "bms_mode": bms_mode.to_string() }
     });
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::days(2), Some(csv_path.clone()), 5),
+            Some(overrides),
+            100,
+            None,
+        ),
     };
-    let result = SimulationEngine::new().run(config).expect("engine.run");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
+    SimulationEngine::new().run(config).expect("engine.run");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -913,7 +915,7 @@ fn bms_actor_observes_its_own_battery_through_real_assembly() {
 fn low_target_strategy_pack_is_raised_to_the_anxiety_band_before_departure() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("ev_low_target_14day.csv");
+    let csv_path = tmp.path().join("ev_low_target_14day.csv");
 
     let low_target = serde_json::json!({"Immediate": { "target_soc": 0.1 }});
     let overrides = serde_json::json!({
@@ -921,19 +923,14 @@ fn low_target_strategy_pack_is_raised_to_the_anxiety_band_before_departure() {
     });
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(14), Some(output_path.clone()), 5),
+        sim_config(Duration::days(14), Some(csv_path.clone()), 5),
         Some(overrides),
     );
-    let result = SimulationEngine::new()
+    SimulationEngine::new()
         .run(config)
         .expect("engine.run should succeed");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -979,7 +976,7 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
     let src = std::fs::read_to_string(second_fixture_dir().join("home.xml")).expect("home.xml");
     let hpxml = tmp.path().join("second_fixture_ev.xml");
     std::fs::write(&hpxml, inject_ev(&src)).expect("write injected HPXML");
-    let output_path = tmp.path().join("ev_nightly_45day_second_fixture.csv");
+    let csv_path = tmp.path().join("ev_nightly_45day_second_fixture.csv");
 
     let nightly = serde_json::json!({"Nightly": {
         "off_peak_start_hour": 22.0,
@@ -990,27 +987,24 @@ fn nightly_strategy_keeps_ev_charged_on_a_second_fixture() {
         "EV": { "charging_strategy": nightly.to_string() }
     });
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(second_fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&second_fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(45), Some(output_path.clone()), 5),
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(
+            second_fixture_dir().join("in.schedules.csv"),
+        )),
+        weather: WeatherInput::Path(weather_for(&second_fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::days(45), Some(csv_path.clone()), 5),
+            Some(overrides),
+            100,
+            None,
+        ),
     };
-    let result = SimulationEngine::new()
+    SimulationEngine::new()
         .run(config)
         .expect("engine.run should succeed");
-    assert!(
-        !matches!(result.status, SimStatus::Failed(_)),
-        "simulation failed: {:?}",
-        result.status
-    );
 
-    let (charge_days, cancelled_max) = summarize_ev_run(&output_path);
+    let (charge_days, cancelled_max) = summarize_ev_run(&csv_path);
     assert!(
         charge_days >= 30,
         "Nightly(22:00-06:00, target 0.90) must top the pack up on most of 45 \
@@ -1042,12 +1036,21 @@ fn checkpoint_restore_rejects_spec_reorder_with_named_error() {
     }
     let checkpoint = dwelling_a.save_checkpoint().expect("save checkpoint");
 
-    // Same config, same equipment set, rotated spec order: the id-injection
-    // pass assigns ids from spec order, so every equipment's id shifts.
-    let mut blueprint_b =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint B");
-    blueprint_b.equipment_specs.rotate_left(1);
-    let mut dwelling_b = blueprint_b.build().expect("build dwelling B");
+    // Same config, same equipment set, reordered: the first equipment is
+    // removed and re-added last, so the id-injection pass assigns ids from
+    // spec order and every equipment's id shifts (the mutators are the
+    // builder's, the blueprints are immutable).
+    let mut builder_b =
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint B");
+    let mut names = builder_b.equipment_names();
+    let first_name = names.remove(0).to_string();
+    let first_spec = builder_b
+        .remove_equipment(&first_name)
+        .expect("the first equipment removes");
+    builder_b
+        .add_equipment_spec(first_spec)
+        .expect("the first equipment re-adds last");
+    let mut dwelling_b = builder_b.build().expect("build dwelling B");
 
     let err = dwelling_b
         .load_checkpoint(checkpoint)
@@ -1141,11 +1144,11 @@ fn add_equipment_rejects_unknown_zone_declaration() {
 fn midrun_equipment_removal_keeps_output_columns_aligned() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("midrun_removal.csv");
+    let csv_path = tmp.path().join("midrun_removal.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1163,7 +1166,7 @@ fn midrun_equipment_removal_keeps_output_columns_aligned() {
     // and flushes/closes the output recorder.
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -1207,19 +1210,19 @@ fn midrun_equipment_removal_keeps_output_columns_aligned() {
 /// columns the frozen schema never allocated: the added equipment gets an
 /// empty column map (its values read as missing — the documented contract),
 /// the dwelling keeps stepping, and the schema-known equipment keep their
-/// own columns. Before the `in_schema` predicate, `build_equipment_column_map`
-/// demanded every applicable column for EVERY equipment and panicked in
-/// debug builds the moment a post-recording add re-derived the map — the
-/// CI python-test failure this pins (add_ev mid-simulation).
+/// own columns. Before the `in_schema` predicate, the row plan's equipment
+/// column bindings demanded every applicable column for EVERY equipment and
+/// panicked in debug builds the moment a post-recording add re-derived the
+/// map — the CI python-test failure this pins (add_ev mid-simulation).
 #[test]
 fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("midrun_add.csv");
+    let csv_path = tmp.path().join("midrun_add.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1242,7 +1245,7 @@ fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
     // its own column would not exist, so assert the observable contract —
     // the run completed and the constant MELs survivor still reports its
     // own energy in its own column on day 2.
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -1253,17 +1256,17 @@ fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
         .iter()
         .position(|c| *c == "MELs Electric Power (kW)")
         .unwrap_or_else(|| panic!("MELs column missing; header: {header:?}"));
-    let mels_day2_kwh: f64 = contents
+    let mels_day2_energy_j: f64 = contents
         .lines()
         .skip(1 + 96)
         .filter_map(|l| l.split(',').nth(mels_col))
         .filter_map(|v| v.trim().parse::<f64>().ok())
-        .map(|kw| kw * 0.25)
+        .map(|kw| kw * 0.25 * 3.6e6)
         .sum();
     assert!(
-        mels_day2_kwh > 1.0,
+        mels_day2_energy_j > 3.6e6,
         "the always-on MELs load must keep reporting its own energy after the \
-         mid-run add; got {mels_day2_kwh} kWh"
+         mid-run add; got {mels_day2_energy_j} J"
     );
     assert!(
         !header.iter().any(|c| c.starts_with("ProbeLate")),
@@ -1284,11 +1287,11 @@ fn midrun_equipment_add_with_recording_gets_empty_map_not_panic() {
 fn midrun_equipment_add_with_recording_at_high_verbosity_does_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("midrun_add_v7.csv");
+    let csv_path = tmp.path().join("midrun_add_v7.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 7),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 7),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1302,11 +1305,13 @@ fn midrun_equipment_add_with_recording_at_high_verbosity_does_not_panic() {
     dwelling.simulate().expect("day-2 simulate");
 }
 
-/// The same mid-run add, but the added equipment's NAME matches an HVAC
-/// column predicate ("... Baseboard" satisfies `is_hvac_or_wh`), so
+/// The same mid-run add, but the added equipment's TYPED END USE matches
+/// the HVAC column family (`with_end_use(HVAC_HEATING)`, the descriptor's
+/// declaration, the retired name-string classifier's replacement), so
 /// record_step's type-gated verbosity-7 debug invariants (`fan_power`,
-/// `runtime_fraction`, and for heat-pump/cooling names `defrost_state`,
-/// `er_power`, `shr`, `latent_gains`) apply to it. Those columns resolve
+/// `runtime_fraction`, and for the heat-pump-heater and cooling families
+/// `defrost_state`, `er_power`, `shr`, `latent_gains`) apply to it. Those
+/// columns resolve
 /// through the `in_schema` gate — a mid-run add after the schema froze is
 /// schema-unknown, so its map is empty by design — and the invariants must
 /// not demand per-equipment columns the schema never emitted: the
@@ -1315,14 +1320,14 @@ fn midrun_equipment_add_with_recording_at_high_verbosity_does_not_panic() {
 /// the one column such equipment still resolves (it accumulates every
 /// equipment's contribution), pinned by the sibling test above.
 #[test]
-fn midrun_add_of_hvac_named_equipment_at_high_verbosity_does_not_panic() {
+fn midrun_add_of_hvac_end_use_equipment_at_high_verbosity_does_not_panic() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("midrun_add_hvac_v7.csv");
+    let csv_path = tmp.path().join("midrun_add_hvac_v7.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 7),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 7),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1331,10 +1336,10 @@ fn midrun_add_of_hvac_named_equipment_at_high_verbosity_does_not_panic() {
         dwelling.step().expect("day-1 step");
     }
     dwelling
-        .add_equipment(Box::new(IdentityProbeEquipment::new(
-            "ProbeLate Baseboard",
-            0,
-        )))
+        .add_equipment(Box::new(
+            IdentityProbeEquipment::new("ProbeLate", 0)
+                .with_end_use(hares_types::EndUse::HVAC_HEATING),
+        ))
         .expect("mid-run add with recording active must succeed");
     dwelling.simulate().expect("day-2 simulate");
 }
@@ -1353,11 +1358,11 @@ fn midrun_add_of_hvac_named_equipment_at_high_verbosity_does_not_panic() {
 fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("end_use_desync.csv");
+    let csv_path = tmp.path().join("end_use_desync.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1365,22 +1370,22 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
     // Pick the remove victim so the shift crosses at least one end-use
     // boundary: the first equipment whose successor belongs to a different
     // end-use. Removing it shifts every later equipment one slot down, into
-    // end-use aggregate slots that are not theirs.
+    // end-use aggregate slots that are not theirs. The end uses are the
+    // descriptors' typed declarations.
     let names: Vec<String> = dwelling
         .equipment()
         .iter()
         .map(|eq| eq.descriptor().name.clone())
         .collect();
-    let victim = names
+    let end_uses: Vec<hares_types::EndUse> = dwelling
+        .equipment()
         .iter()
-        .enumerate()
-        .find(|(i, name)| {
-            names.get(i + 1).is_some_and(|next| {
-                hares_io::equipment_name_to_end_use(name)
-                    != hares_io::equipment_name_to_end_use(next)
-            })
-        })
-        .map(|(_, name)| name.clone())
+        .map(|eq| eq.descriptor().end_use.clone())
+        .collect();
+    let victim = end_uses
+        .windows(2)
+        .position(|pair| pair[0] != pair[1])
+        .map(|i| names[i].clone())
         .expect("fixture must contain two adjacent equipment of different end-uses");
 
     // Day 1 with the full set (rows get recorded; the schema freezes).
@@ -1394,7 +1399,7 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
 
     // Group the surviving equipment by end-use and check every aggregate
     // column against the sum of its members' own columns, step for step.
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let mut lines = contents.lines();
     let header: Vec<&str> = lines.next().expect("header").split(',').collect();
     let day2: Vec<Vec<f64>> = lines
@@ -1419,12 +1424,9 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
     };
     use std::collections::HashMap;
     let mut by_end_use: HashMap<hares_types::EndUse, Vec<&str>> = HashMap::new();
-    for name in &names {
+    for (name, end_use) in names.iter().zip(&end_uses) {
         if name != &victim {
-            by_end_use
-                .entry(hares_io::equipment_name_to_end_use(name))
-                .or_default()
-                .push(name);
+            by_end_use.entry(end_use.clone()).or_default().push(name);
         }
     }
     for (end_use, members) in &by_end_use {
@@ -1462,11 +1464,11 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
 fn midrun_added_equipment_contributes_to_its_end_use_aggregate() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let hpxml = write_fixture_hpxml(tmp.path());
-    let output_path = tmp.path().join("end_use_add.csv");
+    let csv_path = tmp.path().join("end_use_add.csv");
 
     let config = dwelling_config(
         &hpxml,
-        sim_config(Duration::days(2), Some(output_path.clone()), 1),
+        sim_config(Duration::days(2), Some(csv_path.clone()), 1),
         None,
     );
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
@@ -1478,8 +1480,8 @@ fn midrun_added_equipment_contributes_to_its_end_use_aggregate() {
     let other_members: Vec<String> = dwelling
         .equipment()
         .iter()
+        .filter(|eq| eq.descriptor().end_use == hares_types::EndUse::OTHER)
         .map(|eq| eq.descriptor().name.clone())
-        .filter(|name| hares_io::equipment_name_to_end_use(name) == hares_types::EndUse::OTHER)
         .collect();
     assert!(
         !other_members.is_empty(),
@@ -1495,7 +1497,7 @@ fn midrun_added_equipment_contributes_to_its_end_use_aggregate() {
         .expect("mid-run add must succeed");
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let mut lines = contents.lines();
     let header: Vec<&str> = lines.next().expect("header").split(',').collect();
     let day2: Vec<Vec<f64>> = lines
@@ -1800,7 +1802,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
     let src = std::fs::read_to_string(fixture_dir().join("home.xml")).expect("home.xml");
     let hpxml = tmp.path().join("fixture_ev_battery.xml");
     std::fs::write(&hpxml, inject_battery(&inject_ev(&src))).expect("write injected HPXML");
-    let output_path = tmp.path().join("actor_columns_midrun.csv");
+    let csv_path = tmp.path().join("actor_columns_midrun.csv");
 
     let nightly = serde_json::json!({"Nightly": {
         "off_peak_start_hour": 22.0,
@@ -1811,23 +1813,23 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
         "min_soc": 0.1,
         "max_soc": 1.0,
         "solar_only_charging": false,
-        "surplus_deadband_kw": 0.0,
+        "surplus_deadband_w": 0.0,
     }});
     let overrides = serde_json::json!({
         "EV": { "charging_strategy": nightly.to_string() },
         "Battery": { "bms_mode": bms_mode.to_string() },
     });
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::days(2), Some(csv_path.clone()), 5),
+            Some(overrides),
+            100,
+            None,
+        ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
 
@@ -1870,7 +1872,7 @@ fn midrun_equipment_removal_keeps_actor_columns_attributed() {
     // Day 2 with the shifted actor vector.
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -1946,12 +1948,10 @@ fn checkpoint_restore_rejects_a_shrunk_equipment_set() {
     // Same config minus the injected EV spec (proven to assemble — the
     // structural tests above read its equipment): the dwelling is smaller
     // than the checkpoint.
-    let mut blueprint_b =
-        hares_core::dwelling::DwellingBlueprint::from_config(config).expect("blueprint B");
-    blueprint_b
-        .equipment_specs
-        .retain(|s| s.instance_name.clone().unwrap_or_else(|| s.name.clone()) != "EV");
-    let mut dwelling_b = blueprint_b.build().expect("build dwelling B");
+    let mut builder_b =
+        hares_core::dwelling::DwellingBlueprintBuilder::from_config(config).expect("blueprint B");
+    builder_b.remove_equipment("EV").expect("the EV removes");
+    let mut dwelling_b = builder_b.build().expect("build dwelling B");
     assert!(
         !dwelling_b
             .equipment()
@@ -2176,27 +2176,27 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     let hpxml = tmp.path().join("fixture_battery_replace.xml");
     std::fs::write(&hpxml, inject_battery(&src)).expect("write battery-injected HPXML");
 
-    let output_path = tmp.path().join("battery_replace.csv");
+    let csv_path = tmp.path().join("battery_replace.csv");
     let bms_mode = serde_json::json!({"SelfConsumption": {
         "min_soc": 0.1,
         "max_soc": 1.0,
         "solar_only_charging": false,
-        "surplus_deadband_kw": 0.0,
+        "surplus_deadband_w": 0.0,
     }});
     let overrides = serde_json::json!({
         "Battery": { "bms_mode": bms_mode.to_string() }
     });
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::days(2), Some(output_path.clone()), 5),
-        overrides: Some(overrides),
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::days(2), Some(csv_path.clone()), 5),
+            Some(overrides),
+            100,
+            None,
+        ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
 
@@ -2210,8 +2210,8 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     // like the original for its manager (same mode and power limits), so
     // the manager stays bound to the name rather than being rebuilt.
     let Some(hares_equipment::ActorSeed::Battery {
-        max_charge_kw,
-        max_discharge_kw,
+        max_charge_w,
+        max_discharge_w,
         ..
     }) = dwelling
         .equipment()
@@ -2223,9 +2223,9 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
         panic!("the original battery seeds a battery manager");
     };
     let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
-        "capacity_kwh": 13.5,
-        "max_charge_kw": max_charge_kw,
-        "max_discharge_kw": max_discharge_kw,
+        "capacity_j": 13.5 * 3.6e6,
+        "max_charge_w": max_charge_w,
+        "max_discharge_w": max_discharge_w,
         "bms_mode": bms_mode.to_string(),
     }))
     .expect("minimal BatteryConfig");
@@ -2252,7 +2252,7 @@ fn actor_rebinds_to_replacement_equipment_after_replace() {
     // initial 0.5), not the evictee's absent id.
     dwelling.simulate().expect("day-2 simulate");
 
-    let contents = std::fs::read_to_string(&output_path).expect("read output CSV");
+    let contents = std::fs::read_to_string(&csv_path).expect("read output CSV");
     let header: Vec<&str> = contents
         .lines()
         .next()
@@ -2359,11 +2359,11 @@ fn user_bms_actor() -> Box<dyn hares_core::actor::Actor> {
                 min_soc: 0.1,
                 max_soc: 1.0,
                 solar_only_charging: false,
-                surplus_deadband_kw: 0.0,
+                surplus_deadband_w: 0.0,
             },
             grid_export_rule: GridExportRule::Unrestricted,
-            max_charge_kw: 5.0,
-            max_discharge_kw: 5.0,
+            max_charge_w: 5.0,
+            max_discharge_w: 5.0,
             price_schedule: None,
             steps_per_day: 96,
             min_dwell_steps: 0,
@@ -2398,17 +2398,21 @@ fn user_added_actor_resolves_its_equipment_binding_on_add() {
     let hpxml = tmp.path().join("fixture_battery_user_actor.xml");
     std::fs::write(&hpxml, inject_battery(&src)).expect("write battery-injected HPXML");
 
+    // The battery's control is declared `Manual`: the battery follows
+    // commands, and the user BMS added below is the command source. A
+    // Manual declaration seeds no auto-registered BMS, which the
+    // duplicate-name check below still proves.
     let config = DwellingConfig {
-        hpxml_path: hpxml,
-        schedule_path: Some(fixture_dir().join("in.schedules.csv")),
-        weather_path: weather_for(&fixture_dir()),
-        defaults_path: Some(project_root().join("defaults")),
-        sim_config: sim_config(Duration::hours(6), None, 0),
-        overrides: None,
-        bldg_id: 100,
-        initialization_duration: None,
-        resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-        patches: None,
+        hpxml: InputSource::Path(hpxml),
+        schedule: Some(InputSource::Path(fixture_dir().join("in.schedules.csv"))),
+        weather: WeatherInput::Path(weather_for(&fixture_dir())),
+        defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        settings: DwellingSettings::new(
+            sim_config(Duration::hours(6), None, 0),
+            Some(serde_json::json!({ "Battery": { "bms_mode": "\"Manual\"" } })),
+            100,
+            None,
+        ),
     };
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
 
@@ -2441,7 +2445,7 @@ fn actor_binding_recovers_when_its_equipment_arrives_later() {
     // equipment does not exist. Two hours of horizon: one blind step before
     // the battery joins, then the recovery steps.
     let (mut config, _tmp) = fixture_dwelling_config(&fixture_dir(), true, None);
-    config.sim_config.duration = Duration::hours(2);
+    config.settings.sim_config.duration = Duration::hours(2);
     let mut dwelling = Dwelling::from_config(config).expect("dwelling builds");
     dwelling
         .add_actor(user_bms_actor())
@@ -2464,9 +2468,9 @@ fn actor_binding_recovers_when_its_equipment_arrives_later() {
     // The battery joins through the user entrance — registry-built and
     // initialized, mirroring the Python adapter's add path.
     let battery_cfg: hares_equipment::BatteryConfig = serde_json::from_value(serde_json::json!({
-        "capacity_kwh": 13.5,
-        "max_charge_kw": 5.0,
-        "max_discharge_kw": 5.0,
+        "capacity_j": 13.5 * 3.6e6,
+        "max_charge_w": 5000.0,
+        "max_discharge_w": 5000.0,
     }))
     .expect("minimal BatteryConfig");
     let eq_config =
@@ -2549,8 +2553,8 @@ fn ev_soc_check_fails_loudly_when_core_output_soc_is_absent() {
     // adjacent gate stays green and the only behavior under test is the
     // `soc_bounds` loud failure on the absent SOC.
     let derate = hares_equipment::battery::CapacityDerateModel::default().evaluate(25.0);
-    probe.telemetry.insert("capacity_kwh", 60.0 * derate);
-    probe.telemetry.insert("capacity_kwh_rated", 60.0);
+    probe.telemetry.insert("capacity_j", 60.0 * derate);
+    probe.telemetry.insert("capacity_j_rated", 60.0);
     probe.telemetry.insert("capacity_fade_pct", 0.0);
     probe.telemetry.insert("battery_temp_c", 25.0);
     dwelling

@@ -174,6 +174,21 @@ pub struct GasBoilerConfig {
     /// OCHRE HVAC.py GasBoiler class: `condensing = eir_max < 1 / 0.9`.
     #[serde(default)]
     pub condensing: bool,
+    /// Share of the combustion residual that leaves through the flue,
+    /// outdoors [0..1]. The complement is the jacket share that heats the
+    /// boiler's surrounding space. ASHRAE: the flue carries the dominant
+    /// share of a non-condensing boiler's loss (jacket losses are a few
+    /// percent of the fuel input). Default 0.9.
+    ///
+    /// Not the gas water heater's same-named `flue_loss_fraction`
+    /// (`water_heater::wh_config`): that one is a share of the gross
+    /// combustion heat (default 0.10), this one a share of the residual.
+    #[serde(default = "default_boiler_flue_loss_fraction")]
+    pub flue_loss_fraction: f64,
+}
+
+fn default_boiler_flue_loss_fraction() -> f64 {
+    0.9
 }
 
 impl EquipmentTypedConfig for GasBoilerConfig {
@@ -197,6 +212,7 @@ impl Default for GasBoilerConfig {
             number_of_speeds: 1,
             setpoint: HvacSetpointConfig::default(),
             condensing: false,
+            flue_loss_fraction: default_boiler_flue_loss_fraction(),
         }
     }
 }
@@ -237,6 +253,12 @@ impl GasBoilerConfig {
             return Err(HaresError::Equipment(format!(
                 "GasBoilerConfig: condensing=true expects return_temp_c < 70 °C, got {} °C",
                 self.return_temp_c
+            )));
+        }
+        if !(0.0..=1.0).contains(&self.flue_loss_fraction) {
+            return Err(HaresError::Equipment(format!(
+                "GasBoilerConfig: flue_loss_fraction must be in [0.0, 1.0], got {}",
+                self.flue_loss_fraction
             )));
         }
         Ok(())
@@ -417,6 +439,544 @@ fn default_fluid_type() -> FluidType {
     FluidType::Water
 }
 
+/// The the gas furnace's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for GasFurnaceConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating or cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "afue",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the furnace's or boiler's annual fuel utilisation efficiency",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_speeds",
+                hares_types::FieldMeta {
+                    description: Some("the number of speed stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_heating_capacities_w",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage heating capacities, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "stage_heating_eirs",
+                hares_types::FieldMeta {
+                    description: Some("the per-stage heating energy input ratios"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ducts",
+                hares_types::FieldMeta {
+                    description: Some("the duct distribution configuration"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the electric furnace's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for ElectricFurnaceConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating or cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eir",
+                hares_types::FieldMeta {
+                    description: Some("the electric input ratio (W/W)"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_speeds",
+                hares_types::FieldMeta {
+                    description: Some("the number of speed stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ducts",
+                hares_types::FieldMeta {
+                    description: Some("the duct distribution configuration"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the gas boiler's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for GasBoilerConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "loop_id",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop the equipment is wired to"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating or cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "afue",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the furnace's or boiler's annual fuel utilisation efficiency",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop's design flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "return_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop's design return temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fluid_type",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop's fluid"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_speeds",
+                hares_types::FieldMeta {
+                    description: Some("the number of speed stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "condensing",
+                hares_types::FieldMeta {
+                    description: Some("whether the boiler runs in condensing mode"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "flue_loss_fraction",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the flue's share of the combustion residual (outdoors); \
+                         the complement is the jacket share that heats the zone",
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the electric boiler's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for ElectricBoilerConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "loop_id",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop the equipment is wired to"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating or cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eir",
+                hares_types::FieldMeta {
+                    description: Some("the electric input ratio (W/W)"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "flow_rate_kg_s",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop's design flow rate, kg/s"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "return_temp_c",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop's design return temperature, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fluid_type",
+                hares_types::FieldMeta {
+                    description: Some("the hydronic loop's fluid"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the fan's rated power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "number_of_speeds",
+                hares_types::FieldMeta {
+                    description: Some("the number of speed stages"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the electric baseboard's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for ElectricBaseboardConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating or cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eir",
+                hares_types::FieldMeta {
+                    description: Some("the electric input ratio (W/W)"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the ideal HVAC's config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for IdealHvacConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "equipment_id",
+                hares_types::FieldMeta {
+                    description: Some("the explicit equipment id the assembly assigns"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zone_id",
+                hares_types::FieldMeta {
+                    description: Some("the zone the equipment sits in"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "setpoint",
+                hares_types::FieldMeta {
+                    description: Some("the thermostat setpoint configuration"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "deadband_c",
+                hares_types::FieldMeta {
+                    description: Some("the tank's deadband, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "n_speeds",
+                hares_types::FieldMeta {
+                    description: Some("the ideal unit's speed count"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ideal_capacity_mode",
+                hares_types::FieldMeta {
+                    description: Some("the ideal unit's capacity mode"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated heating capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cooling_capacity_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated cooling capacity, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "shr",
+                hares_types::FieldMeta {
+                    description: Some("the sensible heat ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fraction_heating_load_served",
+                hares_types::FieldMeta {
+                    description: Some("the fraction of the heating load the equipment serves"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fraction_cooling_load_served",
+                hares_types::FieldMeta {
+                    description: Some("the fraction of the cooling load the equipment serves"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "rated_fan_power_w",
+                hares_types::FieldMeta {
+                    description: Some("the rated fan power, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "rated_eir",
+                hares_types::FieldMeta {
+                    description: Some("the rated energy input ratio"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_min_w",
+                hares_types::FieldMeta {
+                    description: Some("the minimum capacity before shutdown, watts"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fuel_type",
+                hares_types::FieldMeta {
+                    description: Some("the equipment's fuel"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "capacity_biquadratic_coeffs",
+                hares_types::FieldMeta {
+                    description: Some("the capacity correction curve's coefficients"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "eir_biquadratic_coeffs",
+                hares_types::FieldMeta {
+                    description: Some("the EIR correction curve's coefficients"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
+
+/// The the thermostat setpoint config's fields as the input schema publishes them.
+impl hares_types::DescribeFields for HvacSetpointConfig {
+    fn fields() -> Vec<hares_types::FieldSchema> {
+        crate::describe_fields::field_schemas::<Self>(&[
+            (
+                "heating_setpoint_c",
+                hares_types::FieldMeta {
+                    description: Some("the constant heating setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "heating_setpoint_source",
+                hares_types::FieldMeta {
+                    description: Some("the heating setpoint's active source"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cooling_setpoint_c",
+                hares_types::FieldMeta {
+                    description: Some("the constant cooling setpoint, Celsius"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cooling_setpoint_source",
+                hares_types::FieldMeta {
+                    description: Some("the cooling setpoint's active source"),
+                    ..Default::default()
+                },
+            ),
+        ])
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

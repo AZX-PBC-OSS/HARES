@@ -4,19 +4,20 @@
 //! rather than synthetic stubs, so determinism and performance results are
 //! meaningful.
 
+use hares_core::DwellingSettings;
+use hares_io::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, Duration, NaiveDate, Timelike};
 use hares_core::{DwellingConfig, SimulationConfig};
-use hares_io::OutputFormat;
 
 #[path = "../support/fixture_start.rs"]
 mod fixture_start;
 use fixture_start::fixture_start;
 
-fn output_path(output_dir: &Path, bldg_id: i64) -> Option<PathBuf> {
-    Some(output_dir.join(format!("dwelling-{bldg_id}.csv")))
+fn csv_path(output_dir: &Path, bldg_id: i64) -> PathBuf {
+    output_dir.join(format!("dwelling-{bldg_id}.csv"))
 }
 
 fn examples_dir() -> PathBuf {
@@ -27,7 +28,7 @@ fn examples_dir() -> PathBuf {
 /// (no schedule column, no HPXML fractions) resolves its default profile
 /// there instead of erroring.
 fn repo_defaults_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../defaults")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults")
 }
 
 pub fn ochre_hpxml_path() -> PathBuf {
@@ -74,32 +75,53 @@ pub fn build_beopt_dwelling_config(
     seed: u64,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: ochre_hpxml_path(),
-        schedule_path: Some(ochre_schedule_path()),
-        weather_path: ochre_weather_path(),
-        sim_config: SimulationConfig {
-            start_time: fixture_start(),
-            duration,
-            time_res: Duration::minutes(1),
-            output_verbosity: 0,
-            output_path: output_path(output_dir, bldg_id),
-            write_output: true,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: seed,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: true,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        resample_overrides: None,
-        defaults_path: Some(repo_defaults_path()),
-        patches: None,
+        hpxml: InputSource::Path(ochre_hpxml_path()),
+        schedule: Some(InputSource::Path(ochre_schedule_path())),
+        weather: WeatherInput::Path(ochre_weather_path()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: fixture_start(),
+                duration,
+                time_res: Duration::minutes(1),
+                reports: vec![
+                    hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(0),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Memory,
+                    },
+                    hares_io::ReportSpec {
+                        name: "file".to_string(),
+                        selection: hares_io::Selection::Verbosity(0),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path(output_dir, bldg_id),
+                            // The harness reruns a scenario (the determinism
+                            // sweep's thread counts) into the same directory;
+                            // the old writer truncated the file in place, and
+                            // the reruns keep that behaviour.
+                            overwrite: true,
+                        },
+                    },
+                ],
+                diagnostics: false,
+                metrics: true,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: seed,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            bldg_id,
+            None,
+        ),
     }
 }
 
@@ -110,32 +132,53 @@ pub fn build_resstock_dwelling_config(
     seed: u64,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: resstock_hpxml_path(),
-        schedule_path: Some(resstock_schedule_path()),
-        weather_path: ochre_weather_path(),
-        sim_config: SimulationConfig {
-            start_time: fixture_start(),
-            duration,
-            time_res: Duration::minutes(1),
-            output_verbosity: 0,
-            output_path: output_path(output_dir, bldg_id),
-            write_output: true,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: seed,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: true,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        resample_overrides: None,
-        defaults_path: Some(repo_defaults_path()),
-        patches: None,
+        hpxml: InputSource::Path(resstock_hpxml_path()),
+        schedule: Some(InputSource::Path(resstock_schedule_path())),
+        weather: WeatherInput::Path(ochre_weather_path()),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: fixture_start(),
+                duration,
+                time_res: Duration::minutes(1),
+                reports: vec![
+                    hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(0),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Memory,
+                    },
+                    hares_io::ReportSpec {
+                        name: "file".to_string(),
+                        selection: hares_io::Selection::Verbosity(0),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path(output_dir, bldg_id),
+                            // The harness reruns a scenario (the determinism
+                            // sweep's thread counts) into the same directory;
+                            // the old writer truncated the file in place, and
+                            // the reruns keep that behaviour.
+                            overwrite: true,
+                        },
+                    },
+                ],
+                diagnostics: false,
+                metrics: true,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: seed,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            bldg_id,
+            None,
+        ),
     }
 }
 
@@ -145,12 +188,20 @@ pub fn fixture_hpxml_path() -> PathBuf {
 }
 
 pub fn write_schedule_csv(path: &PathBuf) {
+    // The columns the base fixture's event equipment and wet appliances run
+    // on: a schedule file without an appliance's power column is a
+    // construction error, and the washer and dishwasher draw their hot water
+    // through their hot-water columns. No setpoint column: the base
+    // fixture's HPXML declares thermostat setpoints, and a schedule file
+    // that carries a setpoint column next to them is the overlap the
+    // setpoint rule warns (the OS-HPXML convention), which would degrade
+    // every home the fleet status counts.
     let rows = [
-        "Time,Clothes Washer (kW),HVAC Heating (C),HVAC Cooling (C)",
-        "2021-01-01T00:00:00-07:00,0.10,20.0,25.0",
-        "2021-01-01T00:15:00-07:00,0.20,20.5,25.5",
-        "2021-01-01T00:30:00-07:00,0.15,21.0,26.0",
-        "2021-01-01T00:45:00-07:00,0.12,20.0,25.0",
+        "Time,occupants,clothes_washer,clothes_dryer,dishwasher,cooking_range,hot_water_clothes_washer,hot_water_dishwasher",
+        "2021-01-01T00:00:00-07:00,1.0,0.10,0.10,0.10,0.10,0.10,0.10",
+        "2021-01-01T00:15:00-07:00,1.0,0.20,0.20,0.20,0.20,0.20,0.20",
+        "2021-01-01T00:30:00-07:00,1.0,0.15,0.15,0.15,0.15,0.15,0.15",
+        "2021-01-01T00:45:00-07:00,1.0,0.12,0.12,0.12,0.12,0.12,0.12",
     ]
     .join("\n");
     fs::write(path, rows).expect("failed to write schedule fixture");
@@ -231,31 +282,52 @@ pub fn build_dwelling_config(
     seed: u64,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml_path: fixture_hpxml_path(),
-        schedule_path: Some(schedule_path),
-        weather_path,
-        sim_config: SimulationConfig {
-            start_time: fixture_start(),
-            duration,
-            time_res: Duration::minutes(1),
-            output_verbosity: 0,
-            output_path: output_path(output_dir, bldg_id),
-            write_output: true,
-            output_format: OutputFormat::Csv,
-            output_chunk_size: 1024,
-            setpoint_deadband_c: None,
-            master_seed: seed,
-            civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            retain_batches: true,
-            rotation: hares_io::RotationPolicy::None,
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        },
-        overrides: None,
-        bldg_id,
-        initialization_duration: None,
-        resample_overrides: None,
-        defaults_path: Some(repo_defaults_path()),
-        patches: None,
+        hpxml: InputSource::Path(fixture_hpxml_path()),
+        schedule: Some(InputSource::Path(schedule_path)),
+        weather: WeatherInput::Path(weather_path),
+        defaults: DefaultsSource::directory(repo_defaults_path()),
+        settings: DwellingSettings::new(
+            SimulationConfig {
+                start_time: fixture_start(),
+                duration,
+                time_res: Duration::minutes(1),
+                reports: vec![
+                    hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(0),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Memory,
+                    },
+                    hares_io::ReportSpec {
+                        name: "file".to_string(),
+                        selection: hares_io::Selection::Verbosity(0),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path(output_dir, bldg_id),
+                            // The harness reruns a scenario (the determinism
+                            // sweep's thread counts) into the same directory;
+                            // the old writer truncated the file in place, and
+                            // the reruns keep that behaviour.
+                            overwrite: true,
+                        },
+                    },
+                ],
+                diagnostics: false,
+                metrics: true,
+                output_chunk_size: 1024,
+                setpoint_deadband_c: None,
+                master_seed: seed,
+                civil_timezone: None,
+                site_location: hares_io::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_io::HealthPolicy::default(),
+                first_hour_interpolation: Default::default(),
+                weather_year: hares_io::WeatherYear::default(),
+                warmup: hares_io::Warmup::Disabled,
+            },
+            None,
+            bldg_id,
+            None,
+        ),
     }
 }

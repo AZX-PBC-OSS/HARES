@@ -224,6 +224,8 @@ pub const MINUTES_PER_DAY: f64 = 1_440.0;
 
 /// Hours per year [h/year]. ASHRAE 8760 h = 365 days × 24 h/day.
 pub const HOURS_PER_YEAR: f64 = 8_760.0;
+/// The non-leap year's seconds: 8760 h x 3600 s/h.
+pub const SECONDS_PER_YEAR: f64 = 31_536_000.0;
 
 /// Boiler auxiliary operating hours per year [h/year].
 ///

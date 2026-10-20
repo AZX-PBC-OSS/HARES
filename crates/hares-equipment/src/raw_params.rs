@@ -219,7 +219,7 @@ impl RawParams {
         self.named(key).is_some()
     }
 
-    /// The list, for an error to show: `a, b, phase_<n>_power_kw (n below
+    /// The list, for an error to show: `a, b, phase_<n>_power_w (n below
     /// phase_len), month_multiplier_<n> (n below 12)`.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -231,6 +231,61 @@ impl RawParams {
             param.describe(&mut out);
         }
         out
+    }
+
+    /// The parameters as the input schema's override fields publish them:
+    /// every key parameter and every member of a fixed-count family, with
+    /// the kind the load reads it as; a family whose count another
+    /// parameter sets contributes its base keys at index 0 (the count the
+    /// load reads them under is the override's own `phase_len`-shaped
+    /// parameter's).
+    #[must_use]
+    pub fn field_schemas(&self) -> Vec<hares_types::FieldSchema> {
+        use hares_types::ValueType;
+        let mut out = Vec::new();
+        for param in self.params() {
+            let value_type = match param.kind {
+                ParamKind::Number => ValueType::Number,
+                ParamKind::Text => ValueType::String,
+                ParamKind::Bool => ValueType::Boolean,
+                ParamKind::NumberList => ValueType::Array,
+            };
+            let push = |name: String, out: &mut Vec<hares_types::FieldSchema>| {
+                out.push(hares_types::FieldSchema {
+                    name,
+                    value_type,
+                    unit: None,
+                    default: serde_json::Value::Null,
+                    bounds: None,
+                    description: None,
+                });
+            };
+            match param.form {
+                ParamForm::Key(name) => push(name.to_string(), &mut out),
+                ParamForm::Indexed {
+                    prefix,
+                    suffix,
+                    count,
+                } => match count {
+                    IndexCount::Fixed(n) => {
+                        for index in 0..n {
+                            push(format!("{prefix}{index}{suffix}"), &mut out);
+                        }
+                    }
+                    IndexCount::Param(_) => push(format!("{prefix}0{suffix}"), &mut out),
+                },
+            }
+        }
+        out
+    }
+
+    /// The parameters' names alone, for the schema's tests.
+    #[must_use]
+    pub fn field_names(&self) -> Vec<String> {
+        self.field_schemas()
+            .into_iter()
+            .map(|field| field.name)
+            .collect()
     }
 }
 
@@ -290,6 +345,7 @@ pub fn raw_params_for_class(ochre_class: &str) -> Option<&'static RawParams> {
     if crate::scheduled_load::CLASSES
         .iter()
         .any(|(class, _)| *class == ochre_class)
+        || ochre_class == "Scheduled EV"
     {
         return Some(&SCHEDULED_LOAD);
     }
@@ -319,10 +375,10 @@ mod tests {
         let wet = &WET_APPLIANCE;
         let four_phases = json!({ "phase_len": 4 }).as_object().cloned().unwrap();
         let none = Map::new();
-        assert!(wet.reads("phase_3_power_kw", &lookup(&four_phases)));
-        assert!(!wet.reads("phase_4_power_kw", &lookup(&four_phases)));
-        assert!(!wet.reads("phase_0_power_kw", &lookup(&none)));
-        assert!(wet.names("phase_9_power_kw"));
+        assert!(wet.reads("phase_3_power_w", &lookup(&four_phases)));
+        assert!(!wet.reads("phase_4_power_w", &lookup(&four_phases)));
+        assert!(!wet.reads("phase_0_power_w", &lookup(&none)));
+        assert!(wet.names("phase_9_power_w"));
         assert!(SCHEDULED_LOAD.reads("month_multiplier_11", &lookup(&none)));
         assert!(!SCHEDULED_LOAD.reads("month_multiplier_12", &lookup(&none)));
         assert!(!SCHEDULED_LOAD.names("month_multiplier_12"));
@@ -485,12 +541,11 @@ mod tests {
                     ("power_schedule_col", number(0.0)),
                     ("gas_schedule_source", text("column")),
                     ("gas_schedule_col", number(1.0)),
-                    ("gas_schedule_is_w", ConfigValue::Bool(true)),
                     (KEY_USAGE_MULTIPLIER, number(2.0)),
                 ],
                 [
-                    profile("power_schedule_source", "power_profile_max_kw"),
-                    profile("gas_schedule_source", "gas_profile_max"),
+                    profile("power_schedule_source", "power_profile_max_w"),
+                    profile("gas_schedule_source", "gas_profile_max_w"),
                     vec![
                         ("power_profile_weekday", numbers(24, 1.0)),
                         ("power_profile_weekend", numbers(24, 1.0)),
@@ -503,9 +558,9 @@ mod tests {
                 .concat(),
                 vec![
                     ("power_schedule_source", text("constant")),
-                    ("power_constant_kw", number(0.1)),
+                    ("power_constant_w", number(100.0)),
                     ("gas_schedule_source", text("constant")),
-                    ("gas_constant", number(0.1)),
+                    ("gas_constant_w", number(100.0)),
                 ],
             ]
         } else {
@@ -513,7 +568,7 @@ mod tests {
                 ("event_window_schedule_col", number(0.0)),
                 ("event_probability_schedule_col", number(1.0)),
                 ("fuel_type", text("electricity")),
-                ("event_power_kw_series", numbers(4, 0.0)),
+                ("event_power_w_series", numbers(4, 0.0)),
             ];
             let constant_sources = vec![
                 ("event_window_source", text("constant")),
@@ -521,7 +576,7 @@ mod tests {
                 ("event_probability_constant", number(0.5)),
             ];
             let single_cycle = vec![
-                ("active_power_kw", number(1.0)),
+                ("active_power_w", number(1000.0)),
                 ("active_duration_s", number(60.0)),
                 ("cooldown_duration_s", number(60.0)),
             ];
@@ -530,11 +585,9 @@ mod tests {
             } else {
                 let phased = vec![
                     ("n_units", number(1.0)),
-                    ("hot_water_draw_volume_l", number(10.0)),
                     ("phase_len", number(1.0)),
-                    ("phase_0_power_kw", number(1.0)),
+                    ("phase_0_power_w", number(1000.0)),
                     ("phase_0_duration_s", number(60.0)),
-                    ("phase_0_has_water_draw", ConfigValue::Bool(true)),
                 ];
                 vec![
                     [column_sources, phased].concat(),
@@ -574,6 +627,7 @@ mod tests {
             },
             domains: hares_types::DomainSlots::default(),
             schedule_row: Some(0),
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
             ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
             equipment_telemetry: std::collections::HashMap::new(),
             equipment_core: std::collections::HashMap::new(),

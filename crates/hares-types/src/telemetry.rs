@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 /// `set` call saw that was never pre-populated via `insert()`. Like the
 /// non-finite latch it is a wiring fault recorded for the step-end check.
 ///
+/// The fourth field marks a map built (and sealed) from typed declarations
+/// via [`Telemetry::from_fields`]: a sealed map rejects `insert` of a new
+/// key exactly like a `set` of an unregistered one, latching the key so the
+/// owner's next step-end check fails the run. The seal is not serialised:
+/// a restored map's keys are the declarations' anyway.
+///
 /// The dwelling turns a latched telemetry into a run failure (a
 /// `HaresError` naming the owner and the key); that dwelling check is the
 /// only enforcement, and it is always on. The latches join the derived
@@ -30,16 +36,22 @@ use serde::{Deserialize, Serialize};
 /// both maps hold the same key set (the steady state: every key is
 /// registered at init) and falls back to `HashMap::clone_from`
 /// otherwise.
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Telemetry(
     pub HashMap<String, f64>,
     Option<(String, f64)>,
     #[serde(skip)] Option<String>,
+    #[serde(skip)] Option<std::collections::HashSet<String>>,
 );
 
 impl Clone for Telemetry {
     fn clone(&self) -> Self {
-        Self(self.0.clone(), self.1.clone(), self.2.clone())
+        Self(
+            self.0.clone(),
+            self.1.clone(),
+            self.2.clone(),
+            self.3.clone(),
+        )
     }
 
     /// Copies `source` over `self` in place. When both maps have the same
@@ -62,18 +74,51 @@ impl Clone for Telemetry {
         }
         self.1.clone_from(&source.1);
         self.2.clone_from(&source.2);
+        self.3.clone_from(&source.3);
     }
 }
 
 impl Telemetry {
     #[must_use]
     pub fn new() -> Self {
-        Self(HashMap::new(), None, None)
+        Self(HashMap::new(), None, None, None)
     }
 
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        Self(HashMap::with_capacity(capacity), None, None)
+        Self(HashMap::with_capacity(capacity), None, None, None)
+    }
+
+    /// Builds a sealed telemetry map from typed declarations: exactly the
+    /// declared keys are registered, and the map is sealed against
+    /// `insert` of any key the declarations omit (an undeclared key latches
+    /// like a `set` of one, failing the owner's step-end check).
+    ///
+    /// Every built-in and test actor builds its telemetry this way, so an
+    /// actor's observable channels are exactly its declarations.
+    #[must_use]
+    pub fn from_fields(fields: &[crate::output::TelemetryField]) -> Self {
+        let mut map = HashMap::with_capacity(fields.len());
+        let mut sealed = std::collections::HashSet::with_capacity(fields.len());
+        for field in fields {
+            let key = field.name.to_string();
+            map.insert(key.clone(), 0.0);
+            sealed.insert(key);
+        }
+        Self(map, None, None, Some(sealed))
+    }
+
+    /// Whether the map was built from typed declarations and is sealed
+    /// against `insert` of new keys.
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        self.3.is_some()
+    }
+
+    /// The sealed key set, when the map is sealed.
+    #[must_use]
+    pub fn sealed_keys(&self) -> Option<&std::collections::HashSet<String>> {
+        self.3.as_ref()
     }
 
     pub fn insert(&mut self, key: impl Into<String>, value: f64) -> Option<f64> {
@@ -88,6 +133,21 @@ impl Telemetry {
                 key = %key,
                 value,
                 "Telemetry::insert rejected non-finite value"
+            );
+            return self.0.get(&key).copied();
+        }
+        if let Some(sealed) = &self.3
+            && !sealed.contains(&key)
+        {
+            // A sealed map rejects a new key exactly like `set` does:
+            // the write is dropped and the first unknown key latches.
+            if self.2.is_none() {
+                self.2 = Some(key.clone());
+            }
+            tracing::error!(
+                key = %key,
+                "Telemetry::insert called with undeclared key on a sealed \
+                 map; declare the key in the owner's output_variables"
             );
             return self.0.get(&key).copied();
         }
@@ -134,18 +194,41 @@ impl Telemetry {
         }
     }
 
+    /// Withdraws a channel's value for the current step: `get` reports
+    /// `None` until the next write. The key stays registered: the slot
+    /// holds a NaN payload only `remove` can store (every write rejects
+    /// non-finite values and stores nothing it rejects), so the next `set`
+    /// takes the value back without latching, and the map's key set never
+    /// changes (the snapshot's in-place copy keeps its fast path). This is
+    /// how a producer publishes the absence of a quantity it owns (an
+    /// actor key it did not emit this step): the output cell reads null,
+    /// never a substituted sentinel. A key never registered is logged and
+    /// ignored.
+    pub fn remove(&mut self, key: &str) {
+        if let Some(slot) = self.0.get_mut(key) {
+            *slot = f64::NAN;
+        } else {
+            tracing::debug!(key = %key, "Telemetry::remove of an unregistered key");
+        }
+    }
+
     #[inline]
     #[must_use]
     pub fn get(&self, key: &str) -> Option<f64> {
-        let value = self.0.get(key).copied();
-        #[cfg(debug_assertions)]
-        if let Some(v) = value {
-            assert!(
-                v.is_finite(),
-                "Telemetry::get found non-finite value {v} for key '{key}'"
-            );
+        match self.0.get(key).copied() {
+            // The withdrawn marker: the channel's value is absent this
+            // step.
+            Some(value) if value.is_nan() => None,
+            Some(value) => {
+                #[cfg(debug_assertions)]
+                assert!(
+                    value.is_finite(),
+                    "Telemetry::get found non-finite value {value} for key '{key}'"
+                );
+                Some(value)
+            }
+            None => None,
         }
-        value
     }
 
     #[must_use]
@@ -185,10 +268,41 @@ impl Telemetry {
         self.0.clear();
         self.1 = None;
         self.2 = None;
+        self.3 = None;
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &f64)> {
-        self.0.iter()
+        self.0.iter().filter(|(_, value)| !value.is_nan())
+    }
+}
+
+/// The latched `(key, value)` pair's equality: the latched value may be
+/// the non-finite write itself, and NaN is not `==` NaN, so the pair
+/// compares by the key and by both-values-NaN or exact equality.
+fn latch_eq(a: &Option<(String, f64)>, b: &Option<(String, f64)>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some((key_a, value_a)), Some((key_b, value_b))) => {
+            key_a == key_b && (value_a == value_b || (value_a.is_nan() && value_b.is_nan()))
+        }
+        _ => false,
+    }
+}
+
+/// Equality reads through the withdrawn marker: two maps agree when their
+/// key sets agree and every channel's value agrees, a withdrawn channel
+/// (the NaN payload) equal to another withdrawn one.
+impl PartialEq for Telemetry {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().all(|(key, value)| {
+                other.0.get(key).is_some_and(|other_value| {
+                    *value == *other_value || (value.is_nan() && other_value.is_nan())
+                })
+            })
+            && latch_eq(&self.1, &other.1)
+            && self.2 == other.2
+            && self.3 == other.3
     }
 }
 
@@ -203,13 +317,14 @@ impl<'a> IntoIterator for &'a Telemetry {
 
 impl FromIterator<(String, f64)> for Telemetry {
     fn from_iter<T: IntoIterator<Item = (String, f64)>>(iter: T) -> Self {
-        Self(iter.into_iter().collect(), None, None)
+        Self(iter.into_iter().collect(), None, None, None)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Telemetry;
+    use crate::output::TelemetryField;
 
     #[test]
     fn clone_impl_covers_every_field() {
@@ -217,7 +332,7 @@ mod tests {
         // compile here, so the hand-written `Clone` cannot silently miss
         // it.
         let telemetry = Telemetry::new();
-        let Telemetry(_, _, _) = telemetry;
+        let Telemetry(_, _, _, _) = telemetry;
     }
 
     #[test]
@@ -420,5 +535,25 @@ mod tests {
         assert_eq!(t.get("power"), Some(3.2));
         assert_eq!(t.get("soc"), Some(0.8));
         assert!(t.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn from_fields_registers_exactly_the_declared_keys_and_seals() {
+        let fields = vec![
+            TelemetryField::power_kw("charge_kw", "charging power"),
+            TelemetryField::ratio("soc", "state of charge"),
+        ];
+        let mut t = Telemetry::from_fields(&fields);
+        assert!(t.is_sealed());
+        assert_eq!(t.len(), 2);
+        assert!(t.get("charge_kw").is_some());
+        assert!(t.get("soc").is_some());
+        // A set of a declared key works.
+        t.set("charge_kw", 4.2);
+        assert_eq!(t.get("charge_kw"), Some(4.2));
+        // An insert of a new key on a sealed map latches like an unknown set.
+        t.insert("undeclared", 1.0);
+        assert_eq!(t.unknown_key_latch(), Some("undeclared"));
+        assert!(t.get("undeclared").is_none());
     }
 }

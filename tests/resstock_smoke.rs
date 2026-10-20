@@ -24,8 +24,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use chrono::{Duration, TimeZone};
-    use hares_core::{DwellingConfig, SimStatus, SimulationConfig, SimulationEngine};
-    use hares_io::OutputFormat;
+    use hares_core::{DwellingConfig, DwellingSettings, SimulationConfig, SimulationEngine};
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use sha2::{Digest, Sha256};
 
     fn project_root() -> PathBuf {
@@ -163,7 +163,7 @@ mod tests {
         let hpxml_path = bldg_dir.join("home.xml");
         let weather_path = weather_path(version, bldg_dir);
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("resstock_smoke.csv");
+        let csv_path = output_dir.path().join("resstock_smoke.csv");
 
         let bldg_name = bldg_dir.file_name().unwrap().to_str().unwrap();
         // The bldg0527060 fixture carries no in.schedules.csv, so it runs the
@@ -179,47 +179,55 @@ mod tests {
 
         let engine = SimulationEngine::new();
         let config = DwellingConfig {
-            hpxml_path,
-            schedule_path,
-            weather_path,
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(1),
-                time_res: Duration::minutes(1),
-                output_verbosity: 1,
-                output_path: Some(output_path.clone()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            },
-            overrides: None,
-            bldg_id: 100,
-            initialization_duration: None,
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(hpxml_path),
+            schedule: schedule_path.map(InputSource::Path),
+            weather: WeatherInput::Path(weather_path),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(1),
+                    time_res: Duration::minutes(1),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(1),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path.clone(),
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
+                },
+                None,
+                100,
+                None,
+            ),
         };
 
         let result = engine.run(config).expect("engine.run should succeed");
 
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "[{version}] {bldg_name} simulation failed: {:?}",
-            result.status
-        );
+        let metrics = result
+            .metrics
+            .as_ref()
+            .expect("a run with reports computes its metrics");
 
         eprintln!(
-            "[{version}] {bldg_name} OK — status={:?}, elapsed={:?}, energy={:.4} kWh",
-            result.status, result.elapsed, result.metrics.total_energy_kwh.net_energy_kwh
+            "[{version}] {bldg_name} OK, energy={:.4} kWh",
+            metrics.total_energy_kwh.net_energy_kwh
         );
 
         // Net energy is signed by definition: consumption minus PV
@@ -228,7 +236,7 @@ mod tests {
         // physically correct, so a negative net is allowed only when
         // generation actually occurred. The gross terms are non-negative by
         // definition, and the net must equal their difference.
-        let energy = &result.metrics.total_energy_kwh;
+        let energy = &metrics.total_energy_kwh;
         assert!(
             energy.gross_consumption_kwh >= 0.0 && energy.gross_pv_generation_kwh >= 0.0,
             "[{version}] {bldg_name} gross energy terms must be non-negative: \
@@ -254,8 +262,8 @@ mod tests {
             energy.net_energy_kwh
         );
 
-        if output_path.exists() {
-            assert_physics_bounds(&output_path);
+        if csv_path.exists() {
+            assert_physics_bounds(&csv_path);
         }
     }
 
@@ -366,47 +374,52 @@ mod tests {
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
             .expect("2024.2 bldg0000002 fixture must exist");
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("winter_crankcase_pin.csv");
+        let csv_path = output_dir.path().join("winter_crankcase_pin.csv");
 
         let config = DwellingConfig {
-            hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-            weather_path: weather_path("2024.2", &bldg_dir),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(72),
-                time_res: Duration::minutes(60),
-                output_verbosity: 1,
-                output_path: Some(output_path.clone()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: true,
-                rotation: hares_io::RotationPolicy::None,
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            },
-            overrides: None,
-            bldg_id: 200,
-            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+            schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+            weather: WeatherInput::Path(weather_path("2024.2", &bldg_dir)),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(72),
+                    time_res: Duration::minutes(60),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(1),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path.clone(),
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::default(),
+                },
+                None,
+                200,
+                None,
+            ),
         };
 
         let engine = SimulationEngine::new();
         let result = engine.run(config).expect("engine.run should succeed");
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "winter run failed: {result:?}"
-        );
 
-        let data = parse_csv_columns(&output_path);
+        let data = parse_csv_columns(&csv_path);
         let outdoor = data
             .get("Outdoor Dry Bulb (C)")
             .expect("Outdoor Dry Bulb (C) column");
@@ -448,7 +461,12 @@ mod tests {
         // The cooling end use equals the crankcase heater's energy: the AC is
         // the fixture's only cooling equipment, so the two books reconcile.
         let crankcase_energy_kwh = (below_threshold_steps as f64) * RATED_CRANKCASE_KW * STEP_HOURS;
-        let cooling_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_cooling"];
+        let cooling_kwh = result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .total_energy_kwh
+            .per_end_use["hvac_cooling"];
         assert!(
             (cooling_kwh - crankcase_energy_kwh).abs() < 1e-9,
             "hvac_cooling {cooling_kwh} kWh must equal the crankcase heater's \
@@ -466,37 +484,46 @@ mod tests {
         bldg_dir: &Path,
         month: u32,
         day: u32,
-        output_path: &Path,
+        csv_path: &Path,
     ) -> DwellingConfig {
         DwellingConfig {
-            hpxml_path: bldg_dir.join("home.xml"),
-            schedule_path: Some(bldg_dir.join("in.schedules.csv")),
-            weather_path: weather_path(version, bldg_dir),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time: denver_offset()
-                    .with_ymd_and_hms(2018, month, day, 0, 0, 0)
-                    .unwrap(),
-                duration: Duration::hours(72),
-                time_res: Duration::minutes(60),
-                output_verbosity: 1,
-                output_path: Some(output_path.to_path_buf()),
-                write_output: true,
-                output_format: OutputFormat::Csv,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: true,
-                rotation: hares_io::RotationPolicy::None,
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            },
-            overrides: None,
-            bldg_id: 200,
-            initialization_duration: Some(std::time::Duration::from_secs(24 * 3600)),
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(bldg_dir.join("home.xml")),
+            schedule: Some(InputSource::Path(bldg_dir.join("in.schedules.csv"))),
+            weather: WeatherInput::Path(weather_path(version, bldg_dir)),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time: denver_offset()
+                        .with_ymd_and_hms(2018, month, day, 0, 0, 0)
+                        .unwrap(),
+                    duration: Duration::hours(72),
+                    time_res: Duration::minutes(60),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(1),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path.to_path_buf(),
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: true,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::default(),
+                },
+                None,
+                200,
+                None,
+            ),
         }
     }
 
@@ -510,24 +537,25 @@ mod tests {
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000004"))
             .expect("bldg0000004 fixture must exist");
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("resstock_summer_72h.csv");
+        let csv_path = output_dir.path().join("resstock_summer_72h.csv");
 
-        let config = seasonal_72h_config(version, &bldg_dir, 7, 15, &output_path);
+        let config = seasonal_72h_config(version, &bldg_dir, 7, 15, &csv_path);
         let engine = SimulationEngine::new();
         let result = engine.run(config).expect("engine.run should succeed");
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "{version} summer 72 h run failed: {result:?}"
-        );
 
-        let cooling_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_cooling"];
+        let cooling_kwh = result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .total_energy_kwh
+            .per_end_use["hvac_cooling"];
         eprintln!("[{version}] summer_72h hvac_cooling: {cooling_kwh:.3} kWh");
         assert!(
             cooling_kwh > 0.0,
             "{version} summer 72 h: hvac_cooling must carry energy, got {cooling_kwh} kWh"
         );
 
-        assert_physics_bounds(&output_path);
+        assert_physics_bounds(&csv_path);
     }
 
     /// Three-day January run on the release's `bldg0000002` fixture (Idaho
@@ -543,17 +571,18 @@ mod tests {
             .find(|d| d.file_name().unwrap().to_str().unwrap().contains("000002"))
             .expect("bldg0000002 fixture must exist");
         let output_dir = tempfile::tempdir().expect("create output directory");
-        let output_path = output_dir.path().join("resstock_winter_72h.csv");
+        let csv_path = output_dir.path().join("resstock_winter_72h.csv");
 
-        let config = seasonal_72h_config(version, &bldg_dir, 1, 15, &output_path);
+        let config = seasonal_72h_config(version, &bldg_dir, 1, 15, &csv_path);
         let engine = SimulationEngine::new();
         let result = engine.run(config).expect("engine.run should succeed");
-        assert!(
-            !matches!(result.status, SimStatus::Failed(_)),
-            "{version} winter 72 h run failed: {result:?}"
-        );
 
-        let heating_kwh = result.metrics.total_energy_kwh.per_end_use["hvac_heating"];
+        let heating_kwh = result
+            .metrics
+            .as_ref()
+            .expect("the run requested metrics")
+            .total_energy_kwh
+            .per_end_use["hvac_heating"];
         eprintln!("[{version}] winter_72h hvac_heating: {heating_kwh:.3} kWh");
         assert!(
             heating_kwh > 0.0,
@@ -561,7 +590,7 @@ mod tests {
         );
 
         const STEP_HOURS: f64 = 1.0;
-        let gas_therms: f64 = parse_csv_columns(&output_path)
+        let gas_therms: f64 = parse_csv_columns(&csv_path)
             .remove("Total Gas Power (therms/hour)")
             .expect("Total Gas Power (therms/hour) column in the output CSV")
             .iter()
@@ -573,7 +602,7 @@ mod tests {
             "{version} winter 72 h: gas energy must be above zero, got {gas_therms} therms"
         );
 
-        assert_physics_bounds(&output_path);
+        assert_physics_bounds(&csv_path);
     }
 
     #[test]

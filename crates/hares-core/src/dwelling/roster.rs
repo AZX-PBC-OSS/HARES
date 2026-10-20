@@ -15,7 +15,11 @@ use arrow::datatypes::Schema;
 use chrono_tz::Tz;
 use hares_control::DispatchTarget;
 use hares_equipment::Equipment;
-use hares_io::{StreamingRecorder, build_schema};
+use hares_io::{
+    Catalogue, CatalogueInput, MetricsCalculator, RowPlan, Selection, StreamingRecorder,
+    build_catalogue, build_schema as build_schema_from_catalogue, build_schema_for_columns,
+    build_schema_for_diagnostics, resolve_selection,
+};
 use hares_tariff::{ElectricTariff, TariffEvaluator};
 use hares_types::{
     AmbientLocation, CoreOutput, CustomAccumulator, EndUse, EquipmentId, FluidType, HaresError,
@@ -30,19 +34,15 @@ use crate::scheduler::{ActorSlot, ExecutionPhase};
 
 use super::conversions::build_output_column_index;
 use super::{
-    ActorPricing, ActorSeedState, Dwelling, EquipmentColumns, Result, ZoneColumnCaches,
-    actor_equipment, build_actor_column_map, build_actors_from_seeds,
-    build_end_use_aggregate_indices, build_equipment_column_map, build_hvac_thermal_consistency,
-    build_zone_column_caches, compute_equipment_dispatch_targets,
+    ActorPricing, ActorSeedState, Dwelling, OutputRowBindings, Result, ZoneColumnCaches,
+    actor_equipment, build_actors_from_seeds, build_hvac_thermal_consistency,
+    build_output_row_bindings, build_zone_column_caches, compute_equipment_dispatch_targets,
     compute_equipment_execution_order, describe_target, enrich_schema_with_telemetry_units,
-    equipment_descriptor_specs, extend_schema_with_actor_columns, target_lost,
-    validate_equipment_stage, validate_equipment_zones, zone_display_name,
+    target_lost, validate_equipment_stage, validate_equipment_zones, zone_display_name,
 };
-
 /// The values the per-step path reads that derive from the equipment and
 /// actor rosters. Replaced only by [`Dwelling::install_roster_caches`];
 /// empty until assembly installs the first plan.
-#[derive(Default)]
 pub(super) struct RosterCaches {
     /// Equipment indices in stage-rank order.
     pub(super) equipment_execution_order: Vec<usize>,
@@ -57,19 +57,50 @@ pub(super) struct RosterCaches {
     pub(super) zones: ZoneColumnCaches,
     /// Zone temperatures for the step result, reused every step.
     pub(super) zone_temp_scratch: Vec<(ZoneId, f64)>,
-    /// Output column name to position; empty when output is disabled.
-    pub(super) output_column_index: HashMap<String, usize>,
-    /// Number of value columns the recorder expects (schema minus timestamp).
-    pub(super) output_value_count: usize,
-    /// Output columns of each equipment, in equipment-vector order.
-    pub(super) equipment_column_map: Vec<EquipmentColumns>,
-    /// End-use aggregate electric-power column of each equipment, in
-    /// equipment-vector order.
-    pub(super) end_use_aggregate_indices: Vec<Option<usize>>,
-    /// Telemetry key to output column of each actor, in actor order.
-    pub(super) actor_column_map: Vec<Vec<(String, usize)>>,
-    /// Row buffer for `record_step`, reused every step.
-    pub(super) record_scratch: Vec<f64>,
+    /// The frozen output row plan: the reused row `record_step` fills, its
+    /// validity bitset and local timestamp, and each selection's projection.
+    /// Empty until assembly installs the first plan; every write on the step
+    /// path goes through its precomputed indices.
+    pub(super) row_plan: RowPlan,
+    /// The row plan's per-report projections, copied at freeze: record_step
+    /// pushes each report's projected row to its recorder through these
+    /// indices without borrowing the plan.
+    pub(super) record_projections: Vec<Vec<usize>>,
+    /// The union schema the producer bindings resolved against: the columns
+    /// every report's selections span, first-seen across the reports. A
+    /// mid-run roster change rebuilds the bindings against this frozen
+    /// schema.
+    pub(super) union_schema: Schema,
+    /// The columns the reports promise (the union of the selections
+    /// resolved against the catalogue): an expected column the frozen
+    /// schema cannot place is schema drift.
+    pub(super) expected_columns: std::collections::HashSet<String>,
+    /// The row plan's producer bindings, resolved at freeze: the
+    /// dwelling-level columns, the per-equipment columns, the end-use
+    /// aggregates and the actor columns.
+    pub(super) bindings: OutputRowBindings,
+    /// The output variable catalogue of the current roster: every variable
+    /// the model can produce, declared once, typed. Readable from build on,
+    /// before the first step.
+    pub(super) catalogue: Arc<Catalogue>,
+}
+
+impl Default for RosterCaches {
+    fn default() -> Self {
+        Self {
+            equipment_execution_order: Vec::new(),
+            equipment_ids: Vec::new(),
+            hvac_thermal_consistency: Vec::new(),
+            zones: ZoneColumnCaches::default(),
+            zone_temp_scratch: Vec::new(),
+            row_plan: RowPlan::default(),
+            record_projections: Vec::new(),
+            union_schema: Schema::empty(),
+            expected_columns: std::collections::HashSet::new(),
+            bindings: OutputRowBindings::default(),
+            catalogue: Arc::new(Catalogue::default()),
+        }
+    }
 }
 
 /// The port-slot tables and fluid loop-type map, re-derived from the
@@ -84,28 +115,40 @@ struct PreStepRosterCaches {
 
 /// The output-pipeline part of a roster plan.
 enum OutputCachesPlan {
-    /// Output disabled: nothing to plan or install.
+    /// No report is configured and no metrics requested: nothing to plan
+    /// or install.
     Disabled,
     /// No rows recorded yet: the schema is rebuilt from the prospective
-    /// roster, with a recorder created for it.
-    FreshSchema {
-        recorder: Box<StreamingRecorder>,
-        output_column_index: HashMap<String, usize>,
-        equipment_column_map: Vec<EquipmentColumns>,
-        end_use_aggregate_indices: Vec<Option<usize>>,
-        actor_column_map: Vec<Vec<(String, usize)>>,
-    },
-    /// Rows already recorded: the schema and column index are frozen with
-    /// the output file; only the positional maps into them follow the
-    /// prospective roster. The maps resolve columns by name against the
-    /// frozen index, so surviving entities keep their own columns and
-    /// entities added after recording began get none: missing values,
-    /// never values written into another entity's columns.
-    FrozenUpdate {
-        equipment_column_map: Vec<EquipmentColumns>,
-        end_use_aggregate_indices: Vec<Option<usize>>,
-        actor_column_map: Vec<Vec<(String, usize)>>,
-    },
+    /// roster, with the row plan, its producer bindings and one recorder
+    /// per report created for it.
+    FreshSchema(Box<FreshOutputCaches>),
+    /// Rows already recorded: the schema and the row plan are frozen with
+    /// the reports' destinations; only the producer bindings follow the
+    /// prospective roster. The bindings resolve columns by name against
+    /// the frozen union schema (rebuilt here, at freeze time, never
+    /// stored), so surviving entities keep their own columns and entities
+    /// added after recording began get none: missing values, never values
+    /// written into another entity's columns.
+    FrozenUpdate(Box<FrozenOutputCaches>),
+}
+
+/// The frozen-update plan's payload: the producer bindings rebuilt against
+/// the frozen union schema.
+struct FrozenOutputCaches {
+    bindings: OutputRowBindings,
+}
+
+/// The fresh-schema plan's payload: one recorder per report, the row plan
+/// and its producer bindings, and the union schema the bindings resolved
+/// against with the columns the reports promise. The metrics accumulator,
+/// built when the run requested metrics, rides the same freeze.
+struct FreshOutputCaches {
+    recorders: Vec<StreamingRecorder>,
+    row_plan: RowPlan,
+    bindings: OutputRowBindings,
+    union_schema: Schema,
+    expected_columns: std::collections::HashSet<String>,
+    metrics_calculator: Option<MetricsCalculator>,
 }
 
 /// Everything [`Dwelling::plan_roster_caches`] derives from a prospective
@@ -126,6 +169,8 @@ struct RosterPlan {
     hvac_thermal_consistency: Vec<Vec<usize>>,
     zones: ZoneColumnCaches,
     output: OutputCachesPlan,
+    /// The catalogue built from the prospective roster's declarations.
+    catalogue: Arc<Catalogue>,
 }
 
 /// The actor roster a roster change commits: which live actors stay (by
@@ -219,7 +264,42 @@ impl Dwelling {
             self.plan_roster_caches(&self.equipment_refs(), &change.prospective(&self.actors))?;
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::CallerActor);
         Ok(())
+    }
+
+    /// The dwelling's output variable catalogue: every variable the built
+    /// model can produce, declared once, typed, with its source. Readable
+    /// from build on, before the first step; rebuilt on every equipment or
+    /// actor roster change.
+    ///
+    /// The catalogue does not depend on the selected reports: an output
+    /// verbosity filters the catalogue's variables to the schema's columns,
+    /// it never changes what the model can produce.
+    #[must_use]
+    pub fn catalogue(&self) -> Arc<Catalogue> {
+        Arc::clone(&self.roster.catalogue)
+    }
+
+    /// The first report's recorded output schema's column names, in order
+    /// (the `Time` label first, then one column per selected variable).
+    /// `None` when no report is configured.
+    #[must_use]
+    pub fn output_column_names(&self) -> Option<Vec<String>> {
+        self.recorders.first().map(|r| {
+            r.schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect()
+        })
+    }
+
+    /// The run's report requests: what each report records and where it
+    /// goes.
+    #[must_use]
+    pub fn reports(&self) -> &[hares_io::ReportSpec] {
+        &self.reports
     }
 
     /// Creates and adds an actor from the registry using the provided config.
@@ -236,7 +316,6 @@ impl Dwelling {
         let actor = registry.create(config)?;
         self.add_actor(actor)
     }
-
     fn ensure_actor_names_free(&self, actors: &[Box<dyn Actor>]) -> Result<()> {
         for (i, actor) in actors.iter().enumerate() {
             let name = actor.name();
@@ -394,7 +473,7 @@ impl Dwelling {
         // in the run's health.
         for warning in change.orphaned {
             self.health.evicted_actors += 1;
-            self.warnings.push(warning);
+            self.warnings.push_from("actors", warning);
         }
         let live = std::mem::take(&mut self.actors);
         self.actors = ActorRosterChange::arrange(
@@ -410,6 +489,21 @@ impl Dwelling {
         self.auto_registered_actor_names
             .retain(|name| actors.iter().any(|a| a.name() == name));
         self.auto_registered_actor_names.extend(built_in_names);
+        // The seeded-stream record refreshes with the roster: the
+        // auto-registered actors that hold a dwelling-derived stream (an
+        // EV driver's own, fresh or taken over from the driver it
+        // replaced). reseed re-derives exactly these; a user actor's own
+        // seeded generator (a registry-built driver's config seed) is
+        // never the dwelling's to reseed.
+        self.seeded_stream_actors = self
+            .actors
+            .iter()
+            .filter(|actor| {
+                actor.rng_stream_state().is_some()
+                    && self.auto_registered_actor_names.contains(actor.name())
+            })
+            .map(|actor| actor.name().to_string())
+            .collect();
         self.rebuild_schedule();
     }
 
@@ -478,7 +572,10 @@ impl Dwelling {
     /// The evaluator's or the roster plan's error. On `Err` the dwelling
     /// keeps its previous tariff, actors, billing summaries and warning log.
     pub fn set_tariff(&mut self, tariff: ElectricTariff, tz: Tz) -> Result<()> {
+        let attached_tariff = tariff.clone();
         let parse_warnings = tariff.parse_warnings.clone();
+        let attach_step = self.clock.current_step;
+        let replacing = self.tariff_evaluator.is_some();
         let start = self.clock.start_time.with_timezone(&tz);
         let end = (self.clock.start_time + self.clock.duration).with_timezone(&tz);
         let interval_secs = self.clock.time_res.num_seconds() as u32;
@@ -518,6 +615,18 @@ impl Dwelling {
         self.tariff_evaluator = Some(evaluator);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.tariff_record = Some(crate::TariffRecord {
+            tariff: attached_tariff,
+            zone: tz.name().to_string(),
+            attach_step,
+        });
+        // A replacement closes the outgoing period with the outgoing
+        // tariff's accruals through the run's own steps: a replay cannot
+        // rebuild that close without those steps, so the run's export
+        // refuses.
+        if replacing {
+            self.record_replay_blocker(hares_types::ReplayBlocker::TariffReplaced);
+        }
         Ok(())
     }
 
@@ -561,6 +670,7 @@ impl Dwelling {
         mut eq: Box<dyn Equipment>,
         actors: Vec<Box<dyn Actor>>,
     ) -> Result<()> {
+        let supplies_actors = !actors.is_empty();
         let planned = self
             .validate_candidate_equipment(&mut eq)
             .and_then(|next_equipment_id| {
@@ -594,6 +704,13 @@ impl Dwelling {
         self.equipment.push(eq);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        // The caller's supplied actors register with the equipment: the
+        // same caller-actor surface `add_actor` records, beside the
+        // equipment change the call is also one.
+        if supplies_actors {
+            self.record_replay_blocker(hares_types::ReplayBlocker::CallerActor);
+        }
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(())
     }
 
@@ -792,6 +909,7 @@ impl Dwelling {
         self.equipment.clear();
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(())
     }
 
@@ -827,6 +945,7 @@ impl Dwelling {
         let removed = self.equipment.remove(pos);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(removed)
     }
 
@@ -863,6 +982,7 @@ impl Dwelling {
             .retain(|e| !end_uses.contains(&e.descriptor().end_use));
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(removed_count)
     }
 
@@ -961,6 +1081,7 @@ impl Dwelling {
         let old = std::mem::replace(&mut self.equipment[pos], new_equipment);
         self.commit_actor_change(change);
         self.install_roster_caches(plan);
+        self.record_replay_blocker(hares_types::ReplayBlocker::EquipmentChanged);
         Ok(old)
     }
 
@@ -1056,7 +1177,7 @@ impl Dwelling {
         Ok(())
     }
 
-    fn zone_names(&self) -> Vec<(ZoneId, String)> {
+    pub(super) fn zone_names(&self) -> Vec<(ZoneId, String)> {
         let indoor_zone = self.thermal_solver.config().indoor_zone_id;
         self.latest_env
             .zones
@@ -1069,6 +1190,99 @@ impl Dwelling {
                 )
             })
             .collect()
+    }
+
+    /// The catalogue input for a prospective roster: every equipment's
+    /// base name, instance override, id, typed end use and capabilities,
+    /// fuel and typed telemetry declarations; the zone display names;
+    /// every actor's registered name and typed declarations.
+    fn catalogue_input(
+        equipment: &[&dyn Equipment],
+        actors: &[&dyn Actor],
+        zones: Vec<(ZoneId, String)>,
+    ) -> CatalogueInput {
+        let equipment_input = equipment
+            .iter()
+            .map(|eq| {
+                let desc = eq.descriptor();
+                hares_io::CatalogueEquipment {
+                    name: desc.name.clone(),
+                    instance_name: None,
+                    id: desc.id,
+                    fuel: desc.fuel,
+                    end_use: desc.end_use.clone(),
+                    core_capabilities: desc.core_capabilities,
+                    telemetry: desc.telemetry_fields.clone(),
+                }
+            })
+            .collect();
+        let actor_input = actors
+            .iter()
+            .map(|a| hares_io::CatalogueActor {
+                name: Arc::from(a.name()),
+                output_variables: a.output_variables().to_vec(),
+            })
+            .collect();
+        CatalogueInput {
+            equipment: equipment_input,
+            zones,
+            actors: actor_input,
+        }
+    }
+
+    /// Rejects an actor whose telemetry is not built (and sealed) from its
+    /// declarations, or whose telemetry holds a key the declarations omit,
+    /// naming the actor and the key. Runs at every registration and
+    /// auto-registration, so no per-step check is needed.
+    fn validate_actor_telemetry(actor: &dyn Actor) -> Result<()> {
+        let declared: std::collections::HashSet<&str> = actor
+            .output_variables()
+            .iter()
+            .map(|f| f.name.as_ref())
+            .collect();
+        match actor.telemetry() {
+            None => {
+                if declared.is_empty() {
+                    Ok(())
+                } else {
+                    Err(HaresError::Control(format!(
+                        "actor '{}' declares {} output variables but exposes no telemetry map; \
+                         build it with Telemetry::from_fields(declared)",
+                        actor.name(),
+                        declared.len(),
+                    )))
+                }
+            }
+            Some(telemetry) => {
+                let name = actor.name();
+                if !telemetry.is_sealed() {
+                    return Err(HaresError::Control(format!(
+                        "actor '{name}' telemetry is not sealed: build it with \
+                         Telemetry::from_fields(declared) so its keys are its declarations"
+                    )));
+                }
+                let sealed = telemetry
+                    .sealed_keys()
+                    .expect("a sealed telemetry map has its key set");
+                for key in sealed {
+                    if !declared.contains(key.as_str()) {
+                        return Err(HaresError::Control(format!(
+                            "actor '{name}' telemetry holds undeclared key '{key}'; \
+                             declare it in output_variables or drop it"
+                        )));
+                    }
+                }
+                for key in &declared {
+                    if !sealed.contains(*key) {
+                        return Err(HaresError::Control(format!(
+                            "actor '{name}' declares output variable '{key}' but its \
+                             telemetry does not hold it"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Derives every roster cache from the prospective `equipment` and
@@ -1117,45 +1331,63 @@ impl Dwelling {
         let ports = pre_step.as_ref().map_or(&self.ports, |p| &p.ports);
         let hvac_thermal_consistency = build_hvac_thermal_consistency(ports, equipment);
 
-        let output = if !self.write_output {
+        // An actor whose telemetry is not built from its declarations, or
+        // whose telemetry holds a key the declarations omit, is rejected at
+        // registration: no per-step check is needed.
+        for &actor in actors {
+            Self::validate_actor_telemetry(actor)?;
+        }
+
+        // The catalogue merges every source's typed declarations. Built at
+        // every plan point (assembly, and again on an equipment mutation or
+        // actor registration), readable from build on, before the first
+        // step; a duplicate name or a contradicting aggregation fails the
+        // change here.
+        let catalogue = Arc::new(
+            build_catalogue(&Self::catalogue_input(equipment, actors, self.zone_names())).map_err(
+                |err| HaresError::InvalidState(format!("output variable catalogue: {err}")),
+            )?,
+        );
+
+        let output = if self.reports.is_empty() && !self.sim_config.metrics {
             OutputCachesPlan::Disabled
         } else if self
-            .recorder
-            .as_ref()
+            .recorders
+            .first()
             .map_or(0, StreamingRecorder::total_rows)
+            .max(
+                self.metrics_calculator
+                    .as_ref()
+                    .map_or(0, |c| c.rows_fed() as usize),
+            )
             == 0
         {
-            self.plan_fresh_schema(equipment, actors)?
+            self.plan_fresh_schema(equipment, actors, &catalogue)?
         } else {
-            let column_index = &self.roster.output_column_index;
-            OutputCachesPlan::FrozenUpdate {
-                equipment_column_map: build_equipment_column_map(
+            OutputCachesPlan::FrozenUpdate(Box::new(FrozenOutputCaches {
+                bindings: build_output_row_bindings(
+                    &self.roster.union_schema,
                     equipment,
-                    column_index,
-                    self.output_verbosity,
+                    actors,
+                    &self.roster.expected_columns,
                 )?,
-                end_use_aggregate_indices: build_end_use_aggregate_indices(
-                    &equipment_descriptor_specs(equipment),
-                    column_index,
-                ),
-                actor_column_map: build_actor_column_map(actors, column_index),
-            }
+            }))
         };
 
+        // The freeze-time column index of the schema the zone columns
+        // resolve against, rebuilt here (this is the plan builder; the step
+        // path never sees one).
         let column_index = match &output {
-            OutputCachesPlan::FreshSchema {
-                output_column_index,
-                ..
-            } => output_column_index,
-            OutputCachesPlan::Disabled | OutputCachesPlan::FrozenUpdate { .. } => {
-                &self.roster.output_column_index
+            OutputCachesPlan::FreshSchema(fresh) => build_output_column_index(&fresh.union_schema),
+            OutputCachesPlan::Disabled | OutputCachesPlan::FrozenUpdate(_) => {
+                build_output_column_index(&self.roster.union_schema)
             }
         };
         let zones = build_zone_column_caches(
             &self.latest_env.zones,
             self.environment.zone_types(),
             self.thermal_solver.config().indoor_zone_id,
-            column_index,
+            &column_index,
         );
 
         let joining_core_outputs = equipment
@@ -1178,56 +1410,221 @@ impl Dwelling {
             hvac_thermal_consistency,
             zones,
             output,
+            catalogue,
         })
     }
 
-    /// The output schema rebuilt for the prospective roster, its column
-    /// maps, and a recorder created for it. Creating the recorder is the
-    /// plan's last fallible step.
+    /// The output schemas rebuilt for the prospective roster from its
+    /// catalogue — the union schema the bindings bind against, and one
+    /// schema per report — the row plan and producer bindings frozen from
+    /// them, and one recorder per report. Creating the recorders is the
+    /// plan's last fallible step, and each recorder's freeze-time checks
+    /// (the existing-target and parent-directory checks of its file
+    /// destination) run here, before the first step.
     fn plan_fresh_schema(
         &self,
         equipment: &[&dyn Equipment],
         actors: &[&dyn Actor],
+        catalogue: &Catalogue,
     ) -> Result<OutputCachesPlan> {
-        let specs = equipment_descriptor_specs(equipment);
-        let schema: Schema = build_schema(&specs, self.output_verbosity, &self.zone_names());
-        // Enriched before the actor columns are appended: actor telemetry
-        // columns carry no declared-unit metadata to validate against.
-        let schema = enrich_schema_with_telemetry_units(schema, equipment);
-        let schema = extend_schema_with_actor_columns(&schema, actors);
-        let output_column_index = build_output_column_index(&schema);
-        let equipment_column_map =
-            build_equipment_column_map(equipment, &output_column_index, self.output_verbosity)?;
-        let end_use_aggregate_indices =
-            build_end_use_aggregate_indices(&specs, &output_column_index);
-        let actor_column_map = build_actor_column_map(actors, &output_column_index);
-        let mut recorder = StreamingRecorder::new(
-            schema,
-            self.output_chunk_size,
-            self.output_format,
-            &self.output_path,
-            self.retain_batches,
-            self.output_rotation,
-        )
-        .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?;
-        // Streaming runs collect run metrics incrementally at flush time;
-        // a calculator that cannot initialize fails the plan (the run's
-        // numbers are either computed or the change is refused), it does
-        // not zero the metrics behind a warning.
-        if !self.retain_batches {
-            recorder
-                .enable_metrics(self.sim_config.time_res_secs_u32(), &self.sim_config)
-                .map_err(|err| {
-                    HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
-                })?;
+        // Every report's selection resolves against the catalogue first:
+        // the variables each report records, in its own column order. The
+        // diagnostics request appends the catalogue's diagnostics block to
+        // every report's columns as a suffix (the block is contiguous
+        // last in the report's schema, after the selection's own slots).
+        let diagnostics_names = self
+            .diagnostics
+            .then(|| {
+                resolve_selection(&Selection::Diagnostics, catalogue)
+                    .map_err(|err| HaresError::Dwelling(err.to_string()))
+            })
+            .transpose()?;
+        let resolved: Vec<Vec<String>> = self
+            .reports
+            .iter()
+            .map(|report| {
+                let mut names = resolve_selection(&report.selection, catalogue)
+                    .map_err(|err| HaresError::Dwelling(err.to_string()))?;
+                if let Some(block) = &diagnostics_names {
+                    names.extend(block.iter().cloned());
+                }
+                Ok(names)
+            })
+            .collect::<Result<_>>()?;
+        // The union surface: every selected variable once, first-seen
+        // across the reports in `reports` order, each report's resolved
+        // names in its own order inside its report. The producer bindings
+        // bind against it; each report reads its own columns out of the
+        // union row through its projection.
+        //
+        // When the run requests metrics, the union is instead the row
+        // plan's full declared surface: every catalogue variable the
+        // producers can produce (the diagnostics block appended when the
+        // run requests it), whatever the reports select. The metrics'
+        // inputs resolve from that producer surface, so every metric
+        // computes identically at every verbosity and with no report at
+        // all; the reports project their own columns out of the full row
+        // unchanged, and a run that does not request metrics keeps the
+        // reports' union alone.
+        let mut union: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for names in &resolved {
+            for name in names {
+                if seen.insert(name.clone()) {
+                    union.push(name.clone());
+                }
+            }
         }
-        Ok(OutputCachesPlan::FreshSchema {
-            recorder: Box::new(recorder),
-            output_column_index,
-            equipment_column_map,
-            end_use_aggregate_indices,
-            actor_column_map,
-        })
+        if self.sim_config.metrics {
+            union = catalogue
+                .variables_at_verbosity(u8::MAX)
+                .into_iter()
+                .map(|def| def.name.to_string())
+                .collect();
+            if let Some(block) = &diagnostics_names {
+                union.extend(block.iter().cloned());
+            }
+        }
+        let union_schema = build_schema_for_columns(catalogue, &union);
+        let union_schema = enrich_schema_with_telemetry_units(union_schema, equipment, catalogue);
+        let expected_columns: std::collections::HashSet<String> = union.into_iter().collect();
+
+        // One row plan: the union of every report's selected variables
+        // mapped to producer slots, one projection per report.
+        let name_slots: HashMap<&str, usize> = union_schema
+            .fields()
+            .iter()
+            .skip(1)
+            .enumerate()
+            .map(|(slot, field)| (field.name().as_str(), slot))
+            .collect();
+        let projections: Vec<Vec<usize>> = resolved
+            .iter()
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| {
+                        name_slots.get(name.as_str()).copied().unwrap_or_else(|| {
+                            panic!(
+                                "report column '{name}' resolved against the catalogue \
+                                 is absent from the union schema"
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        // The union schema's value columns' declared units ride the plan:
+        // the write converts each producer's SI value once.
+        let units: Vec<hares_types::Unit> = union_schema
+            .fields()
+            .iter()
+            .skip(1)
+            .map(|field| {
+                field
+                    .metadata()
+                    .get("unit")
+                    .and_then(|symbol| hares_types::Unit::from_symbol(symbol))
+                    .unwrap_or(hares_types::Unit::None)
+            })
+            .collect();
+        let row_plan = RowPlan::from_resolved_projections(
+            union_schema.fields().len().saturating_sub(1),
+            units,
+            projections,
+        );
+
+        // The producer bindings, against the union schema.
+        let bindings =
+            build_output_row_bindings(&union_schema, equipment, actors, &expected_columns)?;
+
+        // One recorder per report, each with its own schema: a verbosity
+        // selection's schema is the catalogue's schema at that tier; a
+        // named or pattern selection's schema spans its resolved columns.
+        let mut recorders: Vec<StreamingRecorder> = self
+            .reports
+            .iter()
+            .zip(&resolved)
+            .map(|(report, names)| {
+                let schema = match &report.selection {
+                    Selection::Verbosity(verbosity) => {
+                        build_schema_from_catalogue(catalogue, *verbosity, self.diagnostics)
+                    }
+                    Selection::Diagnostics => build_schema_for_diagnostics(catalogue),
+                    Selection::Named(_) | Selection::Pattern(_) => {
+                        build_schema_for_columns(catalogue, names)
+                    }
+                };
+                let schema = enrich_schema_with_telemetry_units(schema, equipment, catalogue);
+                // The run's site offset joins the catalogue digest in the
+                // schema metadata: the one key the builders cannot know,
+                // the sign that recovers an instant from the Time column's
+                // naive local wall clock.
+                let mut metadata = (*schema.metadata()).clone();
+                metadata.insert(
+                    "hares:utc_offset_s".to_string(),
+                    i64::from(self.utc_offset_s).to_string(),
+                );
+                let schema = schema.with_metadata(metadata);
+                StreamingRecorder::new(schema, self.output_chunk_size, report.destination.clone())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|err| HaresError::Io(format!("output recorder init failed: {err}")))?;
+
+        // The run metrics' one path: when the run requests them, a fixed
+        // metrics input plan resolves the metrics' columns against the
+        // producer surface (the row plan's full declared surface, built
+        // above), and the accumulator is fed per step from the row plan's
+        // producer slots. A plan that cannot resolve fails the freeze
+        // (the run's numbers are either computed or the run is refused);
+        // a run without the request builds no plan and no accumulator and
+        // pays nothing.
+        let metrics_calculator = if self.sim_config.metrics {
+            let available: Vec<String> = union_schema
+                .fields()
+                .iter()
+                .skip(1)
+                .map(|f| f.name().clone())
+                .collect();
+            let time_res_secs = self.sim_config.time_res_secs_u32().map_err(|err| {
+                HaresError::InvalidState(format!("metrics calculator time resolution: {err}"))
+            })?;
+            let plan = hares_io::MetricsInputPlan::build(
+                &available,
+                &self.sim_config,
+                catalogue.equipment_end_uses(),
+            )
+            .map_err(|err| {
+                HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
+            })?;
+            Some(
+                MetricsCalculator::new(plan, time_res_secs, &self.sim_config).map_err(|err| {
+                    HaresError::InvalidState(format!("metrics calculator init failed: {err}"))
+                })?,
+            )
+        } else {
+            None
+        };
+        // An attached batch callback survives the rebuild: the dwelling
+        // holds the attachment and hands a clone to the named report's
+        // fresh recorder (the recorders are in `reports` order).
+        if let Some(attachment) = &self.attached_callback {
+            let report_index = self
+                .reports
+                .iter()
+                .position(|spec| spec.name == attachment.report());
+            if let Some(recorder) = report_index.and_then(|index| recorders.get_mut(index)) {
+                recorder.attach_callback(attachment.clone());
+            }
+        }
+        Ok(OutputCachesPlan::FreshSchema(Box::new(FreshOutputCaches {
+            recorders,
+            row_plan,
+            bindings,
+            union_schema,
+            expected_columns,
+            metrics_calculator,
+        })))
     }
 
     /// Installs a plan computed by [`Self::plan_roster_caches`]. Every
@@ -1239,6 +1636,7 @@ impl Dwelling {
     /// before calling this.
     fn install_roster_caches(&mut self, plan: RosterPlan) {
         self.equipment_id_by_name = plan.equipment_id_by_name;
+        self.roster.catalogue = plan.catalogue;
         self.active_equipment_ids = plan.active_equipment_ids;
         // Every actor's equipment binding goes stale on any identity change
         // (a replacement receives a new never-reused id, and an actor
@@ -1312,33 +1710,20 @@ impl Dwelling {
         self.roster.zones = plan.zones;
 
         match plan.output {
-            OutputCachesPlan::Disabled => {}
-            OutputCachesPlan::FrozenUpdate {
-                equipment_column_map,
-                end_use_aggregate_indices,
-                actor_column_map,
-            } => {
-                self.roster.equipment_column_map = equipment_column_map;
-                self.roster.end_use_aggregate_indices = end_use_aggregate_indices;
-                self.roster.actor_column_map = actor_column_map;
+            OutputCachesPlan::Disabled => {
+                self.metrics_calculator = None;
             }
-            OutputCachesPlan::FreshSchema {
-                recorder,
-                output_column_index,
-                equipment_column_map,
-                end_use_aggregate_indices,
-                actor_column_map,
-            } => {
-                self.roster.output_value_count = recorder.schema().fields().len() - 1;
-                self.roster.output_column_index = output_column_index;
-                self.roster.equipment_column_map = equipment_column_map;
-                self.roster.end_use_aggregate_indices = end_use_aggregate_indices;
-                self.roster.actor_column_map = actor_column_map;
-                self.roster.record_scratch.clear();
-                self.roster
-                    .record_scratch
-                    .resize(self.roster.output_value_count, 0.0);
-                self.recorder = Some(*recorder);
+            OutputCachesPlan::FrozenUpdate(frozen) => {
+                self.roster.bindings = frozen.bindings;
+            }
+            OutputCachesPlan::FreshSchema(fresh) => {
+                self.recorders = fresh.recorders;
+                self.metrics_calculator = fresh.metrics_calculator;
+                self.roster.row_plan = fresh.row_plan;
+                self.roster.record_projections = self.roster.row_plan.projections().to_vec();
+                self.roster.union_schema = fresh.union_schema;
+                self.roster.expected_columns = fresh.expected_columns;
+                self.roster.bindings = fresh.bindings;
                 #[cfg(feature = "observe")]
                 self.log_output_keys_without_columns();
             }
@@ -1353,7 +1738,7 @@ impl Dwelling {
     #[cfg(feature = "observe")]
     fn log_output_keys_without_columns(&self) {
         let mut covered: HashSet<&str> = HashSet::new();
-        for cols in &self.roster.equipment_column_map {
+        for cols in &self.roster.bindings.equipment {
             for &(key, _idx) in cols.v8_state_columns.iter().chain(&cols.v8_flow_columns) {
                 covered.insert(key);
             }
@@ -1374,8 +1759,10 @@ impl Dwelling {
         }
         if self
             .roster
-            .output_column_index
-            .contains_key(hares_io::SCHEDULED_HEATING_SETPOINT_COL)
+            .bindings
+            .dwelling
+            .scheduled_heating_setpoint
+            .is_some()
         {
             covered.insert(tk::SCHEDULE_HEATING_SETPOINT_C);
             covered.insert(tk::SCHEDULE_COOLING_SETPOINT_C);
@@ -1392,8 +1779,7 @@ impl Dwelling {
                 tracing::info!(
                     target: "hares::output::coverage",
                     key = key,
-                    "output-scoped telemetry key has no output column at verbosity {}",
-                    self.output_verbosity,
+                    "output-scoped telemetry key has no output column in the run's reports",
                 );
             }
         }

@@ -16,8 +16,9 @@ mod denver_offset;
 mod tests {
     use super::denver_offset::denver_offset;
     use chrono::{Duration, TimeZone};
+    use hares_core::DwellingSettings;
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-    use hares_io::OutputFormat;
+    use hares_io::{DefaultsSource, InputSource, WeatherInput};
     use hares_types::ZoneId;
     use std::collections::BTreeMap;
     use std::fs;
@@ -37,7 +38,7 @@ mod tests {
 
     fn beopt_freefloat_config(
         scenario: &str,
-        output_path: PathBuf,
+        csv_path: PathBuf,
         hpxml_path: PathBuf,
     ) -> DwellingConfig {
         // Both HARES and OCHRE treat timestamps as local time internally --
@@ -62,34 +63,49 @@ mod tests {
         };
 
         DwellingConfig {
-            hpxml_path,
-            schedule_path: Some(examples_dir().join("BEopt_example_schedule.csv")),
-            weather_path: examples_dir().join("USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
-            defaults_path: Some(project_root().join("defaults")),
-            sim_config: SimulationConfig {
-                start_time,
-                duration,
-                time_res: Duration::minutes(1),
-                output_verbosity: 6,
-                output_path: Some(output_path),
-                write_output: true,
-                output_format: OutputFormat::Csv,
-                output_chunk_size: 1024,
-                setpoint_deadband_c: None,
-                master_seed: 42,
-                civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                retain_batches: false,
-                rotation: hares_io::RotationPolicy::None,
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            },
-            overrides: None,
-            bldg_id: 1,
-            initialization_duration: None,
-            // Use ZOH resampling for all continuous weather fields to match
-            // OCHRE's pandas resample().ffill() convention for parity testing.
-            resample_overrides: Some(hares_io::ResampleOverrides::ochre_compat()),
-            patches: None,
+            hpxml: InputSource::Path(hpxml_path),
+            schedule: Some(InputSource::Path(
+                examples_dir().join("BEopt_example_schedule.csv"),
+            )),
+            weather: WeatherInput::Path(
+                // The OCHRE reference's zero-order hold of the weather, prepared
+                // by the Python adapter's hold_weather and committed: this test
+                // compares against OCHRE output, so it reads the held file
+                // instead of asking the engine for an override.
+                project_root().join("tests/fixtures/ochre_hold/USA_CO_Denver_60s.epw"),
+            ),
+            defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    start_time,
+                    duration,
+                    time_res: Duration::minutes(1),
+                    reports: vec![hares_io::ReportSpec {
+                        name: "frame".to_string(),
+                        selection: hares_io::Selection::Verbosity(6),
+                        frequency: hares_io::Frequency::default(),
+                        destination: hares_io::Destination::Csv {
+                            path: csv_path,
+                            overwrite: false,
+                        },
+                    }],
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 42,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
+                },
+                None,
+                1,
+                None,
+            ),
         }
     }
 
@@ -124,8 +140,8 @@ mod tests {
         .expect("write fixed-window HPXML");
 
         let config = beopt_freefloat_config(scenario, files.path().join("output.csv"), hpxml_path);
-        let n_steps = (config.sim_config.duration.num_seconds()
-            / config.sim_config.time_res.num_seconds()) as usize;
+        let n_steps = (config.settings.sim_config.duration.num_seconds()
+            / config.settings.sim_config.time_res.num_seconds()) as usize;
         let mut dwelling = Dwelling::from_config(config).expect("Dwelling::from_config");
         assert!(
             dwelling
@@ -1330,42 +1346,40 @@ mod tests {
             }
         };
 
-        let collect_temps =
-            |results: &hares_core::DwellingSimulationResults| -> (Vec<f64>, Vec<f64>) {
-                let zone_indoor = ZoneId(1);
-                let zone_attic = ZoneId(2);
-                let indoor: Vec<f64> = results
-                    .steps
-                    .iter()
-                    .map(|s| {
-                        s.zone_temperatures_c
-                            .iter()
-                            .find(|(z, _)| *z == zone_indoor)
-                            .map(|(_, t)| *t)
-                            .unwrap_or(f64::NAN)
-                    })
-                    .collect();
-                let attic: Vec<f64> = results
-                    .steps
-                    .iter()
-                    .map(|s| {
-                        s.zone_temperatures_c
-                            .iter()
-                            .find(|(z, _)| *z == zone_attic)
-                            .map(|(_, t)| *t)
-                            .unwrap_or(f64::NAN)
-                    })
-                    .collect();
-                (indoor, attic)
-            };
+        let collect_temps = |steps: &[hares_core::StepResult]| -> (Vec<f64>, Vec<f64>) {
+            let zone_indoor = ZoneId(1);
+            let zone_attic = ZoneId(2);
+            let indoor: Vec<f64> = steps
+                .iter()
+                .map(|s| {
+                    s.zone_temperatures_c
+                        .iter()
+                        .find(|(z, _)| *z == zone_indoor)
+                        .map(|(_, t)| *t)
+                        .unwrap_or(f64::NAN)
+                })
+                .collect();
+            let attic: Vec<f64> = steps
+                .iter()
+                .map(|s| {
+                    s.zone_temperatures_c
+                        .iter()
+                        .find(|(z, _)| *z == zone_attic)
+                        .map(|(_, t)| *t)
+                        .unwrap_or(f64::NAN)
+                })
+                .collect();
+            (indoor, attic)
+        };
 
         // ── Baseline: HARES solar (Perez model), no override ──────────────
         let mut baseline = build_freefloat_dwelling(scenario);
         let n_steps = baseline.n_steps;
+        let mut baseline_steps = Vec::new();
         for _ in 0..n_steps {
-            baseline.dwelling.step().expect("dwelling.step (baseline)");
+            baseline_steps.push(baseline.dwelling.step().expect("dwelling.step (baseline)"));
         }
-        let (baseline_indoor, baseline_attic) = collect_temps(&baseline.dwelling.results());
+        let (baseline_indoor, baseline_attic) = collect_temps(&baseline_steps);
         let baseline_indoor_mae = mae(&baseline_indoor, &ochre_indoor);
         let baseline_attic_mae = mae(&baseline_attic, &ochre_attic);
 
@@ -1385,10 +1399,11 @@ mod tests {
             .set_solar_override(solar_data)
             .expect("the freefloat scenarios carry no PV");
 
+        let mut override_steps = Vec::new();
         for _ in 0..n_steps {
-            dwelling_ov.step().expect("dwelling.step (override)");
+            override_steps.push(dwelling_ov.step().expect("dwelling.step (override)"));
         }
-        let (override_indoor, override_attic) = collect_temps(&dwelling_ov.results());
+        let (override_indoor, override_attic) = collect_temps(&override_steps);
         let override_indoor_mae = mae(&override_indoor, &ochre_indoor);
         let override_attic_mae = mae(&override_attic, &ochre_attic);
 

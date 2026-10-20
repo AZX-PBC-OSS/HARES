@@ -33,7 +33,7 @@ fn alloc_snapshot() -> u64 {
 const NARROW_FIELDS: &[&str] = &[
     "outdoor_temp",
     "zone_temp[Indoor]",
-    "total_power_kw",
+    "total_power_w",
     "equipment_power[Electric Furnace]",
     "setpoint_heat[Indoor]",
 ];
@@ -42,8 +42,8 @@ fn wide_fields() -> Vec<&'static str> {
     let base: &[&str] = &[
         "outdoor_temp",
         "outdoor_humidity_ratio",
-        "total_power_kw",
-        "reactive_power_kvar",
+        "total_power_w",
+        "reactive_power_var",
         "zone_temp[Indoor]",
         "setpoint_heat[Indoor]",
         "setpoint_cool[Indoor]",
@@ -72,10 +72,12 @@ fn synthetic_toml(duration_s: i64, time_res_s: i64) -> String {
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res_s = {time_res_s}
-duration_s = {duration_s}
-
+time_res = {time_res_s}
+duration = {duration_s}
+output_chunk_size = 1000
+master_seed = 0
 [geometry]
+number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
 zone_volume_m3 = 120.0
 
@@ -95,13 +97,6 @@ pressure_kpa = 101.325
 
 [schedule]
 occupancy = 1.0
-
-[output]
-output_verbosity = 0
-output_format = "csv"
-output_chunk_size = 1000
-master_seed = 0
-write_output = false
 "#
     )
 }
@@ -109,7 +104,7 @@ write_output = false
 fn make_dwelling(dir: &Path, duration_s: i64, time_res_s: i64) -> Dwelling {
     let path = common::numbered_path(dir, "hares-bench-rl-episode", "toml");
     std::fs::write(&path, synthetic_toml(duration_s, time_res_s)).expect("write TOML");
-    Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("create dwelling")
+    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("create dwelling")
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +134,7 @@ fn bench_reset(c: &mut Criterion, dir: &Path) {
             |path| {
                 std::fs::write(&path, synthetic_toml(86_400, 60)).expect("write TOML");
                 black_box(
-                    Dwelling::from_toml_config_with_write_output(&path, Some(false))
+                    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
                         .expect("create dwelling"),
                 );
             },
@@ -163,12 +158,27 @@ fn bench_observation_vec(c: &mut Criterion, dir: &Path) {
     let telemetry = dwelling.telemetry().unwrap();
 
     group.bench_function("narrow_5_fields", |b| {
-        b.iter(|| black_box(telemetry.to_observation_vec(NARROW_FIELDS).expect("obs")));
+        b.iter(|| {
+            black_box(
+                telemetry
+                    .observation_vec(
+                        NARROW_FIELDS,
+                        &mut hares_core::ObservationWarnOnce::default(),
+                    )
+                    .expect("obs"),
+            )
+        });
     });
 
     let wide = wide_fields();
     group.bench_function("wide_55_fields", |b| {
-        b.iter(|| black_box(telemetry.to_observation_vec(&wide).expect("obs")));
+        b.iter(|| {
+            black_box(
+                telemetry
+                    .observation_vec(&wide, &mut hares_core::ObservationWarnOnce::default())
+                    .expect("obs"),
+            )
+        });
     });
 
     group.finish();
@@ -214,7 +224,13 @@ fn bench_episode_single(c: &mut Criterion, dir: &Path) {
                     for _ in 0..num_steps {
                         dwelling.step().expect("step");
                         let t = dwelling.telemetry().unwrap();
-                        black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+                        black_box(
+                            t.observation_vec(
+                                NARROW_FIELDS,
+                                &mut hares_core::ObservationWarnOnce::default(),
+                            )
+                            .expect("obs"),
+                        );
                     }
                 }
                 let elapsed = start.elapsed();
@@ -282,7 +298,13 @@ fn bench_episode_vec(c: &mut Criterion, dir: &Path) {
             }
             for dwelling in &dwellings {
                 let t = dwelling.telemetry().unwrap();
-                black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+                black_box(
+                    t.observation_vec(
+                        NARROW_FIELDS,
+                        &mut hares_core::ObservationWarnOnce::default(),
+                    )
+                    .expect("obs"),
+                );
             }
             alloc_snapshot().saturating_sub(before_alloc)
         };
@@ -307,7 +329,13 @@ fn bench_episode_vec(c: &mut Criterion, dir: &Path) {
                         }
                         for dwelling in &dwellings {
                             let t = dwelling.telemetry().unwrap();
-                            black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+                            black_box(
+                                t.observation_vec(
+                                    NARROW_FIELDS,
+                                    &mut hares_core::ObservationWarnOnce::default(),
+                                )
+                                .expect("obs"),
+                            );
                         }
                     }
                     start.elapsed()
@@ -350,7 +378,13 @@ fn bench_batch_step(c: &mut Criterion, dir: &Path) {
                         dwellings.par_iter_mut().for_each(|dwelling| {
                             black_box(dwelling.step().expect("step"));
                             let t = dwelling.telemetry().unwrap();
-                            black_box(t.to_observation_vec(NARROW_FIELDS).expect("obs"));
+                            black_box(
+                                t.observation_vec(
+                                    NARROW_FIELDS,
+                                    &mut hares_core::ObservationWarnOnce::default(),
+                                )
+                                .expect("obs"),
+                            );
                         });
                     },
                     criterion::BatchSize::LargeInput,

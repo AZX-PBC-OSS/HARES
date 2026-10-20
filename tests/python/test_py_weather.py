@@ -30,13 +30,13 @@ EXPECTED_COLUMNS = [
 
 class TestParseEpw:
     def test_len_equals_8760(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         assert len(weather) == 8760
 
     def test_to_polars_returns_dataframe(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         df = weather.to_polars()
@@ -46,7 +46,7 @@ class TestParseEpw:
         assert isinstance(df, pl.DataFrame)
 
     def test_to_polars_has_15_columns(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         df = weather.to_polars()
@@ -54,7 +54,7 @@ class TestParseEpw:
         assert len(df.columns) >= 15
 
     def test_to_polars_column_names_match(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         df = weather.to_polars()
@@ -62,43 +62,43 @@ class TestParseEpw:
         assert df.columns == EXPECTED_COLUMNS
 
     def test_latitude_from_epw_header(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         assert weather.latitude == pytest.approx(39.83, rel=0.01)
 
     def test_longitude_from_epw_header(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         assert weather.longitude == pytest.approx(-104.65, rel=0.01)
 
     def test_elevation_m_from_epw_header(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         assert weather.elevation_m == pytest.approx(1650.0, rel=0.01)
 
     def test_source_step_secs_equals_3600(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         assert weather.source_step_secs == 3600
 
-    def test_midpoint_offset_secs_equals_1800(self):
-        from ochre_next import parse_epw
+    def test_record_label_is_interval_end(self):
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
-        assert weather.midpoint_offset_secs == 1800
+        assert weather.record_label == "interval_end"
 
     def test_surface_albedo_none_for_epw(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         assert weather.surface_albedo is None
 
     def test_location_is_non_empty_string(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         assert isinstance(weather.location, str)
@@ -107,7 +107,7 @@ class TestParseEpw:
 
 class TestParseWeatherAutoDetect:
     def test_parse_weather_auto_detects_epw(self):
-        from ochre_next import parse_weather, parse_epw
+        from hares import parse_weather, parse_epw
 
         weather_auto = parse_weather(EPW_PATH)
         weather_explicit = parse_epw(EPW_PATH)
@@ -119,7 +119,7 @@ class TestParseWeatherAutoDetect:
 
 class TestErrorHandling:
     def test_invalid_path_raises_error_with_path_in_message(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         with pytest.raises(Exception) as exc_info:
             parse_epw("/nonexistent/path/to/file.epw")
@@ -129,7 +129,7 @@ class TestErrorHandling:
 
 class TestParseResStockCsv:
     def test_parse_resstock_csv_requires_all_4_location_params(self):
-        from ochre_next import parse_resstock_csv
+        from hares import parse_resstock_csv
         import inspect
 
         sig = inspect.signature(parse_resstock_csv)
@@ -143,7 +143,7 @@ class TestParseResStockCsv:
 
 class TestRepr:
     def test_repr_works_without_error(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         repr_str = repr(weather)
@@ -154,7 +154,7 @@ class TestRepr:
 
 class TestDataFrameRowCount:
     def test_dataframe_row_count_matches_len(self):
-        from ochre_next import parse_epw
+        from hares import parse_epw
 
         weather = parse_epw(EPW_PATH)
         df = weather.to_polars()
@@ -164,13 +164,13 @@ class TestDataFrameRowCount:
 
 class TestParseTmy3:
     def test_len_equals_8760(self):
-        from ochre_next import parse_tmy3
+        from hares import parse_tmy3
 
         weather = parse_tmy3(TMY3_PATH)
         assert len(weather) == 8760
 
     def test_to_polars_returns_dataframe(self):
-        from ochre_next import parse_tmy3
+        from hares import parse_tmy3
 
         weather = parse_tmy3(TMY3_PATH)
 
@@ -179,19 +179,19 @@ class TestParseTmy3:
         assert isinstance(weather.to_polars(), pl.DataFrame)
 
     def test_latitude_accessible(self):
-        from ochre_next import parse_tmy3
+        from hares import parse_tmy3
 
         weather = parse_tmy3(TMY3_PATH)
         assert weather.latitude == pytest.approx(55.317, rel=0.01)
 
     def test_longitude_accessible(self):
-        from ochre_next import parse_tmy3
+        from hares import parse_tmy3
 
         weather = parse_tmy3(TMY3_PATH)
         assert weather.longitude == pytest.approx(-160.517, rel=0.01)
 
     def test_elevation_m_accessible(self):
-        from ochre_next import parse_tmy3
+        from hares import parse_tmy3
 
         weather = parse_tmy3(TMY3_PATH)
         assert weather.elevation_m == pytest.approx(7.0, abs=1.0)
@@ -199,19 +199,19 @@ class TestParseTmy3:
 
 class TestParseWeather:
     def test_len_equals_8760_epw(self):
-        from ochre_next import parse_weather
+        from hares import parse_weather
 
         weather = parse_weather(EPW_PATH)
         assert len(weather) == 8760
 
     def test_len_equals_8760_tmy3(self):
-        from ochre_next import parse_weather
+        from hares import parse_weather
 
         weather = parse_weather(TMY3_PATH)
         assert len(weather) == 8760
 
     def test_metadata_accessible(self):
-        from ochre_next import parse_weather
+        from hares import parse_weather
 
         weather = parse_weather(TMY3_PATH)
         assert weather.latitude == pytest.approx(55.317, rel=0.01)
@@ -221,7 +221,7 @@ class TestParseWeather:
 
 class TestParsePsm3:
     def test_invalid_path_raises(self):
-        from ochre_next import parse_psm3
+        from hares import parse_psm3
 
         with pytest.raises((FileNotFoundError, Exception)):
             parse_psm3("/nonexistent/path/to/file.psm3")

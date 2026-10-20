@@ -1,0 +1,115 @@
+# Cross-platform agreement of the golden fixtures: the committed goldens are
+# Linux x86_64 captures, so the Linux leg's compare-all must pass, and the
+# macOS arm64 leg measures whether a macOS build produces the same bits.
+# Each leg records its runner architecture and rustc version, writes the
+# full products of every golden manifest, and uploads them with its
+# compare-all output for the cross-platform diff.
+
+name: Reproducibility
+
+on:
+  pull_request:
+    branches: [main, initial-implementation]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  golden-agreement:
+    name: "frame_golden agreement (${{ matrix.runner }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
+    env:
+      BIN: target/release/frame_golden
+      OUT: target/reproducibility
+    steps:
+      - uses: actions/checkout@v4
+
+      # The goldens are per-column bit digests, so they must be compared on
+      # the rustc release they were captured with. rust-toolchain.toml owns
+      # that pin: every job, here included, runs the version it names.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Record the platform and toolchain
+        run: |
+          mkdir -p "$OUT"
+          {
+            echo "runner: $RUNNER_NAME"
+            echo "architecture: $RUNNER_ARCH ($(uname -m))"
+            echo "rustc: $(rustc -V)"
+            echo "cargo: $(cargo -V)"
+            echo "head: $(git rev-parse HEAD)"
+          } | tee "$OUT/platform.txt"
+
+      - name: Build frame_golden (default features)
+        run: cargo build --release -p frame_golden
+
+      - name: Full products of every manifest (default features)
+        run: |
+          for manifest in tests/fixtures/golden/*.toml; do
+            if grep -qx 'features = \["dst"\]' "$manifest"; then
+              continue
+            fi
+            name=$(basename "$manifest" .toml)
+            "$BIN" run "$manifest" --output-dir "$OUT/$name"
+          done
+
+      - name: compare-all (default features)
+        run: |
+          set -o pipefail
+          if "$BIN" compare-all 2>&1 | tee "$OUT/compare-all-default.txt"; then
+            echo 0 > "$OUT/status-default.txt"
+          else
+            echo 1 > "$OUT/status-default.txt"
+          fi
+
+      - name: Build frame_golden (dst features)
+        run: cargo build --release -p frame_golden -F dst
+
+      - name: Full products of the dst manifests
+        run: |
+          for manifest in tests/fixtures/golden/*.toml; do
+            if ! grep -qx 'features = \["dst"\]' "$manifest"; then
+              continue
+            fi
+            name=$(basename "$manifest" .toml)
+            "$BIN" run "$manifest" --output-dir "$OUT/$name"
+          done
+
+      - name: compare-all (dst features)
+        run: |
+          set -o pipefail
+          if "$BIN" compare-all 2>&1 | tee "$OUT/compare-all-dst.txt"; then
+            echo 0 > "$OUT/status-dst.txt"
+          else
+            echo 1 > "$OUT/status-dst.txt"
+          fi
+
+      - name: Verdict
+        run: |
+          status=0
+          for file in "$OUT"/status-*.txt; do
+            read -r code < "$file"
+            [ "$code" -eq 0 ] || status=1
+          done
+          if [ "$status" -eq 0 ]; then
+            echo "every golden fixture is bitwise identical on this runner ($RUNNER_ARCH, $(uname -m))"
+          else
+            echo "::error::a golden fixture differs on this runner ($RUNNER_ARCH, $(uname -m)): the compare-all output above names the differing products and columns, and the full products are in the uploaded artifact"
+          fi
+          exit "$status"
+
+      - name: Upload the full products and the compare output
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproducibility-${{ matrix.runner }}
+          path: target/reproducibility

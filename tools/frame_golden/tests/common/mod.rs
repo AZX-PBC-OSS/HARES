@@ -98,6 +98,42 @@ pub fn frame_map(batch: RecordBatch) -> BTreeMap<String, FrameProducts> {
     products
 }
 
+/// A one-day, hourly dwelling manifest against the cz4a parity fixture:
+/// the kind-key discipline tests build their rejects from it.
+pub fn dwelling_manifest() -> String {
+    let features = frame_golden::manifest::running_features()
+        .into_iter()
+        .map(|f| format!("\"{f}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"
+kind = "dwelling"
+features = [{features}]
+defaults = "defaults"
+
+[simulation]
+start_time = "2023-01-01T00:00:00-07:00"
+duration = 86400
+time_res = 3600
+master_seed = 0
+warmup = "disabled"
+
+[[simulation.reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = "memory"
+
+[[home]]
+bldg_id = 1
+hpxml = "tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"
+schedule = "tests/fixtures/parity/cz4a_ashp_hpwh/schedule.csv"
+weather = "tests/fixtures/parity/cz4a_ashp_hpwh/weather.epw"
+overrides = {{}}
+"#
+    )
+}
+
 /// A golden document around the given product digests, with empty metrics
 /// and a fixed health record so the frame logic is what the test varies.
 pub fn golden_doc(products: BTreeMap<String, frame_golden::FrameDigests>) -> GoldenDoc {
@@ -118,6 +154,7 @@ pub fn golden_doc(products: BTreeMap<String, frame_golden::FrameDigests>) -> Gol
         git_dirty: Some(false),
         metrics: vec![metrics],
         products,
+        resolved: Vec::new(),
         health: Some(serde_json::json!({
             "port_rollbacks": 0,
             "rejected_control_signals": 0,

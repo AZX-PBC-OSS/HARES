@@ -18,13 +18,15 @@ pub trait ControlSignalConstructors {
         deadband_c: Option<f64>,
     ) -> ControlSignal;
 
-    fn power_setpoint(active_power_kw: f64, reactive_power_kvar: Option<f64>) -> ControlSignal;
+    fn power_setpoint(active_power_w: f64, reactive_power_var: Option<f64>) -> ControlSignal;
 
-    fn power_limit(max_power_kw: f64, ramp_rate_kw_per_s: Option<f64>) -> ControlSignal;
+    fn power_limit(max_power_w: f64, ramp_rate_w_per_s: Option<f64>) -> ControlSignal;
 
     fn soc_target(target_soc: f64, min_soc: Option<f64>, max_soc: Option<f64>) -> ControlSignal;
 
     fn mode_override(mode: OperatingMode) -> ControlSignal;
+
+    fn mode_release() -> ControlSignal;
 
     fn duty_cycle(
         on_fraction: f64,
@@ -65,36 +67,33 @@ impl ControlSignalConstructors for ControlSignal {
         }
     }
 
-    fn power_setpoint(active_power_kw: f64, reactive_power_kvar: Option<f64>) -> ControlSignal {
-        debug_assert!(
-            active_power_kw.is_finite(),
-            "active_power_kw must be finite"
-        );
-        if let Some(q) = reactive_power_kvar {
-            debug_assert!(q.is_finite(), "reactive_power_kvar must be finite");
+    fn power_setpoint(active_power_w: f64, reactive_power_var: Option<f64>) -> ControlSignal {
+        debug_assert!(active_power_w.is_finite(), "active_power_w must be finite");
+        if let Some(q) = reactive_power_var {
+            debug_assert!(q.is_finite(), "reactive_power_var must be finite");
         }
         ControlSignal::PowerSetpoint {
-            active_power_kw,
-            reactive_power_kvar,
+            active_power_w,
+            reactive_power_var,
             min_soc: None,
             max_soc: None,
         }
     }
 
-    fn power_limit(max_power_kw: f64, ramp_rate_kw_per_s: Option<f64>) -> ControlSignal {
+    fn power_limit(max_power_w: f64, ramp_rate_w_per_s: Option<f64>) -> ControlSignal {
         debug_assert!(
-            max_power_kw >= 0.0 && max_power_kw.is_finite(),
-            "max_power_kw must be >= 0.0 and finite"
+            max_power_w >= 0.0 && max_power_w.is_finite(),
+            "max_power_w must be >= 0.0 and finite"
         );
-        if let Some(r) = ramp_rate_kw_per_s {
+        if let Some(r) = ramp_rate_w_per_s {
             debug_assert!(
                 r >= 0.0 && r.is_finite(),
-                "ramp_rate_kw_per_s must be >= 0.0 and finite"
+                "ramp_rate_w_per_s must be >= 0.0 and finite"
             );
         }
         ControlSignal::PowerLimit {
-            max_power_kw,
-            ramp_rate_kw_per_s,
+            max_power_w,
+            ramp_rate_w_per_s,
         }
     }
 
@@ -122,6 +121,10 @@ impl ControlSignalConstructors for ControlSignal {
 
     fn mode_override(mode: OperatingMode) -> ControlSignal {
         ControlSignal::ModeOverride { mode }
+    }
+
+    fn mode_release() -> ControlSignal {
+        ControlSignal::ModeOverrideRelease
     }
 
     fn duty_cycle(
@@ -225,8 +228,8 @@ mod tests {
         assert_eq!(
             ControlSignal::power_setpoint(4.5, Some(0.3)),
             ControlSignal::PowerSetpoint {
-                active_power_kw: 4.5,
-                reactive_power_kvar: Some(0.3),
+                active_power_w: 4.5,
+                reactive_power_var: Some(0.3),
                 min_soc: None,
                 max_soc: None,
             }
@@ -235,8 +238,8 @@ mod tests {
         assert_eq!(
             ControlSignal::power_limit(7.0, Some(0.5)),
             ControlSignal::PowerLimit {
-                max_power_kw: 7.0,
-                ramp_rate_kw_per_s: Some(0.5),
+                max_power_w: 7.0,
+                ramp_rate_w_per_s: Some(0.5),
             }
         );
 
@@ -254,6 +257,11 @@ mod tests {
             ControlSignal::ModeOverride {
                 mode: OperatingMode::Defrost,
             }
+        );
+
+        assert_eq!(
+            ControlSignal::mode_release(),
+            ControlSignal::ModeOverrideRelease,
         );
 
         assert_eq!(
@@ -327,14 +335,14 @@ mod tests {
 
         #[test]
         #[cfg(debug_assertions)]
-        #[should_panic(expected = "active_power_kw must be finite")]
+        #[should_panic(expected = "active_power_w must be finite")]
         fn power_setpoint_rejects_infinite_active_power() {
             ControlSignal::power_setpoint(f64::INFINITY, None);
         }
 
         #[test]
         #[cfg(debug_assertions)]
-        #[should_panic(expected = "reactive_power_kvar must be finite")]
+        #[should_panic(expected = "reactive_power_var must be finite")]
         fn power_setpoint_rejects_infinite_reactive_power() {
             ControlSignal::power_setpoint(5.0, Some(f64::INFINITY));
         }
@@ -343,21 +351,21 @@ mod tests {
 
         #[test]
         #[cfg(debug_assertions)]
-        #[should_panic(expected = "max_power_kw must be >= 0.0 and finite")]
+        #[should_panic(expected = "max_power_w must be >= 0.0 and finite")]
         fn power_limit_rejects_negative_max_power() {
             ControlSignal::power_limit(-5.0, None);
         }
 
         #[test]
         #[cfg(debug_assertions)]
-        #[should_panic(expected = "max_power_kw must be >= 0.0 and finite")]
+        #[should_panic(expected = "max_power_w must be >= 0.0 and finite")]
         fn power_limit_rejects_infinite_max_power() {
             ControlSignal::power_limit(f64::INFINITY, None);
         }
 
         #[test]
         #[cfg(debug_assertions)]
-        #[should_panic(expected = "ramp_rate_kw_per_s must be >= 0.0 and finite")]
+        #[should_panic(expected = "ramp_rate_w_per_s must be >= 0.0 and finite")]
         fn power_limit_rejects_negative_ramp_rate() {
             ControlSignal::power_limit(7.0, Some(-0.5));
         }

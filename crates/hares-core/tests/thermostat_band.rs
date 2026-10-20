@@ -14,7 +14,7 @@ const STEPS_AFTER_CHECKPOINT: usize = 240;
 fn s54_dwelling() -> Dwelling {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/bestest/s54_heat_pump.toml");
-    Dwelling::from_toml_config_with_write_output(&path, Some(false)).expect("build s54 dwelling")
+    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("build s54 dwelling")
 }
 
 fn heating_equipment_name(dwelling: &Dwelling) -> String {
