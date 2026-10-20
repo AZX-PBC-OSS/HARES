@@ -4663,3 +4663,16 @@ the declared -2 per premise); row 75's and row 77's removals are inside the 2.20
 at its recorded wall cost on the busy host; row 77's threads kept their memory
 target, and this record is the first wall measurement of the thread shape at the
 production set.
+
+## The measurement ladder (the consumer as the instrument, per the operator's mandate)
+
+Every fold re-syncs the consumer and appends a row: the capture wall, the per-run
+CPU cost where recorded, the 13 losses' verdict, the suite counts. The goldens prove
+the engine did not change what it computes; the ladder proves the end-to-end workload
+holds. A capture-wall regression over 5 percent without an attributed, accepted trade
+halts the pipeline until investigated.
+
+| date | engine | the capture wall | the 13 losses | the suite | note |
+| ---- | ------ | ---------------- | ------------- | --------- | ---- |
+| 2026-10-19 | `cb7f7ba11` (B1, row 97) | 179.9 / 180.8 s | re-pinned, 13/13 | 383/0/7 | the baseline; 1.74 CPU-s/run (was 2.20) |
+| 2026-10-20 | `ea46b1f2` (row 112) | 181.7 s | IDENTICAL 13/13 | 383/0/7 | +0.5-1 percent vs the baseline: the docs + the macro-forwarding delta, within noise; the compare vs B1 bitwise identical; the build_info stale-cache catch recorded in row 112's State |
