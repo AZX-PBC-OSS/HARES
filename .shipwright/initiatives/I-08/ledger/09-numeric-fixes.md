@@ -5248,9 +5248,12 @@ moved fixture re-captured deliberately twice, byte-identical
 (compare-all 10 + dst 1 identical after). The moved value pins
 re-pinned with the cause: the ASHP parity fixture's timing anchor
 35 to 32 (the fin's mass sits closer to the cut surface, the zone warms
-earlier in the ramp), the cz4a diagnostics CSV pin (the zone
-temperatures' printed digits; gains and powers unchanged at their
-precision), and the 48 h thermal trace's records (the 48 h heating
+earlier in the ramp), the cz4a diagnostics CSV pin, whose movement is
+five of its columns on 53 of its 60 rows (zone1_temp_c,
+zone1_thermal_gain_w, electrical_net_w, electrical_net_var,
+port_convective_w; step 7: zone1_thermal_gain_w 8147.8 to 8082.7), all
+in the conditioned zone's thermal path, consistent with the
+partition-wall cause, and the 48 h thermal trace's records (the 48 h heating
 28.9580 to 29.1539 kWh, the worst-6 h divergence 2.0090 to 2.0590 C,
 the 48 h mean 0.3940 to 0.3971 C; OCHRE's own 47.052 kWh unchanged).
 
