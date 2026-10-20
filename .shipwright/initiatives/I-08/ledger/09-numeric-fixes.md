@@ -5453,6 +5453,20 @@ through `run_warmup_converged` fails the run naming "500 ms"),
 (the floor's 96, 48 and 672 step pins; 500 ms and 1500 ms rejected with
 the value named). All in `crates/hares-core/src/dwelling/mod.rs` tests.
 
+**Review corrections (2026-10-20):** two reach notes the entry omitted.
+First, the day-long arm of `steps_per_day_at_the_shipped_resolutions`
+(86 400 s giving 1) is arithmetic-valid but practically unreachable:
+the tank invariant fires first, and every real 86 400 s run dies at
+build with `InvariantViolation { tank_temperature_bounds, 234.696 C }`
+(the day-long init step overheats the tank). That named-invariant death
+is the loud failure, not a silent path. Second, the named 500 ms error
+arm is reachable only past `validate()`: `SimulationConfig::validate()`
+intercepts 500 ms first with the truncation-blind message "time_res
+must be greater than zero" (`num_seconds()` truncates 500 ms to 0), so
+an error naming the resolution in milliseconds is met only past
+validate (the acceptance test reaches it by mutating the dwelling's
+clock directly).
+
 **RED first:** the two witnesses executed at the parent: the horizon at
 1500 ms computed 86 400 (the truncated count) and the warm-up entry at
 500 ms returned `Ok(1)` with no step run; the acceptance probes could
@@ -5476,9 +5490,11 @@ errors; the goldens compare-all 10 + dst 1 bitwise identical.
 
 ## Hardening 12: the ASHP debug read leaves the per-step path
 
-**Kind:** performance fix (the hardening phase's equipment hot-path
-entry: the per-step environ read in the heat-pump heater's control
-resolution).
+**Kind:** hygiene (the hardening phase's equipment hot-path entry: the
+per-step environ read in the heat-pump heater's control resolution; per
+the measurement ladder in `02-measurement.md` this is the hygiene case,
+not a performance fix: 29 ns/step against a 900 s step budget, and no
+consumer-measured delta exists or is claimed).
 
 **Problem:** the ASHP control trace's gate read
 `std::env::var("HARES_DEBUG_ASHP_CONTROL")` inside
@@ -5495,7 +5511,13 @@ one atomic load per step. The trace itself is unchanged: set the
 variable before the run and the same control dump prints; the read is
 settled by the first heat-pump step and later environment changes have
 no effect (documented on the helper). No test or fixture reads or
-toggles the variable, so no test-visible reset was needed.
+toggles the variable, so no test-visible reset was needed. (INFO from
+the review: the sibling truncating day-division sites,
+`crates/hares-io/src/config.rs`'s `timestep_count`,
+`crates/hares-core/src/dwelling/roster.rs`'s per-day step count and
+`crates/hares-core/src/environment.rs`'s mains samples-per-day, are
+unreachable past Hardening 11's construction error and were never in
+scope here.)
 
 **RED first (the witness):** the per-call cost measured in release at
 the parent: 1 000 000 environ reads 29.4 ms (29 ns/read) against
