@@ -2894,7 +2894,7 @@ mod tests {
     };
 
     use super::super::constants::MSHP_DEFAULT_STAGE_RATIOS;
-    use super::{ASHPHeater, GshpHeater, MinisplitHeater, SpeedControlMode};
+    use super::{ASHPHeater, GshpHeater, MinisplitHeater, SpeedControlMode, WshpHeater};
     use crate::hvac::ThermostatMode;
     use crate::hvac::heating_config::HvacSetpointConfig;
     use crate::{
@@ -8405,6 +8405,204 @@ mod tests {
             cop_full_load >= 1.0,
             "the full-load compressor COP at −17 °C must stay at or above 1.0 \
              for an HSPF 9.5 unit; got {cop_full_load:.4}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The wrapper newtypes must forward reset_stochastic_state
+    //
+    // The core's Equipment impl rewinds the thermostat's schedule setpoint
+    // sources (the warm-up boundary's call: the dwelling loops
+    // `reset_stochastic_state` over its equipment). A wrapper newtype that
+    // kept the trait's no-op default leaked the warm-up's draws into
+    // production day 1: the inner core's stochastic setpoint sources never
+    // rewound.
+    // -----------------------------------------------------------------------
+
+    use hares_types::{DayFilter, DistributionKind, ScheduleSourceState, TimeWindow};
+
+    use crate::EquipmentRegistry;
+
+    /// A seeded noisy TimeWindows heating setpoint source: an all-day
+    /// window with Gaussian noise, so every step's read draws from the
+    /// source's rng and the stream's position shows in the resolved
+    /// setpoint.
+    fn noisy_setpoint_heater_config() -> HeatPumpHeaterConfig {
+        let mut typed = heater_typed_config();
+        typed.common.setpoint.heating_setpoint_source = Some(ScheduleSourceConfig::TimeWindows {
+            windows: vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                21.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 0.5,
+                },
+                None,
+                None,
+            )],
+            default: Some(21.0),
+            seed: Some([7u8; 32]),
+        });
+        typed
+    }
+
+    /// The 900 s production step convention, the clock advanced `step`
+    /// steps past the base instant.
+    fn step_env_at(step: usize) -> EnvironmentState {
+        let mut e = make_env(18.0, 5.0, 0);
+        e.current_time += ChronoDuration::seconds(900 * step as i64);
+        e.time_res = ChronoDuration::seconds(900);
+        e
+    }
+
+    /// One control-plus-step cycle at the step's own instant: the
+    /// thermostat's source read (and its noisy draw) happens in
+    /// `update_control`, the telemetry lands in `step`.
+    fn drive_step(eq: &mut dyn Equipment, step: usize) {
+        let e = step_env_at(step);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&e);
+        eq.step(&e, Duration::from_secs(900), &mut ports)
+            .expect("the step runs");
+    }
+
+    fn noisy_source_state(core: &super::HeatPumpHeaterCore) -> hares_types::ScheduleSourceState {
+        core.hvac
+            .thermostat_fsm
+            .heating_setpoint_source
+            .as_ref()
+            .expect("the noisy heating setpoint source is configured")
+            .capture_state()
+    }
+
+    /// Every wrapper newtype must forward `reset_stochastic_state` to its
+    /// core: after ten draws, the trait call through the wrapper must
+    /// rewind the thermostat's noisy setpoint source to its construction
+    /// position (the draw counter at zero, the generator at its seed). A
+    /// wrapper that silently keeps the trait's no-op default fails this,
+    /// and a future registry-built heater can regress the same way.
+    #[test]
+    fn the_wrapper_newtypes_forward_reset_stochastic_state_to_their_core() {
+        macro_rules! forwarding_case {
+            ($class:literal, $ctor:expr) => {{
+                let cfg = EquipmentConfig::from_typed(
+                    "hp1".to_string(),
+                    $class.to_string(),
+                    noisy_setpoint_heater_config(),
+                )
+                .expect("typed config");
+                let mut w = $ctor(cfg.clone());
+                w.init(&cfg, &step_env_at(0)).expect("init");
+                for step in 0..10 {
+                    drive_step(&mut w, step);
+                }
+                let advanced = match noisy_source_state(&w.core) {
+                    ScheduleSourceState::NoisyTimeWindows {
+                        draw_count,
+                        rng_word_pos,
+                    } => (draw_count, rng_word_pos),
+                    other => panic!("expected the noisy TimeWindows state, got {other:?}"),
+                };
+                assert_eq!(
+                    advanced.0, 10,
+                    "ten warm-up reads must draw ten times for this pin to mean anything"
+                );
+                w.reset_stochastic_state();
+                let rewound = noisy_source_state(&w.core);
+                (advanced, rewound)
+            }};
+        }
+
+        let cases = [
+            (
+                "ASHP Heater",
+                forwarding_case!("ASHP Heater", ASHPHeater::new),
+            ),
+            (
+                "MSHP Heater",
+                forwarding_case!("MSHP Heater", MinisplitHeater::new),
+            ),
+            (
+                "GSHP Heater",
+                forwarding_case!("GSHP Heater", GshpHeater::new),
+            ),
+            (
+                "WSHP Heater",
+                forwarding_case!("WSHP Heater", WshpHeater::new),
+            ),
+        ];
+        for (class, (advanced, rewound)) in cases {
+            assert_ne!(
+                advanced.1, 0,
+                "{class}: the warm-up's draws must move the generator for this pin to mean anything"
+            );
+            assert_eq!(
+                rewound,
+                ScheduleSourceState::NoisyTimeWindows {
+                    draw_count: 0,
+                    rng_word_pos: 0
+                },
+                "{class}: the wrapper must forward reset_stochastic_state so the \
+                 thermostat's noisy setpoint source rewinds to its construction position",
+            );
+        }
+    }
+
+    /// The warm-up boundary's neutrality on a registry-built heater: after
+    /// the boundary's reset, day 1's resolved setpoints and delivered
+    /// power must be bit-identical whatever the warm-up drew. The no-op
+    /// default leaked the warm-up's draws into day 1: a longer warm-up
+    /// left the noisy source's generator further along, and day 1's
+    /// draws moved with it.
+    #[test]
+    fn warmup_length_never_reaches_a_registry_built_heaters_first_day() {
+        let run = |warmup_steps: usize| -> Vec<u64> {
+            let registry = EquipmentRegistry::new();
+            let cfg = EquipmentConfig::from_typed(
+                "ashp1".to_string(),
+                "ASHP Heater".to_string(),
+                noisy_setpoint_heater_config(),
+            )
+            .expect("typed config");
+            let mut eq = registry.create("ASHP Heater", cfg.clone()).expect("create");
+            eq.init(&cfg, &step_env_at(0)).expect("init");
+            for step in 0..warmup_steps {
+                drive_step(eq.as_mut(), step);
+            }
+            eq.reset_stochastic_state();
+            let mut bits = Vec::new();
+            for production in 0..96 {
+                let step = warmup_steps + production;
+                drive_step(eq.as_mut(), step);
+                let telemetry = eq.telemetry();
+                for key in [
+                    tk::SCHEDULE_HEATING_SETPOINT_C,
+                    tk::HEATING_SETPOINT_C,
+                    tk::ELECTRIC_KW,
+                    tk::THERMAL_OUTPUT_W,
+                    tk::OPERATING_MODE,
+                ] {
+                    bits.push(
+                        telemetry
+                            .get(key)
+                            .expect("the channel is declared")
+                            .to_bits(),
+                    );
+                }
+            }
+            bits
+        };
+
+        assert_eq!(
+            run(96),
+            run(192),
+            "day 1 must be bit-identical across warm-up lengths: a difference is \
+             the warm-up's stochastic state leaking into production",
         );
     }
 }

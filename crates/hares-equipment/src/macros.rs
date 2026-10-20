@@ -62,6 +62,10 @@ macro_rules! delegate_equipment {
                 self.$inner.load_state(state)
             }
 
+            fn reset_stochastic_state(&mut self) {
+                self.$inner.reset_stochastic_state()
+            }
+
             fn apply_signal(&mut self, signal: &hares_types::ControlSignal) -> $crate::Result<()> {
                 self.$inner.apply_signal(signal)
             }
