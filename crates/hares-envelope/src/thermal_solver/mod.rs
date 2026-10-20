@@ -4969,6 +4969,137 @@ mod tests {
         );
     }
 
+    /// A window whose SHGC is below its transmittance is a construction
+    /// error naming the surface, not a per-step panic: SHGC decomposes into
+    /// the transmitted share plus an absorbed share, so the pair is
+    /// self-contradictory and the per-step assert that used to police it
+    /// panicked on a physics path mid-run.
+    #[test]
+    fn window_shgc_below_transmittance_is_a_construction_error() {
+        let zone_temp = 18.0_f64;
+        let r = 2.0_f64;
+        let c = 50_000.0_f64;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 3, &[1.0 / (r * c), 1.0 / c, 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let window_surface_id: u32 = 55;
+        // SHGC 0.3 cannot decompose into transmittance 0.4 plus an absorbed share.
+        let win_props = WindowSolarProperties {
+            shgc: 0.3,
+            winter_shgc: 0.3,
+            u_factor_w_m2_k: 1.8,
+            area_m2: 2.0,
+            transmittance: 0.4,
+            winter_transmittance: 0.4,
+            radiation_frac: 0.2,
+            glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, 0.3),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+        };
+        let env = EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
+            zones: vec![ZoneState {
+                id: ZoneId(1),
+                temperature_c: zone_temp,
+                humidity_ratio: 0.008,
+                volume_m3: 200.0,
+            }],
+            weather: WeatherState {
+                outdoor_temp_c: 5.0,
+                outdoor_humidity_ratio: 0.004,
+                wind_speed_m_s: 0.0,
+                wind_dir_deg: 0.0,
+                ground_temp_c: 5.0,
+                sky_temp_c: 0.0,
+                pressure_kpa: 101.325,
+                solar_irradiance: vec![],
+                outdoor_wet_bulb_c: 0.0,
+                outdoor_enthalpy_j_kg: 0.0,
+                ghi_w_m2: 0.0,
+                dni_w_m2: 0.0,
+                dhi_w_m2: 0.0,
+                solar_altitude_deg: 0.0,
+                solar_azimuth_deg: 180.0,
+                mains_temp_c: 15.0,
+                rainfall_m: 0.0,
+                ground_albedo: 0.2,
+                ground_t_mean_c: 10.0,
+                ground_t_amplitude_c: 0.0,
+                ground_phase_day: 35.0,
+                day_of_year: 1.0,
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
+            domains: hares_types::DomainSlots::default(),
+            equipment_telemetry: std::collections::HashMap::new(),
+            current_time: FixedOffset::east_opt(0)
+                .unwrap()
+                .with_ymd_and_hms(2026, 6, 21, 12, 0, 0)
+                .single()
+                .unwrap(),
+            time_res: chrono::Duration::seconds(60),
+            price_signal: Default::default(),
+            electrical: Default::default(),
+            equipment_core: Default::default(),
+        };
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::from([(window_surface_id, 2usize)]),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let cfg = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::from([(window_surface_id, win_props)]),
+            window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            ideal_capacity_degraded_threshold: 3,
+        };
+
+        let err = ThermalSolver::new(model, wiring, cfg, 60.0, &env, zone_temp)
+            .expect_err("a window whose SHGC is below its transmittance must fail at construction");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("55"),
+            "the error must name the surface id: {msg}"
+        );
+        assert!(
+            msg.contains("SHGC") && msg.contains("transmittance"),
+            "the error must name the contradicted pair: {msg}"
+        );
+    }
+
     /// The reported "Window Transmitted Solar Gain" quantity is the
     /// through-glass flux only, excluding the inward-flowing share of the
     /// glass-absorbed solar: `through_glass = A·τ·POA` and

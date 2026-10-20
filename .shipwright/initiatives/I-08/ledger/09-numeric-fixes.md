@@ -5538,3 +5538,113 @@ errors; the goldens compare-all 10 + dst 1 bitwise identical.
 **Commit:** `perf: the ashp debug read leaves the per-step path`
 
 **Dependencies:** none outside the equipment crate.
+
+## Hardening 13: envelope index ceilings and capacitance floors fail or count loudly
+
+**Kind:** numeric fix (the hardening phase's envelope entry: the
+index-collision guards, the clamp counting, the panicking assert's
+construction-time replacement and the initialization fallback's
+warning, from review 2's envelope findings).
+
+**Problem:** five silent-corruption sites in the envelope. (a) Zone air
+nodes are numbered 1..=n_zones and material-layer nodes start at
+`LAYER_NODE_BASE` (1000), and nothing kept the two ranges disjoint: at
+1000 zones the last zone's air node collides with the first layer node
+and `alloc_node` silently overwrites the zone's declared capacitance
+(the probe's 100 999 J/K zone entry became the wall node's 2 000 000
+J/K) while the zone's state row aliases the layer chain; some wirings
+trip the loud self-loop-edge guard, exterior-edge wirings corrupt
+silently, and the assembled-capacitance insurance added with
+Hardening 10 cannot catch it (the overwriting entry is positive). (b)
+The per-depth ground nodes are `GROUND_NODE_BASE + index`, a table of
+99 entries below `OUTDOOR_NODE_ID` (u32::MAX - 1), and the depth-table
+build indexed without a bound: at 100 unique foundation depths the
+100th node wraps onto the outdoor driving node itself and the assembly
+resolves the run's outdoor column against a ground boundary's column,
+driving a ground boundary with outdoor temperature (the probe assembled
+Ok with the outdoor column resolved on a model with no outdoor
+boundary). (c) The `MIN_CAPACITANCE_J_K` floor clamped silently at the
+assembler's three application sites (the declared zone caps, the
+material-layer path's halved caps, the precomputed path's scaled caps);
+the shipped construction tables carry zero-areal-capacitance fictitious
+layers (the Foundation Wall, Floor, Foundation Floor and Garage Floor
+fictitious-R rows), so the lift engages in production runs and inflates
+a thin or small-area layer's thermal mass invisibly. (d) The per-step
+solar path's `assert!(shgc >= transmittance - 1e-6)` panicked on
+invalid configuration: an SHGC below the transmittance is
+self-contradictory (the SHGC decomposes into the transmitted share plus
+a glass-absorbed share), so the rejection belongs at construction, not
+a panic mid-run. (e) `initialize_steady_state`'s no-pin steady-state
+solve failure fell back to a uniform indoor-temperature initial state
+silently - a legitimate fallback that would hide a broken model.
+
+**Change:** (a) and (b) are construction ceilings in
+`assemble_building_rc`: a zone count that reaches the layer-node base
+and a depth table wider than the ground-node table's 99 entries each
+fail construction with the function's error naming the count, the
+colliding node and the corruption each prevents; the 99-entry capacity
+is a named constant (`MAX_UNIQUE_GROUND_DEPTHS`) on the depth table's
+own documentation. (c) The floor's three application sites count their
+lifts into `EnvelopeDiagnostics::min_capacitance_clamp_count`, shaped
+like `default_r_fallback_count` (behind the `observe` feature), the
+zone count drained together with the graph's layer and precomputed
+counts before the network is consumed; the clamp itself is unchanged
+intended behavior, the count makes it visible. The derive-path floor in
+`derive_zone_capacitances` stays uncounted (it returns a plain vector
+before any diagnostics exist, and its floored output is what the
+assembler's zone loop would see). (d) The assert is deleted and the
+check moves to construction: `WindowSolarProperties::validate` rejects
+an inverted or non-finite pair for either season naming the surface and
+the season, wired through `ThermalSolverConfig::validate` into
+`ThermalSolver::new`'s typed `ThermalSolverError::Configuration` (the
+crate's config-error path); the per-step arithmetic keeps its `.max`
+clamp. (e) The fallback emits a `tracing::warn!` naming the site
+(`initialize_steady_state`), the state count and the uniform
+temperature - the site runs once per solver construction, so the
+warning is one-time per model.
+
+**Acceptance tests:** the two ceiling errors (1000 zones, 100 unique
+depths) and the two just-below cases assembling cleanly (999 zones with
+the declared capacitance intact, 99 depths with the outdoor column
+unresolved on an outdoor-free model) in `boundary_rc.rs` tests; the
+three clamp counts (a sub-floor material layer, a sub-floor precomputed
+layer, a sub-floor declared zone capacitance handed straight to the
+assembler) asserting the counter and the clamped value;
+`window_solar_properties_reject_shgc_below_transmittance` (both
+seasons, the equality case, the non-finite case);
+`window_shgc_below_transmittance_is_a_construction_error` (the full
+solver construction names the surface and the pair);
+`steady_state_fallback_warns` (the warning observed through a counting
+subscriber).
+
+**RED first (the witnesses, executed at the parent 7576ec89):** at 1000
+zones the assembly returned Ok with zone 999's declared 100 999 J/K
+entry overwritten by the wall node; at 100 unique depths the assembly
+returned Ok with the outdoor column resolved on an outdoor-free model;
+the sub-floor material and declared zone capacitances assembled with
+the lift applied and nothing counting it; the inverted SHGC pair passed
+`ThermalSolver::new` and panicked in the per-step solar path
+(`prepare_inputs`); the fallback branch emitted nothing (no warn in the
+base source). GREEN after the change on the same inputs.
+
+**Movement:** none - the guards must be and are unreachable for every
+shipped fixture: the goldens compare-all 10 + dst 1 bitwise identical,
+no re-capture. `EnvelopeDiagnostics` is `observe`-gated and not
+serialized into the golden frames, so the new counter moves no recorded
+number; the fixture sweep (every capacitance row under the fixtures and
+the shipped defaults, 3040 rows) found the sub-floor capacitances
+where the count is expected to engage - the fictitious zero-mass
+insulation layers - and no boundary small enough to dip a nonzero
+layer's node below the floor.
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+-j 2` 8294/8294 passed (8 skipped), the touched crates also green on
+default features 2351/2351 (5 skipped); `pytest -m '' -n 4` after
+`maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright
+0 errors; the goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `fix: envelope index ceilings and capacitance floors fail or count loudly`
+
+**Dependencies:** the envelope crate, plus the observe-gated
+`EnvelopeDiagnostics` literal updates in the core crate's tests.

@@ -262,6 +262,36 @@ impl NaturalVentilationConfig {
     }
 }
 
+impl WindowSolarProperties {
+    /// A window's SHGC must be at least its transmittance: SHGC decomposes
+    /// into the transmitted share plus a glass-absorbed share, so an
+    /// inverted (or non-finite) pair is self-contradictory configuration.
+    /// The check is construction-time and covers both seasons' pairs (the
+    /// per-step path reads only the active season's), naming the surface.
+    pub fn validate(&self, surface_id: u32) -> std::result::Result<(), String> {
+        for (season, shgc, transmittance) in [
+            ("summer", self.shgc, self.transmittance),
+            ("winter", self.winter_shgc, self.winter_transmittance),
+        ] {
+            // `partial_cmp` keeps the non-finite cases in the rejection path:
+            // a NaN on either side never satisfies the comparison, matching
+            // the assertion this construction check replaces.
+            let holds = shgc
+                .partial_cmp(&(transmittance - 1e-6))
+                .is_some_and(|ord| ord != std::cmp::Ordering::Less);
+            if !holds {
+                return Err(format!(
+                    "window {surface_id}: {season} SHGC ({shgc}) is below the {season} \
+                     transmittance ({transmittance}); the solar heat gain coefficient \
+                     decomposes into the transmitted share plus an absorbed share, \
+                     so it must be at least the transmittance"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Solar properties for an individual window surface.
 ///
 /// Used by the thermal solver to apply angle-of-incidence (IAM) corrections to
@@ -792,6 +822,9 @@ impl ThermalSolverConfig {
                 ));
             }
         }
+        for (&surface_id, window) in &self.window_properties {
+            window.validate(surface_id)?;
+        }
         Ok(())
     }
 }
@@ -1182,6 +1215,59 @@ pub struct WindowSolarDiag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window_props(shgc: f64, transmittance: f64) -> WindowSolarProperties {
+        WindowSolarProperties {
+            shgc,
+            winter_shgc: shgc,
+            u_factor_w_m2_k: 1.8,
+            area_m2: 2.0,
+            transmittance,
+            winter_transmittance: transmittance,
+            radiation_frac: 0.2,
+            glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, shgc),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+        }
+    }
+
+    /// A window's SHGC must be at least its transmittance: SHGC decomposes
+    /// into the transmitted share plus an absorbed share, so the inverted
+    /// pair is self-contradictory configuration. The check covers both
+    /// seasons' pairs (the per-step path reads only the active season's).
+    #[test]
+    fn window_solar_properties_reject_shgc_below_transmittance() {
+        assert!(window_props(0.5, 0.4).validate(42).is_ok());
+        // Exactly equal (within the epsilon the per-step check used) passes.
+        assert!(window_props(0.4, 0.4).validate(42).is_ok());
+
+        let bad_summer = window_props(0.3, 0.4);
+        let err = bad_summer
+            .validate(7)
+            .expect_err("an inverted summer pair must fail");
+        assert!(err.to_string().contains("7"), "names the surface: {err}");
+        assert!(
+            err.to_string().contains("summer"),
+            "names the season: {err}"
+        );
+
+        let mut bad_winter = window_props(0.5, 0.4);
+        bad_winter.winter_shgc = 0.3;
+        bad_winter.winter_transmittance = 0.4;
+        let err = bad_winter
+            .validate(7)
+            .expect_err("an inverted winter pair must fail");
+        assert!(
+            err.to_string().contains("winter"),
+            "names the season: {err}"
+        );
+
+        // A non-finite SHGC satisfies no comparison: rejected.
+        let err = window_props(f64::NAN, 0.4)
+            .validate(7)
+            .expect_err("a non-finite SHGC must fail");
+        assert!(err.to_string().contains("7"), "names the surface: {err}");
+    }
 
     #[test]
     fn the_enum_default_is_the_production_pin() {
