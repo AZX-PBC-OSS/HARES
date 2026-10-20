@@ -5543,8 +5543,8 @@ errors; the goldens compare-all 10 + dst 1 bitwise identical.
 
 **Kind:** numeric fix (the hardening phase's envelope entry: the
 index-collision guards, the clamp counting, the panicking assert's
-construction-time replacement and the initialization fallback's
-warning, from review 2's envelope findings).
+construction-time replacement and the initialization fallbacks'
+warnings, from review 2's envelope findings).
 
 **Problem:** five silent-corruption sites in the envelope. (a) Zone air
 nodes are numbered 1..=n_zones and material-layer nodes start at
@@ -5574,9 +5574,17 @@ solar path's `assert!(shgc >= transmittance - 1e-6)` panicked on
 invalid configuration: an SHGC below the transmittance is
 self-contradictory (the SHGC decomposes into the transmitted share plus
 a glass-absorbed share), so the rejection belongs at construction, not
-a panic mid-run. (e) `initialize_steady_state`'s no-pin steady-state
-solve failure fell back to a uniform indoor-temperature initial state
-silently - a legitimate fallback that would hide a broken model.
+a panic mid-run. (e) `initialize_steady_state`'s uniform-temperature
+fallback was silent in all three arms: the no-pin steady-state solve
+failure and the two pinned paths' singular-inverse fallbacks (the
+continuous reduced -A_c solve and the discrete reduced I - A_d solve,
+where `try_inverse` returns None) each fell back to a uniform
+indoor-temperature initial state without a word - a legitimate
+fallback that would hide a broken model. The production constructor
+`ThermalSolver::new` is the sole non-test caller and always pins the
+indoor zone, so the pinned arms are the sites a real run reaches; the
+file's own comment records that OCHRE raises on the singular solve
+rather than silently substituting uniform temperatures.
 
 **Change:** (a) and (b) are construction ceilings in
 `assemble_building_rc`: a zone count that reaches the layer-node base
@@ -5598,10 +5606,12 @@ an inverted or non-finite pair for either season naming the surface and
 the season, wired through `ThermalSolverConfig::validate` into
 `ThermalSolver::new`'s typed `ThermalSolverError::Configuration` (the
 crate's config-error path); the per-step arithmetic keeps its `.max`
-clamp. (e) The fallback emits a `tracing::warn!` naming the site
-(`initialize_steady_state`), the state count and the uniform
-temperature - the site runs once per solver construction, so the
-warning is one-time per model.
+clamp. (e) All three uniform-fallback arms emit a `tracing::warn!`
+naming the branch (continuous or discrete for the pinned arms), the
+site (`initialize_steady_state`), the state count and the uniform
+substitution. The warning is not an error: raising on the singular
+pinned solve, as OCHRE does, would be a behavior change with golden
+risk and is a separate decision, not taken here.
 
 **Acceptance tests:** the two ceiling errors (1000 zones, 100 unique
 depths) and the two just-below cases assembling cleanly (999 zones with
@@ -5615,7 +5625,11 @@ seasons, the equality case, the non-finite case);
 `window_shgc_below_transmittance_is_a_construction_error` (the full
 solver construction names the surface and the pair);
 `steady_state_fallback_warns` (the warning observed through a counting
-subscriber).
+subscriber); the two pinned arms' warns
+(`pinned_discrete_singular_solve_warns`,
+`pinned_continuous_singular_solve_warns`: the singular reduced matrix
+under the production pin returns the uniform [21, 21] initial state
+and exactly one warn naming the branch and the site).
 
 **RED first (the witnesses, executed at the parent 7576ec89):** at 1000
 zones the assembly returned Ok with zone 999's declared 100 999 J/K
@@ -5625,7 +5639,11 @@ the sub-floor material and declared zone capacitances assembled with
 the lift applied and nothing counting it; the inverted SHGC pair passed
 `ThermalSolver::new` and panicked in the per-step solar path
 (`prepare_inputs`); the fallback branch emitted nothing (no warn in the
-base source). GREEN after the change on the same inputs.
+base source); the two pinned `try_inverse`-None arms were also silent
+(the review's probe `rev_pinned_path_singular_solve_is_silent`: a
+singular reduced matrix under the production pin returned the uniform
+[21, 21] state with a warn count of 0). GREEN after the change on the
+same inputs.
 
 **Movement:** none - the guards must be and are unreachable for every
 shipped fixture: the goldens compare-all 10 + dst 1 bitwise identical,
