@@ -1832,10 +1832,6 @@ impl CoolingCore {
         // OCHRE HVAC.py:445-448 -- clip to rated_max * ext_capacity_frac.
         let capacity_ceiling = steady_capacity_w * self.hvac.control.max_capacity_fraction;
         let total_capacity_w = (staged_capacity_w * plr).max(0.0).min(capacity_ceiling);
-        eprintln!(
-            "DBG perf: steady={steady_capacity_w} staged={staged_capacity_w} plr={plr} ceiling={capacity_ceiling} frac={}",
-            self.hvac.control.max_capacity_fraction
-        );
 
         let flow_m3_s = flow_m3_s_for_fan;
 
