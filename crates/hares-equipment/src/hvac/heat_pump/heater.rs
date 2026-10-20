@@ -1,6 +1,7 @@
 //! Heat-pump heater variants (ASHP and MSHP).
 
 use std::borrow::Cow;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
@@ -69,6 +70,17 @@ fn fuel_type_from_backup_fuel(fuel: Option<FuelType>) -> Option<FuelType> {
         ) => fuel,
         _ => None,
     }
+}
+
+/// Whether the ASHP control trace is enabled: the debug environment
+/// variable is read once per process and cached, so the per-step control
+/// resolution pays one atomic load instead of an environ lock per read.
+/// Set `HARES_DEBUG_ASHP_CONTROL` in the environment before the run to
+/// enable the trace; the read is settled by the first heat-pump step and
+/// later environment changes have no effect.
+fn ashp_control_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("HARES_DEBUG_ASHP_CONTROL").is_ok())
 }
 
 #[derive(Clone, Copy)]
@@ -2539,9 +2551,7 @@ impl HeatPumpHeaterCore {
             && er_allowed_by_lockout
             && er_demand;
 
-        if std::env::var("HARES_DEBUG_ASHP_CONTROL").is_ok()
-            && matches!(self.variant, HeaterVariant::Ashp)
-        {
+        if ashp_control_trace_enabled() && matches!(self.variant, HeaterVariant::Ashp) {
             eprintln!(
                 "[ASHP-CTL] t={} mode={:?} z={:.4} sp={:.4} deadband={:.4} hp_lockout={:.4} er_offset={:.4} er_turn_on={:.4} er_turn_off={:.4} hp_avail={} er_temp_ok={} er_cycle_ok={} er_lockout_ok={} er_call={} hp_on={} er_on={} speed_mode={:?} speed_idx={} duty={:.4}",
                 env.current_time,

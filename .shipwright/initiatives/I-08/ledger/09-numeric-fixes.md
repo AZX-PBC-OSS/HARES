@@ -5473,3 +5473,46 @@ errors; the goldens compare-all 10 + dst 1 bitwise identical.
 **Commit:** `fix: a resolution that cannot divide the day fails at construction`
 
 **Dependencies:** none outside the core crate.
+
+## Hardening 12: the ASHP debug read leaves the per-step path
+
+**Kind:** performance fix (the hardening phase's equipment hot-path
+entry: the per-step environ read in the heat-pump heater's control
+resolution).
+
+**Problem:** the ASHP control trace's gate read
+`std::env::var("HARES_DEBUG_ASHP_CONTROL")` inside
+`HeatPumpHeaterCore::resolve_control` (`crates/hares-equipment/src/hvac/
+heat_pump/heater.rs`) - every step for every heat-pump heater instance
+(the environ check preceded the ASHP-variant check, so the MSHP, GSHP
+and WSHP variants paid it too): an environ lock acquisition and a String
+allocation per read, release builds included, for a debug aid that is
+unset in every real run.
+
+**Change:** `ashp_control_trace_enabled()` reads the variable once per
+process into a `OnceLock<bool>` and the per-step gate reads the cache -
+one atomic load per step. The trace itself is unchanged: set the
+variable before the run and the same control dump prints; the read is
+settled by the first heat-pump step and later environment changes have
+no effect (documented on the helper). No test or fixture reads or
+toggles the variable, so no test-visible reset was needed.
+
+**RED first (the witness):** the per-call cost measured in release at
+the parent: 1 000 000 environ reads 29.4 ms (29 ns/read) against
+1 000 000 once-lock reads 0.2 ms (0.2 ns/read), about 145x, with the
+read firing per step per heater in `resolve_control`. The change is
+behavior-preserving (the variable unset in every test and fixture), so
+the gate is the unchanged suite.
+
+**Movement:** none (the trace's gate only; the dump never fires in a
+test or fixture).
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+--build-jobs 2` 8282/8282 passed (8 skipped); `pytest -m '' -n 4` after
+`maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0
+errors; the goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `perf: the ashp debug read leaves the per-step path`
+
+**Dependencies:** none outside the equipment crate.
