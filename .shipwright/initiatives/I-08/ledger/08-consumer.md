@@ -2536,3 +2536,74 @@ design), the census prints nothing, and `writing` passes on the commit.
 **Dependencies:** CN-4, CN-12; `02-measurement.md` M-4b; the operator's
 last push of `feat/output-results` (`plan.md` §3 closing sequence), so the
 pin names the final pushed engine commit.
+
+## the re-sync: the pin follows the integration branch's merge-back
+
+**Kind:** the operator's re-sync record; row 112 in `00-schedule.md`.
+
+**Problem:** row 101's pin names the working branch's pushed head
+(`cb7f7ba11`), and the engine's integration branch then merged the same
+work as a squash commit: pull request 35 into `initial-implementation`,
+tip `ea46b1f26`, whose tree is the working branch's tip's tree. The
+consumer's pin must name the commit the public integration branch
+carries, and the full gate block must re-prove on the squash commit that
+no number moved.
+
+**Evidence:** the consumer main at `39a6a1ec` (clean, up to date with
+origin before the branch); `git -C HARES fetch origin` advances
+`initial-implementation` to `ea46b1f26` and `feat/output-results` to
+`0cb64bd01` (the merge-back commit that rejoins the squash into the
+working branch's history); `git diff cb7f7ba1..ea46b1f2 -- crates/` is
+the forwarding fix in `macros.rs` (`delegate_equipment!` forwards
+`reset_stochastic_state` to the inner core instead of keeping the
+trait's no-op default), a doc comment on `compute_schedule_idx`, and
+tests (the forwarding probes in `heater.rs`, the snapshot round trip in
+`occupant.rs`, the DST cyclic-addressing probes in `environment.rs`).
+
+**Change:** branch `row/r112-resync` from the pushed main; the gitlink
+`cb7f7ba11` -> `ea46b1f26` committed signed as `c1011938` (the message
+names the integration branch's squash); the engine rebuilt into the
+consumer venv. The freshness check earned its place in this entry: the
+first rebuild left `build_info()` reporting `cb7f7ba11`, because the
+maturin install from the binding crate landed in the submodule's own
+environment and the consumer's editable `hares-py` came back from the
+cache unchanged. `uv sync --locked --all-extras --all-groups
+--reinstall-package hares-py` rebuilt the extension from the pinned
+submodule, and the binding's `build_info()` then reports commit
+`ea46b1f26`, dirty False, profile release; the documented
+`maturin develop --release` against the consumer environment re-run on
+top reports the same. Gates on that build: the suite 383 passed,
+0 failed, 7 skipped, 390 total (the recorded seven), ruff clean,
+`hares_contract_check.py` `[hares-contract] PASS` (the same two
+informational NEW items), the DE-trace capture 181.7 s wall and
+`compare` exit 0 identical against `B1-de-trace.json` (sha
+`5439d2fa834c0d915`, the record's; the header alone differs, the
+per-premise payload bitwise), `check_losses.py` all 13 IDENTICAL, exit 0
+(9:14.68 wall), `build_bundle.py`'s registry no MISSING file and none
+untracked, its own suite 383/0/7 and the contract PASS, NOT GREEN on the
+base skips (the recorded exit). The report regenerated for the commit
+(`run_all --report`): the diff is the engine build's sha
+(`8298bbf2bab65a9e` -> `2b66282e9b9d7bd8`) and the DER fleet's recorded
+`pv_err` display 0.115 -> 0.13. The fleet value investigated before
+acceptance: that synthetic fleet's occupancy seed is
+`hash(scen) % 97`, the interpreter's salted string hash, so the metric
+is not bitwise across runs by construction; the report's own committed
+history for the value runs 0.115 to 0.145 across builds, the case's gate
+is 0.20, and the engine is not in the fleet's path at all. No number
+moved: the DE-trace identical and the 13 losses identical across the pin
+advance, the movement the forwarding fix could not reach on the shipped
+fixtures (their setpoint sources are `DailyProfile`/`ColumnRef`, no
+draws to rewind). Committed signed as `8aab0e6f` (the regenerated
+report; the message names the engine commit in full).
+
+**Acceptance test:** as row 101's, on the new pin: the gate block green,
+`compare` against B1 exit 0, the losses identical, `build_info()` naming
+`ea46b1f26` before any number is read, the census prints nothing, and
+the writing check passes on both commits.
+
+**Commit:** `chore: pin the engine to the integration branch's squash of
+the closing landing` + `chore: pin the engine to
+ea46b1f2608d252d79916994b083f1263bf735b2`
+
+**Dependencies:** row 101; the engine integration branch's pull request
+35 merge.
