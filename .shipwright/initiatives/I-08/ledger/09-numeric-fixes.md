@@ -6629,7 +6629,7 @@ pinned in the record.
 
 **The review's finding:** the exterior skin's fixed-point iteration
 (exterior longwave, the iterative path where rad_frac > 0) exits either
-on its 0.01 K step tolerance or on its iteration budget — and the budget
+on its 0.01 K step tolerance or on its iteration budget - and the budget
 exit was accepted with no counter, no residual and no signal. At the
 60 s production timestep the budget is one damped iteration
 (`n_iter = floor(dt/300) + 1`), so mid-transient (sunrise, cloud
@@ -6640,10 +6640,10 @@ silently; the fixed-point invariant guarded only the converged exits.
 self-report, both fields observe-gated like the natural-ventilation
 diagnostics they sit beside:
 
-- `skin_iteration_cap_exits: u64` — the count of iterative-path surfaces
+- `skin_iteration_cap_exits: u64` - the count of iterative-path surfaces
   whose iteration ran out its budget without the tolerance break, reset
   per step like the other per-step gain accumulators;
-- `max_skin_residual_k: f64` — the greatest |t_skin − F| against the
+- `max_skin_residual_k: f64` - the greatest |t_skin − F| against the
   surface's own fixed point F = t_init + (solar + lwr)·rad_res over the
   iterative-path surfaces, converged or not (the converged bound is
   0.5 K, the fixed-point invariant's own tolerance, so any residual
@@ -6662,7 +6662,7 @@ builds a one-surface iterative-path solver with the 60 s production
 budget (one damped iteration, the budget the review's mechanism names)
 and swings the sky temperature 55 °C warmer against the same air: the
 single damped iteration cannot cross the displaced fixed point, the
-loop exits on the cap. At the parent the probe could not be expressed —
+loop exits on the cap. At the parent the probe could not be expressed  - 
 the fields do not exist, the compile failure the witness of the silence
 (the exit had no surface to report through); GREEN after the fields
 landed, the count 1 and the residual 71.4 K on the probe's constants
@@ -6672,7 +6672,7 @@ solve of the same surface counts no cap exit and reports a residual
 inside the 0.5 K converged bound, and the warn latch test holds the
 once-only semantics (set on the first lagging step, never reset).
 
-**Movement:** none — the counting reads the pre-existing residual
+**Movement:** none - the counting reads the pre-existing residual
 quantity the converged branch already computed, no clamp or iteration
 behavior moves, and the fields are compiled out without the observe
 feature the golden build does not enable. The goldens compare-all 10 +
@@ -6780,7 +6780,7 @@ beside the 60 s hard), the same behavior under the now-explicit
 configuration, their intent unchanged.
 
 **Fixture sweep:** no shipped golden or parity fixture exercises any of
-the four surfaces — no fixture configures an ER hard lockout (the
+the four surfaces - no fixture configures an ER hard lockout (the
 default 0 s leaves the soft stage unreachable), supplies a per-stage
 EIR table (the expansion paths supply their own), records the COP
 telemetry column (verbosity 7; the golden frames record verbosity 2,
@@ -6803,7 +6803,7 @@ numerator, the stage validation),
 
 **Kind:** hardening (two vote-pricing corrections and the actor health
 gate; the discharge-ceiling item of this plan entry closed earlier by
-the Hardening 20 row — see the overlap note below).
+the Hardening 20 row - see the overlap note below).
 
 **Overlap verdict (checked first):** this entry's plan text carried a
 third item, "the driver's decision context carries a real discharge
@@ -6820,7 +6820,7 @@ here.
 the import retail rate, while the run publishes a separate export rate
 (the tariff evaluator publishes `export_price` under every export
 mode: net metering's retail credit, the flat rate, the hourly schedule,
-the NetBilling TOU credits) — under net billing the V2G dispatch is
+the NetBilling TOU credits) - under net billing the V2G dispatch is
 systematically mistimed and overvalued. And a missing price signal was
 substituted with $0/kWh: the V2G vote never fired (silently inert) and
 the price optimizer's charge leg fired every step (electricity
@@ -6849,7 +6849,7 @@ silently free).
 - The dwelling's own assembly needs no new guard: its factory already
   falls a tariff-dependent strategy (TouAware, V2G) back to Immediate
   when no tariff is attached, and a tariff evaluator publishes both
-  channels every step — the gate is the direct-construction path's
+  channels every step - the gate is the direct-construction path's
   fail-fast.
 
 **Acceptance tests (RED first, each run at the parent against the old
@@ -6857,14 +6857,14 @@ behavior):**
 
 - `v2g_responds_to_export_price_under_net_billing` (the plan's
   acceptance test): the import price 0.10 below the 0.20 threshold, the
-  export credit 0.30 above it — at the parent the vote idled (it read
+  export credit 0.30 above it - at the parent the vote idled (it read
   the import rate); GREEN after: it exports. The converse
   (`v2g_ignores_the_import_rate_for_the_export_decision`: import 0.50,
   export 0.10) ran at the parent and exported on the import rate's
   level; GREEN after it idles. The threshold's strictness and the
   no-export-price stand-down label are pinned beside them.
 - `discharge_votes_price_against_the_export_rate`: the import price at
-  the discharge threshold with the export credit far below it — at the
+  the discharge threshold with the export credit far below it - at the
   parent the vote discharged (the import rate priced the export);
   GREEN after it stays neutral.
 - `missing_export_price_marks_the_v2g_actor_unhealthy` and
@@ -6882,7 +6882,7 @@ behavior):**
 V2G, TouAware and the floor/discharge witnesses) published only the
 import price; they now publish both channels at the same value, the
 votes pricing the export decision against the export rate at the same
-number the old code read from the import side — every test's intent
+number the old code read from the import side - every test's intent
 unchanged, the channel the vote reads now the one it prices. The
 soc-floor and no-discharge witnesses keep their assertions under the
 mirrored channels (the floor is what blocks, not a missing price).
