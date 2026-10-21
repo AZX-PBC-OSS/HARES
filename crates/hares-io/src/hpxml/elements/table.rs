@@ -1006,7 +1006,9 @@ pub static EVENT_PROBABILITY_CONSTANT: HpxmlElement = HpxmlElement {
     name: "event_probability_constant",
     context: "the synthetic extension element's constant event probability",
     unit: None,
-    description: "the <event_probability_constant> element the parser reads under its parent",
+    description: "the <event_probability_constant> element the parser reads under its parent; \
+                  the value is the probability of starting within one hour of open window, the \
+                  per-step chance derived from it and the step length",
 };
 
 /// the <event_probability_schedule_col> element the parser reads under its parent

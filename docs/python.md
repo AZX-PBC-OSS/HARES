@@ -557,6 +557,11 @@ replacement.
 - Added: `Alignment` (with `instant`, `local_clock`) and the
   `alignment=` keyword on `Fleet.from_buildings` and
   `Fleet.from_resstock`: the fleet's declared time alignment.
+- Added: the `master_seed=None` keyword on `Fleet.from_resstock`: the
+  fleet's master random seed, every home's stochastic streams deriving
+  from it and the home's own building id; `None` keeps the documented
+  default seed of 0, and the build report names the seed the fleet runs
+  under.
 - Added: `ObservationPlan`, `Dwelling.observation_plan(fields)` and
   `Dwelling.observe_into(plan, out)`: the frozen per-step observation
   layout the RL environments read through. The plan is built once per

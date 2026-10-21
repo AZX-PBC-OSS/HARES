@@ -5911,3 +5911,94 @@ goldens compare-all 10 + dst 1 bitwise identical.
 
 **Dependencies:** none outside the core crate's driver and the new
 integration test.
+
+## Hardening 16: fleets seed from the caller and dr compliance is per event
+
+**Kind:** numeric fix (the hardening phase's fleet seed and stochastic
+contract entry; three defects, one commit as the plan's Task 2.9
+packages them: the fleet seed, the DR compliance draw, the event-start
+probability's basis).
+
+**Problem:** three stochastic contracts were broken at their surfaces.
+The ResStock fleet constructor hardcoded every home's master seed to
+zero (`resstock_sim_config` built every `SimulationConfig` with
+`master_seed: 0`) and its signature exposed no seed, so an ensemble or
+uncertainty study could not vary a fleet's stochastic behavior through
+the fleet entry point at all: the per-home streams derive from
+`(master_seed, bldg_id)` via `dwelling_seed`, but the first input was
+out of the caller's reach. The DR compliance actor's probabilistic
+model drew per step (`should_comply` hashed the step's timestamp): a
+0.8-rate home dispatched on about 80 percent of an event's STEPS
+instead of complying with 80 percent of EVENTS - intermittent coverage
+within a complied event, and the effective full-event compliance rate
+the rate names multiplied by the event's step count. The event-load
+start probability was applied per step as-is (`StartDraws::starts`
+thresholded each idle step at the configured value): the probability's
+basis was whatever step length the run happened to use, so the same
+config at a 900 s step started about four times as often per hour as
+at a 3600 s step, and the documented rate in the loads doc was
+resolution-dependent.
+
+**Change:** three closures, one per defect.
+
+The fleet seed: `Fleet::from_resstock` takes `master_seed: Option<u64>`
+(a `None` keeping the documented default of 0, a `Some` the caller's
+seed), threads the resolved value into every home's sim config through
+`resstock_sim_config`, and the build report names the seed the fleet
+runs under (`FleetBuildReport.master_seed`, the resolved value either
+way). The Python binding takes the same keyword (`master_seed=None` on
+`Fleet.from_resstock`, after `defaults_path`, the stub declaring it);
+the frame-golden adapter passes `None`, the captures it compares were
+taken with the documented default.
+
+The DR compliance draw: the actor latches the compliance decision once
+at the event's entry (the first step it sees the level above Normal)
+and holds it for the event's duration; a level change within an event
+does not re-roll, the next event's entry re-draws, and the Normal
+branch clears the latch. The latched decision is part of the
+checkpoint: the snapshot's schema version moves to 5 carrying it, and a
+restore mid-event keeps the event's entry decision instead of
+re-drawing it. The rate's meaning is now the share of events the home
+complies with, as the severity-scaled effective rate always claimed.
+
+The event-start probability's basis: declared per hour, normalized per
+step. The configured probability (a constant or a schedule column
+value) is the probability of starting within one hour of open window;
+the per-step chance is `1 - (1 - p)^(dt / 3600 s)` (the physics
+constants' `SECONDS_PER_HOUR`), so the same config starts at the same
+hourly rate at any resolution. The zero and one endpoints are exact at
+every resolution (never start, always start), every shipped default and
+fixture probability is an endpoint, and one draw is consumed per
+idle-open step whatever the resolution, so the checkpoint draw
+positions are unchanged in structure. The basis is stated where the
+probability is configured and read: the equipment's doc, the loads
+doc's event-triggering section, and the `<event_probability_constant>`
+element's published description.
+
+**Acceptance test:** RED first at the parent on all three shapes. The
+fleet seed: two stochastic ResStock fleets (the fixture building plus
+an injected Microwave whose event load draws every idle step) built
+with different caller seeds drew different aggregate power series, and
+the same seed rebuilt bitwise-identical series; before the parameter
+existed the new-API tests did not compile (the witness of the
+unreachable parameter), and the build report's seed field completed the
+contract. The DR draw: with the rate-0.5 seed-7 model, an event entered
+at 2026-01-01 01:00 dispatched at hours 2 and 5 and declined at hours
+1, 3 and 4 (a random walk within one event), where the contract holds
+the entry decision across the event and re-draws the next event's
+entry; and a save after a complying entry restored into a fresh body
+re-drew the decision. The event rate: the same config at 900 s and
+3600 s steps started 375 against 109 times in 2000 hours, where the
+normalized contract holds the hourly rate across resolutions (the
+normalized run agrees within a few sigma of the binomial spread).
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. No fixture carries a fleet master seed other
+than the documented default, a DR compliance actor, or an event-load
+probability that is not an endpoint; the stochastic contracts close on
+configs nothing shipped exercises.
+
+**Dependencies:** the fleet crate's constructor and build report, the
+Python binding's keyword surface (the stub updated), the core crate's
+DR actor and its checkpoint schema (version 5), the equipment crate's
+event-load draw.

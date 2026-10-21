@@ -118,6 +118,10 @@ pub struct FleetBuildReport {
     /// Built dwellings whose weather file did not resolve (no FIPS, no
     /// file, or an unreadable file).
     pub weather_failed: usize,
+    /// The master random seed every home's stochastic streams derive
+    /// from: the caller's, or the documented default of 0 when the
+    /// caller passed none.
+    pub master_seed: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -350,6 +354,12 @@ impl Fleet {
     /// [`DwellingConfig::defaults`], with the same meaning: the path is
     /// required, and a missing or unreadable defaults tree is a
     /// construction error naming it.
+    ///
+    /// `master_seed` is the fleet's master random seed: `Some(seed)` seeds
+    /// every home's stochastic streams (each home's own streams derive
+    /// from the seed and its building id), `None` keeps the documented
+    /// default seed of 0. The build report names the seed the fleet runs
+    /// under, so a run record is never silent about it.
     // The flat keyword-shaped argument list is the point: it mirrors the
     // Python `Fleet.from_resstock` keyword surface name for name.
     #[allow(clippy::too_many_arguments)]
@@ -362,8 +372,13 @@ impl Fleet {
         filter: Option<HashMap<String, String>>,
         duration: Option<chrono::Duration>,
         defaults_path: &Path,
+        master_seed: Option<u64>,
     ) -> Result<Self> {
         let version = resstock_version.unwrap_or(DEFAULT_RESSTOCK_VERSION);
+        // The caller's seed, or the documented default when unspecified.
+        // Every home's stochastic streams derive from it and the home's
+        // own building id.
+        let resolved_master_seed = master_seed.unwrap_or(0);
         // The release's declared weather-year rule, and the start's year
         // when the release is a typical-year one. Both are decided before
         // any file is read.
@@ -501,7 +516,12 @@ impl Fleet {
                     weather: WeatherInput::Path(weather_path),
                     defaults: DefaultsSource::directory(defaults_path),
                     settings: DwellingSettings::new(
-                        resstock_sim_config(run_duration, start_time, weather_year),
+                        resstock_sim_config(
+                            run_duration,
+                            start_time,
+                            weather_year,
+                            resolved_master_seed,
+                        ),
                         None,
                         building.bldg_id,
                         Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
@@ -532,6 +552,7 @@ impl Fleet {
             dwellings_built: entries.len(),
             weather_resolved: entries.len(),
             weather_failed: 0,
+            master_seed: resolved_master_seed,
         };
         Ok(Self {
             entries,
@@ -2035,13 +2056,15 @@ fn step_dwellings_parallel(
 }
 
 /// The ResStock home's sim config: the constructor's one-minute step and
-/// duration, and the start and weather-year rule the fleet resolved from
+/// duration, the start and weather-year rule the fleet resolved from
 /// the home's weather file and site (`from_resstock`), never a hardcoded
-/// year or offset.
+/// year or offset, and the fleet's master seed (the caller's, or the
+/// documented default of 0).
 fn resstock_sim_config(
     duration: chrono::Duration,
     start_time: DateTime<FixedOffset>,
     weather_year: hares_io::WeatherYear,
+    master_seed: u64,
 ) -> SimulationConfig {
     SimulationConfig {
         start_time,
@@ -2052,7 +2075,7 @@ fn resstock_sim_config(
         metrics: false,
         output_chunk_size: 10_000,
         setpoint_deadband_c: None,
-        master_seed: 0,
+        master_seed,
         civil_timezone: None,
         site_location: hares_io::SiteLocationOverride::default(),
         max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -3677,6 +3700,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect("fleet construction");
 
@@ -3710,6 +3734,7 @@ mod tests {
                         .single()
                         .expect("valid start"),
                     hares_io::WeatherYear::Actual,
+                    0,
                 ),
                 None,
                 1,
@@ -3742,6 +3767,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect("fleet construction");
 
@@ -3782,6 +3808,7 @@ mod tests {
             None,
             None,
             &defaults,
+            None,
         )
         .expect("fleet construction");
         assert_eq!(fleet.entries.len(), 1);
@@ -3813,6 +3840,7 @@ mod tests {
             None,
             Some(Duration::days(365)),
             &repo_defaults_path(),
+            None,
         )
         .expect("fleet construction");
 
@@ -3849,6 +3877,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect("fleet construction");
         assert_eq!(fleet.entries.len(), 1);
@@ -3890,6 +3919,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect("fleet construction");
         assert_eq!(fleet.entries.len(), 1);
@@ -3923,6 +3953,213 @@ mod tests {
         );
     }
 
+    /// A stochastic fleet home's inputs: one building whose Microwave
+    /// draws stochastically every idle step, the fleet's own fixtures for
+    /// the weather the station name resolves to.
+    fn stochastic_fleet() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempdir().expect("tmp");
+        let pq = tmp.path().join("test.parquet");
+        write_resstock_parquet_v2025(&pq, 19_694);
+        write_stochastic_building(tmp.path(), 19_694);
+        (tmp, pq)
+    }
+
+    /// The caller's seed reaches every home's sim config, and the build
+    /// report names the seed the fleet runs under: `None` keeps the
+    /// documented default (0, the value the per-home derivations used
+    /// before the parameter existed), `Some(seed)` is the caller's.
+    #[test]
+    fn from_resstock_seed_reaches_the_configs_and_the_report() {
+        let (tmp, pq) = stochastic_fleet();
+        let weather = resstock_fixtures_root().join("2025.1/weather");
+        let defaults = repo_defaults_path();
+        let build = |seed: Option<u64>| {
+            Fleet::from_resstock(
+                &pq,
+                tmp.path(),
+                &weather,
+                Some(ResStockVersion::V2025_1),
+                None,
+                None,
+                None,
+                &defaults,
+                seed,
+            )
+            .expect("fleet construction")
+        };
+
+        let caller = build(Some(9_2026));
+        assert_eq!(
+            caller
+                .home_configs()
+                .iter()
+                .map(|config| config.settings.sim_config.master_seed)
+                .collect::<Vec<_>>(),
+            vec![9_2026],
+            "the caller's seed is every home's master seed"
+        );
+        assert_eq!(
+            caller
+                .build_report()
+                .expect("a ResStock build records it")
+                .master_seed,
+            9_2026,
+            "the build report names the seed the fleet runs under"
+        );
+
+        let defaulted = build(None);
+        assert_eq!(
+            defaulted
+                .home_configs()
+                .iter()
+                .map(|config| config.settings.sim_config.master_seed)
+                .collect::<Vec<_>>(),
+            vec![0],
+            "None keeps the documented default master seed"
+        );
+        assert_eq!(
+            defaulted
+                .build_report()
+                .expect("a ResStock build records it")
+                .master_seed,
+            0,
+            "the build report names the default seed"
+        );
+    }
+
+    /// Two fleets built with different caller seeds draw different
+    /// stochastic series, and the same seed rebuilds the same series:
+    /// the fleet's stochastic interior answers to the caller. (Before the
+    /// parameter existed every fleet ran the hardcoded default seed, and
+    /// no caller could vary a draw.)
+    #[test]
+    fn from_resstock_seed_partitions_the_stochastic_draws() {
+        let (tmp, pq) = stochastic_fleet();
+        let weather = resstock_fixtures_root().join("2025.1/weather");
+        let defaults = repo_defaults_path();
+        let build = |seed: Option<u64>| {
+            Fleet::from_resstock(
+                &pq,
+                tmp.path(),
+                &weather,
+                Some(ResStockVersion::V2025_1),
+                None,
+                None,
+                None,
+                &defaults,
+                seed,
+            )
+            .expect("fleet construction")
+        };
+        let run = |fleet: &Fleet| {
+            fleet
+                .simulate(
+                    &crate::fold::FleetReport {
+                        selection: hares_io::Selection::Verbosity(2),
+                        frequency: hares_io::Frequency::Minutes(
+                            std::num::NonZeroU32::new(1).expect("1"),
+                        ),
+                        health_policy: hares_io::HealthPolicy::default(),
+                    },
+                    1,
+                    std::num::NonZeroUsize::new(1).expect("1"),
+                )
+                .expect("the fleet runs")
+        };
+        let power = |result: &FleetResult| {
+            let slot = result
+                .aggregate
+                .schema_ref()
+                .fields()
+                .iter()
+                .position(|field| field.name() == "Total Electric Power (kW)")
+                .expect("the power column folds at tier 2");
+            let column = result
+                .aggregate
+                .column(slot)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .expect("a Float64 column");
+            (0..column.len())
+                .map(|row| column.value(row))
+                .collect::<Vec<_>>()
+        };
+
+        let fleet_seven = build(Some(7));
+        let fleet_nine = build(Some(9));
+        let fleet_seven_again = build(Some(7));
+
+        let seven = power(&run(&fleet_seven));
+        let nine = power(&run(&fleet_nine));
+        let seven_repeat = power(&run(&fleet_seven_again));
+
+        assert_eq!(
+            seven.len(),
+            1440,
+            "the default 24 h at the constructor's step"
+        );
+        assert!(
+            seven.iter().any(|value| value != &0.0),
+            "the stochastic home draws power in some step, the series is not vacuous"
+        );
+        assert!(
+            seven
+                .iter()
+                .zip(&seven_repeat)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the same seed rebuilds the same series bitwise"
+        );
+        assert!(
+            seven
+                .iter()
+                .zip(&nine)
+                .any(|(a, b)| a.to_bits() != b.to_bits()),
+            "two different caller seeds draw different series"
+        );
+    }
+
+    /// The extracted building with one stochastic appliance: the committed
+    /// fixture building's own HPXML and schedule, with a Microwave whose
+    /// extension configures the event load's stochastic fallback added
+    /// (the schedule carries no microwave column to replay, so every idle
+    /// step with the window open draws). The shape is the event-load
+    /// stream tests' probe appliance.
+    fn write_stochastic_building(root: &Path, bldg_id: i64) {
+        let dir = root.join(format!("bldg{bldg_id:07}"));
+        fs::create_dir_all(&dir).expect("create building dir");
+        let source = resstock_fixtures_root()
+            .join("2025.1")
+            .join(format!("bldg{bldg_id:07}"));
+        let hpxml = fs::read_to_string(source.join("home.xml"))
+            .expect("the fixture building's HPXML reads");
+        let marker = "</Appliances>";
+        assert!(
+            hpxml.contains(marker),
+            "the fixture building has appliances"
+        );
+        let microwave = r#"        <Microwave>
+          <SystemIdentifier id='Microwave1'/>
+          <extension>
+            <active_power_w>1000.0</active_power_w>
+            <active_duration_s>1800</active_duration_s>
+            <cooldown_duration_s>900</cooldown_duration_s>
+            <event_window_source>constant</event_window_source>
+            <event_probability_source>constant</event_probability_source>
+            <event_probability_constant>0.3</event_probability_constant>
+            <sensible_gain_fraction>0.0</sensible_gain_fraction>
+            <latent_gain_fraction>0.0</latent_gain_fraction>
+          </extension>
+        </Microwave>
+"#;
+        write_temp_file(
+            &dir.join("home.xml"),
+            &hpxml.replacen(marker, &format!("{microwave}{marker}"), 1),
+        );
+        let schedule = fs::read_to_string(source.join("in.schedules.csv"))
+            .expect("the fixture building's schedule reads");
+        write_temp_file(&dir.join("in.schedules.csv"), &schedule);
+    }
+
     /// The dataset-as-distributed shape (zip archives where the extracted
     /// building directories belong) is a typed error naming the fix.
     #[test]
@@ -3945,6 +4182,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect_err("a zip archive is not the unpacked layout");
         let message = err.to_string();
@@ -3991,6 +4229,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect("the fleet builds");
         assert_eq!(fleet.entries.len(), 3);
@@ -4029,6 +4268,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect_err("a typical-year release without a year is an error");
         let message = err.to_string();
@@ -4072,6 +4312,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect("the typical-year fleet builds with its declared year");
         assert_eq!(fleet.entries.len(), 1);
@@ -4175,6 +4416,7 @@ mod tests {
             None,
             None,
             &repo_defaults_path(),
+            None,
         )
         .expect_err("unresolved weather is a construction error");
         let message = err.to_string();

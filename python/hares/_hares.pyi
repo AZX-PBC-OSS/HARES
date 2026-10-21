@@ -2962,6 +2962,7 @@ class Fleet:
         defaults_path: str | None = ...,
         *,
         alignment: Alignment | None = ...,
+        master_seed: int | None = ...,
     ) -> Fleet: ...
     def simulate(
         self,

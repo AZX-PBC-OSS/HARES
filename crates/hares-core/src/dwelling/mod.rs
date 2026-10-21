@@ -23075,14 +23075,14 @@ occupancy = 1.0
 
     /// Helper: write a synthetic TOML with a stochastic CookingRange event
     /// load so the reproducibility test exercises RNG-dependent behaviour.
-    fn write_event_load_toml(path: &PathBuf, master_seed: u64) {
+    fn write_event_load_toml(path: &PathBuf, master_seed: u64, duration_s: u64) {
         let content = format!(
             r#"building_id = 9001
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
-duration = 600
+duration = {duration_s}
 output_chunk_size = 1000
 master_seed = {master_seed}
 [geometry]
@@ -23129,7 +23129,7 @@ latent_gain_fraction = 0.08
     #[test]
     fn identical_dwellings_with_stochastic_load_produce_reproducible_results() {
         let (_dir_a, toml_path_a) = temp_toml("rng_stoch_repro_a");
-        write_event_load_toml(&toml_path_a, 42);
+        write_event_load_toml(&toml_path_a, 42, 600);
         let (_dir_b, toml_path_b) = temp_toml("rng_stoch_repro_b");
         fs::copy(&toml_path_a, &toml_path_b).expect("copy TOML");
 
@@ -23191,17 +23191,19 @@ latent_gain_fraction = 0.08
 
     /// Smoke test: two dwellings with the same stochastic event-load config
     /// but different `master_seed` values MUST produce meaningfully different
-    /// output trajectories.  The event load draws from the dwelling's
-    /// hierarchical RNG at each step to decide whether to start an event;
-    /// with `event_probability = 0.5`, different seeds produce different
-    /// event sequences, proving the RNG is actually consumed (not just a
-    /// fixed sequence) and that the stochastic pipeline is live.
+    /// output trajectories. The event load draws from the dwelling's
+    /// hierarchical RNG at each idle step to decide whether to start an
+    /// event; the start probability is the per-hour basis, so a day of
+    /// one-minute steps at `event_probability = 0.5` starts the load about
+    /// seven times, and different seeds produce different event sequences,
+    /// proving the RNG is actually consumed (not just a fixed sequence)
+    /// and that the stochastic pipeline is live.
     #[test]
     fn different_master_seeds_produce_different_event_load_outputs() {
         let (_dir_a, toml_path_a) = temp_toml("rng_smoke_seed_a");
-        write_event_load_toml(&toml_path_a, 42);
+        write_event_load_toml(&toml_path_a, 42, 86_400);
         let (_dir_b, toml_path_b) = temp_toml("rng_smoke_seed_b");
-        write_event_load_toml(&toml_path_b, 99);
+        write_event_load_toml(&toml_path_b, 99, 86_400);
 
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A (seed 42)");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B (seed 99)");
@@ -23215,10 +23217,9 @@ latent_gain_fraction = 0.08
             "both dwellings must produce the same number of steps"
         );
 
-        // At least one timestep must have a different net electric power.
-        // With event_probability = 0.5 and 10 independent RNG draws per
-        // dwelling, the chance of two different ChaCha8Rng seeds producing
-        // identical sequences is astronomically low (≈ 2^-10 < 0.1%).
+        // At least one timestep must have a different net electric power:
+        // two different ChaCha8 seeds' draw sequences agreeing start for
+        // step across a day is astronomically unlikely.
         let any_differ = results_a.iter().zip(results_b.iter()).any(|(sa, sb)| {
             (sa.net_electric_power_w - sb.net_electric_power_w).abs() > f64::EPSILON
         });

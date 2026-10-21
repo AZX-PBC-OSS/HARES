@@ -87,7 +87,10 @@ stateDiagram-v2
 ### Event Triggering
 
 - `event_window_source`: schedule controlling when events can start (>0 = open)
-- `event_probability_source`: probability of starting per step when window open (0-1)
+- `event_probability_source`: probability of starting within one hour of
+  open window (0-1); the per-step chance is derived from it and the step
+  length, so the same config starts at the same hourly rate at any
+  resolution
 - `ForcedMode::Active` overrides stochastic draw; `ForcedMode::Idle` blocks start
 
 ### Wet Appliance Variant
