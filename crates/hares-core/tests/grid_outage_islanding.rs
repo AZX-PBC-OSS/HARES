@@ -650,7 +650,7 @@ fn island_follows_ev_delivery_and_collapses_when_it_stops() {
 
     // The V2G tariff prices 0.15 USD/kWh on BOTH legs: above the driver's
     // 0.10 export threshold, so the V2G vote stands for every step of the
-    // window. The export leg is what the vote prices — a tariff crediting
+    // window. The export leg is what the vote prices - a tariff crediting
     // exports nothing correctly leaves the vote idle.
     let v2g_tariff = FLAT_TARIFF.replace(r#""mode": "None""#, r#""mode": {"FlatRate": 0.15}"#);
     let tariff: hares_tariff::ElectricTariff =

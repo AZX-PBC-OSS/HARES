@@ -166,7 +166,7 @@ pub struct ThermalSolver {
     max_skin_residual_k: f64,
     /// The skin-lag warning's once-only latch (observe-gated): the first
     /// step whose max skin residual exceeds the 1 K report threshold
-    /// warns once per solver and the latch never resets — a run whose
+    /// warns once per solver and the latch never resets - a run whose
     /// skins lag is one warning, not one per step.
     #[cfg(feature = "observe")]
     skin_lag_warned: bool,

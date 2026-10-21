@@ -1113,7 +1113,7 @@ impl HeatPumpHeaterCore {
             .unwrap_or(DEFAULT_ER_HARD_LOCKOUT_TIME_S);
         // OCHRE HVAC.py:1214-1223: the soft lockout defaults to the hard
         // lockout's own value, and a soft time below the hard one warns
-        // and clamps up to the hard value — the soft stage extends the
+        // and clamps up to the hard value - the soft stage extends the
         // hard lockout, never shortens it.
         self.er_soft_lockout_time_s = match cfg.er_soft_lockout_time_s {
             Some(soft) if soft < self.er_hard_lockout_time_s => {
@@ -1539,8 +1539,8 @@ impl HeatPumpHeaterCore {
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Gross thermal output (pre-DSE) over compressor-only electric input.
         // DSE losses are a distribution inefficiency, not a reduction in equipment COP.
-        // The numerator is the COMPRESSOR's own delivered heat — the HP's
-        // capacity plus its fan heat — never the backup element's: during
+        // The numerator is the COMPRESSOR's own delivered heat - the HP's
+        // capacity plus its fan heat - never the backup element's: during
         // combined HP+ER operation the ER's heat rode the numerator while
         // the denominator stayed compressor-only, and the reported COP
         // could exceed the compressor's physical COP (the clamp below
@@ -2440,7 +2440,7 @@ impl HeatPumpHeaterCore {
         // er_soft_lockout_time_s it releases regardless of zone temp trend. The
         // soft time defaults to the hard lockout's own value (OCHRE
         // HVAC.py:1216), where the release fires the step the hard lockout
-        // expires and the soft stage is inert — the elapsed and remaining
+        // expires and the soft stage is inert - the elapsed and remaining
         // clocks run together while the hard lockout holds.
         // OCHRE HVAC.py:1338: temp_indoor >= self.temp_indoor_prev (non-strict).
         // Using >= prevents ER engagement when zone temperature plateaus after a
@@ -6000,8 +6000,8 @@ mod tests {
     }
 
     /// The OCHRE soft/hard split (HVAC.py:1214-1223): the soft lockout's
-    /// time defaults to the HARD lockout's own value, so the soft stage —
-    /// the post-hard, zone-still-rising hold — is inert at the default:
+    /// time defaults to the HARD lockout's own value, so the soft stage -
+    /// the post-hard, zone-still-rising hold - is inert at the default:
     /// the ER engages the step the hard lockout expires, whatever the
     /// zone's trend. The engine hardwired the soft stage's release at
     /// twice the hard time, holding the ER up to twice as long as the
@@ -6074,7 +6074,7 @@ mod tests {
         .unwrap();
 
         // 21 raise-steps = 1260 s: the hard lockout (600 s) expired, the
-        // old 2x release (1200 s) would have fired too — only the
+        // old 2x release (1200 s) would have fired too - only the
         // configured soft time (1800 s) still holds the ER.
         for s in 1..=21i64 {
             let zone_c = 16.0 + 0.01 * s as f64;
@@ -6108,7 +6108,7 @@ mod tests {
     }
 
     /// OCHRE HVAC.py:1217-1223: a soft time below the hard one warns and
-    /// clamps up to the hard value — the soft stage can never shorten the
+    /// clamps up to the hard value - the soft stage can never shorten the
     /// hard lockout.
     #[test]
     fn er_soft_lockout_below_hard_clamps_up_to_hard() {

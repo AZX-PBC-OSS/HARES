@@ -75,7 +75,7 @@ impl ChargingPreference for PriceOptimizer {
 
         // The two legs price the rates they trade at: charging pays the
         // import rate, discharging (an export decision) earns the export
-        // rate. A missing channel never reads as a fabricated $0/kWh —
+        // rate. A missing channel never reads as a fabricated $0/kWh -
         // the leg stands down and the actor's decide-time gate reports
         // the missing channel unhealthy.
         let import_price = ctx.env.price_signal.electricity_price;

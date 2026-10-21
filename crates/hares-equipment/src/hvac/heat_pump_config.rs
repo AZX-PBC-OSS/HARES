@@ -281,7 +281,7 @@ pub struct HeatPumpHeaterConfig {
     /// setpoint raise. Defaults to the hard lockout's own value (OCHRE
     /// `HVAC.py:1216` reads `Backup Soft Lockout Time (minutes)` with the
     /// hard time as its default), and a value below the hard one clamps
-    /// up to it at init — the soft stage can never shorten the hard
+    /// up to it at init - the soft stage can never shorten the hard
     /// lockout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_soft_lockout_time_s: Option<f64>,

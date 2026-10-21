@@ -13,7 +13,7 @@ impl ChargingPreference for V2GExport {
         // The export decision prices the rate the export earns: the run's
         // published export price (the tariff evaluator publishes it under
         // every export mode, the NetBilling credits included). A run that
-        // publishes no export price never sees a fabricated $0/kWh here —
+        // publishes no export price never sees a fabricated $0/kWh here -
         // the vote stands down and the actor's decide-time gate reports
         // the missing channel unhealthy.
         let price = ctx.env.price_signal.export_price;

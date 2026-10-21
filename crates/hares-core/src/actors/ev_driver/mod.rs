@@ -6282,7 +6282,7 @@ mod tests {
     /// price channel is never decided on a fabricated $0/kWh: the actor
     /// records the cause and reports unhealthy, the step failing at the
     /// post-decide health check. The old fallback substituted 0.0 and the
-    /// price optimizer's charge leg fired every step — electricity
+    /// price optimizer's charge leg fired every step - electricity
     /// silently free.
     #[test]
     fn missing_price_marks_the_tou_actor_unhealthy_not_free() {
@@ -6323,7 +6323,7 @@ mod tests {
     /// The V2G strategy's whole decision prices the export rate: a run
     /// that publishes no export price cannot decide export votes on a
     /// fabricated $0/kWh (the old substitution meant the vote never
-    /// fired, silently) — the actor reports unhealthy naming the
+    /// fired, silently) - the actor reports unhealthy naming the
     /// channel.
     #[test]
     fn missing_export_price_marks_the_v2g_actor_unhealthy() {

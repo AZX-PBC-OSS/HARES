@@ -235,10 +235,10 @@ impl TanklessWH {
 
         // Fallback chain for efficiency factor:
         // 1. energy_factor — pre-2015 EF test procedure value (direct use).
-        // 2. uniform_energy_factor — post-2015 UEF test procedure value,
+        // 2. uniform_energy_factor - post-2015 UEF test procedure value,
         //    taken as the energy factor directly: OCHRE's
         //    instantaneous-water-heater branch (hpxml.py:1055-1058) reads
-        //    `energy_factor = uniform_energy_factor` with no conversion —
+        //    `energy_factor = uniform_energy_factor` with no conversion -
         //    the RESNET storage-tank conversion (`EF = 0.9066·UEF +
         //    0.0711`, which the gas storage heater here applies) is the
         //    storage branch's alone, and the RESNET calculator defines a
@@ -995,7 +995,7 @@ mod tests {
 
     /// The UEF a tankless unit declares is its energy factor: OCHRE's
     /// instantaneous-water-heater branch (hpxml.py:1055-1058) reads
-    /// `energy_factor = uniform_energy_factor` with no conversion — the
+    /// `energy_factor = uniform_energy_factor` with no conversion - the
     /// RESNET storage-tank conversion (EF = 0.9066·UEF + 0.0711) is the
     /// storage branch's alone and understated the instantaneous fuel
     /// meter's efficiency by about 2 percent at UEF 0.95.

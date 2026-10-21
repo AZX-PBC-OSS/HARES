@@ -19,7 +19,7 @@ use super::ThermalSolver;
 /// The skin-lag warning's threshold [K]: the first exterior-skin residual
 /// beyond it warns once per solver. The converged solve's own bound is
 /// 0.5 K (the fixed-point invariant below), so only a cap exit can cross
-/// this — and by more than the converged bound's 2x when it does.
+/// this - and by more than the converged bound's 2x when it does.
 #[cfg(feature = "observe")]
 const SKIN_LAG_WARN_THRESHOLD_K: f64 = 1.0;
 
@@ -380,7 +380,7 @@ impl ThermalSolver {
                 }
                 // Warn once per solver on a skin lag beyond 1 K: the
                 // warm-start acceptance is designed to lag mid-transient,
-                // so the warning fires on the first LARGE lag only — a
+                // so the warning fires on the first LARGE lag only - a
                 // skin that never closes its balance within a step's
                 // budget by more than the converged bound's 8x.
                 if !self.skin_lag_warned && skin_residual_k > SKIN_LAG_WARN_THRESHOLD_K {
@@ -1255,7 +1255,7 @@ mod tests {
     /// The convergence self-report: an iteration run out its budget (the
     /// 60 s production budget is one damped iteration, and a sky swing
     /// that far displaces the fixed point) must be COUNTED in the step's
-    /// component gains with the skin's residual visible — never a silent
+    /// component gains with the skin's residual visible - never a silent
     /// exit. Observe-gated like the rest of the diagnostics: the fields
     /// do not exist without the feature.
     #[cfg(feature = "observe")]
@@ -1311,7 +1311,7 @@ mod tests {
     }
 
     /// The warn-once latch: the first step whose skin residual crosses the
-    /// 1 K report threshold sets it, and it never resets — a run whose
+    /// 1 K report threshold sets it, and it never resets - a run whose
     /// skins lag is one warning, not one per step.
     #[cfg(feature = "observe")]
     #[test]
