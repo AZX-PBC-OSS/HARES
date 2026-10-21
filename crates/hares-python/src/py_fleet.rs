@@ -199,10 +199,16 @@ impl PyFleet {
     /// built-in year). Every home starts Jan 1 00:00 local standard time
     /// at its own site's standard offset.
     ///
-    /// ``master_seed`` seeds every home's stochastic streams (each home's
-    /// own streams derive from the seed and its building id); ``None``
+    /// ``master_seed`` seeds each home's event-load streams (they derive
+    /// from the seed and the home's building id); ``None``
     /// keeps the documented default seed of 0. The construction report
-    /// names the seed the fleet runs under.
+    /// names the seed the fleet runs under. The seed does not reach the
+    /// DR compliance driver's draw, the EV driver's key material or a
+    /// noisy TimeWindows source's keystream key: each keys on its own
+    /// configured seed or identity, and the fleet path constructs none
+    /// of them today. If the fleet path gains actor or noisy-source
+    /// construction, the master seed must thread into their
+    /// unspecified-seed derivations the same way.
     #[classmethod]
     #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, typical_year=None, duration_s=None, defaults_path=None, *, alignment=None, master_seed=None, **unexpected))]
     #[allow(clippy::too_many_arguments)]

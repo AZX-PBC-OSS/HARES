@@ -89,8 +89,13 @@ stateDiagram-v2
 - `event_window_source`: schedule controlling when events can start (>0 = open)
 - `event_probability_source`: probability of starting within one hour of
   open window (0-1); the per-step chance is derived from it and the step
-  length, so the same config starts at the same hourly rate at any
-  resolution
+  length, so the same hourly rate holds for any step of an hour or
+  less. (The start count drifts outside that: a few percent above the
+  hourly rate's count for sub-hourly steps, since starts can coincide
+  within an hour - about 102 percent of the count at 900 s against
+  100 percent at 3600 s - and below it for supra-hourly steps, since a
+  step longer than the hour starts at most once - about 88 percent at
+  a 6 h step.)
 - `ForcedMode::Active` overrides stochastic draw; `ForcedMode::Idle` blocks start
 
 ### Wet Appliance Variant

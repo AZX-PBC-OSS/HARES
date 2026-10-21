@@ -114,10 +114,15 @@ replacement.
   `alignment=` keyword on `Fleet.from_buildings` and
   `Fleet.from_resstock`: the fleet's declared time alignment.
 - Added: the `master_seed=None` keyword on `Fleet.from_resstock`: the
-  fleet's master random seed, every home's stochastic streams deriving
+  fleet's master random seed, each home's event-load streams deriving
   from it and the home's own building id; `None` keeps the documented
   default seed of 0, and the build report names the seed the fleet runs
-  under.
+  under. The seed does not reach the DR compliance driver's draw, the
+  EV driver's key material or a noisy TimeWindows source's keystream
+  key: each keys on its own configured seed or identity, and the fleet
+  path constructs none of them today. If the fleet path gains actor or
+  noisy-source construction, the master seed must thread into their
+  unspecified-seed derivations the same way.
 - Added: `ObservationPlan`, `Dwelling.observation_plan(fields)` and
   `Dwelling.observe_into(plan, out)`: the frozen per-step observation
   layout the RL environments read through. The plan is built once per

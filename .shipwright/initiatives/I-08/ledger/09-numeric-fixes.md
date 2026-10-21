@@ -5915,9 +5915,8 @@ integration test.
 ## Hardening 16: fleets seed from the caller and dr compliance is per event
 
 **Kind:** numeric fix (the hardening phase's fleet seed and stochastic
-contract entry; three defects, one commit as the plan's Task 2.9
-packages them: the fleet seed, the DR compliance draw, the event-start
-probability's basis).
+contract entry; three defects, one commit packages them: the fleet
+seed, the DR compliance draw, the event-start probability's basis).
 
 **Problem:** three stochastic contracts were broken at their surfaces.
 The ResStock fleet constructor hardcoded every home's master seed to
@@ -5949,7 +5948,18 @@ runs under (`FleetBuildReport.master_seed`, the resolved value either
 way). The Python binding takes the same keyword (`master_seed=None` on
 `Fleet.from_resstock`, after `defaults_path`, the stub declaring it);
 the frame-golden adapter passes `None`, the captures it compares were
-taken with the documented default.
+taken with the documented default. The seed's reach is scoped to what
+actually threads it: the per-dwelling derivations
+(`dwelling_seed`), the key each home's event-load streams draw from.
+The later review found the CHANGELOG and the binding's doc claiming
+the seed drives "every home's stochastic streams", where the DR
+compliance driver's draw, the EV driver's key material and a noisy
+TimeWindows source's keystream key key on their own configured seed or
+identity, and the fleet path constructs none of them today; the claim
+now reads the event-load interiors, and the rng module's contract
+comment and the schedule-sources doc state the constraint: if the
+fleet path gains actor or noisy-source construction, the master seed
+must thread into their unspecified-seed derivations the same way.
 
 The DR compliance draw: the actor latches the compliance decision once
 at the event's entry (the first step it sees the level above Normal)
@@ -5965,15 +5975,20 @@ The event-start probability's basis: declared per hour, normalized per
 step. The configured probability (a constant or a schedule column
 value) is the probability of starting within one hour of open window;
 the per-step chance is `1 - (1 - p)^(dt / 3600 s)` (the physics
-constants' `SECONDS_PER_HOUR`), so the same config starts at the same
-hourly rate at any resolution. The zero and one endpoints are exact at
+constants' `SECONDS_PER_HOUR`), so the same hourly rate holds for any
+step of an hour or less (the hourly probability of at least one start
+is exact there; the start count runs a few percent high for
+sub-hourly steps, since starts can coincide within an hour, and low
+for supra-hourly steps, since a step longer than the hour starts at
+most once). The zero and one endpoints are exact at
 every resolution (never start, always start), every shipped default and
 fixture probability is an endpoint, and one draw is consumed per
 idle-open step whatever the resolution, so the checkpoint draw
 positions are unchanged in structure. The basis is stated where the
 probability is configured and read: the equipment's doc, the loads
 doc's event-triggering section, and the `<event_probability_constant>`
-element's published description.
+element's published description, the rate's resolution scoping and
+residual stated in each.
 
 **Acceptance test:** RED first at the parent on all three shapes. The
 fleet seed: two stochastic ResStock fleets (the fixture building plus
@@ -5982,7 +5997,13 @@ with different caller seeds drew different aggregate power series, and
 the same seed rebuilt bitwise-identical series; before the parameter
 existed the new-API tests did not compile (the witness of the
 unreachable parameter), and the build report's seed field completed the
-contract. The DR draw: with the rate-0.5 seed-7 model, an event entered
+contract. The dwelling's own seed smoke test moved its window in this
+commit (`write_event_load_toml` gained the `duration_s` parameter; the
+smoke run 600 s to 86,400 s): 600 s at the 0.5/h default started about
+8 percent of the time, and the day-long window gives the two seeds'
+series many steps to diverge on instead of one or two, the
+discriminating power the smoke test exists for. The DR draw: with the
+rate-0.5 seed-7 model, an event entered
 at 2026-01-01 01:00 dispatched at hours 2 and 5 and declined at hours
 1, 3 and 4 (a random walk within one event), where the contract holds
 the entry decision across the event and re-draws the next event's
@@ -6114,8 +6135,9 @@ config's 68 C daily-profile source each fail the same FSM gate.
 **Movement:** none - the goldens compare-all 10 + dst 1 bitwise
 identical, no re-capture. No golden manifest's schedule carries a
 setpoint column and no fixture HPXML's setpoints fall outside the band
-(the shipped profiles are the 68/78 F constants and the cz4a hourly
-arrays, 65-76 F).
+(the shipped ResStock profiles span 49-84 F, 9.44-28.89 C, all inside
+it; the ochre samples' 68/78 F constants and the cz4a hourly arrays,
+65-76 F, sit inside that span).
 
 **Dependencies:** the physics constants' band, the hares-io schedule
 resolution's validation sites (the three original ones, moved to the

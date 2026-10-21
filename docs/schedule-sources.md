@@ -97,6 +97,8 @@ ScheduleSource::TimeWindows {
 
 **Noise**: a window may carry a distribution; a matching window then samples `value + noise` from the source's ChaCha8 generator. The generator's key is the configured `seed` when one is set; without one it is derived from the source's identity (`<dwelling identity>:<owner name>:<source role>`, the dwelling identity the config-stable building id the per-dwelling stream derivations key on) at conversion, so two same-configured sources never draw identical series - not within a dwelling and not across homes, whose HPXML-derived equipment names are generic type strings - and the same identity is reproducible run to run. The default is never the all-zero key: sources sharing one key would correlate their noise.
 
+**Master-seed reach**: the fleet's master seed threads only the per-dwelling derivations (`dwelling_seed`, the key the event-load streams draw from). The DR compliance driver's draw, the EV driver's key material and a noisy TimeWindows source's keystream key key on their own configured seed or identity, and the fleet path constructs none of them today. If the fleet path gains actor or noisy-source construction, the master seed must thread into their unspecified-seed derivations the same way, or re-seeding a fleet would silently leave those streams unseeded.
+
 #### TimeWindow
 
 ```rust

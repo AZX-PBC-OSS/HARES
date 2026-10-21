@@ -58,6 +58,15 @@ impl RngStream {
 /// Generator key of the dwelling with `bldg_id` under `master_seed`: bytes
 /// 0..8 are `master_seed` and 8..16 are `bldg_id` (both little-endian,
 /// two's complement for negative ids), the rest zero.
+///
+/// Contract: this derivation is where the master seed's reach ends. The
+/// fleet path threads the seed here and nowhere else: the DR compliance
+/// driver's draw, the EV driver's key material and a noisy TimeWindows
+/// source's keystream key key on their own configured seed or identity,
+/// and the fleet path constructs none of them. If the fleet path gains
+/// actor or noisy-source construction, the master seed MUST thread into
+/// their unspecified-seed derivations the same way, or re-seeding a
+/// fleet would silently leave those streams unseeded.
 #[must_use]
 pub fn dwelling_seed(master_seed: u64, bldg_id: i64) -> [u8; 32] {
     let mut seed = [0_u8; 32];

@@ -1763,7 +1763,7 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
 /// The start probability the draws read is the probability of starting
 /// within one hour of open window (the probability's declared basis): the
 /// per-step chance is derived from it and the step length, so the same
-/// config starts at the same hourly rate at any resolution.
+/// hourly rate holds for any step of an hour or less.
 #[derive(Clone, Debug)]
 struct StartDraws {
     stream: RngStream,
@@ -1786,8 +1786,13 @@ impl StartDraws {
     /// the probability source, a constant or a schedule column, is the
     /// chance of starting within one hour of open window); the step's
     /// chance is `1 - (1 - p)^(dt / SECONDS_PER_HOUR)`, the per-hour
-    /// probability compounded over the step, so the same config starts
-    /// at the same hourly rate at any resolution. The zero and one
+    /// probability compounded over the step, so the same hourly rate
+    /// holds for any step of an hour or less: the hourly probability of
+    /// at least one start is exact there, while the start count runs a
+    /// few percent high (starts can coincide within an hour, about 102
+    /// percent of the hourly rate's count at 900 s) and, for supra-hourly
+    /// steps, low (a step longer than the hour starts at most once,
+    /// about 88 percent at 6 h). The zero and one
     /// endpoints are exact at every resolution (never start, always
     /// start). A step draws once whatever its length.
     fn starts(&mut self, probability: f64, dt_s: f64) -> bool {
@@ -2109,8 +2114,11 @@ mod tests {
     }
 
     /// The start probability is the probability of starting within an hour
-    /// of open window, so the same config starts at the same hourly rate
-    /// at 3600 s and 900 s steps. (Per-step application made the event
+    /// of open window, so the same hourly rate holds at 3600 s and 900 s
+    /// steps, both within the hour (the hourly probability of at least
+    /// one start is exact there; the 900 s count runs about 2 percent
+    /// high, since starts can coincide within an hour - far inside the
+    /// test's tolerance). (Per-step application made the event
     /// rate scale with the resolution: four times the steps, four times
     /// the events.) The event is short against both step sizes, so every
     /// step is idle and open when it begins, one draw decides it, and the

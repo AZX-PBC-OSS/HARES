@@ -1008,7 +1008,10 @@ pub static EVENT_PROBABILITY_CONSTANT: HpxmlElement = HpxmlElement {
     unit: None,
     description: "the <event_probability_constant> element the parser reads under its parent; \
                   the value is the probability of starting within one hour of open window, the \
-                  per-step chance derived from it and the step length",
+                  per-step chance derived from it and the step length; the same hourly rate \
+                  holds for any step of an hour or less (the start count a few percent high \
+                  for sub-hourly steps, since starts can coincide within an hour, and low for \
+                  supra-hourly steps, since a step longer than the hour starts at most once)",
 };
 
 /// the <event_probability_schedule_col> element the parser reads under its parent
