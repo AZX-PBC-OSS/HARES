@@ -199,7 +199,7 @@ pub struct MechanicalVentilationParams {
 ///
 /// # References
 /// - EnergyPlus `ZoneEquipmentManager.cc:5716-5806` (v24.2.0): the `WindAndStack` runtime calculation
-/// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct (DH, DiscCoef)
+/// - EnergyPlus v26.2.0 `DataHeatBalance.hh:1207-1214` (the vendored copy) — `WindandStackOpenArea` struct (DH, DiscCoef)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: `Q = Cw × A × U`
 /// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: `Q = sqrt(Qw² + Qst²)`
 #[derive(Debug, Clone, PartialEq)]

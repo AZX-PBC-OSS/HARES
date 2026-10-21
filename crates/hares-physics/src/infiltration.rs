@@ -399,7 +399,7 @@ pub struct NaturalVentilationInputs {
 /// # References
 /// - EnergyPlus `ZoneEquipmentManager.cc`'s WindAndStack block (v24.2.0
 ///   lines 5716-5806) - the runtime calculation and the AutoCalculate arms
-/// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct
+/// - EnergyPlus v26.2.0 `DataHeatBalance.hh:1207-1214` (the vendored copy) — `WindandStackOpenArea` struct
 /// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: Q = sqrt(Qw² + Qst²)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q_wind = Cw × A × U
 /// - ASHRAE HoF 2009 Ch. 16.14: single-sided Cd = 0.15–0.25; cross-ventilation Cd = 0.60–0.65
@@ -2818,7 +2818,7 @@ mod tests {
     /// `VVF = sqrt(Qw² + Qst²)`. This is the comparator the divergence is
     /// recorded against: HARES's wind term matches it exactly (the same
     /// auto-Cw); the stack term's discharge coefficient is the recorded
-    /// divergence (D-, see docs/PHYSICS_DECISIONS.md).
+    /// divergence (recorded in docs/PHYSICS_DECISIONS.md under 'Natural ventilation keeps the fixed geometry discharge coefficient').
     #[allow(clippy::too_many_arguments)]
     fn energyplus_wind_and_stack_auto_m3_s(
         open_area_m2: f64,
