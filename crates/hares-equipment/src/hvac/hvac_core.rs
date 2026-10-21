@@ -661,7 +661,6 @@ impl HvacEquipment {
             deadband_offset: extract_numeric(config, "deadband_offset").unwrap_or(0.2),
             band_class: hares_types::ThermostatBandClass::Cycling,
         };
-        self.thermostat_fsm.validate_configuration(env)?;
 
         if let Some(value) = extract_numeric(config, "heating_setpoint_c") {
             self.thermostat_fsm.static_setpoints.heating_c = value;
@@ -704,6 +703,11 @@ impl HvacEquipment {
             extract_numeric(config, "heating_setpoint_c").is_some() && !heating_seeded;
         let cooling_named =
             extract_numeric(config, "cooling_setpoint_c").is_some() && !cooling_seeded;
+        // The FSM's init gate runs after this unit's setpoints have landed
+        // on it (the constants above, the sources beside them), so its
+        // plausibility sweep reads what this config brought, and before
+        // the deadband reconciliation opens on it.
+        self.thermostat_fsm.validate_configuration(env)?;
         self.thermostat_fsm.static_setpoints = self
             .thermostat_fsm
             .static_setpoints
@@ -1431,6 +1435,29 @@ mod tests {
             "the unnamed pair re-centers on its midpoint: 21 and 22 to 20.5 and 22.5"
         );
         assert_eq!(hvac.thermostat_fsm.static_setpoints.cooling_c, 22.5);
+    }
+
+    /// The constant setpoints the config names (`heating_setpoint_c=` on
+    /// the Python surface, through `setpoint_config`) land on the
+    /// thermostat FSM's static setpoints, so the plausibility band holds
+    /// at the FSM: 68 typed into a `_c` key is 68 C, an absurd
+    /// thermostat, and the init fails naming the value and the band
+    /// instead of driving the HVAC at it.
+    #[test]
+    fn an_implausible_constant_setpoint_fails_init_at_the_fsm() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .test_extras_mut()
+            .insert("heating_setpoint_c".to_string(), 68.0.into());
+        let err = hvac
+            .init(&config, &env(20.0, 60, 0))
+            .expect_err("68 in a Celsius key is outside the plausible band");
+        let message = err.to_string();
+        assert!(
+            message.contains("68") && message.contains("plausible"),
+            "the error names the value and the band: {message}"
+        );
     }
 
     #[test]

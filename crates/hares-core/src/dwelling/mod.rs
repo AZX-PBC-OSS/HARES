@@ -21489,7 +21489,12 @@ latent_gain_fraction = 0.08
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
                 setpoint: HvacSetpointConfig {
-                    cooling_setpoint_c: Some(0.0),
+                    // The band's minimum, an in-band value that still
+                    // drives the AC to its highest stage against a
+                    // ~20 C zone: the 0 C this placeholder once carried
+                    // is outside the setpoint plausibility band, and the
+                    // init gate refuses it.
+                    cooling_setpoint_c: Some(5.0),
                     // Cooling alone is named: a heating constant below it
                     // would be the both-named deadband violation the init
                     // errors on, and the unnamed heating axis opens the
@@ -21525,7 +21530,8 @@ latent_gain_fraction = 0.08
             .expect("init AC with one shared curve pair across three stages");
         replace_equipment_for_test(&mut dwelling, vec![Box::new(ac)]);
 
-        // Max cooling demand (setpoint 0 °C against a ~20 °C zone) drives
+        // Max cooling demand (the 5 C setpoint, the plausibility band's
+        // minimum, against a ~20 °C zone) drives
         // the AC to its highest stage, whose curve index (speed 2 → 4)
         // exceeds the single shared cap+EIR pair. The step itself may fail
         // the temperature-bounds invariant from the deliberately absurd
@@ -22494,7 +22500,12 @@ occupancy = 1.0
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
                 setpoint: HvacSetpointConfig {
-                    cooling_setpoint_c: Some(0.0),
+                    // The band's minimum, an in-band value that still
+                    // drives the AC to its highest stage against a
+                    // ~20 C zone: the 0 C this placeholder once carried
+                    // is outside the setpoint plausibility band, and the
+                    // init gate refuses it.
+                    cooling_setpoint_c: Some(5.0),
                     // Cooling alone is named: a heating constant below it
                     // would be the both-named deadband violation the init
                     // errors on, and the unnamed heating axis opens the

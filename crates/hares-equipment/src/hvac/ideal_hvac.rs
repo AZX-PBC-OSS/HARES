@@ -1247,6 +1247,7 @@ mod tests {
     use super::super::thermostat::ThermostatMode;
     use super::IdealHvac;
     use crate::{Equipment, EquipmentConfig, EquipmentRegistry};
+    use hares_types::ScheduleSourceConfig;
 
     fn env(zone_temp_c: f64, time_res_s: i64, second: i64) -> EnvironmentState {
         EnvironmentState {
@@ -1889,6 +1890,65 @@ mod tests {
 
         assert!(eq.thermostat_fsm.heating_setpoint_source.is_some());
         assert!(eq.thermostat_fsm.cooling_setpoint_source.is_some());
+    }
+
+    /// The programmatic builders land their sources on the thermostat FSM
+    /// like every other surface, so the plausibility band holds at the
+    /// FSM's init gate: a `with_setpoints` profile of 68/24, a
+    /// `with_heating_setpoint_source` constant of 68 C, and a user's
+    /// typed config whose `heating_setpoint_source` rides
+    /// `extract_schedule_source` into the FSM all fail the init naming
+    /// the value and the band. The rule is one: the band holds at the
+    /// thermostat boundary regardless of the surface.
+    #[test]
+    fn the_builders_setpoints_fail_init_outside_the_plausibility_band() {
+        let mut cfg = config("IH");
+        cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
+        let env = env(20.0, 60, 0);
+
+        let mut eq = IdealHvac::new(cfg.clone())
+            .with_setpoints([68.0; 24], [68.0; 24], [24.0; 24], [24.0; 24]);
+        let err = eq
+            .init(&cfg, &env)
+            .expect_err("68 C through the with_setpoints builder is out of the band");
+        assert!(
+            err.to_string().contains("68") && err.to_string().contains("plausible"),
+            "the error names the value and the band: {err}"
+        );
+
+        let mut eq = IdealHvac::new(cfg.clone())
+            .with_heating_setpoint_source(ScheduleSource::Constant(68.0));
+        let err = eq
+            .init(&cfg, &env)
+            .expect_err("68 C through the source builder is out of the band");
+        assert!(
+            err.to_string().contains("68") && err.to_string().contains("plausible"),
+            "the error names the value and the band: {err}"
+        );
+
+        let typed = crate::IdealHvacConfig {
+            zone_id: Some(1),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_source: Some(ScheduleSourceConfig::DailyProfile {
+                    weekday: [68.0; 24],
+                    weekend: [68.0; 24],
+                    month_multipliers: [1.0; 12],
+                    max_value: 1.0,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let cfg = EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed)
+            .expect("the typed config serializes");
+        let mut eq = IdealHvac::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &env)
+            .expect_err("68 C through the typed config's source is out of the band");
+        assert!(
+            err.to_string().contains("68") && err.to_string().contains("plausible"),
+            "the error names the value and the band: {err}"
+        );
     }
 
     #[test]

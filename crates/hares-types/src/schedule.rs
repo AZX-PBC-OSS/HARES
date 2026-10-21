@@ -565,6 +565,43 @@ impl ScheduleSource {
             Self::TimeWindows { .. } => "time windows",
         }
     }
+
+    /// The literal values this source's shape declares, in Celsius where
+    /// the source carries setpoints, for callers that sweep a plausibility
+    /// band over a source (the thermostat FSM's setpoint band is the
+    /// user). The match is exhaustive over the enum's own variants, so a
+    /// variant added here fails to compile until its author states which
+    /// of its values the sweep reads: a [`ScheduleSource::ColumnRef`]
+    /// declares none (its column is swept whole where the column
+    /// resolves), and a [`ScheduleSource::Stochastic`] or
+    /// [`ScheduleSource::Shared`] source declares none (no literal).
+    /// The scaling fields (`month_multipliers`, `max_value`) are not
+    /// returned: every setpoint source ships them at the identity, the
+    /// read-time value is the declared literal.
+    pub fn declared_literal_values(&self) -> Vec<f64> {
+        match self {
+            Self::Constant(value) => vec![*value],
+            Self::DailyProfile {
+                weekday, weekend, ..
+            } => weekday.iter().chain(weekend.iter()).copied().collect(),
+            Self::ColumnRef { .. } | Self::Stochastic { .. } | Self::Shared { .. } => Vec::new(),
+            Self::SolarAware {
+                daytime_fraction,
+                evening_fraction,
+                overnight_fraction,
+                ..
+            } => vec![*daytime_fraction, *evening_fraction, *overnight_fraction],
+            Self::TimeWindows {
+                windows, default, ..
+            } => {
+                let mut values: Vec<f64> = windows.iter().map(|w| w.value).collect();
+                if let Some(value) = default {
+                    values.push(*value);
+                }
+                values
+            }
+        }
+    }
 }
 
 /// Serde-friendly schedule config representation for typed equipment configs.

@@ -6038,6 +6038,39 @@ convention); the profile error names the side and the HVACControl
 elements the profile came from. The band's edges are inclusive, and a
 NaN fails the range check like any other impossible value.
 
+**The band at every surface:** the entry's three paths validated the
+schedule resolution's surfaces, and the review found the paths that
+bypassed them. The Ideal HVAC spec name rides the building setpoint
+profiles (`apply_building_setpoint_profiles` hands the Ideal HVAC its
+heating and cooling sources from the HVACControl) while appearing in
+neither the heating nor the cooling equipment name set the per-spec
+injection validated against, so a 160 F heating setpoint that failed a
+gas-furnace home's construction built and ran an IdealHVAC home, the
+solver back-calculating whatever load holds 71.11 C, silently. The
+config's raw `*_setpoint_c` constants reached the thermostat FSM
+unvalidated (68 typed into a `_c` key passing for 68 C), and the
+programmatic builders (`with_setpoints`, `with_heating_setpoint_source`)
+and a user's typed-config sources (`extract_schedule_source` into
+`into_runtime`) landed sources on the FSM with no sweep. The fix is
+the band at the choke points, structural over list-append: the HPXML
+profiles validate at the distribution point every setpoint-consuming
+spec takes (the building profiles where they distribute, the
+HVACControl params where they parse, so the next new system type
+cannot bypass the band by being a new name), and the thermostat FSM
+sweeps every setpoint it carries at its init gate
+(`validate_configuration`, which every owner already calls after the
+setpoints land and before the first step): the static constants and
+each source shape's declared literals, through
+`ScheduleSource::declared_literal_values`, whose match is exhaustive
+where the enum is defined, so a source shape added there fails to
+compile until its author classifies its values. The rule is one: the
+band holds at the thermostat boundary regardless of the surface. Two
+dwelling curve-clamp tests' cooling placeholder moves in the same
+commit (0 C, a deliberately absurd max-drive placeholder the new FSM
+gate refuses, to 5 C, the band's minimum, which still drives the AC
+to its highest stage against a ~20 C zone); the validations fire on
+no other shipped fixture or test config.
+
 **Fixture sweep (the Fahrenheit reality):** no shipped data fixture or
 golden manifest carries a schedule setpoint column at all - the golden
 manifests' schedule CSVs (the ResStock `in.schedules.csv` files and the
@@ -6070,7 +6103,13 @@ an HPXML heating-season constant of 160 F (71.11 C) fails naming the
 side, the elements and the value. The three repaired test CSVs are the
 sweep's own witnesses: their construction failed at the parent under
 the new check, and builds again with the same resolved setpoints the
-column's values state.
+column's values state. The band at every surface is witnessed per
+surface: the Ideal HVAC home's 160 F heating setpoint fails
+`resolve_equipment` naming the side and the resolved value, identically
+to the gas-furnace home's; a 68 C constant typed into a `_c` config
+key fails the FSM's init naming the value and the band; and the
+builders' 68 C profiles, the 68 C constant source and the typed
+config's 68 C daily-profile source each fail the same FSM gate.
 
 **Movement:** none - the goldens compare-all 10 + dst 1 bitwise
 identical, no re-capture. No golden manifest's schedule carries a
@@ -6079,4 +6118,7 @@ setpoint column and no fixture HPXML's setpoints fall outside the band
 arrays, 65-76 F).
 
 **Dependencies:** the physics constants' band, the hares-io schedule
-resolution's three validation sites, the three repaired test CSVs.
+resolution's validation sites (the three original ones, moved to the
+distribution point every setpoint-consuming spec takes), the
+thermostat FSM's init gate and `ScheduleSource::declared_literal_values`,
+the three repaired test CSVs.

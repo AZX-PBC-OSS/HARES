@@ -590,7 +590,8 @@ fn the_setpoint_plausibility_band_is_inclusive_at_its_edges() {
 
 /// The HPXML path's setpoints validate the same way: a heating season
 /// constant that resolves outside the plausible band fails the
-/// construction naming the value, before any column could be read.
+/// construction naming the value, at the equipment resolution where the
+/// profile derives -- before any column could be read.
 #[test]
 fn an_implausible_hpxml_setpoint_fails_construction() {
     let xml = format!(
@@ -644,7 +645,7 @@ fn an_implausible_hpxml_setpoint_fails_construction() {
         offending_f = 160.0,
     );
     let building = hares_io::hpxml::building::parse_building(&xml).expect("the HPXML parses");
-    let mut specs = resolve_equipment(
+    let error = resolve_equipment(
         &building,
         None,
         None,
@@ -652,30 +653,73 @@ fn an_implausible_hpxml_setpoint_fails_construction() {
         None,
         &mut Vec::new(),
     )
-    .expect("the equipment resolves");
-    let start =
-        chrono::DateTime::parse_from_rfc3339("2026-03-18T00:00:00+00:00").expect("valid timestamp");
-    let mut schedule = ScheduleTimeSeries {
-        timestamps: vec![start],
-        column_names: vec!["occupants".to_string()],
-        columns: vec![vec![1.0]],
-        column_index: [("occupants".to_string(), 0_usize)].into_iter().collect(),
-        source_step_secs: 60,
-        column_aggregations: vec![ColumnAggregation::Mean],
-    };
-    let defaults_dir = repo_root().join("python/hares/defaults");
-    let mut warnings: Vec<Warning> = Vec::new();
-    let error = inject_schedule_into_specs(
-        &mut specs,
-        &mut schedule,
-        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
-        &repo_defaults(),
-        &mut warnings,
-    )
     .expect_err("the implausible HPXML setpoint is a construction error");
     let message = error.to_string();
     assert!(
         message.contains("heating") && (message.contains("71.11") || message.contains("71.1")),
         "the error names the side and the resolved value: {message}"
+    );
+}
+
+/// The Ideal HVAC path takes the same building setpoint profiles every
+/// heating system takes (`apply_building_setpoint_profiles` hands the
+/// Ideal HVAC its heating and cooling sources from the HVACControl), so
+/// the plausibility band holds there too: a 160 F heating setpoint that a
+/// gas-furnace home refuses at construction an IdealHVAC home refuses
+/// identically, naming the side, the elements and the value. The ideal
+/// solver would otherwise back-calculate whatever load holds 71.11 C and
+/// run the year silently at it.
+#[test]
+fn an_implausible_hpxml_setpoint_fails_the_ideal_hvac_construction_too() {
+    let xml = format!(
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+          <NumberofBedrooms>3</NumberofBedrooms>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems>
+        <HVAC>
+          <HVACControl>
+            <SetpointTempHeatingSeason>{offending_f}</SetpointTempHeatingSeason>
+          </HVACControl>
+          <HVACPlant>
+            <HeatingSystem>
+              <SystemIdentifier id='Ideal'/>
+              <HeatingSystemFuel>electricity</HeatingSystemFuel>
+              <HeatingSystemType><IdealHVAC/></HeatingSystemType>
+              <HeatingCapacity>24000</HeatingCapacity>
+              <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+            </HeatingSystem>
+          </HVACPlant>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#,
+        offending_f = 160.0,
+    );
+    let building = hares_io::hpxml::building::parse_building(&xml).expect("the HPXML parses");
+    let error = resolve_equipment(
+        &building,
+        None,
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect_err("the Ideal HVAC home's implausible setpoint is a construction error");
+    let message = error.to_string();
+    assert!(
+        message.contains("heating") && (message.contains("71.11") || message.contains("71.1")),
+        "the error names the side and the resolved value, identically to the \
+         gas-furnace case: {message}"
     );
 }

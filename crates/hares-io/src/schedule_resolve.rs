@@ -952,7 +952,7 @@ fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Valu
 /// OS-HPXML Fahrenheit convention lands an order of magnitude outside
 /// every habitable setpoint) and any corrupt value, not a style opinion:
 /// the OS-HPXML defaults sit far inside it.
-fn setpoint_value_is_implausible(value: f64) -> bool {
+pub(crate) fn setpoint_value_is_implausible(value: f64) -> bool {
     !(SETPOINT_PLAUSIBILITY_MIN_C..=SETPOINT_PLAUSIBILITY_MAX_C).contains(&value)
 }
 
@@ -989,7 +989,7 @@ fn validate_setpoint_column(
 /// The HPXML setpoint profile's plausibility: the first value outside
 /// the plausible band fails the construction naming the side, the
 /// elements the profile came from and the value.
-fn validate_setpoint_profile(prefix: &str, values: &[f64]) -> Result<(), HaresError> {
+pub(crate) fn validate_setpoint_profile(prefix: &str, values: &[f64]) -> Result<(), HaresError> {
     if let Some(&value) = values
         .iter()
         .find(|&value| setpoint_value_is_implausible(*value))
