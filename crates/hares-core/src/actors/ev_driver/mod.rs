@@ -2091,6 +2091,194 @@ mod tests {
         );
     }
 
+    /// The daily-miles read site's own failure-propagation witness: an
+    /// unreadable miles source fails the day roll naming the actor and
+    /// the daily-miles source, no day invented. Each read site's witness
+    /// fails under its own revert to the fabricated default, so a
+    /// reverted site cannot hide behind another site's witness.
+    #[test]
+    fn unreadable_miles_source_fails_the_day_roll_naming_the_miles_source() {
+        use chrono::Weekday;
+        use hares_types::{DayFilter, TimeWindow};
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        // The other reads resolve; only the miles source cannot: its only
+        // window matches Mondays and the env steps a Thursday, and no
+        // default is set.
+        actor.departure_time = ScheduleSource::Constant(360.0);
+        actor.daily_drive_distance_m = ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(
+                DayFilter::Day(Weekday::Mon),
+                0,
+                1440,
+                30_000.0,
+            )],
+            default: None,
+            rng_state: None,
+        };
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "the miles read failure must mark the actor unhealthy"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("daily-miles"),
+            "the failure must name the actor and the daily-miles source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from a miles source the driver could not read"
+        );
+    }
+
+    /// The trip-duration read site's own failure-propagation witness (the
+    /// fallback branch: no direct arrival source, the arrival derived
+    /// from departure plus the duration).
+    #[test]
+    fn unreadable_duration_source_fails_the_day_roll_naming_the_duration_source() {
+        use chrono::Weekday;
+        use hares_types::{DayFilter, TimeWindow};
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.departure_time = ScheduleSource::Constant(360.0);
+        actor.arrival_time = None;
+        actor.trip_duration = ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(
+                DayFilter::Day(Weekday::Mon),
+                0,
+                1440,
+                600.0,
+            )],
+            default: None,
+            rng_state: None,
+        };
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "the duration read failure must mark the actor unhealthy"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("trip-duration"),
+            "the failure must name the actor and the trip-duration source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from a duration source the driver could not read"
+        );
+    }
+
+    /// The direct-arrival read site's own failure-propagation witness:
+    /// the arrival source fails on its first read.
+    #[test]
+    fn unreadable_arrival_source_fails_the_day_roll_naming_the_arrival_source() {
+        use chrono::Weekday;
+        use hares_types::{DayFilter, TimeWindow};
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.departure_time = ScheduleSource::Constant(360.0);
+        actor.arrival_time = Some(ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(
+                DayFilter::Day(Weekday::Mon),
+                0,
+                1440,
+                1080.0,
+            )],
+            default: None,
+            rng_state: None,
+        });
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "the arrival read failure must mark the actor unhealthy"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("arrival"),
+            "the failure must name the actor and the arrival source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from an arrival source the driver could not read"
+        );
+    }
+
+    /// The arrival re-sample read site's own failure-propagation witness:
+    /// the first arrival read resolves (a value at or before the
+    /// departure, forcing the re-sample loop) and the loop's own read
+    /// then fails - the first read's success alone cannot carry the
+    /// site's witness.
+    #[test]
+    fn failing_arrival_resample_read_fails_the_day_roll_naming_the_arrival_source() {
+        use std::sync::Arc as StdArc;
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.departure_time = ScheduleSource::Constant(360.0);
+        // One readable sample (before the departure, forcing a re-sample),
+        // then the data is exhausted and the re-sample read errors.
+        actor.arrival_time = Some(ScheduleSource::Shared {
+            data: StdArc::from([5.0]),
+            cursor: 0,
+            boundary: hares_types::BoundaryPolicy::Error,
+        });
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "the re-sample read failure must mark the actor unhealthy"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("arrival"),
+            "the re-sample read's failure must name the actor and the \
+             arrival source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from a re-sample read the driver could not read"
+        );
+    }
+
     /// Reseed re-derives every driving source from the new dwelling key:
     /// each source's key is the construction derivation of the seed, each
     /// position rewound, and two seeds never share a source keystream - a
