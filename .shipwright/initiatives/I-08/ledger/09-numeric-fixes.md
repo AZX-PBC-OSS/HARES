@@ -5768,3 +5768,83 @@ goldens compare-all 10 + dst 1 bitwise identical.
 **Dependencies:** none outside the types, equipment, core and Python
 crates; the `into_runtime` signature change is compile-guided at every
 conversion site.
+
+## Hardening 15: the EV driver fails on unreadable schedules instead of inventing a day
+
+**Kind:** numeric fix (the hardening phase's silent-fallback elimination
+entry).
+
+**Problem:** the EV driver's day-roll schedule reads substituted
+fabricated defaults on failure - a departure read that failed became
+480.0 (8:00), an arrival 1080.0, a trip duration 600.0 minutes, a miles
+read 30 miles. An unreadable schedule (a TimeWindows with no matching
+window and no default, a corrupt distribution the source's own
+validation rejects) therefore silently became a constant 8:00-departure,
+30-mile day: the vehicle departed, drove and charged on invented times,
+with no signal. This reopened the class `ScheduleSource::value_at`
+deliberately closes - it rejects non-finite and unmatched values with a
+typed error so corrupt input cannot under-report load unrecorded - and
+the driver, the one actor whose whole day hangs on these four reads, was
+the consumer that reopens it.
+
+**Change:** the five read sites (departure, the direct arrival draw and
+its re-samples, the trip duration, the daily miles) propagate the typed
+error, each naming the EV driver actor and the source whose read failed
+and carrying the source's own cause, so the step error is self-sufficient
+on the text path the batch boundary carries. The actor records the cause
+in its sticky health failure and reports unhealthy: the step fails at the
+post-decide health check, the existing actor step-failure machinery (the
+same path the needed-charge-hours estimate contract rides). No day is
+invented: the day's plan is dropped, and the failure is sticky, a
+schedule that cannot be read cannot become readable by drawing on. The
+documented re-sample-exhausted arrival guard is kept as it stands: it
+repairs the arrival-after-departure ordering constraint after five
+re-samples (a clamp to departure+1), it never substitutes a schedule
+value for a failed read. The field carrying the actor's sticky failure
+was renamed `estimate_error` to `health_error` (its contract now covers
+both the estimate and the schedule reads); the checkpoint's wire format
+is positional and its shape is unchanged, the schema version stays 5.
+
+The kept-state-energy question (the row 111 accounting): nothing to
+count, and the reason is structural. The failed decide runs in the
+ActorDecide phase, before the dispatch pass and before any equipment
+steps - the signals the failed decide queued are never applied, the
+ports receive nothing, there is no rollback and no kept port draw. The
+driver actor itself holds no energy-bearing state (a draw position, a
+day plan and a battery belief; the pack is the EV equipment's, whose own
+step failures keep the row 111 reporter accounting).
+`Equipment::stored_energy_j` is the Equipment trait's reporter and does
+not apply to actors.
+
+**Acceptance test:** the unit witness
+(`unreadable_schedule_source_fails_the_day_roll_naming_the_actor`, the
+driver's own tests): a departure source no window resolves fails the day
+roll - the actor reports unhealthy, the cause names the actor and the
+departure source, and no day event exists. The dwelling-level witnesses
+(`ev_driver_schedule_failure.rs`): the failing-schedule dwelling's step
+errors naming the actor and the source, with the read's own cause in the
+text; a readable-schedule control steps; and the text carries the actor,
+the source and the cause without further context. RED first: at the
+parent the actor stayed healthy with the invented day in hand and the
+step succeeded - the probe run confirmed the invented-day behavior
+end to end (the failing-schedule dwelling stepped 96 steps with the EV
+charging on the invented times).
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. The fixtures' EV drivers are the dwelling's
+built-in Constant-source drivers; no fixture's schedule read can fail,
+and no fixture's driver reaches the day roll's reads with a failing
+source.
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean, the touched crates also clean on
+default features; nextest `--workspace --all-features -j 2` 8311/8311
+passed (8 skipped), the touched crates also green on default features
+5120/5120 (5 skipped); `pytest -m '' -n 4` after `maturin develop`
+1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0 errors; the
+goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `fix: the ev driver fails on unreadable schedules instead of inventing a day`
+
+**Dependencies:** none outside the core crate's driver and the new
+integration test.

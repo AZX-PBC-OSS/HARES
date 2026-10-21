@@ -468,10 +468,13 @@ pub struct EvDriverActor {
     drive_cancelled: u32,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
-    /// First estimate-contract error (a non-finite or negative
-    /// needed-charge-hours result): the actor reports unhealthy and the step
-    /// fails at the post-decide health check.
-    estimate_error: Option<String>,
+    /// The actor's first contract failure: a driving schedule the driver
+    /// cannot read (the day roll's departure, arrival, duration or miles
+    /// source) or a non-finite or negative needed-charge-hours estimate.
+    /// The actor reports unhealthy and the step fails at the post-decide
+    /// health check; the failure is sticky because a schedule that cannot
+    /// be read cannot become readable by drawing on.
+    health_error: Option<String>,
 }
 
 use efficiency::temp_efficiency_multiplier;
@@ -513,7 +516,7 @@ impl EvDriverActor {
 
     /// Builds a driver actor with its own RNG stream.
     /// Takes over the decision state (its RNG stream and position, the
-    /// strategy's gate latches and the sticky estimate failure included)
+    /// strategy's gate latches and the sticky health failure included)
     /// and telemetry of the driver this one is rebuilt to replace with new
     /// prices.
     pub(crate) fn take_over(&mut self, predecessor: &dyn Actor) -> Result<(), HaresError> {
@@ -605,7 +608,7 @@ impl EvDriverActor {
             needs_away_charge: false,
             drive_cancelled: 0,
             telemetry,
-            estimate_error: None,
+            health_error: None,
         }
     }
 
@@ -763,10 +766,22 @@ impl EvDriverActor {
     }
 
     /// Roll a daily event for a new day if needed.
-    fn maybe_roll_daily_event(&mut self, env: &EnvironmentState) {
+    ///
+    /// A driving schedule the driver cannot read is a typed error naming
+    /// the actor and the source; no day is invented from defaults (the
+    /// departure, arrival, duration and miles values a failed read used
+    /// to substitute drove and charged the vehicle on invented times).
+    /// The caller records the cause: the actor reports unhealthy and the
+    /// step fails at the post-decide health check.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError::Equipment`] naming the actor and the source whose
+    /// read failed, carrying the source's own cause.
+    fn maybe_roll_daily_event(&mut self, env: &EnvironmentState) -> Result<(), HaresError> {
         let ordinal = env.current_time.ordinal0() as i32 + env.current_time.year() * 366;
         if ordinal == self.current_day_ordinal {
-            return;
+            return Ok(());
         }
         self.current_day_ordinal = ordinal;
 
@@ -779,18 +794,28 @@ impl EvDriverActor {
             self.reconcile_soc(env, "day_start");
         }
 
+        // The read-failure error for one of the driver's schedule sources:
+        // the actor and the source are named here, the source's own cause
+        // rides along, so the step error is self-sufficient.
+        let read_failed = |source: &str, err: HaresError| {
+            HaresError::Equipment(format!(
+                "EV driver actor '{}': the {source} schedule read failed: {err}",
+                self.name
+            ))
+        };
+
         // Decide if today is a driving day
         let roll: f64 = self.rng.random();
         if roll >= self.event_day_ratio {
             self.todays_event = None;
-            return;
+            return Ok(());
         }
 
         // Sample departure time from ScheduleSource (seeded, reproducible)
         let departure_min = self
             .departure_time
             .value_at(env)
-            .unwrap_or(480.0)
+            .map_err(|err| read_failed("departure-time", err))?
             .clamp(0.0, 1439.0) as u16;
 
         let arrival = if let Some(ref mut arrival_src) = self.arrival_time {
@@ -800,7 +825,7 @@ impl EvDriverActor {
             // unconditional arrival distribution shape.
             let mut arrival_raw = arrival_src
                 .value_at(env)
-                .unwrap_or(1080.0)
+                .map_err(|err| read_failed("arrival-time", err))?
                 .clamp(0.0, 1439.0) as u16;
             for _ in 0..5 {
                 if arrival_raw > departure_min {
@@ -808,12 +833,14 @@ impl EvDriverActor {
                 }
                 arrival_raw = arrival_src
                     .value_at(env)
-                    .unwrap_or(1080.0)
+                    .map_err(|err| read_failed("arrival-time", err))?
                     .clamp(0.0, 1439.0) as u16;
             }
             // Guard: if re-sampling fails (extremely unlikely given the
             // ~540-minute gap between commuter departure and arrival means),
-            // clamp to departure+1 to keep the invariant.
+            // clamp to departure+1 to keep the invariant. This is the
+            // documented re-sample-exhausted arrival guard: it repairs the
+            // ordering constraint, it never substitutes a schedule value.
             if arrival_raw <= departure_min {
                 (departure_min as u32 + 1).min(1439) as u16
             } else {
@@ -824,7 +851,7 @@ impl EvDriverActor {
             let dur = self
                 .trip_duration
                 .value_at(env)
-                .unwrap_or(600.0)
+                .map_err(|err| read_failed("trip-duration", err))?
                 .clamp(30.0, 1200.0) as u16;
             (departure_min as u32 + dur as u32).min(1439) as u16
         };
@@ -833,7 +860,7 @@ impl EvDriverActor {
         let distance_m = self
             .daily_drive_distance_m
             .value_at(env)
-            .unwrap_or(defaults::DAILY_DRIVE_DISTANCE_M)
+            .map_err(|err| read_failed("daily-miles", err))?
             .max(0.0);
 
         #[cfg(feature = "observe")]
@@ -880,6 +907,7 @@ impl EvDriverActor {
             arrival_minute: arrival,
             drive_j,
         });
+        Ok(())
     }
 
     /// Check if current minute-of-day matches a target minute within time resolution.
@@ -1187,7 +1215,7 @@ impl EvDriverActor {
             // check, and the override stays inactive for that step.
             let Ok(needed) = needed_charge_hours_to_target(anxiety_soc, CHARGING_EFFICIENCY, &ctx)
             else {
-                self.estimate_error =
+                self.health_error =
                     Some("needed_charge_hours estimate is not a valid number".to_string());
                 return None;
             };
@@ -1279,7 +1307,7 @@ impl EvDriverActor {
         let Ok(hours) =
             needed_charge_hours_to_target(anxiety_soc.clamp(0.0, 1.0), CHARGING_EFFICIENCY, &ctx)
         else {
-            self.estimate_error =
+            self.health_error =
                 Some("needed_charge_hours estimate is not a valid number".to_string());
             return;
         };
@@ -1300,7 +1328,7 @@ impl EvDriverActor {
                     ..ctx.clone()
                 },
             ) else {
-                self.estimate_error =
+                self.health_error =
                     Some("needed_charge_hours estimate is not a valid number".to_string());
                 return;
             };
@@ -1364,8 +1392,8 @@ struct EvDriverSnapshot {
     drive_cancelled: u32,
     /// The charging strategy's gate hysteresis latches, in stack order.
     gate_latches: Vec<bool>,
-    /// The sticky health failure; see `EvDriverActor::estimate_error`.
-    estimate_error: Option<String>,
+    /// The sticky health failure; see `EvDriverActor::health_error`.
+    health_error: Option<String>,
     /// The composer's carried decision state (the last action, the last
     /// resolved target, rate and cap, the last needed-charge-hours
     /// estimate).
@@ -1395,11 +1423,11 @@ impl Actor for EvDriverActor {
     }
 
     fn healthy(&self) -> bool {
-        self.estimate_error.is_none()
+        self.health_error.is_none()
     }
 
     fn health_detail(&self) -> Option<&str> {
-        self.estimate_error.as_deref()
+        self.health_error.as_deref()
     }
 
     fn telemetry(&self) -> Option<&Telemetry> {
@@ -1466,7 +1494,16 @@ impl Actor for EvDriverActor {
         let res_seconds = env.time_res.num_seconds();
         debug_assert!(res_seconds >= 1, "time_res must be >= 1 second");
         self.time_res_minutes = (res_seconds.max(1) as f64) / 60.0;
-        self.maybe_roll_daily_event(env);
+        // A schedule the driver cannot read fails the day roll: the actor
+        // records the cause and reports unhealthy, so the step fails at
+        // the post-decide health check. No day is invented from defaults;
+        // the day's plan is dropped, and the failure is sticky - a
+        // schedule that cannot be read cannot become readable by drawing
+        // on.
+        if let Err(err) = self.maybe_roll_daily_event(env) {
+            self.health_error = Some(err.to_string());
+            self.todays_event = None;
+        }
 
         let before_out = out.len();
         let current_minute = (env.current_time.hour() * 60 + env.current_time.minute()) as u16;
@@ -1488,7 +1525,7 @@ impl Actor for EvDriverActor {
         // fails at the post-decide health check); the channel keeps its
         // previous value for that step.
         if let Err(err) = self.composer.refresh_needed_charge_hours(&ctx) {
-            self.estimate_error = Some(err.to_string());
+            self.health_error = Some(err.to_string());
         }
 
         // A non-driving day changes only *future* departures. An in-flight
@@ -1797,7 +1834,7 @@ impl Actor for EvDriverActor {
             needs_away_charge: self.needs_away_charge,
             drive_cancelled: self.drive_cancelled,
             gate_latches: self.composer.gate_latches(),
-            estimate_error: self.estimate_error.clone(),
+            health_error: self.health_error.clone(),
             composer_carried: self.composer.carried_state(),
             sources: EvDriverSourceStates {
                 miles: self.daily_drive_distance_m.capture_state(),
@@ -1827,7 +1864,7 @@ impl Actor for EvDriverActor {
         self.needs_away_charge = snap.needs_away_charge;
         self.drive_cancelled = snap.drive_cancelled;
         self.composer.restore_gate_latches(&snap.gate_latches)?;
-        self.estimate_error = snap.estimate_error;
+        self.health_error = snap.health_error;
         self.composer.restore_carried_state(snap.composer_carried);
         self.daily_drive_distance_m
             .restore_state(&snap.sources.miles)?;
@@ -1854,7 +1891,7 @@ impl Actor for EvDriverActor {
     /// boundary, instead of postcard failing inside `load_state`.
     ///
     /// v3: the snapshot carries the charging strategy's gate hysteresis
-    /// latches and the sticky estimate failure.
+    /// latches and the sticky health failure.
     ///
     /// v4: the carried energies (`DayEvent.drive_j`, `Driving.remaining_j`)
     /// hold J (SI) where v3 held kWh - a v3 blob's energies would read
@@ -1989,6 +2026,58 @@ mod tests {
             },
             ChaCha8Rng::seed_from_u64(42),
         )
+    }
+
+    /// An unreadable driving schedule fails the day roll naming the actor
+    /// and the source; the step then fails at the post-decide health
+    /// check. No day may be invented from a schedule the driver could not
+    /// read: the fabricated-default fallback this replaced drove and
+    /// charged the vehicle on invented times (an 8:00 departure, a
+    /// 30-mile trip) whenever a source failed to resolve.
+    #[test]
+    fn unreadable_schedule_source_fails_the_day_roll_naming_the_actor() {
+        use chrono::Weekday;
+        use hares_types::{DayFilter, TimeWindow};
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        // The departure source cannot resolve a value in this env: its
+        // only window matches Mondays and the env steps a Thursday, and
+        // no default is set.
+        actor.departure_time = ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(
+                DayFilter::Day(Weekday::Mon),
+                0,
+                1440,
+                480.0,
+            )],
+            default: None,
+            rng_state: None,
+        };
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "a schedule read failure must mark the actor unhealthy; the \
+             fabricated-default fallback instead invented the day"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("departure"),
+            "the failure must name the actor and the source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from a schedule the driver could not read"
+        );
     }
 
     /// Reseed re-derives every driving source from the new dwelling key:
@@ -3772,7 +3861,7 @@ mod tests {
     fn take_over_keeps_the_estimate_failure_latch() {
         let strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
         let mut failed = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
-        failed.estimate_error = Some("needed-hours estimate failed".to_string());
+        failed.health_error = Some("needed-hours estimate failed".to_string());
         assert!(!failed.healthy());
         assert_eq!(
             failed.health_detail(),
