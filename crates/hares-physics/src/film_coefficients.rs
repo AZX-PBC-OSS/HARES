@@ -535,7 +535,15 @@ pub fn film_resistances(
         // exterior LWR T_eff correction to diverge (h_out appears in the
         // denominator at longwave.rs:106). A minimum of 1.0 protects all
         // consumers of exterior film resistance, not just the window path.
-        let h_ext = (h_natural + h_forced).max(1.0);
+        // The floor's firing is counted, never silent.
+        let h_ext_unfloored = h_natural + h_forced;
+        #[cfg(feature = "observe")]
+        if h_ext_unfloored < 1.0 {
+            hares_types::clamp_census::record(
+                hares_types::clamp_census::ClampSite::ExteriorFilmFloor,
+            );
+        }
+        let h_ext = h_ext_unfloored.max(1.0);
         1.0 / h_ext
     } else if exterior_zone == ZoneLabel::Ground {
         1.0 / h_conv
@@ -1118,5 +1126,40 @@ mod tests {
             "at 2 m/s wind, r_ext={r_ext_typical:.6} should be well below 1.0 — \
              floor must not override valid values"
         );
+    }
+
+    /// The clamp census counts the exterior film coefficient's floor: at
+    /// zero wind and the minimum temperature difference the DOE-2 model's
+    /// convection coefficient lands below 1.0 W/(m²·K) and the floor
+    /// holds it there. A firing that went uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_exterior_film_floor() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        // The zero-wind, minimum-ΔT conditions the floor exists for: the
+        // DOE-2 model produces h ≈ 0.608 < 1.0.
+        let (_, r_ext) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            0.0,
+            10.0,
+            15.0,
+            SurfaceRoughness::Smooth,
+        );
+        assert_approx(r_ext, 1.0, 1e-10);
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::ExteriorFilmFloor),
+            1,
+            "the floored exterior film records its clamp"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
     }
 }

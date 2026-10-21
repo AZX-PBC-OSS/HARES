@@ -6144,3 +6144,75 @@ resolution's validation sites (the three original ones, moved to the
 distribution point every setpoint-consuming spec takes), the
 thermostat FSM's init gate and `ScheduleSource::declared_literal_values`,
 the three repaired test CSVs.
+
+## Hardening 18: every physics clamp is counted, none are silent
+
+**Kind:** hardening (the clamp census; diagnostics only, no physics
+moves).
+
+**Problem:** the physics clamps a value into its valid domain silently
+at every surface but one: the equipment's biquadratic curve-index clamp
+counted into `RunHealth::curve_index_clamps` (with its policy limit),
+while the AIM-2 pressure exponent's band, the relative-humidity
+saturation hold, the natural ventilation's comfort-base adjustment and
+its 20-ACH cap, the DOE-2 exterior film coefficient's floor and the
+tank's draw truncation all overwrote their values with no signal. A
+clamp firing is information the run's consumer needs: an exponent that
+keeps falling outside its band, a draw that never fits the tank, a
+humidity ratio that outruns saturation all say something about the
+inputs, and none of it was visible.
+
+**Change:** a counted clamp-site taxonomy, `hares_types::clamp_census`:
+the `ClampSite` enum names every physics clamp surface (each site is
+its own census key, serialized under its own name), and `ClampCensus`
+holds the per-site run totals. The recording sites tally on the calling
+thread (a thread-local per-step tally, the same accumulate-at-the-source
+and take-and-reset-per-drain shape the equipment's
+`take_health_counts` uses); the dwelling drains the tally once per
+timestep beside the equipment health drain, into run totals read
+through `Dwelling::clamp_census()`. The census is observe-gated
+(`hares_types/observe`, carried by the physics and equipment crates'
+own observe features) and diagnostics-scoped like the envelope's
+diagnostics: it surfaces through the dwelling's accessor alone, never
+through the run result's health totals, the output frames or the
+policy.
+
+**The sites:** the plan named six surfaces; the census carries eight
+sites (the grep of the clamp idioms found two more at the named
+surfaces, both from the review's own enumeration). Per site:
+`Aim2PressureExponent` (the `n_i.clamp(N_I_MIN, N_I_MAX)` at both of
+its clamp points, the per-step ASHRAE wind-stack evaluation and the
+ACH50-to-coefficients conversion), `Aim2LeakageDistribution` (the
+Walker & Wilson Eq. 10-11 stack-factor hold and the Eq. 25 ceiling
+asymmetry hold in the ACH50 conversion; with the fixed leakage-class
+table these are guards valid inputs cannot trip, counted so a table
+change that lets them fire is visible), `NaturalVentilationAdj` (the
+comfort-base adjustment ratio held into [0, 1] when the base sits
+below the outdoor temperature), `NaturalVentilationAchCap` (the
+20-ACH cap), `RelativeHumidity` (the saturation hold), `ExteriorFilmFloor`
+(the 1.0 W/(m2 K) DOE-2 floor), `TankDrawTruncation` (the step draw
+truncated to the tank's volume) and `CurveIndex` (the biquadratic
+curve-index clamp: the existing health counter stays the policy and
+run-result surface, and the site joins the census beside it). A site's
+count rises only when its clamp changes the value: the recording reads
+the pre-clamp value and the clamp expression is untouched, so no
+clamp's behavior moves.
+
+**Acceptance test:** RED first at the census wired but the sites
+silent: six witness probes (the AIM-2 exponent at both points, the
+ventilation adjustment and cap, the saturation hold, the film floor,
+the tank truncation, and the dwelling-level drain that asserts the
+census site equals the health counter on a clamping run) each failed
+at zero, GREEN after the recording calls landed. The census's own
+unit tests pin the record/take/merge shape and the name-keyed
+serialization.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture (the census is compiled out without the
+observe feature the golden build does not enable, and nothing in the
+frame path reads it with the feature on).
+
+**Dependencies:** the hares-types clamp-census module, the recording
+sites in the physics (infiltration, psychrometrics, film coefficients)
+and equipment (hvac core, tank) crates, and the dwelling's per-step
+drain beside the equipment health drain.

@@ -1141,6 +1141,13 @@ impl HvacEquipment {
                     None => return DEFAULT_BIQUADRATIC_COEFFS,
                 };
                 if clamped != curve_index {
+                    // The clamp's firing is counted, never silent: the
+                    // census site rides the equipment health counter's
+                    // own count, and the dwelling drains both per step.
+                    #[cfg(feature = "observe")]
+                    hares_types::clamp_census::record(
+                        hares_types::clamp_census::ClampSite::CurveIndex,
+                    );
                     if !self
                         .config
                         .biquadratic_clamp
@@ -1993,6 +2000,33 @@ mod tests {
             (result - (-10.0)).abs() < 1e-9,
             "input -200°C must clamp to -10°C x1 lower bound; got {result}"
         );
+    }
+
+    /// The clamp census counts the curve-index clamp: an evaluation
+    /// past the configured curve set clamps to the last same-type
+    /// curve, and the firing is recorded at the site whose count the
+    /// dwelling's census drains beside the equipment health counter.
+    /// A firing that went uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_curve_index_clamp() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.config.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        let _ = hvac.evaluate_biquadratic(4, 20.0, 30.0);
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::CurveIndex),
+            1,
+            "the out-of-bounds curve evaluation records its clamp"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
     }
 
     #[test]

@@ -168,6 +168,15 @@ pub fn ashrae_wind_stack(
     shelter_coeff: f64,
     n_i: f64,
 ) -> f64 {
+    // The clamp's firing is counted, never silent: an exponent outside
+    // the band is held to it (intended behavior) and the hold is
+    // recorded for the dwelling's per-step census drain.
+    #[cfg(feature = "observe")]
+    if !(N_I_MIN..=N_I_MAX).contains(&n_i) {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::Aim2PressureExponent,
+        );
+    }
     let n_i = n_i.clamp(N_I_MIN, N_I_MAX);
     let q_temp = c_s * delta_t_c.abs().powf(n_i);
     let q_wind = c_w * (shelter_coeff.max(0.0) * wind_speed_m_s).powf(2.0 * n_i);
@@ -430,14 +439,31 @@ pub fn natural_ventilation_flow_m3_s(inputs: NaturalVentilationInputs) -> (f64, 
     };
 
     // Adjustment factor: how far above comfort base is the zone, relative to the delta
-    let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
+    // The clamp's firing is counted, never silent: the ratio is held
+    // into [0, 1] when the comfort base sits below the outdoor
+    // temperature.
+    let adj_raw = (t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c);
+    #[cfg(feature = "observe")]
+    if !(0.0..=1.0).contains(&adj_raw) {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::NaturalVentilationAdj,
+        );
+    }
+    let adj = adj_raw.clamp(0.0, 1.0);
 
     // Quadrature combination: Q_total = adj × sqrt(Q_wind² + Q_stack²)
     // EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area; ASHRAE HoF 2009 Ch. 16.14
     let q_total = adj * (q_wind * q_wind + q_stack * q_stack).sqrt();
 
-    // Cap at 20 ACH (OCHRE `max_nat_flow = 20.0 * volume * m3hr_to_m3s`)
+    // Cap at 20 ACH (OCHRE `max_nat_flow = 20.0 * volume * m3hr_to_m3s`).
+    // The cap's firing is counted, never silent.
     let max_nat_flow = 20.0 * zone_volume_m3 / SECONDS_PER_HOUR;
+    #[cfg(feature = "observe")]
+    if q_total > max_nat_flow {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::NaturalVentilationAchCap,
+        );
+    }
     let q_nat = q_total.min(max_nat_flow);
 
     (q_nat, q_stack * adj, q_wind * adj, cd)
@@ -650,6 +676,15 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     /// Assumed indoor temperature [K] ≈ 23 °C (73.5 °F) -- matches OCHRE.
     const T_IN_K: f64 = 296.15;
 
+    // The clamp's firing is counted, never silent, at the conversion
+    // that interprets the input's exponent the same way the per-step
+    // evaluation holds it.
+    #[cfg(feature = "observe")]
+    if !(N_I_MIN..=N_I_MAX).contains(&params.n_i) {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::Aim2PressureExponent,
+        );
+    }
     let n_i = params.n_i.clamp(N_I_MIN, N_I_MAX);
 
     // Step 1: Flow coefficient C [m³/s/Pa^n_i]
@@ -670,6 +705,13 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
 
     // Step 3: Stack factor -- Walker & Wilson (1998) Eq. 9-12
     let m_o = (x_i_raw + (2.0 * n_i + 1.0) * y_i).powi(2) / (2.0 - r_i);
+    // The distribution clamps' firings are counted, never silent.
+    #[cfg(feature = "observe")]
+    if m_o > 1.0 {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::Aim2LeakageDistribution,
+        );
+    }
     let m_i = m_o.min(1.0); // Eq. 10-11
 
     let f_i = if params.has_flue {
@@ -696,6 +738,13 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     // Step 5: Wind factor -- Walker & Wilson (1998) Eq. 15-25
     let f_w = if matches!(params.foundation, FoundationLeakageClass::VentedCrawlspace) {
         // Crawlspace modified wind factor (Eq. 20-24)
+        // The distribution clamps' firings are counted, never silent.
+        #[cfg(feature = "observe")]
+        if x_i_raw > 1.0 - 2.0 * y_i {
+            hares_types::clamp_census::record(
+                hares_types::clamp_census::ClampSite::Aim2LeakageDistribution,
+            );
+        }
         let x_i = x_i_raw.min(1.0 - 2.0 * y_i); // Eq. 25 clamp
         let r_x = 1.0 - r_i * (n_i / 2.0 + 0.2); // Eq. 21
         let y_x = 1.0 - y_i / 4.0; // Eq. 22
@@ -2660,5 +2709,80 @@ mod tests {
 
         // Ratio of shelter coefficients must equal ratio of f_t factors (terrain only differs there).
         approx_eq(actual_ratio, expected_ratio, 1e-10);
+    }
+
+    /// The clamp census counts this file's clamp firings: the AIM-2
+    /// pressure exponent at both of its clamp sites (the per-step
+    /// ASHRAE wind-stack evaluation and the ACH50 conversion), the
+    /// natural ventilation's comfort-base adjustment and its 20-ACH
+    /// cap. Each probe's inputs force the clamp it witnesses; a firing
+    /// that went uncounted fails the probe. The AIM-2
+    /// leakage-distribution guards cannot fire from valid inputs (the
+    /// leakage-class table fixes the ratios), so that site's counting
+    /// is pinned by the census module's own unit test.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_infiltration_clamps() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probes assert their own firings.
+        let _ = clamp_census::take();
+
+        // One per-step evaluation and one conversion, both with an
+        // exponent above the band: two firings at one site.
+        ashrae_wind_stack(1.0, 1.0, 10.0, 1.0, 0.5, 0.9);
+        let params = Aim2Params {
+            ach50: 7.0,
+            volume_m3: 400.0,
+            infiltration_height_m: 5.0,
+            foundation: FoundationLeakageClass::Other,
+            shielding: ShieldingClass::Normal,
+            terrain: TerrainClass::Suburban,
+            has_flue: false,
+            n_i: 0.9,
+            floors_above_grade: 2.0,
+        };
+        let _ = aim2_coefficients_from_ach50(&params);
+
+        // The comfort base sits below the outdoor temperature, so the
+        // adjustment ratio exceeds one and clamps; the enormous open
+        // area then hits the 20-ACH cap. One call, two sites.
+        let _ = natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+            open_area_m2: 1000.0,
+            t_zone_c: 30.0,
+            t_outdoor_c: 25.0,
+            t_base_c: 20.0,
+            outdoor_humidity_ratio: 0.001,
+            max_outdoor_humidity_ratio: 0.0115,
+            wind_speed_m_s: 20.0,
+            zone_volume_m3: 100.0,
+            opening_azimuth_deg: 180.0,
+            wind_direction_deg: 180.0,
+            dh_m: 2.0,
+            opening_type: OpeningType::CrossVentilation,
+            zone_height_m: 2.5,
+        });
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::Aim2PressureExponent),
+            2,
+            "both n_i clamp surfaces record their firings"
+        );
+        assert_eq!(
+            census.count(ClampSite::NaturalVentilationAdj),
+            1,
+            "the comfort-base adjustment records its clamp"
+        );
+        assert_eq!(
+            census.count(ClampSite::NaturalVentilationAchCap),
+            1,
+            "the 20-ACH cap records its clamp"
+        );
+        assert!(
+            census.count(ClampSite::RelativeHumidity) == 0,
+            "a site's count only rises when that site's clamp fires"
+        );
     }
 }

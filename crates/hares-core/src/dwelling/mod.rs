@@ -3015,6 +3015,13 @@ pub struct Dwelling {
     diagnostic_accum: Option<DiagnosticAccumulator>,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     envelope_diagnostics: EnvelopeDiagnostics,
+    /// The run's clamp census: every physics clamp the run applied,
+    /// counted at its site and drained per step from the recording
+    /// thread's tally. Diagnostics only: the census surfaces through the
+    /// dwelling's `clamp_census` accessor, never the run result's health
+    /// totals or the output frames.
+    #[cfg(feature = "observe")]
+    clamp_census: hares_types::clamp_census::ClampCensus,
 }
 
 /// Borrowed view of per-step actor-interest filter state passed to
@@ -4607,6 +4614,8 @@ fn assemble_from_blueprint_with_seed(
         diagnostic_accum: None,
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         envelope_diagnostics: solvers.envelope_diagnostics,
+        #[cfg(feature = "observe")]
+        clamp_census: hares_types::clamp_census::ClampCensus::default(),
     };
 
     // The post-hoc diagnostic accumulator: part of the diagnostics report,
@@ -5257,6 +5266,15 @@ impl Dwelling {
     pub fn envelope_diagnostics_json(&self) -> Result<String> {
         serde_json::to_string_pretty(&self.envelope_diagnostics)
             .map_err(|e| HaresError::Io(format!("EnvelopeDiagnostics serialization: {e}")))
+    }
+
+    /// The run's clamp census: per-site counts of every physics clamp the
+    /// run applied, drained per step. Diagnostics only: the census rides
+    /// this accessor, never the health totals the frames serialize.
+    #[cfg(feature = "observe")]
+    #[must_use]
+    pub fn clamp_census(&self) -> &hares_types::clamp_census::ClampCensus {
+        &self.clamp_census
     }
 
     /// Stores the active price signal for equipment controllers.
@@ -7792,6 +7810,21 @@ impl Dwelling {
         // collision the run hit, with no policy limit (the event escalates
         // nothing: the warning is the signal).
         self.health.cross_tier_deadband_events += step_cross_tier_deadband_events;
+
+        // The clamp census: once per timestep, after the physics and
+        // equipment steps complete, drain the recording thread's per-step
+        // tally into the run totals, the same take-and-reset the
+        // equipment health counts above use. Diagnostics only: no policy
+        // limit and no warning ride the census; the counts surface
+        // through the dwelling's `clamp_census` accessor, never through
+        // the health totals the frames serialize.
+        #[cfg(feature = "observe")]
+        {
+            let step_clamps = hares_types::clamp_census::take();
+            if !step_clamps.is_empty() {
+                self.clamp_census.merge(&step_clamps);
+            }
+        }
 
         // Step 3c: propagate per-timestep ventilation recovery effectiveness
         // from equipment to the thermal solver config.  The Ventilation equipment
@@ -21543,6 +21576,20 @@ latent_gain_fraction = 0.08
             dwelling.health().curve_index_clamps >= 1,
             "the out-of-bounds curve evaluation must land in the dwelling's run total; got {:?}",
             dwelling.health()
+        );
+
+        // The clamp census drains the same events per step into its own
+        // diagnostics-scoped totals: the site's count equals the health
+        // counter's (both drain the same clamp events), and the census
+        // surfaces through the dwelling's accessor alone, never the
+        // health totals the output frames serialize.
+        #[cfg(feature = "observe")]
+        assert_eq!(
+            dwelling
+                .clamp_census()
+                .count(hares_types::clamp_census::ClampSite::CurveIndex),
+            dwelling.health().curve_index_clamps,
+            "the census site counts the same clamp events the health total drains"
         );
     }
 

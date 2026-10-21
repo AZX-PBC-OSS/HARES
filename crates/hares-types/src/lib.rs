@@ -12,6 +12,8 @@
 extern crate uom;
 
 pub mod alloc_count;
+#[cfg(feature = "observe")]
+pub mod clamp_census;
 pub mod control_signal;
 pub mod domain_solver;
 pub mod environment;
