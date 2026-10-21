@@ -1151,7 +1151,7 @@ pub struct EnvelopeComponentGains {
     /// close, and this count is where that shows.
     #[cfg(feature = "observe")]
     pub skin_iteration_cap_exits: u64,
-    /// The largest exterior-skin residual this step [K]: the greatest
+    /// The largest exterior-skin residual this step (K): the greatest
     /// |t_skin − F| against the skin's own fixed point
     /// F = t_init + (solar + lwr)·rad_res over the iterative-path
     /// surfaces, converged or not. Zero when no iterative-path surface
