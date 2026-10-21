@@ -1137,6 +1137,24 @@ pub struct EnvelopeComponentGains {
     /// Angle between wind direction and opening normal [°], in [0, 180].
     #[cfg(feature = "observe")]
     pub natural_ventilation_wind_angle_deg: f64,
+    /// Exterior-skin fixed-point iterations that exited on the iteration
+    /// cap this step: the iterative-path (rad_frac > 0) surfaces whose
+    /// budget (`n_iter`, the floor of dt/300 + 1 — one damped iteration
+    /// at 60 s) ran out without the 0.01 K step tolerance break. The
+    /// warm-start design converges across timesteps mid-transient, so a
+    /// cap exit is intended behavior — but a run whose skins cap every
+    /// step is a run whose skins never close, and this count is where
+    /// that shows.
+    #[cfg(feature = "observe")]
+    pub skin_iteration_cap_exits: u64,
+    /// The largest exterior-skin residual this step [K]: the greatest
+    /// |t_skin − F| against the skin's own fixed point
+    /// F = t_init + (solar + lwr)·rad_res over the iterative-path
+    /// surfaces, converged or not. Zero when no iterative-path surface
+    /// exists. A residual above 1 K means the delivered skin temperature
+    /// sits far from the balance the injection assumed.
+    #[cfg(feature = "observe")]
+    pub max_skin_residual_k: f64,
     /// Outdoor moist-air density used for infiltration/ventilation mass flow conversion [kg/m³].
     /// Computed per timestep from outdoor T, P, and humidity ratio via ASHRAE HoF 2021 Ch.1 Eq.28.
     /// Included in diagnostic CSV (verbosity ≥ 4) for altitude-aware density verification.

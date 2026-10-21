@@ -6622,3 +6622,63 @@ dst 1 bitwise identical, no re-capture.
 **Dependencies:** `crates/hares-physics/src/infiltration.rs` (docstring
 and tests only), `docs/PHYSICS_DECISIONS.md`, and the upstream E+ source
 pinned in the record.
+
+## Hardening 22: the exterior skin solve reports its own convergence
+
+**Kind:** hardening (diagnostics only, observe-gated; no physics moves).
+
+**The review's finding:** the exterior skin's fixed-point iteration
+(exterior longwave, the iterative path where rad_frac > 0) exits either
+on its 0.01 K step tolerance or on its iteration budget — and the budget
+exit was accepted with no counter, no residual and no signal. At the
+60 s production timestep the budget is one damped iteration
+(`n_iter = floor(dt/300) + 1`), so mid-transient (sunrise, cloud
+passage) the skin lags its fixed point and the non-converged skin rides
+silently; the fixed-point invariant guarded only the converged exits.
+
+**Change:** the step's component gains carry the solve's convergence
+self-report, both fields observe-gated like the natural-ventilation
+diagnostics they sit beside:
+
+- `skin_iteration_cap_exits: u64` — the count of iterative-path surfaces
+  whose iteration ran out its budget without the tolerance break, reset
+  per step like the other per-step gain accumulators;
+- `max_skin_residual_k: f64` — the greatest |t_skin − F| against the
+  surface's own fixed point F = t_init + (solar + lwr)·rad_res over the
+  iterative-path surfaces, converged or not (the converged bound is
+  0.5 K, the fixed-point invariant's own tolerance, so any residual
+  above it is a budget exit's lag).
+
+And the first step whose residual crosses 1 K warns once per solver
+(the one-time-warn pattern, the interior-LWR linearisation latch's
+shape): the warm-start acceptance is designed to lag mid-transient, so
+the warning names the surface, the residual and whether the exit was
+the cap, once for the run, never per step. The warn threshold is the
+converged bound's 2x; only a budget exit can cross it.
+
+**Acceptance test (RED first):** the forced-cap probe
+(`longwave::tests::forced_iteration_cap_exit_is_counted_with_its_residual`)
+builds a one-surface iterative-path solver with the 60 s production
+budget (one damped iteration, the budget the review's mechanism names)
+and swings the sky temperature 55 °C warmer against the same air: the
+single damped iteration cannot cross the displaced fixed point, the
+loop exits on the cap. At the parent the probe could not be expressed —
+the fields do not exist, the compile failure the witness of the silence
+(the exit had no surface to report through); GREEN after the fields
+landed, the count 1 and the residual 71.4 K on the probe's constants
+(area 12 m², emissivity 0.9, rad_frac 0.5, rad_res 0.05 K/W, one
+iteration). The counter's specificity is pinned beside it: a 60-budget
+solve of the same surface counts no cap exit and reports a residual
+inside the 0.5 K converged bound, and the warn latch test holds the
+once-only semantics (set on the first lagging step, never reset).
+
+**Movement:** none — the counting reads the pre-existing residual
+quantity the converged branch already computed, no clamp or iteration
+behavior moves, and the fields are compiled out without the observe
+feature the golden build does not enable. The goldens compare-all 10 +
+dst 1 bitwise identical, no re-capture.
+
+**Dependencies:** `crates/hares-envelope/src/thermal_solver/longwave.rs`
+(the counting, the residual and the warn at the iteration's exit),
+`thermal_solver/mod.rs` (the per-step accumulators and the gains
+wiring), `thermal_solver/config.rs` (the two observe-gated fields).

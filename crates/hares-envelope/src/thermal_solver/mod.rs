@@ -154,6 +154,22 @@ pub struct ThermalSolver {
     /// Accumulator for window exterior LWR beyond U-factor assumption [W].
     /// Set during `apply_exterior_longwave_inputs_iterative`.
     window_exterior_lwr_w: f64,
+    /// Exterior-skin iteration-cap exits this step (observe-gated):
+    /// counted per surface in `apply_exterior_longwave_inputs_iterative`,
+    /// reported through `component_gains`.
+    #[cfg(feature = "observe")]
+    skin_iteration_cap_exits: u64,
+    /// The largest exterior-skin residual this step [K] (observe-gated):
+    /// the greatest |t_skin − F| against the surface's fixed point over
+    /// the iterative-path surfaces, reported through `component_gains`.
+    #[cfg(feature = "observe")]
+    max_skin_residual_k: f64,
+    /// The skin-lag warning's once-only latch (observe-gated): the first
+    /// step whose max skin residual exceeds the 1 K report threshold
+    /// warns once per solver and the latch never resets — a run whose
+    /// skins lag is one warning, not one per step.
+    #[cfg(feature = "observe")]
+    skin_lag_warned: bool,
     /// Net exterior LWR at opaque exterior skins [W], both application
     /// paths: the non-iterative path (rad_frac == 0, flux routed through the
     /// semi-implicit coupling, not `u`) and the iterative path (rad_frac > 0,
@@ -1155,6 +1171,12 @@ impl ThermalSolver {
             solar_absorbed_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_by_zone_buf: Vec::with_capacity(n_lwr_zones),
             window_exterior_lwr_w: 0.0,
+            #[cfg(feature = "observe")]
+            skin_iteration_cap_exits: 0,
+            #[cfg(feature = "observe")]
+            max_skin_residual_k: 0.0,
+            #[cfg(feature = "observe")]
+            skin_lag_warned: false,
             opaque_exterior_lwr_w: 0.0,
             solar_irr_slot_buf: HashMap::with_capacity(n_ext_surfaces),
             solar_slot_map_keys: Vec::with_capacity(env.weather.solar_irradiance.len()),
@@ -1487,6 +1509,10 @@ impl ThermalSolver {
             natural_ventilation_wind_angle_deg: indoor_inf
                 .map(|c| c.natural_ventilation_wind_angle_deg)
                 .unwrap_or(0.0),
+            #[cfg(feature = "observe")]
+            skin_iteration_cap_exits: self.skin_iteration_cap_exits,
+            #[cfg(feature = "observe")]
+            max_skin_residual_k: self.max_skin_residual_k,
             air_density_kg_m3: {
                 moist_air_density_kg_m3(
                     env.weather.pressure_pa(),
