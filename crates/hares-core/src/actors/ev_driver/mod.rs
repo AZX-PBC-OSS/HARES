@@ -61,7 +61,8 @@ use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     ChargingStrategy, ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId,
-    EvConnectionState, HaresError, PlugInPolicy, ScheduleSource, Telemetry, TelemetryField,
+    EvConnectionState, HaresError, PlugInPolicy, PriceSignal, ScheduleSource, Telemetry,
+    TelemetryField,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -1290,6 +1291,27 @@ impl EvDriverActor {
         }
     }
 
+    /// The price channel the strategy's votes read that the run does not
+    /// publish: the export rate drives the export decisions (the V2G
+    /// vote and the price optimizer's discharge leg), the import rate
+    /// drives the price optimizer's charge leg. `None` when every
+    /// channel the strategy reads is published.
+    fn missing_price_channel(&self, price: &PriceSignal) -> Option<&'static str> {
+        match self.strategy {
+            ChargingStrategy::V2G { .. } => price.export_price.is_none().then_some("export"),
+            ChargingStrategy::TouAware { .. } => {
+                if price.electricity_price.is_none() {
+                    Some("import")
+                } else if price.export_price.is_none() {
+                    Some("export")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// The equipment's own published cold-charge capability factor
     /// (`CHARGE_DERATE` telemetry) when the target equipment is
     /// observable — the physical state the needed-hours estimate keys on
@@ -1537,6 +1559,20 @@ impl Actor for EvDriverActor {
         if let Err(err) = self.maybe_roll_daily_event(env) {
             self.health_error = Some(err.to_string());
             self.todays_event = None;
+        }
+
+        // A price-driven strategy prices its votes against the channels
+        // the run publishes: charging pays the import rate, exporting
+        // earns the export rate. A run that publishes no channel the
+        // strategy reads is never decided on a fabricated $0/kWh price
+        // (the old substitution made charging free and the export votes
+        // inert): the actor records the cause and reports unhealthy, and
+        // the step fails at the post-decide health check.
+        if let Some(channel) = self.missing_price_channel(&env.price_signal) {
+            self.health_error = Some(format!(
+                "the {channel} price channel is not published; the strategy's votes \
+                 price against it and never on a substituted $0/kWh"
+            ));
         }
 
         let before_out = out.len();
@@ -2975,6 +3011,7 @@ mod tests {
                 if needs_price_schedule {
                     env.price_signal = PriceSignal {
                         electricity_price: Some(0.02),
+                        export_price: Some(0.02),
                         ..Default::default()
                     };
                 }
@@ -3192,6 +3229,7 @@ mod tests {
         let mut env = env_at_minute(19 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.30),
+            export_price: Some(0.30),
             ..Default::default()
         };
         // Previous-step equipment flow says +3600 W (charging); this step
@@ -4801,6 +4839,7 @@ mod tests {
         let mut env = env_at_minute(2 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.01),
+            export_price: Some(0.01),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4835,6 +4874,7 @@ mod tests {
         let mut env = env_at_minute(12 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.10),
+            export_price: Some(0.10),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -5097,6 +5137,7 @@ mod tests {
         let mut env = env_at_minute(19 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.30),
+            export_price: Some(0.30),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -5136,6 +5177,7 @@ mod tests {
         let mut env = env_at_minute(19 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.10),
+            export_price: Some(0.10),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -5417,6 +5459,7 @@ mod tests {
         let mut env = env_at_minute(23 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(prices[23]),
+            export_price: Some(prices[23]),
             ..Default::default()
         };
         let mut out = Vec::new();
@@ -5474,6 +5517,7 @@ mod tests {
         let mut env = env_at_minute(0);
         env.price_signal = PriceSignal {
             electricity_price: Some(prices[0]),
+            export_price: Some(prices[0]),
             ..Default::default()
         };
         let mut out = Vec::new();
@@ -5832,6 +5876,7 @@ mod tests {
         let mut env = env_at_minute(6 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.40), // expensive
+            export_price: Some(0.40),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -5976,6 +6021,7 @@ mod tests {
         let mut env = env_at_minute(19 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.50), // well above threshold
+            export_price: Some(0.50),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -6013,6 +6059,7 @@ mod tests {
         let mut env_cheap = env_at_minute(2 * 60);
         env_cheap.price_signal = PriceSignal {
             electricity_price: Some(0.02),
+            export_price: Some(0.02),
             ..Default::default()
         };
         let out_cheap = plugged_in_step_with_env(&mut actor, &env_cheap);
@@ -6040,6 +6087,7 @@ mod tests {
         let mut env_expensive = env_at_minute(20 * 60);
         env_expensive.price_signal = PriceSignal {
             electricity_price: Some(0.44),
+            export_price: Some(0.44),
             ..Default::default()
         };
         let out_expensive = plugged_in_step_with_env(&mut actor, &env_expensive);
@@ -6230,8 +6278,14 @@ mod tests {
 
     // ======= Edge case tests =======
 
+    /// A price-driven strategy deciding against a run that publishes no
+    /// price channel is never decided on a fabricated $0/kWh: the actor
+    /// records the cause and reports unhealthy, the step failing at the
+    /// post-decide health check. The old fallback substituted 0.0 and the
+    /// price optimizer's charge leg fired every step — electricity
+    /// silently free.
     #[test]
-    fn ev_missing_price_signal_tou_falls_back() {
+    fn missing_price_marks_the_tou_actor_unhealthy_not_free() {
         let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.02).collect();
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::TouAware {
@@ -6245,25 +6299,78 @@ mod tests {
         actor.estimated_soc = 0.4;
         actor.phase = DriverPhase::HomePluggedIn;
 
-        // No price signal (None) -- should not panic
+        // No price channel published at all.
         let mut env = env_at_minute(12 * 60);
         env.price_signal = PriceSignal {
             electricity_price: None,
+            export_price: None,
             ..Default::default()
         };
-        let out = plugged_in_step_with_env(&mut actor, &env);
-        // PriceOptimizer uses unwrap_or(0.0) for None, so price=0.0 <= charge_threshold.
-        // With SOC=0.4 and target=0.9, SocTarget fallback should still emit.
-        let has_signal = out.iter().any(|r| {
-            matches!(
-                r.signal,
-                ControlSignal::SOCTarget { .. } | ControlSignal::PowerSetpoint { .. }
-            )
-        });
+        let _out = plugged_in_step_with_env(&mut actor, &env);
         assert!(
-            has_signal,
-            "TOU with missing price should still emit via fallback, got {} signals: {out:?}",
-            out.len()
+            !actor.healthy(),
+            "a TOU actor deciding on a missing price channel must report unhealthy, \
+             not decide on a substituted $0/kWh"
+        );
+        let detail = actor.health_detail().unwrap_or_default();
+        assert!(
+            detail.contains("import"),
+            "the health failure must name the missing channel (the import rate the \
+             charge leg prices against); got: {detail}"
+        );
+    }
+
+    /// The V2G strategy's whole decision prices the export rate: a run
+    /// that publishes no export price cannot decide export votes on a
+    /// fabricated $0/kWh (the old substitution meant the vote never
+    /// fired, silently) — the actor reports unhealthy naming the
+    /// channel.
+    #[test]
+    fn missing_export_price_marks_the_v2g_actor_unhealthy() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_w: 5000.0,
+                price_threshold: 0.20,
+            },
+            0.7,
+        );
+        let mut env = env_at_minute(19 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(0.30),
+            export_price: None,
+            ..Default::default()
+        };
+        let _out = plugged_in_step_with_env(&mut actor, &env);
+        assert!(
+            !actor.healthy(),
+            "a V2G actor deciding on a missing export price must report unhealthy, \
+             not decide on a substituted $0/kWh"
+        );
+        let detail = actor.health_detail().unwrap_or_default();
+        assert!(
+            detail.contains("export"),
+            "the health failure must name the missing channel (the export rate the \
+             export vote prices against); got: {detail}"
+        );
+    }
+
+    /// A strategy that reads no price channel (Immediate) stays healthy
+    /// whatever the signal carries: the gate is the price-driven
+    /// strategies' contract, not a global price requirement.
+    #[test]
+    fn immediate_strategy_stays_healthy_without_any_price() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+        let mut env = env_at_minute(12 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: None,
+            export_price: None,
+            ..Default::default()
+        };
+        let _out = plugged_in_step_with_env(&mut actor, &env);
+        assert!(
+            actor.healthy(),
+            "a strategy that reads no price channel has no price contract to fail"
         );
     }
 
@@ -6433,6 +6540,7 @@ mod tests {
         let mut env = env_at_minute(6 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.40),
+            export_price: Some(0.40),
             ..Default::default()
         };
         let _out = plugged_in_step_with_env(&mut actor, &env);
@@ -6483,6 +6591,7 @@ mod tests {
         let mut env = env_at_minute(12 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.10),
+            export_price: Some(0.10),
             ..Default::default()
         };
 
@@ -6542,6 +6651,7 @@ mod tests {
         let mut env = env_at_minute(2 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.50), // expensive
+            export_price: Some(0.50),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -8563,6 +8673,7 @@ mod tests {
             let mut env = env_at_minute(minute);
             env.price_signal = PriceSignal {
                 electricity_price: Some(0.50), // well above the 0.20 threshold
+                export_price: Some(0.50),
                 ..Default::default()
             };
             let mut out = Vec::new();

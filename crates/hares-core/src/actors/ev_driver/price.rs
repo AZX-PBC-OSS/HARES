@@ -73,9 +73,17 @@ impl ChargingPreference for PriceOptimizer {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
         self.ensure_thresholds(ctx);
 
-        let price = ctx.env.price_signal.electricity_price.unwrap_or(0.0);
+        // The two legs price the rates they trade at: charging pays the
+        // import rate, discharging (an export decision) earns the export
+        // rate. A missing channel never reads as a fabricated $0/kWh —
+        // the leg stands down and the actor's decide-time gate reports
+        // the missing channel unhealthy.
+        let import_price = ctx.env.price_signal.electricity_price;
+        let export_price = ctx.env.price_signal.export_price;
 
-        if price <= self.charge_threshold {
+        if let Some(price) = import_price
+            && price <= self.charge_threshold
+        {
             // Cheap price -- encourage charging
             let urgency = if self.charge_threshold > 0.0 {
                 1.0 - (price / self.charge_threshold).min(1.0)
@@ -91,8 +99,10 @@ impl ChargingPreference for PriceOptimizer {
                 score: 2.0 + urgency,
                 label: "price:charge",
             }
-        } else if price >= self.discharge_threshold {
-            // Expensive price -- encourage discharge
+        } else if let Some(price) = export_price
+            && price >= self.discharge_threshold
+        {
+            // Expensive export credit -- encourage discharge
             let urgency = if self.discharge_threshold > 0.0 {
                 ((price / self.discharge_threshold) - 1.0).min(1.0)
             } else {
@@ -164,7 +174,7 @@ mod tests {
 
         let env = TestEnvBuilder::new()
             .with_price_signal(PriceSignal {
-                electricity_price: Some(0.20),
+                export_price: Some(0.20),
                 ..Default::default()
             })
             .build();
@@ -174,6 +184,35 @@ mod tests {
         assert!(vote.score > 0.0);
         assert_eq!(vote.label, "price:discharge");
         assert!(vote.power_w.unwrap() < 0.0);
+    }
+
+    /// The discharge vote is an export decision and prices the rate the
+    /// export earns: an import price deep in the discharge tier with the
+    /// export credit below it does not discharge (under NetBilling the
+    /// two rates diverge and the export decision tracks the credit).
+    #[test]
+    fn discharge_votes_price_against_the_export_rate() {
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();
+        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices.into()), 24);
+
+        // Import 0.20 is at the discharge threshold; the export credit
+        // 0.05 is not. The vote must not discharge on the import rate.
+        let env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.20),
+                export_price: Some(0.05),
+                ..Default::default()
+            })
+            .build();
+        let ctx = make_ctx_with_price(&env);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(
+            vote.label, "price:neutral",
+            "the discharge vote prices the export credit (0.05 below the \
+             threshold), not the import rate (0.20 at it)"
+        );
+        assert!(vote.power_w.is_none());
     }
 
     #[test]

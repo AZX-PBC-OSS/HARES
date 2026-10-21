@@ -6798,3 +6798,102 @@ numerator, the stage validation),
 `crates/hares-types/src/telemetry_keys.rs` (the key),
 `crates/hares-io/src/hpxml/resolve_hvac.rs` (the params read),
 `docs/equipment/{hvac,water-heater}.md`.
+
+## Hardening 24: export decisions price the export rate, and a missing price is not zero dollars
+
+**Kind:** hardening (two vote-pricing corrections and the actor health
+gate; the discharge-ceiling item of this plan entry closed earlier by
+the Hardening 20 row — see the overlap note below).
+
+**Overlap verdict (checked first):** this entry's plan text carried a
+third item, "the driver's decision context carries a real discharge
+ceiling". That item is CLOSED by the Hardening 20 row: the decision
+context reads the equipment's published live `DISCHARGE_CEILING_W`
+telemetry (the tighter of each enabled leg's rating and its energy
+above the effective discharge floor over the step) into
+`max_discharge_w` at the context build, the charge-rating stand-in
+gone, the equipment's own clamp matching what the vote sized. Verified
+in the code before any of this entry's work started; no further work
+here.
+
+**The review's finding (grid M6):** the price-driven export votes read
+the import retail rate, while the run publishes a separate export rate
+(the tariff evaluator publishes `export_price` under every export
+mode: net metering's retail credit, the flat rate, the hourly schedule,
+the NetBilling TOU credits) — under net billing the V2G dispatch is
+systematically mistimed and overvalued. And a missing price signal was
+substituted with $0/kWh: the V2G vote never fired (silently inert) and
+the price optimizer's charge leg fired every step (electricity
+silently free).
+
+**Change:**
+
+- The V2G export vote prices `price_signal.export_price`: the rate the
+  export earns, the import rate never an export decision's input.
+- The price optimizer's legs price the rates they trade at: the charge
+  leg the import rate (what charging costs), the discharge leg the
+  export rate (what exporting earns). The day-shape thresholds stay
+  the wired schedule's percentiles; the per-step comparison is what
+  prices the decision.
+- A run that publishes no channel a strategy reads is never decided on
+  a fabricated $0/kWh: the actor's decide-time gate records the cause
+  and reports unhealthy, the step failing at the post-decide health
+  check (the row 116/117 machinery: the sticky `health_error`, the
+  cause naming the missing channel). The votes themselves stand down on
+  a missing channel (the V2G stand-down's own vote label
+  `v2g:no_export_price`, the discharge leg falling through to neutral);
+  no layer substitutes a price. Strategies that read no price channel
+  (Immediate, Nightly, LowSoc, QuickThenWait, PreDeparture,
+  SolarSurplus, V2H) have no price contract and stay healthy whatever
+  the signal carries.
+- The dwelling's own assembly needs no new guard: its factory already
+  falls a tariff-dependent strategy (TouAware, V2G) back to Immediate
+  when no tariff is attached, and a tariff evaluator publishes both
+  channels every step — the gate is the direct-construction path's
+  fail-fast.
+
+**Acceptance tests (RED first, each run at the parent against the old
+behavior):**
+
+- `v2g_responds_to_export_price_under_net_billing` (the plan's
+  acceptance test): the import price 0.10 below the 0.20 threshold, the
+  export credit 0.30 above it — at the parent the vote idled (it read
+  the import rate); GREEN after: it exports. The converse
+  (`v2g_ignores_the_import_rate_for_the_export_decision`: import 0.50,
+  export 0.10) ran at the parent and exported on the import rate's
+  level; GREEN after it idles. The threshold's strictness and the
+  no-export-price stand-down label are pinned beside them.
+- `discharge_votes_price_against_the_export_rate`: the import price at
+  the discharge threshold with the export credit far below it — at the
+  parent the vote discharged (the import rate priced the export);
+  GREEN after it stays neutral.
+- `missing_export_price_marks_the_v2g_actor_unhealthy` and
+  `missing_price_marks_the_tou_actor_unhealthy_not_free` ran at the
+  parent with the gate disabled and FAILED (both actors healthy while
+  deciding on missing channels); GREEN after: unhealthy, the cause
+  naming the channel. The no-price-contract control
+  (`immediate_strategy_stays_healthy_without_any_price`) pins the
+  gate's scope.
+- The replaced test `ev_missing_price_signal_tou_falls_back` pinned the
+  old defect itself (a missing price falling back to the $0 charge
+  vote); rewritten as the unhealthy witness above.
+
+**Existing test movement:** the price-driven test envs (the EV driver's
+V2G, TouAware and the floor/discharge witnesses) published only the
+import price; they now publish both channels at the same value, the
+votes pricing the export decision against the export rate at the same
+number the old code read from the import side — every test's intent
+unchanged, the channel the vote reads now the one it prices. The
+soc-floor and no-discharge witnesses keep their assertions under the
+mirrored channels (the floor is what blocks, not a missing price).
+
+**Fixture sweep:** the shipped fixtures' EV drivers are the built-in
+Immediate drivers over constant sources (no V2G, no TouAware, no
+price-driven vote anywhere in a golden run); the goldens compare-all
+10 + dst 1 bitwise identical, no re-capture.
+
+**Dependencies:** `crates/hares-core/src/actors/ev_driver/v2g.rs` (the
+export rate read, the stand-down label),
+`ev_driver/price.rs` (the two legs' rate split),
+`ev_driver/mod.rs` (the decide-time gate and the channel helper), and
+the three files' tests.
