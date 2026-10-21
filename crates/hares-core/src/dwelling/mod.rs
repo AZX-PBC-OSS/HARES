@@ -21593,6 +21593,97 @@ latent_gain_fraction = 0.08
         );
     }
 
+    /// The multi-timestep drain witness: a dwelling run of three steps
+    /// whose AC clamps its curve index on the step it runs (two
+    /// out-of-bounds curve evaluations at the highest stage, then the
+    /// 5 °C setpoint is satisfied and the AC stays off) drains each
+    /// step's own firings, the per-step census growth reading [2, 0, 0]
+    /// and the run total 2. A drain that took-and-reset only the
+    /// temporary copy `Cell::get()` hands out left the firings on the
+    /// thread tally: steps 2 and 3 fired nothing, yet their drains
+    /// re-merged the stale tally and the run total read 6 - the reviewer's
+    /// probe number, there with one firing per step (drained per-step
+    /// counts [1, 2, 3], total 6 where the truth is 3).
+    #[cfg(feature = "observe")]
+    #[test]
+    fn the_census_drains_each_steps_own_clamps() {
+        use hares_equipment::hvac::air_conditioner::AirConditioner;
+        use hares_equipment::{CentralAirConditionerConfig, DuctConfig, HvacSetpointConfig};
+
+        let mut dwelling = bestest_dwelling();
+        let config = EquipmentConfig::from_typed(
+            "AC1".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                eir: 0.33,
+                shr: Some(0.75),
+                number_of_speeds: 4,
+                stage_capacities_w: Some(vec![2_000.0, 4_000.0, 6_000.0, 8_000.0]),
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(5.0),
+                    heating_setpoint_c: None,
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: Some(hares_equipment::hvac::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_w: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
+            },
+        )
+        .expect("typed AC config");
+        let mut ac = AirConditioner::new(config.clone());
+        ac.init(&config, &dwelling.latest_env)
+            .expect("init AC with one shared curve pair across three stages");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(ac)]);
+
+        // The step itself may fail the temperature-bounds invariant from
+        // the deliberately absurd one-step cool-down; the census drain is
+        // the subject, and it is drained before the invariant pass.
+        let mut per_step: Vec<u64> = Vec::new();
+        let mut prev = 0;
+        for _ in 0..3 {
+            let _ = dwelling.run_timestep(false);
+            let total = dwelling
+                .clamp_census()
+                .count(hares_types::clamp_census::ClampSite::CurveIndex);
+            per_step.push(total - prev);
+            prev = total;
+        }
+        assert_eq!(
+            per_step,
+            vec![2, 0, 0],
+            "each step's drain carries its own firings only; a later drain \
+             re-merged the tally's history"
+        );
+        assert_eq!(
+            prev, 2,
+            "the run total is the two firings' count, not the re-merged history"
+        );
+    }
+
     /// Warm-up capped at two days on a non-converging run records
     /// `Ran { converged: false, days_run: 2 }` on the run health and pushes
     /// exactly one warm-up warning naming the exceeding zones.

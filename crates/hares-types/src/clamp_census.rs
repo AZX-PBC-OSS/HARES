@@ -210,12 +210,55 @@ pub fn record(site: ClampSite) {
 /// the per-site counts and resets the tally to zero.
 #[must_use]
 pub fn take() -> ClampCensus {
-    STEP_TALLY.with(|tally| tally.get().take())
+    STEP_TALLY.with(|tally| {
+        // `ClampCensus` is `Copy`, so take-and-reset on the temporary
+        // copy `tally.get()` hands out would leave the tally itself
+        // untouched: every later drain would re-merge the full history.
+        // Take on a local and write the reset state back into the cell.
+        let mut current = tally.get();
+        let taken = current.take();
+        tally.set(current);
+        taken
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ClampCensus, ClampSite};
+    use super::{ClampCensus, ClampSite, record, take};
+
+    /// The two-drain-cycle probe: two firing cycles in one process, with
+    /// an empty drain between and after them. `ClampCensus` is `Copy`, so
+    /// a drain that takes-and-resets the temporary copy `Cell::get()`
+    /// hands out, without writing the reset state back into the `Cell`,
+    /// leaves the full history on the tally: every later drain re-merges
+    /// it, and this empty second drain returns the first cycle's counts.
+    #[test]
+    fn the_step_tally_resets_between_drain_cycles() {
+        // Cycle 1: one firing, drained once.
+        record(ClampSite::CurveIndex);
+        let first = take();
+        assert_eq!(first.count(ClampSite::CurveIndex), 1);
+
+        // Cycle 2: nothing fires since the last drain, so the drain
+        // reads empty.
+        let second = take();
+        assert!(
+            second.is_empty(),
+            "an empty cycle's drain reads empty, got curve_index={}",
+            second.count(ClampSite::CurveIndex)
+        );
+
+        // Cycle 3: the next firing drains its own cycle's count only,
+        // not the cycle-1 history.
+        record(ClampSite::RelativeHumidity);
+        let third = take();
+        assert_eq!(third.count(ClampSite::RelativeHumidity), 1);
+        assert_eq!(
+            third.total(),
+            1,
+            "the drain carries no earlier cycle's count"
+        );
+    }
 
     #[test]
     fn every_site_names_itself_and_appears_in_the_stable_order() {
