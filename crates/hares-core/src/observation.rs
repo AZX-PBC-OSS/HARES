@@ -8,8 +8,8 @@
 //! resolves every field once, at plan build, to a typed source (an
 //! outdoor scalar, a zone or equipment index, a time feature, an actor
 //! channel), failing there on an unknown field and naming it. The
-//! executors — [`DwellingTelemetry::observe_into`] on a telemetry
-//! snapshot and `Dwelling::observe_into` (in `dwelling`) on the live
+//! executors — `DwellingTelemetry`'s snapshot executor and
+//! `Dwelling::observe_into` (in `dwelling`) on the live
 //! dwelling — write the values into a caller-owned slice with no
 //! allocation, the values and NaN handling `to_observation_vec` has
 //! always reported, which is now a thin wrapper over the same plan.

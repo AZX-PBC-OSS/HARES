@@ -2229,7 +2229,7 @@ impl Equipment for Ev {
         9
     }
 
-    /// The pack's stored charge [J], on the Battery reporter's exact
+    /// The pack's stored charge (J), on the Battery reporter's exact
     /// convention (`battery/mod.rs`: SOC × the nominal capacity): the
     /// fraction of the degradation-adjusted pack capacity
     /// (`degradation_adjusted_capacity_j`, rated × SOH) the SoC holds.

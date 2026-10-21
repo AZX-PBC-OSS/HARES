@@ -25,7 +25,7 @@ pub struct RejectedHpxmlElement {
     pub reason: &'static str,
 }
 
-/// the <AboveApartment> element the parser reads under its parent
+/// the `<AboveApartment>` element the parser reads under its parent
 pub static ABOVE_APARTMENT: HpxmlElement = HpxmlElement {
     name: "AboveApartment",
     context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/AboveApartment",
@@ -33,7 +33,7 @@ pub static ABOVE_APARTMENT: HpxmlElement = HpxmlElement {
     description: "the <AboveApartment> element the parser reads under its parent",
 };
 
-/// the <active_duration_s> element the parser reads under its parent
+/// the `<active_duration_s>` element the parser reads under its parent
 pub static ACTIVE_DURATION_S: HpxmlElement = HpxmlElement {
     name: "active_duration_s",
     context: "the synthetic extension element's active duration, seconds",
@@ -41,7 +41,7 @@ pub static ACTIVE_DURATION_S: HpxmlElement = HpxmlElement {
     description: "the <active_duration_s> element the parser reads under its parent",
 };
 
-/// the <active_power_w> element the parser reads under its parent
+/// the `<active_power_w>` element the parser reads under its parent
 pub static ACTIVE_POWER_W: HpxmlElement = HpxmlElement {
     name: "active_power_w",
     context: "the synthetic extension element's active power, watts",
@@ -49,7 +49,7 @@ pub static ACTIVE_POWER_W: HpxmlElement = HpxmlElement {
     description: "the <active_power_w> element the parser reads under its parent",
 };
 
-/// the <AdjustedAnnualkWh> element the parser reads under its parent
+/// the `<AdjustedAnnualkWh>` element the parser reads under its parent
 pub static ADJUSTED_ANNUALK_WH: HpxmlElement = HpxmlElement {
     name: "AdjustedAnnualkWh",
     context: "BuildingDetails/Appliances/*/extension (every appliance and load extension)",
@@ -57,7 +57,7 @@ pub static ADJUSTED_ANNUALK_WH: HpxmlElement = HpxmlElement {
     description: "the <AdjustedAnnualkWh> element the parser reads under its parent",
 };
 
-/// the <AdvancedResearchFeatures> element the parser reads under its parent
+/// the `<AdvancedResearchFeatures>` element the parser reads under its parent
 pub static ADVANCED_RESEARCH_FEATURES: HpxmlElement = HpxmlElement {
     name: "AdvancedResearchFeatures",
     context: "SoftwareInfo/extension/SimulationControl/AdvancedResearchFeatures",
@@ -65,7 +65,7 @@ pub static ADVANCED_RESEARCH_FEATURES: HpxmlElement = HpxmlElement {
     description: "the <AdvancedResearchFeatures> element the parser reads under its parent",
 };
 
-/// the <Aext> element the parser reads under its parent
+/// the `<Aext>` element the parser reads under its parent
 pub static AEXT: HpxmlElement = HpxmlElement {
     name: "Aext",
     context: "BuildingDetails/Enclosure/AirInfiltration/AirInfiltrationMeasurement/extension/Aext",
@@ -73,7 +73,7 @@ pub static AEXT: HpxmlElement = HpxmlElement {
     description: "the <Aext> element the parser reads under its parent",
 };
 
-/// the <AFUE> element the parser reads under its parent
+/// the `<AFUE>` element the parser reads under its parent
 pub static AFUE: HpxmlElement = HpxmlElement {
     name: "AFUE",
     context: "a heating system's AFUE (the legacy direct-child form)",
@@ -81,7 +81,7 @@ pub static AFUE: HpxmlElement = HpxmlElement {
     description: "the <AFUE> element the parser reads under its parent",
 };
 
-/// the <AirDistribution> element the parser reads under its parent
+/// the `<AirDistribution>` element the parser reads under its parent
 pub static AIR_DISTRIBUTION: HpxmlElement = HpxmlElement {
     name: "AirDistribution",
     context: "BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution",
@@ -89,7 +89,7 @@ pub static AIR_DISTRIBUTION: HpxmlElement = HpxmlElement {
     description: "the <AirDistribution> element the parser reads under its parent",
 };
 
-/// the <Airflow> element the parser reads under its parent
+/// the `<Airflow>` element the parser reads under its parent
 pub static AIRFLOW: HpxmlElement = HpxmlElement {
     name: "Airflow",
     context: "BuildingDetails/Lighting/CeilingFan/Airflow",
@@ -97,7 +97,7 @@ pub static AIRFLOW: HpxmlElement = HpxmlElement {
     description: "the <Airflow> element the parser reads under its parent",
 };
 
-/// the <AirflowDefectRatio> element the parser reads under its parent
+/// the `<AirflowDefectRatio>` element the parser reads under its parent
 pub static AIRFLOW_DEFECT_RATIO: HpxmlElement = HpxmlElement {
     name: "AirflowDefectRatio",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/extension/AirflowDefectRatio | BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/extension/AirflowDefectRatio | BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem/extension/AirflowDefectRatio",
@@ -105,7 +105,7 @@ pub static AIRFLOW_DEFECT_RATIO: HpxmlElement = HpxmlElement {
     description: "the <AirflowDefectRatio> element the parser reads under its parent",
 };
 
-/// the <AirInfiltrationMeasurement> element the parser reads under its parent
+/// the `<AirInfiltrationMeasurement>` element the parser reads under its parent
 pub static AIR_INFILTRATION_MEASUREMENT: HpxmlElement = HpxmlElement {
     name: "AirInfiltrationMeasurement",
     context: "BuildingDetails/Enclosure/AirInfiltration/AirInfiltrationMeasurement",
@@ -113,7 +113,7 @@ pub static AIR_INFILTRATION_MEASUREMENT: HpxmlElement = HpxmlElement {
     description: "the <AirInfiltrationMeasurement> element the parser reads under its parent",
 };
 
-/// the <AirLeakage> element the parser reads under its parent
+/// the `<AirLeakage>` element the parser reads under its parent
 pub static AIR_LEAKAGE: HpxmlElement = HpxmlElement {
     name: "AirLeakage",
     context: "BuildingDetails/Enclosure/AirInfiltration/AirInfiltrationMeasurement/BuildingAirLeakage/AirLeakage",
@@ -129,7 +129,7 @@ pub static ALTITUDE: HpxmlElement = HpxmlElement {
     description: "the weather station's altitude",
 };
 
-/// the <Ambient> element the parser reads under its parent
+/// the `<Ambient>` element the parser reads under its parent
 pub static AMBIENT: HpxmlElement = HpxmlElement {
     name: "Ambient",
     context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/Ambient",
@@ -137,7 +137,7 @@ pub static AMBIENT: HpxmlElement = HpxmlElement {
     description: "the <Ambient> element the parser reads under its parent",
 };
 
-/// the <Basement> element the parser reads under its parent
+/// the `<Basement>` element the parser reads under its parent
 pub static BASEMENT: HpxmlElement = HpxmlElement {
     name: "Basement",
     context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/Basement",
@@ -145,7 +145,7 @@ pub static BASEMENT: HpxmlElement = HpxmlElement {
     description: "the <Basement> element the parser reads under its parent",
 };
 
-/// the <AnnualConsumptionkBtu> element the parser reads under its parent
+/// the `<AnnualConsumptionkBtu>` element the parser reads under its parent
 pub static ANNUAL_CONSUMPTIONK_BTU: HpxmlElement = HpxmlElement {
     name: "AnnualConsumptionkBtu",
     context: "Systems/extension/Generators/Generator",
@@ -169,7 +169,7 @@ pub static ANNUAL_HEATING_EFFICIENCY: HpxmlElement = HpxmlElement {
     description: "a heating system's annual efficiency (the units attribute names the kind)",
 };
 
-/// the <AnnualOutputkWh> element the parser reads under its parent
+/// the `<AnnualOutputkWh>` element the parser reads under its parent
 pub static ANNUAL_OUTPUTK_WH: HpxmlElement = HpxmlElement {
     name: "AnnualOutputkWh",
     context: "Systems/extension/Generators/Generator",
@@ -177,7 +177,7 @@ pub static ANNUAL_OUTPUTK_WH: HpxmlElement = HpxmlElement {
     description: "the <AnnualOutputkWh> element the parser reads under its parent",
 };
 
-/// the <Appliances> element the parser reads under its parent
+/// the `<Appliances>` element the parser reads under its parent
 pub static APPLIANCES: HpxmlElement = HpxmlElement {
     name: "Appliances",
     context: "BuildingDetails/Appliances",
@@ -193,7 +193,7 @@ pub static AREA: HpxmlElement = HpxmlElement {
     description: "an element's area (an HPXML units attribute carries its unit)",
 };
 
-/// the <AreaFraction> element the parser reads under its parent
+/// the `<AreaFraction>` element the parser reads under its parent
 pub static AREA_FRACTION: HpxmlElement = HpxmlElement {
     name: "AreaFraction",
     context: "BuildingDetails/Enclosure/extension/FurnitureMass/AreaFraction | BuildingDetails/Enclosure/extension/PartitionWallMass/AreaFraction",
@@ -209,7 +209,7 @@ pub static ARRAY_AZIMUTH: HpxmlElement = HpxmlElement {
     description: "the PV array's azimuth, degrees",
 };
 
-/// the <ArrayOrientation> element the parser reads under its parent
+/// the `<ArrayOrientation>` element the parser reads under its parent
 pub static ARRAY_ORIENTATION: HpxmlElement = HpxmlElement {
     name: "ArrayOrientation",
     context: "BuildingDetails/Systems/Photovoltaics/PVSystem/ArrayOrientation",
@@ -225,7 +225,7 @@ pub static ARRAY_TILT: HpxmlElement = HpxmlElement {
     description: "the PV array's tilt from horizontal, degrees",
 };
 
-/// the <AssemblyEffectiveRValue> element the parser reads under its parent
+/// the `<AssemblyEffectiveRValue>` element the parser reads under its parent
 pub static ASSEMBLY_EFFECTIVE_R_VALUE: HpxmlElement = HpxmlElement {
     name: "AssemblyEffectiveRValue",
     context: "BuildingDetails/Enclosure/Floors/Floor/Insulation/AssemblyEffectiveRValue | BuildingDetails/Enclosure/RimJoists/RimJoist/Insulation/AssemblyEffectiveRValue | BuildingDetails/Enclosure/Roofs/Roof/Insulation/AssemblyEffectiveRValue | BuildingDetails/Enclosure/Walls/Wall/Insulation/AssemblyEffectiveRValue",
@@ -233,7 +233,7 @@ pub static ASSEMBLY_EFFECTIVE_R_VALUE: HpxmlElement = HpxmlElement {
     description: "the <AssemblyEffectiveRValue> element the parser reads under its parent",
 };
 
-/// the <AttachedToFloor> element the parser reads under its parent
+/// the `<AttachedToFloor>` element the parser reads under its parent
 pub static ATTACHED_TO_FLOOR: HpxmlElement = HpxmlElement {
     name: "AttachedToFloor",
     context: "BuildingDetails/Enclosure/Attics/Attic/AttachedToFloor | BuildingDetails/Enclosure/Foundations/Foundation/AttachedToFloor",
@@ -241,7 +241,7 @@ pub static ATTACHED_TO_FLOOR: HpxmlElement = HpxmlElement {
     description: "the <AttachedToFloor> element the parser reads under its parent",
 };
 
-/// the <AttachedToHotWaterDistribution> element the parser reads under its parent
+/// the `<AttachedToHotWaterDistribution>` element the parser reads under its parent
 pub static ATTACHED_TO_HOT_WATER_DISTRIBUTION: HpxmlElement = HpxmlElement {
     name: "AttachedToHotWaterDistribution",
     context: "WaterHeatingSystem and WaterHeating (the distribution link)",
@@ -257,7 +257,7 @@ pub static ATTACHED_TO_INVERTER: HpxmlElement = HpxmlElement {
     description: "the PV system's inverter link",
 };
 
-/// the <AttachedToPool> element the parser reads under its parent
+/// the `<AttachedToPool>` element the parser reads under its parent
 pub static ATTACHED_TO_POOL: HpxmlElement = HpxmlElement {
     name: "AttachedToPool",
     context: "Pool and PermanentSpa (the pool link)",
@@ -265,7 +265,7 @@ pub static ATTACHED_TO_POOL: HpxmlElement = HpxmlElement {
     description: "the <AttachedToPool> element the parser reads under its parent",
 };
 
-/// the <AttachedToRoof> element the parser reads under its parent
+/// the `<AttachedToRoof>` element the parser reads under its parent
 pub static ATTACHED_TO_ROOF: HpxmlElement = HpxmlElement {
     name: "AttachedToRoof",
     context: "BuildingDetails/Enclosure/Attics/Attic/AttachedToRoof",
@@ -273,7 +273,7 @@ pub static ATTACHED_TO_ROOF: HpxmlElement = HpxmlElement {
     description: "the <AttachedToRoof> element the parser reads under its parent",
 };
 
-/// the <AttachedToWall> element the parser reads under its parent
+/// the `<AttachedToWall>` element the parser reads under its parent
 pub static ATTACHED_TO_WALL: HpxmlElement = HpxmlElement {
     name: "AttachedToWall",
     context: "BuildingDetails/Enclosure/Attics/Attic/AttachedToWall | BuildingDetails/Enclosure/Doors/Door/AttachedToWall | BuildingDetails/Enclosure/Foundations/Foundation/AttachedToWall | BuildingDetails/Enclosure/Windows/Window/AttachedToWall",
@@ -281,7 +281,7 @@ pub static ATTACHED_TO_WALL: HpxmlElement = HpxmlElement {
     description: "the <AttachedToWall> element the parser reads under its parent",
 };
 
-/// the <AttachedToWaterHeatingSystem> element the parser reads under its parent
+/// the `<AttachedToWaterHeatingSystem>` element the parser reads under its parent
 pub static ATTACHED_TO_WATER_HEATING_SYSTEM: HpxmlElement = HpxmlElement {
     name: "AttachedToWaterHeatingSystem",
     context: "Appliances' load elements (the water-heating link)",
@@ -289,7 +289,7 @@ pub static ATTACHED_TO_WATER_HEATING_SYSTEM: HpxmlElement = HpxmlElement {
     description: "the <AttachedToWaterHeatingSystem> element the parser reads under its parent",
 };
 
-/// the <Attic> element the parser reads under its parent
+/// the `<Attic>` element the parser reads under its parent
 pub static ATTIC: HpxmlElement = HpxmlElement {
     name: "Attic",
     context: "BuildingDetails/Enclosure/Attics/Attic | BuildingDetails/Enclosure/Attics/Attic/AtticType/Attic",
@@ -297,7 +297,7 @@ pub static ATTIC: HpxmlElement = HpxmlElement {
     description: "the <Attic> element the parser reads under its parent",
 };
 
-/// the <Attics> element the parser reads under its parent
+/// the `<Attics>` element the parser reads under its parent
 pub static ATTICS: HpxmlElement = HpxmlElement {
     name: "Attics",
     context: "BuildingDetails/Enclosure/Attics",
@@ -305,7 +305,7 @@ pub static ATTICS: HpxmlElement = HpxmlElement {
     description: "the <Attics> element the parser reads under its parent",
 };
 
-/// the <AtticType> element the parser reads under its parent
+/// the `<AtticType>` element the parser reads under its parent
 pub static ATTIC_TYPE: HpxmlElement = HpxmlElement {
     name: "AtticType",
     context: "BuildingDetails/Enclosure/Attics/Attic/AtticType",
@@ -313,7 +313,7 @@ pub static ATTIC_TYPE: HpxmlElement = HpxmlElement {
     description: "the <AtticType> element the parser reads under its parent",
 };
 
-/// the <AutosizingLimits> element the parser reads under its parent
+/// the `<AutosizingLimits>` element the parser reads under its parent
 pub static AUTOSIZING_LIMITS: HpxmlElement = HpxmlElement {
     name: "AutosizingLimits",
     context: "HVAC system elements and their extension (the autosizing limits)",
@@ -321,7 +321,7 @@ pub static AUTOSIZING_LIMITS: HpxmlElement = HpxmlElement {
     description: "the <AutosizingLimits> element the parser reads under its parent",
 };
 
-/// the <AverageCeilingHeight> element the parser reads under its parent
+/// the `<AverageCeilingHeight>` element the parser reads under its parent
 pub static AVERAGE_CEILING_HEIGHT: HpxmlElement = HpxmlElement {
     name: "AverageCeilingHeight",
     context: "BuildingDetails/BuildingSummary/BuildingConstruction/AverageCeilingHeight",
@@ -337,7 +337,7 @@ pub static AZIMUTH: HpxmlElement = HpxmlElement {
     description: "an element's facing, degrees clockwise from north",
 };
 
-/// the <BackupAnnualHeatingEfficiency> element the parser reads under its parent
+/// the `<BackupAnnualHeatingEfficiency>` element the parser reads under its parent
 pub static BACKUP_ANNUAL_HEATING_EFFICIENCY: HpxmlElement = HpxmlElement {
     name: "BackupAnnualHeatingEfficiency",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/BackupAnnualHeatingEfficiency",
@@ -345,7 +345,7 @@ pub static BACKUP_ANNUAL_HEATING_EFFICIENCY: HpxmlElement = HpxmlElement {
     description: "the <BackupAnnualHeatingEfficiency> element the parser reads under its parent",
 };
 
-/// the <BackupHeatingAutosizingFactor> element the parser reads under its parent
+/// the `<BackupHeatingAutosizingFactor>` element the parser reads under its parent
 pub static BACKUP_HEATING_AUTOSIZING_FACTOR: HpxmlElement = HpxmlElement {
     name: "BackupHeatingAutosizingFactor",
     context: "the backup heating autosizing factor (extension)",
@@ -353,7 +353,7 @@ pub static BACKUP_HEATING_AUTOSIZING_FACTOR: HpxmlElement = HpxmlElement {
     description: "the <BackupHeatingAutosizingFactor> element the parser reads under its parent",
 };
 
-/// the <BackupHeatingCapacity> element the parser reads under its parent
+/// the `<BackupHeatingCapacity>` element the parser reads under its parent
 pub static BACKUP_HEATING_CAPACITY: HpxmlElement = HpxmlElement {
     name: "BackupHeatingCapacity",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/BackupHeatingCapacity | BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/BackupHeatingCapacity",
@@ -361,7 +361,7 @@ pub static BACKUP_HEATING_CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <BackupHeatingCapacity> element the parser reads under its parent",
 };
 
-/// the <BackupHeatingLockoutTemperature> element the parser reads under its parent
+/// the `<BackupHeatingLockoutTemperature>` element the parser reads under its parent
 pub static BACKUP_HEATING_LOCKOUT_TEMPERATURE: HpxmlElement = HpxmlElement {
     name: "BackupHeatingLockoutTemperature",
     context: "the backup heating lockout temperature, degrees Fahrenheit",
@@ -369,7 +369,7 @@ pub static BACKUP_HEATING_LOCKOUT_TEMPERATURE: HpxmlElement = HpxmlElement {
     description: "the <BackupHeatingLockoutTemperature> element the parser reads under its parent",
 };
 
-/// the <BackupHeatingSwitchoverTemperature> element the parser reads under its parent
+/// the `<BackupHeatingSwitchoverTemperature>` element the parser reads under its parent
 pub static BACKUP_HEATING_SWITCHOVER_TEMPERATURE: HpxmlElement = HpxmlElement {
     name: "BackupHeatingSwitchoverTemperature",
     context: "the backup heating switchover temperature, degrees Fahrenheit",
@@ -377,7 +377,7 @@ pub static BACKUP_HEATING_SWITCHOVER_TEMPERATURE: HpxmlElement = HpxmlElement {
     description: "the <BackupHeatingSwitchoverTemperature> element the parser reads under its parent",
 };
 
-/// the <BackupSystemFuel> element the parser reads under its parent
+/// the `<BackupSystemFuel>` element the parser reads under its parent
 pub static BACKUP_SYSTEM_FUEL: HpxmlElement = HpxmlElement {
     name: "BackupSystemFuel",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/BackupSystemFuel",
@@ -385,7 +385,7 @@ pub static BACKUP_SYSTEM_FUEL: HpxmlElement = HpxmlElement {
     description: "the <BackupSystemFuel> element the parser reads under its parent",
 };
 
-/// the <BackupType> element the parser reads under its parent
+/// the `<BackupType>` element the parser reads under its parent
 pub static BACKUP_TYPE: HpxmlElement = HpxmlElement {
     name: "BackupType",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/BackupType",
@@ -393,7 +393,7 @@ pub static BACKUP_TYPE: HpxmlElement = HpxmlElement {
     description: "the <BackupType> element the parser reads under its parent",
 };
 
-/// the <Crawlspace> element the parser reads under its parent
+/// the `<Crawlspace>` element the parser reads under its parent
 pub static CRAWLSPACE: HpxmlElement = HpxmlElement {
     name: "Crawlspace",
     context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/Crawlspace",
@@ -401,7 +401,7 @@ pub static CRAWLSPACE: HpxmlElement = HpxmlElement {
     description: "the <Crawlspace> element the parser reads under its parent",
 };
 
-/// the <Batteries> element the parser reads under its parent
+/// the `<Batteries>` element the parser reads under its parent
 pub static BATTERIES: HpxmlElement = HpxmlElement {
     name: "Batteries",
     context: "BuildingDetails/Systems/Batteries",
@@ -409,7 +409,7 @@ pub static BATTERIES: HpxmlElement = HpxmlElement {
     description: "the <Batteries> element the parser reads under its parent",
 };
 
-/// the <Battery> element the parser reads under its parent
+/// the `<Battery>` element the parser reads under its parent
 pub static BATTERY: HpxmlElement = HpxmlElement {
     name: "Battery",
     context: "BuildingDetails/Systems/Batteries/Battery | BuildingDetails/Systems/Vehicles/Vehicle/VehicleType/BatteryElectricVehicle/Battery",
@@ -417,7 +417,7 @@ pub static BATTERY: HpxmlElement = HpxmlElement {
     description: "the <Battery> element the parser reads under its parent",
 };
 
-/// the <BatteryCapacity> element the parser reads under its parent
+/// the `<BatteryCapacity>` element the parser reads under its parent
 pub static BATTERY_CAPACITY: HpxmlElement = HpxmlElement {
     name: "BatteryCapacity",
     context: "Systems/ElectricVehicles/ElectricVehicle",
@@ -425,7 +425,7 @@ pub static BATTERY_CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <BatteryCapacity> element the parser reads under its parent",
 };
 
-/// the <BeginDayOfMonth> element the parser reads under its parent
+/// the `<BeginDayOfMonth>` element the parser reads under its parent
 pub static BEGIN_DAY_OF_MONTH: HpxmlElement = HpxmlElement {
     name: "BeginDayOfMonth",
     context: "an unavailable period's begin day of month",
@@ -433,7 +433,7 @@ pub static BEGIN_DAY_OF_MONTH: HpxmlElement = HpxmlElement {
     description: "the <BeginDayOfMonth> element the parser reads under its parent",
 };
 
-/// the <BeginHourOfDay> element the parser reads under its parent
+/// the `<BeginHourOfDay>` element the parser reads under its parent
 pub static BEGIN_HOUR_OF_DAY: HpxmlElement = HpxmlElement {
     name: "BeginHourOfDay",
     context: "an unavailable period's begin hour of day",
@@ -441,7 +441,7 @@ pub static BEGIN_HOUR_OF_DAY: HpxmlElement = HpxmlElement {
     description: "the <BeginHourOfDay> element the parser reads under its parent",
 };
 
-/// the <BeginMonth> element the parser reads under its parent
+/// the `<BeginMonth>` element the parser reads under its parent
 pub static BEGIN_MONTH: HpxmlElement = HpxmlElement {
     name: "BeginMonth",
     context: "an unavailable period's begin month",
@@ -449,7 +449,7 @@ pub static BEGIN_MONTH: HpxmlElement = HpxmlElement {
     description: "the <BeginMonth> element the parser reads under its parent",
 };
 
-/// the <BranchPipingLoopLength> element the parser reads under its parent
+/// the `<BranchPipingLoopLength>` element the parser reads under its parent
 pub static BRANCH_PIPING_LOOP_LENGTH: HpxmlElement = HpxmlElement {
     name: "BranchPipingLoopLength",
     context: "WaterHeatingSystem/HotWaterDistribution/Recirculation",
@@ -457,7 +457,7 @@ pub static BRANCH_PIPING_LOOP_LENGTH: HpxmlElement = HpxmlElement {
     description: "the <BranchPipingLoopLength> element the parser reads under its parent",
 };
 
-/// the <Building> element the parser reads under its parent
+/// the `<Building>` element the parser reads under its parent
 pub static BUILDING: HpxmlElement = HpxmlElement {
     name: "Building",
     context: "HPXML root (Building/BuildingDetails; the subtree the parser reads)",
@@ -465,7 +465,7 @@ pub static BUILDING: HpxmlElement = HpxmlElement {
     description: "the <Building> element the parser reads under its parent",
 };
 
-/// the <BuildingAirLeakage> element the parser reads under its parent
+/// the `<BuildingAirLeakage>` element the parser reads under its parent
 pub static BUILDING_AIR_LEAKAGE: HpxmlElement = HpxmlElement {
     name: "BuildingAirLeakage",
     context: "BuildingDetails/Enclosure/AirInfiltration/AirInfiltrationMeasurement/BuildingAirLeakage",
@@ -473,7 +473,7 @@ pub static BUILDING_AIR_LEAKAGE: HpxmlElement = HpxmlElement {
     description: "the <BuildingAirLeakage> element the parser reads under its parent",
 };
 
-/// the <BuildingConstruction> element the parser reads under its parent
+/// the `<BuildingConstruction>` element the parser reads under its parent
 pub static BUILDING_CONSTRUCTION: HpxmlElement = HpxmlElement {
     name: "BuildingConstruction",
     context: "BuildingDetails/BuildingSummary/BuildingConstruction",
@@ -481,7 +481,7 @@ pub static BUILDING_CONSTRUCTION: HpxmlElement = HpxmlElement {
     description: "the <BuildingConstruction> element the parser reads under its parent",
 };
 
-/// the <BuildingDetails> element the parser reads under its parent
+/// the `<BuildingDetails>` element the parser reads under its parent
 pub static BUILDING_DETAILS: HpxmlElement = HpxmlElement {
     name: "BuildingDetails",
     context: "Building/BuildingDetails (the subtree the parser reads)",
@@ -489,7 +489,7 @@ pub static BUILDING_DETAILS: HpxmlElement = HpxmlElement {
     description: "the <BuildingDetails> element the parser reads under its parent",
 };
 
-/// the <BuildingOccupancy> element the parser reads under its parent
+/// the `<BuildingOccupancy>` element the parser reads under its parent
 pub static BUILDING_OCCUPANCY: HpxmlElement = HpxmlElement {
     name: "BuildingOccupancy",
     context: "BuildingDetails/BuildingSummary/BuildingOccupancy",
@@ -497,7 +497,7 @@ pub static BUILDING_OCCUPANCY: HpxmlElement = HpxmlElement {
     description: "the <BuildingOccupancy> element the parser reads under its parent",
 };
 
-/// the <BuildingSummary> element the parser reads under its parent
+/// the `<BuildingSummary>` element the parser reads under its parent
 pub static BUILDING_SUMMARY: HpxmlElement = HpxmlElement {
     name: "BuildingSummary",
     context: "BuildingDetails/BuildingSummary",
@@ -505,7 +505,7 @@ pub static BUILDING_SUMMARY: HpxmlElement = HpxmlElement {
     description: "the <BuildingSummary> element the parser reads under its parent",
 };
 
-/// the <Capacity> element the parser reads under its parent
+/// the `<Capacity>` element the parser reads under its parent
 pub static CAPACITY: HpxmlElement = HpxmlElement {
     name: "Capacity",
     context: "the washer's or appliance's capacity (the units attribute names the kind)",
@@ -513,7 +513,7 @@ pub static CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <Capacity> element the parser reads under its parent",
 };
 
-/// the <CeilingFan> element the parser reads under its parent
+/// the `<CeilingFan>` element the parser reads under its parent
 pub static CEILING_FAN: HpxmlElement = HpxmlElement {
     name: "CeilingFan",
     context: "BuildingDetails/Lighting/CeilingFan",
@@ -521,7 +521,7 @@ pub static CEILING_FAN: HpxmlElement = HpxmlElement {
     description: "the <CeilingFan> element the parser reads under its parent",
 };
 
-/// the <ChargeDefectRatio> element the parser reads under its parent
+/// the `<ChargeDefectRatio>` element the parser reads under its parent
 pub static CHARGE_DEFECT_RATIO: HpxmlElement = HpxmlElement {
     name: "ChargeDefectRatio",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/extension/ChargeDefectRatio | BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/extension/ChargeDefectRatio",
@@ -529,7 +529,7 @@ pub static CHARGE_DEFECT_RATIO: HpxmlElement = HpxmlElement {
     description: "the <ChargeDefectRatio> element the parser reads under its parent",
 };
 
-/// the <ChargingLevel> element the parser reads under its parent
+/// the `<ChargingLevel>` element the parser reads under its parent
 pub static CHARGING_LEVEL: HpxmlElement = HpxmlElement {
     name: "ChargingLevel",
     context: "BuildingDetails/Systems/ElectricVehicleChargers/ElectricVehicleCharger/ChargingLevel",
@@ -537,7 +537,7 @@ pub static CHARGING_LEVEL: HpxmlElement = HpxmlElement {
     description: "the <ChargingLevel> element the parser reads under its parent",
 };
 
-/// the <ClimateandRiskZones> element the parser reads under its parent
+/// the `<ClimateandRiskZones>` element the parser reads under its parent
 pub static CLIMATEAND_RISK_ZONES: HpxmlElement = HpxmlElement {
     name: "ClimateandRiskZones",
     context: "BuildingDetails/ClimateandRiskZones",
@@ -553,7 +553,7 @@ pub static CLIMATE_ZONE: HpxmlElement = HpxmlElement {
     description: "the IECC climate zone string",
 };
 
-/// the <ClimateZoneIECC> element the parser reads under its parent
+/// the `<ClimateZoneIECC>` element the parser reads under its parent
 pub static CLIMATE_ZONE_IECC: HpxmlElement = HpxmlElement {
     name: "ClimateZoneIECC",
     context: "BuildingDetails/ClimateandRiskZones/ClimateZoneIECC",
@@ -561,7 +561,7 @@ pub static CLIMATE_ZONE_IECC: HpxmlElement = HpxmlElement {
     description: "the <ClimateZoneIECC> element the parser reads under its parent",
 };
 
-/// the <ClothesDryer> element the parser reads under its parent
+/// the `<ClothesDryer>` element the parser reads under its parent
 pub static CLOTHES_DRYER: HpxmlElement = HpxmlElement {
     name: "ClothesDryer",
     context: "BuildingDetails/Appliances/ClothesDryer",
@@ -569,7 +569,7 @@ pub static CLOTHES_DRYER: HpxmlElement = HpxmlElement {
     description: "the <ClothesDryer> element the parser reads under its parent",
 };
 
-/// the <ClothesWasher> element the parser reads under its parent
+/// the `<ClothesWasher>` element the parser reads under its parent
 pub static CLOTHES_WASHER: HpxmlElement = HpxmlElement {
     name: "ClothesWasher",
     context: "BuildingDetails/Appliances/ClothesWasher",
@@ -577,7 +577,7 @@ pub static CLOTHES_WASHER: HpxmlElement = HpxmlElement {
     description: "the <ClothesWasher> element the parser reads under its parent",
 };
 
-/// the <ColumnName> element the parser reads under its parent
+/// the `<ColumnName>` element the parser reads under its parent
 pub static COLUMN_NAME: HpxmlElement = HpxmlElement {
     name: "ColumnName",
     context: "an unavailable period's schedule column name (its type)",
@@ -585,7 +585,7 @@ pub static COLUMN_NAME: HpxmlElement = HpxmlElement {
     description: "the <ColumnName> element the parser reads under its parent",
 };
 
-/// the <CombinedEnergyFactor> element the parser reads under its parent
+/// the `<CombinedEnergyFactor>` element the parser reads under its parent
 pub static COMBINED_ENERGY_FACTOR: HpxmlElement = HpxmlElement {
     name: "CombinedEnergyFactor",
     context: "BuildingDetails/Appliances/ClothesDryer/CombinedEnergyFactor",
@@ -593,7 +593,7 @@ pub static COMBINED_ENERGY_FACTOR: HpxmlElement = HpxmlElement {
     description: "the <CombinedEnergyFactor> element the parser reads under its parent",
 };
 
-/// the <CompressorLockoutTemperature> element the parser reads under its parent
+/// the `<CompressorLockoutTemperature>` element the parser reads under its parent
 pub static COMPRESSOR_LOCKOUT_TEMPERATURE: HpxmlElement = HpxmlElement {
     name: "CompressorLockoutTemperature",
     context: "the compressor lockout temperature, degrees Fahrenheit",
@@ -601,7 +601,7 @@ pub static COMPRESSOR_LOCKOUT_TEMPERATURE: HpxmlElement = HpxmlElement {
     description: "the <CompressorLockoutTemperature> element the parser reads under its parent",
 };
 
-/// the <CompressorType> element the parser reads under its parent
+/// the `<CompressorType>` element the parser reads under its parent
 pub static COMPRESSOR_TYPE: HpxmlElement = HpxmlElement {
     name: "CompressorType",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/CompressorType | BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/CompressorType",
@@ -609,7 +609,7 @@ pub static COMPRESSOR_TYPE: HpxmlElement = HpxmlElement {
     description: "the <CompressorType> element the parser reads under its parent",
 };
 
-/// the <Conditioned> element the parser reads under its parent
+/// the `<Conditioned>` element the parser reads under its parent
 pub static CONDITIONED: HpxmlElement = HpxmlElement {
     name: "Conditioned",
     context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/Basement/Conditioned",
@@ -633,7 +633,7 @@ pub static CONDITIONED_FLOOR_AREA: HpxmlElement = HpxmlElement {
     description: "the conditioned floor area",
 };
 
-/// the <Conductivity> element the parser reads under its parent
+/// the `<Conductivity>` element the parser reads under its parent
 pub static CONDUCTIVITY: HpxmlElement = HpxmlElement {
     name: "Conductivity",
     context: "BuildingDetails/BuildingSummary/Site/Soil/Conductivity",
@@ -641,7 +641,7 @@ pub static CONDUCTIVITY: HpxmlElement = HpxmlElement {
     description: "the <Conductivity> element the parser reads under its parent",
 };
 
-/// the <CookingRange> element the parser reads under its parent
+/// the `<CookingRange>` element the parser reads under its parent
 pub static COOKING_RANGE: HpxmlElement = HpxmlElement {
     name: "CookingRange",
     context: "BuildingDetails/Appliances/CookingRange",
@@ -649,7 +649,7 @@ pub static COOKING_RANGE: HpxmlElement = HpxmlElement {
     description: "the <CookingRange> element the parser reads under its parent",
 };
 
-/// the <cooldown_duration_s> element the parser reads under its parent
+/// the `<cooldown_duration_s>` element the parser reads under its parent
 pub static COOLDOWN_DURATION_S: HpxmlElement = HpxmlElement {
     name: "cooldown_duration_s",
     context: "the synthetic extension element's cooldown duration, seconds",
@@ -657,7 +657,7 @@ pub static COOLDOWN_DURATION_S: HpxmlElement = HpxmlElement {
     description: "the <cooldown_duration_s> element the parser reads under its parent",
 };
 
-/// the <CoolingAirflowCFM> element the parser reads under its parent
+/// the `<CoolingAirflowCFM>` element the parser reads under its parent
 pub static COOLING_AIRFLOW_CFM: HpxmlElement = HpxmlElement {
     name: "CoolingAirflowCFM",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/extension/CoolingAirflowCFM | BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/extension/CoolingAirflowCFM",
@@ -665,7 +665,7 @@ pub static COOLING_AIRFLOW_CFM: HpxmlElement = HpxmlElement {
     description: "the <CoolingAirflowCFM> element the parser reads under its parent",
 };
 
-/// the <CoolingAutosizingFactor> element the parser reads under its parent
+/// the `<CoolingAutosizingFactor>` element the parser reads under its parent
 pub static COOLING_AUTOSIZING_FACTOR: HpxmlElement = HpxmlElement {
     name: "CoolingAutosizingFactor",
     context: "the cooling autosizing factor (extension)",
@@ -673,7 +673,7 @@ pub static COOLING_AUTOSIZING_FACTOR: HpxmlElement = HpxmlElement {
     description: "the <CoolingAutosizingFactor> element the parser reads under its parent",
 };
 
-/// the <CoolingCapacity> element the parser reads under its parent
+/// the `<CoolingCapacity>` element the parser reads under its parent
 pub static COOLING_CAPACITY: HpxmlElement = HpxmlElement {
     name: "CoolingCapacity",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/CoolingCapacity | BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/CoolingCapacity",
@@ -681,7 +681,7 @@ pub static COOLING_CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <CoolingCapacity> element the parser reads under its parent",
 };
 
-/// the <CoolingSensibleHeatFraction> element the parser reads under its parent
+/// the `<CoolingSensibleHeatFraction>` element the parser reads under its parent
 pub static COOLING_SENSIBLE_HEAT_FRACTION: HpxmlElement = HpxmlElement {
     name: "CoolingSensibleHeatFraction",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/CoolingSensibleHeatFraction",
@@ -689,7 +689,7 @@ pub static COOLING_SENSIBLE_HEAT_FRACTION: HpxmlElement = HpxmlElement {
     description: "the <CoolingSensibleHeatFraction> element the parser reads under its parent",
 };
 
-/// the <CoolingSystem> element the parser reads under its parent
+/// the `<CoolingSystem>` element the parser reads under its parent
 pub static COOLING_SYSTEM: HpxmlElement = HpxmlElement {
     name: "CoolingSystem",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem",
@@ -697,7 +697,7 @@ pub static COOLING_SYSTEM: HpxmlElement = HpxmlElement {
     description: "the <CoolingSystem> element the parser reads under its parent",
 };
 
-/// the <CoolingSystemFuel> element the parser reads under its parent
+/// the `<CoolingSystemFuel>` element the parser reads under its parent
 pub static COOLING_SYSTEM_FUEL: HpxmlElement = HpxmlElement {
     name: "CoolingSystemFuel",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/CoolingSystemFuel",
@@ -705,7 +705,7 @@ pub static COOLING_SYSTEM_FUEL: HpxmlElement = HpxmlElement {
     description: "the <CoolingSystemFuel> element the parser reads under its parent",
 };
 
-/// the <CoolingSystemType> element the parser reads under its parent
+/// the `<CoolingSystemType>` element the parser reads under its parent
 pub static COOLING_SYSTEM_TYPE: HpxmlElement = HpxmlElement {
     name: "CoolingSystemType",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/CoolingSystemType",
@@ -713,7 +713,7 @@ pub static COOLING_SYSTEM_TYPE: HpxmlElement = HpxmlElement {
     description: "the <CoolingSystemType> element the parser reads under its parent",
 };
 
-/// the <COP> element the parser reads under its parent
+/// the `<COP>` element the parser reads under its parent
 pub static COP: HpxmlElement = HpxmlElement {
     name: "COP",
     context: "a heat pump's COP (the legacy direct-child form)",
@@ -721,7 +721,7 @@ pub static COP: HpxmlElement = HpxmlElement {
     description: "the <COP> element the parser reads under its parent",
 };
 
-/// the <Count> element the parser reads under its parent
+/// the `<Count>` element the parser reads under its parent
 pub static COUNT: HpxmlElement = HpxmlElement {
     name: "Count",
     context: "BuildingDetails/Lighting/CeilingFan/Count | BuildingDetails/Systems/MechanicalVentilation/VentilationFans/VentilationFan/Count",
@@ -729,7 +729,7 @@ pub static COUNT: HpxmlElement = HpxmlElement {
     description: "the <Count> element the parser reads under its parent",
 };
 
-/// the <CrankcaseHeaterPowerWatts> element the parser reads under its parent
+/// the `<CrankcaseHeaterPowerWatts>` element the parser reads under its parent
 pub static CRANKCASE_HEATER_POWER_WATTS: HpxmlElement = HpxmlElement {
     name: "CrankcaseHeaterPowerWatts",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/extension/CrankcaseHeaterPowerWatts | BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/extension/CrankcaseHeaterPowerWatts",
@@ -737,7 +737,7 @@ pub static CRANKCASE_HEATER_POWER_WATTS: HpxmlElement = HpxmlElement {
     description: "the <CrankcaseHeaterPowerWatts> element the parser reads under its parent",
 };
 
-/// the <CrankcaseHeaterWatts> element the parser reads under its parent
+/// the `<CrankcaseHeaterWatts>` element the parser reads under its parent
 pub static CRANKCASE_HEATER_WATTS: HpxmlElement = HpxmlElement {
     name: "CrankcaseHeaterWatts",
     context: "CoolingSystem (and heat pump) cooling",
@@ -745,7 +745,7 @@ pub static CRANKCASE_HEATER_WATTS: HpxmlElement = HpxmlElement {
     description: "the <CrankcaseHeaterWatts> element the parser reads under its parent",
 };
 
-/// the <Dehumidifier> element the parser reads under its parent
+/// the `<Dehumidifier>` element the parser reads under its parent
 pub static DEHUMIDIFIER: HpxmlElement = HpxmlElement {
     name: "Dehumidifier",
     context: "BuildingDetails/Appliances/Dehumidifier",
@@ -753,7 +753,7 @@ pub static DEHUMIDIFIER: HpxmlElement = HpxmlElement {
     description: "the <Dehumidifier> element the parser reads under its parent",
 };
 
-/// the <DehumidistatSetpoint> element the parser reads under its parent
+/// the `<DehumidistatSetpoint>` element the parser reads under its parent
 pub static DEHUMIDISTAT_SETPOINT: HpxmlElement = HpxmlElement {
     name: "DehumidistatSetpoint",
     context: "BuildingDetails/Appliances/Dehumidifier/DehumidistatSetpoint",
@@ -761,7 +761,7 @@ pub static DEHUMIDISTAT_SETPOINT: HpxmlElement = HpxmlElement {
     description: "the <DehumidistatSetpoint> element the parser reads under its parent",
 };
 
-/// the <Density> element the parser reads under its parent
+/// the `<Density>` element the parser reads under its parent
 pub static DENSITY: HpxmlElement = HpxmlElement {
     name: "Density",
     context: "material Layer (insulation and mass layers)",
@@ -769,7 +769,7 @@ pub static DENSITY: HpxmlElement = HpxmlElement {
     description: "the <Density> element the parser reads under its parent",
 };
 
-/// the <DepthBelowGrade> element the parser reads under its parent
+/// the `<DepthBelowGrade>` element the parser reads under its parent
 pub static DEPTH_BELOW_GRADE: HpxmlElement = HpxmlElement {
     name: "DepthBelowGrade",
     context: "BuildingDetails/Enclosure/FoundationWalls/FoundationWall/DepthBelowGrade | BuildingDetails/Enclosure/Slabs/Slab/DepthBelowGrade",
@@ -777,7 +777,7 @@ pub static DEPTH_BELOW_GRADE: HpxmlElement = HpxmlElement {
     description: "the <DepthBelowGrade> element the parser reads under its parent",
 };
 
-/// the <Dishwasher> element the parser reads under its parent
+/// the `<Dishwasher>` element the parser reads under its parent
 pub static DISHWASHER: HpxmlElement = HpxmlElement {
     name: "Dishwasher",
     context: "BuildingDetails/Appliances/Dishwasher",
@@ -785,7 +785,7 @@ pub static DISHWASHER: HpxmlElement = HpxmlElement {
     description: "the <Dishwasher> element the parser reads under its parent",
 };
 
-/// the <DistanceToBottomOfInsulation> element the parser reads under its parent
+/// the `<DistanceToBottomOfInsulation>` element the parser reads under its parent
 pub static DISTANCE_TO_BOTTOM_OF_INSULATION: HpxmlElement = HpxmlElement {
     name: "DistanceToBottomOfInsulation",
     context: "BuildingDetails/Enclosure/FoundationWalls/FoundationWall/Insulation/Layer/DistanceToBottomOfInsulation",
@@ -793,7 +793,7 @@ pub static DISTANCE_TO_BOTTOM_OF_INSULATION: HpxmlElement = HpxmlElement {
     description: "the <DistanceToBottomOfInsulation> element the parser reads under its parent",
 };
 
-/// the <DistanceToTopOfInsulation> element the parser reads under its parent
+/// the `<DistanceToTopOfInsulation>` element the parser reads under its parent
 pub static DISTANCE_TO_TOP_OF_INSULATION: HpxmlElement = HpxmlElement {
     name: "DistanceToTopOfInsulation",
     context: "BuildingDetails/Enclosure/FoundationWalls/FoundationWall/Insulation/Layer/DistanceToTopOfInsulation",
@@ -801,7 +801,7 @@ pub static DISTANCE_TO_TOP_OF_INSULATION: HpxmlElement = HpxmlElement {
     description: "the <DistanceToTopOfInsulation> element the parser reads under its parent",
 };
 
-/// the <Door> element the parser reads under its parent
+/// the `<Door>` element the parser reads under its parent
 pub static DOOR: HpxmlElement = HpxmlElement {
     name: "Door",
     context: "Enclosure/Doors (one door)",
@@ -809,7 +809,7 @@ pub static DOOR: HpxmlElement = HpxmlElement {
     description: "the <Door> element the parser reads under its parent",
 };
 
-/// the <Doors> element the parser reads under its parent
+/// the `<Doors>` element the parser reads under its parent
 pub static DOORS: HpxmlElement = HpxmlElement {
     name: "Doors",
     context: "Enclosure (the door container)",
@@ -817,7 +817,7 @@ pub static DOORS: HpxmlElement = HpxmlElement {
     description: "the <Doors> element the parser reads under its parent",
 };
 
-/// the <DuctInsulationRValue> element the parser reads under its parent
+/// the `<DuctInsulationRValue>` element the parser reads under its parent
 pub static DUCT_INSULATION_R_VALUE: HpxmlElement = HpxmlElement {
     name: "DuctInsulationRValue",
     context: "BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution/Ducts/DuctInsulationRValue",
@@ -825,7 +825,7 @@ pub static DUCT_INSULATION_R_VALUE: HpxmlElement = HpxmlElement {
     description: "the <DuctInsulationRValue> element the parser reads under its parent",
 };
 
-/// the <DuctLeakage> element the parser reads under its parent
+/// the `<DuctLeakage>` element the parser reads under its parent
 pub static DUCT_LEAKAGE: HpxmlElement = HpxmlElement {
     name: "DuctLeakage",
     context: "BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution/DuctLeakageMeasurement/DuctLeakage",
@@ -833,7 +833,7 @@ pub static DUCT_LEAKAGE: HpxmlElement = HpxmlElement {
     description: "the <DuctLeakage> element the parser reads under its parent",
 };
 
-/// the <DuctLeakageMeasurement> element the parser reads under its parent
+/// the `<DuctLeakageMeasurement>` element the parser reads under its parent
 pub static DUCT_LEAKAGE_MEASUREMENT: HpxmlElement = HpxmlElement {
     name: "DuctLeakageMeasurement",
     context: "BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution/DuctLeakageMeasurement",
@@ -841,7 +841,7 @@ pub static DUCT_LEAKAGE_MEASUREMENT: HpxmlElement = HpxmlElement {
     description: "the <DuctLeakageMeasurement> element the parser reads under its parent",
 };
 
-/// the <DuctLocation> element the parser reads under its parent
+/// the `<DuctLocation>` element the parser reads under its parent
 pub static DUCT_LOCATION: HpxmlElement = HpxmlElement {
     name: "DuctLocation",
     context: "BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution/Ducts/DuctLocation",
@@ -849,7 +849,7 @@ pub static DUCT_LOCATION: HpxmlElement = HpxmlElement {
     description: "the <DuctLocation> element the parser reads under its parent",
 };
 
-/// the <Ducts> element the parser reads under its parent
+/// the `<Ducts>` element the parser reads under its parent
 pub static DUCTS: HpxmlElement = HpxmlElement {
     name: "Ducts",
     context: "BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution/Ducts | BuildingDetails/Systems/HVAC/HVACPlant/extension/DesignLoads/CoolingLatent/Ducts | BuildingDetails/Systems/HVAC/HVACPlant/extension/DesignLoads/CoolingSensible/Ducts | BuildingDetails/Systems/HVAC/HVACPlant/extension/DesignLoads/Heating/Ducts",
@@ -857,7 +857,7 @@ pub static DUCTS: HpxmlElement = HpxmlElement {
     description: "the <Ducts> element the parser reads under its parent",
 };
 
-/// the <DuctSurfaceArea> element the parser reads under its parent
+/// the `<DuctSurfaceArea>` element the parser reads under its parent
 pub static DUCT_SURFACE_AREA: HpxmlElement = HpxmlElement {
     name: "DuctSurfaceArea",
     context: "BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution/Ducts/DuctSurfaceArea",
@@ -865,7 +865,7 @@ pub static DUCT_SURFACE_AREA: HpxmlElement = HpxmlElement {
     description: "the <DuctSurfaceArea> element the parser reads under its parent",
 };
 
-/// the <DuctType> element the parser reads under its parent
+/// the `<DuctType>` element the parser reads under its parent
 pub static DUCT_TYPE: HpxmlElement = HpxmlElement {
     name: "DuctType",
     context: "BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution/DuctLeakageMeasurement/DuctType | BuildingDetails/Systems/HVAC/HVACDistribution/DistributionSystemType/AirDistribution/Ducts/DuctType",
@@ -873,7 +873,7 @@ pub static DUCT_TYPE: HpxmlElement = HpxmlElement {
     description: "the <DuctType> element the parser reads under its parent",
 };
 
-/// the <EER> element the parser reads under its parent
+/// the `<EER>` element the parser reads under its parent
 pub static EER: HpxmlElement = HpxmlElement {
     name: "EER",
     context: "a cooling system's EER (the legacy direct-child form)",
@@ -881,7 +881,7 @@ pub static EER: HpxmlElement = HpxmlElement {
     description: "the <EER> element the parser reads under its parent",
 };
 
-/// the <EER2> element the parser reads under its parent
+/// the `<EER2>` element the parser reads under its parent
 pub static EER_2: HpxmlElement = HpxmlElement {
     name: "EER2",
     context: "a cooling system's EER2 (the legacy direct-child form)",
@@ -889,7 +889,7 @@ pub static EER_2: HpxmlElement = HpxmlElement {
     description: "the <EER2> element the parser reads under its parent",
 };
 
-/// the <EffectiveLeakageArea> element the parser reads under its parent
+/// the `<EffectiveLeakageArea>` element the parser reads under its parent
 pub static EFFECTIVE_LEAKAGE_AREA: HpxmlElement = HpxmlElement {
     name: "EffectiveLeakageArea",
     context: "AirInfiltrationMeasurement (first descendant read)",
@@ -897,7 +897,7 @@ pub static EFFECTIVE_LEAKAGE_AREA: HpxmlElement = HpxmlElement {
     description: "the <EffectiveLeakageArea> element the parser reads under its parent",
 };
 
-/// the <Efficiency> element the parser reads under its parent
+/// the `<Efficiency>` element the parser reads under its parent
 pub static EFFICIENCY: HpxmlElement = HpxmlElement {
     name: "Efficiency",
     context: "BuildingDetails/Lighting/CeilingFan/Airflow/Efficiency | BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/CoolingDetailedPerformanceData/PerformanceDataPoint/Efficiency",
@@ -905,7 +905,7 @@ pub static EFFICIENCY: HpxmlElement = HpxmlElement {
     description: "the <Efficiency> element the parser reads under its parent",
 };
 
-/// the <ElectricalPowerOutput> element the parser reads under its parent
+/// the `<ElectricalPowerOutput>` element the parser reads under its parent
 pub static ELECTRICAL_POWER_OUTPUT: HpxmlElement = HpxmlElement {
     name: "ElectricalPowerOutput",
     context: "Systems/extension/Generators/Generator",
@@ -913,7 +913,7 @@ pub static ELECTRICAL_POWER_OUTPUT: HpxmlElement = HpxmlElement {
     description: "the <ElectricalPowerOutput> element the parser reads under its parent",
 };
 
-/// the <ElectricAuxiliaryEnergy> element the parser reads under its parent
+/// the `<ElectricAuxiliaryEnergy>` element the parser reads under its parent
 pub static ELECTRIC_AUXILIARY_ENERGY: HpxmlElement = HpxmlElement {
     name: "ElectricAuxiliaryEnergy",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem/ElectricAuxiliaryEnergy",
@@ -921,7 +921,7 @@ pub static ELECTRIC_AUXILIARY_ENERGY: HpxmlElement = HpxmlElement {
     description: "the <ElectricAuxiliaryEnergy> element the parser reads under its parent",
 };
 
-/// the <ElectricVehicle> element the parser reads under its parent
+/// the `<ElectricVehicle>` element the parser reads under its parent
 pub static ELECTRIC_VEHICLE: HpxmlElement = HpxmlElement {
     name: "ElectricVehicle",
     context: "Systems/ElectricVehicles",
@@ -929,7 +929,7 @@ pub static ELECTRIC_VEHICLE: HpxmlElement = HpxmlElement {
     description: "the <ElectricVehicle> element the parser reads under its parent",
 };
 
-/// the <ElectricVehicles> element the parser reads under its parent
+/// the `<ElectricVehicles>` element the parser reads under its parent
 pub static ELECTRIC_VEHICLES: HpxmlElement = HpxmlElement {
     name: "ElectricVehicles",
     context: "Systems (the EV container)",
@@ -945,7 +945,7 @@ pub static ELEVATION: HpxmlElement = HpxmlElement {
     description: "the site's elevation above sea level",
 };
 
-/// the <Emittance> element the parser reads under its parent
+/// the `<Emittance>` element the parser reads under its parent
 pub static EMITTANCE: HpxmlElement = HpxmlElement {
     name: "Emittance",
     context: "BuildingDetails/Enclosure/RimJoists/RimJoist/Emittance | BuildingDetails/Enclosure/Roofs/Roof/Emittance | BuildingDetails/Enclosure/Walls/Wall/Emittance",
@@ -953,7 +953,7 @@ pub static EMITTANCE: HpxmlElement = HpxmlElement {
     description: "the <Emittance> element the parser reads under its parent",
 };
 
-/// the <Enclosure> element the parser reads under its parent
+/// the `<Enclosure>` element the parser reads under its parent
 pub static ENCLOSURE: HpxmlElement = HpxmlElement {
     name: "Enclosure",
     context: "BuildingDetails/Enclosure",
@@ -961,7 +961,7 @@ pub static ENCLOSURE: HpxmlElement = HpxmlElement {
     description: "the <Enclosure> element the parser reads under its parent",
 };
 
-/// the <EndDayOfMonth> element the parser reads under its parent
+/// the `<EndDayOfMonth>` element the parser reads under its parent
 pub static END_DAY_OF_MONTH: HpxmlElement = HpxmlElement {
     name: "EndDayOfMonth",
     context: "an unavailable period's end day of month",
@@ -969,7 +969,7 @@ pub static END_DAY_OF_MONTH: HpxmlElement = HpxmlElement {
     description: "the <EndDayOfMonth> element the parser reads under its parent",
 };
 
-/// the <EndHourOfDay> element the parser reads under its parent
+/// the `<EndHourOfDay>` element the parser reads under its parent
 pub static END_HOUR_OF_DAY: HpxmlElement = HpxmlElement {
     name: "EndHourOfDay",
     context: "an unavailable period's end hour of day",
@@ -977,7 +977,7 @@ pub static END_HOUR_OF_DAY: HpxmlElement = HpxmlElement {
     description: "the <EndHourOfDay> element the parser reads under its parent",
 };
 
-/// the <EndMonth> element the parser reads under its parent
+/// the `<EndMonth>` element the parser reads under its parent
 pub static END_MONTH: HpxmlElement = HpxmlElement {
     name: "EndMonth",
     context: "an unavailable period's end month",
@@ -985,7 +985,7 @@ pub static END_MONTH: HpxmlElement = HpxmlElement {
     description: "the <EndMonth> element the parser reads under its parent",
 };
 
-/// the <EnergyFactor> element the parser reads under its parent
+/// the `<EnergyFactor>` element the parser reads under its parent
 pub static ENERGY_FACTOR: HpxmlElement = HpxmlElement {
     name: "EnergyFactor",
     context: "BuildingDetails/Appliances/Dehumidifier/EnergyFactor | BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/EnergyFactor",
@@ -993,7 +993,7 @@ pub static ENERGY_FACTOR: HpxmlElement = HpxmlElement {
     description: "the <EnergyFactor> element the parser reads under its parent",
 };
 
-/// the <ERICalculation> element the parser reads under its parent
+/// the `<ERICalculation>` element the parser reads under its parent
 pub static ERI_CALCULATION: HpxmlElement = HpxmlElement {
     name: "ERICalculation",
     context: "SoftwareInfo/extension (the ERI calculation's version)",
@@ -1001,7 +1001,7 @@ pub static ERI_CALCULATION: HpxmlElement = HpxmlElement {
     description: "the <ERICalculation> element the parser reads under its parent",
 };
 
-/// the <event_probability_constant> element the parser reads under its parent
+/// the `<event_probability_constant>` element the parser reads under its parent
 pub static EVENT_PROBABILITY_CONSTANT: HpxmlElement = HpxmlElement {
     name: "event_probability_constant",
     context: "the synthetic extension element's constant event probability",
@@ -1014,7 +1014,7 @@ pub static EVENT_PROBABILITY_CONSTANT: HpxmlElement = HpxmlElement {
                   supra-hourly steps, since a step longer than the hour starts at most once)",
 };
 
-/// the <event_probability_schedule_col> element the parser reads under its parent
+/// the `<event_probability_schedule_col>` element the parser reads under its parent
 pub static EVENT_PROBABILITY_SCHEDULE_COL: HpxmlElement = HpxmlElement {
     name: "event_probability_schedule_col",
     context: "the synthetic extension element's event-probability schedule column",
@@ -1022,7 +1022,7 @@ pub static EVENT_PROBABILITY_SCHEDULE_COL: HpxmlElement = HpxmlElement {
     description: "the <event_probability_schedule_col> element the parser reads under its parent",
 };
 
-/// the <event_probability_source> element the parser reads under its parent
+/// the `<event_probability_source>` element the parser reads under its parent
 pub static EVENT_PROBABILITY_SOURCE: HpxmlElement = HpxmlElement {
     name: "event_probability_source",
     context: "the synthetic extension element's event-probability source kind",
@@ -1030,7 +1030,7 @@ pub static EVENT_PROBABILITY_SOURCE: HpxmlElement = HpxmlElement {
     description: "the <event_probability_source> element the parser reads under its parent",
 };
 
-/// the <event_window_schedule_col> element the parser reads under its parent
+/// the `<event_window_schedule_col>` element the parser reads under its parent
 pub static EVENT_WINDOW_SCHEDULE_COL: HpxmlElement = HpxmlElement {
     name: "event_window_schedule_col",
     context: "the synthetic extension element's event-window schedule column",
@@ -1038,7 +1038,7 @@ pub static EVENT_WINDOW_SCHEDULE_COL: HpxmlElement = HpxmlElement {
     description: "the <event_window_schedule_col> element the parser reads under its parent",
 };
 
-/// the <event_window_source> element the parser reads under its parent
+/// the `<event_window_source>` element the parser reads under its parent
 pub static EVENT_WINDOW_SOURCE: HpxmlElement = HpxmlElement {
     name: "event_window_source",
     context: "the synthetic extension element's event-window source kind",
@@ -1046,7 +1046,7 @@ pub static EVENT_WINDOW_SOURCE: HpxmlElement = HpxmlElement {
     description: "the <event_window_source> element the parser reads under its parent",
 };
 
-/// the <ExposedPerimeter> element the parser reads under its parent
+/// the `<ExposedPerimeter>` element the parser reads under its parent
 pub static EXPOSED_PERIMETER: HpxmlElement = HpxmlElement {
     name: "ExposedPerimeter",
     context: "BuildingDetails/Enclosure/Slabs/Slab/ExposedPerimeter",
@@ -1070,7 +1070,7 @@ pub static EXTERIOR_ADJACENT_TO: HpxmlElement = HpxmlElement {
     description: "the zone the element's exterior faces",
 };
 
-/// the <ExteriorShading> element the parser reads under its parent
+/// the `<ExteriorShading>` element the parser reads under its parent
 pub static EXTERIOR_SHADING: HpxmlElement = HpxmlElement {
     name: "ExteriorShading",
     context: "BuildingDetails/Enclosure/Windows/Window/ExteriorShading",
@@ -1078,7 +1078,7 @@ pub static EXTERIOR_SHADING: HpxmlElement = HpxmlElement {
     description: "the <ExteriorShading> element the parser reads under its parent",
 };
 
-/// the <FanPower> element the parser reads under its parent
+/// the `<FanPower>` element the parser reads under its parent
 pub static FAN_POWER: HpxmlElement = HpxmlElement {
     name: "FanPower",
     context: "BuildingDetails/Systems/MechanicalVentilation/VentilationFans/VentilationFan/FanPower",
@@ -1086,7 +1086,7 @@ pub static FAN_POWER: HpxmlElement = HpxmlElement {
     description: "the <FanPower> element the parser reads under its parent",
 };
 
-/// the <FanPowerWatts> element the parser reads under its parent
+/// the `<FanPowerWatts>` element the parser reads under its parent
 pub static FAN_POWER_WATTS: HpxmlElement = HpxmlElement {
     name: "FanPowerWatts",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem/extension/FanPowerWatts",
@@ -1094,7 +1094,7 @@ pub static FAN_POWER_WATTS: HpxmlElement = HpxmlElement {
     description: "the <FanPowerWatts> element the parser reads under its parent",
 };
 
-/// the <FanPowerWattsPerCFM> element the parser reads under its parent
+/// the `<FanPowerWattsPerCFM>` element the parser reads under its parent
 pub static FAN_POWER_WATTS_PER_CFM: HpxmlElement = HpxmlElement {
     name: "FanPowerWattsPerCFM",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/extension/FanPowerWattsPerCFM | BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/extension/FanPowerWattsPerCFM | BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem/extension/FanPowerWattsPerCFM",
@@ -1102,7 +1102,7 @@ pub static FAN_POWER_WATTS_PER_CFM: HpxmlElement = HpxmlElement {
     description: "the <FanPowerWattsPerCFM> element the parser reads under its parent",
 };
 
-/// the <FanType> element the parser reads under its parent
+/// the `<FanType>` element the parser reads under its parent
 pub static FAN_TYPE: HpxmlElement = HpxmlElement {
     name: "FanType",
     context: "BuildingDetails/Systems/MechanicalVentilation/VentilationFans/VentilationFan/FanType",
@@ -1110,7 +1110,7 @@ pub static FAN_TYPE: HpxmlElement = HpxmlElement {
     description: "the <FanType> element the parser reads under its parent",
 };
 
-/// the <FirstHourRating> element the parser reads under its parent
+/// the `<FirstHourRating>` element the parser reads under its parent
 pub static FIRST_HOUR_RATING: HpxmlElement = HpxmlElement {
     name: "FirstHourRating",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/FirstHourRating",
@@ -1118,7 +1118,7 @@ pub static FIRST_HOUR_RATING: HpxmlElement = HpxmlElement {
     description: "the <FirstHourRating> element the parser reads under its parent",
 };
 
-/// the <FlatRoof> element the parser reads under its parent
+/// the `<FlatRoof>` element the parser reads under its parent
 pub static FLAT_ROOF: HpxmlElement = HpxmlElement {
     name: "FlatRoof",
     context: "BuildingDetails/Enclosure/Attics/Attic/AtticType/FlatRoof",
@@ -1126,7 +1126,7 @@ pub static FLAT_ROOF: HpxmlElement = HpxmlElement {
     description: "the <FlatRoof> element the parser reads under its parent",
 };
 
-/// the <Floor> element the parser reads under its parent
+/// the `<Floor>` element the parser reads under its parent
 pub static FLOOR: HpxmlElement = HpxmlElement {
     name: "Floor",
     context: "Enclosure/Floors (one floor)",
@@ -1142,7 +1142,7 @@ pub static FLOOR_AREA: HpxmlElement = HpxmlElement {
     description: "a foundation's or zone's floor area",
 };
 
-/// the <FloorOrCeiling> element the parser reads under its parent
+/// the `<FloorOrCeiling>` element the parser reads under its parent
 pub static FLOOR_OR_CEILING: HpxmlElement = HpxmlElement {
     name: "FloorOrCeiling",
     context: "BuildingDetails/Enclosure/Floors/Floor/FloorOrCeiling",
@@ -1150,7 +1150,7 @@ pub static FLOOR_OR_CEILING: HpxmlElement = HpxmlElement {
     description: "the <FloorOrCeiling> element the parser reads under its parent",
 };
 
-/// the <Floors> element the parser reads under its parent
+/// the `<Floors>` element the parser reads under its parent
 pub static FLOORS: HpxmlElement = HpxmlElement {
     name: "Floors",
     context: "Enclosure (the floor container)",
@@ -1158,7 +1158,7 @@ pub static FLOORS: HpxmlElement = HpxmlElement {
     description: "the <Floors> element the parser reads under its parent",
 };
 
-/// the <FloorType> element the parser reads under its parent
+/// the `<FloorType>` element the parser reads under its parent
 pub static FLOOR_TYPE: HpxmlElement = HpxmlElement {
     name: "FloorType",
     context: "BuildingDetails/Enclosure/Floors/Floor/FloorType",
@@ -1166,7 +1166,7 @@ pub static FLOOR_TYPE: HpxmlElement = HpxmlElement {
     description: "the <FloorType> element the parser reads under its parent",
 };
 
-/// the <FlueLossFraction> element the parser reads under its parent
+/// the `<FlueLossFraction>` element the parser reads under its parent
 pub static FLUE_LOSS_FRACTION: HpxmlElement = HpxmlElement {
     name: "FlueLossFraction",
     context: "WaterHeatingSystem (gas)",
@@ -1174,7 +1174,7 @@ pub static FLUE_LOSS_FRACTION: HpxmlElement = HpxmlElement {
     description: "the <FlueLossFraction> element the parser reads under its parent",
 };
 
-/// the <Foundation> element the parser reads under its parent
+/// the `<Foundation>` element the parser reads under its parent
 pub static FOUNDATION: HpxmlElement = HpxmlElement {
     name: "Foundation",
     context: "BuildingDetails/Enclosure/Foundations/Foundation",
@@ -1182,7 +1182,7 @@ pub static FOUNDATION: HpxmlElement = HpxmlElement {
     description: "the <Foundation> element the parser reads under its parent",
 };
 
-/// the <Foundations> element the parser reads under its parent
+/// the `<Foundations>` element the parser reads under its parent
 pub static FOUNDATIONS: HpxmlElement = HpxmlElement {
     name: "Foundations",
     context: "BuildingDetails/Enclosure/Foundations",
@@ -1190,7 +1190,7 @@ pub static FOUNDATIONS: HpxmlElement = HpxmlElement {
     description: "the <Foundations> element the parser reads under its parent",
 };
 
-/// the <FoundationType> element the parser reads under its parent
+/// the `<FoundationType>` element the parser reads under its parent
 pub static FOUNDATION_TYPE: HpxmlElement = HpxmlElement {
     name: "FoundationType",
     context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType",
@@ -1198,7 +1198,7 @@ pub static FOUNDATION_TYPE: HpxmlElement = HpxmlElement {
     description: "the <FoundationType> element the parser reads under its parent",
 };
 
-/// the <FoundationWall> element the parser reads under its parent
+/// the `<FoundationWall>` element the parser reads under its parent
 pub static FOUNDATION_WALL: HpxmlElement = HpxmlElement {
     name: "FoundationWall",
     context: "Enclosure/FoundationWalls (one foundation wall)",
@@ -1206,7 +1206,7 @@ pub static FOUNDATION_WALL: HpxmlElement = HpxmlElement {
     description: "the <FoundationWall> element the parser reads under its parent",
 };
 
-/// the <FoundationWalls> element the parser reads under its parent
+/// the `<FoundationWalls>` element the parser reads under its parent
 pub static FOUNDATION_WALLS: HpxmlElement = HpxmlElement {
     name: "FoundationWalls",
     context: "Enclosure (the foundation-wall container)",
@@ -1214,7 +1214,7 @@ pub static FOUNDATION_WALLS: HpxmlElement = HpxmlElement {
     description: "the <FoundationWalls> element the parser reads under its parent",
 };
 
-/// the <FracLatent> element the parser reads under its parent
+/// the `<FracLatent>` element the parser reads under its parent
 pub static FRAC_LATENT: HpxmlElement = HpxmlElement {
     name: "FracLatent",
     context: "BuildingDetails/MiscLoads/FuelLoad/extension/FracLatent | BuildingDetails/MiscLoads/PlugLoad/extension/FracLatent",
@@ -1222,7 +1222,7 @@ pub static FRAC_LATENT: HpxmlElement = HpxmlElement {
     description: "the <FracLatent> element the parser reads under its parent",
 };
 
-/// the <FracRadiant> element the parser reads under its parent
+/// the `<FracRadiant>` element the parser reads under its parent
 pub static FRAC_RADIANT: HpxmlElement = HpxmlElement {
     name: "FracRadiant",
     context: "appliance and load extension (the radiant gain fraction)",
@@ -1230,7 +1230,7 @@ pub static FRAC_RADIANT: HpxmlElement = HpxmlElement {
     description: "the <FracRadiant> element the parser reads under its parent",
 };
 
-/// the <FracSensible> element the parser reads under its parent
+/// the `<FracSensible>` element the parser reads under its parent
 pub static FRAC_SENSIBLE: HpxmlElement = HpxmlElement {
     name: "FracSensible",
     context: "BuildingDetails/MiscLoads/FuelLoad/extension/FracSensible | BuildingDetails/MiscLoads/PlugLoad/extension/FracSensible",
@@ -1246,7 +1246,7 @@ pub static FRACTION_COOLING_LOAD_SERVED: HpxmlElement = HpxmlElement {
     description: "the fraction of the cooling load the equipment serves",
 };
 
-/// the <FractionCoolLoadServed> element the parser reads under its parent
+/// the `<FractionCoolLoadServed>` element the parser reads under its parent
 pub static FRACTION_COOL_LOAD_SERVED: HpxmlElement = HpxmlElement {
     name: "FractionCoolLoadServed",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/FractionCoolLoadServed | BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/FractionCoolLoadServed",
@@ -1254,7 +1254,7 @@ pub static FRACTION_COOL_LOAD_SERVED: HpxmlElement = HpxmlElement {
     description: "the <FractionCoolLoadServed> element the parser reads under its parent",
 };
 
-/// the <FractionDehumidificationLoadServed> element the parser reads under its parent
+/// the `<FractionDehumidificationLoadServed>` element the parser reads under its parent
 pub static FRACTION_DEHUMIDIFICATION_LOAD_SERVED: HpxmlElement = HpxmlElement {
     name: "FractionDehumidificationLoadServed",
     context: "BuildingDetails/Appliances/Dehumidifier/FractionDehumidificationLoadServed",
@@ -1262,7 +1262,7 @@ pub static FRACTION_DEHUMIDIFICATION_LOAD_SERVED: HpxmlElement = HpxmlElement {
     description: "the <FractionDehumidificationLoadServed> element the parser reads under its parent",
 };
 
-/// the <FractionDHWLoadServed> element the parser reads under its parent
+/// the `<FractionDHWLoadServed>` element the parser reads under its parent
 pub static FRACTION_DHW_LOAD_SERVED: HpxmlElement = HpxmlElement {
     name: "FractionDHWLoadServed",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/FractionDHWLoadServed",
@@ -1278,7 +1278,7 @@ pub static FRACTION_HEATING_LOAD_SERVED: HpxmlElement = HpxmlElement {
     description: "the fraction of the heating load the equipment serves",
 };
 
-/// the <FractionHeatLoadServed> element the parser reads under its parent
+/// the `<FractionHeatLoadServed>` element the parser reads under its parent
 pub static FRACTION_HEAT_LOAD_SERVED: HpxmlElement = HpxmlElement {
     name: "FractionHeatLoadServed",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/FractionHeatLoadServed | BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem/FractionHeatLoadServed",
@@ -1294,7 +1294,7 @@ pub static FRACTION_LOAD_SERVED: HpxmlElement = HpxmlElement {
     description: "the fraction of the load the equipment serves",
 };
 
-/// the <FractionofUnitsInLocation> element the parser reads under its parent
+/// the `<FractionofUnitsInLocation>` element the parser reads under its parent
 pub static FRACTIONOF_UNITS_IN_LOCATION: HpxmlElement = HpxmlElement {
     name: "FractionofUnitsInLocation",
     context: "BuildingDetails/Lighting/LightingGroup/FractionofUnitsInLocation",
@@ -1302,7 +1302,7 @@ pub static FRACTIONOF_UNITS_IN_LOCATION: HpxmlElement = HpxmlElement {
     description: "the <FractionofUnitsInLocation> element the parser reads under its parent",
 };
 
-/// the <FractionOperable> element the parser reads under its parent
+/// the `<FractionOperable>` element the parser reads under its parent
 pub static FRACTION_OPERABLE: HpxmlElement = HpxmlElement {
     name: "FractionOperable",
     context: "BuildingDetails/Enclosure/Windows/Window/FractionOperable",
@@ -1310,7 +1310,7 @@ pub static FRACTION_OPERABLE: HpxmlElement = HpxmlElement {
     description: "the <FractionOperable> element the parser reads under its parent",
 };
 
-/// the <FrameFloor> element the parser reads under its parent
+/// the `<FrameFloor>` element the parser reads under its parent
 pub static FRAME_FLOOR: HpxmlElement = HpxmlElement {
     name: "FrameFloor",
     context: "Enclosure/FrameFloors (one frame floor)",
@@ -1318,7 +1318,7 @@ pub static FRAME_FLOOR: HpxmlElement = HpxmlElement {
     description: "the <FrameFloor> element the parser reads under its parent",
 };
 
-/// the <FrameFloors> element the parser reads under its parent
+/// the `<FrameFloors>` element the parser reads under its parent
 pub static FRAME_FLOORS: HpxmlElement = HpxmlElement {
     name: "FrameFloors",
     context: "Enclosure (the frame-floor container)",
@@ -1326,7 +1326,7 @@ pub static FRAME_FLOORS: HpxmlElement = HpxmlElement {
     description: "the <FrameFloors> element the parser reads under its parent",
 };
 
-/// the <FramingFactor> element the parser reads under its parent
+/// the `<FramingFactor>` element the parser reads under its parent
 pub static FRAMING_FACTOR: HpxmlElement = HpxmlElement {
     name: "FramingFactor",
     context: "BuildingDetails/Enclosure/Floors/Floor/FloorJoists/FramingFactor | BuildingDetails/Enclosure/Roofs/Roof/Rafters/FramingFactor | BuildingDetails/Enclosure/Walls/Wall/Studs/FramingFactor",
@@ -1334,7 +1334,7 @@ pub static FRAMING_FACTOR: HpxmlElement = HpxmlElement {
     description: "the <FramingFactor> element the parser reads under its parent",
 };
 
-/// the <Freezer> element the parser reads under its parent
+/// the `<Freezer>` element the parser reads under its parent
 pub static FREEZER: HpxmlElement = HpxmlElement {
     name: "Freezer",
     context: "BuildingDetails/Appliances/Freezer",
@@ -1342,7 +1342,7 @@ pub static FREEZER: HpxmlElement = HpxmlElement {
     description: "the <Freezer> element the parser reads under its parent",
 };
 
-/// the <FuelLoad> element the parser reads under its parent
+/// the `<FuelLoad>` element the parser reads under its parent
 pub static FUEL_LOAD: HpxmlElement = HpxmlElement {
     name: "FuelLoad",
     context: "BuildingDetails/MiscLoads/FuelLoad",
@@ -1350,7 +1350,7 @@ pub static FUEL_LOAD: HpxmlElement = HpxmlElement {
     description: "the <FuelLoad> element the parser reads under its parent",
 };
 
-/// the <FuelLoadType> element the parser reads under its parent
+/// the `<FuelLoadType>` element the parser reads under its parent
 pub static FUEL_LOAD_TYPE: HpxmlElement = HpxmlElement {
     name: "FuelLoadType",
     context: "BuildingDetails/MiscLoads/FuelLoad/FuelLoadType",
@@ -1358,7 +1358,7 @@ pub static FUEL_LOAD_TYPE: HpxmlElement = HpxmlElement {
     description: "the <FuelLoadType> element the parser reads under its parent",
 };
 
-/// the <FuelType> element the parser reads under its parent
+/// the `<FuelType>` element the parser reads under its parent
 pub static FUEL_TYPE: HpxmlElement = HpxmlElement {
     name: "FuelType",
     context: "BuildingDetails/Appliances/ClothesDryer/FuelType | BuildingDetails/Appliances/CookingRange/FuelType | BuildingDetails/MiscLoads/FuelLoad/FuelType | BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/FuelType",
@@ -1366,7 +1366,7 @@ pub static FUEL_TYPE: HpxmlElement = HpxmlElement {
     description: "the <FuelType> element the parser reads under its parent",
 };
 
-/// the <FurnitureMass> element the parser reads under its parent
+/// the `<FurnitureMass>` element the parser reads under its parent
 pub static FURNITURE_MASS: HpxmlElement = HpxmlElement {
     name: "FurnitureMass",
     context: "BuildingDetails/Enclosure/extension/FurnitureMass",
@@ -1374,7 +1374,7 @@ pub static FURNITURE_MASS: HpxmlElement = HpxmlElement {
     description: "the <FurnitureMass> element the parser reads under its parent",
 };
 
-/// the <Garage> element the parser reads under its parent
+/// the `<Garage>` element the parser reads under its parent
 pub static GARAGE: HpxmlElement = HpxmlElement {
     name: "Garage",
     context: "Enclosure/Garages (garage zones)",
@@ -1382,7 +1382,7 @@ pub static GARAGE: HpxmlElement = HpxmlElement {
     description: "the <Garage> element the parser reads under its parent",
 };
 
-/// the <Garages> element the parser reads under its parent
+/// the `<Garages>` element the parser reads under its parent
 pub static GARAGES: HpxmlElement = HpxmlElement {
     name: "Garages",
     context: "Enclosure",
@@ -1390,7 +1390,7 @@ pub static GARAGES: HpxmlElement = HpxmlElement {
     description: "the <Garages> element the parser reads under its parent",
 };
 
-/// the <Generator> element the parser reads under its parent
+/// the `<Generator>` element the parser reads under its parent
 pub static GENERATOR: HpxmlElement = HpxmlElement {
     name: "Generator",
     context: "Systems/extension/Generators",
@@ -1398,7 +1398,7 @@ pub static GENERATOR: HpxmlElement = HpxmlElement {
     description: "the <Generator> element the parser reads under its parent",
 };
 
-/// the <Generators> element the parser reads under its parent
+/// the `<Generators>` element the parser reads under its parent
 pub static GENERATORS: HpxmlElement = HpxmlElement {
     name: "Generators",
     context: "Systems/extension (the generator container)",
@@ -1414,7 +1414,7 @@ pub static HAS_FLUE_OR_CHIMNEY_IN_CONDITIONED_SPACE: HpxmlElement = HpxmlElement
     description: "the flue-in-conditioned-space flag (an xs:boolean)",
 };
 
-/// the <Heater> element the parser reads under its parent
+/// the `<Heater>` element the parser reads under its parent
 pub static HEATER: HpxmlElement = HpxmlElement {
     name: "Heater",
     context: "BuildingDetails/HotTubs/HotTub/Heater | BuildingDetails/Pools/Pool/Heater",
@@ -1422,7 +1422,7 @@ pub static HEATER: HpxmlElement = HpxmlElement {
     description: "the <Heater> element the parser reads under its parent",
 };
 
-/// the <HeatingAirflowCFM> element the parser reads under its parent
+/// the `<HeatingAirflowCFM>` element the parser reads under its parent
 pub static HEATING_AIRFLOW_CFM: HpxmlElement = HpxmlElement {
     name: "HeatingAirflowCFM",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/extension/HeatingAirflowCFM | BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem/extension/HeatingAirflowCFM",
@@ -1430,7 +1430,7 @@ pub static HEATING_AIRFLOW_CFM: HpxmlElement = HpxmlElement {
     description: "the <HeatingAirflowCFM> element the parser reads under its parent",
 };
 
-/// the <HeatingAutosizingFactor> element the parser reads under its parent
+/// the `<HeatingAutosizingFactor>` element the parser reads under its parent
 pub static HEATING_AUTOSIZING_FACTOR: HpxmlElement = HpxmlElement {
     name: "HeatingAutosizingFactor",
     context: "the heating autosizing factor (extension)",
@@ -1438,7 +1438,7 @@ pub static HEATING_AUTOSIZING_FACTOR: HpxmlElement = HpxmlElement {
     description: "the <HeatingAutosizingFactor> element the parser reads under its parent",
 };
 
-/// the <HeatingCapacity> element the parser reads under its parent
+/// the `<HeatingCapacity>` element the parser reads under its parent
 pub static HEATING_CAPACITY: HpxmlElement = HpxmlElement {
     name: "HeatingCapacity",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/HeatingCapacity | BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem/HeatingCapacity | BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/HeatingCapacity",
@@ -1446,7 +1446,7 @@ pub static HEATING_CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <HeatingCapacity> element the parser reads under its parent",
 };
 
-/// the <HeatingCapacity17F> element the parser reads under its parent
+/// the `<HeatingCapacity17F>` element the parser reads under its parent
 pub static HEATING_CAPACITY_17_F: HpxmlElement = HpxmlElement {
     name: "HeatingCapacity17F",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/HeatingCapacity17F",
@@ -1454,7 +1454,7 @@ pub static HEATING_CAPACITY_17_F: HpxmlElement = HpxmlElement {
     description: "the <HeatingCapacity17F> element the parser reads under its parent",
 };
 
-/// the <HeatingSystem> element the parser reads under its parent
+/// the `<HeatingSystem>` element the parser reads under its parent
 pub static HEATING_SYSTEM: HpxmlElement = HpxmlElement {
     name: "HeatingSystem",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem",
@@ -1462,7 +1462,7 @@ pub static HEATING_SYSTEM: HpxmlElement = HpxmlElement {
     description: "the <HeatingSystem> element the parser reads under its parent",
 };
 
-/// the <HeatingSystemFuel> element the parser reads under its parent
+/// the `<HeatingSystemFuel>` element the parser reads under its parent
 pub static HEATING_SYSTEM_FUEL: HpxmlElement = HpxmlElement {
     name: "HeatingSystemFuel",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatingSystem/HeatingSystemFuel",
@@ -1470,7 +1470,7 @@ pub static HEATING_SYSTEM_FUEL: HpxmlElement = HpxmlElement {
     description: "the <HeatingSystemFuel> element the parser reads under its parent",
 };
 
-/// the <HeatingSystemType> element the parser reads under its parent
+/// the `<HeatingSystemType>` element the parser reads under its parent
 pub static HEATING_SYSTEM_TYPE: HpxmlElement = HpxmlElement {
     name: "HeatingSystemType",
     context: "a heating system's type discriminator element",
@@ -1478,7 +1478,7 @@ pub static HEATING_SYSTEM_TYPE: HpxmlElement = HpxmlElement {
     description: "the <HeatingSystemType> element the parser reads under its parent",
 };
 
-/// the <HeatPump> element the parser reads under its parent
+/// the `<HeatPump>` element the parser reads under its parent
 pub static HEAT_PUMP: HpxmlElement = HpxmlElement {
     name: "HeatPump",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump",
@@ -1486,7 +1486,7 @@ pub static HEAT_PUMP: HpxmlElement = HpxmlElement {
     description: "the <HeatPump> element the parser reads under its parent",
 };
 
-/// the <HeatPumpType> element the parser reads under its parent
+/// the `<HeatPumpType>` element the parser reads under its parent
 pub static HEAT_PUMP_TYPE: HpxmlElement = HpxmlElement {
     name: "HeatPumpType",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/HeatPumpType",
@@ -1494,7 +1494,7 @@ pub static HEAT_PUMP_TYPE: HpxmlElement = HpxmlElement {
     description: "the <HeatPumpType> element the parser reads under its parent",
 };
 
-/// the <Height> element the parser reads under its parent
+/// the `<Height>` element the parser reads under its parent
 pub static HEIGHT: HpxmlElement = HpxmlElement {
     name: "Height",
     context: "BuildingDetails/Enclosure/FoundationWalls/FoundationWall/Height",
@@ -1502,7 +1502,7 @@ pub static HEIGHT: HpxmlElement = HpxmlElement {
     description: "the <Height> element the parser reads under its parent",
 };
 
-/// the <HotTub> element the parser reads under its parent
+/// the `<HotTub>` element the parser reads under its parent
 pub static HOT_TUB: HpxmlElement = HpxmlElement {
     name: "HotTub",
     context: "BuildingDetails/HotTubs/HotTub",
@@ -1510,7 +1510,7 @@ pub static HOT_TUB: HpxmlElement = HpxmlElement {
     description: "the <HotTub> element the parser reads under its parent",
 };
 
-/// the <HotTubPump> element the parser reads under its parent
+/// the `<HotTubPump>` element the parser reads under its parent
 pub static HOT_TUB_PUMP: HpxmlElement = HpxmlElement {
     name: "HotTubPump",
     context: "BuildingDetails/HotTubs/HotTub/HotTubPumps/HotTubPump",
@@ -1518,7 +1518,7 @@ pub static HOT_TUB_PUMP: HpxmlElement = HpxmlElement {
     description: "the <HotTubPump> element the parser reads under its parent",
 };
 
-/// the <HotTubPumps> element the parser reads under its parent
+/// the `<HotTubPumps>` element the parser reads under its parent
 pub static HOT_TUB_PUMPS: HpxmlElement = HpxmlElement {
     name: "HotTubPumps",
     context: "BuildingDetails/HotTubs/HotTub/HotTubPumps",
@@ -1526,7 +1526,7 @@ pub static HOT_TUB_PUMPS: HpxmlElement = HpxmlElement {
     description: "the <HotTubPumps> element the parser reads under its parent",
 };
 
-/// the <HotTubs> element the parser reads under its parent
+/// the `<HotTubs>` element the parser reads under its parent
 pub static HOT_TUBS: HpxmlElement = HpxmlElement {
     name: "HotTubs",
     context: "BuildingDetails/HotTubs",
@@ -1534,7 +1534,7 @@ pub static HOT_TUBS: HpxmlElement = HpxmlElement {
     description: "the <HotTubs> element the parser reads under its parent",
 };
 
-/// the <HotWaterDistribution> element the parser reads under its parent
+/// the `<HotWaterDistribution>` element the parser reads under its parent
 pub static HOT_WATER_DISTRIBUTION: HpxmlElement = HpxmlElement {
     name: "HotWaterDistribution",
     context: "BuildingDetails/Systems/WaterHeating/HotWaterDistribution",
@@ -1542,7 +1542,7 @@ pub static HOT_WATER_DISTRIBUTION: HpxmlElement = HpxmlElement {
     description: "the <HotWaterDistribution> element the parser reads under its parent",
 };
 
-/// the <HotWaterTemperature> element the parser reads under its parent
+/// the `<HotWaterTemperature>` element the parser reads under its parent
 pub static HOT_WATER_TEMPERATURE: HpxmlElement = HpxmlElement {
     name: "HotWaterTemperature",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/HotWaterTemperature",
@@ -1550,7 +1550,7 @@ pub static HOT_WATER_TEMPERATURE: HpxmlElement = HpxmlElement {
     description: "the <HotWaterTemperature> element the parser reads under its parent",
 };
 
-/// the <HoursInOperation> element the parser reads under its parent
+/// the `<HoursInOperation>` element the parser reads under its parent
 pub static HOURS_IN_OPERATION: HpxmlElement = HpxmlElement {
     name: "HoursInOperation",
     context: "BuildingDetails/Systems/MechanicalVentilation/VentilationFans/VentilationFan/HoursInOperation",
@@ -1566,7 +1566,7 @@ pub static HPXML: HpxmlElement = HpxmlElement {
     description: "the document root the parse requires",
 };
 
-/// the <HSPF> element the parser reads under its parent
+/// the `<HSPF>` element the parser reads under its parent
 pub static HSPF: HpxmlElement = HpxmlElement {
     name: "HSPF",
     context: "a heat pump's HSPF (the legacy direct-child form)",
@@ -1574,7 +1574,7 @@ pub static HSPF: HpxmlElement = HpxmlElement {
     description: "the <HSPF> element the parser reads under its parent",
 };
 
-/// the <HSPF2> element the parser reads under its parent
+/// the `<HSPF2>` element the parser reads under its parent
 pub static HSPF_2: HpxmlElement = HpxmlElement {
     name: "HSPF2",
     context: "a heat pump's HSPF2 (the legacy direct-child form)",
@@ -1582,7 +1582,7 @@ pub static HSPF_2: HpxmlElement = HpxmlElement {
     description: "the <HSPF2> element the parser reads under its parent",
 };
 
-/// the <HVAC> element the parser reads under its parent
+/// the `<HVAC>` element the parser reads under its parent
 pub static HVAC: HpxmlElement = HpxmlElement {
     name: "HVAC",
     context: "BuildingDetails/Systems/HVAC",
@@ -1590,7 +1590,7 @@ pub static HVAC: HpxmlElement = HpxmlElement {
     description: "the <HVAC> element the parser reads under its parent",
 };
 
-/// the <HVACControl> element the parser reads under its parent
+/// the `<HVACControl>` element the parser reads under its parent
 pub static HVAC_CONTROL: HpxmlElement = HpxmlElement {
     name: "HVACControl",
     context: "BuildingDetails/Systems/HVAC/HVACControl",
@@ -1598,7 +1598,7 @@ pub static HVAC_CONTROL: HpxmlElement = HpxmlElement {
     description: "the <HVACControl> element the parser reads under its parent",
 };
 
-/// the <HVACPlant> element the parser reads under its parent
+/// the `<HVACPlant>` element the parser reads under its parent
 pub static HVAC_PLANT: HpxmlElement = HpxmlElement {
     name: "HVACPlant",
     context: "BuildingDetails/Systems/HVAC/HVACPlant",
@@ -1606,7 +1606,7 @@ pub static HVAC_PLANT: HpxmlElement = HpxmlElement {
     description: "the <HVACPlant> element the parser reads under its parent",
 };
 
-/// the <IgnitionType> element the parser reads under its parent
+/// the `<IgnitionType>` element the parser reads under its parent
 pub static IGNITION_TYPE: HpxmlElement = HpxmlElement {
     name: "IgnitionType",
     context: "WaterHeatingSystem (gas)",
@@ -1614,7 +1614,7 @@ pub static IGNITION_TYPE: HpxmlElement = HpxmlElement {
     description: "the <IgnitionType> element the parser reads under its parent",
 };
 
-/// the <InfiltrationHeight> element the parser reads under its parent
+/// the `<InfiltrationHeight>` element the parser reads under its parent
 pub static INFILTRATION_HEIGHT: HpxmlElement = HpxmlElement {
     name: "InfiltrationHeight",
     context: "BuildingDetails/Enclosure/AirInfiltration/AirInfiltrationMeasurement/InfiltrationHeight",
@@ -1622,7 +1622,7 @@ pub static INFILTRATION_HEIGHT: HpxmlElement = HpxmlElement {
     description: "the <InfiltrationHeight> element the parser reads under its parent",
 };
 
-/// the <Insulation> element the parser reads under its parent
+/// the `<Insulation>` element the parser reads under its parent
 pub static INSULATION: HpxmlElement = HpxmlElement {
     name: "Insulation",
     context: "BuildingDetails/Enclosure/Floors/Floor/Insulation | BuildingDetails/Enclosure/FoundationWalls/FoundationWall/Insulation | BuildingDetails/Enclosure/RimJoists/RimJoist/Insulation | BuildingDetails/Enclosure/Roofs/Roof/Insulation; and 1 more parent paths in the fixture corpus",
@@ -1630,7 +1630,7 @@ pub static INSULATION: HpxmlElement = HpxmlElement {
     description: "the <Insulation> element the parser reads under its parent",
 };
 
-/// the <InsulationDepth> element the parser reads under its parent
+/// the `<InsulationDepth>` element the parser reads under its parent
 pub static INSULATION_DEPTH: HpxmlElement = HpxmlElement {
     name: "InsulationDepth",
     context: "BuildingDetails/Enclosure/Slabs/Slab/PerimeterInsulation/Layer/InsulationDepth",
@@ -1638,7 +1638,7 @@ pub static INSULATION_DEPTH: HpxmlElement = HpxmlElement {
     description: "the <InsulationDepth> element the parser reads under its parent",
 };
 
-/// the <InsulationRValue> element the parser reads under its parent
+/// the `<InsulationRValue>` element the parser reads under its parent
 pub static INSULATION_R_VALUE: HpxmlElement = HpxmlElement {
     name: "InsulationRValue",
     context: "duct and insulation elements (first descendant read)",
@@ -1646,7 +1646,7 @@ pub static INSULATION_R_VALUE: HpxmlElement = HpxmlElement {
     description: "the <InsulationRValue> element the parser reads under its parent",
 };
 
-/// the <InsulationSpansEntireSlab> element the parser reads under its parent
+/// the `<InsulationSpansEntireSlab>` element the parser reads under its parent
 pub static INSULATION_SPANS_ENTIRE_SLAB: HpxmlElement = HpxmlElement {
     name: "InsulationSpansEntireSlab",
     context: "BuildingDetails/Enclosure/Slabs/Slab/UnderSlabInsulation/Layer/InsulationSpansEntireSlab",
@@ -1654,7 +1654,7 @@ pub static INSULATION_SPANS_ENTIRE_SLAB: HpxmlElement = HpxmlElement {
     description: "the <InsulationSpansEntireSlab> element the parser reads under its parent",
 };
 
-/// the <InsulationWidth> element the parser reads under its parent
+/// the `<InsulationWidth>` element the parser reads under its parent
 pub static INSULATION_WIDTH: HpxmlElement = HpxmlElement {
     name: "InsulationWidth",
     context: "BuildingDetails/Enclosure/Slabs/Slab/ExteriorHorizontalInsulation/Layer/InsulationWidth | BuildingDetails/Enclosure/Slabs/Slab/UnderSlabInsulation/Layer/InsulationWidth",
@@ -1670,7 +1670,7 @@ pub static INTEGRATED_ENERGY_FACTOR: HpxmlElement = HpxmlElement {
     description: "the dehumidifier's or appliance's integrated energy factor",
 };
 
-/// the <IntegratedModifiedEnergyFactor> element the parser reads under its parent
+/// the `<IntegratedModifiedEnergyFactor>` element the parser reads under its parent
 pub static INTEGRATED_MODIFIED_ENERGY_FACTOR: HpxmlElement = HpxmlElement {
     name: "IntegratedModifiedEnergyFactor",
     context: "BuildingDetails/Appliances/ClothesWasher/IntegratedModifiedEnergyFactor",
@@ -1686,7 +1686,7 @@ pub static INTERIOR_ADJACENT_TO: HpxmlElement = HpxmlElement {
     description: "the zone the element's interior faces",
 };
 
-/// the <InteriorShading> element the parser reads under its parent
+/// the `<InteriorShading>` element the parser reads under its parent
 pub static INTERIOR_SHADING: HpxmlElement = HpxmlElement {
     name: "InteriorShading",
     context: "BuildingDetails/Enclosure/Windows/Window/InteriorShading",
@@ -1694,7 +1694,7 @@ pub static INTERIOR_SHADING: HpxmlElement = HpxmlElement {
     description: "the <InteriorShading> element the parser reads under its parent",
 };
 
-/// the <Inverter> element the parser reads under its parent
+/// the `<Inverter>` element the parser reads under its parent
 pub static INVERTER: HpxmlElement = HpxmlElement {
     name: "Inverter",
     context: "BuildingDetails/Systems/Photovoltaics/Inverter",
@@ -1702,7 +1702,7 @@ pub static INVERTER: HpxmlElement = HpxmlElement {
     description: "the <Inverter> element the parser reads under its parent",
 };
 
-/// the <InverterEfficiency> element the parser reads under its parent
+/// the `<InverterEfficiency>` element the parser reads under its parent
 pub static INVERTER_EFFICIENCY: HpxmlElement = HpxmlElement {
     name: "InverterEfficiency",
     context: "BuildingDetails/Systems/Photovoltaics/Inverter/InverterEfficiency",
@@ -1710,7 +1710,7 @@ pub static INVERTER_EFFICIENCY: HpxmlElement = HpxmlElement {
     description: "the <InverterEfficiency> element the parser reads under its parent",
 };
 
-/// the <IsInduction> element the parser reads under its parent
+/// the `<IsInduction>` element the parser reads under its parent
 pub static IS_INDUCTION: HpxmlElement = HpxmlElement {
     name: "IsInduction",
     context: "BuildingDetails/Appliances/CookingRange/IsInduction",
@@ -1718,7 +1718,7 @@ pub static IS_INDUCTION: HpxmlElement = HpxmlElement {
     description: "the <IsInduction> element the parser reads under its parent",
 };
 
-/// the <IsSharedAppliance> element the parser reads under its parent
+/// the `<IsSharedAppliance>` element the parser reads under its parent
 pub static IS_SHARED_APPLIANCE: HpxmlElement = HpxmlElement {
     name: "IsSharedAppliance",
     context: "BuildingDetails/Appliances/ClothesDryer/IsSharedAppliance | BuildingDetails/Appliances/ClothesWasher/IsSharedAppliance | BuildingDetails/Appliances/Dishwasher/IsSharedAppliance",
@@ -1726,7 +1726,7 @@ pub static IS_SHARED_APPLIANCE: HpxmlElement = HpxmlElement {
     description: "the <IsSharedAppliance> element the parser reads under its parent",
 };
 
-/// the <Jacket> element the parser reads under its parent
+/// the `<Jacket>` element the parser reads under its parent
 pub static JACKET: HpxmlElement = HpxmlElement {
     name: "Jacket",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/WaterHeaterInsulation/Jacket",
@@ -1734,7 +1734,7 @@ pub static JACKET: HpxmlElement = HpxmlElement {
     description: "the <Jacket> element the parser reads under its parent",
 };
 
-/// the <JacketRValue> element the parser reads under its parent
+/// the `<JacketRValue>` element the parser reads under its parent
 pub static JACKET_R_VALUE: HpxmlElement = HpxmlElement {
     name: "JacketRValue",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/WaterHeaterInsulation/Jacket/JacketRValue",
@@ -1742,7 +1742,7 @@ pub static JACKET_R_VALUE: HpxmlElement = HpxmlElement {
     description: "the <JacketRValue> element the parser reads under its parent",
 };
 
-/// the <LabelAnnualGasCost> element the parser reads under its parent
+/// the `<LabelAnnualGasCost>` element the parser reads under its parent
 pub static LABEL_ANNUAL_GAS_COST: HpxmlElement = HpxmlElement {
     name: "LabelAnnualGasCost",
     context: "the label's annual gas cost ($)",
@@ -1750,7 +1750,7 @@ pub static LABEL_ANNUAL_GAS_COST: HpxmlElement = HpxmlElement {
     description: "the <LabelAnnualGasCost> element the parser reads under its parent",
 };
 
-/// the <LabelElectricRate> element the parser reads under its parent
+/// the `<LabelElectricRate>` element the parser reads under its parent
 pub static LABEL_ELECTRIC_RATE: HpxmlElement = HpxmlElement {
     name: "LabelElectricRate",
     context: "the label's electric rate ($/kWh)",
@@ -1758,7 +1758,7 @@ pub static LABEL_ELECTRIC_RATE: HpxmlElement = HpxmlElement {
     description: "the <LabelElectricRate> element the parser reads under its parent",
 };
 
-/// the <LabelGasRate> element the parser reads under its parent
+/// the `<LabelGasRate>` element the parser reads under its parent
 pub static LABEL_GAS_RATE: HpxmlElement = HpxmlElement {
     name: "LabelGasRate",
     context: "the label's gas rate ($/therm)",
@@ -1766,7 +1766,7 @@ pub static LABEL_GAS_RATE: HpxmlElement = HpxmlElement {
     description: "the <LabelGasRate> element the parser reads under its parent",
 };
 
-/// the <LabelUsage> element the parser reads under its parent
+/// the `<LabelUsage>` element the parser reads under its parent
 pub static LABEL_USAGE: HpxmlElement = HpxmlElement {
     name: "LabelUsage",
     context: "the clothes washer's or dishwasher's label usage (kWh/year)",
@@ -1774,7 +1774,7 @@ pub static LABEL_USAGE: HpxmlElement = HpxmlElement {
     description: "the <LabelUsage> element the parser reads under its parent",
 };
 
-/// the <latent_gain_fraction> element the parser reads under its parent
+/// the `<latent_gain_fraction>` element the parser reads under its parent
 pub static LATENT_GAIN_FRACTION: HpxmlElement = HpxmlElement {
     name: "latent_gain_fraction",
     context: "the latent gain fraction (the synthetic extension element)",
@@ -1798,7 +1798,7 @@ pub static LAYER: HpxmlElement = HpxmlElement {
     description: "one layer of an assembly's insulation or mass",
 };
 
-/// the <Length> element the parser reads under its parent
+/// the `<Length>` element the parser reads under its parent
 pub static LENGTH: HpxmlElement = HpxmlElement {
     name: "Length",
     context: "duct and geometry elements (Length)",
@@ -1806,7 +1806,7 @@ pub static LENGTH: HpxmlElement = HpxmlElement {
     description: "the <Length> element the parser reads under its parent",
 };
 
-/// the <Lighting> element the parser reads under its parent
+/// the `<Lighting>` element the parser reads under its parent
 pub static LIGHTING: HpxmlElement = HpxmlElement {
     name: "Lighting",
     context: "BuildingDetails/Lighting",
@@ -1814,7 +1814,7 @@ pub static LIGHTING: HpxmlElement = HpxmlElement {
     description: "the <Lighting> element the parser reads under its parent",
 };
 
-/// the <LightingGroup> element the parser reads under its parent
+/// the `<LightingGroup>` element the parser reads under its parent
 pub static LIGHTING_GROUP: HpxmlElement = HpxmlElement {
     name: "LightingGroup",
     context: "BuildingDetails/Lighting/LightingGroup",
@@ -1822,7 +1822,7 @@ pub static LIGHTING_GROUP: HpxmlElement = HpxmlElement {
     description: "the <LightingGroup> element the parser reads under its parent",
 };
 
-/// the <LightingType> element the parser reads under its parent
+/// the `<LightingType>` element the parser reads under its parent
 pub static LIGHTING_TYPE: HpxmlElement = HpxmlElement {
     name: "LightingType",
     context: "BuildingDetails/Lighting/LightingGroup/LightingType",
@@ -1854,7 +1854,7 @@ pub static LONGITUDE: HpxmlElement = HpxmlElement {
     description: "the site's longitude, degrees",
 };
 
-/// the <LowFlow> element the parser reads under its parent
+/// the `<LowFlow>` element the parser reads under its parent
 pub static LOW_FLOW: HpxmlElement = HpxmlElement {
     name: "LowFlow",
     context: "BuildingDetails/Systems/WaterHeating/WaterFixture/LowFlow",
@@ -1862,7 +1862,7 @@ pub static LOW_FLOW: HpxmlElement = HpxmlElement {
     description: "the <LowFlow> element the parser reads under its parent",
 };
 
-/// the <MaxCapacity> element the parser reads under its parent
+/// the `<MaxCapacity>` element the parser reads under its parent
 pub static MAX_CAPACITY: HpxmlElement = HpxmlElement {
     name: "MaxCapacity",
     context: "an AutosizingLimits element's maximum capacity (Btu/h)",
@@ -1870,7 +1870,7 @@ pub static MAX_CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <MaxCapacity> element the parser reads under its parent",
 };
 
-/// the <MaxChargingPower> element the parser reads under its parent
+/// the `<MaxChargingPower>` element the parser reads under its parent
 pub static MAX_CHARGING_POWER: HpxmlElement = HpxmlElement {
     name: "MaxChargingPower",
     context: "Systems/ElectricVehicles/ElectricVehicle",
@@ -1886,7 +1886,7 @@ pub static MAX_POWER_OUTPUT: HpxmlElement = HpxmlElement {
     description: "the PV system's or inverter's maximum power output, watts",
 };
 
-/// the <MechanicalVentilation> element the parser reads under its parent
+/// the `<MechanicalVentilation>` element the parser reads under its parent
 pub static MECHANICAL_VENTILATION: HpxmlElement = HpxmlElement {
     name: "MechanicalVentilation",
     context: "BuildingDetails/Systems/MechanicalVentilation",
@@ -1894,7 +1894,7 @@ pub static MECHANICAL_VENTILATION: HpxmlElement = HpxmlElement {
     description: "the <MechanicalVentilation> element the parser reads under its parent",
 };
 
-/// the <Microwave> element the parser reads under its parent
+/// the `<Microwave>` element the parser reads under its parent
 pub static MICROWAVE: HpxmlElement = HpxmlElement {
     name: "Microwave",
     context: "Appliances (the microwave container; BEopt/OCHRE schedules only)",
@@ -1902,7 +1902,7 @@ pub static MICROWAVE: HpxmlElement = HpxmlElement {
     description: "the <Microwave> element the parser reads under its parent",
 };
 
-/// the <MinCapacity> element the parser reads under its parent
+/// the `<MinCapacity>` element the parser reads under its parent
 pub static MIN_CAPACITY: HpxmlElement = HpxmlElement {
     name: "MinCapacity",
     context: "an AutosizingLimits element's minimum capacity (Btu/h)",
@@ -1910,7 +1910,7 @@ pub static MIN_CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <MinCapacity> element the parser reads under its parent",
 };
 
-/// the <MinimumCapacity> element the parser reads under its parent
+/// the `<MinimumCapacity>` element the parser reads under its parent
 pub static MINIMUM_CAPACITY: HpxmlElement = HpxmlElement {
     name: "MinimumCapacity",
     context: "HeatPump (autosizing minimum)",
@@ -1918,7 +1918,7 @@ pub static MINIMUM_CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <MinimumCapacity> element the parser reads under its parent",
 };
 
-/// the <MiscLoads> element the parser reads under its parent
+/// the `<MiscLoads>` element the parser reads under its parent
 pub static MISC_LOADS: HpxmlElement = HpxmlElement {
     name: "MiscLoads",
     context: "BuildingDetails/MiscLoads",
@@ -1926,7 +1926,7 @@ pub static MISC_LOADS: HpxmlElement = HpxmlElement {
     description: "the <MiscLoads> element the parser reads under its parent",
 };
 
-/// the <ModuleType> element the parser reads under its parent
+/// the `<ModuleType>` element the parser reads under its parent
 pub static MODULE_TYPE: HpxmlElement = HpxmlElement {
     name: "ModuleType",
     context: "BuildingDetails/Systems/Photovoltaics/PVSystem/ModuleType",
@@ -1942,7 +1942,7 @@ pub static MONTHLY_SCHEDULE_MULTIPLIERS: HpxmlElement = HpxmlElement {
     description: "the 12 monthly schedule multipliers (extension)",
 };
 
-/// the <Name> element the parser reads under its parent
+/// the `<Name>` element the parser reads under its parent
 pub static NAME: HpxmlElement = HpxmlElement {
     name: "Name",
     context: "the weather station's or element's Name child",
@@ -1950,7 +1950,7 @@ pub static NAME: HpxmlElement = HpxmlElement {
     description: "the <Name> element the parser reads under its parent",
 };
 
-/// the <NaturalVentilation> element the parser reads under its parent
+/// the `<NaturalVentilation>` element the parser reads under its parent
 pub static NATURAL_VENTILATION: HpxmlElement = HpxmlElement {
     name: "NaturalVentilation",
     context: "an unavailable period's natural-ventilation kind",
@@ -1958,7 +1958,7 @@ pub static NATURAL_VENTILATION: HpxmlElement = HpxmlElement {
     description: "the <NaturalVentilation> element the parser reads under its parent",
 };
 
-/// the <NominalCapacity> element the parser reads under its parent
+/// the `<NominalCapacity>` element the parser reads under its parent
 pub static NOMINAL_CAPACITY: HpxmlElement = HpxmlElement {
     name: "NominalCapacity",
     context: "BuildingDetails/Systems/Batteries/Battery/NominalCapacity | BuildingDetails/Systems/Vehicles/Vehicle/VehicleType/BatteryElectricVehicle/Battery/NominalCapacity",
@@ -1982,7 +1982,7 @@ pub static NUMBEROF_BEDROOMS: HpxmlElement = HpxmlElement {
     description: "the building's bedroom count (adjusted for the water heater's draw)",
 };
 
-/// the <NumberofConditionedFloors> element the parser reads under its parent
+/// the `<NumberofConditionedFloors>` element the parser reads under its parent
 pub static NUMBEROF_CONDITIONED_FLOORS: HpxmlElement = HpxmlElement {
     name: "NumberofConditionedFloors",
     context: "BuildingDetails/BuildingSummary/BuildingConstruction/NumberofConditionedFloors",
@@ -1998,7 +1998,7 @@ pub static NUMBEROF_CONDITIONED_FLOORS_ABOVE_GRADE: HpxmlElement = HpxmlElement 
     description: "the conditioned floors above grade",
 };
 
-/// the <NumberofResidents> element the parser reads under its parent
+/// the `<NumberofResidents>` element the parser reads under its parent
 pub static NUMBEROF_RESIDENTS: HpxmlElement = HpxmlElement {
     name: "NumberofResidents",
     context: "BuildingDetails/BuildingSummary/BuildingOccupancy/NumberofResidents",
@@ -2006,7 +2006,7 @@ pub static NUMBEROF_RESIDENTS: HpxmlElement = HpxmlElement {
     description: "the <NumberofResidents> element the parser reads under its parent",
 };
 
-/// the <PerformanceAdjustment> element the parser reads under its parent
+/// the `<PerformanceAdjustment>` element the parser reads under its parent
 pub static PERFORMANCE_ADJUSTMENT: HpxmlElement = HpxmlElement {
     name: "PerformanceAdjustment",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/PerformanceAdjustment",
@@ -2014,7 +2014,7 @@ pub static PERFORMANCE_ADJUSTMENT: HpxmlElement = HpxmlElement {
     description: "the <PerformanceAdjustment> element the parser reads under its parent",
 };
 
-/// the <Perimeter> element the parser reads under its parent
+/// the `<Perimeter>` element the parser reads under its parent
 pub static PERIMETER: HpxmlElement = HpxmlElement {
     name: "Perimeter",
     context: "Slab",
@@ -2022,7 +2022,7 @@ pub static PERIMETER: HpxmlElement = HpxmlElement {
     description: "the <Perimeter> element the parser reads under its parent",
 };
 
-/// the <PerimeterInsulation> element the parser reads under its parent
+/// the `<PerimeterInsulation>` element the parser reads under its parent
 pub static PERIMETER_INSULATION: HpxmlElement = HpxmlElement {
     name: "PerimeterInsulation",
     context: "BuildingDetails/Enclosure/Slabs/Slab/PerimeterInsulation",
@@ -2030,7 +2030,7 @@ pub static PERIMETER_INSULATION: HpxmlElement = HpxmlElement {
     description: "the <PerimeterInsulation> element the parser reads under its parent",
 };
 
-/// the <PermanentSpa> element the parser reads under its parent
+/// the `<PermanentSpa>` element the parser reads under its parent
 pub static PERMANENT_SPA: HpxmlElement = HpxmlElement {
     name: "PermanentSpa",
     context: "Spas",
@@ -2038,7 +2038,7 @@ pub static PERMANENT_SPA: HpxmlElement = HpxmlElement {
     description: "the <PermanentSpa> element the parser reads under its parent",
 };
 
-/// the <Photovoltaics> element the parser reads under its parent
+/// the `<Photovoltaics>` element the parser reads under its parent
 pub static PHOTOVOLTAICS: HpxmlElement = HpxmlElement {
     name: "Photovoltaics",
     context: "BuildingDetails/Systems/Photovoltaics",
@@ -2046,7 +2046,7 @@ pub static PHOTOVOLTAICS: HpxmlElement = HpxmlElement {
     description: "the <Photovoltaics> element the parser reads under its parent",
 };
 
-/// the <PilotPower> element the parser reads under its parent
+/// the `<PilotPower>` element the parser reads under its parent
 pub static PILOT_POWER: HpxmlElement = HpxmlElement {
     name: "PilotPower",
     context: "WaterHeatingSystem (gas; the pilot light)",
@@ -2054,7 +2054,7 @@ pub static PILOT_POWER: HpxmlElement = HpxmlElement {
     description: "the <PilotPower> element the parser reads under its parent",
 };
 
-/// the <PipeInsulation> element the parser reads under its parent
+/// the `<PipeInsulation>` element the parser reads under its parent
 pub static PIPE_INSULATION: HpxmlElement = HpxmlElement {
     name: "PipeInsulation",
     context: "BuildingDetails/Systems/WaterHeating/HotWaterDistribution/PipeInsulation",
@@ -2062,7 +2062,7 @@ pub static PIPE_INSULATION: HpxmlElement = HpxmlElement {
     description: "the <PipeInsulation> element the parser reads under its parent",
 };
 
-/// the <PipeRValue> element the parser reads under its parent
+/// the `<PipeRValue>` element the parser reads under its parent
 pub static PIPE_R_VALUE: HpxmlElement = HpxmlElement {
     name: "PipeRValue",
     context: "BuildingDetails/Systems/WaterHeating/HotWaterDistribution/PipeInsulation/PipeRValue",
@@ -2070,7 +2070,7 @@ pub static PIPE_R_VALUE: HpxmlElement = HpxmlElement {
     description: "the <PipeRValue> element the parser reads under its parent",
 };
 
-/// the <PipingLength> element the parser reads under its parent
+/// the `<PipingLength>` element the parser reads under its parent
 pub static PIPING_LENGTH: HpxmlElement = HpxmlElement {
     name: "PipingLength",
     context: "BuildingDetails/Systems/WaterHeating/HotWaterDistribution/SystemType/Standard/PipingLength",
@@ -2078,7 +2078,7 @@ pub static PIPING_LENGTH: HpxmlElement = HpxmlElement {
     description: "the <PipingLength> element the parser reads under its parent",
 };
 
-/// the <Pitch> element the parser reads under its parent
+/// the `<Pitch>` element the parser reads under its parent
 pub static PITCH: HpxmlElement = HpxmlElement {
     name: "Pitch",
     context: "BuildingDetails/Enclosure/Roofs/Roof/Pitch",
@@ -2086,7 +2086,7 @@ pub static PITCH: HpxmlElement = HpxmlElement {
     description: "the <Pitch> element the parser reads under its parent",
 };
 
-/// the <PlaceSettingCapacity> element the parser reads under its parent
+/// the `<PlaceSettingCapacity>` element the parser reads under its parent
 pub static PLACE_SETTING_CAPACITY: HpxmlElement = HpxmlElement {
     name: "PlaceSettingCapacity",
     context: "the dishwasher's place-setting capacity",
@@ -2094,7 +2094,7 @@ pub static PLACE_SETTING_CAPACITY: HpxmlElement = HpxmlElement {
     description: "the <PlaceSettingCapacity> element the parser reads under its parent",
 };
 
-/// the <PlugLoad> element the parser reads under its parent
+/// the `<PlugLoad>` element the parser reads under its parent
 pub static PLUG_LOAD: HpxmlElement = HpxmlElement {
     name: "PlugLoad",
     context: "BuildingDetails/MiscLoads/PlugLoad",
@@ -2102,7 +2102,7 @@ pub static PLUG_LOAD: HpxmlElement = HpxmlElement {
     description: "the <PlugLoad> element the parser reads under its parent",
 };
 
-/// the <PlugLoadType> element the parser reads under its parent
+/// the `<PlugLoadType>` element the parser reads under its parent
 pub static PLUG_LOAD_TYPE: HpxmlElement = HpxmlElement {
     name: "PlugLoadType",
     context: "BuildingDetails/MiscLoads/PlugLoad/PlugLoadType",
@@ -2110,7 +2110,7 @@ pub static PLUG_LOAD_TYPE: HpxmlElement = HpxmlElement {
     description: "the <PlugLoadType> element the parser reads under its parent",
 };
 
-/// the <Pool> element the parser reads under its parent
+/// the `<Pool>` element the parser reads under its parent
 pub static POOL: HpxmlElement = HpxmlElement {
     name: "Pool",
     context: "BuildingDetails/Pools/Pool",
@@ -2118,7 +2118,7 @@ pub static POOL: HpxmlElement = HpxmlElement {
     description: "the <Pool> element the parser reads under its parent",
 };
 
-/// the <PoolPump> element the parser reads under its parent
+/// the `<PoolPump>` element the parser reads under its parent
 pub static POOL_PUMP: HpxmlElement = HpxmlElement {
     name: "PoolPump",
     context: "BuildingDetails/Pools/Pool/PoolPumps/PoolPump",
@@ -2126,7 +2126,7 @@ pub static POOL_PUMP: HpxmlElement = HpxmlElement {
     description: "the <PoolPump> element the parser reads under its parent",
 };
 
-/// the <PoolPumps> element the parser reads under its parent
+/// the `<PoolPumps>` element the parser reads under its parent
 pub static POOL_PUMPS: HpxmlElement = HpxmlElement {
     name: "PoolPumps",
     context: "BuildingDetails/Pools/Pool/PoolPumps",
@@ -2134,7 +2134,7 @@ pub static POOL_PUMPS: HpxmlElement = HpxmlElement {
     description: "the <PoolPumps> element the parser reads under its parent",
 };
 
-/// the <Pools> element the parser reads under its parent
+/// the `<Pools>` element the parser reads under its parent
 pub static POOLS: HpxmlElement = HpxmlElement {
     name: "Pools",
     context: "BuildingDetails/Pools",
@@ -2142,7 +2142,7 @@ pub static POOLS: HpxmlElement = HpxmlElement {
     description: "the <Pools> element the parser reads under its parent",
 };
 
-/// the <PortableElectricSpa> element the parser reads under its parent
+/// the `<PortableElectricSpa>` element the parser reads under its parent
 pub static PORTABLE_ELECTRIC_SPA: HpxmlElement = HpxmlElement {
     name: "PortableElectricSpa",
     context: "Spas",
@@ -2150,7 +2150,7 @@ pub static PORTABLE_ELECTRIC_SPA: HpxmlElement = HpxmlElement {
     description: "the <PortableElectricSpa> element the parser reads under its parent",
 };
 
-/// the <PrimaryCoolingSystem> element the parser reads under its parent
+/// the `<PrimaryCoolingSystem>` element the parser reads under its parent
 pub static PRIMARY_COOLING_SYSTEM: HpxmlElement = HpxmlElement {
     name: "PrimaryCoolingSystem",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/PrimarySystems/PrimaryCoolingSystem",
@@ -2158,7 +2158,7 @@ pub static PRIMARY_COOLING_SYSTEM: HpxmlElement = HpxmlElement {
     description: "the <PrimaryCoolingSystem> element the parser reads under its parent",
 };
 
-/// the <PrimaryHeatingSystem> element the parser reads under its parent
+/// the `<PrimaryHeatingSystem>` element the parser reads under its parent
 pub static PRIMARY_HEATING_SYSTEM: HpxmlElement = HpxmlElement {
     name: "PrimaryHeatingSystem",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/PrimarySystems/PrimaryHeatingSystem",
@@ -2166,7 +2166,7 @@ pub static PRIMARY_HEATING_SYSTEM: HpxmlElement = HpxmlElement {
     description: "the <PrimaryHeatingSystem> element the parser reads under its parent",
 };
 
-/// the <PrimaryIndicator> element the parser reads under its parent
+/// the `<PrimaryIndicator>` element the parser reads under its parent
 pub static PRIMARY_INDICATOR: HpxmlElement = HpxmlElement {
     name: "PrimaryIndicator",
     context: "BuildingDetails/Appliances/Refrigerator/PrimaryIndicator",
@@ -2174,7 +2174,7 @@ pub static PRIMARY_INDICATOR: HpxmlElement = HpxmlElement {
     description: "the <PrimaryIndicator> element the parser reads under its parent",
 };
 
-/// the <PrimarySystems> element the parser reads under its parent
+/// the `<PrimarySystems>` element the parser reads under its parent
 pub static PRIMARY_SYSTEMS: HpxmlElement = HpxmlElement {
     name: "PrimarySystems",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/PrimarySystems",
@@ -2182,7 +2182,7 @@ pub static PRIMARY_SYSTEMS: HpxmlElement = HpxmlElement {
     description: "the <PrimarySystems> element the parser reads under its parent",
 };
 
-/// the <PVSystem> element the parser reads under its parent
+/// the `<PVSystem>` element the parser reads under its parent
 pub static PV_SYSTEM: HpxmlElement = HpxmlElement {
     name: "PVSystem",
     context: "BuildingDetails/Systems/Photovoltaics/PVSystem",
@@ -2190,7 +2190,7 @@ pub static PV_SYSTEM: HpxmlElement = HpxmlElement {
     description: "the <PVSystem> element the parser reads under its parent",
 };
 
-/// the <RadiantBarrier> element the parser reads under its parent
+/// the `<RadiantBarrier>` element the parser reads under its parent
 pub static RADIANT_BARRIER: HpxmlElement = HpxmlElement {
     name: "RadiantBarrier",
     context: "BuildingDetails/Enclosure/Floors/Floor/RadiantBarrier | BuildingDetails/Enclosure/Roofs/Roof/RadiantBarrier | BuildingDetails/Enclosure/Walls/Wall/RadiantBarrier",
@@ -2198,7 +2198,7 @@ pub static RADIANT_BARRIER: HpxmlElement = HpxmlElement {
     description: "the <RadiantBarrier> element the parser reads under its parent",
 };
 
-/// the <RatedAnnualkWh> element the parser reads under its parent
+/// the `<RatedAnnualkWh>` element the parser reads under its parent
 pub static RATED_ANNUALK_WH: HpxmlElement = HpxmlElement {
     name: "RatedAnnualkWh",
     context: "the appliance's rated annual energy (kWh/year)",
@@ -2206,7 +2206,7 @@ pub static RATED_ANNUALK_WH: HpxmlElement = HpxmlElement {
     description: "the <RatedAnnualkWh> element the parser reads under its parent",
 };
 
-/// the <RatedFlowRate> element the parser reads under its parent
+/// the `<RatedFlowRate>` element the parser reads under its parent
 pub static RATED_FLOW_RATE: HpxmlElement = HpxmlElement {
     name: "RatedFlowRate",
     context: "BuildingDetails/Systems/MechanicalVentilation/VentilationFans/VentilationFan/RatedFlowRate",
@@ -2214,7 +2214,7 @@ pub static RATED_FLOW_RATE: HpxmlElement = HpxmlElement {
     description: "the <RatedFlowRate> element the parser reads under its parent",
 };
 
-/// the <RatedPowerOutput> element the parser reads under its parent
+/// the `<RatedPowerOutput>` element the parser reads under its parent
 pub static RATED_POWER_OUTPUT: HpxmlElement = HpxmlElement {
     name: "RatedPowerOutput",
     context: "BuildingDetails/Systems/Batteries/Battery/RatedPowerOutput",
@@ -2222,7 +2222,7 @@ pub static RATED_POWER_OUTPUT: HpxmlElement = HpxmlElement {
     description: "the <RatedPowerOutput> element the parser reads under its parent",
 };
 
-/// the <Recirculation> element the parser reads under its parent
+/// the `<Recirculation>` element the parser reads under its parent
 pub static RECIRCULATION: HpxmlElement = HpxmlElement {
     name: "Recirculation",
     context: "WaterHeatingSystem/HotWaterDistribution",
@@ -2230,7 +2230,7 @@ pub static RECIRCULATION: HpxmlElement = HpxmlElement {
     description: "the <Recirculation> element the parser reads under its parent",
 };
 
-/// the <RecoveryEfficiency> element the parser reads under its parent
+/// the `<RecoveryEfficiency>` element the parser reads under its parent
 pub static RECOVERY_EFFICIENCY: HpxmlElement = HpxmlElement {
     name: "RecoveryEfficiency",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/RecoveryEfficiency",
@@ -2238,7 +2238,7 @@ pub static RECOVERY_EFFICIENCY: HpxmlElement = HpxmlElement {
     description: "the <RecoveryEfficiency> element the parser reads under its parent",
 };
 
-/// the <Refrigerator> element the parser reads under its parent
+/// the `<Refrigerator>` element the parser reads under its parent
 pub static REFRIGERATOR: HpxmlElement = HpxmlElement {
     name: "Refrigerator",
     context: "BuildingDetails/Appliances/Refrigerator",
@@ -2246,7 +2246,7 @@ pub static REFRIGERATOR: HpxmlElement = HpxmlElement {
     description: "the <Refrigerator> element the parser reads under its parent",
 };
 
-/// the <RelatedHVACSystem> element the parser reads under its parent
+/// the `<RelatedHVACSystem>` element the parser reads under its parent
 pub static RELATED_HVAC_SYSTEM: HpxmlElement = HpxmlElement {
     name: "RelatedHVACSystem",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/RelatedHVACSystem",
@@ -2254,7 +2254,7 @@ pub static RELATED_HVAC_SYSTEM: HpxmlElement = HpxmlElement {
     description: "the <RelatedHVACSystem> element the parser reads under its parent",
 };
 
-/// the <ResidentialFacilityType> element the parser reads under its parent
+/// the `<ResidentialFacilityType>` element the parser reads under its parent
 pub static RESIDENTIAL_FACILITY_TYPE: HpxmlElement = HpxmlElement {
     name: "ResidentialFacilityType",
     context: "BuildingDetails/BuildingSummary/BuildingConstruction/ResidentialFacilityType",
@@ -2262,7 +2262,7 @@ pub static RESIDENTIAL_FACILITY_TYPE: HpxmlElement = HpxmlElement {
     description: "the <ResidentialFacilityType> element the parser reads under its parent",
 };
 
-/// the <RimJoist> element the parser reads under its parent
+/// the `<RimJoist>` element the parser reads under its parent
 pub static RIM_JOIST: HpxmlElement = HpxmlElement {
     name: "RimJoist",
     context: "Enclosure/RimJoists (one rim joist)",
@@ -2270,7 +2270,7 @@ pub static RIM_JOIST: HpxmlElement = HpxmlElement {
     description: "the <RimJoist> element the parser reads under its parent",
 };
 
-/// the <RimJoists> element the parser reads under its parent
+/// the `<RimJoists>` element the parser reads under its parent
 pub static RIM_JOISTS: HpxmlElement = HpxmlElement {
     name: "RimJoists",
     context: "Enclosure (the rim-joist container)",
@@ -2278,7 +2278,7 @@ pub static RIM_JOISTS: HpxmlElement = HpxmlElement {
     description: "the <RimJoists> element the parser reads under its parent",
 };
 
-/// the <Roof> element the parser reads under its parent
+/// the `<Roof>` element the parser reads under its parent
 pub static ROOF: HpxmlElement = HpxmlElement {
     name: "Roof",
     context: "Enclosure/Roofs (one roof)",
@@ -2286,7 +2286,7 @@ pub static ROOF: HpxmlElement = HpxmlElement {
     description: "the <Roof> element the parser reads under its parent",
 };
 
-/// the <Roofs> element the parser reads under its parent
+/// the `<Roofs>` element the parser reads under its parent
 pub static ROOFS: HpxmlElement = HpxmlElement {
     name: "Roofs",
     context: "Enclosure (the roof container)",
@@ -2294,7 +2294,7 @@ pub static ROOFS: HpxmlElement = HpxmlElement {
     description: "the <Roofs> element the parser reads under its parent",
 };
 
-/// the <RoofType> element the parser reads under its parent
+/// the `<RoofType>` element the parser reads under its parent
 pub static ROOF_TYPE: HpxmlElement = HpxmlElement {
     name: "RoofType",
     context: "BuildingDetails/Enclosure/Roofs/Roof/RoofType",
@@ -2302,7 +2302,7 @@ pub static ROOF_TYPE: HpxmlElement = HpxmlElement {
     description: "the <RoofType> element the parser reads under its parent",
 };
 
-/// the <RoundTripEfficiency> element the parser reads under its parent
+/// the `<RoundTripEfficiency>` element the parser reads under its parent
 pub static ROUND_TRIP_EFFICIENCY: HpxmlElement = HpxmlElement {
     name: "RoundTripEfficiency",
     context: "Systems/Batteries/Battery",
@@ -2310,7 +2310,7 @@ pub static ROUND_TRIP_EFFICIENCY: HpxmlElement = HpxmlElement {
     description: "the <RoundTripEfficiency> element the parser reads under its parent",
 };
 
-/// the <RValue> element the parser reads under its parent
+/// the `<RValue>` element the parser reads under its parent
 pub static R_VALUE: HpxmlElement = HpxmlElement {
     name: "RValue",
     context: "BuildingDetails/Enclosure/Doors/Door/RValue",
@@ -2318,7 +2318,7 @@ pub static R_VALUE: HpxmlElement = HpxmlElement {
     description: "the <RValue> element the parser reads under its parent",
 };
 
-/// the <SEER> element the parser reads under its parent
+/// the `<SEER>` element the parser reads under its parent
 pub static SEER: HpxmlElement = HpxmlElement {
     name: "SEER",
     context: "a cooling system's SEER (the legacy direct-child form)",
@@ -2326,7 +2326,7 @@ pub static SEER: HpxmlElement = HpxmlElement {
     description: "the <SEER> element the parser reads under its parent",
 };
 
-/// the <SEER2> element the parser reads under its parent
+/// the `<SEER2>` element the parser reads under its parent
 pub static SEER_2: HpxmlElement = HpxmlElement {
     name: "SEER2",
     context: "a cooling system's SEER2 (the legacy direct-child form)",
@@ -2334,7 +2334,7 @@ pub static SEER_2: HpxmlElement = HpxmlElement {
     description: "the <SEER2> element the parser reads under its parent",
 };
 
-/// the <sensible_gain_fraction> element the parser reads under its parent
+/// the `<sensible_gain_fraction>` element the parser reads under its parent
 pub static SENSIBLE_GAIN_FRACTION: HpxmlElement = HpxmlElement {
     name: "sensible_gain_fraction",
     context: "the sensible gain fraction (the synthetic extension element)",
@@ -2342,7 +2342,7 @@ pub static SENSIBLE_GAIN_FRACTION: HpxmlElement = HpxmlElement {
     description: "the <sensible_gain_fraction> element the parser reads under its parent",
 };
 
-/// the <SensibleHeatFraction> element the parser reads under its parent
+/// the `<SensibleHeatFraction>` element the parser reads under its parent
 pub static SENSIBLE_HEAT_FRACTION: HpxmlElement = HpxmlElement {
     name: "SensibleHeatFraction",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/CoolingSystem/SensibleHeatFraction",
@@ -2350,7 +2350,7 @@ pub static SENSIBLE_HEAT_FRACTION: HpxmlElement = HpxmlElement {
     description: "the <SensibleHeatFraction> element the parser reads under its parent",
 };
 
-/// the <SensibleRecoveryEfficiency> element the parser reads under its parent
+/// the `<SensibleRecoveryEfficiency>` element the parser reads under its parent
 pub static SENSIBLE_RECOVERY_EFFICIENCY: HpxmlElement = HpxmlElement {
     name: "SensibleRecoveryEfficiency",
     context: "VentilationFan (HRV/ERV)",
@@ -2406,7 +2406,7 @@ pub static SETUP_TEMP_COOLING_SEASON: HpxmlElement = HpxmlElement {
     description: "the cooling setup temperature, degrees Fahrenheit",
 };
 
-/// the <SHGC> element the parser reads under its parent
+/// the `<SHGC>` element the parser reads under its parent
 pub static SHGC: HpxmlElement = HpxmlElement {
     name: "SHGC",
     context: "BuildingDetails/Enclosure/Windows/Window/SHGC",
@@ -2414,7 +2414,7 @@ pub static SHGC: HpxmlElement = HpxmlElement {
     description: "the <SHGC> element the parser reads under its parent",
 };
 
-/// the <ShieldingofHome> element the parser reads under its parent
+/// the `<ShieldingofHome>` element the parser reads under its parent
 pub static SHIELDINGOF_HOME: HpxmlElement = HpxmlElement {
     name: "ShieldingofHome",
     context: "BuildingDetails/BuildingSummary/Site/ShieldingofHome",
@@ -2422,7 +2422,7 @@ pub static SHIELDINGOF_HOME: HpxmlElement = HpxmlElement {
     description: "the <ShieldingofHome> element the parser reads under its parent",
 };
 
-/// the <Siding> element the parser reads under its parent
+/// the `<Siding>` element the parser reads under its parent
 pub static SIDING: HpxmlElement = HpxmlElement {
     name: "Siding",
     context: "a wall's or rim joist's siding finish (its Type element)",
@@ -2430,7 +2430,7 @@ pub static SIDING: HpxmlElement = HpxmlElement {
     description: "the <Siding> element the parser reads under its parent",
 };
 
-/// the <SimulationControl> element the parser reads under its parent
+/// the `<SimulationControl>` element the parser reads under its parent
 pub static SIMULATION_CONTROL: HpxmlElement = HpxmlElement {
     name: "SimulationControl",
     context: "SoftwareInfo/extension/SimulationControl (the simulation control's extension)",
@@ -2438,7 +2438,7 @@ pub static SIMULATION_CONTROL: HpxmlElement = HpxmlElement {
     description: "the <SimulationControl> element the parser reads under its parent",
 };
 
-/// the <Site> element the parser reads under its parent
+/// the `<Site>` element the parser reads under its parent
 pub static SITE: HpxmlElement = HpxmlElement {
     name: "Site",
     context: "BuildingDetails/BuildingSummary/Site",
@@ -2446,7 +2446,7 @@ pub static SITE: HpxmlElement = HpxmlElement {
     description: "the <Site> element the parser reads under its parent",
 };
 
-/// the <SiteType> element the parser reads under its parent
+/// the `<SiteType>` element the parser reads under its parent
 pub static SITE_TYPE: HpxmlElement = HpxmlElement {
     name: "SiteType",
     context: "Building/Site (the site's type)",
@@ -2454,7 +2454,7 @@ pub static SITE_TYPE: HpxmlElement = HpxmlElement {
     description: "the <SiteType> element the parser reads under its parent",
 };
 
-/// the <Skylight> element the parser reads under its parent
+/// the `<Skylight>` element the parser reads under its parent
 pub static SKYLIGHT: HpxmlElement = HpxmlElement {
     name: "Skylight",
     context: "Enclosure/Skylights",
@@ -2462,7 +2462,7 @@ pub static SKYLIGHT: HpxmlElement = HpxmlElement {
     description: "the <Skylight> element the parser reads under its parent",
 };
 
-/// the <Skylights> element the parser reads under its parent
+/// the `<Skylights>` element the parser reads under its parent
 pub static SKYLIGHTS: HpxmlElement = HpxmlElement {
     name: "Skylights",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/extension/DesignLoads/CoolingSensible/Skylights | BuildingDetails/Systems/HVAC/HVACPlant/extension/DesignLoads/Heating/Skylights",
@@ -2470,7 +2470,7 @@ pub static SKYLIGHTS: HpxmlElement = HpxmlElement {
     description: "the <Skylights> element the parser reads under its parent",
 };
 
-/// the <Slab> element the parser reads under its parent
+/// the `<Slab>` element the parser reads under its parent
 pub static SLAB: HpxmlElement = HpxmlElement {
     name: "Slab",
     context: "Enclosure/Slabs (one slab)",
@@ -2478,7 +2478,7 @@ pub static SLAB: HpxmlElement = HpxmlElement {
     description: "the <Slab> element the parser reads under its parent",
 };
 
-/// the <Slabs> element the parser reads under its parent
+/// the `<Slabs>` element the parser reads under its parent
 pub static SLABS: HpxmlElement = HpxmlElement {
     name: "Slabs",
     context: "Enclosure (the slab container)",
@@ -2486,7 +2486,7 @@ pub static SLABS: HpxmlElement = HpxmlElement {
     description: "the <Slabs> element the parser reads under its parent",
 };
 
-/// the <SlabOnGrade> element the parser reads under its parent
+/// the `<SlabOnGrade>` element the parser reads under its parent
 pub static SLAB_ON_GRADE: HpxmlElement = HpxmlElement {
     name: "SlabOnGrade",
     context: "BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/SlabOnGrade",
@@ -2494,7 +2494,7 @@ pub static SLAB_ON_GRADE: HpxmlElement = HpxmlElement {
     description: "the <SlabOnGrade> element the parser reads under its parent",
 };
 
-/// the <SoftwareInfo> element the parser reads under its parent
+/// the `<SoftwareInfo>` element the parser reads under its parent
 pub static SOFTWARE_INFO: HpxmlElement = HpxmlElement {
     name: "SoftwareInfo",
     context: "HPXML root (the SoftwareInfo extension tree)",
@@ -2502,7 +2502,7 @@ pub static SOFTWARE_INFO: HpxmlElement = HpxmlElement {
     description: "the <SoftwareInfo> element the parser reads under its parent",
 };
 
-/// the <SolarAbsorptance> element the parser reads under its parent
+/// the `<SolarAbsorptance>` element the parser reads under its parent
 pub static SOLAR_ABSORPTANCE: HpxmlElement = HpxmlElement {
     name: "SolarAbsorptance",
     context: "BuildingDetails/Enclosure/RimJoists/RimJoist/SolarAbsorptance | BuildingDetails/Enclosure/Roofs/Roof/SolarAbsorptance | BuildingDetails/Enclosure/Walls/Wall/SolarAbsorptance",
@@ -2510,7 +2510,7 @@ pub static SOLAR_ABSORPTANCE: HpxmlElement = HpxmlElement {
     description: "the <SolarAbsorptance> element the parser reads under its parent",
 };
 
-/// the <Spas> element the parser reads under its parent
+/// the `<Spas>` element the parser reads under its parent
 pub static SPAS: HpxmlElement = HpxmlElement {
     name: "Spas",
     context: "BuildingDetails",
@@ -2518,7 +2518,7 @@ pub static SPAS: HpxmlElement = HpxmlElement {
     description: "the <Spas> element the parser reads under its parent",
 };
 
-/// the <SpecificHeat> element the parser reads under its parent
+/// the `<SpecificHeat>` element the parser reads under its parent
 pub static SPECIFIC_HEAT: HpxmlElement = HpxmlElement {
     name: "SpecificHeat",
     context: "material Layer (mass layers)",
@@ -2526,7 +2526,7 @@ pub static SPECIFIC_HEAT: HpxmlElement = HpxmlElement {
     description: "the <SpecificHeat> element the parser reads under its parent",
 };
 
-/// the <Standard> element the parser reads under its parent
+/// the `<Standard>` element the parser reads under its parent
 pub static STANDARD: HpxmlElement = HpxmlElement {
     name: "Standard",
     context: "BuildingDetails/Systems/WaterHeating/HotWaterDistribution/SystemType/Standard",
@@ -2534,7 +2534,7 @@ pub static STANDARD: HpxmlElement = HpxmlElement {
     description: "the <Standard> element the parser reads under its parent",
 };
 
-/// the <StandbyPower> element the parser reads under its parent
+/// the `<StandbyPower>` element the parser reads under its parent
 pub static STANDBY_POWER: HpxmlElement = HpxmlElement {
     name: "StandbyPower",
     context: "PermanentSpa and PortableElectricSpa",
@@ -2542,7 +2542,7 @@ pub static STANDBY_POWER: HpxmlElement = HpxmlElement {
     description: "the <StandbyPower> element the parser reads under its parent",
 };
 
-/// the <StudSpacing> element the parser reads under its parent
+/// the `<StudSpacing>` element the parser reads under its parent
 pub static STUD_SPACING: HpxmlElement = HpxmlElement {
     name: "StudSpacing",
     context: "Wall (the framing stud spacing)",
@@ -2550,7 +2550,7 @@ pub static STUD_SPACING: HpxmlElement = HpxmlElement {
     description: "the <StudSpacing> element the parser reads under its parent",
 };
 
-/// the <StudWidth> element the parser reads under its parent
+/// the `<StudWidth>` element the parser reads under its parent
 pub static STUD_WIDTH: HpxmlElement = HpxmlElement {
     name: "StudWidth",
     context: "Wall (the framing stud width)",
@@ -2558,7 +2558,7 @@ pub static STUD_WIDTH: HpxmlElement = HpxmlElement {
     description: "the <StudWidth> element the parser reads under its parent",
 };
 
-/// the <SummerShadingCoefficient> element the parser reads under its parent
+/// the `<SummerShadingCoefficient>` element the parser reads under its parent
 pub static SUMMER_SHADING_COEFFICIENT: HpxmlElement = HpxmlElement {
     name: "SummerShadingCoefficient",
     context: "BuildingDetails/Enclosure/Windows/Window/ExteriorShading/SummerShadingCoefficient | BuildingDetails/Enclosure/Windows/Window/InteriorShading/SummerShadingCoefficient",
@@ -2566,7 +2566,7 @@ pub static SUMMER_SHADING_COEFFICIENT: HpxmlElement = HpxmlElement {
     description: "the <SummerShadingCoefficient> element the parser reads under its parent",
 };
 
-/// the <SupplementalHeatingLockoutTemperature> element the parser reads under its parent
+/// the `<SupplementalHeatingLockoutTemperature>` element the parser reads under its parent
 pub static SUPPLEMENTAL_HEATING_LOCKOUT_TEMPERATURE: HpxmlElement = HpxmlElement {
     name: "SupplementalHeatingLockoutTemperature",
     context: "HeatPump",
@@ -2582,7 +2582,7 @@ pub static SYSTEM_IDENTIFIER: HpxmlElement = HpxmlElement {
     description: "the system's or load's identifier; the parser reads its @id",
 };
 
-/// the <SystemLossesFraction> element the parser reads under its parent
+/// the `<SystemLossesFraction>` element the parser reads under its parent
 pub static SYSTEM_LOSSES_FRACTION: HpxmlElement = HpxmlElement {
     name: "SystemLossesFraction",
     context: "BuildingDetails/Systems/Photovoltaics/PVSystem/SystemLossesFraction",
@@ -2590,7 +2590,7 @@ pub static SYSTEM_LOSSES_FRACTION: HpxmlElement = HpxmlElement {
     description: "the <SystemLossesFraction> element the parser reads under its parent",
 };
 
-/// the <Systems> element the parser reads under its parent
+/// the `<Systems>` element the parser reads under its parent
 pub static SYSTEMS: HpxmlElement = HpxmlElement {
     name: "Systems",
     context: "BuildingDetails/Systems",
@@ -2598,7 +2598,7 @@ pub static SYSTEMS: HpxmlElement = HpxmlElement {
     description: "the <Systems> element the parser reads under its parent",
 };
 
-/// the <SystemType> element the parser reads under its parent
+/// the `<SystemType>` element the parser reads under its parent
 pub static SYSTEM_TYPE: HpxmlElement = HpxmlElement {
     name: "SystemType",
     context: "BuildingDetails/Systems/SolarThermal/SolarThermalSystem/SystemType | BuildingDetails/Systems/WaterHeating/HotWaterDistribution/SystemType",
@@ -2606,7 +2606,7 @@ pub static SYSTEM_TYPE: HpxmlElement = HpxmlElement {
     description: "the <SystemType> element the parser reads under its parent",
 };
 
-/// the <TankHeight> element the parser reads under its parent
+/// the `<TankHeight>` element the parser reads under its parent
 pub static TANK_HEIGHT: HpxmlElement = HpxmlElement {
     name: "TankHeight",
     context: "WaterHeatingSystem (storage tanks)",
@@ -2614,7 +2614,7 @@ pub static TANK_HEIGHT: HpxmlElement = HpxmlElement {
     description: "the <TankHeight> element the parser reads under its parent",
 };
 
-/// the <TankVolume> element the parser reads under its parent
+/// the `<TankVolume>` element the parser reads under its parent
 pub static TANK_VOLUME: HpxmlElement = HpxmlElement {
     name: "TankVolume",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/TankVolume",
@@ -2622,7 +2622,7 @@ pub static TANK_VOLUME: HpxmlElement = HpxmlElement {
     description: "the <TankVolume> element the parser reads under its parent",
 };
 
-/// the <Temperature> element the parser reads under its parent
+/// the `<Temperature>` element the parser reads under its parent
 pub static TEMPERATURE: HpxmlElement = HpxmlElement {
     name: "Temperature",
     context: "BuildingDetails/Systems/HVAC/HVACPlant/HeatPump/extension/HeatingCapacityRetention/Temperature",
@@ -2638,7 +2638,7 @@ pub static TEMPERATURE_CAPACITANCE_MULTIPLIER: HpxmlElement = HpxmlElement {
     description: "the zone air capacitance multiplier (an advanced research feature)",
 };
 
-/// the <text> element the parser reads under its parent
+/// the `<text>` element the parser reads under its parent
 pub static TEXT: HpxmlElement = HpxmlElement {
     name: "text",
     context: "the XML-1.0 normalisation pin's synthetic document",
@@ -2654,7 +2654,7 @@ pub static THICKNESS: HpxmlElement = HpxmlElement {
     description: "an insulation or finish layer's thickness",
 };
 
-/// the <Tilt> element the parser reads under its parent
+/// the `<Tilt>` element the parser reads under its parent
 pub static TILT: HpxmlElement = HpxmlElement {
     name: "Tilt",
     context: "a surface's tilt from horizontal, degrees",
@@ -2670,7 +2670,7 @@ pub static TIME_ZONE: HpxmlElement = HpxmlElement {
     description: "the site's time zone wrapper",
 };
 
-/// the <TotalAnnualPowerConsumptionInStandbyMode> element the parser reads under its parent
+/// the `<TotalAnnualPowerConsumptionInStandbyMode>` element the parser reads under its parent
 pub static TOTAL_ANNUAL_POWER_CONSUMPTION_IN_STANDBY_MODE: HpxmlElement = HpxmlElement {
     name: "TotalAnnualPowerConsumptionInStandbyMode",
     context: "PermanentSpa and PortableElectricSpa",
@@ -2678,7 +2678,7 @@ pub static TOTAL_ANNUAL_POWER_CONSUMPTION_IN_STANDBY_MODE: HpxmlElement = HpxmlE
     description: "the <TotalAnnualPowerConsumptionInStandbyMode> element the parser reads under its parent",
 };
 
-/// the <TotalRecoveryEfficiency> element the parser reads under its parent
+/// the `<TotalRecoveryEfficiency>` element the parser reads under its parent
 pub static TOTAL_RECOVERY_EFFICIENCY: HpxmlElement = HpxmlElement {
     name: "TotalRecoveryEfficiency",
     context: "VentilationFan (HRV/ERV)",
@@ -2702,7 +2702,7 @@ pub static TOTAL_SETUP_HOURSPER_WEEK_COOLING: HpxmlElement = HpxmlElement {
     description: "the cooling setup's hours per week",
 };
 
-/// the <Tracking> element the parser reads under its parent
+/// the `<Tracking>` element the parser reads under its parent
 pub static TRACKING: HpxmlElement = HpxmlElement {
     name: "Tracking",
     context: "BuildingDetails/Systems/Photovoltaics/PVSystem/Tracking",
@@ -2718,7 +2718,7 @@ pub static TYPE: HpxmlElement = HpxmlElement {
     description: "a discriminator element (attic type, foundation type, finish type)",
 };
 
-/// the <TypeOfInfiltrationLeakage> element the parser reads under its parent
+/// the `<TypeOfInfiltrationLeakage>` element the parser reads under its parent
 pub static TYPE_OF_INFILTRATION_LEAKAGE: HpxmlElement = HpxmlElement {
     name: "TypeOfInfiltrationLeakage",
     context: "BuildingDetails/Enclosure/AirInfiltration/AirInfiltrationMeasurement/TypeOfInfiltrationLeakage",
@@ -2726,7 +2726,7 @@ pub static TYPE_OF_INFILTRATION_LEAKAGE: HpxmlElement = HpxmlElement {
     description: "the <TypeOfInfiltrationLeakage> element the parser reads under its parent",
 };
 
-/// the <UFactor> element the parser reads under its parent
+/// the `<UFactor>` element the parser reads under its parent
 pub static U_FACTOR: HpxmlElement = HpxmlElement {
     name: "UFactor",
     context: "BuildingDetails/Enclosure/Windows/Window/UFactor",
@@ -2742,7 +2742,7 @@ pub static UNAVAILABLE_PERIOD: HpxmlElement = HpxmlElement {
     description: "one unavailable period whose steps zero the schedule columns",
 };
 
-/// the <UnavailablePeriods> element the parser reads under its parent
+/// the `<UnavailablePeriods>` element the parser reads under its parent
 pub static UNAVAILABLE_PERIODS: HpxmlElement = HpxmlElement {
     name: "UnavailablePeriods",
     context: "SoftwareInfo/extension (the unavailable periods' container)",
@@ -2750,7 +2750,7 @@ pub static UNAVAILABLE_PERIODS: HpxmlElement = HpxmlElement {
     description: "the <UnavailablePeriods> element the parser reads under its parent",
 };
 
-/// the <UnderSlabInsulation> element the parser reads under its parent
+/// the `<UnderSlabInsulation>` element the parser reads under its parent
 pub static UNDER_SLAB_INSULATION: HpxmlElement = HpxmlElement {
     name: "UnderSlabInsulation",
     context: "BuildingDetails/Enclosure/Slabs/Slab/UnderSlabInsulation",
@@ -2758,7 +2758,7 @@ pub static UNDER_SLAB_INSULATION: HpxmlElement = HpxmlElement {
     description: "the <UnderSlabInsulation> element the parser reads under its parent",
 };
 
-/// the <UniformEnergyFactor> element the parser reads under its parent
+/// the `<UniformEnergyFactor>` element the parser reads under its parent
 pub static UNIFORM_ENERGY_FACTOR: HpxmlElement = HpxmlElement {
     name: "UniformEnergyFactor",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/UniformEnergyFactor",
@@ -2766,7 +2766,7 @@ pub static UNIFORM_ENERGY_FACTOR: HpxmlElement = HpxmlElement {
     description: "the <UniformEnergyFactor> element the parser reads under its parent",
 };
 
-/// the <UnitHeightAboveGrade> element the parser reads under its parent
+/// the `<UnitHeightAboveGrade>` element the parser reads under its parent
 pub static UNIT_HEIGHT_ABOVE_GRADE: HpxmlElement = HpxmlElement {
     name: "UnitHeightAboveGrade",
     context: "BuildingDetails/BuildingSummary/BuildingConstruction/UnitHeightAboveGrade",
@@ -2774,7 +2774,7 @@ pub static UNIT_HEIGHT_ABOVE_GRADE: HpxmlElement = HpxmlElement {
     description: "the <UnitHeightAboveGrade> element the parser reads under its parent",
 };
 
-/// the <UnitofMeasure> element the parser reads under its parent
+/// the `<UnitofMeasure>` element the parser reads under its parent
 pub static UNITOF_MEASURE: HpxmlElement = HpxmlElement {
     name: "UnitofMeasure",
     context: "BuildingDetails/Enclosure/AirInfiltration/AirInfiltrationMeasurement/BuildingAirLeakage/UnitofMeasure | BuildingDetails/Enclosure/Attics/Attic/VentilationRate/UnitofMeasure | BuildingDetails/Enclosure/Foundations/Foundation/VentilationRate/UnitofMeasure",
@@ -2790,7 +2790,7 @@ pub static UNITS: HpxmlElement = HpxmlElement {
     description: "the units attribute-carrier of a Load, Usage or Value element",
 };
 
-/// the <Usage> element the parser reads under its parent
+/// the `<Usage>` element the parser reads under its parent
 pub static USAGE: HpxmlElement = HpxmlElement {
     name: "Usage",
     context: "xml_helpers' energy-element tests' synthetic Load (no fixture carries it)",
@@ -2806,7 +2806,7 @@ pub static USAGE_MULTIPLIER: HpxmlElement = HpxmlElement {
     description: "the extension's usage multiplier scaling the load",
 };
 
-/// the <UsedForSeasonalCoolingLoadReduction> element the parser reads under its parent
+/// the `<UsedForSeasonalCoolingLoadReduction>` element the parser reads under its parent
 pub static USED_FOR_SEASONAL_COOLING_LOAD_REDUCTION: HpxmlElement = HpxmlElement {
     name: "UsedForSeasonalCoolingLoadReduction",
     context: "the attic's seasonal-cooling load reduction flag (an xs:boolean)",
@@ -2814,7 +2814,7 @@ pub static USED_FOR_SEASONAL_COOLING_LOAD_REDUCTION: HpxmlElement = HpxmlElement
     description: "the <UsedForSeasonalCoolingLoadReduction> element the parser reads under its parent",
 };
 
-/// the <UsedForWholeBuildingVentilation> element the parser reads under its parent
+/// the `<UsedForWholeBuildingVentilation>` element the parser reads under its parent
 pub static USED_FOR_WHOLE_BUILDING_VENTILATION: HpxmlElement = HpxmlElement {
     name: "UsedForWholeBuildingVentilation",
     context: "BuildingDetails/Systems/MechanicalVentilation/VentilationFans/VentilationFan/UsedForWholeBuildingVentilation",
@@ -2838,7 +2838,7 @@ pub static VALUE: HpxmlElement = HpxmlElement {
     description: "the numeric value of a Load, Usage or units-carried element",
 };
 
-/// the <Vented> element the parser reads under its parent
+/// the `<Vented>` element the parser reads under its parent
 pub static VENTED: HpxmlElement = HpxmlElement {
     name: "Vented",
     context: "BuildingDetails/Appliances/ClothesDryer/Vented | BuildingDetails/Enclosure/Attics/Attic/AtticType/Attic/Vented | BuildingDetails/Enclosure/Foundations/Foundation/FoundationType/Crawlspace/Vented",
@@ -2846,7 +2846,7 @@ pub static VENTED: HpxmlElement = HpxmlElement {
     description: "the <Vented> element the parser reads under its parent",
 };
 
-/// the <VentilationFan> element the parser reads under its parent
+/// the `<VentilationFan>` element the parser reads under its parent
 pub static VENTILATION_FAN: HpxmlElement = HpxmlElement {
     name: "VentilationFan",
     context: "BuildingDetails/Systems/MechanicalVentilation/VentilationFans/VentilationFan",
@@ -2854,7 +2854,7 @@ pub static VENTILATION_FAN: HpxmlElement = HpxmlElement {
     description: "the <VentilationFan> element the parser reads under its parent",
 };
 
-/// the <VentilationFans> element the parser reads under its parent
+/// the `<VentilationFans>` element the parser reads under its parent
 pub static VENTILATION_FANS: HpxmlElement = HpxmlElement {
     name: "VentilationFans",
     context: "BuildingDetails/Systems/MechanicalVentilation/VentilationFans",
@@ -2862,7 +2862,7 @@ pub static VENTILATION_FANS: HpxmlElement = HpxmlElement {
     description: "the <VentilationFans> element the parser reads under its parent",
 };
 
-/// the <VentilationRate> element the parser reads under its parent
+/// the `<VentilationRate>` element the parser reads under its parent
 pub static VENTILATION_RATE: HpxmlElement = HpxmlElement {
     name: "VentilationRate",
     context: "BuildingDetails/Enclosure/Attics/Attic/VentilationRate | BuildingDetails/Enclosure/Foundations/Foundation/VentilationRate",
@@ -2870,7 +2870,7 @@ pub static VENTILATION_RATE: HpxmlElement = HpxmlElement {
     description: "the <VentilationRate> element the parser reads under its parent",
 };
 
-/// the <Version> element the parser reads under its parent
+/// the `<Version>` element the parser reads under its parent
 pub static VERSION: HpxmlElement = HpxmlElement {
     name: "Version",
     context: "SoftwareInfo/extension/ERICalculation (the ANSI/RESNET/ICC 301 version)",
@@ -2878,7 +2878,7 @@ pub static VERSION: HpxmlElement = HpxmlElement {
     description: "the <Version> element the parser reads under its parent",
 };
 
-/// the <Wall> element the parser reads under its parent
+/// the `<Wall>` element the parser reads under its parent
 pub static WALL: HpxmlElement = HpxmlElement {
     name: "Wall",
     context: "Enclosure/Walls (one wall)",
@@ -2886,7 +2886,7 @@ pub static WALL: HpxmlElement = HpxmlElement {
     description: "the <Wall> element the parser reads under its parent",
 };
 
-/// the <WallHeight> element the parser reads under its parent
+/// the `<WallHeight>` element the parser reads under its parent
 pub static WALL_HEIGHT: HpxmlElement = HpxmlElement {
     name: "WallHeight",
     context: "Wall and FoundationWall (the wall height)",
@@ -2894,7 +2894,7 @@ pub static WALL_HEIGHT: HpxmlElement = HpxmlElement {
     description: "the <WallHeight> element the parser reads under its parent",
 };
 
-/// the <Walls> element the parser reads under its parent
+/// the `<Walls>` element the parser reads under its parent
 pub static WALLS: HpxmlElement = HpxmlElement {
     name: "Walls",
     context: "Enclosure (the wall container)",
@@ -2902,7 +2902,7 @@ pub static WALLS: HpxmlElement = HpxmlElement {
     description: "the <Walls> element the parser reads under its parent",
 };
 
-/// the <WallType> element the parser reads under its parent
+/// the `<WallType>` element the parser reads under its parent
 pub static WALL_TYPE: HpxmlElement = HpxmlElement {
     name: "WallType",
     context: "BuildingDetails/Enclosure/Walls/Wall/WallType",
@@ -2910,7 +2910,7 @@ pub static WALL_TYPE: HpxmlElement = HpxmlElement {
     description: "the <WallType> element the parser reads under its parent",
 };
 
-/// the <WaterFixture> element the parser reads under its parent
+/// the `<WaterFixture>` element the parser reads under its parent
 pub static WATER_FIXTURE: HpxmlElement = HpxmlElement {
     name: "WaterFixture",
     context: "BuildingDetails/Systems/WaterHeating/WaterFixture",
@@ -2918,7 +2918,7 @@ pub static WATER_FIXTURE: HpxmlElement = HpxmlElement {
     description: "the <WaterFixture> element the parser reads under its parent",
 };
 
-/// the <WaterFixturesUsageMultiplier> element the parser reads under its parent
+/// the `<WaterFixturesUsageMultiplier>` element the parser reads under its parent
 pub static WATER_FIXTURES_USAGE_MULTIPLIER: HpxmlElement = HpxmlElement {
     name: "WaterFixturesUsageMultiplier",
     context: "BuildingDetails/Systems/WaterHeating/extension/WaterFixturesUsageMultiplier",
@@ -2926,7 +2926,7 @@ pub static WATER_FIXTURES_USAGE_MULTIPLIER: HpxmlElement = HpxmlElement {
     description: "the <WaterFixturesUsageMultiplier> element the parser reads under its parent",
 };
 
-/// the <WaterHeaterAutosizingFactor> element the parser reads under its parent
+/// the `<WaterHeaterAutosizingFactor>` element the parser reads under its parent
 pub static WATER_HEATER_AUTOSIZING_FACTOR: HpxmlElement = HpxmlElement {
     name: "WaterHeaterAutosizingFactor",
     context: "WaterHeatingSystem/extension",
@@ -2934,7 +2934,7 @@ pub static WATER_HEATER_AUTOSIZING_FACTOR: HpxmlElement = HpxmlElement {
     description: "the <WaterHeaterAutosizingFactor> element the parser reads under its parent",
 };
 
-/// the <WaterHeaterInsulation> element the parser reads under its parent
+/// the `<WaterHeaterInsulation>` element the parser reads under its parent
 pub static WATER_HEATER_INSULATION: HpxmlElement = HpxmlElement {
     name: "WaterHeaterInsulation",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/WaterHeaterInsulation",
@@ -2942,7 +2942,7 @@ pub static WATER_HEATER_INSULATION: HpxmlElement = HpxmlElement {
     description: "the <WaterHeaterInsulation> element the parser reads under its parent",
 };
 
-/// the <WaterHeaterType> element the parser reads under its parent
+/// the `<WaterHeaterType>` element the parser reads under its parent
 pub static WATER_HEATER_TYPE: HpxmlElement = HpxmlElement {
     name: "WaterHeaterType",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem/WaterHeaterType",
@@ -2950,7 +2950,7 @@ pub static WATER_HEATER_TYPE: HpxmlElement = HpxmlElement {
     description: "the <WaterHeaterType> element the parser reads under its parent",
 };
 
-/// the <WaterHeating> element the parser reads under its parent
+/// the `<WaterHeating>` element the parser reads under its parent
 pub static WATER_HEATING: HpxmlElement = HpxmlElement {
     name: "WaterHeating",
     context: "BuildingDetails/Systems/WaterHeating",
@@ -2958,7 +2958,7 @@ pub static WATER_HEATING: HpxmlElement = HpxmlElement {
     description: "the <WaterHeating> element the parser reads under its parent",
 };
 
-/// the <WaterHeatingSystem> element the parser reads under its parent
+/// the `<WaterHeatingSystem>` element the parser reads under its parent
 pub static WATER_HEATING_SYSTEM: HpxmlElement = HpxmlElement {
     name: "WaterHeatingSystem",
     context: "BuildingDetails/Systems/WaterHeating/WaterHeatingSystem",
@@ -2966,7 +2966,7 @@ pub static WATER_HEATING_SYSTEM: HpxmlElement = HpxmlElement {
     description: "the <WaterHeatingSystem> element the parser reads under its parent",
 };
 
-/// the <WeatherStation> element the parser reads under its parent
+/// the `<WeatherStation>` element the parser reads under its parent
 pub static WEATHER_STATION: HpxmlElement = HpxmlElement {
     name: "WeatherStation",
     context: "the HPXML weather-station element (the resstock reader's name lookup)",
@@ -3022,7 +3022,7 @@ pub static WEEKEND_SETPOINT_TEMPS_HEATING_SEASON: HpxmlElement = HpxmlElement {
     description: "the 24-hour weekend heating setpoint profile, degrees Fahrenheit",
 };
 
-/// the <Window> element the parser reads under its parent
+/// the `<Window>` element the parser reads under its parent
 pub static WINDOW: HpxmlElement = HpxmlElement {
     name: "Window",
     context: "BuildingDetails/Enclosure/Windows/Window",
@@ -3030,7 +3030,7 @@ pub static WINDOW: HpxmlElement = HpxmlElement {
     description: "the <Window> element the parser reads under its parent",
 };
 
-/// the <Windows> element the parser reads under its parent
+/// the `<Windows>` element the parser reads under its parent
 pub static WINDOWS: HpxmlElement = HpxmlElement {
     name: "Windows",
     context: "BuildingDetails/Enclosure/Windows | BuildingDetails/Systems/HVAC/HVACPlant/extension/DesignLoads/CoolingSensible/Windows | BuildingDetails/Systems/HVAC/HVACPlant/extension/DesignLoads/Heating/Windows",
@@ -3038,7 +3038,7 @@ pub static WINDOWS: HpxmlElement = HpxmlElement {
     description: "the <Windows> element the parser reads under its parent",
 };
 
-/// the <WinterShadingCoefficient> element the parser reads under its parent
+/// the `<WinterShadingCoefficient>` element the parser reads under its parent
 pub static WINTER_SHADING_COEFFICIENT: HpxmlElement = HpxmlElement {
     name: "WinterShadingCoefficient",
     context: "BuildingDetails/Enclosure/Windows/Window/ExteriorShading/WinterShadingCoefficient | BuildingDetails/Enclosure/Windows/Window/InteriorShading/WinterShadingCoefficient",
@@ -3046,7 +3046,7 @@ pub static WINTER_SHADING_COEFFICIENT: HpxmlElement = HpxmlElement {
     description: "the <WinterShadingCoefficient> element the parser reads under its parent",
 };
 
-/// the <WithinInfiltrationVolume> element the parser reads under its parent
+/// the `<WithinInfiltrationVolume>` element the parser reads under its parent
 pub static WITHIN_INFILTRATION_VOLUME: HpxmlElement = HpxmlElement {
     name: "WithinInfiltrationVolume",
     context: "BuildingDetails/Enclosure/Attics/Attic/WithinInfiltrationVolume",

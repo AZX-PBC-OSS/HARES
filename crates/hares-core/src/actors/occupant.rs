@@ -268,7 +268,7 @@ impl Occupant {
     /// Returns the current presence state, read at the actor's own step
     /// counter.
     ///
-    /// The clock path is [`Self::presence_at_clock_row`]: `decide` reads
+    /// The clock path is `presence_at`: `decide` reads
     /// presence at the environment's schedule row. This counter read is
     /// the fallback for states built without an environment manager.
     ///

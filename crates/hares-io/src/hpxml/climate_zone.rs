@@ -72,8 +72,8 @@ pub fn climate_zone_resolution(
 
 /// The building's effective IECC zone for a path-based reader: the HPXML's
 /// declared zone, else the weather station's zone (the OS-HPXML default,
-/// `apply_climate_and_risk_zones`, defaults.rb:974-983). One resolution
-/// path for the dwelling ([`apply_climate_zone_default`]) and the fleet's
+/// `apply_climate_and_risk_zones`, defaults.rb:974-983). This function is
+/// the dwelling's one zone-default resolution path and the fleet's
 /// zone-match validation, so a building whose HPXML gives no zone is
 /// validated against the same zone the dwelling would derive.
 pub fn resolve_iecc_climate_zone(

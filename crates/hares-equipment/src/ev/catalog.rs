@@ -643,25 +643,25 @@ impl ArchetypePreset {
     }
 
     /// The miles source's key: the driver's key with the miles row's tag
-    /// byte flipped ([`DRIVER_SOURCE_KEY_TAGS`]).
+    /// byte flipped (`DRIVER_SOURCE_KEY_TAGS`).
     pub fn derive_miles_seed(seed: [u8; 32]) -> [u8; 32] {
         apply_source_tag(seed, DRIVER_SOURCE_KEY_TAGS[0].1)
     }
 
     /// The departure source's key: the driver's key with the departure
-    /// row's tag byte flipped ([`DRIVER_SOURCE_KEY_TAGS`]).
+    /// row's tag byte flipped (`DRIVER_SOURCE_KEY_TAGS`).
     pub fn derive_departure_seed(seed: [u8; 32]) -> [u8; 32] {
         apply_source_tag(seed, DRIVER_SOURCE_KEY_TAGS[1].1)
     }
 
     /// The trip-duration source's key: the driver's key with the duration
-    /// row's tag byte flipped ([`DRIVER_SOURCE_KEY_TAGS`]).
+    /// row's tag byte flipped (`DRIVER_SOURCE_KEY_TAGS`).
     pub fn derive_duration_seed(seed: [u8; 32]) -> [u8; 32] {
         apply_source_tag(seed, DRIVER_SOURCE_KEY_TAGS[2].1)
     }
 
     /// The arrival source's key: the driver's key with the arrival row's
-    /// tag byte flipped ([`DRIVER_SOURCE_KEY_TAGS`]).
+    /// tag byte flipped (`DRIVER_SOURCE_KEY_TAGS`).
     pub fn derive_arrival_seed(seed: [u8; 32]) -> [u8; 32] {
         apply_source_tag(seed, DRIVER_SOURCE_KEY_TAGS[3].1)
     }

@@ -2251,7 +2251,7 @@ fn determine_initial_indoor_temp_c(
 /// and `Hot Water Mains Temperature (C)`.
 ///
 /// The rows are the run's internal series: the evaluation is the same
-/// [`StepWeatherEvaluator`] the environment update calls, so the exposed
+/// `StepWeatherEvaluator` the environment update calls, so the exposed
 /// channels match the run's own on bits. The wind direction is not one
 /// of them: a direction has no mean over a period, so it is not a
 /// catalogue variable.

@@ -37,7 +37,7 @@ impl std::fmt::Display for ResStockVersion {
 impl std::str::FromStr for ResStockVersion {
     type Err = String;
 
-    /// Parses the release spellings [`Display`](Self::fmt) writes: the
+    /// Parses the release spellings `Display` writes: the
     /// error names every accepted spelling.
     fn from_str(text: &str) -> std::result::Result<Self, Self::Err> {
         match text {

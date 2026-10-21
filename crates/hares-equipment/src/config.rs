@@ -374,7 +374,7 @@ impl EquipmentConfig {
     /// config-stable per-dwelling value every per-dwelling stream
     /// derivation keys on) and `<owner name>:<source role>`. Every
     /// conversion site passes both to
-    /// [`ScheduleSourceConfig::into_runtime`], so two homes carrying an
+    /// [`hares_types::ScheduleSourceConfig::into_runtime`], so two homes carrying an
     /// identically-configured unspecified-seed source (HPXML names
     /// equipment by generic type string) never derive the same key.
     pub fn source_identity(&self, role: &str) -> (String, String) {

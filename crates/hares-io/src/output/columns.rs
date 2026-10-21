@@ -24,7 +24,7 @@ pub const GAS_POWER_SUFFIX: &str = "Gas Power (therms/hour)";
 /// Whether equipment burning `fuel` reports a `"{name} Gas Power (therms/hour)"`
 /// column (all combustion fuels; the OCHRE-style column name is historical).
 ///
-/// Single source of truth for the fuel→column mapping: [`build_schema`] uses it
+/// Single source of truth for the fuel→column mapping: [`crate::output::catalogue::build_schema`] uses it
 /// to emit the schema column and `hares-core`'s equipment column map uses it to
 /// resolve (and populate) the same column. Keeping one predicate guarantees a
 /// schema column is emitted if and only if it will be populated.
@@ -163,7 +163,7 @@ pub fn parse_end_use_electric_power_column_key(name: &str) -> Option<String> {
 /// per-end-use aggregates (an equipment named `"HVAC Heating End Use"`
 /// would produce `"HVAC Heating End Use Electric Power (kW)"`). Both sets
 /// are recognized through their existing single homes — the `LEVEL_0_COLUMNS`
-/// const and [`parse_end_use_electric_power_column`] — so this predicate
+/// const and [`parse_end_use_electric_power_column_key`] — so this predicate
 /// cannot drift from the emission sites.
 ///
 /// The contract it enforces, shared by `build_schema` and the dwelling's

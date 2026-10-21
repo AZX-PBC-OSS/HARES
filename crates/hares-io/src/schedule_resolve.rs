@@ -691,8 +691,9 @@ pub fn inject_schedule_into_specs(
 }
 
 /// [`inject_schedule_into_specs`] with the schedule's pre-period columns:
-/// the columns as loaded, before [`apply_unavailable_periods`] zeroed the
-/// periods' steps (`apply_unavailable_periods` returns them). The draw and
+/// the columns as loaded, before
+/// [`apply_unavailable_periods`](crate::unavailable_periods::apply_unavailable_periods)
+/// zeroed the periods' steps (`apply_unavailable_periods` returns them). The draw and
 /// power normalizations take their mean from the pre-period column and
 /// their shape from the zeroed one, OpenStudio-HPXML's shape: the peak
 /// comes from the pre-period schedule (`schedules.rb:1051-1052`) and the

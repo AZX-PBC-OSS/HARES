@@ -311,7 +311,7 @@ impl StratifiedTank {
         self.total_volume_m3
     }
 
-    /// The water's stored thermal energy [J], relative to 0 °C: the sum
+    /// The water's stored thermal energy (J), relative to 0 °C: the sum
     /// over nodes of mass times specific heat times temperature. The
     /// zero reference cancels in every use (the failed-step rollback
     /// counts the state's energy delta across the step).

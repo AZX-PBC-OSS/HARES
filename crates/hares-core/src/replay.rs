@@ -7,7 +7,7 @@
 //! effect; every random stream the run drew derives from it and the
 //! building id), the inputs' digests with their content, the attached
 //! tariff and the build identity. `load` rebuilds the
-//! [`DwellingConfig`](crate::DwellingConfig) from a directory alone and
+//! `DwellingConfig` from a directory alone and
 //! verifies the defaults tree the replay will read against the digest the
 //! run recorded, so a replay either reproduces the run or fails naming
 //! what it cannot reproduce.

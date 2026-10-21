@@ -17,8 +17,8 @@
 //! key and needs no digest beside it: a table belongs to the weather it
 //! was built from, and that identity is the parsed-weather handle the
 //! table is cached on
-//! ([`ParsedWeather::forcing_table`](crate::inputs::ParsedWeather::
-//! forcing_table)), so a handle's drop releases its tables and a re-parse
+//! ([`ParsedWeather::forcing_table`](crate::inputs::ParsedWeather::forcing_table)),
+//! so a handle's drop releases its tables and a re-parse
 //! of a changed file keys nothing stale.
 
 /// Identifies one forcing table's time grid. Plain values only: the naive

@@ -404,7 +404,7 @@ pub const HEATER_POWER_W: &str = "heater_power_w";
 /// scope: internal
 pub const DISCHARGE_DERATE: &str = "discharge_derate";
 
-/// The pack's live AC discharge ceiling [W] (SI): the tighter of each
+/// The pack's live AC discharge ceiling (W, SI): the tighter of each
 /// enabled discharge leg's rating and that leg's energy above its
 /// effective discharge floor, over the step. The EV driver's dispatch
 /// votes read it as the decision context's discharge ceiling; zero when
