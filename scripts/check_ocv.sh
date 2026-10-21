@@ -187,19 +187,19 @@ for chem in $CHEMISTRIES; do
     esac
 done
 
-if diff -ru "$REPO_ROOT/defaults/ocv_tables" "$TMPDIR/ocv_tables"; then
-    echo "  [OK] defaults/ocv_tables"
+if diff -ru "$REPO_ROOT/python/hares/defaults/ocv_tables" "$TMPDIR/ocv_tables"; then
+    echo "  [OK] python/hares/defaults/ocv_tables"
 else
     echo ""
-    echo "--- MISMATCH: defaults/ocv_tables differs from gen_ocv.py output (diff above) ---"
+    echo "--- MISMATCH: python/hares/defaults/ocv_tables differs from gen_ocv.py output (diff above) ---"
     DIFF_FOUND=1
 fi
 
 if [ "$DIFF_FOUND" -ne 0 ]; then
     echo ""
-    echo "FAIL: OCV tables in ocv.rs or defaults/ocv_tables are out of sync with gen_ocv.py output."
+    echo "FAIL: OCV tables in ocv.rs or python/hares/defaults/ocv_tables are out of sync with gen_ocv.py output."
     echo "Run 'uv run --locked --extra pybamm python scripts/gen_ocv.py', update ocv.rs,"
-    echo "and commit the regenerated defaults/ocv_tables."
+    echo "and commit the regenerated python/hares/defaults/ocv_tables."
     exit 1
 fi
 

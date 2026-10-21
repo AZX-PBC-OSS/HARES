@@ -30,7 +30,7 @@ _parser = argparse.ArgumentParser(description=__doc__)
 _parser.add_argument(
     "--toml-dir",
     type=Path,
-    default=Path(__file__).resolve().parent.parent / "defaults" / "ocv_tables",
+    default=Path(__file__).resolve().parent.parent / "python" / "hares" / "defaults" / "ocv_tables",
     help="directory the per-chemistry TOML tables are written to",
 )
 TOML_DIR: Path = _parser.parse_args().toml_dir
@@ -277,7 +277,7 @@ for name, source, ocv, _ in chemistries:
 #
 # Writes per-chemistry TOML files suitable for runtime loading via
 # Battery::set_ocv_table(). Files are written to --toml-dir, which defaults
-# to defaults/ocv_tables/.
+# to python/hares/defaults/ocv_tables/.
 # ---------------------------------------------------------------------------
 print()
 print("=" * 70)
