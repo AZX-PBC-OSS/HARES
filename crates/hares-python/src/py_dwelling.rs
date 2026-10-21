@@ -1107,6 +1107,9 @@ impl PyDwelling {
         // bad parameter, a duplicate name, or an event the dwelling's
         // equipment cannot serve.
         let mut dwelling = self.acquire()?;
+        // The dwelling identity the actor's key material keys on (the EV
+        // driver's driving sources): the config-stable building id.
+        config.dwelling_id = dwelling.bldg_id;
         dwelling
             .add_actor_by_name(&self.registry, config)
             .map_err(|e| HaresConfigError::new_err(e.to_string()))?;
@@ -1578,17 +1581,15 @@ impl PyDwelling {
         let mut dwelling = self.acquire()?;
         eq.init(&config, dwelling.latest_env()).map_err(to_py_err)?;
 
-        let seed_bytes = {
-            let mut bytes = [0u8; 32];
-            bytes[..8].copy_from_slice(&seed.to_le_bytes());
-            bytes
-        };
-
         // The day-roll stream rides the reserved EV-driver stream nonce,
         // the same partition the registry path and the dwelling's built-in
         // drivers draw from; the driving sources' tagged keys are
         // stream-0 keys beside it - every consumer of the caller's key
-        // draws from its own keystream.
+        // draws from its own keystream. The caller's seed first mixes the
+        // dwelling's identity (the config-stable building id): the same
+        // seed added to two dwellings must not draw the same driving
+        // series.
+        let seed_bytes = hares_core::actors::ev_driver::driver_key_material(seed, dwelling.bldg_id);
         let day_roll = hares_core::rng::derive_sub_rng(
             &hares_core::ChaCha8Rng::from_seed(seed_bytes),
             hares_core::rng::RNG_STREAM_EV_DRIVER_BASE,

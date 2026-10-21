@@ -618,15 +618,21 @@ pub enum ScheduleSourceConfig {
 impl ScheduleSourceConfig {
     /// Converts the config into the runtime source.
     ///
-    /// `identity` is the source's identity within its owner, in the form
+    /// `dwelling` is the dwelling's config-stable identity (the building
+    /// id the per-dwelling stream derivations key on, as a string) and
+    /// `identity` the source's identity within its owner, in the form
     /// `<owner name>:<source role>` (for example
-    /// `"Gas Water Heater 1:draw_flow_rate_source"`). A noisy TimeWindows
-    /// config with no explicit seed derives its keystream key from the
-    /// identity (`hares_types::rng::schedule_source_key`): every
-    /// unspecified-seed source keyed to the shared all-zero key would
-    /// draw identical noise. An explicit seed always wins.
+    /// `"Gas Water Heater 1:draw_flow_rate_source"`). The derivation keys
+    /// on both, `<dwelling>:<owner name>:<source role>`: HPXML names
+    /// equipment by generic type string, so without the dwelling part
+    /// every home carrying an identically-configured unspecified-seed
+    /// noisy source would derive the same key and draw the same series. A
+    /// noisy TimeWindows config with no explicit seed derives its
+    /// keystream key from that identity
+    /// (`hares_types::rng::schedule_source_key`). An explicit seed always
+    /// wins.
     #[must_use]
-    pub fn into_runtime(self, identity: &str) -> ScheduleSource {
+    pub fn into_runtime(self, dwelling: &str, identity: &str) -> ScheduleSource {
         match self {
             Self::Constant(v) => ScheduleSource::Constant(v),
             Self::DailyProfile {
@@ -667,7 +673,8 @@ impl ScheduleSourceConfig {
             } => {
                 let has_noise = windows.iter().any(|w| w.noise.is_some());
                 if has_noise {
-                    let seed = crate::rng::schedule_source_key(seed, identity);
+                    let full_identity = format!("{dwelling}:{identity}");
+                    let seed = crate::rng::schedule_source_key(seed, &full_identity);
                     ScheduleSource::noisy_time_windows(windows, default, seed)
                 } else {
                     ScheduleSource::TimeWindows {
@@ -2274,6 +2281,63 @@ mod tests {
     /// all-zero key this replaced drew identical values in every
     /// unspecified-seed source, perfectly correlating their noise. The
     /// same identity is reproducible, and an explicit seed wins.
+    /// The across-homes closure: the dwelling identity joins the
+    /// derivation, so two homes' identically-configured unspecified-seed
+    /// sources never draw the same series. HPXML names equipment by
+    /// generic type string ("Gas Water Heater"), so without the dwelling
+    /// part the owner-and-role identity is the same string in both homes
+    /// and the keys collide, guaranteed.
+    #[test]
+    fn same_configured_sources_in_two_dwellings_do_not_share_a_keystream() {
+        let env = default_env();
+        let config = ScheduleSourceConfig::TimeWindows {
+            windows: vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                10.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 3.0,
+                },
+                None,
+                None,
+            )],
+            default: None,
+            seed: None,
+        };
+        let mut home_a = config
+            .clone()
+            .into_runtime("7", "Gas Water Heater:draw_flow_rate_source");
+        let mut home_b = config
+            .clone()
+            .into_runtime("8", "Gas Water Heater:draw_flow_rate_source");
+        let mut home_a_again = config
+            .clone()
+            .into_runtime("7", "Gas Water Heater:draw_flow_rate_source");
+
+        let mut any_differ = false;
+        for _ in 0..10 {
+            let va = home_a.value_at(&env).unwrap();
+            let vb = home_b.value_at(&env).unwrap();
+            assert_eq!(
+                va,
+                home_a_again.value_at(&env).unwrap(),
+                "the same dwelling identity is reproducible"
+            );
+            if va.to_bits() != vb.to_bits() {
+                any_differ = true;
+            }
+        }
+        assert!(
+            any_differ,
+            "two dwellings' same-configured unspecified-seed sources must \
+             not draw identical series: the generic HPXML equipment names \
+             key every home's identical configuration to one keystream \
+             without the dwelling identity"
+        );
+    }
+
     #[test]
     fn unspecified_seed_noisy_sources_do_not_share_a_keystream() {
         let env = default_env();
@@ -2299,11 +2363,11 @@ mod tests {
 
         let mut a = config
             .clone()
-            .into_runtime("Water Heater 1:draw_flow_rate_source");
+            .into_runtime("0", "Water Heater 1:draw_flow_rate_source");
         let mut b = config
             .clone()
-            .into_runtime("Water Heater 2:draw_flow_rate_source");
-        let mut c = config.into_runtime("Water Heater 1:draw_flow_rate_source");
+            .into_runtime("0", "Water Heater 2:draw_flow_rate_source");
+        let mut c = config.into_runtime("0", "Water Heater 1:draw_flow_rate_source");
 
         let mut any_differ = false;
         for _ in 0..10 {
@@ -2328,7 +2392,7 @@ mod tests {
             default: None,
             seed: Some([12_u8; 32]),
         }
-        .into_runtime("Water Heater 1:draw_flow_rate_source");
+        .into_runtime("0", "Water Heater 1:draw_flow_rate_source");
         let mut seeded = ScheduleSource::noisy_time_windows(windows(), None, [12_u8; 32]);
         for _ in 0..10 {
             assert_eq!(

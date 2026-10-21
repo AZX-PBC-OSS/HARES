@@ -4225,6 +4225,11 @@ fn assemble_from_blueprint_with_seed(
         // constructor and `init` both read, so every constructor-time
         // decision sees the same config the step's flows follow.
         let mut merged_cfg = merged_equipment_config(spec, &override_root)?;
+        // The dwelling identity the schedule-source key derivations key
+        // on: the config-stable building id, attached before the
+        // constructor and init both read the config, so every conversion
+        // site keys its sources on this dwelling.
+        merged_cfg.bldg_id = config.bldg_id;
         let mut eq = create_equipment_from_config(&registry, merged_cfg.clone())?;
 
         // Entrance-1 identity validation runs before `init` so an unassigned

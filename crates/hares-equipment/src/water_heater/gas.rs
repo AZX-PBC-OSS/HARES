@@ -373,18 +373,24 @@ impl GasWH {
 
         self.mains_temp_c = super::require_mains_temp_c(env, "Gas Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.draw_l_per_min_source = c
-            .draw_flow_rate_source
-            .clone()
-            .map(|s| s.into_runtime(&format!("{}:draw_flow_rate_source", config.name)));
-        self.mains_temp_c_source = c
-            .mains_temp_c_source
-            .clone()
-            .map(|s| s.into_runtime(&format!("{}:mains_temp_c_source", config.name)));
-        self.appliance_draw_source = c
-            .appliance_draw_flow_rate_source
-            .clone()
-            .map(|s| s.into_runtime(&format!("{}:appliance_draw_flow_rate_source", config.name)));
+        self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| {
+            s.into_runtime(
+                &config.bldg_id.to_string(),
+                &format!("{}:draw_flow_rate_source", config.name),
+            )
+        });
+        self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| {
+            s.into_runtime(
+                &config.bldg_id.to_string(),
+                &format!("{}:mains_temp_c_source", config.name),
+            )
+        });
+        self.appliance_draw_source = c.appliance_draw_flow_rate_source.clone().map(|s| {
+            s.into_runtime(
+                &config.bldg_id.to_string(),
+                &format!("{}:appliance_draw_flow_rate_source", config.name),
+            )
+        });
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
         self.hot_draw_temp_c = c.hot_draw_temp_c;
@@ -1905,6 +1911,82 @@ mod tests {
             any_differ,
             "two unspecified-seed noisy draw sources must not draw identical series: \
              a shared keystream correlates the heaters' hot-water use"
+        );
+    }
+
+    /// The across-homes closure: two dwellings' same-configured heaters
+    /// carrying the HPXML generic equipment name ("Gas Water Heater")
+    /// never share a keystream. The owner-and-role identity alone keys
+    /// every home's identical unspecified-seed configuration to the same
+    /// string and the same series; the derivation keys on the dwelling's
+    /// building id, the config-stable per-dwelling value the per-dwelling
+    /// stream derivations key on.
+    #[test]
+    fn two_homes_same_configured_draw_sources_draw_distinct_series() {
+        use hares_types::{DayFilter, DistributionKind, ScheduleSourceConfig, TimeWindow};
+
+        let build = |bldg_id: i64| {
+            let mut typed: crate::GasWaterHeaterConfig = config().typed().unwrap();
+            typed.draw_flow_rate_source = Some(ScheduleSourceConfig::TimeWindows {
+                windows: vec![TimeWindow::with_noise(
+                    DayFilter::Any,
+                    0,
+                    1440,
+                    0.02,
+                    DistributionKind::LogNormal {
+                        mu: 0.0,
+                        sigma: 0.5,
+                    },
+                    Some(0.0),
+                    None,
+                )],
+                default: Some(0.02),
+                seed: None,
+            });
+            let mut wh_config = EquipmentConfig::from_typed(
+                "Gas Water Heater".to_string(),
+                "Gas Water Heater".to_string(),
+                typed,
+            )
+            .unwrap();
+            wh_config.bldg_id = bldg_id;
+            let mut wh = GasWH::new(wh_config.clone());
+            wh.init(&wh_config, &env(21.0)).unwrap();
+            wh
+        };
+        let mut home_a = build(1);
+        let mut home_b = build(2);
+        let step_env = env(21.0);
+
+        let mut any_differ = false;
+        for _ in 0..20 {
+            let mut p_a = ports();
+            let mut p_b = ports();
+            home_a
+                .step(&step_env, Duration::from_secs(60), &mut p_a)
+                .unwrap();
+            home_b
+                .step(&step_env, Duration::from_secs(60), &mut p_b)
+                .unwrap();
+            let flow_a = home_a
+                .telemetry()
+                .get(tk::DRAW_FLOW_RATE_KG_S)
+                .expect("draw flow");
+            let flow_b = home_b
+                .telemetry()
+                .get(tk::DRAW_FLOW_RATE_KG_S)
+                .expect("draw flow");
+            if flow_a.to_bits() != flow_b.to_bits() {
+                any_differ = true;
+                break;
+            }
+        }
+        assert!(
+            any_differ,
+            "two homes' same-configured unspecified-seed draw sources must \
+             not draw identical series: the generic HPXML equipment name \
+             keys every home's identical configuration to one keystream \
+             without the dwelling identity"
         );
     }
 

@@ -218,14 +218,10 @@ fn ev_archetype_dwelling(archetype: EvArchetypeId, min_days: u32, max_days: u32)
     ev.init(&ev_config, dwelling.latest_env()).expect("EV init");
 
     // The driver: the archetype's own stochastic sources (miles, departure,
-    // duration, arrival), the caller's seed the way the registry path's
-    // `seed` parameter lands.
+    // duration, arrival), the caller's seed mixed with the dwelling's
+    // identity the way the Python add-ev-with-driver path derives it.
     let preset = archetype_by_id(archetype.to_string().as_str()).expect("the archetype exists");
-    let seed_bytes = {
-        let mut b = [0u8; 32];
-        b[..8].copy_from_slice(&7_u64.to_le_bytes());
-        b
-    };
+    let seed_bytes = hares_core::actors::ev_driver::driver_key_material(7, dwelling.bldg_id);
     let params = EvDriverParams {
         strategy: preset.strategy.clone(),
         plug_in_policy: preset.plug_in_policy.clone(),

@@ -50,6 +50,12 @@ pub struct ActorConfig {
     pub name: String,
     pub actor_type: String,
     pub parameters: HashMap<String, ConfigValue>,
+    /// The dwelling's building id, set by the caller that has the
+    /// dwelling (the Python `add_actor_by_name` surface). The EV driver's
+    /// key material keys on it: two dwellings' identically-configured
+    /// drivers must not draw the same driving series. `0` until a caller
+    /// sets it.
+    pub dwelling_id: i64,
 }
 
 impl ActorConfig {
@@ -58,6 +64,7 @@ impl ActorConfig {
             name: name.into(),
             actor_type: actor_type.into(),
             parameters: HashMap::new(),
+            dwelling_id: 0,
         }
     }
 
@@ -352,11 +359,12 @@ impl ActorRegistry {
                 })? as u64;
 
                 let params = EvDriverParams::from_registry_config(&config)?;
-                let seed_bytes = {
-                    let mut b = [0u8; 32];
-                    b[..8].copy_from_slice(&seed.to_le_bytes());
-                    b
-                };
+                // The dwelling identity rides the key material (both the
+                // sources' derivations above and the day roll here): the
+                // same configured seed in two dwellings must not draw the
+                // same driving series.
+                let seed_bytes =
+                    crate::actors::ev_driver::driver_key_material(seed, config.dwelling_id);
                 // The day-roll stream rides the reserved EV-driver stream
                 // nonce, the same partition the dwelling's built-in
                 // drivers draw from: the caller's key at stream 0 is the
@@ -691,6 +699,50 @@ mod tests {
             crate::rng::RNG_STREAM_EV_DRIVER_BASE,
             "the registry driver's day-roll must ride the reserved EV-driver \
              stream nonce, not the dwelling stream the caller's key also feeds"
+        );
+    }
+
+    /// Two dwellings' registry EV drivers with the same configured seed
+    /// draw distinct driving series: the key material mixes the dwelling
+    /// identity (the config-stable building id), so a fleet script that
+    /// adds identically-configured drivers to every home never keys them
+    /// to one keystream.
+    #[test]
+    fn ev_drivers_with_the_same_seed_in_two_dwellings_draw_distinct_series() {
+        use crate::actor::testing::test_env;
+
+        let distance_series = |dwelling_id: i64| {
+            let config = ActorConfig::new("Driver1", "EvDriver")
+                .with_param("target", ConfigValue::Text("EV1".into()))
+                .with_param("seed", ConfigValue::Float(42.0))
+                .with_param("preset", ConfigValue::Text("daily_commuter_l2".into()));
+            let mut config = config;
+            config.dwelling_id = dwelling_id;
+            let mut params = EvDriverParams::from_registry_config(&config)
+                .expect("the preset builds the driving sources");
+            let env = test_env().build();
+            (0..10)
+                .map(|_| {
+                    params
+                        .daily_drive_distance_m
+                        .value_at(&env)
+                        .expect("the miles source draws")
+                })
+                .collect::<Vec<f64>>()
+        };
+
+        let home_a = distance_series(1);
+        let home_b = distance_series(2);
+        assert_ne!(
+            home_a, home_b,
+            "two dwellings' identically-configured EV drivers must not draw \
+             the same miles series: the configured seed alone keys every \
+             home's driver to one keystream"
+        );
+        assert_eq!(
+            home_a,
+            distance_series(1),
+            "the same dwelling identity is reproducible"
         );
     }
 

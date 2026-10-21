@@ -95,7 +95,7 @@ ScheduleSource::TimeWindows {
 
 **Evaluation**: windows are checked in declaration order; the first match wins. Overlapping windows are allowed — use ordering to express priority (e.g. a Monday-specific override before a broad weekday rule). If no window matches, `default` is returned. If `default` is `None` and nothing matches, an error is raised.
 
-**Noise**: a window may carry a distribution; a matching window then samples `value + noise` from the source's ChaCha8 generator. The generator's key is the configured `seed` when one is set; without one it is derived from the source's identity (`<owner name>:<source role>`) at conversion, so two same-configured sources never draw identical series and the same identity is reproducible run to run. The default is never the all-zero key: sources sharing one key would correlate their noise.
+**Noise**: a window may carry a distribution; a matching window then samples `value + noise` from the source's ChaCha8 generator. The generator's key is the configured `seed` when one is set; without one it is derived from the source's identity (`<dwelling identity>:<owner name>:<source role>`, the dwelling identity the config-stable building id the per-dwelling stream derivations key on) at conversion, so two same-configured sources never draw identical series - not within a dwelling and not across homes, whose HPXML-derived equipment names are generic type strings - and the same identity is reproducible run to run. The default is never the all-zero key: sources sharing one key would correlate their noise.
 
 #### TimeWindow
 

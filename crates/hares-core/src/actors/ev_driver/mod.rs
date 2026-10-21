@@ -325,11 +325,7 @@ impl EvDriverParams {
         };
 
         let seed = config.get_f64("seed").unwrap_or(0.0) as u64;
-        let seed_bytes = {
-            let mut b = [0u8; 32];
-            b[..8].copy_from_slice(&seed.to_le_bytes());
-            b
-        };
+        let seed_bytes = driver_key_material(seed, config.dwelling_id);
 
         let strategy = preset
             .map(|p| p.strategy.clone())
@@ -390,6 +386,21 @@ impl EvDriverParams {
                 .unwrap_or(defaults::AWAY_CHARGE_POWER_W),
         })
     }
+}
+
+/// The EV driver's key material: the configured `seed` with the dwelling's
+/// identity in bytes 8..16 (the slot [`hares_types::rng::dwelling_seed`]
+/// puts the building id in). The day-roll generator and the four driving
+/// sources' tagged derivations all key off this one derivation, so two
+/// dwellings' identically-configured drivers - the same configured seed,
+/// and no per-driver identity beyond it - never draw the same driving
+/// series. The dwelling id is the config-stable per-dwelling value every
+/// per-dwelling stream derivation keys on.
+pub fn driver_key_material(seed: u64, dwelling_id: i64) -> [u8; 32] {
+    let mut bytes = [0_u8; 32];
+    bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    bytes[8..16].copy_from_slice(&dwelling_id.to_le_bytes());
+    bytes
 }
 
 /// Behavioral inputs for [`EvDriverActor::new`], grouped so the constructor

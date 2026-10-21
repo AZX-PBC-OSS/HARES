@@ -68,12 +68,17 @@ pub fn dwelling_seed(master_seed: u64, bldg_id: i64) -> [u8; 32] {
 
 /// A schedule source's stochastic keystream key: the configured key when
 /// the source carries an explicit seed, otherwise derived from the
-/// source's identity (`<owner>:<source role>`). The identity's FNV-1a
-/// words fill the key the way [`RngStream::event_load`] fills its stream
-/// nonce, so two sources with distinct identities never share a
-/// keystream, the same identity is reproducible run to run, and the
-/// default is never the all-zero key every unspecified-seed source would
-/// otherwise share.
+/// source's identity (`<dwelling identity>:<owner name>:<source role>`).
+/// The dwelling identity part is the caller's config-stable per-dwelling
+/// value (the building id the per-dwelling stream derivations key on),
+/// without which every home carrying an identically-configured
+/// unspecified-seed source (HPXML names equipment by generic type
+/// string) would derive the same key and draw the same series. The
+/// identity's FNV-1a words fill the key the way [`RngStream::event_load`]
+/// fills its stream nonce, so two sources with distinct identities never
+/// share a keystream, the same identity is reproducible run to run, and
+/// the default is never the all-zero key every unspecified-seed source
+/// would otherwise share.
 #[must_use]
 pub fn schedule_source_key(explicit: Option<[u8; 32]>, identity: &str) -> [u8; 32] {
     if let Some(key) = explicit {

@@ -5698,25 +5698,59 @@ and, for identical unspecified configurations, across homes. Exactly the
 correlation the RNG module's docs promise the stream partitioning
 prevents.
 
+**Residual (found in the row's independent review):** the first cut
+derived the unspecified-seed key from the owner-and-role identity alone
+(`"<owner name>:<source role>"`), and that does not close the across-homes
+half of the problem. HPXML names equipment by generic type string (the
+water heater is "Gas Water Heater", the heat pump water heater "Heat Pump
+Water Heater"), so every home carrying an identically-configured
+unspecified-seed noisy source derived the SAME identity string, the SAME
+key, and drew the SAME series - guaranteed, not probabilistic: the
+reviewer's probe produced bit-identical keys across homes by
+construction. This contradicted the rng module's own contract (every
+stream derived from a single PER-DWELLING master seed; the event-load
+convention keys per-dwelling via `dwelling_seed`) and the entry's own
+Problem statement above.
+
 **Change:** the derivation convention the codebase already uses, applied
 to every source key. A new `hares_types::rng::schedule_source_key`
-derives a schedule source's key from its identity (`<owner name>:<source
-role>`) with domain-separated FNV-1a words filling the key the way
-`RngStream::event_load` fills its stream nonce: an explicit seed wins
-unchanged, the default is never the shared zero key, distinct identities
-never share a keystream, the same identity is reproducible run to run.
-`ScheduleSourceConfig::into_runtime` takes the identity and passes it
-through, and every conversion site names its owner and role (the five
-water heaters' draw, mains and appliance sources, the thermostat
-setpoint sources, the ideal HVAC's setpoint sources). The catalogue's
-miles builder tags its own key beside the departure, duration and
-arrival tags (byte 3), so the day-roll stream and the four driving
-sources draw from disjoint keystreams under one driver key, at
-construction and at reseed alike; the registry and Python day-roll
-generators ride `derive_sub_rng` at the reserved EV-driver stream nonce
-(stream 0 under the caller's key is the dwelling rng's own stream,
-`dwelling_seed` with building id 0). The event-load stream nonce space
-is untouched (the plain identity hash, pinned by test).
+derives a schedule source's key from its identity with domain-separated
+FNV-1a words filling the key the way `RngStream::event_load` fills its
+stream nonce: an explicit seed wins unchanged, the default is never the
+shared zero key, distinct identities never share a keystream, the same
+identity is reproducible run to run. `ScheduleSourceConfig::into_runtime`
+takes the identity and passes it through, and every conversion site names
+its owner and role (the five water heaters' draw, mains and appliance
+sources, the thermostat setpoint sources, the ideal HVAC's setpoint
+sources). The catalogue's miles builder tags its own key beside the
+departure, duration and arrival tags (byte 3), so the day-roll stream and
+the four driving sources draw from disjoint keystreams under one driver
+key, at construction and at reseed alike; the registry and Python
+day-roll generators ride `derive_sub_rng` at the reserved EV-driver
+stream nonce (stream 0 under the caller's key is the dwelling rng's own
+stream, `dwelling_seed` with building id 0). The event-load stream nonce
+space is untouched (the plain identity hash, pinned by test).
+
+The across-homes closure (the review's fix): the identity keys on the
+dwelling too - `<dwelling identity>:<owner name>:<source role>` - where
+the dwelling identity is the config-stable per-dwelling value the
+per-dwelling stream derivations already key on, the building id
+(`dwelling_seed`'s own input, what `derive_sub_rng`'s per-dwelling
+streams derive from). `EquipmentConfig` carries it (`bldg_id`), the
+dwelling stamps it on every config it builds at assembly before the
+constructor and init read the config, and `into_runtime` takes it as an
+explicit parameter threaded from every conversion site (no
+default-to-empty escape hatch: the two-parameter signature is
+compile-guided at every site). The EV sources key the dwelling in the
+same way: one shared `driver_key_material` derivation mixes the
+configured seed with the building id (bytes 8..16, `dwelling_seed`'s
+slot), both the registry factory and the Python `add_ev_with_driver`
+path route their key material through it, and the Python
+`add_actor_by_name` surface stamps the dwelling id on the actor config.
+The derivation stays config-stable, never runtime state: the checkpoint
+restore rebuilds the configs from the same building id and re-derives
+the same keys (it carries positions only, never a re-derivation of the
+seed), so the restore and the gym-reset invariants hold unchanged.
 
 **Acceptance test:** the review's pinned probe, three levels deep.
 `unspecified_seed_noisy_sources_do_not_share_a_keystream`
@@ -5737,9 +5771,24 @@ the capture and restore carry positions only, never a re-derivation),
 and `warmup_day_count_neutrality_holds_with_the_ev_drivers_noisy_sources`
 (the warm-up 2-day and 4-day runs of the EV-archetype dwelling whose
 production carries the noisy TimeWindows miles source beside the event
-load produce bit-identical production telemetry). RED first: all the
+load produce bit-identical production telemetry). The across-homes
+probes (the review's shape, added with the closure): two dwelling
+configs differing only in the dwelling identity, the same unspecified
+noisy source config - `same_configured_sources_in_two_dwellings_do_not_share_a_keystream`
+(`hares-types`, the derivation under `"7"` and `"8"` building ids with
+the generic "Gas Water Heater" owner name),
+`two_homes_same_configured_draw_sources_draw_distinct_series`
+(`hares-equipment`, two same-configured gas water heaters both named
+"Gas Water Heater", `bldg_id` 1 and 2, stepping in lockstep, the drawn
+flow series diverging) and
+`ev_drivers_with_the_same_seed_in_two_dwellings_draw_distinct_series`
+(`hares-core`, the registry drivers' miles sources under the same
+configured seed and distinct dwelling ids), each verified RED under its
+own mutation (the dwelling identity unmixed, the series collapse to
+bit-identical). RED first: all the
 distinctness witnesses failed at the parent (identical series at both
-levels, the miles derivation the identity, the day-roll at stream 0),
+levels, the miles derivation the identity, the day-roll at stream 0,
+and the reviewer's across-homes probe bit-identical by construction),
 the machinery tests passed before and after.
 
 **Movement:** none - the goldens compare-all 10 + dst 1 bitwise
@@ -5751,9 +5800,12 @@ EV drivers in the fixtures are the dwelling's built-in Constant-source
 drivers. No unspecified-seed noisy source exists in any fixture or
 shipped default, so no fixture's stream changes. The one Python test
 whose day-cycle assert depended on the day-roll's specific draw
-(`test_ev_full_day_cycle`, seed 42) rolled a non-driving day under the
-new stream - the honest movement of the fix; the test now uses a seed
-that rolls a driving day, with the roll's role documented at the seed.
+(`test_ev_full_day_cycle`) re-picked its seed twice with the cause
+documented at the seed: the owner-and-role key moved its roll (seed 42
+to 1), and the dwelling-identity mix moved it again (seed 1 to 2) - the
+day roll draws from the driver's key material, the configured seed mixed
+with the building id, so a seed's roll is what that derivation makes
+it.
 
 **Verification:** fmt clean; clippy `--workspace --all-targets
 --all-features -D warnings` clean, the touched crates also clean on
