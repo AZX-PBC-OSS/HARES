@@ -267,6 +267,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The vendored OCHRE reference is pyright's `ochre` import: the
+      # execution environments point extraPaths at vendors/OCHRE (the
+      # ochre extra installs the package's dependencies only), so the
+      # submodule must be checked out or every ochre import fails to
+      # resolve.
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v10.2.0
         with:
