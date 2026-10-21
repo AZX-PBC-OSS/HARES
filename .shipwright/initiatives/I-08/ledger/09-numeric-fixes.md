@@ -5847,15 +5847,26 @@ on the text path the batch boundary carries. The actor records the cause
 in its sticky health failure and reports unhealthy: the step fails at the
 post-decide health check, the existing actor step-failure machinery (the
 same path the needed-charge-hours estimate contract rides). No day is
-invented: the day's plan is dropped, and the failure is sticky, a
-schedule that cannot be read cannot become readable by drawing on. The
-documented re-sample-exhausted arrival guard is kept as it stands: it
-repairs the arrival-after-departure ordering constraint after five
-re-samples (a clamp to departure+1), it never substitutes a schedule
-value for a failed read. The field carrying the actor's sticky failure
-was renamed `estimate_error` to `health_error` (its contract now covers
-both the estimate and the schedule reads); the checkpoint's wire format
-is positional and its shape is unchanged, the schema version stays 5.
+invented: the day's plan is dropped. The stickiness, named honestly:
+`health_error` has no clearing path, and a read failure's cause can be
+calendar-transient - a TimeWindows source whose no-matching-window day
+falls on a weekday its windows do not cover is unreadable that day and
+readable on a later one (a Mon-only window is unreadable Saturday,
+readable Monday). The stickiness does not distinguish that transient from
+a permanent one: one calendar-unreadable day removes the driver for the
+rest of the run, including the later days whose windows would read.
+Fail-fast is the choice defended here - the failure rides the same
+health-check machinery every actor contract failure rides, and a
+self-clearing failure would have the driver silently rejoin mid-run with
+no replay of the driving it never planned - but the permanent-death
+consequence is the record, not a property to lean on. The documented
+re-sample-exhausted arrival guard is kept as it stands: it repairs the
+arrival-after-departure ordering constraint after five re-samples (a
+clamp to departure+1), it never substitutes a schedule value for a failed
+read. The field carrying the actor's sticky failure was renamed
+`estimate_error` to `health_error` (its contract now covers both the
+estimate and the schedule reads); the checkpoint's wire format is
+positional and its shape is unchanged, the schema version stays 5.
 
 The kept-state-energy question (the row 111 accounting): nothing to
 count, and the reason is structural. The failed decide runs in the

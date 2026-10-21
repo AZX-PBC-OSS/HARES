@@ -483,8 +483,13 @@ pub struct EvDriverActor {
     /// cannot read (the day roll's departure, arrival, duration or miles
     /// source) or a non-finite or negative needed-charge-hours estimate.
     /// The actor reports unhealthy and the step fails at the post-decide
-    /// health check; the failure is sticky because a schedule that cannot
-    /// be read cannot become readable by drawing on.
+    /// health check. The failure is sticky (no clearing path): a read's
+    /// cause can be calendar-transient (a TimeWindows source with no
+    /// window matching the day's weekday is unreadable that day and
+    /// readable on a later one), and stickiness trades the transient's
+    /// missed days for a fail-fast signal the run cannot silently resume
+    /// past - the driver does not rejoin mid-run on a day the source
+    /// would read.
     health_error: Option<String>,
 }
 
