@@ -6294,7 +6294,8 @@ asserting the module's factor equals the physics constant failed at the
 parent (left 3.412, right 3.412141633), the witness of the drift itself.
 No golden moves: autosizing is opt-in (`autosize_heating`,
 `autosize_cooling`, `autosize_water_heater`) and no golden manifest
-enables it, so the factor's 1.2e-4 relative change reaches no fixture.
+enables it, so the factor's 4.15e-5 relative change (the constant's
+absolute delta is 1.416e-4) reaches no fixture.
 
 **The companion-RTF plumbing: deleted, and why.** The heat-pump heater
 recorded its last heating RTF every step and exposed it through four
@@ -6331,9 +6332,13 @@ production caller (its own tests said the path was replaced): the
 non-DST fallback and the DST path both derive schedule rows from the
 calendar ordinal directly. The function and its five leap-year tests
 are deleted; the fallback comment that named it as a sibling now
-describes the surviving derivation. The compile check is the witness:
-any dangling reference fails the build, and none exists across the
-crates, the Python package and the tests.
+describes the surviving derivation. The deleted tests' leap-year
+coverage survives on the production path: the Feb 28 to Mar 1 2024
+walk (`typical_file_without_feb29_skips_the_day`), the leap-year
+acceptance file `crates/hares-core/tests/weather_year.rs`, and the
+`leap_year_february_900s` golden's bitwise pin. The compile check is
+the witness: any dangling reference fails the build, and none exists
+across the crates, the Python package and the tests.
 
 **The docs:** five claims fixed in this commit, each verified against
 the current behavior. `weather-pipeline.md` documented PCHIP
