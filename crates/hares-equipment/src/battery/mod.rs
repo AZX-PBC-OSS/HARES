@@ -132,8 +132,15 @@ const DEFAULT_HEATER_POWER_W: f64 = 0.0;
 /// Heater activation threshold. Tesla Heat Mode targets 0 C minimum cell temp;
 /// Franklin activates around 5-10 C. 0 C is the Li-ion plating safety boundary.
 const DEFAULT_HEATER_THRESHOLD_C: f64 = 0.0;
-/// Default round-trip efficiency used by the raw config path.
-/// Typed configs convert RTE to one-way efficiency before init.
+/// The default ONE-WAY efficiency, shared by the constructor and the typed
+/// init (through `default_one_way_eta`): 0.97 applied one-way in each
+/// direction, round-trip 0.9409 (the documented post-init convention). It
+/// is not a round-trip efficiency and no raw config path holds it: the
+/// battery is typed-only (`init` routes to `init_typed`, which requires
+/// the typed `BatteryConfig`). A round-trip efficiency reaches the pack
+/// only where an input still states one, and those sites convert to the
+/// one-way eta before init: the catalog's chemistry defaults and the
+/// HPXML typed resolution.
 const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.97;
 /// The one-way efficiency convention's default, shared by the constructor
 /// and the typed init: the inverter efficiency applies one-way in each
@@ -1027,8 +1034,11 @@ impl Battery {
             .unwrap_or(DEFAULT_SELF_DISCHARGE_PCT_PER_DAY);
         self.self_discharge_rate_per_s = self_discharge / 100.0 / SECONDS_PER_DAY;
 
-        // Typed configs carry one-way efficiency directly.
-        // Raw configs still pass round-trip efficiency and are split in init_raw().
+        // Typed configs carry one-way efficiency directly; the battery is
+        // typed-only, and no raw path splits a round-trip efficiency
+        // anymore. The conversion survives only where an input still
+        // states a round-trip efficiency: the catalog's chemistry defaults
+        // and the HPXML typed resolution.
         let one_way_eta = c
             .inverter_efficiency
             .unwrap_or_else(default_one_way_eta)

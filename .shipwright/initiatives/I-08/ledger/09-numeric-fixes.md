@@ -6555,7 +6555,7 @@ specify nothing - while the ASHRAE chapter the model cites gives the
 coefficient by geometry (single-sided 0.15-0.25, cross 0.60-0.65), which
 is the physics the module's `OpeningType` carries; OCHRE, the parity
 reference whose gating the module adopted, uses a fixed coefficient
-itself (the ResStock flat 0.6 window-area multiplier, `Envelope.py:44`),
+itself (the ResStock flat 0.6 window-area multiplier, `Envelope.py:48`),
 so the cross leg's 0.60 is OCHRE-aligned and the single-sided leg
 refines it with the ASHRAE physics; adopting the auto value would more
 than double the single-sided stack flow (0.20 -> 0.427 at 6 K) and cut
@@ -6585,7 +6585,13 @@ own vector hand-derived from the documented hybrid and pinned at 1e-9
 beside it, and the stack terms' ratio held at 1e-9 - the recorded Cd
 choice's magnitude (0.60 against the auto 0.427, the two gravity
 literals under the square root). Neither side can drift without the
-record moving.
+record moving. The witness split, stated exactly: this pin holds the
+CROSS leg only (the reference case is cross-ventilated; its Cd 0.60 is
+pinned directly and through the stack ratio against the auto 0.427).
+The single-sided 0.20 rides the pre-existing ratio witness
+(`single_sided_lower_stack_than_cross_ventilation`, the single-sided
+stack over the cross stack at 0.20/0.60 = 1/3). Between them the two
+witnesses hold both legs of the geometry split; neither holds both.
 
 **Movement:** none - the model's behavior is unchanged by this entry
 (docstring, decision record and pin only); the goldens compare-all 10 +

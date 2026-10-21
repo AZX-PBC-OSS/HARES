@@ -198,7 +198,7 @@ pub struct MechanicalVentilationParams {
 /// - `zone_height_m`: 2.5 m (typical residential ceiling height)
 ///
 /// # References
-/// - EnergyPlus `ZoneEquipmentManager.cc:5988–6033` — `WindAndStack` runtime calculation
+/// - EnergyPlus `ZoneEquipmentManager.cc:5716-5806` (v24.2.0): the `WindAndStack` runtime calculation
 /// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct (DH, DiscCoef)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: `Q = Cw × A × U`
 /// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: `Q = sqrt(Qw² + Qst²)`

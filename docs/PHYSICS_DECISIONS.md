@@ -1041,7 +1041,7 @@ of the same E+ block):
    the cross flow by about 30% (0.60 -> 0.427).
 2. OCHRE - the parity reference whose gating this module adopted - uses
    a fixed coefficient itself: the ResStock convention applies a flat
-   0.6 multiplier to the window area (`Envelope.py:44`,
+   0.6 multiplier to the window area (`Envelope.py:48`,
    `area = open_window_area * 0.6`), with no auto correlation anywhere.
    The cross leg's 0.60 is exactly that value; the single-sided leg
    refines it with the ASHRAE single-sided physics. Adopting E+'s auto

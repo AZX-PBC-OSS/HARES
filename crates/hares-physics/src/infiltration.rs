@@ -249,7 +249,7 @@ pub fn terrain_wind_speed_for_class(u_met: f64, class: TerrainClass, height: f64
 /// - 180° = wind blowing from the opposite side (leeward).
 ///
 /// # References
-/// - EnergyPlus `ZoneEquipmentManager.cc:6007–6009`: angle = abs(wind_direction − eff_angle),
+/// - EnergyPlus `ZoneEquipmentManager.cc:5762` (v24.2.0): angle = abs(wind_direction - eff_angle),
 ///   corrected for > 180° wraparound.
 pub fn wind_incidence_angle_deg(opening_azimuth_deg: f64, wind_direction_deg: f64) -> f64 {
     let raw_diff = (wind_direction_deg - opening_azimuth_deg).abs() % 360.0;
@@ -287,7 +287,7 @@ pub fn wind_incidence_angle_deg(opening_azimuth_deg: f64, wind_direction_deg: f6
 /// perpendicular winds and 0.0 means no effective flow (leeward or > 90°).
 ///
 /// # References
-/// - EnergyPlus `ZoneEquipmentManager.cc:6007–6023`: angle, slope, and intercept.
+/// - EnergyPlus `ZoneEquipmentManager.cc:5762-5778` (v24.2.0): angle, slope, and intercept.
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q = Cw × A × U.
 /// - ASHRAE HoF 2009 Table: Cw = 0.5–0.6 for perpendicular winds, 0.25–0.35 for diagonal.
 pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_deg: f64) -> f64 {
@@ -1740,7 +1740,7 @@ mod tests {
     }
 
     // Cw opening effectiveness -- wind-direction-dependent computation
-    // (ASHRAE HoF 2009 Ch. 16.14, Eq. 37; EnergyPlus ZoneEquipmentManager.cc:6007-6023)
+    // (ASHRAE HoF 2009 Ch. 16.14, Eq. 37; EnergyPlus ZoneEquipmentManager.cc:5762-5778, v24.2.0)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2877,6 +2877,14 @@ mod tests {
         // agreement form (HARES == the E+ port at 1e-9) and it failed:
         // HARES 0.5779 m³/s against the port's 0.8465 m³/s on the
         // reference case - the recorded disagreement.
+        //
+        // Witness split: this pin holds the CROSS leg only (the reference
+        // case is cross-ventilated: Cd 0.60 pinned directly, and the stack
+        // ratio 0.60 against the auto 0.427). The single-sided 0.20 rides
+        // the pre-existing ratio witness
+        // `single_sided_lower_stack_than_cross_ventilation` (the
+        // 0.20/0.60 = 1/3 stack ratio); between them the two witnesses
+        // hold both legs of the geometry split.
         let args = reference_case();
         let (q, q_stack, q_wind, cd) = args.call();
 
