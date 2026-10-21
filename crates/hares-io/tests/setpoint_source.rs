@@ -520,3 +520,162 @@ fn appended_column_values_are_the_injected_ones() {
         );
     }
 }
+
+/// A resolved setpoint outside the plausible band fails the construction
+/// naming the column and the value: an applied heating column holding
+/// 150 (F, the convention) resolves to 65.56 C, which no thermostat
+/// should ever be handed, and a Celsius file read under the Fahrenheit
+/// convention lands exactly there.
+#[test]
+fn an_implausible_setpoint_column_fails_construction_naming_the_column_and_value() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut specs = fixture_specs();
+    let mut schedule = schedule_with_appended_column(&dir, "heating_setpoint", 150.0);
+    let defaults_dir = repo_root().join("python/hares/defaults");
+    let mut warnings: Vec<Warning> = Vec::new();
+    let error = inject_schedule_into_specs(
+        &mut specs,
+        &mut schedule,
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
+        &repo_defaults(),
+        &mut warnings,
+    )
+    .expect_err("the implausible column is a construction error");
+    let message = error.to_string();
+    assert!(
+        message.contains("heating_setpoint"),
+        "the error names the column: {message}"
+    );
+    assert!(
+        message.contains("65.56") || message.contains("65.6"),
+        "the error names the resolved value: {message}"
+    );
+}
+
+/// The band's edges are inclusive: the converted 41 F (5.0 C) and 104 F
+/// (40.0 C) columns build, the 40.5 F (4.72 C) and 110 F (43.33 C)
+/// columns fail construction.
+#[test]
+fn the_setpoint_plausibility_band_is_inclusive_at_its_edges() {
+    let build_with = |value: f64| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut specs = fixture_specs();
+        let mut schedule = schedule_with_appended_column(&dir, "heating_setpoint", value);
+        let defaults_dir = repo_root().join("python/hares/defaults");
+        let mut warnings: Vec<Warning> = Vec::new();
+        (
+            inject_schedule_into_specs(
+                &mut specs,
+                &mut schedule,
+                Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
+                &repo_defaults(),
+                &mut warnings,
+            ),
+            dir,
+        )
+    };
+    for plausible in [41.0, 70.0, 104.0] {
+        let (result, _dir) = build_with(plausible);
+        result.expect("the plausible column builds");
+    }
+    for implausible in [40.5, 110.0] {
+        let (result, _dir) = build_with(implausible);
+        let error = result.expect_err("the implausible column fails construction");
+        assert!(
+            error.to_string().contains("heating_setpoint"),
+            "the error names the column: {error}"
+        );
+    }
+}
+
+/// The HPXML path's setpoints validate the same way: a heating season
+/// constant that resolves outside the plausible band fails the
+/// construction naming the value, before any column could be read.
+#[test]
+fn an_implausible_hpxml_setpoint_fails_construction() {
+    let xml = format!(
+        r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
+  <Building>
+    <BuildingDetails>
+      <BuildingSummary>
+        <Site><SiteType>suburban</SiteType></Site>
+        <BuildingConstruction>
+          <ConditionedFloorArea units="m2">200</ConditionedFloorArea>
+          <ConditionedBuildingVolume units="m3">500</ConditionedBuildingVolume>
+          <NumberofConditionedFloorsAboveGrade>1</NumberofConditionedFloorsAboveGrade>
+          <NumberofBedrooms>3</NumberofBedrooms>
+        </BuildingConstruction>
+      </BuildingSummary>
+      <Enclosure><Walls /></Enclosure>
+      <Systems>
+        <HVAC>
+          <HVACControl>
+            <SetpointTempHeatingSeason>{offending_f}</SetpointTempHeatingSeason>
+          </HVACControl>
+          <HVACPlant>
+            <HeatingSystem>
+              <SystemIdentifier id='Furnace'/>
+              <DistributionSystem idref='AirDistributionSystem'/>
+              <HeatingSystemFuel>natural gas</HeatingSystemFuel>
+              <HeatingSystemType><Furnace/></HeatingSystemType>
+              <HeatingCapacity>24000</HeatingCapacity>
+              <AnnualHeatingEfficiency><Units>AFUE</Units><Value>0.8</Value></AnnualHeatingEfficiency>
+              <FractionHeatLoadServed>1.0</FractionHeatLoadServed>
+            </HeatingSystem>
+            <CoolingSystem>
+              <SystemIdentifier id='AC'/>
+              <DistributionSystem idref='AirDistributionSystem'/>
+              <CoolingSystemType>central air conditioner</CoolingSystemType>
+              <CoolingSystemFuel>electricity</CoolingSystemFuel>
+              <CoolingCapacity>6000</CoolingCapacity>
+              <AnnualCoolingEfficiency><Units>SEER</Units><Value>13.0</Value></AnnualCoolingEfficiency>
+              <FractionCoolLoadServed>1.0</FractionCoolLoadServed>
+            </CoolingSystem>
+          </HVACPlant>
+          <HVACDistribution>
+            <SystemIdentifier id='AirDistributionSystem'/>
+            <DistributionSystemType><LeakageToOutside><DuctLeakageMeasurement><Units>CFM25</Units><Value>0.0</Value></DuctLeakageMeasurement></LeakageToOutside></DistributionSystemType>
+          </HVACDistribution>
+        </HVAC>
+      </Systems>
+    </BuildingDetails>
+  </Building>
+</HPXML>"#,
+        offending_f = 160.0,
+    );
+    let building = hares_io::hpxml::building::parse_building(&xml).expect("the HPXML parses");
+    let mut specs = resolve_equipment(
+        &building,
+        None,
+        None,
+        &repo_defaults(),
+        None,
+        &mut Vec::new(),
+    )
+    .expect("the equipment resolves");
+    let start =
+        chrono::DateTime::parse_from_rfc3339("2026-03-18T00:00:00+00:00").expect("valid timestamp");
+    let mut schedule = ScheduleTimeSeries {
+        timestamps: vec![start],
+        column_names: vec!["occupants".to_string()],
+        columns: vec![vec![1.0]],
+        column_index: [("occupants".to_string(), 0_usize)].into_iter().collect(),
+        source_step_secs: 60,
+        column_aggregations: vec![ColumnAggregation::Mean],
+    };
+    let defaults_dir = repo_root().join("python/hares/defaults");
+    let mut warnings: Vec<Warning> = Vec::new();
+    let error = inject_schedule_into_specs(
+        &mut specs,
+        &mut schedule,
+        Some(&hares_io::load_default_profiles(&defaults_dir).expect("the profiles load")),
+        &repo_defaults(),
+        &mut warnings,
+    )
+    .expect_err("the implausible HPXML setpoint is a construction error");
+    let message = error.to_string();
+    assert!(
+        message.contains("heating") && (message.contains("71.11") || message.contains("71.1")),
+        "the error names the side and the resolved value: {message}"
+    );
+}

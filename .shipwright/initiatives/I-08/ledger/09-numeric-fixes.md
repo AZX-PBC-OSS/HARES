@@ -6002,3 +6002,81 @@ configs nothing shipped exercises.
 Python binding's keyword surface (the stub updated), the core crate's
 DR actor and its checkpoint schema (version 5), the equipment crate's
 event-load draw.
+
+## Hardening 17: the setpoint columns' plausibility band fails the construction
+
+**Kind:** numeric fix (the hardening phase's setpoint unit-and-plausibility
+entry; the unit half landed in row 94b, this entry adds the plausibility
+half and the sweep that closes the task).
+
+**Problem:** the schedule-file thermostat setpoint columns convert from
+the OS-HPXML Fahrenheit convention at the parse since row 94b, and the
+HPXML setpoint profiles converted at their own parse, but nothing
+validated the RESOLVED values: a file written in Celsius and read under
+the Fahrenheit convention resolved its 20 C heating setpoint to -6.67 C
+(a thermostat that never heats; the same class in reverse as the
+pre-94b defect, undetectable), and any corrupt profile value reached
+the thermostat raw. The engine's own test suites demonstrated the
+residue: three of them carried schedule CSVs whose `heating_setpoint`
+column held Celsius-scale values (20.0-21.5) added before row 94b, so
+under the conversion they resolved to -6.67 C and the homes they built
+simply never heated - the tests kept passing because their assertions
+do not touch heating, which is exactly how the class survives silently.
+
+**Change:** construction-time plausibility validation at the schedule
+resolution, in the band the plan states: a resolved setpoint outside
+[5, 40] C fails the construction naming the source and the value. The
+band lives in the physics constants (`SETPOINT_PLAUSIBILITY_MIN_C` /
+`SETPOINT_PLAUSIBILITY_MAX_C`). Three paths validate, at the point each
+resolves: an applied schedule column sweeps its full converted column
+once per side before any spec consumes it; an HPXML profile sweeps its
+weekday and weekend arrays before the source is recorded; and the
+default-profile injection validates its own conversion. The column
+error names the CSV column and the offending Celsius value with the
+usual cause stated (a Celsius file read under the Fahrenheit
+convention); the profile error names the side and the HVACControl
+elements the profile came from. The band's edges are inclusive, and a
+NaN fails the range check like any other impossible value.
+
+**Fixture sweep (the Fahrenheit reality):** no shipped data fixture or
+golden manifest carries a schedule setpoint column at all - the golden
+manifests' schedule CSVs (the ResStock `in.schedules.csv` files and the
+BEopt example) carry no setpoint column, and the only setpoint-headed
+CSVs in the tree are OCHRE reference OUTPUT tables ("HVAC Heating
+Setpoint (C)", the values Celsius and labelled so) that no engine
+schedule parser reads. The engine's own test CSVs were the one
+counterexample (three files, the Celsius-scale values above); they
+move in this commit to the documented convention, their values the
+Fahrenheit equivalents of the setpoints they state (68.0-70.7 F
+resolving to the same 20.0-21.5 C), with the conversion stated in a
+comment. One hares-io unit test's placeholder HPXML profile
+(`[1.0; 24]`, an arbitrary placeholder whose value is not the point)
+moves to a plausible value (22.0 C, the max_value it already declared).
+
+**Consumer-contract check:** PASS against this tree's engine
+(`[hares-contract] PASS`, the two informational NEW end-use items row
+96's gate recorded). The direction agrees: the engine publishes the two
+setpoint columns' unit as Fahrenheit - the unit it READS them in,
+converting to Celsius at the parse - and the consumer writes
+Fahrenheit values into them, so the conversion and the validation sit
+downstream of the published unit and nothing the consumer feeds moves.
+The published schema is untouched by this commit.
+
+**Acceptance test:** RED first at the parent: an applied heating column
+holding 150 F resolved to 65.56 C and the injection succeeded; after,
+the construction fails naming `heating_setpoint` and the value. The
+band's edges are pinned (41 F / 104 F build, 40.5 F / 110 F fail), and
+an HPXML heating-season constant of 160 F (71.11 C) fails naming the
+side, the elements and the value. The three repaired test CSVs are the
+sweep's own witnesses: their construction failed at the parent under
+the new check, and builds again with the same resolved setpoints the
+column's values state.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. No golden manifest's schedule carries a
+setpoint column and no fixture HPXML's setpoints fall outside the band
+(the shipped profiles are the 68/78 F constants and the cz4a hourly
+arrays, 65-76 F).
+
+**Dependencies:** the physics constants' band, the hares-io schedule
+resolution's three validation sites, the three repaired test CSVs.

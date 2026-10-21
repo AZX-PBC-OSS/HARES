@@ -729,14 +729,16 @@ fn base_config(hpxml_path: &Path, inputs: &SharedInputs) -> DwellingConfig {
 }
 
 /// The schedule columns the base fixture's event equipment and wet
-/// appliances run on.
+/// appliances run on. The setpoint column is read in the OS-HPXML
+/// Fahrenheit convention, so its values are Fahrenheit: these resolve to
+/// the 20.0-21.5 C heating setpoints the column states.
 fn build_schedule_csv() -> String {
     [
         "Time,occupants,clothes_washer,clothes_dryer,dishwasher,cooking_range,hot_water_clothes_washer,hot_water_dishwasher,heating_setpoint",
-        "2021-01-01T00:00:00-07:00,1.0,0.10,0.10,0.10,0.10,0.10,0.10,20.0",
-        "2021-01-01T00:15:00-07:00,1.0,0.20,0.20,0.20,0.20,0.20,0.20,20.5",
-        "2021-01-01T00:30:00-07:00,1.0,0.30,0.30,0.30,0.30,0.30,0.30,21.0",
-        "2021-01-01T00:45:00-07:00,1.0,0.40,0.40,0.40,0.40,0.40,0.40,21.5",
+        "2021-01-01T00:00:00-07:00,1.0,0.10,0.10,0.10,0.10,0.10,0.10,68.0",
+        "2021-01-01T00:15:00-07:00,1.0,0.20,0.20,0.20,0.20,0.20,0.20,68.9",
+        "2021-01-01T00:30:00-07:00,1.0,0.30,0.30,0.30,0.30,0.30,0.30,69.8",
+        "2021-01-01T00:45:00-07:00,1.0,0.40,0.40,0.40,0.40,0.40,0.40,70.7",
     ]
     .join("\n")
 }

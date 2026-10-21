@@ -353,6 +353,31 @@ pub fn water_density_kg_m3(t_celsius: f64) -> f64 {
     numerator / denominator
 }
 
+// --- Thermostat Setpoint Plausibility ---
+
+/// The lowest plausible resolved thermostat setpoint, in °C.
+///
+/// The plausibility bound a schedule-resolved setpoint must lie within at
+/// construction. The OS-HPXML detailed-schedule convention carries the
+/// thermostat setpoint columns in degrees Fahrenheit (converted at the
+/// parse), so a Celsius file read under that convention lands an order
+/// of magnitude outside every habitable setpoint - the check's purpose
+/// is to fail that file at construction, naming the column and the
+/// value, instead of driving the HVAC at it. 5 °C is above any
+/// legitimate heating setpoint's freeze-protection floor and well below
+/// any cooling setpoint; OS-HPXML's own manual-thermostat defaults
+/// (68 °F heating, 78 °F cooling) sit far inside the band.
+pub const SETPOINT_PLAUSIBILITY_MIN_C: f64 = 5.0;
+
+/// The highest plausible resolved thermostat setpoint, in °C.
+///
+/// The upper half of the plausibility band
+/// [`SETPOINT_PLAUSIBILITY_MIN_C`] states the contract for. 40 °C is
+/// above any residential heating setpoint (energy-saving setbacks stay
+/// above 10 °C; comfort heating stays below 30 °C) and an order of
+/// magnitude above the converted OS-HPXML defaults.
+pub const SETPOINT_PLAUSIBILITY_MAX_C: f64 = 40.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

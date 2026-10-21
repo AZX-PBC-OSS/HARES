@@ -12,7 +12,9 @@ use hares_equipment::{
     ConfigPayload, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_physics::constants::SECONDS_PER_YEAR;
+use hares_physics::constants::{
+    SECONDS_PER_YEAR, SETPOINT_PLAUSIBILITY_MAX_C, SETPOINT_PLAUSIBILITY_MIN_C,
+};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, Warning, normalize_ascii,
@@ -887,6 +889,13 @@ fn inject_default_setpoint(
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     let setpoint_c = hares_physics::units::temperature_f_to_c(default_f);
+    if setpoint_value_is_implausible(setpoint_c) {
+        return Err(HaresError::Equipment(format!(
+            "the {prefix} setpoint default {default_f} °F resolves to {setpoint_c:.2} °C, \
+             outside the plausible range \
+             [{SETPOINT_PLAUSIBILITY_MIN_C}, {SETPOINT_PLAUSIBILITY_MAX_C}] °C"
+        )));
+    }
     // The config enum is internally tagged, so a constant travels as a flat
     // daily profile.
     let source = serde_json::to_value(ScheduleSourceConfig::DailyProfile {
@@ -934,6 +943,70 @@ fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Valu
         }
         None => false,
     }
+}
+
+/// The resolved setpoint's plausibility band: a value outside
+/// [`SETPOINT_PLAUSIBILITY_MIN_C`, `SETPOINT_PLAUSIBILITY_MAX_C`] °C
+/// fails the construction naming the source and the value. The band's
+/// purpose is the unit-convention mistake (a Celsius file read under the
+/// OS-HPXML Fahrenheit convention lands an order of magnitude outside
+/// every habitable setpoint) and any corrupt value, not a style opinion:
+/// the OS-HPXML defaults sit far inside it.
+fn setpoint_value_is_implausible(value: f64) -> bool {
+    !(SETPOINT_PLAUSIBILITY_MIN_C..=SETPOINT_PLAUSIBILITY_MAX_C).contains(&value)
+}
+
+/// The applied setpoint column's plausibility: the first value outside
+/// the plausible band fails the construction naming the column and the
+/// value. The column is already in Celsius here (the parser converted
+/// the Fahrenheit convention), so the named value is the value the
+/// thermostat would see.
+fn validate_setpoint_column(
+    schedule: &ScheduleTimeSeries,
+    col_idx: usize,
+    column: &str,
+) -> Result<(), HaresError> {
+    let values = schedule.columns.get(col_idx).ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "schedule CSV column '{column}': the column index {col_idx} is not in the \
+                 schedule's columns"
+        ))
+    })?;
+    if let Some(&value) = values
+        .iter()
+        .find(|&value| setpoint_value_is_implausible(*value))
+    {
+        return Err(HaresError::Equipment(format!(
+            "schedule CSV column '{column}': the resolved setpoint {value:.2} °C is outside \
+             the plausible range [{SETPOINT_PLAUSIBILITY_MIN_C}, {SETPOINT_PLAUSIBILITY_MAX_C}] °C; \
+             the OS-HPXML detailed-schedule convention carries these columns in degrees \
+             Fahrenheit, and a file written in Celsius read under it is the usual cause"
+        )));
+    }
+    Ok(())
+}
+
+/// The HPXML setpoint profile's plausibility: the first value outside
+/// the plausible band fails the construction naming the side, the
+/// elements the profile came from and the value.
+fn validate_setpoint_profile(prefix: &str, values: &[f64]) -> Result<(), HaresError> {
+    if let Some(&value) = values
+        .iter()
+        .find(|&value| setpoint_value_is_implausible(*value))
+    {
+        return Err(HaresError::Equipment(format!(
+            "the HPXML {prefix} setpoints (the HVACControl's SetpointTemp{side}Season element \
+             or its Weekday/WeekendSetpointTemps{side}Season arrays): the resolved setpoint \
+             {value:.2} °C is outside the plausible range \
+             [{SETPOINT_PLAUSIBILITY_MIN_C}, {SETPOINT_PLAUSIBILITY_MAX_C}] °C",
+            side = if prefix == "heating" {
+                "Heating"
+            } else {
+                "Cooling"
+            },
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve each HVAC side's thermostat setpoints by the OpenStudio-HPXML
@@ -988,6 +1061,27 @@ fn inject_setpoint_schedules(
     // timestep from the environment's schedule domain payload. No materialization.
     let heating_col = csv_col_map.get("heating_setpoint").copied();
     let cooling_col = csv_col_map.get("cooling_setpoint").copied();
+
+    // The applied column's plausibility, checked once per side before any
+    // spec consumes it: every value the run could resolve must lie in the
+    // plausible band, and the failure names the column and the value. A
+    // file written in Celsius and read under the Fahrenheit convention
+    // lands an order of magnitude outside the band, which is the check's
+    // purpose to catch at construction.
+    if let Some(col_idx) = heating_col
+        && specs
+            .iter()
+            .any(|spec| HEATING_EQUIPMENT.contains(&spec.name.as_str()))
+    {
+        validate_setpoint_column(schedule, col_idx, "heating_setpoint")?;
+    }
+    if let Some(col_idx) = cooling_col
+        && specs
+            .iter()
+            .any(|spec| COOLING_EQUIPMENT.contains(&spec.name.as_str()))
+    {
+        validate_setpoint_column(schedule, col_idx, "cooling_setpoint")?;
+    }
 
     // One warning per side when the column and the HPXML setpoints are
     // both given: the overlap is an input property, not a per-unit one.
@@ -1044,6 +1138,8 @@ fn inject_setpoint_schedules(
                 }
                 None => match hpxml_setpoint_profile(spec, "heating") {
                     Some((weekday_c, weekend_c)) => {
+                        validate_setpoint_profile("heating", &weekday_c)?;
+                        validate_setpoint_profile("heating", &weekend_c)?;
                         let source = SetpointSource::Hpxml {
                             weekday_c,
                             weekend_c,
@@ -1095,6 +1191,8 @@ fn inject_setpoint_schedules(
                 }
                 None => match hpxml_setpoint_profile(spec, "cooling") {
                     Some((weekday_c, weekend_c)) => {
+                        validate_setpoint_profile("cooling", &weekday_c)?;
+                        validate_setpoint_profile("cooling", &weekend_c)?;
                         let source = SetpointSource::Hpxml {
                             weekday_c,
                             weekend_c,
@@ -4350,14 +4448,14 @@ mod tests {
         let mut schedule = make_schedule(24);
 
         let hpxml_heating_source = hares_types::ScheduleSourceConfig::DailyProfile {
-            weekday: [1.0; 24],
-            weekend: [1.0; 24],
+            weekday: [22.0; 24],
+            weekend: [22.0; 24],
             month_multipliers: [1.0; 12],
             max_value: 22.0,
         };
         let hpxml_cooling_source = hares_types::ScheduleSourceConfig::DailyProfile {
-            weekday: [1.0; 24],
-            weekend: [1.0; 24],
+            weekday: [26.0; 24],
+            weekend: [26.0; 24],
             month_multipliers: [1.0; 12],
             max_value: 26.0,
         };
