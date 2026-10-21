@@ -37,12 +37,19 @@ pub fn repo_defaults_path() -> PathBuf {
 }
 
 pub fn write_schedule_csv(path: &PathBuf) {
+    // The canonical schedule column names the resolver's mapping table
+    // reads: every event appliance the HPXML fixture declares needs its
+    // own fraction column (the constant-window fallback for a missing
+    // column is a construction error), and the file carries no setpoint
+    // columns, so the HVAC setpoints come from the HPXML's own profiles.
+    // The shipped defaults directory supplies the lighting and plug-load
+    // profiles the file omits.
     let rows = [
-        "Time,Clothes Washer (kW),HVAC Heating (C),HVAC Cooling (C)",
-        "2021-01-01T00:00:00-07:00,0.10,20.0,25.0",
-        "2021-01-01T00:15:00-07:00,0.20,20.5,25.5",
-        "2021-01-01T00:30:00-07:00,0.15,21.0,26.0",
-        "2021-01-01T00:45:00-07:00,0.12,20.0,25.0",
+        "Time,clothes_washer,clothes_dryer,dishwasher,cooking_range,hot_water_clothes_washer,hot_water_dishwasher",
+        "2021-01-01T00:00:00-07:00,0.10,0.0,0.0,0.0,0.1,0.0",
+        "2021-01-01T00:15:00-07:00,0.20,0.5,0.0,0.0,0.2,0.0",
+        "2021-01-01T00:30:00-07:00,0.15,0.5,0.3,0.0,0.15,0.3",
+        "2021-01-01T00:45:00-07:00,0.12,0.0,0.0,0.6,0.12,0.0",
     ]
     .join("\n");
     fs::write(path, rows).expect("failed to write schedule fixture");
@@ -161,13 +168,13 @@ pub fn build_dwelling_config(
     }
 }
 
-pub fn synthetic_toml_case(path: &PathBuf, duration_s: i64) {
-    let toml = format!(
+pub fn synthetic_toml(duration_s: i64, time_res_s: i64) -> String {
+    format!(
         r#"building_id = 1
 
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
-time_res = 60
+time_res = {time_res_s}
 duration = {duration_s}
 output_chunk_size = 1000
 master_seed = 0
@@ -190,9 +197,22 @@ dew_point_c = 4.0
 rel_humidity_pct = 55.0
 pressure_kpa = 101.325
 
+# The infiltration measurement the airflow assembly requires (OS-HPXML
+# errors on a dwelling with neither a measurement nor a constant rate):
+# 3 ACH, a conventional continuous rate for the leaky tier this
+# synthetic single-zone dwelling models (R-2 walls, no controlled
+# ventilation). The bench's workload is the stepping cost, unchanged
+# from what the fixture intended before the assembly hardened.
+[infiltration]
+ach = 3.0
+
 [schedule]
 occupancy = 1.0
 "#
-    );
+    )
+}
+
+pub fn synthetic_toml_case(path: &PathBuf, duration_s: i64) {
+    let toml = synthetic_toml(duration_s, 60);
     fs::write(path, toml).expect("failed to write synthetic TOML fixture");
 }
