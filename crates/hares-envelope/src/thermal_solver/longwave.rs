@@ -382,7 +382,7 @@ impl ThermalSolver {
                 // warm-start acceptance is designed to lag mid-transient,
                 // so the warning fires on the first LARGE lag only - a
                 // skin that never closes its balance within a step's
-                // budget by more than the converged bound's 8x.
+                // budget by more than the converged bound's 2x.
                 if !self.skin_lag_warned && skin_residual_k > SKIN_LAG_WARN_THRESHOLD_K {
                     self.skin_lag_warned = true;
                     tracing::warn!(

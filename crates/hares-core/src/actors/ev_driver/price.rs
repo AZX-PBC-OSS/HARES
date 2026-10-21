@@ -215,6 +215,71 @@ mod tests {
         assert!(vote.power_w.is_none());
     }
 
+    /// The fall-through the actor's decide-time gate contains: the
+    /// import channel present with the export channel missing prices no
+    /// discharge. The discharge vote is an export decision and prices
+    /// the rate the export earns; with that channel unpublished the leg
+    /// stands down and the vote idles neutral (a run never reaches this
+    /// shape - the gate reports the missing export channel unhealthy
+    /// before any vote is consulted, and a tariff evaluator publishes
+    /// both channels - but the vote-level semantics are pinned so a
+    /// refactor cannot silently price the discharge on a missing
+    /// channel).
+    #[test]
+    fn missing_export_channel_falls_through_to_neutral() {
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();
+        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices.into()), 24);
+
+        // Import 0.80 sits above the discharge threshold; the export
+        // channel is missing. The vote must not discharge on the import
+        // rate, and a missing channel is not a fabricated $0 credit.
+        let env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.80),
+                ..Default::default()
+            })
+            .build();
+        let ctx = make_ctx_with_price(&env);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(
+            vote.label, "price:neutral",
+            "present import and missing export must fall through to neutral, not \
+             price the discharge off the import rate"
+        );
+        assert!(vote.power_w.is_none());
+    }
+
+    /// The stand-down the actor's decide-time gate contains: a missing
+    /// import channel is never read as a fabricated $0/kWh. The charge
+    /// leg's pre-fix substitution charged on every missing-price step
+    /// ($0 is below any threshold); the leg stands down instead (a run
+    /// never reaches this shape - the gate reports the missing import
+    /// channel unhealthy first - but the vote-level semantics are
+    /// pinned so a refactor cannot silently restore the substitution).
+    #[test]
+    fn missing_import_channel_does_not_substitute_a_zero_price_charge() {
+        let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();
+        let mut pref = PriceOptimizer::new(0.25, 0.75, Some(prices.into()), 24);
+
+        // Both channels missing: the charge leg must not fire on a $0
+        // substitution (the pre-fix behavior, $0 below any threshold),
+        // and the discharge leg has no credit to price either.
+        let env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal::default())
+            .build();
+        let ctx = make_ctx_with_price(&env);
+        let vote = pref.score(&ctx);
+
+        assert_ne!(
+            vote.label, "price:charge",
+            "a missing import channel must stand the charge leg down, not read \
+             as a fabricated $0/kWh"
+        );
+        assert_eq!(vote.label, "price:neutral");
+        assert!(vote.power_w.is_none());
+    }
+
     #[test]
     fn neutral_at_mid_price() {
         let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.01).collect();

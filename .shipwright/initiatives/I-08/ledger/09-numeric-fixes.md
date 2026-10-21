@@ -6651,16 +6651,26 @@ diagnostics they sit beside:
 
 And the first step whose residual crosses 1 K warns once per solver
 (the one-time-warn pattern, the interior-LWR linearisation latch's
-shape): the warm-start acceptance is designed to lag mid-transient, so
-the warning names the surface, the residual and whether the exit was
-the cap, once for the run, never per step. The warn threshold is the
-converged bound's 2x; only a budget exit can cross it.
+shape): the warning names the surface, the residual and whether the
+exit was the cap, once for the run, never per step. The warn threshold
+is the converged bound's 2x, and its scope is a pathology alarm at the
+60 s resolution, not a normal-mid-transient alarm: the designed
+warm-start lag rides inside it (a real mid-transient sky moves well
+under 1 K per step), so a residual crossing it says the skin is not
+closing its balance - the cap-exit pathology is real - while the
+counting itself is magnitude-independent and rides every budget exit
+however small.
 
 **Acceptance test (RED first):** the forced-cap probe
 (`longwave::tests::forced_iteration_cap_exit_is_counted_with_its_residual`)
 builds a one-surface iterative-path solver with the 60 s production
 budget (one damped iteration, the budget the review's mechanism names)
-and swings the sky temperature 55 °C warmer against the same air: the
+and swings the sky temperature 55 °C warmer against the same air (air
+at -15 °C, sky to +40 °C: a deliberately synthetic forcing, unreachable
+from any real weather file - a real sky runs 0-40 K below the air,
+never 55 K above it, and moves well under 1 K per 60 s step where this
+swing jumps 55 °C in one step; the magnitude isolates the counting,
+whose mechanics are magnitude-independent): the
 single damped iteration cannot cross the displaced fixed point, the
 loop exits on the cap. At the parent the probe could not be expressed  - 
 the fields do not exist, the compile failure the witness of the silence

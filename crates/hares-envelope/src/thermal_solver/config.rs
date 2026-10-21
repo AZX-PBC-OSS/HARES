@@ -1139,12 +1139,16 @@ pub struct EnvelopeComponentGains {
     pub natural_ventilation_wind_angle_deg: f64,
     /// Exterior-skin fixed-point iterations that exited on the iteration
     /// cap this step: the iterative-path (rad_frac > 0) surfaces whose
-    /// budget (`n_iter`, the floor of dt/300 + 1 - one damped iteration
-    /// at 60 s) ran out without the 0.01 K step tolerance break. The
-    /// warm-start design converges across timesteps mid-transient, so a
-    /// cap exit is intended behavior - but a run whose skins cap every
-    /// step is a run whose skins never close, and this count is where
-    /// that shows.
+    /// budget ran out without the 0.01 K step tolerance break. The
+    /// budget is each surface's own `n_iter`, wired per surface - the
+    /// solver never derives it from dt: the production wiring
+    /// (`solver_builder`'s thermal-solver construction) supplies
+    /// `floor(dt/300) + 1`, which at the 60 s production timestep is
+    /// one damped iteration, and this solver's own fixtures hardcode
+    /// the same `n_iter: 1`. The warm-start design converges across
+    /// timesteps mid-transient, so a cap exit is intended behavior -
+    /// but a run whose skins cap every step is a run whose skins never
+    /// close, and this count is where that shows.
     #[cfg(feature = "observe")]
     pub skin_iteration_cap_exits: u64,
     /// The largest exterior-skin residual this step [K]: the greatest
