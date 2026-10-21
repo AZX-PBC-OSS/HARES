@@ -737,6 +737,12 @@ mod tests {
                 protocol: ProtocolId(17),
                 payload: vec![1, 2, 3, 4, 5],
             },
+            ControlSignal::CurtailmentPercent { percent: 25.0 },
+            ControlSignal::ReactiveSetpoint { var: 10.0 },
+            ControlSignal::PowerFactorSetpoint { power_factor: 0.95 },
+            ControlSignal::InverterPriorityMode {
+                priority: InverterPriority::Watt,
+            },
             ControlSignal::IdealCapacity {
                 capacity_w: 3500.0,
                 degraded: false,
@@ -757,9 +763,17 @@ mod tests {
                 departure_hour: 7.0,
                 target_soc: 0.8,
             },
+            ControlSignal::EvClearReadyBy,
             ControlSignal::EventDelay { delay_s: 300.0 },
             ControlSignal::MaxCapacityFraction { fraction: 0.5 },
+            ControlSignal::NonHvacZoneInput {
+                zone: ZoneId(1),
+                watts: 100.0,
+            },
         ];
+        // The list is an enumeration witness: one entry per ControlSignal
+        // variant, so a new variant cannot slip past the round-trip.
+        assert_eq!(signals.len(), 28, "one entry per ControlSignal variant");
 
         for signal in signals {
             let json = serde_json::to_string(&signal).expect("serialize signal");

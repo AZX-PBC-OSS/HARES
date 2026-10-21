@@ -4532,13 +4532,11 @@ fn already_at_target_produces_zero_power() {
 
 #[test]
 fn deadline_passed_charges_immediately() {
-    // Deadline at 14:00, currently 15:00 -- unambiguously past the deadline
-    // on the same day. With wrap, hours_until_deadline = 23, which is huge
-    // relative to the small SOC deficit, so BMS would delay. But in reality
-    // the deadline has passed and the EV should charge immediately.
-    // This test verifies that a tight SOC deficit with a "past" deadline
-    // still results in charging, since the wrap means there's plenty of
-    // time and the BMS starts immediately if hours_needed < hours_until_deadline.
+    // Deadline at the current hour (15:00 against a 15.0 ready-by): a past
+    // or present deadline reads as tomorrow's (the ready-by departure
+    // recurs daily), so the wrap puts the next occurrence 24 h out and the
+    // proportional pace charges the open deficit over the day. This test
+    // verifies that a "past" deadline still results in charging.
     let mut raw = base_raw();
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.3.into());
     let config = ev_config(raw);

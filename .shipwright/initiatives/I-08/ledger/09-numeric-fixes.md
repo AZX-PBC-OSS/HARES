@@ -6460,7 +6460,16 @@ that would not happen. The cancellation path now dispatches a typed
 `EV_SET_READY_BY` capability, Schedule tier, the Python
 `Signal.ev_clear_ready_by()` / `DispatchRequest.ev_clear_ready_by`
 surfaces and the dict round-trip alongside), and the equipment's arm
-drops the deadline's target, pacing and floor contribution together.
+drops the deadline's target, pacing and floor contribution together. The
+pre-existing witnesses the new pacing retuned, named: their assertions
+were re-derived from the proportional model -
+`ev_set_ready_by_delays_then_charges`, `ev_departure_at_step_boundary`,
+and `deadline_passed_charges_immediately` in
+`crates/hares-equipment/src/ev/tests.rs`, and
+`bms_delay_outputs_zero_power_before_start`, renamed
+`bms_paces_small_deficit_low_before_a_far_deadline` (its old
+zero-power-before-start assertion was the bang-bang model's behavior,
+not a contract).
 
 **(d) The scheduled load's setpoint override.** A `PowerSetpoint`
 override returned `(override_w, 0.0, 0.0)`, so a nonzero-pf load
@@ -6482,8 +6491,9 @@ consistent choice is deliberate per unit class). Neither record moves
 code: the shipped fixtures' space_fraction values are 1.0, where both
 conventions coincide.
 
-**The Task 1.9 refutation, recorded.** The review's core M3 claimed the
-control-signal validation was debug-only and that the external
+**The review's core M3 refutation, recorded.** The review's core M3
+claimed the control-signal validation was debug-only and that the
+external
 `apply_control` path bypassed even that - a release-profile hazard
 where inverted setpoints or NaN powers reach the equipment. The
 verification refuted the claim: `Equipment::apply_control`
@@ -6518,7 +6528,19 @@ inert), no battery self-discharge configuration (the default 0%/day and
 the fixture batteries read the defaults), no EV V2G/V2H strategy or
 ready-by deadline (the fixture drivers are the built-in Immediate
 strategy over constant sources), and no scheduled-load setpoint
-override (no controller dispatches in the golden runs).
+override (no controller dispatches in the golden runs). Why the eta
+unification specifically moves nothing, stated exactly: the golden runs
+build every battery through the dwelling path, which always runs
+`init()`, landing in `init_typed`, and the typed init overwrites
+whatever etas the constructor set (`crates/hares-core/src/dwelling/mod.rs:4295`
+into `crates/hares-equipment/src/battery/mod.rs`'s typed init); and the
+fixtures' HPXML batteries state no `RoundTripEfficiency`, so the typed
+resolution leaves `inverter_efficiency` None
+(`crates/hares-io/src/hpxml/resolve_der.rs:227`) and the one-way default
+applies identically before and after the change. The review's core M5 is
+the empirical proof: with the constructor's sqrt split restored,
+`constructor_defaults_match_the_post_init_efficiency_convention` fails
+and the goldens STILL come back bitwise.
 
 **Gates (run once on the branch tip carrying rows 122 and 123
 together, the two packages' files disjoint):** fmt clean, clippy
