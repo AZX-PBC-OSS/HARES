@@ -6216,3 +6216,103 @@ frame path reads it with the feature on).
 sites in the physics (infiltration, psychrometrics, film coefficients)
 and equipment (hvac core, tank) crates, and the dwelling's per-step
 drain beside the equipment health drain.
+
+## Hardening 19: one home for conversion factors and docs that match the code
+
+**Kind:** cleanup (the duplicated-constant and dead-code sweep; no
+physics moves).
+
+**The constant's one home:** the autosize module defined its own
+`BTU_PER_HR_PER_W = 3.412`, a lower-precision copy of the physics
+constants' `BTU_PER_HR_PER_W = 3.412_141_633`, and the copy had drifted:
+the water-heater FHR capacity formula read the truncated value while the
+same conversion everywhere else (the HVAC EIR resolutions, the defaults
+loader's COP checks, the Python binding) read the full-precision one.
+The local definition is deleted and the module imports the physics
+constant; the two walkthrough comments' factor restated from 4.395 to
+4.3943 (their products' rounded results unchanged). RED first: a test
+asserting the module's factor equals the physics constant failed at the
+parent (left 3.412, right 3.412141633), the witness of the drift itself.
+No golden moves: autosizing is opt-in (`autosize_heating`,
+`autosize_cooling`, `autosize_water_heater`) and no golden manifest
+enables it, so the factor's 1.2e-4 relative change reaches no fixture.
+
+**The companion-RTF plumbing: deleted, and why.** The heat-pump heater
+recorded its last heating RTF every step and exposed it through four
+getters "so the HP system coordinator can pass it" to the companion
+cooler, whose setter refined the crankcase heater's draw to
+`rated * (1 - max(cooling_rtf, heating_rtf))` and fed a companion-aware
+branch of the Henderson-Rengarajan latent degradation. No coordinator
+exists: the setters and getters had zero callers in any crate, test
+suite or binding, every consumer read `None` through the whole chain,
+and the branch conditions were unreachable in production. The plumbing
+computed a value nothing consumes - the dead-code half of the
+wire-or-delete rule. WIRING it was the alternative (one dwelling-level
+pass), and it is rejected on the record: wiring makes the crankcase
+refinement and the companion SHR correction live, a physics behavior
+change with no parity contract behind it (OCHRE's crankcase is
+mode-gated, `HVAC.py:1076`, full draw when the compressor is off, with
+no runtime-fraction refinement at all), and this task's gate is the
+goldens bitwise. The deleted surface: the heater's field, recording and
+getters (ASHP, minisplit, GSHP, WSHP), the cooler's field, setter and
+its three mirror `last_cooling_rtf` getters, the AC step's
+`companion_heating_rtf` parameter, the crankcase internal's max
+refinement, and the latent-degradation function's `heating_rtf`
+parameter with its branch. The surviving crankcase model is the
+mode-off draw scaled by the cooling coil's own off fraction, which is
+what every shipped run computed before and after. The decision and the
+re-wiring recipe are recorded in `docs/equipment/hvac.md`'s crankcase
+section. The deleted tests (the companion SHR reduction, the two
+crankcase companion-RTF cases) tested the dead machinery through
+test-only entry points; the surviving crankcase tests cover the
+remaining model at the same power values.
+
+**compute_schedule_offset: deleted.** The test-only helper had no
+production caller (its own tests said the path was replaced): the
+non-DST fallback and the DST path both derive schedule rows from the
+calendar ordinal directly. The function and its five leap-year tests
+are deleted; the fallback comment that named it as a sibling now
+describes the surviving derivation. The compile check is the witness:
+any dangling reference fails the build, and none exists across the
+crates, the Python package and the tests.
+
+**The docs:** five claims fixed in this commit, each verified against
+the current behavior. `weather-pipeline.md` documented PCHIP
+resampling (`fritsch_carlson_slopes()`/`pchip_resample()` - no such
+functions exist in the tree); the resampling is EnergyPlus's own:
+sub-hourly files at a mismatched step are an error
+(`WeatherManager.cc:715-722`), an hourly file at a longer step takes
+the interval mean, and an hourly file at a shorter step interpolates
+per field type (point fields linear at the step's end, wind direction
+on the circle, precipitation's weighted depth over the steps per hour,
+solar at the hour's midpoint, sky temperature recomputed from the
+interpolated inputs, ground temperature and albedo holding the hour's
+record), with the first-hour rule stated. `schedule-sources.md`'s
+variant catalog listed a `SeededNoise` variant that does not exist; the
+catalog now documents the actual `Stochastic` variant (its
+`DistributionKind`, clamps and snapshot/reseed state) and points at the
+TimeWindows noise section's keystream derivation (the dwelling-keyed
+identity `<dwelling identity>:<owner name>:<source role>` with an
+explicit seed winning, the scheme row 116 shipped). 
+`thermal-envelope-solver.md` claimed ground-reflected irradiance is
+"excluded for windows by design"; the window path includes it in the
+diffuse POA (`solar.rs`'s
+`poa_diffuse = (diffuse + reflected) * iam_diffuse`, pinned by
+`window_solar_includes_ground_reflected`), and the doc now says so.
+`hvac.md` listed the crankcase heater in the heater's electrical port;
+the heater has no crankcase model (the cooler's, matching OCHRE's
+class layout), and the port list now splits the heater's and cooler's
+electrical contributions. `python.md`'s "Changes in this release"
+section carried a full stale duplicate of the itemized changelog
+behind a pointer to CHANGELOG.md; the duplicate is deleted and the
+section is the pointer.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture (the constant re-homes to a value no fixture
+reads, the deleted code was unreachable in production, the deleted
+tests tested it through test-only entry points, and the docs change no
+bytes of engine output).
+
+**Dependencies:** the physics constants' `BTU_PER_HR_PER_W`, the
+autosize water-heater capacity formula, the crankcase and latent
+degradation models' surviving forms, and the five docs.

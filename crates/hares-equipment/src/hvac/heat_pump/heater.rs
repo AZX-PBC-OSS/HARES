@@ -160,10 +160,6 @@ struct HeatPumpHeaterCore {
     /// Used to force-release the soft lockout after `er_hard_lockout_time_s * 2`
     /// to prevent it from holding indefinitely.
     soft_lockout_elapsed_s: f64,
-    /// Runtime fraction (PLR) of the heating coil from the most recent step.
-    /// Exposed so the HP system coordinator can pass it to the companion cooler
-    /// for crankcase heater power accounting.
-    last_heating_rtf: f64,
     /// Heating-side sensible heat ratio. Default 1.0 (all-sensible) per OCHRE
     /// HVAC.py:458-462. When < 1.0, reverse-cycle defrost produces a small
     /// positive latent gain from indoor-coil surface moisture.
@@ -342,14 +338,6 @@ impl ASHPHeater {
             core: HeatPumpHeaterCore::new(config, HeaterVariant::Ashp),
         }
     }
-
-    /// Return the heating coil's runtime fraction from the most recent step.
-    ///
-    /// Used by the system coordinator to pass as `companion_heating_rtf` to
-    /// the HP cooler for crankcase heater power accounting.
-    pub fn last_heating_rtf(&self) -> f64 {
-        self.core.last_heating_rtf
-    }
 }
 
 impl MinisplitHeater {
@@ -358,11 +346,6 @@ impl MinisplitHeater {
         Self {
             core: HeatPumpHeaterCore::new(config, HeaterVariant::Minisplit),
         }
-    }
-
-    /// Return the heating coil's runtime fraction from the most recent step.
-    pub fn last_heating_rtf(&self) -> f64 {
-        self.core.last_heating_rtf
     }
 }
 
@@ -377,11 +360,6 @@ impl GshpHeater {
             core: HeatPumpHeaterCore::new(config, HeaterVariant::Gshp),
         }
     }
-
-    /// Return the heating coil's runtime fraction from the most recent step.
-    pub fn last_heating_rtf(&self) -> f64 {
-        self.core.last_heating_rtf
-    }
 }
 
 pub struct WshpHeater {
@@ -394,11 +372,6 @@ impl WshpHeater {
         Self {
             core: HeatPumpHeaterCore::new(config, HeaterVariant::Wshp),
         }
-    }
-
-    /// Return the heating coil's runtime fraction from the most recent step.
-    pub fn last_heating_rtf(&self) -> f64 {
-        self.core.last_heating_rtf
     }
 }
 
@@ -693,7 +666,6 @@ impl HeatPumpHeaterCore {
             prev_zone_temp_c: f64::NAN,
             er_soft_lockout: false,
             soft_lockout_elapsed_s: 0.0,
-            last_heating_rtf: 0.0,
             heating_shr: 1.0,
             pump_loop_depth_m: if matches!(variant, HeaterVariant::Gshp | HeaterVariant::Wshp) {
                 60.0
@@ -766,7 +738,6 @@ impl HeatPumpHeaterCore {
         self.er_soft_lockout = false;
         self.soft_lockout_elapsed_s = 0.0;
         self.hp_available = env.weather.outdoor_temp_c >= self.hp_lockout_temp_c;
-        self.last_heating_rtf = 0.0;
         self.run_time_s = 0.0;
         self.cycle_on_steps = 0;
         self.cycle_off_steps = 0;
@@ -1445,18 +1416,6 @@ impl HeatPumpHeaterCore {
         let borehole_heat_w = -(step.thermal_output_w - (step.compressor_w));
         self.source_temp
             .record_source_heat_rate(borehole_heat_w, dt_s);
-
-        // Record RTF for companion cooler crankcase accounting. When the HP
-        // compressor is running the RTF equals the duty cycle (PLR).
-        let hp_on_control = matches!(
-            self.operating_mode,
-            OperatingMode::HeatingHP | OperatingMode::HeatingHPAndER
-        );
-        self.last_heating_rtf = if hp_on_control {
-            self.hvac.runtime.duty_cycle.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
 
         if self.operating_mode == OperatingMode::Off {
             self.cycle_off_steps += 1;

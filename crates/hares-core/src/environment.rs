@@ -1230,8 +1230,7 @@ impl EnvironmentManager {
         }
 
         // Fallback: derive the schedule row from the current sim time with
-        // the same 365-day-calendar ordinal as the DST path and
-        // compute_schedule_offset.
+        // the same 365-day-calendar ordinal as the DST path.
         let sim_time = clock.current_time();
         let doy0 = u64::from(hares_types::schedule_day_ordinal(&sim_time)) - 1;
         let h = sim_time.hour() as u64;
@@ -1793,34 +1792,6 @@ fn build_forcing_table(
         })
         .collect();
     Ok(ForcingTable::from_rows(rows?))
-}
-
-/// Compute offset into the schedule time series.
-/// Schedules from ResStock/BEopt are annual, indexed from Jan 1 in local time.
-/// ResStock/BEopt schedules are always 365-day non-leap-year data; the row
-/// lookup's day-of-year is the shared 365-day-calendar ordinal, whose
-/// leap-year rule keeps calendar dates after Feb 29 on the same schedule
-/// rows as in a non-leap year.
-#[cfg(test)]
-fn compute_schedule_offset(
-    schedule: &ScheduleTimeSeries,
-    start_time: DateTime<FixedOffset>,
-    step_secs: u32,
-) -> usize {
-    if step_secs == 0 || schedule.is_empty() {
-        return 0;
-    }
-    let doy0 = u64::from(hares_types::schedule_day_ordinal(&start_time)) - 1;
-    let h = start_time.hour() as u64;
-    let m = start_time.minute() as u64;
-    let s = start_time.second() as u64;
-    let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
-    // Derive year length from the actual schedule array size so wrapping is
-    // correct regardless of whether the schedule is hourly, sub-hourly, etc.
-    // An empty schedule is rejected at load (`EmptySchedule`), so the length
-    // here is positive and the former debug re-check is deleted.
-    let year_secs = schedule.len() as u64 * step_secs as u64;
-    (seconds_into_year % year_secs / step_secs as u64) as usize
 }
 
 fn compute_mains_inputs(weather: &WeatherTimeSeries, step_secs: u32) -> (f64, f64) {
@@ -3691,75 +3662,6 @@ mod tests {
         // caller (the evaluator's interpolate layout), so here the
         // record is asserted.
         assert_eq!(addressing.record_at(t).expect("addressable"), 1);
-    }
-
-    // ----- compute_schedule_offset leap-year tests (T-0032) -----
-
-    /// Schedule offset for Feb 29 in a leap year.
-    /// Feb 29 ordinal0=59, same as non-leap Mar 1. The schedule has 8760 rows
-    /// (365-day non-leap) so Feb 29 maps to row 59*24=1416 (March 1 data).
-    /// No adjustment needed since ordinal0 <= 59, but year_secs wrapping
-    /// protects against out-of-bounds.
-    #[test]
-    fn compute_schedule_offset_leap_year_feb_29() {
-        let schedule = hourly_schedule(8760);
-        let start = utc_offset().with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
-        let offset = compute_schedule_offset(&schedule, start, 3600);
-        assert_eq!(offset, 1416, "Feb 29 should index row 1416 (day 59)");
-    }
-
-    /// Schedule offset for March 1 in a leap year.
-    /// ordinal0=60, adjusted -1 → 59 so the schedule row matches the non-leap
-    /// index for March 1 (59*24=1416).
-    #[test]
-    fn compute_schedule_offset_leap_year_mar_1() {
-        let schedule = hourly_schedule(8760);
-        let start = utc_offset().with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
-        let offset = compute_schedule_offset(&schedule, start, 3600);
-        assert_eq!(offset, 1416, "March 1 leap year should index day 59 (1416)");
-    }
-
-    /// Regression: same calendar date across leap and non-leap years produces
-    /// identical schedule offsets. The one-day shift after Feb 29 is the
-    /// defect T-0032 fixes.
-    #[test]
-    fn compute_schedule_offset_same_date_leap_vs_non_leap() {
-        let schedule = hourly_schedule(8760);
-        let start_leap = utc_offset()
-            .with_ymd_and_hms(2024, 7, 4, 12, 30, 0)
-            .unwrap();
-        let start_non_leap = utc_offset()
-            .with_ymd_and_hms(2023, 7, 4, 12, 30, 0)
-            .unwrap();
-        let leap_offset = compute_schedule_offset(&schedule, start_leap, 3600);
-        let non_leap_offset = compute_schedule_offset(&schedule, start_non_leap, 3600);
-        assert_eq!(
-            leap_offset, non_leap_offset,
-            "same calendar date (Jul 4) must produce identical schedule offset"
-        );
-    }
-
-    /// Leap year Dec 31 wraps correctly. ordinal0=365, adjusted -1 → 364.
-    /// Row = 364*24 = 8736.
-    #[test]
-    fn compute_schedule_offset_leap_year_dec_31() {
-        let schedule = hourly_schedule(8760);
-        let start = utc_offset()
-            .with_ymd_and_hms(2024, 12, 31, 0, 0, 0)
-            .unwrap();
-        let offset = compute_schedule_offset(&schedule, start, 3600);
-        assert_eq!(offset, 8736, "Dec 31 leap year → adjusted ordinal 364");
-    }
-
-    /// Sub-hourly schedule (15-min steps, 35040 rows) in a leap year.
-    /// Mar 1 ordinal0=60, adjusted -1 → 59. seconds = 59*86400=5097600.
-    /// index = 5097600/900 = 5664.
-    #[test]
-    fn compute_schedule_offset_leap_year_15min() {
-        let schedule = hourly_schedule(35040);
-        let start = utc_offset().with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
-        let offset = compute_schedule_offset(&schedule, start, 900);
-        assert_eq!(offset, 5664, "15-min March 1 leap year");
     }
 
     /// Regression: non-DST running path produces correct schedule index after Feb 29.

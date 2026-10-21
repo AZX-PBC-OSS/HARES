@@ -31,10 +31,6 @@ pub struct HpCooler {
     descriptor: EquipmentDescriptor,
     ports: Vec<PortDeclaration>,
     is_mshp: bool,
-    /// RTF of the companion heating coil from the previous step.
-    /// Set by the system coordinator after the heater step so that the cooler
-    /// can compute crankcase power using `max(cooling_rtf, heating_rtf)`.
-    companion_heating_rtf: Option<f64>,
 }
 
 impl HpCooler {
@@ -87,7 +83,6 @@ impl HpCooler {
             ports: inner.ports().to_vec(),
             inner,
             is_mshp,
-            companion_heating_rtf: None,
         }
     }
 
@@ -99,22 +94,6 @@ impl HpCooler {
     #[must_use]
     pub fn mshp_cooler(config: EquipmentConfig) -> Self {
         Self::build(config, "MSHP Cooler", true)
-    }
-
-    /// Provide the companion heating coil's RTF from the most recent step.
-    ///
-    /// Call this after the heater's `step()` completes and before calling this
-    /// cooler's `step()`, so that crankcase heater power accounts for HP heating
-    /// mode operation. Pass `None` to clear the companion RTF (standalone AC mode).
-    pub fn set_companion_heating_rtf(&mut self, rtf: Option<f64>) {
-        self.companion_heating_rtf = rtf;
-    }
-
-    /// Return the cooling coil's runtime fraction from the most recent step.
-    ///
-    /// Used by the system coordinator to pass to the companion heater side.
-    pub fn last_cooling_rtf(&self) -> f64 {
-        self.inner.core.last_cooling_rtf
     }
 
     fn typed_hp_to_central_ac_config(
@@ -278,11 +257,7 @@ impl Equipment for HpCooler {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        // Pass companion_heating_rtf so crankcase uses max(cooling_rtf, heating_rtf)
-        // when this cooler is part of an HP system.
-        self.inner
-            .core
-            .step(env, dt, ports, self.companion_heating_rtf)
+        self.inner.core.step(env, dt, ports)
     }
 
     fn telemetry(&self) -> &Telemetry {
@@ -498,11 +473,6 @@ impl GshpCooler {
         cfg.zone_map = source.zone_map.clone();
         cfg.zone_capacitance_j_per_k = source.zone_capacitance_j_per_k;
         Ok(cfg)
-    }
-
-    /// Return the cooling coil's runtime fraction from the most recent step.
-    pub fn last_cooling_rtf(&self) -> f64 {
-        self.inner.core.last_cooling_rtf
     }
 }
 
@@ -940,10 +910,6 @@ impl WshpCooler {
         cfg.zone_map = source.zone_map.clone();
         cfg.zone_capacitance_j_per_k = source.zone_capacitance_j_per_k;
         Ok(cfg)
-    }
-
-    pub fn last_cooling_rtf(&self) -> f64 {
-        self.inner.core.last_cooling_rtf
     }
 }
 

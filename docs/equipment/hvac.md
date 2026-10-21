@@ -77,6 +77,22 @@ Both support ReverseCycle or Resistive heat delivery.
 - ASHP default: 50 W @ 12.8C activation threshold
 - MSHP default: 15 W @ 0C
 - Optional capacity curve: `effective_cap = rated * (c0 + c1*T + c2*T²)`
+- Scales with the cooling coil's off fraction: `effective_cap * (1 - cooling_rtf)`,
+  drawing power only on off-steps below the threshold
+
+**No companion-heating RTF input.** The crankcase model reads the
+cooler's own cooling runtime fraction alone. A companion-RTF plumbing
+(the heater exposing its last heating RTF, the cooler accepting it and
+refining the crankcase draw to `rated * (1 - max(cooling_rtf,
+heating_rtf))`, and a companion-aware branch in the coil's latent
+degradation) existed unused: no coordinator ever passed the value, so
+every consumer read `None` and the refinement never fired. The plumbing
+is deleted; OCHRE's crankcase is mode-gated (`HVAC.py:1076`, full draw
+when the compressor is off) with no runtime-fraction refinement at all,
+so the deleted machinery had no parity contract behind it. If a future
+coordinator wants the refinement, it is a one-line pass at the dwelling
+level plus this model's max form, and this paragraph is the place the
+decision is recorded.
 
 ### Backup/Auxiliary Electric Resistance
 
@@ -97,7 +113,8 @@ graph LR
 
 - Heater: `ThermalCategory::HvacHeating`, applies `duct_dse` and `space_fraction`
 - Cooler: negative sensible + latent via SHR split, `ThermalCategory::HvacCooling`
-- Electrical: compressor + fan + ER backup + crankcase + pan heater (MSHP), plus reactive power per [power-factor](./power-factor.md)
+- Electrical (heater): compressor + fan + ER backup + pan heater (MSHP), plus reactive power per [power-factor](./power-factor.md)
+- Electrical (cooler): compressor + fan + crankcase, plus reactive power per the same rule (the crankcase heater is the cooler's model, matching OCHRE's class layout)
 
 ### Reactive Power
 

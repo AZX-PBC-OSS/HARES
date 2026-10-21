@@ -56,19 +56,23 @@ ScheduleSource::SolarAware {
 }
 ```
 
-### SeededNoise
+### Stochastic
 
-Deterministic pseudo-random draws (ChaCha8). Determinism depends on seed + call order, not on simulation time. Supports `reset()` for checkpoint restart.
+Stateful pseudo-random draws (ChaCha8). Determinism depends on seed + call order, not on simulation time. Supports `reset()` for checkpoint restart, and the state (seed, draw count, RNG position) rides the schedule-source snapshots and the reseed derivation.
 
 ```rust
-ScheduleSource::SeededNoise {
-    base: f64,
-    std_dev: f64,
+ScheduleSource::Stochastic {
+    kind: DistributionKind,  // Gaussian | Uniform | LogNormal | Exponential
     seed: [u8; 32],
-    ..
+    draw_count: u64,
+    rng: ChaCha8Rng,
+    clamp_min: Option<f64>,
+    clamp_max: Option<f64>,
 }
-// result = base + std_dev * N(0,1)
 ```
+
+The noisy-TimeWindows source's RNG keystream derivation is documented
+under [TimeWindows](#timewindows) below.
 
 ### Shared
 

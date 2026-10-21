@@ -99,16 +99,13 @@ pub(super) struct CoilOperatingState {
 /// The coil operating state is the fields of [`CoilOperatingState`]:
 /// steady-state SHR, runtime fraction, entering dry-bulb and wet-bulb
 /// temperatures, and the rated and actual latent capacities. `params` carries
-/// the Henderson-Rengarajan model coefficients. `heating_rtf` is the companion
-/// heating coil RTF, if heating runs during AC off-cycles (e.g. heat-pump +
-/// auxiliary heat); pass `None` or `Some(0.0)` when not applicable.
+/// the Henderson-Rengarajan model coefficients.
 ///
 /// # Returns
 /// Effective SHR clamped to `[steady_state_shr, 1.0]`.
 pub(super) fn effective_shr_with_latent_degradation(
     state: CoilOperatingState,
     params: &LatentDegradationParams,
-    heating_rtf: Option<f64>,
 ) -> f64 {
     let CoilOperatingState {
         steady_state_shr,
@@ -164,20 +161,12 @@ pub(super) fn effective_shr_with_latent_degradation(
         return steady_state_shr; // RTF = 0: compressor never on, no degradation meaningful
     };
 
-    // If a companion heating coil runs during the cooling off-cycle, the coil
-    // sees warm moist air for a shorter effective off-time, reducing degradation.
-    let heating_rtf_val = heating_rtf.unwrap_or(0.0).clamp(0.0, 1.0);
     let two_twet_over_gamma = if gamma > 0.0 {
         2.0 * twet / gamma
     } else {
         f64::INFINITY
     };
-    let toff_capped = toff_base.min(two_twet_over_gamma);
-    let toff_effective = if heating_rtf_val > rtf && heating_rtf_val > 0.0 {
-        toff_capped * rtf / heating_rtf_val
-    } else {
-        toff_capped
-    };
+    let toff_effective = toff_base.min(two_twet_over_gamma);
 
     // Initial estimate of `aa` -- a surrogate for the moisture removal onset time.
     let aa = gamma * toff_effective - 0.25 / twet * gamma * gamma * toff_effective * toff_effective;
@@ -625,11 +614,7 @@ mod latent_degradation_tests {
 
     /// Call the degradation model at AHRI-rated entering conditions with the
     /// given RTF; the common test shape.
-    fn degradation_shr(
-        runtime_fraction: f64,
-        params: &LatentDegradationParams,
-        heating_rtf: Option<f64>,
-    ) -> f64 {
+    fn degradation_shr(runtime_fraction: f64, params: &LatentDegradationParams) -> f64 {
         effective_shr_with_latent_degradation(
             CoilOperatingState {
                 steady_state_shr: STEADY_SHR,
@@ -640,7 +625,6 @@ mod latent_degradation_tests {
                 actual_latent_capacity_w: ACTUAL_LAT_W,
             },
             params,
-            heating_rtf,
         )
     }
 
@@ -684,7 +668,6 @@ mod latent_degradation_tests {
                 actual_latent_capacity_w: 0.0,
             },
             &params,
-            None,
         );
         assert_eq!(
             result, STEADY_SHR,
@@ -698,7 +681,7 @@ mod latent_degradation_tests {
     #[test]
     fn full_load_no_degradation() {
         let params = partial_degradation_params();
-        let result = degradation_shr(1.0, &params, None);
+        let result = degradation_shr(1.0, &params);
         assert_eq!(
             result, STEADY_SHR,
             "RTF=1.0 must return steady_state_shr unchanged"
@@ -717,7 +700,7 @@ mod latent_degradation_tests {
     #[test]
     fn high_rtf_partial_degradation() {
         let params = partial_degradation_params();
-        let result = degradation_shr(0.9, &params, None);
+        let result = degradation_shr(0.9, &params);
         assert!(
             result > STEADY_SHR,
             "high-RTF SHR ({result:.4}) must exceed steady-state ({STEADY_SHR})"
@@ -746,7 +729,7 @@ mod latent_degradation_tests {
         // Only RTFs where ton < To yield SHR=1.0.
         for rtf_pct in [10u32, 30, 50] {
             let rtf = rtf_pct as f64 / 100.0;
-            let result = degradation_shr(rtf, &params, None);
+            let result = degradation_shr(rtf, &params);
             assert_eq!(
                 result, 1.0,
                 "twet=1000s at RTF={rtf} → To > ton → max degradation, got {result:.4}"
@@ -762,40 +745,13 @@ mod latent_degradation_tests {
         let params = partial_degradation_params();
         for rtf_pct in 1..=99u32 {
             let rtf = rtf_pct as f64 / 100.0;
-            let result = degradation_shr(rtf, &params, None);
+            let result = degradation_shr(rtf, &params);
             assert!(
                 result >= STEADY_SHR,
                 "SHR {result:.4} below steady-state {STEADY_SHR} at RTF={rtf}"
             );
             assert!(result <= 1.0, "SHR {result:.4} above 1.0 at RTF={rtf}");
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Test 7: Companion heating RTF > cooling RTF → shorter effective off-time
-    //         → less moisture re-evaporation → lower SHR_eff.
-    //
-    // Uses small twet (50s) at high RTF (0.9) so partial degradation is visible.
-    // ------------------------------------------------------------------
-    #[test]
-    fn companion_heating_reduces_degradation() {
-        let params = LatentDegradationParams {
-            twet_rated_s: 50.0,
-            gamma_rated: 1.5,
-            max_cycling_rate: 3.0,
-            latent_time_constant_s: 45.0,
-        };
-        let cooling_rtf = 0.9;
-        let heating_rtf = 0.95;
-
-        let shr_no_heat = degradation_shr(cooling_rtf, &params, None);
-        let shr_with_heat = degradation_shr(cooling_rtf, &params, Some(heating_rtf));
-        // With companion heating the effective off-time is shorter → less moisture
-        // re-evaporates → more latent removal → lower effective SHR.
-        assert!(
-            shr_with_heat <= shr_no_heat,
-            "companion heating SHR ({shr_with_heat:.4}) must be <= no-heating ({shr_no_heat:.4})"
-        );
     }
 
     // ------------------------------------------------------------------
@@ -814,7 +770,7 @@ mod latent_degradation_tests {
             max_cycling_rate: 3.0,
             latent_time_constant_s: 45.0,
         };
-        let result = degradation_shr(0.9, &params, None);
+        let result = degradation_shr(0.9, &params);
         assert!(
             result > STEADY_SHR && result <= 1.0,
             "huge twet at high RTF → partial degradation: expected SHR in ({STEADY_SHR:.4}, 1.0], got {result:.4}"
@@ -844,8 +800,8 @@ mod latent_degradation_tests {
             ..fast
         };
         let rtf = 0.9;
-        let shr_fast = degradation_shr(rtf, &fast, None);
-        let shr_slow = degradation_shr(rtf, &slow, None);
+        let shr_fast = degradation_shr(rtf, &fast);
+        let shr_slow = degradation_shr(rtf, &slow);
         // Both must be in [STEADY_SHR, 1.0].
         assert!(
             (STEADY_SHR..=1.0).contains(&shr_fast),
@@ -891,7 +847,7 @@ mod latent_degradation_tests {
             max_cycling_rate: 3.0,
             latent_time_constant_s: 45.0,
         };
-        let result = degradation_shr(0.9, &params, None);
+        let result = degradation_shr(0.9, &params);
         // Expected ≈ 0.787; allow ±0.005 for floating-point and gamma normalisation.
         assert!(
             (result - 0.787).abs() < 0.005,
@@ -911,7 +867,7 @@ mod latent_degradation_tests {
             max_cycling_rate: 6.0,
             latent_time_constant_s: 45.0,
         };
-        let result = degradation_shr(0.5, &params, None);
+        let result = degradation_shr(0.5, &params);
         // ton = 3600/(4*6*0.5) = 300s > twet=50s → To < ton → lhr_mult > 0 → degradation.
         assert!(
             result >= STEADY_SHR,
@@ -942,7 +898,7 @@ mod latent_degradation_tests {
             latent_time_constant_s: 45.0,
         };
         for rtf in [0.10, 0.15, 0.20, 0.25, 0.30, 0.35] {
-            let shr = degradation_shr(rtf, &params, None);
+            let shr = degradation_shr(rtf, &params);
             assert!(
                 shr >= STEADY_SHR,
                 "SHR at RTF={rtf:.2} must be >= steady-state SHR {STEADY_SHR}, got {shr:.4}"
