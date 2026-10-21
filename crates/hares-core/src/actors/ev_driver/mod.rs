@@ -1259,11 +1259,29 @@ impl EvDriverActor {
         env: &'a EnvironmentState,
         current_minute: u16,
     ) -> DecisionContext<'a> {
+        // The pack's live discharge ceiling is the equipment's published
+        // `DISCHARGE_CEILING_KW` telemetry when the equipment is
+        // observable - the leg ratings and the energy above the effective
+        // discharge floor, the ceiling the equipment's own discharge step
+        // will enforce. Sizing a discharge vote on the charge rating
+        // overstates the pack's capability: the equipment clamps the
+        // export, and dispatch and delivery diverge exactly where a
+        // consumer regresses on the pack. The unobservable-equipment
+        // fallback stays the charge rating (the warned unresolved-equipment
+        // mode, the same fallback the needed-hours estimate carries).
+        // allowed: DISCHARGE_CEILING_W is the equipment's published live
+        // discharge ceiling, telemetry-only (CoreOutput has no ceiling
+        // field); the same name-keyed telemetry contract
+        // `observed_charge_derate` reads under.
+        let observed_discharge_ceiling_w = env
+            .equipment_telemetry
+            .get(self.target_name())
+            .and_then(|t| t.get(tk::DISCHARGE_CEILING_W));
         DecisionContext {
             current_soc: self.perceived_soc(),
             capacity_j: self.capacity_j,
             max_charge_w: self.max_charge_w,
-            max_discharge_w: self.max_charge_w,
+            max_discharge_w: observed_discharge_ceiling_w.unwrap_or(self.max_charge_w),
             env,
             current_minute,
             next_departure_minute: self.todays_event.map(|e| e.departure_minute),
@@ -1592,6 +1610,16 @@ impl Actor for EvDriverActor {
                         // back to expected miles, the honest basis for a
                         // trip that will not happen).
                         self.todays_event = None;
+                        // The day's ready-by deadline dies with the trip:
+                        // a deadline the driver latched for this departure
+                        // must not keep raising the charging destination,
+                        // pacing the pack, or holding the discharge floor
+                        // ready for a departure that will not happen.
+                        out.push(DispatchRequest {
+                            target: self.vehicle.target.clone(),
+                            signal: ControlSignal::EvClearReadyBy,
+                            priority: PriorityTier::Schedule,
+                        });
                         tracing::warn!(
                             actor = %self.name,
                             target = self.target_name(),
@@ -2144,6 +2172,104 @@ mod tests {
         assert!(
             actor.todays_event.is_none(),
             "no day may be invented from a miles source the driver could not read"
+        );
+    }
+
+    /// The decision context's discharge ceiling is the equipment's
+    /// published live discharge ceiling when the equipment is observable -
+    /// not the charge rating. A vote sized off the charge rating
+    /// overstates the pack's capability: the equipment clamps the export
+    /// to its own leg rating and the energy above its discharge floor, so
+    /// dispatch and delivery diverge exactly where a consumer regresses on
+    /// the pack's capability. The unobservable-equipment fallback stays
+    /// the charge rating (the warned unresolved-equipment mode).
+    #[test]
+    fn decision_context_carries_the_equipment_s_discharge_ceiling() {
+        let actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_w: 5_000.0,
+                price_threshold: 0.20,
+            },
+            0.7,
+        );
+        let mut env = env_at_minute(18 * 60 + 1);
+        // The equipment publishes its live discharge ceiling: 3000 W,
+        // below the driver's 7200 W charge rating the context used to
+        // carry.
+        let mut telemetry = hares_types::Telemetry::with_capacity(2);
+        telemetry.insert(tk::DISCHARGE_CEILING_W, 3000.0);
+        env.equipment_telemetry
+            .insert(actor.target_name().to_string(), telemetry);
+
+        let ctx = actor.decision_context(&env, 18 * 60 + 1);
+        assert!(
+            (ctx.max_discharge_w - 3000.0).abs() < 1e-9,
+            "the decision context must carry the equipment's published \
+             discharge ceiling (3000 W), got {} W (the charge rating is 7200 W)",
+            ctx.max_discharge_w
+        );
+    }
+
+    #[test]
+    fn decision_context_discharge_ceiling_falls_back_to_the_charge_rating() {
+        let actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_w: 5_000.0,
+                price_threshold: 0.20,
+            },
+            0.7,
+        );
+        let env = env_at_minute(18 * 60 + 1);
+
+        let ctx = actor.decision_context(&env, 18 * 60 + 1);
+        assert!(
+            (ctx.max_discharge_w - 7200.0).abs() < 1e-9,
+            "with no equipment telemetry the context falls back to the charge \
+             rating, got {} W",
+            ctx.max_discharge_w
+        );
+    }
+
+    /// A cancelled trip clears the equipment's ready-by deadline: the
+    /// driver dispatches the clear beside consuming the day's event, so
+    /// the deadline's target, pacing and discharge-floor effects do not
+    /// linger on a pack whose trip will never happen.
+    #[test]
+    fn cancelled_trip_clears_the_ready_by_deadline() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+        // A trip the pack cannot cover: 300 miles against a 60 kWh pack
+        // (300 mi x 1609.344 m/mi x 671.08 J/m ~ 3.24e8 J). The departure
+        // minute must match the step.
+        actor.todays_event = Some(DayEvent {
+            departure_minute: 8 * 60,
+            arrival_minute: 18 * 60,
+            drive_j: 300.0 * 1609.344 * 671.080_887_616_320_6,
+        });
+        let event_drive_j = {
+            let event = actor.todays_event.expect("event set");
+            event.drive_j
+        };
+        assert!(
+            event_drive_j > 216_000_000.0,
+            "the test's trip must exceed the pack to force the cancellation path"
+        );
+
+        let env = env_at_minute(8 * 60);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            actor.todays_event.is_none(),
+            "the cancelled trip consumes the day's event"
+        );
+        assert_eq!(actor.drive_cancelled, 1);
+        assert!(
+            out.iter()
+                .any(|r| matches!(r.signal, ControlSignal::EvClearReadyBy)),
+            "the cancellation must dispatch the ready-by clear so the \
+             equipment's latched deadline does not outlive the trip, got {out:?}"
         );
     }
 

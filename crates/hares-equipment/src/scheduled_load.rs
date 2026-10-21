@@ -430,7 +430,12 @@ impl Equipment for ScheduledLoad {
         // is cleared at the end of this step (per-step, not persistent).
         let (electric_power_w, reactive_power_var, gas_consumption_w) =
             if let Some(override_w) = self.power_setpoint_override.take() {
-                (override_w, 0.0, 0.0)
+                // The override commands real power; the reactive side stays
+                // the ZIP model's at that power (Rule R1: Q-only, the real
+                // side untouched) - an overridden nonzero-pf load keeps its
+                // vars, exactly as the scheduled path's Q does.
+                let q = self.zip.reactive_var(override_w, env.grid.bus_voltage_pu());
+                (override_w, q, 0.0)
             } else {
                 // Apply the month multiplier (D-013). Negative schedule
                 // values are silently clamped to zero -- OCHRE treats them as "no load" rather
@@ -1365,6 +1370,42 @@ mod tests {
         assert!(
             (ports.electrical.net_active_w() - 3000.0).abs() < 10.0,
             "step 2 should revert to schedule 3.0"
+        );
+    }
+
+    /// A `PowerSetpoint` override keeps the load's reactive power: Q comes
+    /// from the ZIP model at the commanded real power, exactly as the
+    /// scheduled path's Q does. The pre-fix override returned
+    /// `(override_w, 0.0, 0.0)`, so a nonzero-pf load overriding its power
+    /// for a step reported P with no Q - the reactive power of the load
+    /// vanished for the step.
+    #[test]
+    fn power_setpoint_override_keeps_reactive_power_from_the_zip_model() {
+        let mut config = config_with_schedule("s", "Lighting", &[3.0]);
+        // A nonzero-pf ZIP: pf = 0.9, unity reactive base (constant-power
+        // reactive: zq = iq = 0, pq = 1).
+        let mut zip = ZipLoad::constant_power();
+        zip.pf = 0.9;
+        config.zip = Some(zip);
+        let mut eq = ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+        let env = base_env();
+        eq.init(&config, &env).unwrap();
+        eq.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: 5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots::default();
+        eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+        let q = ports.electrical.reactive_power_var;
+        let expected = 5000.0 * 0.9_f64.acos().tan();
+        assert!(
+            (q - expected).abs() < 1e-6,
+            "an overridden setpoint must keep the ZIP model's reactive power \
+             (expected ~{expected} var at pf 0.9), got {q} var"
         );
     }
 

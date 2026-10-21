@@ -137,6 +137,12 @@ class TestControlSignalConstructors:
         sig = ControlSignal.ev_set_ready_by(7.0, 0.85)
         assert sig.to_dict()["target_soc"] == 0.85
 
+    def test_ev_clear_ready_by_round_trips(self):
+        sig = ControlSignal.ev_clear_ready_by()
+        assert sig.to_dict()["type"] == "EvClearReadyBy"
+        restored = ControlSignal.from_dict(sig.to_dict())
+        assert restored.to_dict() == sig.to_dict()
+
     def test_max_capacity_fraction_rejects_out_of_range(self):
         with pytest.raises(ValueError):
             ControlSignal.max_capacity_fraction(-0.1)

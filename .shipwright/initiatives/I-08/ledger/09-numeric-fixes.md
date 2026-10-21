@@ -6380,3 +6380,155 @@ bytes of engine output).
 **Dependencies:** the physics constants' `BTU_PER_HR_PER_W`, the
 autosize water-heater capacity formula, the crankcase and latent
 degradation models' surviving forms, and the five docs.
+
+## Hardening 20: the grid and equipment edge behavior matches its documented contracts
+
+**Kind:** hardening (five minor grid/equipment defects; behavior changes
+only where the current behavior is the defect, plus two divergence
+records and one refutation recorded; no golden moves).
+
+**(a) The PV inverter's default priority.** The PV's constructed default
+inverter priority was Var: at the first apparent-power overload it
+curtailed real generation to hold reactive output no controller asked
+for, while the battery's and EV's kVA clamps are active-power-priority
+by contract - the default silently differed from the rest of the DER
+fleet's convention. The constructed default is Watt (active-power
+priority), and the three modes' behavior at zero real power - the place
+they disagree, past the apparent-power rating (within it every mode
+passes the request unchanged) - is documented on the `InverterPriority`
+enum and in `docs/equipment/pv.md`: Watt's min-pf bound is zero at
+P = 0, Var's Q ceiling is proportional to P and so zero at P = 0, and
+Cpf delivers the full reactive request up to the rating at P = 0. The
+P = 0 contract is pinned by
+`inverter_priority_zero_power_semantics_per_mode` (green at the parent:
+a doc-contract pin of the shipped semantics, written beside the RED
+default witnesses).
+
+**(b) The battery's efficiency convention and its floor.** Two defects.
+The constructor's default one-way efficiencies split the round-trip
+efficiency `sqrt()` per direction (round-trip 0.97) while the typed
+init's convention applies the inverter efficiency one-way each direction
+(round-trip 0.9409, the documented one): a battery stepped on its
+constructor defaults discharged at a different efficiency than a battery
+round-tripped through init with no configured efficiency - the same
+command moved the two packs' SOC by different amounts (the parent
+witness: discharge deltas 0.0376 against 0.0584 on the old comparison
+shape). The constructor and the typed init now share one
+`default_one_way_eta()` holding the documented convention. Second, the
+self-discharge subtraction ran BEFORE the charge/discharge update whose
+result is clamped back into the operating bounds, so an idle battery
+parked at `min_soc` ended every step exactly at the floor with zero
+metered power - its configured self-discharge loss restored free,
+indefinitely (the parent witness: 50 idle steps at a 2%/day rate held
+SOC at exactly 0.15). The self-discharge now applies AFTER the power
+update and its bounds clamp - OCHRE's own composition
+(`Battery.py`: `next_soc = soc + power_term - self_discharge`), which
+HARES's comment already cited - and the bounds clamp never lifts a pack
+that enters below the floor: a SOC eased below it by the passive loss is
+not recharged by the clamp (the loss would be refunded free every step,
+with zero metered power). The pack at the floor now eases below it by
+its real passive loss; the default rate is 0%/day and every shipped
+battery reads the default, so no recorded number moves.
+
+**(c) The EV driver's discharge ceiling, pacing and cancellation.** Three
+defects. The decision context's `max_discharge_w` carried the charge
+rating where the pack's live discharge ceiling belongs - a V2G/V2H vote
+sized off the charge rating overstates the pack's capability, and the
+equipment clamps the export, so dispatch and delivery diverge exactly
+where a consumer regresses on the pack. The EV equipment now publishes
+its live AC discharge ceiling (`DISCHARGE_CEILING_W`: the tighter of
+each enabled leg's rating and that leg's energy above its effective
+discharge floor over the step; zero when neither leg is enabled) and the
+driver's decision context carries it, falling back to the charge rating
+only in the warned unresolved-equipment mode. Second, the ready-by
+pacing was bang-bang with a ±1 h past-deadline grace window: full rated
+power only when the deficit could not land in time, zero otherwise, and
+full rate for up to an hour past a latched deadline whose departure
+never fired - a pack that could coast to its deadline charged at nothing
+for hours, then slammed to full rate at the buffer boundary. The pacing
+is now proportional: the average power that lands the deficit by the
+deadline, clamped to the rated power, recomputed every step so the
+CC-CV taper's deepening self-corrects; a deadline in the past reads as
+tomorrow's (the ready-by departure recurs daily; the pre-existing wrap
+semantics the tests encoded), and the grace window is gone. Third, a
+cancelled trip's deadline lingered: the driver consumed the day's event
+but dispatched nothing, so the equipment's latched ready-by kept
+raising the charging destination (`max(controller, deadline)` under
+DeadlineGuarantee) and holding the discharge floor ready for a departure
+that would not happen. The cancellation path now dispatches a typed
+`EvClearReadyBy` signal (the new `ControlSignal` variant, the
+`EV_SET_READY_BY` capability, Schedule tier, the Python
+`Signal.ev_clear_ready_by()` / `DispatchRequest.ev_clear_ready_by`
+surfaces and the dict round-trip alongside), and the equipment's arm
+drops the deadline's target, pacing and floor contribution together.
+
+**(d) The scheduled load's setpoint override.** A `PowerSetpoint`
+override returned `(override_w, 0.0, 0.0)`, so a nonzero-pf load
+overriding its power for a step reported P with no Q - the reactive
+power of the load vanished for the step. The override keeps the ZIP
+model's Q at the commanded power (`ZipLoad::reactive_var`, Rule R1: the
+real side untouched, the reactive side the model's), exactly as the
+scheduled path's Q does.
+
+**(e) The divergence records.** `docs/alignment/DIVERGENCES.md` gains
+D-035 (the HVAC `space_fraction` scales the metering, not the zone
+gains: OCHRE `HVAC.py:556-565`'s own note keeps the envelope's gains
+unsplit while the results side scales; HARES's heat-pump heater and air
+conditioner reproduce the asymmetry, the sites named) and D-036 (the
+fuel units - furnace and boiler - scale their zone delivery by
+`space_fraction` symmetrically with their meters: no OCHRE contract
+covers them, the boiler being a stub in OCHRE, and the internally
+consistent choice is deliberate per unit class). Neither record moves
+code: the shipped fixtures' space_fraction values are 1.0, where both
+conventions coincide.
+
+**The Task 1.9 refutation, recorded.** The review's core M3 claimed the
+control-signal validation was debug-only and that the external
+`apply_control` path bypassed even that - a release-profile hazard
+where inverted setpoints or NaN powers reach the equipment. The
+verification refuted the claim: `Equipment::apply_control`
+(`crates/hares-equipment/src/lib.rs`) runs
+`ensure_signal_supported` (the equipment's declared control
+capabilities) and `ControlSignal::validate_numeric_bounds()` (the typed
+per-field domain checks: setpoint ranges, deadband ordering, finite
+powers) unconditionally, in every build profile, before dispatching to
+the equipment's own arm, and the dwelling's external path
+(`Dwelling::apply_control` -> the equipment trait method) rides the same
+boundary. The `debug_assert`s that remain live in the constructors
+(`hares-control/src/signal.rs`) are constructor-time ergonomics for test
+callers, not the validation layer; the runtime boundary validates in
+release. No code change: the claimed hazard does not exist.
+
+**RED first:** every behavior change carried its parent witness - the PV
+default's two (the constructed default reads Var; the overload curtails
+4000 W to 3200 W under the default), the battery's two (the discharge
+delta's convention split; the floor refund holding SOC at exactly
+`min_soc`), the driver's three (the context's ceiling reading the charge
+rating; the pacing returning bang-bang zero for a coasting deadline and
+the grace rate for a half-hour-past one; the cancellation dispatching no
+clear - the last a compile witness, the typed signal not existing at
+the parent), and the scheduled load's (the override reporting zero Q at
+pf 0.9). The natural-ventilation pin's RED arc is Hardening 21's record.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. The fixture sweep: the shipped fixtures carry
+no PV inverter-overload surface (the 1:1 DC/AC ratio with the pf-1
+baseline stays within the apparent rating, so the priority mode is
+inert), no battery self-discharge configuration (the default 0%/day and
+the fixture batteries read the defaults), no EV V2G/V2H strategy or
+ready-by deadline (the fixture drivers are the built-in Immediate
+strategy over constant sources), and no scheduled-load setpoint
+override (no controller dispatches in the golden runs).
+
+**Gates (run once on the branch tip carrying rows 122 and 123
+together, the two packages' files disjoint):** fmt clean, clippy
+`--workspace --all-targets --all-features -D warnings` clean, nextest
+`--workspace --all-features -j 2` 8349/8349 (8 skipped), `pytest -m ''
+-n 4` after `maturin develop` 1801 passed + 6 xfailed, 0 failed,
+0 errors, pyright 0, the goldens compare-all 10 + dst 1 bitwise
+identical.
+
+**Dependencies:** the `InverterPriority` enum, the PV, battery, EV and
+scheduled-load step paths, the EV telemetry, the `ControlSignal` enum
+and its Python surface, the two alignment docs, and the fixture suites
+unchanged.

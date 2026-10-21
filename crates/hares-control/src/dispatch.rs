@@ -62,7 +62,7 @@ impl From<&ControlSignal> for PriorityTier {
     /// | Safety (3)    | (reserved — no signal maps here)                                        |
     /// | Grid (2)      | DemandResponse, CurtailmentPercent, ReactiveSetpoint, PowerFactorSetpoint, InverterPriorityMode, PowerLimit |
     /// | UserOverride (1) | ThermalSetpoint, HumiditySetpoint, ModeOverride, ModeOverrideRelease, ThermalSetpointDelta |
-    /// | Schedule (0)  | PowerSetpoint, SOCTarget, DutyCycle, LoadFraction, GridConnect, SelfConsumption, ProtocolNative, IdealCapacity, IdealCapacityModeOverride, EvPlugIn, EvDrive, EvAwayCharge, EvSetReadyBy, EventDelay, MaxCapacityFraction, NonHvacZoneInput |
+    /// | Schedule (0)  | PowerSetpoint, SOCTarget, DutyCycle, LoadFraction, GridConnect, SelfConsumption, ProtocolNative, IdealCapacity, IdealCapacityModeOverride, EvPlugIn, EvDrive, EvAwayCharge, EvSetReadyBy, EvClearReadyBy, EventDelay, MaxCapacityFraction, NonHvacZoneInput |
     fn from(signal: &ControlSignal) -> Self {
         match signal {
             ControlSignal::ThermalSetpoint { .. }
@@ -91,6 +91,7 @@ impl From<&ControlSignal> for PriorityTier {
             | ControlSignal::EvDrive { .. }
             | ControlSignal::EvAwayCharge { .. }
             | ControlSignal::EvSetReadyBy { .. }
+            | ControlSignal::EvClearReadyBy
             | ControlSignal::EventDelay { .. }
             | ControlSignal::MaxCapacityFraction { .. }
             | ControlSignal::NonHvacZoneInput { .. } => PriorityTier::Schedule,

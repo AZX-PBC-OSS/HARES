@@ -647,6 +647,7 @@ pub enum PySignal {
         departure_hour: f64,
         target_soc: f64,
     },
+    EvClearReadyBy(),
     EvAwayCharge {
         power_w: f64,
     },
@@ -830,6 +831,7 @@ impl PySignal {
                 departure_hour,
                 target_soc,
             },
+            PySignal::EvClearReadyBy() => ControlSignal::EvClearReadyBy,
             PySignal::EvAwayCharge { power_w } => ControlSignal::EvAwayCharge { power_w },
             PySignal::EventDelay { delay_s } => ControlSignal::EventDelay { delay_s },
             PySignal::HumiditySetpoint {
@@ -1170,6 +1172,16 @@ impl PyDispatchRequest {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (target, priority=None))]
+    fn ev_clear_ready_by(target: String, priority: Option<PyPriority>) -> PyResult<Self> {
+        Ok(Self {
+            target,
+            signal: PySignal::EvClearReadyBy(),
+            priority: priority.unwrap_or(PyPriority::Schedule),
+        })
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (target, delay_s, priority=None))]
     fn event_delay(target: String, delay_s: f64, priority: Option<PyPriority>) -> PyResult<Self> {
         Ok(Self {
@@ -1490,6 +1502,11 @@ impl PySignal {
             departure_hour,
             target_soc,
         }
+    }
+
+    #[staticmethod]
+    fn ev_clear_ready_by() -> Self {
+        PySignal::EvClearReadyBy()
     }
 
     #[staticmethod]

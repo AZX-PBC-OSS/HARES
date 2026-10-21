@@ -135,6 +135,14 @@ const DEFAULT_HEATER_THRESHOLD_C: f64 = 0.0;
 /// Default round-trip efficiency used by the raw config path.
 /// Typed configs convert RTE to one-way efficiency before init.
 const DEFAULT_INVERTER_EFFICIENCY: f64 = 0.97;
+/// The one-way efficiency convention's default, shared by the constructor
+/// and the typed init: the inverter efficiency applies one-way in each
+/// direction (the documented post-init convention), so a battery stepped
+/// on its constructor defaults behaves like one round-tripped through
+/// init with no configured efficiency.
+fn default_one_way_eta() -> f64 {
+    DEFAULT_INVERTER_EFFICIENCY
+}
 /// All major residential batteries (Powerwall, aPower 2, Enphase IQ) spec -20 C
 /// as the lower operating limit for discharge.
 const DEFAULT_MIN_DISCHARGE_TEMP_C: f64 = -20.0;
@@ -478,8 +486,8 @@ impl Battery {
             max_soc: DEFAULT_MAX_SOC,
             import_limit_w: None,
             export_limit_w: None,
-            charge_efficiency: DEFAULT_INVERTER_EFFICIENCY.sqrt(),
-            discharge_efficiency: DEFAULT_INVERTER_EFFICIENCY.sqrt(),
+            charge_efficiency: default_one_way_eta(),
+            discharge_efficiency: default_one_way_eta(),
             heater_power_w: DEFAULT_HEATER_POWER_W,
             heater_threshold_c: DEFAULT_HEATER_THRESHOLD_C,
             min_discharge_temp_c: DEFAULT_MIN_DISCHARGE_TEMP_C,
@@ -1023,7 +1031,7 @@ impl Battery {
         // Raw configs still pass round-trip efficiency and are split in init_raw().
         let one_way_eta = c
             .inverter_efficiency
-            .unwrap_or(DEFAULT_INVERTER_EFFICIENCY)
+            .unwrap_or_else(default_one_way_eta)
             .clamp(f64::EPSILON, 1.0);
         self.charge_efficiency = c
             .charge_efficiency
@@ -1290,22 +1298,16 @@ impl Equipment for Battery {
         let (power_w, _ohmic_loss_w, terminal_v, current_a) =
             self.compute_electrical(target_power_w);
 
-        // -- Apply self-discharge --
-        // Self-discharge: absolute SOC loss per OCHRE Battery.py:337-338, matching Li-ion calendar aging model.
-        let soc_before = self.soc; // true pre-step SOC before self-discharge
-        self.soc -= self.self_discharge_rate_per_s * dt_s;
-        self.soc = self.soc.clamp(0.0, 1.0);
-
         // -- Update SOC from charge/discharge --
         // DC power seen by the cells after inverter conversion.
         // The terminal-voltage model in compute_electrical() already embeds ohmic
         // losses in the power balance -- do NOT subtract I²R again here.
+        let soc_before = self.soc; // true pre-step SOC, before power and self-discharge
         let dc_power_w = if power_w > 0.0 {
             power_w * self.charge_efficiency
         } else {
             power_w / self.discharge_efficiency
         };
-        let soc_before_charge = self.soc; // post-self-discharge, pre-charge/discharge
         let energy_delta_j = dc_power_w * dt_s;
         // Guard against division by zero when battery has no effective capacity
         // (fully degraded, SOH=0). The SOC cannot change without capacity to store
@@ -1314,12 +1316,18 @@ impl Equipment for Battery {
         if self.capacity_j > 0.0 {
             self.soc += energy_delta_j / self.capacity_j;
         }
-        self.soc = self.soc.clamp(eff_min_soc, eff_max_soc);
+        // The operating bounds govern the power-driven update: the floor
+        // stops discharge, the ceiling stops charge. Neither bound lifts a
+        // pack that enters below the floor: a SOC eased below it by the
+        // passive loss must not be recharged by the clamp (the loss would
+        // be refunded free every step, with zero metered power).
+        let soc_floor = eff_min_soc.min(soc_before);
+        self.soc = self.soc.clamp(soc_floor, eff_max_soc);
 
         // Recompute actual grid power and ohmic losses if SOC was clamped.
         // When SOC hits a bound, the actual energy transferred differs from
         // the target, so we must recompute losses from the actual current.
-        let actual_soc_delta = self.soc - soc_before_charge;
+        let actual_soc_delta = self.soc - soc_before;
         let actual_cell_energy_j = actual_soc_delta * self.capacity_j;
         let (actual_power_w, ohmic_loss_w) =
             if actual_soc_delta.abs() < f64::EPSILON && power_w.abs() > IDLE_POWER_THRESHOLD_W {
@@ -1343,6 +1351,18 @@ impl Equipment for Battery {
                 let (_, actual_ohmic_w, _, _) = self.compute_electrical(ac_equivalent_w);
                 (ac_equivalent_w, actual_ohmic_w)
             };
+
+        // -- Apply self-discharge --
+        // Self-discharge: absolute SOC loss per OCHRE Battery.py:337-338
+        // (Li-ion calendar aging), applied after the power update and its
+        // bounds clamp - OCHRE composes next_soc = soc + power_term -
+        // self_discharge in one step - so the clamp cannot refund the
+        // loss. Only the physical (0, 1) limits bound it: the operating
+        // floor above governs the power-driven update, and a pack parked
+        // at the floor eases below it by its real passive loss instead of
+        // holding the floor on restored energy.
+        self.soc -= self.self_discharge_rate_per_s * dt_s;
+        self.soc = self.soc.clamp(0.0, 1.0);
 
         // -- Cell heater --
         // Heater activates based on cell temperature alone -- it protects cells
@@ -2456,6 +2476,90 @@ mod tests {
         assert!(
             format!("{err:?}").contains("active_power_w"),
             "error must name the offending field, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn constructor_defaults_match_the_post_init_efficiency_convention() {
+        // A battery stepped on its constructor defaults must obey the same
+        // one-way efficiency convention as a battery round-tripped through
+        // init with no configured efficiency: the inverter efficiency
+        // applies one-way in each direction (the documented post-init
+        // convention). The pre-fix constructor split the round-trip
+        // efficiency sqrt() per direction (round-trip 0.97) while
+        // init_typed applies the inverter efficiency one-way (round-trip
+        // 0.9409), so the same discharge command moved the two packs'
+        // SOC by different amounts.
+        let env = base_env();
+        let config = typed_battery_config(None, None);
+
+        let mut bat = Battery::new(config.clone());
+        // The constructor's defaults state the post-init convention.
+        assert!(
+            (bat.charge_efficiency - default_one_way_eta()).abs() < 1e-12
+                && (bat.discharge_efficiency - default_one_way_eta()).abs() < 1e-12,
+            "the constructor's default one-way efficiencies must equal the \
+             post-init convention's default: charge {}, discharge {}",
+            bat.charge_efficiency,
+            bat.discharge_efficiency
+        );
+
+        // Behavioral witness: the SOC the discharge step consumes matches
+        // the one-way convention's arithmetic on the battery's own fields.
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let soc_before = bat.soc;
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let expected = (2000.0 / default_one_way_eta()) * 900.0 / bat.capacity_j;
+        assert!(
+            ((soc_before - bat.soc) - expected).abs() < 1e-12,
+            "a constructor-default battery must discharge under the one-way \
+             convention (expected SOC delta {expected}), got {}",
+            soc_before - bat.soc
+        );
+    }
+
+    #[test]
+    fn battery_at_min_soc_does_not_regain_self_discharged_energy() {
+        // A battery parked at its minimum SOC holds its charge: the bound
+        // clamp must not refund the self-discharge loss every step. The
+        // pre-fix order subtracted self-discharge and then clamped the
+        // operating bounds back on, so an idle pack at min_soc ended every
+        // step exactly at the floor with zero metered power - its
+        // configured self-discharge loss restored free, indefinitely.
+        let config = battery_config(&[
+            (KEY_SELF_DISCHARGE_PCT_PER_DAY, 2.0),
+            (KEY_INITIAL_SOC, DEFAULT_MIN_SOC),
+        ]);
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        let soc_start = bat.soc;
+        assert!((soc_start - DEFAULT_MIN_SOC).abs() < 1e-12);
+
+        let mut ports = default_ports();
+        for _ in 0..50 {
+            bat.step(&env, Duration::from_secs(900), &mut ports)
+                .unwrap();
+            assert!(
+                bat.soc <= soc_start + 1e-12,
+                "an idle battery must never gain SOC, got {} from {soc_start}",
+                bat.soc
+            );
+        }
+        assert!(
+            bat.soc < soc_start - 1e-6,
+            "a battery at min_soc with a configured self-discharge rate must \
+             lose charge while idle: the bound clamp refunded the loss, \
+             holding SOC at {}",
+            bat.soc
         );
     }
 

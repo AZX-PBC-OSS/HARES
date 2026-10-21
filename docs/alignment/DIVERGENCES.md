@@ -1591,3 +1591,83 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   `schedule_index_wraps_after_schedule_length`,
   `schedule_value_is_loaded_each_timestep`,
   `generated_schedule_dec31_wraps_to_the_jan1_profile`.
+
+## D-035: The HVAC `space_fraction` scales the metering, not the zone gains
+
+- **Quantity:** what the HVAC `space_fraction` multiplies: the unit's
+  metered electric/fuel powers and telemetry against the zone's thermal
+  gains - the two sides scale differently, and the asymmetry is the
+  OCHRE-faithful shape.
+- **Reference behavior:** OCHRE `HVAC.py:556-565` scales the RESULTS side
+  only - `delivered_heat`, `electric_kw`, `fan_power`,
+  `gas_therms_per_hour` each `*= self.space_fraction`, under the source's
+  own note "reduce delivered heat (only for results) and power output
+  based on space fraction / Note: sensible/latent gains to envelope are
+  not updated". The zone's heat arrives through `add_gains_to_zone`
+  (`HVAC.py:560-563`), which distributes `sensible_gain` /
+  `latent_gain` by the per-zone fractions - the space_fraction never
+  touches the envelope's gains.
+- **HARES behavior:** the heat-pump heater and the air conditioner
+  reproduce the asymmetry exactly. The metering scales:
+  `heater.rs`'s `scaled_electric_w = step.electric_w * sf` (and the
+  fuel, reactive, fan, pump, ER-backup and pan-heater telemetry the same
+  way), `air_conditioner.rs`'s
+  `electric_w = (compressor_w + fan_w + crankcase) * sf` with each
+  sub-meter scaled. The zone gains do not:
+  `heater.rs`'s `write_zone_thermal_contributions(ports, sensible_gain_w
+  = step.thermal_output_w - latent, latent)` and the air conditioner's
+  cooling-side equivalent pass the unit's unscaled delivered heat to the
+  zone.
+- **Justification:** the space_fraction splits a shared unit's METERING
+  among the spaces it serves (a downstairs unit metered 70/30 across two
+  zones) - the bill and the end-use rollups read the scaled meter; the
+  zone's physical heat input is what the unit delivers to the air, and
+  OCHRE's own note keeps the gains unsplit. Re-aligning either side
+  (scaling the gains, or unscaling the meter) would break the OCHRE
+  parity fixtures' meter-vs-gains reconciliation in both directions.
+- **Class:** (a). OCHRE's asymmetry is the reference; HARES reproduces
+  it.
+- **Measured impact:** none - this is the convention the parity
+  fixtures already pin; entry records it so a re-alignment cannot "fix"
+  it silently.
+- **Pinning tests:** the OCHRE parity fixtures' per-equipment end-use
+  reconciliation (`meter kW` vs zone heat) across
+  `tests/fixtures/parity/` and `tests/fixtures/ochre_hold/`.
+
+## D-036: The fuel HVAC units scale their zone delivery by `space_fraction`
+
+- **Quantity:** the same `space_fraction` applied on the ZONE side for
+  the furnace and the boiler - the opposite of D-035's meter-only
+  asymmetry, and internally consistent (both the meter and the delivery
+  scale together).
+- **Reference behavior:** none to cite. OCHRE's furnace is a resistance
+  element whose meter scales (`HVAC.py:556-565`, D-035) with the gains
+  arriving unscaled; OCHRE's gas boiler is a stub - there is no OCHRE
+  boiler convention to diverge from, and no OCHRE furnace delivers its
+  zone heat scaled.
+- **HARES behavior:** the furnace computes
+  `gross_capacity_w = rated_capacity_w * duty * sf` (`furnace.rs`'s gas
+  and direct-fuel step paths), so the zone's delivered heat - and the
+  fan/electric meter and the fuel input derived from it - all scale by
+  sf together. The electric boiler does the same
+  (`thermal_output_w = rated_capacity_w * duty * sf` in `boiler.rs`),
+  with `element_w` and the pump draw following it.
+- **Justification:** the fuel units were never OCHRE parity targets for
+  the gains side (the boiler stub carries no contract; the furnace's
+  OCHRE twin is the resistance element, not a fuel burner), so there is
+  no upstream convention to reproduce, and the symmetric scaling is the
+  internally consistent choice: a unit metered at `sf` of its draw
+  delivers `sf` of its heat, and the end-use rollups reconcile without
+  a special case. Unifying on D-035's asymmetric shape would be a
+  physics change (the fuel units' zone gains would jump by `1/sf`) with
+  no parity contract behind it and no fixture asking for it; unifying
+  the HVAC units on THIS shape would break the OCHRE parity the review
+  verified. The two conventions are deliberate per unit class.
+- **Class:** (d). Comparison-artifact: the fuel units' symmetric
+  convention exists because their reference implementations differ from
+  the OCHRE HVAC units'.
+- **Measured impact:** none on the shipped fixtures - their
+  space_fraction values are 1.0 (single-zone units), where both
+  conventions coincide.
+- **Pinning tests:** the parity fixtures' fuel-unit end-use
+  reconciliation (the same suite as D-035's).

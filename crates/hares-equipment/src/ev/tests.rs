@@ -3856,11 +3856,22 @@ fn ev_set_ready_by_delays_then_charges() {
     })
     .unwrap();
 
-    // Step at 18:00 -- should be too early, BMS delays
+    // Step at 18:00 -- deadline reads as tomorrow 7:00 (13 h out): the
+    // deficit paces a proportional trickle, not the bang-bang zero.
     env.current_time = dt(2026, 1, 1, 18, 0, 0);
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let power_early = ev.telemetry().get("active_power_kw").unwrap();
+    {
+        let deficit_j = (0.8 - 0.3) * ev.battery_capacity_j;
+        let eta = ev.charging_efficiency.max(0.01);
+        let expected_w = (deficit_j / (13.0 * 3600.0) / eta).min(7200.0);
+        assert!(
+            (power_early - expected_w).abs() < expected_w * 1e-3,
+            "a 13-hour deadline with a 0.5-pack deficit must pace a trickle \
+             (~{expected_w} W), got {power_early} W"
+        );
+    }
 
     // Step at 5:00 -- should be charging (close to deadline)
     ev.soc = 0.3;
@@ -3869,11 +3880,11 @@ fn ev_set_ready_by_delays_then_charges() {
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let power_late = ev.telemetry().get("active_power_kw").unwrap();
 
-    assert_eq!(
-        power_early, 0.0,
-        "BMS should delay charging early in the evening"
+    assert!(
+        power_late > 0.0,
+        "BMS should be charging close to deadline: the 2-hour window needs \
+         more than rated, so the pace is the rated power"
     );
-    assert!(power_late > 0.0, "BMS should be charging close to deadline");
 }
 
 #[test]
@@ -4273,9 +4284,144 @@ fn controller_target_above_ready_by_raises_destination() {
     );
 }
 
-/// A hold latched at home must not silently zero away-charging: the away
-/// arm consults the same `power_setpoint_w`, so the disconnect clear is
-/// what keeps `away_charge_fraction > 0` drivers able to charge off-site.
+/// The ready-by pace is proportional: the average power that lands the
+/// deficit at the deadline, clamped to the rated power. The pre-fix model
+/// was bang-bang - full rated power only when the deficit could not land
+/// in time, zero otherwise - so a pack that could coast to its deadline
+/// charged at nothing for hours and then slammed to full rate at the
+/// buffer boundary.
+#[test]
+fn ready_by_power_paces_proportionally_to_the_deadline() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Deadline 8 hours out; the deficit is sized to need 2 hours at rated
+    // power, so the paced power is rated * 2/8.
+    let now = dt(2026, 1, 1, 10, 0, 0);
+    ev.ready_by_hour = Some(18.0);
+    ev.soc = 0.5;
+    let soc_limit = 0.7;
+    let deficit_j = (soc_limit - ev.soc) * ev.battery_capacity_j;
+    let eta = ev.charging_efficiency.max(0.01);
+    let expected = (deficit_j / (8.0 * 3600.0) / eta).min(7200.0);
+
+    let paced = ev.bms_ready_by_power(now, 7200.0, soc_limit);
+    assert!(
+        (paced - expected).abs() < 1e-6,
+        "an 8-hour deadline with a 2-hour deficit must pace at ~{expected} W, got {paced} W"
+    );
+}
+
+/// A deadline in the past reads as tomorrow's (the ready-by departure
+/// recurs daily), and the pre-fix ±1 h past-deadline grace window is
+/// gone: a deadline half an hour past paces toward its next occurrence -
+/// a trickle, not the grace's full rate.
+#[test]
+fn ready_by_power_paces_a_past_deadline_at_its_next_occurrence() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    // Half an hour past the deadline (inside the old grace window),
+    // deficit open: the pace reads the deadline as tomorrow's (23.5 h
+    // out) - no grace rate.
+    let now = dt(2026, 1, 1, 10, 0, 0);
+    ev.ready_by_hour = Some(9.5);
+    ev.soc = 0.5;
+    let soc_limit = 0.7;
+    let deficit_j = (soc_limit - ev.soc) * ev.battery_capacity_j;
+    let eta = ev.charging_efficiency.max(0.01);
+    let expected = (deficit_j / (23.5 * 3600.0) / eta).min(7200.0);
+
+    let paced = ev.bms_ready_by_power(now, 7200.0, soc_limit);
+    assert!(
+        (paced - expected).abs() < 1e-6,
+        "a past deadline must pace at its next occurrence (~{expected} W), got {paced} W"
+    );
+}
+
+/// The witness of the lingering deadline: a latched ready-by whose
+/// departure has passed keeps raising the charging destination above the
+/// controller's target - the pack charges toward a departure that will
+/// not happen. The driver's cancellation path is what must clear it; this
+/// half holds the pre-clear state the clear releases.
+#[test]
+fn a_stale_deadline_keeps_the_pack_charging_past_its_departure() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.6.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    env.current_time = dt(2026, 1, 1, 7, 30, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 7.0, // already past: a trip that did not happen
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.5, // the controller's own target is BELOW the SOC
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        power > 0.0,
+        "the stale deadline (target 0.9 over SOC 0.6) keeps the pack charging \
+         for a departure that passed: power {power} kW"
+    );
+}
+
+/// The clear releases the pack: the deadline gone, the controller's own
+/// target governs the destination and the discharge floor loses the
+/// deadline's contribution.
+#[test]
+fn ev_clear_ready_by_signal_clears_the_deadline() {
+    let mut raw = base_raw();
+    raw.insert(KEY_INITIAL_SOC.to_string(), 0.6.into());
+    let config = ev_config(raw);
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    env.current_time = dt(2026, 1, 1, 7, 30, 0);
+    ev.apply_control_unchecked(&ControlSignal::EvSetReadyBy {
+        departure_hour: 7.0,
+        target_soc: 0.9,
+    })
+    .unwrap();
+    ev.apply_control(&ControlSignal::SOCTarget {
+        target_soc: 0.5,
+        min_soc: None,
+        max_soc: None,
+    })
+    .unwrap();
+    assert!(ev.ready_by_hour.is_some());
+
+    ev.apply_control_unchecked(&ControlSignal::EvClearReadyBy)
+        .unwrap();
+    assert!(ev.ready_by_hour.is_none());
+    assert!(ev.ready_by_soc.is_none());
+
+    let mut ports = PortSlots::default();
+    env.current_time = dt(2026, 1, 1, 7, 45, 0);
+    ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
+    let power = ev.telemetry().get("active_power_kw").unwrap();
+    assert!(
+        power == 0.0,
+        "with the deadline cleared the controller's target (0.5 below SOC) \
+         must govern: no charging for a cancelled departure, got {power} kW"
+    );
+}
+
 #[test]
 fn disconnect_clears_latched_hold_for_away_charging() {
     let mut raw = base_raw();
@@ -4324,7 +4470,7 @@ fn disconnect_clears_latched_hold_for_away_charging() {
 }
 
 #[test]
-fn bms_delay_outputs_zero_power_before_start() {
+fn bms_paces_small_deficit_low_before_a_far_deadline() {
     let mut raw = base_raw();
     raw.insert(KEY_INITIAL_SOC.to_string(), 0.75.into());
     let config = ev_config(raw);
@@ -4342,9 +4488,20 @@ fn bms_delay_outputs_zero_power_before_start() {
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(15), &mut ports).unwrap();
     let power = ev.telemetry().get("active_power_kw").unwrap();
-    assert_eq!(
-        power, 0.0,
-        "BMS should delay when SOC deficit is small and deadline is far"
+    // Proportional pacing: a small deficit (0.05 of the pack) with 12 h
+    // until the deadline paces a trickle, nowhere near the rated power.
+    // (The channel's held values are SI watts, the house SI convention
+    // for the legacy-named power keys.)
+    let deficit_j = (0.8 - 0.75) * ev.battery_capacity_j;
+    let eta = ev.charging_efficiency.max(0.01);
+    let expected_w = (deficit_j / (12.0 * 3600.0) / eta).min(7200.0);
+    assert!(
+        (power - expected_w).abs() < expected_w * 1e-6,
+        "a small deficit with a far deadline must pace low (~{expected_w} W), got {power}"
+    );
+    assert!(
+        power < 1000.0,
+        "the paced power must stay well under the rated power, got {power}"
     );
 }
 
@@ -6133,15 +6290,22 @@ fn ev_departure_at_step_boundary() {
     })
     .unwrap();
 
-    // At 12:00: 12 h until midnight, only 7.63 h needed → BMS delays
+    // At 12:00: 12 h until midnight, only 7.63 h needed → the proportional
+    // pace is the deficit spread over the remaining 12 h (well under
+    // rated; the pre-fix bang-bang model held zero here).
     env.current_time = dt(2026, 1, 1, 12, 0, 0);
     let mut ports = PortSlots::default();
     ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
     let power_early = ev.telemetry().get("active_power_kw").unwrap();
-    assert_eq!(
-        power_early, 0.0,
-        "BMS should delay at 12:00 for midnight departure (12 h remaining, needs 7.63 h)"
-    );
+    {
+        let deficit_j = (0.9 - ev.soc) * ev.battery_capacity_j;
+        let expected_w = (deficit_j / (12.0 * 3600.0) / 0.9).min(7200.0);
+        assert!(
+            (power_early - expected_w).abs() < expected_w * 1e-2,
+            "the midnight deadline paces the deficit over the remaining 12 h \
+             (~{expected_w} W), got {power_early} W"
+        );
+    }
 
     // At 20:00: 4 h until midnight but 7.63 h needed → BMS charges immediately
     ev.soc = 0.2;

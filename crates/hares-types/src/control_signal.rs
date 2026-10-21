@@ -164,6 +164,12 @@ pub enum ControlSignal {
         departure_hour: f64,
         target_soc: f64,
     },
+    /// Clear the EV BMS's latched ready-by deadline. A deadline whose trip
+    /// was cancelled must not keep raising the charging destination,
+    /// pacing the pack, or holding the discharge floor: the driver's
+    /// trip-cancellation path dispatches this beside consuming the day's
+    /// event.
+    EvClearReadyBy,
     /// Defer the next event/cycle start by `delay_s` seconds. Cannot be applied
     /// to an already-active event.
     EventDelay {
@@ -190,6 +196,26 @@ pub enum ControlSignal {
 }
 
 /// Inverter priority mode for smart inverter Watt/Var/CPF dispatch.
+///
+/// Within the apparent-power rating a request passes unchanged in every
+/// mode; the modes govern only the overload, and their behavior at zero
+/// real power (P = 0) with a reactive request pending is where they
+/// disagree:
+///
+/// - [`InverterPriority::Watt`]: real power is never curtailed for vars.
+///   With a minimum power factor configured (the default, 0.8), the
+///   min-pf enforcement bounds `|Q| <= |P|·tan(acos(min_pf))`, which is
+///   zero at P = 0 - Q falls to zero with the real power.
+/// - [`InverterPriority::Var`]: the Q ceiling is proportional to P
+///   (`|Q| <= |P|·tan(acos(min_pf))` via the max-q-at-pf ceiling), so Q
+///   also falls to zero at P = 0.
+/// - [`InverterPriority::Cpf`]: the apparent power is scaled to the
+///   rating preserving the power factor, so at P = 0 the full reactive
+///   request is delivered up to the rating (full Q at P = 0, capped at
+///   the apparent-power rating).
+///
+/// The constructed default is Watt: active-power priority, matching the
+/// battery's and EV's kVA clamps' active-power-priority contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InverterPriority {
     Watt,
@@ -568,6 +594,7 @@ impl ControlSignal {
                     )));
                 }
             }
+            Self::EvClearReadyBy => {}
             Self::EventDelay { delay_s } => {
                 if !delay_s.is_finite() || *delay_s < 0.0 {
                     return Err(HaresError::Control(format!(
@@ -621,6 +648,7 @@ impl ControlSignal {
             Self::EvDrive { .. } => ControlCapabilities::EV_DRIVE,
             Self::EvAwayCharge { .. } => ControlCapabilities::EV_AWAY_CHARGE,
             Self::EvSetReadyBy { .. } => ControlCapabilities::EV_SET_READY_BY,
+            Self::EvClearReadyBy => ControlCapabilities::EV_SET_READY_BY,
             Self::EventDelay { .. } => ControlCapabilities::EVENT_DELAY,
             Self::MaxCapacityFraction { .. } => ControlCapabilities::MAX_CAPACITY_FRACTION,
             Self::NonHvacZoneInput { .. } => ControlCapabilities::NON_HVAC_ZONE_INPUT,
