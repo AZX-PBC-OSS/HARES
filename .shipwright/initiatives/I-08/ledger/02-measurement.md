@@ -4683,3 +4683,41 @@ halts the pipeline until investigated.
 | 2026-10-21 | `c668dc25` (rows 120/121, the package E fold) | 176.4 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the clamp census and the constant/dead-code sweep package, the census diagnostics-scoped and proven pure with observe on/off, the sweep dead expected; the compare vs B1 bitwise identical; the wall under every prior row (1.9 percent under the B1 baseline, 0.5 percent under row 119's), the host quiet (load 1.58 at the start); the build_info reports `c668dc25`, dirty False, release |
 | 2026-10-21 | `dce26f77` (rows 122/123, the package F fold) | 176.7 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the grid/equipment batch and the ventilation contract decision, and the fixture sweep was bitwise at the tip, so the package carried no inverter-overload, self-discharge, V2G or setpoint-override surface; the compare vs B1 bitwise identical; the wall +0.2 percent vs row 121's, 1.8 to 2.3 percent under the B1 baseline, the host quiet (load 1.08 at the start); the build_info reports `dce26f77`, dirty False, release |
 | 2026-10-21 | `fe3fde8a` (rows 124/125/126, the package G fold) | 215.1 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the skin convergence self-report, the stage validation and the COP honesty, the export-price honesty, and the fixture sweep found no shipped golden exercising any changed surface (the fixtures carry no ER lockout config, no per-stage EIR table, no COP telemetry column, no tankless WH, and Immediate EV drivers over constant sources); the compare vs B1 bitwise identical; WALL CONTEXT: the fold's quiet-start wall 215.1 s (load 0.27) is +2.0 percent vs a same-day quiet-start control on the previous pin `dce26f77` run through the same instrument (210.9 s, load 0.24), inside the 5 percent band, while both pins measure 19 to 22 percent over their own recorded rows from hours earlier (row 123's 176.7 s, the B1 baseline 179.9/180.8 s), so the absolute shift is the host's era (a sibling session's build waves on the shared box), not the engine; the build_info reports `fe3fde8a`, dirty False, release |
+
+## The schedule resample's memory, 2026-10-21 (row 129, Hardening 25)
+
+The instrument is the I-08 allocation-accounting machinery: the
+counting allocator (`crates/hares-types/src/alloc_count.rs`) gained a
+byte channel beside its call count - `thread_alloc_bytes`, the
+calling thread's live requested bytes, the net of every allocating
+call's size and every deallocation's size, read as a delta across a
+measured region. The workload is the fleet's own shape: the 15-minute,
+16-column ResStock schedule (`bldg0000006`, 35040 rows) parsed once,
+resampled to the fleet's 1-minute step, then cloned ten times for the
+per-dwelling copies the environment builds hold. The measurement binary
+is `crates/hares-core/tests/schedule_resample_memory.rs` (its own test
+executable, the counting allocator installed); the pin runs in the
+suite and prints the numbers under `--nocapture`.
+
+| quantity | before (materialised expansion) | after (held source rows) |
+| ---- | ---- | ---- |
+| the resample to 60 s | 75,688,714 B (53 calls) | 5,048,074 B (53 calls) |
+| one dwelling's table (resample + one copy) | 83,257,737 B | 5,553,033 B |
+| the 10-dwelling fixture scale | 832,577,374 B | 55,530,334 B |
+| the ratio | 1x | 15.0x less |
+
+The before columns are the RED run's printed values at the parent
+shape; the after columns the GREEN run's, the same counters, the same
+workload, the same machine. The plan's ~50 MB/dwelling estimate
+understated the true per-dwelling cost (about 83 MB): 67.3 MB of
+expanded columns plus 8.4 MB of per-row stamps, and the per-dwelling
+copy pays it again. The call count does not witness the defect (the
+expansion is a handful of large allocations); the byte channel is the
+witness, and the counter's call-count semantics are untouched (its own
+exact-count tests pass unchanged).
+
+The value identity is pinned alongside: all 16 columns x all 525600
+per-step rows of the resampled series bitwise the source table's
+zero-order hold (`to_bits`), before and after. The consumer-side
+before/after (the ladder's DE-trace capture wall) lands with the
+ladder's next fold row; the engine-side proof is this record.
