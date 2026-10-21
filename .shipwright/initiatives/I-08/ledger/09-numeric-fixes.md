@@ -6682,3 +6682,119 @@ dst 1 bitwise identical, no re-capture.
 (the counting, the residual and the warn at the iteration's exit),
 `thermal_solver/mod.rs` (the per-step accumulators and the gains
 wiring), `thermal_solver/config.rs` (the two observe-gated fields).
+
+## Hardening 23: equipment stage validation and the backup heat's telemetry honesty
+
+**Kind:** hardening (one config surface added, two validations, one
+telemetry correction, one parity conversion).
+
+**The review's findings (equipment M4, m3, m4, m5), item by item:**
+
+**(a) The ER soft-lockout time was hardwired to twice the hard lockout.**
+`soft_lockout_max_s = er_hard_lockout_time_s * 2.0` with no config key:
+a user-configured hard lockout blocked the backup element during
+recovery ramps up to twice as long as OCHRE, whose
+`Backup Soft Lockout Time (minutes)` (HVAC.py:1216-1223) defaults to
+the hard value and clamps a below-hard soft time up to it. The new
+`er_soft_lockout_time_s` field rides the typed config
+(`HeatPumpHeaterConfig`, the deserialization schema, the published
+field list and the params/override path the HPXML resolve reads), the
+heater's telemetry (`er_soft_lockout_time_s` beside the hard key) and
+the OCHRE semantics: default = the hard lockout's own value (the soft
+stage inert, the ER engaging the step the hard lockout expires), a
+below-hard value warns and clamps up at init. The Python and TOML
+surfaces need no new plumbing beyond the typed field: both carry
+equipment overrides as the JSON object the typed config deserializes
+from, and the `.pyi` stub's override surface is `dict[str, Any]` with
+no per-key list to extend.
+
+**(b) The per-stage EIR count mismatch was silently clamped.** The heat
+pump heater accepted any `stage_heating_eirs` length; the staging index
+clamp reused the last EIR for every stage past the table's end and
+never read the extra rows of a longer table. The furnace fails
+construction on the same mismatch. The heater now runs the furnace's
+contract after its own stage expansion (the MSHP path's expansion
+included, so the check sees both tables in their final shape): a
+mismatched table fails construction naming the two counts. The
+no-explicit-table arm fills the default EIR to the stage count (the
+furnace's own convention; the same EIR every stage evaluated before,
+now stated instead of clamped).
+
+**(c) The reported COP inflated during ER backup.** The numerator was
+the step's total thermal output (the HP's heat plus the backup
+element's plus the fan's) over the compressor-only denominator: during
+combined HP+ER operation the reported COP could exceed the
+compressor's physical COP, the 10.0 clamp papering over the largest
+cases. The numerator is now the compressor's own delivered gross heat
+(the HP's capacity plus its fan heat, the AHRI convention's fan
+placement unchanged), so the reported COP is the heat pump's own in
+every mode.
+
+**(d) The tankless UEF conversion was the storage tank's.** The
+instantaneous unit applied the RESNET gas-storage conversion
+(`EF = 0.9066·UEF + 0.0711`) where OCHRE's instantaneous-water-heater
+branch (hpxml.py:1055-1058) reads `energy_factor =
+uniform_energy_factor` with no conversion; the parity-aligned choice
+is the identity, adopted (about 2 percent on the fuel meter at UEF
+0.95, the storage conversion understating it). The storage branch's
+conversion stays in `gas.rs` where OCHRE applies it. No DIVERGENCES
+entry: the parity-aligned choice leaves no divergence; the choice and
+its citation are stated at the conversion site and in
+`docs/equipment/water-heater.md`.
+
+**Acceptance tests (RED first, each at the parent):**
+
+- (a) The OCHRE-default behavioral witness
+  (`er_soft_lockout_defaults_to_the_hard_time_and_releases_at_its_expiry`)
+  ran at the parent and FAILED: a 600 s hard lockout, the zone trend
+  rising throughout, and the ER still off at the 660th second (the
+  hardwired 2x release holding it to 1200 s; mode `Off`). GREEN after:
+  the ER engages at the hard expiry. The configured-soft witness (the
+  field at 1800 s) could not be expressed at the parent, the missing
+  field the compile witness of the unconfigurable surface; GREEN after
+  it holds the ER past 1260 s and releases by 1860 s. The clamp-up
+  witness (soft 0 below hard 600 clamps to 600 at init) is GREEN-only
+  (the field's own semantics).
+- (b) The wrong-length witness
+  (`stage_heating_eirs_length_mismatch_fails_construction`) could not
+  assert the error at the parent because construction SUCCEEDED (the
+  3-EIR table against a 2-stage capacity table built and silently
+  clamped); GREEN after the construction fails naming 3 against 2.
+- (c) The COP witness
+  (`reported_cop_during_combined_mode_is_the_compressors_own`) ran at
+  the parent against the old numerator and FAILED with the inflation
+  quantified: the forced combined step (HP 6896.5 W, ER 4000 W, fan 0,
+  compressor 2878.4 W) reported COP 3.7857 where the compressor's own
+  COP is 2.3960, +58 percent. GREEN after: the reported COP is
+  2.3960.
+- (d) The identity pin (`the_uef_is_the_energy_factor_for_a_tankless_unit`)
+  pins EF = UEF at 1e-9 with the citation in place; the pre-change
+  behavior (0.9066·0.95 + 0.0711 = 0.9324) is the movement this entry
+  records.
+
+**Existing test movement:** the three soft-lockout block/sequence tests
+pinned the hardwired 2x default (the soft stage blocking past the hard
+expiry with no soft time configured); they now configure the explicit
+soft time their scenario means (`er_soft_lockout_time_s` at 120 s
+beside the 60 s hard), the same behavior under the now-explicit
+configuration, their intent unchanged.
+
+**Fixture sweep:** no shipped golden or parity fixture exercises any of
+the four surfaces — no fixture configures an ER hard lockout (the
+default 0 s leaves the soft stage unreachable), supplies a per-stage
+EIR table (the expansion paths supply their own), records the COP
+telemetry column (verbosity 7; the golden frames record verbosity 2,
+and the run metrics' heating COP divides the envelope's delivered heat
+by the metered electric, not the telemetry channel), or configures a
+tankless water heater (the 19 resstock storage tanks and one heat pump
+WH, the storage conversion untouched). The goldens compare-all 10 +
+dst 1 bitwise identical, no re-capture.
+
+**Dependencies:** `crates/hares-equipment/src/hvac/heat_pump_config.rs`
+(the field, the schema, the validation),
+`hvac/heat_pump/heater.rs` (the init, the lockout release, the COP
+numerator, the stage validation),
+`water_heater/tankless.rs` (the identity),
+`crates/hares-types/src/telemetry_keys.rs` (the key),
+`crates/hares-io/src/hpxml/resolve_hvac.rs` (the params read),
+`docs/equipment/{hvac,water-heater}.md`.

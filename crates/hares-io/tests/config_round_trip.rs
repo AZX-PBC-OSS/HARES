@@ -262,6 +262,7 @@ fn sample_heat_pump_config() -> HeatPumpConfig {
         max_oat_supplemental_c: None,
         er_setpoint_offset_c: None,
         er_hard_lockout_time_s: None,
+        er_soft_lockout_time_s: None,
         heating_shr: None,
         capacity_ratio_at_17f: None,
         defrost: DefrostConfig::default(),

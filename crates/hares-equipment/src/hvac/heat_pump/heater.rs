@@ -150,6 +150,12 @@ struct HeatPumpHeaterCore {
     er_lockout_remaining_s: f64,
     /// Duration of the ER hard lockout [s] after a setpoint increase.
     er_hard_lockout_time_s: f64,
+    /// Duration of the ER soft lockout [s]: the post-hard hold keeping
+    /// the backup element off while the zone temperature still rises.
+    /// Defaults to the hard lockout's own value (OCHRE HVAC.py:1216,
+    /// `Backup Soft Lockout Time` defaulting to `Backup Lockout Time`);
+    /// a configured value below the hard one clamps up to it.
+    er_soft_lockout_time_s: f64,
     /// Previous zone temperature for soft-lockout detection.
     /// OCHRE HVAC.py: two-stage lockout -- after hard lockout expires, ER stays off
     /// while zone temp is still rising (heat pump is winning).
@@ -157,7 +163,7 @@ struct HeatPumpHeaterCore {
     /// Whether the ER soft lockout is currently active.
     er_soft_lockout: bool,
     /// Elapsed time [s] that the soft lockout has been continuously active.
-    /// Used to force-release the soft lockout after `er_hard_lockout_time_s * 2`
+    /// Used to force-release the soft lockout after `er_soft_lockout_time_s`
     /// to prevent it from holding indefinitely.
     soft_lockout_elapsed_s: f64,
     /// Heating-side sensible heat ratio. Default 1.0 (all-sensible) per OCHRE
@@ -663,6 +669,7 @@ impl HeatPumpHeaterCore {
             prev_base_setpoint: f64::NEG_INFINITY,
             er_lockout_remaining_s: 0.0,
             er_hard_lockout_time_s: DEFAULT_ER_HARD_LOCKOUT_TIME_S,
+            er_soft_lockout_time_s: DEFAULT_ER_HARD_LOCKOUT_TIME_S,
             prev_zone_temp_c: f64::NAN,
             er_soft_lockout: false,
             soft_lockout_elapsed_s: 0.0,
@@ -870,7 +877,12 @@ impl HeatPumpHeaterCore {
         self.hvac.config.eir_by_stage = if let Some(stages) = &cfg.common.stage_heating_eirs {
             stages.clone()
         } else {
-            vec![default_eir]
+            // No explicit EIR table: the default EIR fills every stage the
+            // capacity table carries (the furnace's own convention), so a
+            // multi-speed unit without an EIR table evaluates the same
+            // EIR at every stage.
+            let stage_count = self.hvac.config.heating_capacities_w.len();
+            vec![default_eir; stage_count]
         };
 
         if let Some(r) = cfg.common.charge_defect_ratio {
@@ -961,6 +973,22 @@ impl HeatPumpHeaterCore {
                     },
                 )?
             };
+        }
+
+        // The furnace's stage-count contract: the EIR table and the
+        // capacity table describe the same stages. A user EIR table
+        // shorter than the stage list silently reused its last EIR for
+        // every stage past the table's end (and a longer one's extra
+        // rows were never read), so the mismatch fails construction
+        // naming the two counts. Runs after the stage expansion above:
+        // both tables are in their final shape here.
+        if self.hvac.config.heating_capacities_w.len() != self.hvac.config.eir_by_stage.len() {
+            return Err(hares_types::HaresError::Equipment(format!(
+                "Heat pump heater init: stage_heating_eirs has {} element(s) but the heating \
+                 stage table has {} stage(s); supply one EIR per stage or none",
+                self.hvac.config.eir_by_stage.len(),
+                self.hvac.config.heating_capacities_w.len(),
+            )));
         }
 
         // Fan-specific power is normalized to the TOP stage's airflow, sized
@@ -1061,6 +1089,23 @@ impl HeatPumpHeaterCore {
         self.er_hard_lockout_time_s = cfg
             .er_hard_lockout_time_s
             .unwrap_or(DEFAULT_ER_HARD_LOCKOUT_TIME_S);
+        // OCHRE HVAC.py:1214-1223: the soft lockout defaults to the hard
+        // lockout's own value, and a soft time below the hard one warns
+        // and clamps up to the hard value — the soft stage extends the
+        // hard lockout, never shortens it.
+        self.er_soft_lockout_time_s = match cfg.er_soft_lockout_time_s {
+            Some(soft) if soft < self.er_hard_lockout_time_s => {
+                tracing::warn!(
+                    er_hard_lockout_time_s = self.er_hard_lockout_time_s,
+                    er_soft_lockout_time_s = soft,
+                    "ER soft lockout time is below the hard lockout time; \
+                     clamping the soft lockout up to the hard value"
+                );
+                self.er_hard_lockout_time_s
+            }
+            Some(soft) => soft,
+            None => self.er_hard_lockout_time_s,
+        };
 
         if matches!(self.variant, HeaterVariant::Ashp) {
             self.hvac.config.equipment_type = if self.backup_capacity_w > 0.0 {
@@ -1083,6 +1128,8 @@ impl HeatPumpHeaterCore {
             .set(tk::ER_SETPOINT_OFFSET_C, self.er_setpoint_offset_c);
         self.telemetry
             .set(tk::ER_HARD_LOCKOUT_TIME_S, self.er_hard_lockout_time_s);
+        self.telemetry
+            .set(tk::ER_SOFT_LOCKOUT_TIME_S, self.er_soft_lockout_time_s);
         self.telemetry
             .set(tk::BACKUP_CAPACITY_W, self.backup_capacity_w);
         self.telemetry.set(tk::BACKUP_EIR, self.backup_eir);
@@ -1470,12 +1517,18 @@ impl HeatPumpHeaterCore {
         // COP per AHRI/SEER convention: excludes fan power from denominator.
         // Gross thermal output (pre-DSE) over compressor-only electric input.
         // DSE losses are a distribution inefficiency, not a reduction in equipment COP.
-        // The COP of a step with no compressor input is undefined, not zero:
-        // None (the cell null) when the compressor did not run.
+        // The numerator is the COMPRESSOR's own delivered heat — the HP's
+        // capacity plus its fan heat — never the backup element's: during
+        // combined HP+ER operation the ER's heat rode the numerator while
+        // the denominator stayed compressor-only, and the reported COP
+        // could exceed the compressor's physical COP (the clamp below
+        // papering over the largest cases). A step with no compressor
+        // input has no COP to report (None, the null cell).
         let compressor_only_w = step.compressor_w;
+        let hp_gross_thermal_w = step.hp_capacity_w + step.fan_w;
         let cop = if compressor_only_w > 1e-6 {
             Some(
-                (step.thermal_output_w / compressor_only_w)
+                (hp_gross_thermal_w / compressor_only_w)
                     // AHRI 210/240-2023: ASHP heating COP ~1.5–5.0; clamp to [0.0, 10.0]
                     // to exclude physically impossible values from telemetry. Non-finite
                     // input survives the clamp: a NaN COP reaching telemetry is a typed
@@ -2361,8 +2414,12 @@ impl HeatPumpHeaterCore {
 
         // OCHRE HVAC.py: two-stage lockout -- after hard lockout expires, ER stays
         // off while zone temp is still rising (heat pump is winning the load).
-        // Time-based safety release: if soft lockout has been active longer than
-        // er_hard_lockout_time_s * 2 it releases regardless of zone temp trend.
+        // Time-based safety release: once the soft lockout has been active for
+        // er_soft_lockout_time_s it releases regardless of zone temp trend. The
+        // soft time defaults to the hard lockout's own value (OCHRE
+        // HVAC.py:1216), where the release fires the step the hard lockout
+        // expires and the soft stage is inert — the elapsed and remaining
+        // clocks run together while the hard lockout holds.
         // OCHRE HVAC.py:1338: temp_indoor >= self.temp_indoor_prev (non-strict).
         // Using >= prevents ER engagement when zone temperature plateaus after a
         // setpoint increase, matching OCHRE's intent to give the heat pump time
@@ -2376,7 +2433,7 @@ impl HeatPumpHeaterCore {
                 .set(tk::ZONE_RISING, if zone_rising { 1.0 } else { 0.0 });
         }
 
-        let soft_lockout_max_s = self.er_hard_lockout_time_s * 2.0;
+        let soft_lockout_max_s = self.er_soft_lockout_time_s;
         let soft_lockout_timeout =
             soft_lockout_max_s > 0.0 && self.soft_lockout_elapsed_s >= soft_lockout_max_s;
         if !er_allowed_by_hard_lockout {
@@ -2967,6 +3024,7 @@ mod tests {
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            er_soft_lockout_time_s: None,
             heating_shr: None,
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
@@ -3030,6 +3088,7 @@ mod tests {
             max_oat_supplemental_c: None,
             er_setpoint_offset_c: None,
             er_hard_lockout_time_s: None,
+            er_soft_lockout_time_s: None,
             heating_shr: None,
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
@@ -5053,8 +5112,12 @@ mod tests {
     fn er_soft_lockout_blocks_er_while_zone_temp_is_rising() {
         // OCHRE HVAC.py: two-stage lockout -- after hard lockout expires, ER stays
         // off while zone temp is still rising (heat pump is winning the load).
+        // The soft stage needs an explicit time beyond the hard one (the
+        // soft time defaults to the hard lockout's own value, where the
+        // stage is inert and the ER engages at the hard expiry).
         let cfg = heater_config_with(|typed| {
             typed.er_hard_lockout_time_s = Some(60.0);
+            typed.er_soft_lockout_time_s = Some(120.0);
             typed.er_lockout_temp_c = Some(100.0);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_setpoint_offset_c = Some(0.0);
@@ -5100,11 +5163,14 @@ mod tests {
 
     // OCHRE HVAC.py:1338 uses non-strict >= for zone_rising so that a plateaued
     // zone temperature (not yet declining) keeps ER locked out. With strict >
-    // the soft lockout would release one timestep early.
+    // the soft lockout would release one timestep early. The soft stage is
+    // configured explicitly here (an explicit soft time beyond the hard one;
+    // the default soft = hard makes the stage inert).
     #[test]
     fn er_soft_lockout_blocks_er_while_zone_temp_is_plateaued() {
         let cfg = heater_config_with(|typed| {
             typed.er_hard_lockout_time_s = Some(60.0);
+            typed.er_soft_lockout_time_s = Some(120.0);
             typed.er_lockout_temp_c = Some(100.0);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_setpoint_offset_c = Some(0.0);
@@ -5911,6 +5977,227 @@ mod tests {
         );
     }
 
+    /// The OCHRE soft/hard split (HVAC.py:1214-1223): the soft lockout's
+    /// time defaults to the HARD lockout's own value, so the soft stage —
+    /// the post-hard, zone-still-rising hold — is inert at the default:
+    /// the ER engages the step the hard lockout expires, whatever the
+    /// zone's trend. The engine hardwired the soft stage's release at
+    /// twice the hard time, holding the ER up to twice as long as the
+    /// reference on every configured hard lockout.
+    #[test]
+    fn er_soft_lockout_defaults_to_the_hard_time_and_releases_at_its_expiry() {
+        let cfg = heater_config_with(|typed| {
+            typed.er_hard_lockout_time_s = Some(600.0);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let e = make_env(16.0, 0.0, 0);
+        eq.init(&cfg, &e).unwrap();
+
+        // One control step records prev_base_setpoint; then the genuine
+        // raise arms the hard lockout (600 s).
+        eq.update_control(&e);
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(23.0),
+            cooling_setpoint_c: Some(26.0),
+            deadband_c: None,
+        })
+        .unwrap();
+
+        // Step the 600 s lockout out at 60 s per step; the zone trend is
+        // rising throughout (the env's zone temperature never falls), the
+        // trend the soft stage alone holds the ER off on.
+        let mut mode_at_expiry = OperatingMode::Off;
+        for s in 1..=11i64 {
+            let zone_c = 16.0 + 0.01 * s as f64;
+            let t = make_env(zone_c, 0.0, s * 60);
+            mode_at_expiry = eq.update_control(&t);
+        }
+        assert!(
+            matches!(
+                mode_at_expiry,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
+            "with the OCHRE default (soft = hard) the ER must engage the step the \
+             hard lockout expires; the hardwired 2x soft release held it; \
+             got {mode_at_expiry:?}"
+        );
+    }
+
+    /// The configured soft time governs the post-hard hold: a soft lockout
+    /// beyond the hard one keeps the ER off while the zone rises until the
+    /// soft time itself elapses.
+    #[test]
+    fn er_soft_lockout_time_s_configures_the_post_hard_hold() {
+        let cfg = heater_config_with(|typed| {
+            typed.er_hard_lockout_time_s = Some(600.0);
+            typed.er_soft_lockout_time_s = Some(1800.0);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let e = make_env(16.0, 0.0, 0);
+        eq.init(&cfg, &e).unwrap();
+        eq.update_control(&e);
+        eq.apply_control(&ControlSignal::ThermalSetpoint {
+            heating_setpoint_c: Some(23.0),
+            cooling_setpoint_c: Some(26.0),
+            deadband_c: None,
+        })
+        .unwrap();
+
+        // 21 raise-steps = 1260 s: the hard lockout (600 s) expired, the
+        // old 2x release (1200 s) would have fired too — only the
+        // configured soft time (1800 s) still holds the ER.
+        for s in 1..=21i64 {
+            let zone_c = 16.0 + 0.01 * s as f64;
+            let t = make_env(zone_c, 0.0, s * 60);
+            let mode = eq.update_control(&t);
+            assert!(
+                !matches!(
+                    mode,
+                    OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+                ),
+                "the configured soft lockout (1800 s) must hold the ER past the old \
+                 2x release at step {s}, got {mode:?}"
+            );
+        }
+
+        // Step past the soft time: the release fires.
+        let mut mode_after_soft = OperatingMode::Off;
+        for s in 22..=31i64 {
+            let zone_c = 16.0 + 0.01 * s as f64;
+            let t = make_env(zone_c, 0.0, s * 60);
+            mode_after_soft = eq.update_control(&t);
+        }
+        assert!(
+            matches!(
+                mode_after_soft,
+                OperatingMode::HeatingER | OperatingMode::HeatingHPAndER
+            ),
+            "the configured soft lockout must release once its own time elapses \
+             (1800 s), got {mode_after_soft:?}"
+        );
+    }
+
+    /// OCHRE HVAC.py:1217-1223: a soft time below the hard one warns and
+    /// clamps up to the hard value — the soft stage can never shorten the
+    /// hard lockout.
+    #[test]
+    fn er_soft_lockout_below_hard_clamps_up_to_hard() {
+        let cfg = heater_config_with(|typed| {
+            typed.er_hard_lockout_time_s = Some(600.0);
+            typed.er_soft_lockout_time_s = Some(0.0);
+            typed.er_lockout_temp_c = Some(100.0);
+            typed.hp_lockout_temp_c = Some(100.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+        });
+
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let e = make_env(16.0, 0.0, 0);
+        eq.init(&cfg, &e).unwrap();
+        assert!(
+            (eq.core.er_soft_lockout_time_s - 600.0).abs() < 1e-9,
+            "a soft time below the hard one must clamp up to the hard value at init, \
+             got {}",
+            eq.core.er_soft_lockout_time_s
+        );
+    }
+
+    /// A stage_heating_eirs vector that does not cover the capacity
+    /// table's stages fails construction naming the two counts, the
+    /// furnace's own contract: the silent clamp reused the last EIR for
+    /// every stage past the vector's end.
+    #[test]
+    fn stage_heating_eirs_length_mismatch_fails_construction() {
+        let mut typed = heater_typed_config();
+        typed.common.number_of_speeds = 2;
+        typed.common.stage_heating_capacities_w = Some(vec![8_000.0, 12_000.0]);
+        typed.common.stage_heating_eirs = Some(vec![0.30, 0.33, 0.36]);
+        let cfg = EquipmentConfig::from_typed(
+            "hp_stage_eirs".to_string(),
+            "ASHP Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+        let e = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &e)
+            .expect_err("a 3-EIR table against a 2-stage capacity table must fail construction");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("3") && msg.contains("2") && msg.contains("stage"),
+            "the construction error must name the expected and actual stage counts; got: {msg}"
+        );
+    }
+
+    /// The COP telemetry reports the compressor's own coefficient of
+    /// performance: the numerator is the heat pump's own delivered gross
+    /// heat, never the backup element's. During combined HP+ER operation
+    /// the ER's heat rode the numerator while the denominator stayed
+    /// compressor-only, and the reported COP could exceed the
+    /// compressor's physical COP.
+    #[test]
+    fn reported_cop_during_combined_mode_is_the_compressors_own() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.backup_capacity_w = Some(4_000.0);
+            typed.common.backup_eir = Some(1.0);
+            typed.common.fan_power_w = Some(0.0);
+        });
+
+        let e = env(18.0, -5.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+
+        // Force the combined mode: the compressor and the backup element
+        // run the same step.
+        eq.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::HeatingHPAndER,
+        })
+        .unwrap();
+        eq.update_control(&e);
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        let hp_capacity_w = eq
+            .telemetry()
+            .get(tk::HP_CAPACITY_W)
+            .expect("HP_CAPACITY_W must be present");
+        let er_capacity_w = eq
+            .telemetry()
+            .get(tk::ER_CAPACITY_W)
+            .expect("ER_CAPACITY_W must be present");
+        let compressor_kw = eq
+            .telemetry()
+            .get(tk::COMPRESSOR_KW)
+            .expect("COMPRESSOR_KW must be present");
+        let cop = eq.telemetry().get(tk::COP).expect("COP must be present");
+
+        assert!(
+            er_capacity_w > 0.0 && hp_capacity_w > 0.0,
+            "the forced combined mode must run both stages, hp={hp_capacity_w} er={er_capacity_w}"
+        );
+        // The telemetry store carries raw watts under the _KW keys (the
+        // column layer owns the unit scaling), so the expected COP is the
+        // ratio at the store's own units.
+        let expected_cop = hp_capacity_w / compressor_kw;
+        assert!(
+            (cop - expected_cop).abs() < 1e-6,
+            "the reported COP must be the HP's own heat over the compressor's draw \
+             ({expected_cop:.4}); the ER's heat rode the numerator and reported {cop:.4}"
+        );
+    }
+
     // M5 regression: DRLevel::High must set dr_duty_cycle explicitly, preventing
     // a stale value from a prior DR level from leaking in.
     #[test]
@@ -6467,12 +6754,15 @@ mod tests {
 
     // Full ER lockout sequence integration test: exercises hard lockout → soft
     // lockout with plateaued temp → release on decline. Verifies parity with
-    // OCHRE behaviour (HVAC.py:1338 uses non-strict >= for zone_rising).
+    // OCHRE behaviour (HVAC.py:1338 uses non-strict >= for zone_rising). The
+    // soft stage is configured explicitly (an explicit soft time beyond the
+    // hard one; the default soft = hard makes the stage inert).
     #[test]
     fn er_full_lockout_sequence_hard_lockout_soft_lockout_plateau_release() {
         let lockout_s = 60.0_f64;
         let cfg = heater_config_with(|typed| {
             typed.er_hard_lockout_time_s = Some(lockout_s);
+            typed.er_soft_lockout_time_s = Some(lockout_s * 2.0);
             typed.er_lockout_temp_c = Some(100.0);
             typed.hp_lockout_temp_c = Some(100.0);
             typed.er_setpoint_offset_c = Some(0.0);
@@ -8092,6 +8382,7 @@ mod tests {
                 max_oat_supplemental_c: None,
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,
+                er_soft_lockout_time_s: None,
                 heating_shr: None,
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
@@ -8693,6 +8984,7 @@ mod ideal_capacity_tests {
                 max_oat_supplemental_c: None,
                 er_setpoint_offset_c: None,
                 er_hard_lockout_time_s: None,
+                er_soft_lockout_time_s: None,
                 heating_shr: None,
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
@@ -8912,6 +9204,7 @@ mod ideal_capacity_tests {
                 max_oat_supplemental_c: Some(21.0),
                 er_setpoint_offset_c: Some(3.0),
                 er_hard_lockout_time_s: None,
+                er_soft_lockout_time_s: None,
                 heating_shr: None,
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
@@ -9078,6 +9371,7 @@ mod ideal_capacity_tests {
                 max_oat_supplemental_c: Some(21.0),
                 er_setpoint_offset_c: Some(0.0),
                 er_hard_lockout_time_s: None,
+                er_soft_lockout_time_s: None,
                 heating_shr: None,
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),
@@ -9185,6 +9479,7 @@ mod ideal_capacity_tests {
                 max_oat_supplemental_c: Some(21.0),
                 er_setpoint_offset_c: Some(3.0),
                 er_hard_lockout_time_s: None,
+                er_soft_lockout_time_s: None,
                 heating_shr: None,
                 capacity_ratio_at_17f: None,
                 defrost: DefrostConfig::default(),

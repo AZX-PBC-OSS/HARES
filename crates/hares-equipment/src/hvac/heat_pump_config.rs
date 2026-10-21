@@ -276,6 +276,15 @@ pub struct HeatPumpHeaterConfig {
     /// ER hard lockout duration after a setpoint raise (s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub er_hard_lockout_time_s: Option<f64>,
+    /// ER soft-lockout duration (s): the post-hard hold that keeps the
+    /// backup element off while the zone temperature still rises after a
+    /// setpoint raise. Defaults to the hard lockout's own value (OCHRE
+    /// `HVAC.py:1216` reads `Backup Soft Lockout Time (minutes)` with the
+    /// hard time as its default), and a value below the hard one clamps
+    /// up to it at init — the soft stage can never shorten the hard
+    /// lockout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub er_soft_lockout_time_s: Option<f64>,
     /// Heating-side sensible heat ratio. Default 1.0 (all-sensible) matching
     /// OCHRE HVAC.py:458-462 which returns SHR=1 for all heating modes.
     /// When < 1.0, a small positive latent gain is emitted during
@@ -721,6 +730,17 @@ impl hares_types::DescribeFields for HeatPumpHeaterConfig {
                 hares_types::FieldMeta {
                     description: Some(
                         "the ER hard lockout duration after a setpoint raise, seconds",
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "er_soft_lockout_time_s",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the ER soft-lockout duration holding the backup off while the zone \
+                         still rises after a setpoint raise, seconds, defaulting to the hard \
+                         lockout's value",
                     ),
                     ..Default::default()
                 },
@@ -1297,6 +1317,7 @@ impl HeatPumpHeaterConfig {
             ("max_oat_supplemental_c", self.max_oat_supplemental_c),
             ("er_setpoint_offset_c", self.er_setpoint_offset_c),
             ("er_hard_lockout_time_s", self.er_hard_lockout_time_s),
+            ("er_soft_lockout_time_s", self.er_soft_lockout_time_s),
             ("heating_shr", self.heating_shr),
         ] {
             if let Some(v) = value
@@ -1326,6 +1347,13 @@ impl HeatPumpHeaterConfig {
         {
             return Err(HaresError::Equipment(
                 "HeatPumpHeaterConfig: er_hard_lockout_time_s must be >= 0".to_string(),
+            ));
+        }
+        if let Some(v) = self.er_soft_lockout_time_s
+            && v < 0.0
+        {
+            return Err(HaresError::Equipment(
+                "HeatPumpHeaterConfig: er_soft_lockout_time_s must be >= 0".to_string(),
             ));
         }
         if let Some(v) = self.heating_shr
@@ -1695,6 +1723,7 @@ mod tests {
             max_oat_supplemental_c: Some(21.0),
             er_setpoint_offset_c: Some(1.6),
             er_hard_lockout_time_s: Some(600.0),
+            er_soft_lockout_time_s: None,
             heating_shr: None,
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),
@@ -1914,6 +1943,7 @@ mod tests {
             max_oat_supplemental_c: Some(21.0),
             er_setpoint_offset_c: Some(1.6),
             er_hard_lockout_time_s: Some(600.0),
+            er_soft_lockout_time_s: None,
             heating_shr: None,
             capacity_ratio_at_17f: None,
             defrost: DefrostConfig::default(),

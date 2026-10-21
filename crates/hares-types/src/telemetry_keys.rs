@@ -621,6 +621,7 @@ pub const ER_SETPOINT_OFFSET_C: &str = "er_setpoint_offset_c";
 
 /// scope: internal
 pub const ER_HARD_LOCKOUT_TIME_S: &str = "er_hard_lockout_time_s";
+pub const ER_SOFT_LOCKOUT_TIME_S: &str = "er_soft_lockout_time_s";
 
 /// ER soft lockout `zone_rising` flag: 1.0 when zone temperature has not yet
 /// declined after the hard lockout expired; 0.0 otherwise. Captured only under
@@ -1235,6 +1236,7 @@ mod tests {
             ER_LOCKOUT_TEMP_C,
             ER_SETPOINT_OFFSET_C,
             ER_HARD_LOCKOUT_TIME_S,
+            ER_SOFT_LOCKOUT_TIME_S,
             ZONE_RISING,
             BACKUP_CAPACITY_W,
             BACKUP_EIR,
@@ -1495,6 +1497,7 @@ mod tests {
             ER_LOCKOUT_TEMP_C,
             ER_SETPOINT_OFFSET_C,
             ER_HARD_LOCKOUT_TIME_S,
+            ER_SOFT_LOCKOUT_TIME_S,
             ZONE_RISING,
             BACKUP_CAPACITY_W,
             BACKUP_EIR,

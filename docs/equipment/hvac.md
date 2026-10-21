@@ -98,7 +98,10 @@ decision is recorded.
 
 Separate capacity + EIR stages with lockout logic:
 - **Hard lockout**: ER disabled for configurable duration after setpoint raise
-- **Soft lockout**: ER disabled while zone temp is rising (HP is winning)
+- **Soft lockout**: ER disabled while zone temp is rising (HP is winning), for the
+  configured soft duration (`er_soft_lockout_time_s`, defaulting to the hard
+  lockout's own value per OCHRE, where the stage is inert and the ER engages at
+  the hard expiry; a soft time below the hard one clamps up to it)
 - **Temperature lockout**: HP locked out below -17.78C; ER locked out below 4.44C
 - **Supplemental threshold**: ER disabled when OAT > 21C
 

@@ -1622,6 +1622,7 @@ fn try_build_heat_pump_heater_config(
         max_oat_supplemental_c: params.get("max_oat_supplemental_c").and_then(Value::as_f64),
         er_setpoint_offset_c: params.get("er_setpoint_offset_c").and_then(Value::as_f64),
         er_hard_lockout_time_s: params.get("er_hard_lockout_time_s").and_then(Value::as_f64),
+        er_soft_lockout_time_s: params.get("er_soft_lockout_time_s").and_then(Value::as_f64),
         heating_shr: None,
         capacity_ratio_at_17f: params.get("capacity_ratio_at_17f").and_then(Value::as_f64),
         defrost: {
