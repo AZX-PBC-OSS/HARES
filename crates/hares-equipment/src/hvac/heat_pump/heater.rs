@@ -840,6 +840,17 @@ impl HeatPumpHeaterCore {
 
         self.hvac.config.heating_capacities_w =
             if let Some(stages) = &cfg.common.stage_heating_capacities_w {
+                if stages.is_empty() {
+                    // An empty table is not a valid stage table: at one
+                    // speed (or a mini-split) no config-level length
+                    // check runs, and a zero-stage unit would pass every
+                    // later check and evaluate no stage at all.
+                    return Err(HaresError::Equipment(
+                        "Heat pump heater init: stage_heating_capacities_w is empty; \
+                         an empty table is not a valid stage table"
+                            .into(),
+                    ));
+                }
                 stages.clone()
             } else if let Some(cap) = cfg.common.heating_capacity_w {
                 vec![cap]
@@ -875,6 +886,17 @@ impl HeatPumpHeaterCore {
             })
             .unwrap_or(DEFAULT_HEATING_EIR);
         self.hvac.config.eir_by_stage = if let Some(stages) = &cfg.common.stage_heating_eirs {
+            if stages.is_empty() {
+                // An empty table is not a valid stage table: on a
+                // single-capacity mini-split the stage expansion below
+                // indexes the base EIR at position 0 and would panic
+                // here before any length check could speak.
+                return Err(HaresError::Equipment(
+                    "Heat pump heater init: stage_heating_eirs is empty; \
+                     an empty table is not a valid stage table"
+                        .into(),
+                ));
+            }
             stages.clone()
         } else {
             // No explicit EIR table: the default EIR fills every stage the
@@ -6112,12 +6134,17 @@ mod tests {
     /// A stage_heating_eirs vector that does not cover the capacity
     /// table's stages fails construction naming the two counts, the
     /// furnace's own contract: the silent clamp reused the last EIR for
-    /// every stage past the vector's end.
+    /// every stage past the vector's end. The shape is single-speed
+    /// deliberately: the config-level stage_heating_eirs length check
+    /// only runs from two speeds up, so a single-stage unit is the
+    /// shape only the init check can catch, and the assertion on the
+    /// init check's own wording pins which check caught it.
     #[test]
     fn stage_heating_eirs_length_mismatch_fails_construction() {
         let mut typed = heater_typed_config();
-        typed.common.number_of_speeds = 2;
-        typed.common.stage_heating_capacities_w = Some(vec![8_000.0, 12_000.0]);
+        // number_of_speeds stays 1: at two speeds and up the
+        // config-level length check fails the mismatch first and this
+        // init check never sees it.
         typed.common.stage_heating_eirs = Some(vec![0.30, 0.33, 0.36]);
         let cfg = EquipmentConfig::from_typed(
             "hp_stage_eirs".to_string(),
@@ -6129,11 +6156,67 @@ mod tests {
         let mut eq = ASHPHeater::new(cfg.clone());
         let err = eq
             .init(&cfg, &e)
-            .expect_err("a 3-EIR table against a 2-stage capacity table must fail construction");
+            .expect_err("a 3-EIR table against a 1-stage capacity table must fail construction");
         let msg = err.to_string();
         assert!(
-            msg.contains("3") && msg.contains("2") && msg.contains("stage"),
-            "the construction error must name the expected and actual stage counts; got: {msg}"
+            msg.contains("stage_heating_eirs has 3 element(s)")
+                && msg.contains("the heating stage table has 1 stage(s)"),
+            "the init check's own construction error must name the two counts; got: {msg}"
+        );
+    }
+
+    /// An empty stage_heating_eirs table is not a valid stage table: on
+    /// a single-capacity mini-split it used to panic the stage
+    /// expansion (the base EIR indexed position 0 of the empty table)
+    /// before any check could speak; construction fails naming the
+    /// field instead.
+    #[test]
+    fn empty_stage_heating_eirs_fails_construction_not_a_panic() {
+        let mut typed = mshp_typed_config(10_000.0);
+        typed.common.stage_heating_eirs = Some(Vec::new());
+        let cfg = EquipmentConfig::from_typed(
+            "mshp_empty_eirs".to_string(),
+            "MSHP Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+        let e = env(18.0, 5.0, 0.004);
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &e)
+            .expect_err("an empty stage_heating_eirs table is not a valid stage table");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stage_heating_eirs") && msg.contains("empty"),
+            "the construction error must name the field and the empty table; got: {msg}"
+        );
+    }
+
+    /// An empty stage_heating_capacities_w table is not a valid stage
+    /// table either: the config-level length check only runs from two
+    /// speeds up, so an empty table at one speed used to build a
+    /// zero-stage unit that passed every check; construction fails
+    /// naming the field instead.
+    #[test]
+    fn empty_stage_heating_capacities_fail_construction() {
+        let mut typed = heater_typed_config();
+        typed.common.heating_capacity_w = None;
+        typed.common.stage_heating_capacities_w = Some(Vec::new());
+        let cfg = EquipmentConfig::from_typed(
+            "hp_empty_capacities".to_string(),
+            "ASHP Heater".to_string(),
+            typed,
+        )
+        .unwrap();
+        let e = env(18.0, 0.0, 0.003);
+        let mut eq = ASHPHeater::new(cfg.clone());
+        let err = eq
+            .init(&cfg, &e)
+            .expect_err("an empty stage_heating_capacities_w table is not a valid stage table");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stage_heating_capacities_w") && msg.contains("empty"),
+            "the construction error must name the field and the empty table; got: {msg}"
         );
     }
 

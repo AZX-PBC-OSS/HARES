@@ -6685,8 +6685,8 @@ wiring), `thermal_solver/config.rs` (the two observe-gated fields).
 
 ## Hardening 23: equipment stage validation and the backup heat's telemetry honesty
 
-**Kind:** hardening (one config surface added, two validations, one
-telemetry correction, one parity conversion).
+**Kind:** hardening (one config surface added, two validations, two
+empty-table guards, one telemetry correction, one parity conversion).
 
 **The review's findings (equipment M4, m3, m4, m5), item by item:**
 
@@ -6718,7 +6718,25 @@ included, so the check sees both tables in their final shape): a
 mismatched table fails construction naming the two counts. The
 no-explicit-table arm fills the default EIR to the stage count (the
 furnace's own convention; the same EIR every stage evaluated before,
-now stated instead of clamped).
+now stated instead of clamped). An empty table on either stage field
+also fails construction naming the field (an empty table is not a
+valid stage table): an empty `stage_heating_eirs` panicked the
+single-capacity mini-split's expansion indexing the base EIR, and an
+empty `stage_heating_capacities_w` at one speed built a zero-stage
+unit that passed every check (the config-level length checks run from
+two speeds up only).
+
+**The witness's shadowing, disclosed:** the wrong-length witness was
+first committed in a shadowed shape (a 3-EIR table against a 2-stage
+capacity table at `number_of_speeds` 2), where the config-level
+`stage_heating_eirs` length check (live from two speeds up) fails the
+construction first - the new init check never saw the mismatch, and
+the witness passed with the init check disabled (the mutation proof),
+so the original RED story here (construction SUCCEEDED at the parent)
+was false for that shape. The committed witness now uses the
+discriminating shape (the 3-EIR table against a single-speed unit,
+where the config check does not run) and asserts the init check's own
+wording; the RED story below is told from that shape.
 
 **(c) The reported COP inflated during ER backup.** The numerator was
 the step's total thermal output (the HP's heat plus the backup
@@ -6756,10 +6774,22 @@ its citation are stated at the conversion site and in
   witness (soft 0 below hard 600 clamps to 600 at init) is GREEN-only
   (the field's own semantics).
 - (b) The wrong-length witness
-  (`stage_heating_eirs_length_mismatch_fails_construction`) could not
-  assert the error at the parent because construction SUCCEEDED (the
-  3-EIR table against a 2-stage capacity table built and silently
-  clamped); GREEN after the construction fails naming 3 against 2.
+  (`stage_heating_eirs_length_mismatch_fails_construction`), in the
+  discriminating shape (the 3-EIR table against a single-speed unit,
+  `number_of_speeds` at its default 1, where the config-level length
+  check does not run): with ONLY the new init check disabled the
+  witness FAILED - construction succeeded, the silent clamp's own
+  behavior, the RED witness (the shadowing disclosure above records
+  the first committed shape, where the config check fired first and
+  the witness passed with the init check disabled); with the check
+  live the construction fails and the error's own wording
+  (`stage_heating_eirs has 3 element(s) but the heating stage table
+  has 1 stage(s)`) is asserted. The two empty-table guards are pinned
+  beside it, RED at the pre-guard behavior: the empty
+  `stage_heating_eirs` probe panicked (the base EIR indexing position
+  0 of the empty table, index out of bounds) and the empty
+  `stage_heating_capacities_w` probe built the zero-stage unit (init
+  `Ok`); GREEN after the guards fail construction naming the field.
 - (c) The COP witness
   (`reported_cop_during_combined_mode_is_the_compressors_own`) ran at
   the parent against the old numerator and FAILED with the inflation
