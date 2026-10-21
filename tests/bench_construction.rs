@@ -38,14 +38,12 @@ fn bench_rl_step_dwelling_constructs() {
 fn bench_rl_episode_dwellings_construct() {
     let dir = tempdir().expect("bench temp dir");
     for time_res_s in [60, 900] {
-        let path =
-            bench_common::numbered_path(dir.path(), "hares-bench-rl-episode", "toml");
+        let path = bench_common::numbered_path(dir.path(), "hares-bench-rl-episode", "toml");
         std::fs::write(&path, bench_common::synthetic_toml(86_400, time_res_s))
             .expect("write the rl_episode bench's TOML");
-        Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
-            .unwrap_or_else(|e| {
-                panic!("the rl_episode bench's dwelling must construct at {time_res_s} s: {e}")
-            });
+        Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).unwrap_or_else(|e| {
+            panic!("the rl_episode bench's dwelling must construct at {time_res_s} s: {e}")
+        });
     }
 }
 
@@ -115,10 +113,10 @@ fn relocate_reports(
 ) -> hares_core::DwellingConfig {
     let mut config = config.clone();
     for report in &mut config.settings.sim_config.reports {
-        if let hares_io::Destination::Csv { path, .. } = &mut report.destination {
-            if let Some(name) = path.file_name() {
-                *path = out_dir.join(name);
-            }
+        if let hares_io::Destination::Csv { path, .. } = &mut report.destination
+            && let Some(name) = path.file_name()
+        {
+            *path = out_dir.join(name);
         }
     }
     config
