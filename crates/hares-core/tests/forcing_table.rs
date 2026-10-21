@@ -8,8 +8,8 @@
 //! the forcing on every of its steps).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::compute::concat_batches;
@@ -18,6 +18,16 @@ use hares_core::{
     Dwelling, DwellingBlueprint, DwellingConfig, DwellingSettings, FORCE_PER_STEP_FORCING,
     SimulationConfig,
 };
+
+/// The forcing counters this file probes (`FORCING_TABLES_LIVE`,
+/// `FORCING_COMPUTATIONS`) are process-global, and the probes' assertions
+/// assume no sibling construction or drop runs between their samples.
+/// nextest runs each test in its own process, where the lock is
+/// uncontended; in-process runners (plain `cargo test`, the coverage
+/// job's llvm-cov run) execute the tests on shared threads, so every
+/// test here holds the lock for its whole body and the samples read the
+/// counters alone.
+static COUNTER_EXCLUSIVITY: Mutex<()> = Mutex::new(());
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -240,6 +250,9 @@ fn cz4a_settings(start_time: DateTime<chrono::FixedOffset>, days: i64) -> Dwelli
 /// performs.
 #[test]
 fn forcing_computed_once_per_weather_and_time_grid() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let before = hares_core::FORCING_COMPUTATIONS.load(Ordering::Relaxed);
 
     let shared = SharedCz4a::new();
@@ -271,6 +284,9 @@ fn forcing_computed_once_per_weather_and_time_grid() {
 /// full-duration bitwise proof is the golden compare's own.
 #[test]
 fn forcing_table_run_equals_uncached_run() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let cases = [
         ("leap day", "2024-02-27T00:00:00-07:00", 5, Some(604_800)),
         (
@@ -299,6 +315,9 @@ fn forcing_table_run_equals_uncached_run() {
 #[test]
 #[cfg(feature = "dst")]
 fn forcing_table_run_equals_uncached_run_across_dst() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let config = cz4a_config(
         start_at("2023-03-10T00:00:00-07:00"),
         4,
@@ -313,6 +332,9 @@ fn forcing_table_run_equals_uncached_run_across_dst() {
 /// no warm-up, one day at 900 s, bitwise-equal frames both ways.
 #[test]
 fn forcing_table_run_equals_uncached_run_consumer_shape() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let config = DwellingConfig {
         hpxml: hares_io::InputSource::Path(
             repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227/home.xml"),
@@ -341,6 +363,9 @@ fn forcing_table_run_equals_uncached_run_consumer_shape() {
 /// run's first hour's steps read.
 #[test]
 fn forcing_key_differs_by_first_hour() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let shared = SharedCz4a::new();
     let mut first_settings = cz4a_settings(start_at("2024-02-27T00:00:00-07:00"), 1);
     let mut second_settings = first_settings.clone();
@@ -369,6 +394,9 @@ fn forcing_key_differs_by_first_hour() {
 /// keys and different tables on that handle.
 #[test]
 fn forcing_key_differs_by_start_date() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let shared = SharedCz4a::new();
     let first = shared
         .blueprint(cz4a_settings(start_at("2024-02-27T00:00:00-07:00"), 1))
@@ -402,6 +430,9 @@ fn forcing_key_differs_by_start_date() {
 #[test]
 #[cfg(feature = "dst")]
 fn forcing_key_differs_by_utc_offset_at_equal_instant() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let shared = SharedCz4a::new();
     let settings_at_offset = |offset_h: f64, start: &str| {
         let mut settings = cz4a_settings(start_at(start), 2);
@@ -527,6 +558,9 @@ impl ForcingKeyFields {
 /// the same forcing table.
 #[test]
 fn blueprints_from_different_hpxml_share_forcing() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let inputs = SharedInputs::new();
     let weather = Arc::new(
         hares_io::ParsedWeather::parse(&hares_io::WeatherInput::Path(
@@ -593,6 +627,9 @@ fn blueprints_from_different_hpxml_share_forcing() {
 /// and produce different frames, each bitwise equal to its per-step run.
 #[test]
 fn azimuth_change_shares_the_table() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let inputs = SharedInputs::new();
     let base_xml = repo_root().join("tests/fixtures/hpxml/ochre_samples/base.xml");
     let original = std::fs::read_to_string(&base_xml).expect("read base.xml");
@@ -825,6 +862,9 @@ fn build_epw_8760_variant(variant: i32) -> String {
 /// after the drops exactly none.
 #[test]
 fn dropped_dwellings_drop_their_forcing_tables() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     const DISTINCT_WEATHERS: usize = 40;
 
     let before_live = hares_io::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
