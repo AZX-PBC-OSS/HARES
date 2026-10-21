@@ -1626,11 +1626,20 @@ impl EnvironmentManager {
         mains_payload.clear();
         mains_payload.push(weather.mains_temp_c);
         state.schedule_row = Some(schedule_idx);
-        state.unavailable_periods = self
-            .unavailable_flags
-            .get(schedule_idx)
-            .copied()
-            .unwrap_or_default();
+        // The flags carry one entry per schedule step when unavailable
+        // periods are configured; an empty vec means every step is
+        // available. Any other length mismatch is a construction desync.
+        state.unavailable_periods = if self.unavailable_flags.is_empty() {
+            UnavailablePeriodState::default()
+        } else {
+            assert!(
+                schedule_idx < self.unavailable_flags.len(),
+                "the unavailable-period flags cover {} steps against schedule step {}: the flags and the schedule diverged at construction",
+                self.unavailable_flags.len(),
+                schedule_idx
+            );
+            self.unavailable_flags[schedule_idx]
+        };
         #[cfg(test)]
         if let (Some(before), Some(after)) =
             (alloc_before, hares_types::alloc_count::thread_allocations())
