@@ -263,7 +263,8 @@ pub fn wind_incidence_angle_deg(opening_azimuth_deg: f64, wind_direction_deg: f6
 /// Compute natural ventilation opening effectiveness (Cw) from the angle between
 /// wind direction and opening normal, following the EnergyPlus linear interpolation.
 ///
-/// EnergyPlus computes Cw at `ZoneEquipmentManager.cc:5988–6023` by calculating the
+/// EnergyPlus computes Cw at `ZoneEquipmentManager.cc`'s WindAndStack
+/// block (v24.2.0 lines 5762-5796) by calculating the
 /// absolute angle between wind direction and `EffAngle`, then linearly interpolating
 /// Cw between 0.55 at 0° and 0.3 at 45°, dropping to 0.0 at > 90°.
 ///
@@ -304,8 +305,8 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
     }
 }
 
-/// Named inputs for [`natural_ventilation_flow_m3_s`], the EnergyPlus
-/// `ZoneVentilation:WindandStackOpenArea` model.
+/// Named inputs for [`natural_ventilation_flow_m3_s`] (the stated hybrid:
+/// see that function's doc).
 #[derive(Debug, Clone, Copy)]
 pub struct NaturalVentilationInputs {
     /// Ventilating open area (m²).
@@ -337,17 +338,33 @@ pub struct NaturalVentilationInputs {
 }
 
 /// Natural ventilation flow through operable windows (EnergyPlus
-/// `ZoneVentilation:WindandStackOpenArea` model).
+/// `ZoneVentilation:WindandStackOpenArea` comparator).
 ///
-/// Implements the EnergyPlus wind-and-stack natural ventilation model for
-/// operable windows. Wind and stack flow components are computed separately
-/// and combined in quadrature:
+/// The natural-ventilation model is a stated hybrid of three sources, not
+/// a pure EnergyPlus port (see `docs/PHYSICS_DECISIONS.md`, the
+/// natural-ventilation entry, and the pinned divergence in the tests):
+///
+/// - **EnergyPlus `ZoneVentilation:WindandStackOpenArea`** supplies the
+///   structure: the wind and stack components computed separately and
+///   combined in quadrature, and the auto opening effectiveness Cw
+///   (0.55 perpendicular → 0.30 at 45°, zero leeward):
 ///
 /// ```text
 /// Q_wind  = Cw × A × U_wind
 /// Q_stack = Cd × A × sqrt(2·g·dh_m·|ΔT|/T_zone)
 /// Q_total = sqrt(Q_wind² + Q_stack²)
 /// ```
+///
+/// - **ASHRAE HoF 2009 Ch. 16.14** supplies the discharge coefficient,
+///   FIXED BY OPENING GEOMETRY (single-sided 0.20, cross 0.60) - not
+///   E+'s AutoCalculate correlation (`Cd = 0.40 + 0.0045|ΔT|`), which
+///   carries no geometry split. The pinned divergence in this module's
+///   tests holds the magnitude against the ported E+ comparator.
+///
+/// - **OCHRE's comfort gating** supplies the three gating conditions and
+///   the adjustment factor, taken from OCHRE `Envelope.py`'s
+///   `_natural_ventilation` (itself ResStock's
+///   `apply_natural_ventilation_and_whole_house_fan`).
 ///
 /// Flow is gated by three conditions (all must hold for non-zero flow):
 /// 1. Zone temperature > outdoor temperature (stack buoyancy drives outward exhaust).
@@ -380,7 +397,8 @@ pub struct NaturalVentilationInputs {
 /// Returns volumetric flow [m³/s], or 0.0 when gating conditions are not met.
 ///
 /// # References
-/// - EnergyPlus `ZoneEquipmentManager.cc:5988–6033` — `WindAndStack` runtime calculation
+/// - EnergyPlus `ZoneEquipmentManager.cc`'s WindAndStack block (v24.2.0
+///   lines 5716-5806) - the runtime calculation and the AutoCalculate arms
 /// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct
 /// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: Q = sqrt(Qw² + Qst²)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q_wind = Cw × A × U
@@ -2784,5 +2802,118 @@ mod tests {
             census.count(ClampSite::RelativeHumidity) == 0,
             "a site's count only rises when that site's clamp fires"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The natural-ventilation contract: the EnergyPlus comparator and the
+    // recorded divergence
+    // -----------------------------------------------------------------------
+
+    /// EnergyPlus `ZoneEquipmentManager.cc`'s WindAndStack ventilation
+    /// block (v24.2.0, lines 5716-5806), the AutoCalculate arms, ported
+    /// verbatim from the upstream source: the auto opening effectiveness
+    /// (Cw: 0.55 at perpendicular, linear to 0.30 at 45°, zero leeward),
+    /// the auto discharge coefficient (`Cd = 0.40 + 0.0045|T_ext -
+    /// T_mat|` with E+'s own 9.81 literal), and the wind/stack quadrature
+    /// `VVF = sqrt(Qw² + Qst²)`. This is the comparator the divergence is
+    /// recorded against: HARES's wind term matches it exactly (the same
+    /// auto-Cw); the stack term's discharge coefficient is the recorded
+    /// divergence (D-, see docs/PHYSICS_DECISIONS.md).
+    #[allow(clippy::too_many_arguments)]
+    fn energyplus_wind_and_stack_auto_m3_s(
+        open_area_m2: f64,
+        wind_speed_m_s: f64,
+        dh_m: f64,
+        t_zone_c: f64,
+        t_outdoor_c: f64,
+        incidence_angle_deg: f64,
+    ) -> f64 {
+        let angle = 180.0 - (incidence_angle_deg - 180.0).abs().abs(); // E+'s fold, verbatim shape
+        let cw = if angle > 90.0 {
+            0.0
+        } else {
+            0.55 + angle * ((0.3 - 0.55) / 45.0)
+        };
+        let cd = 0.40 + 0.0045 * (t_outdoor_c - t_zone_c).abs();
+        let qw = cw * open_area_m2 * wind_speed_m_s;
+        let qst = cd
+            * open_area_m2
+            * (2.0 * 9.81 * dh_m * (t_outdoor_c - t_zone_c).abs() / (t_zone_c + 273.15)).sqrt();
+        (qw * qw + qst * qst).sqrt()
+    }
+
+    /// The reference case: a south-facing cross-ventilated opening,
+    /// perpendicular 3 m/s wind, a 6 K warm zone over a 20 °C outdoor, the
+    /// OCHRE comfort base at 22 °C. The documented inputs every number in
+    /// the pins below is derived from.
+    fn reference_case() -> NaturalVentilationInputs {
+        NaturalVentilationInputs {
+            open_area_m2: 0.5,
+            t_zone_c: 26.0,
+            t_outdoor_c: 20.0,
+            t_base_c: 22.0,
+            outdoor_humidity_ratio: 0.008,
+            max_outdoor_humidity_ratio: 0.0115,
+            wind_speed_m_s: 3.0,
+            zone_volume_m3: 300.0,
+            opening_azimuth_deg: 180.0,
+            wind_direction_deg: 180.0,
+            dh_m: 2.0,
+            opening_type: OpeningType::CrossVentilation,
+            zone_height_m: 2.5,
+        }
+    }
+
+    #[test]
+    fn natural_ventilation_pin_matches_the_recorded_divergence_vector() {
+        // The divergence's own vector. The contract DECIDED (see
+        // docs/PHYSICS_DECISIONS.md, the natural-ventilation entry):
+        // HARES keeps the hybrid - the E+ auto opening effectiveness on
+        // the wind term, the ASHRAE HoF 2009 Ch. 16.14 fixed geometry
+        // discharge coefficient (0.60 cross) on the stack term, and the
+        // OCHRE comfort adjustment - against E+'s AutoCalculate block
+        // (auto Cd = 0.40 + 0.0045|dT|), which carries no geometry split
+        // and no comfort adjustment. The parent ran this pin in its
+        // agreement form (HARES == the E+ port at 1e-9) and it failed:
+        // HARES 0.5779 m³/s against the port's 0.8465 m³/s on the
+        // reference case - the recorded disagreement.
+        let args = reference_case();
+        let (q, q_stack, q_wind, cd) = args.call();
+
+        // HARES's vector, hand-derived from the documented hybrid:
+        // the E+ auto-Cw wind term, the fixed geometry Cd, the OCHRE
+        // comfort adjustment, the wind/stack quadrature.
+        let cw = 0.55_f64; // perpendicular wind
+        let g = 9.806_65_f64;
+        let t_zone_k = 26.0 + 273.15;
+        let cd_expected = 0.60_f64;
+        let q_wind_expected = cw * 0.5 * 3.0;
+        let q_stack_expected =
+            cd_expected * 0.5 * (2.0 * g * 2.0 * (26.0 - 20.0) / t_zone_k).sqrt();
+        let adj = ((26.0_f64 - 22.0) / (26.0 - 20.0)).clamp(0.0, 1.0);
+        let q_expected =
+            adj * (q_wind_expected * q_wind_expected + q_stack_expected * q_stack_expected).sqrt();
+
+        approx_eq(q, q_expected, 1e-9);
+        approx_eq(q_wind, q_wind_expected * adj, 1e-9);
+        approx_eq(q_stack, q_stack_expected * adj, 1e-9);
+        approx_eq(cd, cd_expected, 1e-9);
+
+        // The comparator beside it: the ported E+ AutoCalculate block on
+        // the same inputs, its own vector pinned, so neither side can
+        // drift without the record moving. The stack terms' ratio is the
+        // recorded Cd choice's magnitude: the fixed 0.60 against E+'s
+        // auto 0.427 at 6 K, with the two gravity literals (9.80665
+        // standard, E+'s 9.81) under the square root.
+        let q_eplus = energyplus_wind_and_stack_auto_m3_s(0.5, 3.0, 2.0, 26.0, 20.0, 0.0);
+        let q_eplus_expected = 0.846_462_990_617_057_3_f64;
+        approx_eq(q_eplus, q_eplus_expected, 1e-9);
+
+        let stack_ratio = (q_stack / adj)
+            / (0.40 + 0.0045 * 6.0)
+            / 0.5
+            / (2.0 * 9.81 * 2.0 * 6.0 / t_zone_k).sqrt();
+        let expected_stack_ratio = 0.60 / (0.40 + 0.0045 * 6.0) * (9.806_65_f64 / 9.81).sqrt();
+        approx_eq(stack_ratio, expected_stack_ratio, 1e-9);
     }
 }

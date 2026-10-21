@@ -997,3 +997,71 @@ reporting name, the value under it is SI, and the row plan converts
 once. The EV driver's behavioural defaults are named SI constants
 (`ev_driver::defaults`) written from the documented values (30 mi,
 30 mph, 20 mi, 6.6 kW); no value moved.
+
+## Natural ventilation keeps the fixed geometry discharge coefficient
+
+The natural-ventilation model in
+`crates/hares-physics/src/infiltration.rs`
+(`natural_ventilation_flow_m3_s`) is a stated hybrid of three sources,
+and the discharge coefficient stays the ASHRAE fixed geometry values
+(single-sided 0.20, cross 0.60), not EnergyPlus's AutoCalculate
+correlation.
+
+The three sources:
+
+- EnergyPlus `ZoneVentilation:WindandStackOpenArea` supplies the
+  structure: the wind and stack flow components computed separately and
+  combined in quadrature (`VVF = sqrt(Qw² + Qst²)`,
+  `ZoneEquipmentManager.cc`'s WindAndStack block, v24.2.0 lines
+  5716-5806), and the auto opening effectiveness (Cw: 0.55 for
+  perpendicular wind, linear to 0.30 at 45°, zero leeward). HARES's
+  `compute_natural_ventilation_cw` implements the same auto-Cw exactly.
+- ASHRAE HoF 2009 Ch. 16.14 supplies the discharge coefficient, fixed by
+  opening geometry: single-sided openings 0.15-0.25 (turbulent buoyancy,
+  no well-defined pressure head; HARES holds the midpoint 0.20),
+  cross-ventilation 0.60-0.65 (HARES holds 0.60).
+- OCHRE supplies the comfort gating: the three flow conditions and the
+  adjustment factor `adj = (T_zone - T_base)/(T_zone - T_outdoor)`
+  clamped to [0, 1], and the 20-ACH cap
+  (`Envelope.py`'s `_natural_ventilation`, lines 28-55, itself ResStock's
+  `apply_natural_ventilation_and_whole_house_fan`).
+
+The decision - why not E+'s auto Cd
+(`Cd = 0.40 + 0.0045|T_ext - T_mat|`, the `DiscCoef` AutoCalculate arm
+of the same E+ block):
+
+1. E+'s auto correlation is geometry-blind. The `WindandStackOpenArea`
+   object takes the discharge coefficient as an input and offers the
+   correlation as the default for objects that specify nothing; the
+   ASHRAE chapter the model cites gives the coefficient BY GEOMETRY
+   (single-sided versus cross), which is the physics the opening type
+   carries. Adopting the auto value erases the single-sided/cross
+   distinction the module models: at a 6 K delta-T the auto Cd (0.427)
+   more than doubles the single-sided stack flow (0.20 -> 0.427) and cuts
+   the cross flow by about 30% (0.60 -> 0.427).
+2. OCHRE - the parity reference whose gating this module adopted - uses
+   a fixed coefficient itself: the ResStock convention applies a flat
+   0.6 multiplier to the window area (`Envelope.py:44`,
+   `area = open_window_area * 0.6`), with no auto correlation anywhere.
+   The cross leg's 0.60 is exactly that value; the single-sided leg
+   refines it with the ASHRAE single-sided physics. Adopting E+'s auto
+   Cd would move the cross leg off the OCHRE-aligned value the gating
+   was adopted alongside.
+3. E+'s own literal for the gravitational acceleration in the same block
+   is 9.81; HARES holds the standard 9.80665. The divergence pin holds
+   both literals' effect.
+
+The docstring's former claim ("Implements the EnergyPlus
+`ZoneVentilation:WindandStackOpenArea` model") was wrong by omission -
+the gating and the discharge coefficient are not E+'s - and now names
+the hybrid. The magnitude is pinned:
+`infiltration::tests::natural_ventilation_pin_matches_the_recorded_divergence_vector`
+ports the E+ AutoCalculate arms verbatim (from the upstream source,
+including the 9.81 literal), pins HARES's reference-case vector at 1e-9,
+pins the port's own vector, and holds the stack terms' ratio - the
+recorded divergence's magnitude. The pin ran at the parent in its
+agreement form (HARES == the E+ port at 1e-9) and failed: HARES
+0.5779 m³/s against the port's 0.8465 m³/s on the reference case
+(a 0.5 m² south-facing cross-ventilated opening, perpendicular 3 m/s
+wind, 26 °C zone over 20 °C outdoor, 22 °C comfort base) - the
+disagreement the decision records.

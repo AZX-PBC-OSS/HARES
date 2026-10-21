@@ -6532,3 +6532,65 @@ identical.
 scheduled-load step paths, the EV telemetry, the `ControlSignal` enum
 and its Python surface, the two alignment docs, and the fixture suites
 unchanged.
+
+## Hardening 21: the natural ventilation model states and implements one contract
+
+**Kind:** decision + docstring + pin (the model's behavior is unchanged;
+the contract is stated, recorded and pinned).
+
+**The review's finding:** the natural-ventilation module's docstring
+claimed "Implements the EnergyPlus `ZoneVentilation:WindandStackOpenArea`
+model" while the code implements a hybrid the docstring did not name:
+the discharge coefficient deviates structurally from the cited model
+(fixed 0.20 single-sided / 0.60 cross against E+'s AutoCalculate
+`Cd = 0.40 + 0.0045|T_ext - T_mat|`), and the gating and adjustment
+factor are OCHRE's.
+
+**The decision (kept the fixed geometry Cd):** full reasoning and the
+three-source attribution in `docs/PHYSICS_DECISIONS.md` ("Natural
+ventilation keeps the fixed geometry discharge coefficient"). In brief:
+E+'s auto correlation is geometry-blind - the object takes `DiscCoef` as
+an input and offers the correlation as the default for objects that
+specify nothing - while the ASHRAE chapter the model cites gives the
+coefficient by geometry (single-sided 0.15-0.25, cross 0.60-0.65), which
+is the physics the module's `OpeningType` carries; OCHRE, the parity
+reference whose gating the module adopted, uses a fixed coefficient
+itself (the ResStock flat 0.6 window-area multiplier, `Envelope.py:44`),
+so the cross leg's 0.60 is OCHRE-aligned and the single-sided leg
+refines it with the ASHRAE physics; adopting the auto value would more
+than double the single-sided stack flow (0.20 -> 0.427 at 6 K) and cut
+the cross flow about 30% (0.60 -> 0.427) with no parity contract behind
+either shift. The docstring now names the hybrid and its three sources,
+and the stale E+ line references are corrected to the verified block
+(v24.2.0 lines 5716-5806; the plan's and the comments' 5988-6060 were
+another version's numbering).
+
+**The golden-vector pin:**
+`infiltration::tests::natural_ventilation_pin_matches_the_recorded_divergence_vector`.
+The EnergyPlus comparator is ported VERBATIM from the upstream source
+(`ZoneEquipmentManager.cc`'s WindAndStack block, v24.2.0 lines
+5716-5806, fetched from the NREL/EnergyPlus repository: the AutoCalculate
+Cw interpolation, the AutoCalculate Cd, the wind/stack quadrature,
+including E+'s own 9.81 gravity literal where HARES holds the standard
+9.80665). The pin ran at the parent in its AGREEMENT form (HARES ==
+the E+ port at 1e-9) and FAILED - the recorded disagreement witnessed:
+HARES 0.5779017617765289 m³/s against the port's 0.8464629906170573
+m³/s on the reference case (a 0.5 m² south-facing cross-ventilated
+opening, perpendicular 3 m/s wind, a 26 °C zone over a 20 °C outdoor,
+the 22 °C comfort base; the difference carries the auto-vs-fixed Cd AND
+the OCHRE adjustment factor the port does not model). The pin then
+settled into the recorded-divergence form the decision dictates: HARES's
+own vector hand-derived from the documented hybrid and pinned at 1e-9
+(all four returned channels), the port's own vector pinned at 1e-9
+beside it, and the stack terms' ratio held at 1e-9 - the recorded Cd
+choice's magnitude (0.60 against the auto 0.427, the two gravity
+literals under the square root). Neither side can drift without the
+record moving.
+
+**Movement:** none - the model's behavior is unchanged by this entry
+(docstring, decision record and pin only); the goldens compare-all 10 +
+dst 1 bitwise identical, no re-capture.
+
+**Dependencies:** `crates/hares-physics/src/infiltration.rs` (docstring
+and tests only), `docs/PHYSICS_DECISIONS.md`, and the upstream E+ source
+pinned in the record.
