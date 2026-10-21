@@ -2,7 +2,7 @@
 
 Source: the I-09 planning round, 2026-10-17, verified against the tree at
 `0911b711`. "Task N.N" refers to the I-08 hardening fan-out plan
-(docs/superpowers/plans/2026-10-17-hares-hardening-fanout.md).
+(.shipwright/initiatives/I-08/plans/2026-10-17-hares-hardening-fanout.md).
 
 ## Axis B: Monte Carlo at scale
 

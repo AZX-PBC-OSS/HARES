@@ -2,7 +2,7 @@
 
 External-standards research for I-09, 2026-10-17. Mandate: the charter
 (00-charter.md), success criteria 1 and 6. Starting set: the fan-out plan's
-Wave 5 (docs/superpowers/plans/2026-10-17-hares-hardening-fanout.md, Tasks
+Wave 5 (.shipwright/initiatives/I-08/plans/2026-10-17-hares-hardening-fanout.md, Tasks
 5.1-5.5). Every claim names the fetched source (URL plus what it says).
 Paywalled standard text is marked UNVERIFIABLE-WEB with the exact scope the
 operator should supply from library access. No em dashes are used in this
@@ -13,7 +13,7 @@ not the web): `tests/bestest/` runs cases 600, 900, 600FF, 900FF and 640
 with bands pinned in `tests/bestest/reference_bands.rs` from ASHRAE
 140-2017 Tables B8-2 and B8-3a (docs/validation.md); fixtures exist for
 610, 620, ce100, ce200 and a heat-pump case but the I-08 envelope review
-(docs/superpowers/plans/2026-10-17-hares-hardening-reviews/2-envelope.md,
+(.shipwright/initiatives/I-08/plans/2026-10-17-hares-hardening-reviews/2-envelope.md,
 line 45) records that only 600, 900, 600FF, 900FF and 640 actually run,
 with 620, 650, 920, 950, 195 and 395 missing. ISO 13786 is not implemented.
 The vendored Ruby cites ANSI/RESNET/ICC 301 for equipment equations and

@@ -349,8 +349,8 @@ The active source per side is recorded where the setpoints resolve
 `heating_setpoint_source` / `cooling_setpoint_source`), so the run's
 provenance names where each thermostat's setpoints came from: the schedule
 column, the HPXML control, or the default profile. OCHRE lets the column
-win silently (`vendors/OCHRE/ochre/utils/schedule.py:408-427`); the
-warning follows OS-HPXML, not OCHRE.
+take precedence without a warning (`vendors/OCHRE/ochre/utils/schedule.py:408-427`);
+the warning follows OS-HPXML, not OCHRE.
 
 ## A constant setpoint override replaces the resolved setpoint sources
 
@@ -1034,22 +1034,24 @@ of the same E+ block):
    object takes the discharge coefficient as an input and offers the
    correlation as the default for objects that specify nothing; the
    ASHRAE chapter the model cites gives the coefficient BY GEOMETRY
-   (single-sided versus cross), which is the physics the opening type
-   carries. Adopting the auto value erases the single-sided/cross
-   distinction the module models: at a 6 K delta-T the auto Cd (0.427)
+   (single-sided versus cross), and the ASHRAE ranges are the measured
+   evidence. HARES's geometry-aware split is more physical than either
+   E+'s object default or a single flat value: adopting the auto
+   correlation erases the single-sided/cross distinction the module
+   models, and one flat value erases the single-sided leg's refinement.
+   At a 6 K delta-T the auto Cd (0.427)
    more than doubles the single-sided stack flow (0.20 -> 0.427) and cuts
    the cross flow by about 30% (0.60 -> 0.427).
-2. OCHRE - the parity reference whose gating this module adopted - uses
-   a fixed coefficient itself: the ResStock convention applies a flat
-   0.6 multiplier to the window area (`Envelope.py:48`,
-   `area = open_window_area * 0.6`), with no auto correlation anywhere.
-   The cross leg's 0.60 is exactly that value; the single-sided leg
-   refines it with the ASHRAE single-sided physics. Adopting E+'s auto
-   Cd would move the cross leg off the OCHRE-aligned value the gating
-   was adopted alongside.
-3. E+'s own literal for the gravitational acceleration in the same block
+2. E+'s own literal for the gravitational acceleration in the same block
    is 9.81; HARES holds the standard 9.80665. The divergence pin holds
    both literals' effect.
+
+A note on OCHRE, not a reason: OCHRE uses a fixed coefficient itself,
+the ResStock convention's flat 0.6 multiplier on the window area
+(`Envelope.py:48`, `area = open_window_area * 0.6`), with no auto
+correlation anywhere. The cross leg's 0.60 is consistent with that
+value; the single-sided leg refines it with the ASHRAE single-sided
+physics.
 
 The docstring's former claim ("Implements the EnergyPlus
 `ZoneVentilation:WindandStackOpenArea` model") was wrong by omission -
