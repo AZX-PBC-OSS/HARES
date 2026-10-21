@@ -5602,10 +5602,12 @@ intended behavior, the count makes it visible. The derive-path floor in
 before any diagnostics exist, and its floored output is what the
 assembler's zone loop would see). (d) The assert is deleted and the
 check moves to construction: `WindowSolarProperties::validate` rejects
-an inverted or non-finite pair for either season naming the surface and
-the season, wired through `ThermalSolverConfig::validate` into
-`ThermalSolver::new`'s typed `ThermalSolverError::Configuration` (the
-crate's config-error path); the per-step arithmetic keeps its `.max`
+an inverted pair or a NaN on either field for either season naming the
+surface and the season, wired through `ThermalSolverConfig::validate`
+into `ThermalSolver::new`'s typed `ThermalSolverError::Configuration`
+(the crate's config-error path); an infinity on either field passes,
+the per-step comparison's pre-existing acceptance, now documented
+here. The per-step arithmetic keeps its `.max`
 clamp. (e) All three uniform-fallback arms emit a `tracing::warn!`
 naming the branch (continuous or discrete for the pinned arms), the
 site (`initialize_steady_state`), the state count and the uniform
@@ -5621,7 +5623,8 @@ three clamp counts (a sub-floor material layer, a sub-floor precomputed
 layer, a sub-floor declared zone capacitance handed straight to the
 assembler) asserting the counter and the clamped value;
 `window_solar_properties_reject_shgc_below_transmittance` (both
-seasons, the equality case, the non-finite case);
+seasons, the equality case, the NaN case; an infinity passes, per the
+change note);
 `window_shgc_below_transmittance_is_a_construction_error` (the full
 solver construction names the surface and the pair);
 `steady_state_fallback_warns` (the warning observed through a counting
@@ -5661,6 +5664,15 @@ layer's node below the floor.
 default features 2351/2351 (5 skipped); `pytest -m '' -n 4` after
 `maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright
 0 errors; the goldens compare-all 10 + dst 1 bitwise identical.
+The record correction's re-run (2026-10-20, the two pinned-arm warns
+and the zone-ceiling message fix added; commits `7f0b9ea9` and
+`9b50d81d`): fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+-j 2` 8297/8297 passed (8 skipped); `pytest -m '' -n 4` after
+`maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright
+0 errors; the goldens compare-all 10 + dst 1 bitwise identical (the
+`tracing` warn is not serialized into the golden frames, so it moves
+no recorded number).
 
 **Commit:** `fix: envelope index ceilings and capacitance floors fail or count loudly`
 

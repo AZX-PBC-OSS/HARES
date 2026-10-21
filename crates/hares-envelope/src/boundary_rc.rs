@@ -548,6 +548,11 @@ pub enum BoundaryRcError {
 ///
 /// Cite: ASHRAE HoF 2021 §1.8 Eq.28; EnergyPlus `PsyRhoAirFnPbTdbW`;
 /// ISA 1976 / ICAO Doc 7488.
+///
+/// The `MIN_CAPACITANCE_J_K` floor applied here is uncounted: this
+/// pre-assembly output feeds the assembler's zone loop, and the assembler's
+/// clamp lifts are what `EnvelopeDiagnostics::min_capacitance_clamp_count`
+/// counts.
 pub fn derive_zone_capacitances(
     zones: &[ZoneInput],
     site_pressure_pa: f64,
