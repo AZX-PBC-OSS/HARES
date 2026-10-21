@@ -6145,7 +6145,7 @@ distribution point every setpoint-consuming spec takes), the
 thermostat FSM's init gate and `ScheduleSource::declared_literal_values`,
 the three repaired test CSVs.
 
-## Hardening 18: every physics clamp is counted, none are silent
+## Hardening 18: the counted clamp census, and its scope
 
 **Kind:** hardening (the clamp census; diagnostics only, no physics
 moves).
@@ -6163,8 +6163,10 @@ humidity ratio that outruns saturation all say something about the
 inputs, and none of it was visible.
 
 **Change:** a counted clamp-site taxonomy, `hares_types::clamp_census`:
-the `ClampSite` enum names every physics clamp surface (each site is
-its own census key, serialized under its own name), and `ClampCensus`
+the `ClampSite` enum names every counted physics clamp surface (each
+site is its own census key, serialized under its own name; the scope
+table below records what is counted and what is excluded, with the
+class and the reason), and `ClampCensus`
 holds the per-site run totals. The recording sites tally on the calling
 thread (a thread-local per-step tally, the same accumulate-at-the-source
 and take-and-reset-per-drain shape the equipment's
@@ -6177,9 +6179,10 @@ diagnostics: it surfaces through the dwelling's accessor alone, never
 through the run result's health totals, the output frames or the
 policy.
 
-**The sites:** the plan named six surfaces; the census carries eight
+**The sites:** the plan named six surfaces; the census carries eleven
 sites (the grep of the clamp idioms found two more at the named
-surfaces, both from the review's own enumeration). Per site:
+surfaces, both from the review's own enumeration, and the scope
+triage's three joins below complete the counted set). Per site:
 `Aim2PressureExponent` (the `n_i.clamp(N_I_MIN, N_I_MAX)` at both of
 its clamp points, the per-step ASHRAE wind-stack evaluation and the
 ACH50-to-coefficients conversion), `Aim2LeakageDistribution` (the
@@ -6189,11 +6192,19 @@ table these are guards valid inputs cannot trip, counted so a table
 change that lets them fire is visible), `NaturalVentilationAdj` (the
 comfort-base adjustment ratio held into [0, 1] when the base sits
 below the outdoor temperature), `NaturalVentilationAchCap` (the
-20-ACH cap), `RelativeHumidity` (the saturation hold), `ExteriorFilmFloor`
+20-ACH cap), `RelativeHumidity` (the saturation hold),
+`ZoneHumiditySaturation` (the humidity solver's zone humidity ratio
+held into [0, w_sat]; the clamped mass is the solver's condensation
+and frost bookkeeping), `FilmDeltaTFloor` (the TARP exterior
+natural-convection model's ΔT floored at 0.1 K, the same delivered
+film resistance the floor below protects), `ExteriorFilmFloor`
 (the 1.0 W/(m2 K) DOE-2 floor), `TankDrawTruncation` (the step draw
-truncated to the tank's volume) and `CurveIndex` (the biquadratic
-curve-index clamp: the existing health counter stays the policy and
-run-result surface, and the site joins the census beside it). A site's
+truncated to the tank's volume), `FlowFractionBounds` (the biquadratic
+flow fraction held into the configured `[ff_min, ff_max]` before the
+part-load-fraction quadratic evaluates) and `CurveIndex` (the
+biquadratic curve-index clamp: the existing health counter stays the
+policy and run-result surface, and the site joins the census beside
+it). A site's
 count rises only when its clamp changes the value: the recording reads
 the pre-clamp value and the clamp expression is untouched, so no
 clamp's behavior moves.
@@ -6203,9 +6214,57 @@ silent: six witness probes (the AIM-2 exponent at both points, the
 ventilation adjustment and cap, the saturation hold, the film floor,
 the tank truncation, and the dwelling-level drain that asserts the
 census site equals the health counter on a clamping run) each failed
-at zero, GREEN after the recording calls landed. The census's own
+at zero, GREEN after the recording calls landed. The scope triage's
+three joins each carried its own witness (the film ΔT floor, the
+flow-fraction bounds, the zone humidity hold), RED with the site
+muted and GREEN with it live. The census's own
 unit tests pin the record/take/merge shape and the name-keyed
 serialization.
+
+**The drain's own defect, fixed after the entry landed:** `ClampCensus`
+is `Copy`, and the tally drain's `tally.get().take()` took-and-reset
+the temporary copy `Cell::get()` hands out without writing the reset
+state back into the cell, so every drain after the first re-merged the
+tally's full history: a dwelling whose clamp fired on one step of
+three read a run total of 6 where the truth is 2 (the per-step census
+growth [2, 2, 2] where each step's own firings give [2, 0, 0]), and a
+process whose second drain cycle fired nothing read the first cycle's
+counts back out of an empty drain. The drain takes on a local and
+writes the reset state back into the cell, pinned by two witnesses:
+the two-drain-cycle probe in the census's own unit tests (an empty
+cycle's drain reads empty) and the three-timestep dwelling witness
+(the per-step growth [2, 0, 0], the run total 2).
+
+**The scope (site by site, what the census counts and what it
+excludes):** the counted set is the per-step physics clamps whose
+unclamped value is computable but outside the model's valid band and
+whose clamped result is delivered; a clamp guarding the expression's
+own mathematical domain (a NaN, epsilon or sign guard), a
+construction-time validation, or a solver-internal iteration bound is
+outside the census. Every surface the review's independent grep named
+carries a verdict with its reason.
+
+| Surface | Verdict | Class and reason |
+|---|---|---|
+| `infiltration.rs` `n_i.clamp(N_I_MIN, N_I_MAX)`, both points | counted (`Aim2PressureExponent`) | the exponent's band holds a delivered flow at two per-step/conversion points |
+| `infiltration.rs` `m_o.min(1.0)`, `x_i_raw.min(1.0 - 2 y_i)` | counted (`Aim2LeakageDistribution`) | the distribution holds on delivered coefficients |
+| `infiltration.rs` `adj_raw.clamp(0.0, 1.0)` | counted (`NaturalVentilationAdj`) | the comfort-base ratio scales the delivered ventilation flow |
+| `infiltration.rs` the 20-ACH cap | counted (`NaturalVentilationAchCap`) | the cap holds the delivered ventilation flow |
+| `psychrometrics.rs` the RH saturation hold | counted (`RelativeHumidity`) | a delivered humidity state held into [0, 1] |
+| `humidity_solver.rs` `w_new.clamp(0.0, w_sat)` | counted (`ZoneHumiditySaturation`) | the delivered zone humidity ratio, the clamped mass the condensation bookkeeping |
+| `film_coefficients.rs` `delta_t.max(0.1)` | counted (`FilmDeltaTFloor`) | the TARP model evaluates at the floor and the film resistance is delivered |
+| `film_coefficients.rs` `h_ext.max(1.0)` | counted (`ExteriorFilmFloor`) | the delivered exterior film resistance's floor |
+| `tank.rs` the draw truncation | counted (`TankDrawTruncation`) | the delivered draw held to the tank's volume |
+| `hvac_core.rs` `flow_fraction.clamp(ff_bounds)` | counted (`FlowFractionBounds`) | the flow fraction held into the configured bounds before the delivered PLF quadratic |
+| `hvac_core.rs` the curve-index clamp | counted (`CurveIndex`) | the delivered curve evaluation held to the configured set |
+| `psychrometrics.rs` `w.max(MIN_HUMIDITY_RATIO)` (the six w floors in the conversion functions) | excluded | a numerical-epsilon guard: the 1e-7 floor keeps the inverse psychrometric divisions and logs finite; a valid atmosphere never reaches it |
+| `tank.rs` `vol_ratio.clamp(0.0, 1.0)` at the two TMV sites | excluded | a domain guard on a degenerate mixing ratio: inside its branch the ratio is below 1 by construction, and it goes below 0 only when the configured delivery temperature sits below the mains, an input defect for construction-time validation; the sibling 1e-9 denominator epsilon guards the same expression |
+| `infiltration.rs` `shelter_coeff.max(0.0)` | excluded | a numerical guard: the AIM-2 conversion's shelter coefficient is nonnegative by its table construction, and the floor only keeps `powf`'s fractional power of a negative base out of the wind term |
+| `infiltration.rs` `floors_above_grade.max(1.0)` | excluded | construction-time validation: the flue correction runs once in the ACH50-to-coefficients conversion on the building description; a sub-one floor count is an input defect the blueprint should refuse, and the hold only keeps Eq. 12-13's flue correction finite |
+| `infiltration.rs` the ELA `driver.max(0.0)` | excluded | a numerical guard: the OS-HPXML stack and wind coefficients are nonnegative, and the floor only keeps `sqrt`'s argument nonnegative |
+| `air_conditioner.rs` the crankcase's `max_rtf.clamp(0.0, 1.0)` | excluded | inert: the runtime fraction is held into [0, 1] at every stage of its own production chain (the duty-cycle PLR clamp, the PLF clamp's `.max(plr)`, the RTF = PLR/PLF clamp), so no input the chain can produce fires the read site |
+| `thermal_solver/longwave.rs` the exterior skin's `t_new.clamp(t_surf ± 2 K)` and the interior's `t_new.clamp(t_surf_min, t_surf_max)` | excluded | solver-internal stability clamps protecting the fixed-point iterations (the heavy-ball damping's per-iteration step bound, OCHRE's designed behavior); the skin's own fixed-point invariant guards the converged result |
+| the envelope's vent adjustment and its 20-ACH cap | counted already | the envelope's production ventilation path calls the physics `natural_ventilation_flow_m3_s`, whose comfort-base adjustment and 20-ACH cap are the counted `NaturalVentilationAdj` and `NaturalVentilationAchCap` sites (the envelope's `infiltration.rs` copies of the formulas are the test's own expected-value computation) |
 
 **Movement:** none - the goldens compare-all 10 + dst 1 bitwise
 identical, no re-capture (the census is compiled out without the

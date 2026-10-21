@@ -3015,11 +3015,14 @@ pub struct Dwelling {
     diagnostic_accum: Option<DiagnosticAccumulator>,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     envelope_diagnostics: EnvelopeDiagnostics,
-    /// The run's clamp census: every physics clamp the run applied,
-    /// counted at its site and drained per step from the recording
-    /// thread's tally. Diagnostics only: the census surfaces through the
-    /// dwelling's `clamp_census` accessor, never the run result's health
-    /// totals or the output frames.
+    /// The run's clamp census: the counted physics clamps the run
+    /// applied, per site, drained per step from the recording thread's
+    /// tally. The census's scope is the per-step value clamps whose
+    /// clamped result is delivered; the excluded classes and their
+    /// members are the Hardening 18 entry's scope table. Diagnostics
+    /// only: the census surfaces through the dwelling's `clamp_census`
+    /// accessor, never the run result's health totals or the output
+    /// frames.
     #[cfg(feature = "observe")]
     clamp_census: hares_types::clamp_census::ClampCensus,
 }
@@ -5268,9 +5271,11 @@ impl Dwelling {
             .map_err(|e| HaresError::Io(format!("EnvelopeDiagnostics serialization: {e}")))
     }
 
-    /// The run's clamp census: per-site counts of every physics clamp the
-    /// run applied, drained per step. Diagnostics only: the census rides
-    /// this accessor, never the health totals the frames serialize.
+    /// The run's clamp census: per-site counts of the counted physics
+    /// clamps the run applied (the per-step value clamps; the excluded
+    /// classes are the Hardening 18 entry's scope table), drained per
+    /// step. Diagnostics only: the census rides this accessor, never
+    /// the health totals the frames serialize.
     #[cfg(feature = "observe")]
     #[must_use]
     pub fn clamp_census(&self) -> &hares_types::clamp_census::ClampCensus {

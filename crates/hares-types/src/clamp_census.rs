@@ -1,5 +1,9 @@
-//! The census of physics clamps: every clamp the physics applies to a
-//! value is counted at its site, none are silent.
+//! The census of the physics clamps: the per-step value clamps whose
+//! clamped result is delivered are counted at their site; the clamps
+//! outside that scope (the numerical-epsilon and domain guards, the
+//! construction-time validation, the solver-internal iteration
+//! stability clamps) are listed with their classes in the Hardening 18
+//! entry's scope table in the I-08 ledger.
 //!
 //! A physics clamp keeps a model inside its valid domain by overwriting
 //! the value it is given (a range clamp, a cap, a floor, a truncation).
@@ -50,6 +54,16 @@ pub enum ClampSite {
     /// Relative humidity clamped into [0, 1]: a humidity ratio above
     /// saturation at the local pressure is held to saturation.
     RelativeHumidity,
+    /// The humidity solver's zone humidity ratio held into [0, w_sat]:
+    /// latent gains that drive the zone past saturation (or below zero)
+    /// are held there, and the clamped mass is the solver's condensation
+    /// and frost bookkeeping.
+    ZoneHumiditySaturation,
+    /// The TARP exterior natural-convection model's temperature
+    /// difference floored at 0.1 K: a surface within 0.1 K of its zone
+    /// evaluates the model at the floor, the same delivered film
+    /// resistance the 1.0 W/(m²·K) floor below protects.
+    FilmDeltaTFloor,
     /// The exterior film coefficient floored at 1.0 W/(m²·K): at zero
     /// wind and a near-zero surface temperature difference the DOE-2
     /// model's convection coefficient approaches zero, and the floor
@@ -59,6 +73,10 @@ pub enum ClampSite {
     /// withdrawal exceeds what the tank holds, so the delivered draw is
     /// the volume.
     TankDrawTruncation,
+    /// A biquadratic flow fraction outside the configured
+    /// `[ff_min, ff_max]` bounds, held to the bounds before the
+    /// part-load-fraction quadratic evaluates.
+    FlowFractionBounds,
     /// A biquadratic curve index out of bounds, clamped to the last
     /// same-type curve. The same events the equipment health counter
     /// `curve_index_clamps` drains: that counter carries the policy
@@ -74,13 +92,16 @@ impl ClampSite {
         Self::NaturalVentilationAdj,
         Self::NaturalVentilationAchCap,
         Self::RelativeHumidity,
+        Self::ZoneHumiditySaturation,
+        Self::FilmDeltaTFloor,
         Self::ExteriorFilmFloor,
         Self::TankDrawTruncation,
+        Self::FlowFractionBounds,
         Self::CurveIndex,
     ];
 
     /// The number of clamp sites.
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 11;
 
     /// The site's own name: the key the census reports the site's count
     /// under.
@@ -92,8 +113,11 @@ impl ClampSite {
             Self::NaturalVentilationAdj => "natural_ventilation_adj",
             Self::NaturalVentilationAchCap => "natural_ventilation_ach_cap",
             Self::RelativeHumidity => "relative_humidity",
+            Self::ZoneHumiditySaturation => "zone_humidity_saturation",
+            Self::FilmDeltaTFloor => "film_delta_t_floor",
             Self::ExteriorFilmFloor => "exterior_film_floor",
             Self::TankDrawTruncation => "tank_draw_truncation",
+            Self::FlowFractionBounds => "flow_fraction_bounds",
             Self::CurveIndex => "curve_index",
         }
     }

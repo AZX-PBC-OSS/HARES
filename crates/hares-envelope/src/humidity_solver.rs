@@ -334,6 +334,16 @@ impl DomainSolver for HumiditySolver {
 
             let w_sat = humidity_ratio_from_tdp(t_zone_c, p_pa);
             let w_raw = w_new;
+            // The saturation hold's firing is counted, never silent: a
+            // zone humidity ratio driven past saturation (or below zero)
+            // is held into [0, w_sat], and the clamped mass is the
+            // condensation bookkeeping below.
+            #[cfg(feature = "observe")]
+            if !(0.0..=w_sat).contains(&w_raw) {
+                hares_types::clamp_census::record(
+                    hares_types::clamp_census::ClampSite::ZoneHumiditySaturation,
+                );
+            }
             let w_new = w_new.clamp(0.0, w_sat);
             self.humidity_ratios.insert(zone_id, w_new);
 
@@ -588,6 +598,49 @@ mod tests {
             solver.condensation_mass_kg(ZoneId(1)) < 0.0,
             "condensation mass must be < 0 when clamped at zero from below"
         );
+    }
+
+    /// The clamp census counts the zone humidity ratio's saturation
+    /// hold: latent gains that drive the zone humidity ratio outside
+    /// [0, w_sat] are held there, and the firing is recorded. The probe
+    /// drives the hold's lower bound (a latent sink that pulls the zone
+    /// below zero), where the census total stays isolated: the hold's
+    /// supersaturated bound co-fires the psychrometric RH conversion's
+    /// own counted hold at the clamped boundary, the same physical event
+    /// at both surfaces. A firing that went uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_zone_humidity_saturation() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        let env = env_with_zone(20.0, 0.008);
+        let mut solver = HumiditySolver::new(HumiditySolverConfig::default(), &env);
+        let ports_lo = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: ZoneId(1),
+                sensible_gain_w: 0.0,
+                latent_gain_w: -1.0e9,
+                ..ThermalAccumulator::new(ZoneId(1))
+            }],
+            ..Default::default()
+        };
+        let _ = solver.resolve_new(&ports_lo, &env, Duration::from_secs(60));
+        assert!(
+            solver.humidity_ratio(ZoneId(1)) >= 0.0,
+            "the hold kept the zone humidity ratio at its lower bound"
+        );
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::ZoneHumiditySaturation),
+            1,
+            "the below-zero zone humidity ratio records its hold"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
     }
 
     /// Regression: latent heat was inconsistent between modules (2450 vs 2501 kJ/kg).

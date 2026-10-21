@@ -1244,6 +1244,15 @@ impl HvacEquipment {
         flow_fraction: f64,
     ) -> (f64, f64) {
         let raw = self.evaluate_biquadratic(curve_index, t_indoor_c, t_outdoor_c);
+        // The bounds clamp's firing is counted, never silent: a flow
+        // fraction outside the configured bounds is held to them before
+        // the part-load-fraction quadratic evaluates.
+        #[cfg(feature = "observe")]
+        if !(self.config.ff_bounds.0..=self.config.ff_bounds.1).contains(&flow_fraction) {
+            hares_types::clamp_census::record(
+                hares_types::clamp_census::ClampSite::FlowFractionBounds,
+            );
+        }
         let ff_clamped = flow_fraction.clamp(self.config.ff_bounds.0, self.config.ff_bounds.1);
         // Use cap_ff for capacity curves (even index), eir_ff for EIR curves (odd index).
         let ff_coeffs = if curve_index.is_multiple_of(2) {
@@ -2025,6 +2034,33 @@ mod tests {
             census.count(ClampSite::CurveIndex),
             1,
             "the out-of-bounds curve evaluation records its clamp"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
+    }
+
+    /// The clamp census counts the part-load flow fraction's bounds: a
+    /// flow fraction outside the configured `[ff_min, ff_max]` is held
+    /// to the bounds before the ff quadratic evaluates, and the firing
+    /// is recorded. A firing that went uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_flow_fraction_bounds() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.config.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        hvac.config.ff_bounds = (0.7, 1.3);
+        let _ = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.6);
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::FlowFractionBounds),
+            1,
+            "the out-of-bounds flow fraction records its clamp"
         );
         assert_eq!(census.total(), 1, "no other site fires in this probe");
     }

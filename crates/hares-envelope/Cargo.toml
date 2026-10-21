@@ -15,8 +15,10 @@ serde = { workspace = true }
 chrono.workspace = true
 
 [features]
-observe = []
-observe_detailed = []
+# The clamp census's recording sites live in the leaf's observe-gated
+# module, so this crate's observe gate carries the leaf's.
+observe = ["hares-types/observe"]
+observe_detailed = ["observe"]
 
 [dev-dependencies]
 approx = "0.5"
