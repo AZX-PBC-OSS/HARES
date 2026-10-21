@@ -436,3 +436,83 @@ forward) and the envelope package (one SHIP, one documentation-only
 round, its three findings landed). What remains of I-08: row 97
 (CN-4's B1 re-baseline on this head), rows 100/101 and the operator
 pushes.
+
+## The hardening Wave 2's completion (2026-10-21)
+
+Every Wave-2 item from the hardening fan-out is fixed, folded and
+measured. Rows 113 through 129, linear on the head `dff2b8d0`, ten
+landed units: the package A (113/114) the warm-up day count computed
+exactly, a resolution that cannot divide the day fails construction
+naming it, the shared `steps_per_day_exact`, and the ASHP control
+trace's environment read out of the per-step path behind a `OnceLock`
+with the read-once semantics permanently pinned; the package B (115)
+the envelope's index ceilings and capacitance floors fail or count
+loudly, the steady-state fallback warns on the arms that run, the
+fixture sweep's 3040 capacitance rows moving no recorded number; the
+package C (116/117) the schedule sources never share a random
+keystream, the identity keyed on the dwelling after the reviewer's
+bit-identical-keys-across-homes probe, and the EV driver fails on
+unreadable schedules instead of inventing a day; the package D
+(118/119) the fleet seeds from the caller with DR compliance latched
+per event and the restore keeping it, the event rate's quantization
+residual stated, and the setpoint columns follow the os-hpxml
+Fahrenheit convention with the construction-time plausibility band at
+every surface that lands one; the package E (120/121) the clamp census
+counts every per-step physics clamp at a named site, the tally drain's
+reset fixed, the scope stated site by site against the review's
+independent grep, and one home for the conversion factors; the package
+F (122/123) the grid and equipment edge behavior matches its
+documented contracts (five items) and the natural-ventilation contract
+decided and pinned with the citations naming the vendored copy's own
+lines; the package G (124/125/126) the exterior skin solve reports its
+own convergence, the equipment stage counts validate and backup heat
+stops inflating the reported COP, and the export decisions price the
+export rate with a missing price never read as zero dollars; the docs
+register (127) the public-docs directive applied to the engine repo,
+the divergence records framing upstream by design goals and the public
+tree carrying no process archaeology; the package H's code (128) the
+schedule resample holds its source rows instead of materialising an
+upsampled copy; and the package H's record (129) the measured
+before/after in the allocation ledger, the resample 75,688,714 B to
+5,048,074 B, the 10-dwelling fixture scale 832,577,374 B to
+55,530,334 B, the ratio 15.0x less, the value identity pinned bitwise
+over all 16 columns and all 525600 rows.
+
+Every package ran the standing dispatch shape implement, attack, fix,
+fold, measured, and the eight attack rounds' findings total 21 fixer
+commits between each package's implementation commits and its fold (A
+2, B 3, C 3, D 2, E 3, F 3, G 4, H 1), each round's catches
+Green-gated and folded before the fold's ladder row; the reviewer's
+probes landed as permanent surfaces: `e3bb5257` (A, the read-once pin,
+the revert having failed zero tests), `f9b2c115` (A, the ledger
+entries' review corrections), `64d6e715` and `29394d63` (C, the
+across-homes closure and the tag-table witnesses), `8992a248` and
+`8c9c7416` (E, the drain reset and the census's scope), `16e72966` and
+`fe3fde8a` (G, the EIR length witness unshadowed, the skin-lag warn
+scoped honestly and the vote stand-downs pinned), and `dff2b8d0` (H,
+the unavailable-period flags' length mismatch fails loudly instead of
+reading as available).
+
+The measurement ladder (02-measurement.md) closes the wave with eleven
+rows, the B1 baseline through the boundary's heavy row, every payload
+bitwise identical to B1 throughout (the DE-trace compare exit 0 at
+every row), the paired method standing from the ladder's row 11 (its
+debut the package H fold's paired row, the same-sitting control on the
+previous pin with the CPU time and the peak RSS beside the wall). The
+memory proof is row 129's: 15.0x less per-dwelling allocation on the
+resample path. The boundary's heavy pass verdict, 2026-10-21 on the
+verified-quiet host: check_losses 13/13 IDENTICAL, exit 0, wall
+9:28.84 (11545.9 user + 52.7 sys s, peak RSS 5,992,900 KB), no moved
+loss and no re-pin; the DE-trace capture two back-to-back legs at the
+boundary head, walls 187.52 and 190.32 s (the mean 188.9 s), CPU
+3393.1 / 3454.0 user + 20.4 / 21.3 sys s, peak RSS 6,183,556 /
+6,293,704 KB, mid-run loads 15.8 to 20.8 all the capture's own fleet
+with the external residual under the quiet bar, the compare against
+the standing `B1-de-trace.json` exit 0 bitwise on both legs and
+mutual; the paired mean 0.4 percent under the package H fold's same-day
+control leg (189.6 s) and 0.9 percent over its fold mean (187.3 s),
+inside the 5 percent band, no wall regression; the suite 383 passed /
+0 failed / 7 skipped, ruff clean, the contract PASS; the build_info
+reports `dff2b8d0`, dirty False, profile release. What remains of
+I-08: rows 100/100a and 101/101a (the operator-gated hosted run and
+the pin advance) and the I-09 S-tier opening.
