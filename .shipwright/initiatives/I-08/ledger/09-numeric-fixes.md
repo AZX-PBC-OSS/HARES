@@ -6937,3 +6937,120 @@ export rate read, the stand-down label),
 `ev_driver/price.rs` (the two legs' rate split),
 `ev_driver/mod.rs` (the decide-time gate and the channel helper), and
 the three files' tests.
+
+## Hardening 25: the schedule table holds its source rows instead of an upsampled copy
+
+**Kind:** hardening (the schedule resample's per-dwelling memory).
+
+**The review's finding (schedules m4):** the schedule resample
+materialised the series at the run's step: the upsample branch expanded
+every resolved schedule to per-row values and per-row
+`DateTime<FixedOffset>` stamps, addressed by a direct index the runtime
+gets from pure arithmetic (`compute_schedule_idx` is arithmetic on the
+civil clock; the per-row stamps are read at generation time only) - so a
+15-minute, 16-column ResStock schedule at the fleet's 1-minute step paid
+the full expanded table per dwelling, multiplied across fleet workers.
+
+**RED (measured, not estimated):** the counting allocator gained a byte
+channel (`thread_alloc_bytes`, the live requested bytes on the thread,
+net of deallocations, beside the untouched call count; the same per-thread
+machinery, `crates/hares-types/src/alloc_count.rs`) and the measurement
+binary `crates/hares-core/tests/schedule_resample_memory.rs` pinned the
+workload: the 15-minute, 16-column ResStock schedule (`bldg0000006`,
+35040 rows) parsed, resampled to 60 s, then cloned ten times for the
+per-dwelling copies the environment builds hold (the blueprint's series
+is cloned per dwelling because the unavailable-period zeroing and the
+schedule injection write the build's own copy). At the parent shape the
+resample allocated **75,688,714 bytes** (525600 rows x 16 columns of
+f64, 67.3 MB, plus 525600 stamps of 16 bytes, 8.4 MB) in 53 allocation
+calls, the per-dwelling cost (resample + one copy) **83,257,737 bytes**,
+the 10-dwelling fixture scale **832,577,374 bytes**; the plan's ~50
+MB/dwelling estimate understated the true number. The GREEN pin asserts
+the per-dwelling cost stays under twice the held table's size (about
+5.05 MB) and failed at the parent shape as the RED witness; the value
+pin asserts the zero-order hold bitwise (all 16 columns x all 525600
+per-step rows against the source table, `to_bits`) and passed at the
+parent shape and after.
+
+**Change:** the resample's upsample path holds the source-resolution
+rows and the readers index by division - the plan's first option. The
+series keeps its rows, stamps, columns and `source_step_secs` (the
+rows' own step, 900) and adds nothing; the environment derives the
+expansion (`schedule_upsample_factor = source_step_secs / step_secs`,
+at least 1) at construction and:
+
+- `compute_schedule_idx` keeps returning the sim grid's per-step row
+  (the published `schedule_row` the occupant's presence and the event
+  replay address, unchanged); its cycle-span arithmetic uses the rows'
+  own step, the same product the materialised length times the sim step
+  produced, so the cyclic wrap, the DST civil addressing and the
+  365-day ordinal rule are unchanged;
+- the per-step column read divides the per-step row by the expansion
+  once and reads the held row - the zero-order hold the expanded rows
+  carried, bitwise;
+- the unavailable-period flags expand, each row's flag standing for the
+  steps its row covers, the same per-step vector the materialised rows
+  produced;
+- the build's consumers that sum columns (the draw and power
+  normalizations' means, the premise ZIP's mean) run over the expanded
+  sequence - each row's value repeated in order, the same addition
+  order the materialised column produced, so the means are bitwise the
+  old values - and the event replay's power series builds expanded to
+  the per-step length its row addressing requires.
+
+The plan's rejected option (drop the per-row stamps for a compact
+representation): rejected because the stamps are the smaller half of
+the defect (8.4 of 75.7 MB at the 1-minute step); the columns' 67.3 MB
+expansion is the cost the division indexing removes, and the stamps
+stay as the held rows' own generation-time record.
+
+**The exactness guard:** the hold is exact only while every row's
+sub-steps stay inside the row stamp's civil hour - the unavailable-period
+flags and the generated occupancy columns read hour-of-day (and the
+365-day ordinal, which only changes with the hour) from the row stamps,
+and a sub-step spilling into the next hour would read a different hour
+than the row's single value stands for. The resample checks this once
+per source series (a whole-second comparison per stamp, no allocation)
+and a stamp unaligned to its own step falls through to the materialised
+expansion, the pre-change behaviour exactly. Stamps aligned to their own
+step - the shipped fixtures, ResStock, OCHRE and the generated
+schedules - never spill; the guard's own test
+(`a_stamp_unaligned_to_its_own_step_still_expands`) pins the fallback
+shape and its bitwise zero-order hold.
+
+**Checkpoint decision: `CHECKPOINT_VERSION` 22 unchanged, no bump.**
+The checkpoint does not carry the schedule table: `DwellingCheckpoint`'s
+fields (reports, metrics, tariff, equipment states, actor states, the
+thermal and environment maps) hold no `ScheduleTimeSeries`, and the
+restore rebuilds the schedule from the dwelling's own inputs - the
+representation change moves no serialized shape. The checkpoint resume
+suites (checkpoint_resume, checkpoint_file_resume,
+checkpoint_regressions) pass unchanged.
+
+**Existing test movement:** `resample_from_15min_to_60s_is_zoh`
+rewritten as `resample_from_15min_to_60s_holds_source_rows` (the held
+shape pinned: the rows' own step unchanged, the per-step reads bitwise
+the source's zero-order hold through the division the environment
+runs); the two outside callers of
+`inject_schedule_into_specs_with_pre_period` (unavailable_period_rows,
+wet_appliance_hot_water) pass the parsed series' factor 1; the premise
+ZIP tests pass 1. Every other schedule, environment, parity and
+fixture test passes unchanged.
+
+**Tripwire verdicts:** the goldens compare-all 10 (default features) +
+dst 1 (the `dst` build) bitwise identical - the DST manifest
+`full_year_900s_dst` exercises the civil-time calendar paths and moved
+nothing; pytest 1801 passed + 6 xfailed, pyright 0 (no Python-visible
+schedule surface reads the materialized structure: the `ParsedSchedule`
+binding is opaque and the environment publishes the per-step values and
+row index exactly as before).
+
+**Dependencies:** `crates/hares-io/src/schedule.rs` (the hold and the
+guard), `crates/hares-core/src/environment.rs` (the expansion
+derivation, the division read, the flags' expansion),
+`crates/hares-core/src/dwelling/mod.rs` and
+`crates/hares-core/src/dwelling/premise_zip.rs` (the factor through the
+build's consumers), `crates/hares-io/src/schedule_resolve.rs` (the
+expanded means and the event series),
+`crates/hares-types/src/alloc_count.rs` (the byte channel), and the
+measurement binary.

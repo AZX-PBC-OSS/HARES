@@ -3983,10 +3983,12 @@ fn assemble_from_blueprint_with_seed(
         environment.schedule_mut(),
         &bp.building.unavailable_periods,
     )?;
+    let schedule_upsample_factor = environment.schedule_upsample_factor();
     hares_io::inject_schedule_into_specs_with_pre_period(
         &mut equipment_specs,
         environment.schedule_mut(),
         pre_period_columns.as_deref(),
+        schedule_upsample_factor,
         Some(&bp.inputs.defaults.profiles()),
         &defaults,
         &mut schedule_warnings,
@@ -5099,7 +5101,11 @@ impl Dwelling {
     /// expected draw — never a silent constant-power answer.
     #[must_use]
     pub fn premise_zip(&self) -> Option<PremiseZip> {
-        premise_zip::aggregate_premise_zip(self.equipment(), self.environment.schedule())
+        premise_zip::aggregate_premise_zip(
+            self.equipment(),
+            self.environment.schedule(),
+            self.environment.schedule_upsample_factor(),
+        )
     }
 
     /// Returns per-equipment HPXML setpoint reconciliation records, keyed by

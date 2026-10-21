@@ -734,8 +734,15 @@ pub struct EnvironmentManager {
     /// The schedule at the step resolution, owned per build: the
     /// assembly's unavailable-period zeroing and the schedule injection
     /// add columns to the build's own copy, cloned from the blueprint's
-    /// shared series.
+    /// shared series. An upsampled series holds its source-resolution
+    /// rows; `schedule_upsample_factor` is the rows' expansion.
     schedule: ScheduleTimeSeries,
+    /// The schedule rows' expansion: each held row stands for this many
+    /// consecutive steps of the sim grid. 1 when the rows are per-step (a
+    /// no-op resample, a downsample, or a stamp unaligned to its own step,
+    /// which materialises the expansion); the source-to-sim step ratio for
+    /// an upsampled series holding its source rows.
+    schedule_upsample_factor: u32,
     zone_types: Vec<hares_io::hpxml::ZoneType>,
     /// The building's one conditioned zone, if it has one.
     conditioned_zone: Option<ZoneId>,
@@ -979,7 +986,23 @@ impl EnvironmentManager {
             .iter()
             .map(|zone| zone.zone_type.clone())
             .collect();
-        let unavailable_flags = unavailable_period_flags(building, &schedule);
+        // The schedule rows' expansion: an upsample resample holds the
+        // source-resolution rows (each standing for `factor` sim steps)
+        // instead of materialising an expanded copy, so every per-step read
+        // divides by it to reach the held row. A no-op resample, a
+        // downsample or a materialised expansion carries per-step rows and
+        // the factor is 1.
+        let schedule_upsample_factor = (schedule.source_step_secs / step_secs).max(1);
+        // The flags are per-step state (the environment publishes them by
+        // the step's schedule row): the held rows' flags expand, each flag
+        // standing for the `factor` steps its row covers. The resample's
+        // hour-uniformity guard is what makes the expansion exact -- a
+        // row's sub-steps share its hour-of-day, so the expanded flags are
+        // the per-sub-step flags the materialised rows carried.
+        let unavailable_flags = unavailable_period_flags(building, &schedule)
+            .into_iter()
+            .flat_map(|flag| std::iter::repeat_n(flag, schedule_upsample_factor as usize))
+            .collect::<Vec<_>>();
         let conditioned_zone = building
             .conditioned_zone_index()?
             .map(|idx| ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)));
@@ -1038,6 +1061,7 @@ impl EnvironmentManager {
 
         Ok(Self {
             schedule,
+            schedule_upsample_factor,
             zone_types,
             conditioned_zone,
             ambient_locations: Vec::new(),
@@ -1207,8 +1231,17 @@ impl EnvironmentManager {
     /// the table's span"). After a spring-forward the civil clock runs up
     /// to 3600 s past a run-spanning table's end and the run's last steps
     /// read the cycle's opening rows.
+    ///
+    /// The returned index is the sim grid's per-step row: the published
+    /// `schedule_row`, which the occupant's presence and the event replay
+    /// also address. An upsampled table holds its source-resolution rows,
+    /// each standing for `schedule_upsample_factor` steps, so the column
+    /// reads divide it once more to reach the held row (the step 3 read in
+    /// `update_in_place`); the span arithmetic uses the rows' own step so
+    /// the cycle covers the same seconds either representation holds.
     fn compute_schedule_idx(&self, clock: &SimClock) -> usize {
         let schedule_len = self.schedule.len();
+        let row_secs = self.schedule.source_step_secs;
 
         #[cfg(feature = "dst")]
         if let Some(tz) = self.civil_tz {
@@ -1225,7 +1258,7 @@ impl EnvironmentManager {
             if step_secs == 0 {
                 return 0;
             }
-            let year_secs = schedule_len as u64 * step_secs;
+            let year_secs = schedule_len as u64 * u64::from(row_secs);
             return (civil_secs % year_secs / step_secs) as usize;
         }
 
@@ -1241,7 +1274,7 @@ impl EnvironmentManager {
         if step_secs == 0 {
             return 0;
         }
-        let year_secs = schedule_len as u64 * step_secs;
+        let year_secs = schedule_len as u64 * u64::from(row_secs);
         (civil_secs % year_secs / step_secs) as usize
     }
     #[must_use]
@@ -1252,6 +1285,17 @@ impl EnvironmentManager {
     /// Mutably borrow the parsed schedule time series.
     pub fn schedule_mut(&mut self) -> &mut ScheduleTimeSeries {
         &mut self.schedule
+    }
+
+    /// The schedule rows' expansion: each held row stands for this many
+    /// consecutive steps of the sim grid. The per-step schedule row divides
+    /// by it to reach the held row; 1 when the rows are per-step. The
+    /// build's series consumers (the unavailable-period application, the
+    /// schedule injection, the premise ZIP mean) take their per-step sums
+    /// and series lengths through it.
+    #[must_use]
+    pub fn schedule_upsample_factor(&self) -> u32 {
+        self.schedule_upsample_factor
     }
 
     /// Zone types aligned with [`EnvironmentState::zones`].
@@ -1525,10 +1569,14 @@ impl EnvironmentManager {
             &mut self.solar_irradiance_buf,
         );
 
-        // Step 3: schedule values (reuse self.schedule_values_buf)
+        // Step 3: schedule values (reuse self.schedule_values_buf). An
+        // upsampled table holds its source-resolution rows: the per-step
+        // row divides by the expansion once, and every column reads the
+        // held row -- the zero-order hold the materialised rows carried.
+        let held_row = schedule_idx / self.schedule_upsample_factor as usize;
         self.schedule_values_buf.clear();
         self.schedule_values_buf
-            .extend(self.schedule.columns.iter().map(|col| col[schedule_idx]));
+            .extend(self.schedule.columns.iter().map(|col| col[held_row]));
 
         // Step 4: zones -- written from self.zones (already updated by feed_zones or update).
         state.zones.clear();

@@ -685,7 +685,9 @@ pub fn inject_schedule_into_specs(
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
-    inject_schedule_into_specs_with_pre_period(specs, schedule, None, profiles, defaults, warnings)
+    inject_schedule_into_specs_with_pre_period(
+        specs, schedule, None, 1, profiles, defaults, warnings,
+    )
 }
 
 /// [`inject_schedule_into_specs`] with the schedule's pre-period columns:
@@ -696,10 +698,19 @@ pub fn inject_schedule_into_specs(
 /// comes from the pre-period schedule (`schedules.rb:1051-1052`) and the
 /// zeroing removes the period's volume instead of spreading it over the
 /// remaining days. `None` when no period ran.
+///
+/// `upsample_factor` is the schedule rows' expansion: an upsample resample
+/// holds the source-resolution rows, each standing for that many sim steps,
+/// so the per-step means and series this injects (the event replay's power
+/// series, the normalizations' means) take the rows' values at the
+/// expansion's step count -- the same values in the same order the
+/// materialised rows carried. 1 when the rows are per-step.
+#[allow(clippy::too_many_arguments)]
 pub fn inject_schedule_into_specs_with_pre_period(
     specs: &mut Vec<EquipmentSpec>,
     schedule: &mut ScheduleTimeSeries,
     pre_period_columns: Option<&[Vec<f64>]>,
+    upsample_factor: u32,
     profiles: Option<&DefaultProfiles>,
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
@@ -807,12 +818,13 @@ pub fn inject_schedule_into_specs_with_pre_period(
                     mapping,
                     &csv_col_map,
                     schedule,
+                    upsample_factor,
                     profiles,
                     pre_period_columns,
                 )?;
             }
             ScheduleCategory::EventWindow => {
-                inject_event_schedule(spec, mapping, &csv_col_map, schedule)?;
+                inject_event_schedule(spec, mapping, &csv_col_map, schedule, upsample_factor)?;
             }
             ScheduleCategory::Occupancy => {
                 inject_occupancy_schedule(spec, schedule, profiles);
@@ -828,7 +840,14 @@ pub fn inject_schedule_into_specs_with_pre_period(
     // When neither a schedule CSV column nor HPXML-derived setpoints are
     // present, the unit takes OS-HPXML's manual-thermostat default
     // (68 °F heating, 78 °F cooling), recorded as a warning naming it.
-    inject_setpoint_schedules(specs, &csv_col_map, schedule, pre_period_columns, warnings)?;
+    inject_setpoint_schedules(
+        specs,
+        &csv_col_map,
+        schedule,
+        upsample_factor,
+        pre_period_columns,
+        warnings,
+    )?;
     Ok(())
 }
 
@@ -1041,6 +1060,7 @@ fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    upsample_factor: u32,
     pre_period_columns: Option<&[Vec<f64>]>,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
@@ -1117,7 +1137,13 @@ fn inject_setpoint_schedules(
         ));
     }
 
-    inject_water_heater_schedule_columns(specs, csv_col_map, schedule, pre_period_columns)?;
+    inject_water_heater_schedule_columns(
+        specs,
+        csv_col_map,
+        schedule,
+        upsample_factor,
+        pre_period_columns,
+    )?;
 
     for spec in specs.iter_mut() {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {
@@ -1340,6 +1366,7 @@ fn inject_water_heater_schedule_columns(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    upsample_factor: u32,
     pre_period_columns: Option<&[Vec<f64>]>,
 ) -> Result<(), HaresError> {
     let draw_col = first_present_column(csv_col_map, &["hot_water_fixtures"]);
@@ -1417,7 +1444,7 @@ fn inject_water_heater_schedule_columns(
             // The normalization's mean comes from the pre-period column
             // (the peak OpenStudio-HPXML computes), the shape from the
             // zeroed one: the period removes volume.
-            let mean = column_mean(pre_period_columns, col_idx, &raw_values);
+            let mean = column_mean(pre_period_columns, col_idx, &raw_values, upsample_factor);
             let kg_s_series: Vec<f64> =
                 normalize_draw_profile_at_mean(&raw_values, mean, avg_daily_l, rho_kg_per_l);
 
@@ -1452,7 +1479,12 @@ fn inject_water_heater_schedule_columns(
             if let (Some(col_idx), Some(volume_l)) =
                 (washer_col, washer_share.map(|share| washer.daily_l * share))
             {
-                let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
+                let mean = column_mean(
+                    pre_period_columns,
+                    col_idx,
+                    &schedule.columns[col_idx],
+                    upsample_factor,
+                );
                 let series = normalize_draw_profile_at_mean(
                     &schedule.columns[col_idx],
                     mean,
@@ -1465,7 +1497,12 @@ fn inject_water_heater_schedule_columns(
                 dishwasher_col,
                 dishwasher_share.map(|share| dishwasher.daily_l * share),
             ) {
-                let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
+                let mean = column_mean(
+                    pre_period_columns,
+                    col_idx,
+                    &schedule.columns[col_idx],
+                    upsample_factor,
+                );
                 let series = normalize_draw_profile_at_mean(
                     &schedule.columns[col_idx],
                     mean,
@@ -1799,14 +1836,24 @@ fn column_mean(
     pre_period_columns: Option<&[Vec<f64>]>,
     col_idx: usize,
     live_column: &[f64],
+    upsample_factor: u32,
 ) -> f64 {
+    debug_assert!(upsample_factor >= 1, "the rows' expansion is at least 1");
     let column: &[f64] = pre_period_columns
         .and_then(|pre| pre.get(col_idx))
         .map_or(live_column, |pre: &Vec<f64>| pre.as_slice());
     if column.is_empty() {
         return 0.0;
     }
-    column.iter().sum::<f64>() / column.len() as f64
+    // The rows' expansion: a held row stands for that many sim steps, so
+    // the mean runs over the per-step sequence -- each row's value repeated
+    // in order, the sum and count the materialised rows produced.
+    let factor = upsample_factor as usize;
+    column
+        .iter()
+        .flat_map(|v| std::iter::repeat_n(*v, factor))
+        .sum::<f64>()
+        / (column.len() * factor) as f64
 }
 
 fn inject_power_schedule(
@@ -1814,6 +1861,7 @@ fn inject_power_schedule(
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    upsample_factor: u32,
     profiles: &DefaultProfiles,
     pre_period_columns: Option<&[Vec<f64>]>,
 ) -> Result<(), HaresError> {
@@ -1839,7 +1887,12 @@ fn inject_power_schedule(
         // The design level's mean comes from the pre-period column
         // (OpenStudio-HPXML's calc_design_level_from_daily_kwh reads the
         // pre-period schedules), the column's shape from the zeroed one.
-        let mean_fraction: f64 = column_mean(pre_period_columns, col_idx, &fraction_series);
+        let mean_fraction: f64 = column_mean(
+            pre_period_columns,
+            col_idx,
+            &fraction_series,
+            upsample_factor,
+        );
 
         let max_w = resolve_max_w(
             spec,
@@ -2178,6 +2231,7 @@ fn inject_event_schedule(
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &ScheduleTimeSeries,
+    upsample_factor: u32,
 ) -> Result<(), HaresError> {
     // Skip if equipment already has event source keys.
     if spec.parameters.keys().any(|k| {
@@ -2197,6 +2251,13 @@ fn inject_event_schedule(
             return Ok(());
         }
 
+        // The event replay addresses its rows by the environment's per-step
+        // schedule row, and a held row stands for `upsample_factor` steps:
+        // the series expands, each row's value repeated in order -- the
+        // sequence the materialised rows carried, bitwise.
+        debug_assert!(upsample_factor >= 1, "the rows' expansion is at least 1");
+        let factor = upsample_factor as usize;
+
         // Always inject the column index for the stochastic path.
         spec.parameters.insert(
             "event_window_schedule_col".to_string(),
@@ -2204,13 +2265,17 @@ fn inject_event_schedule(
         );
 
         // Compute kW time series from fractions × max_w for deterministic event extraction.
-        let mean_fraction: f64 =
-            fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
+        let mean_fraction: f64 = fraction_series
+            .iter()
+            .flat_map(|f| std::iter::repeat_n(*f, factor))
+            .sum::<f64>()
+            / (fraction_series.len() * factor) as f64;
         if let Some(max_w) = determine_max_w(spec, mean_fraction) {
             // The series values are fractions x the W maximum: W (SI).
             let w_series: Vec<Value> = fraction_series
                 .iter()
-                .map(|f| Value::from(f * max_w))
+                .flat_map(|f| std::iter::repeat_n(f * max_w, factor))
+                .map(Value::from)
                 .collect();
             spec.parameters
                 .insert("event_power_w_series".to_string(), Value::Array(w_series));
