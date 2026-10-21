@@ -100,10 +100,13 @@ class TestEvFullDayCycle:
     def test_ev_full_day_cycle(self):
         dw = make_dwelling(duration_s=1500 * 60, time_res_s=60)
         dw.initialize()
+        # The archetype's day roll decides driving days (DailyCommuterL2
+        # drives on about half of them); seed 1 rolls a driving day, which
+        # is what the full cycle below walks.
         dw.add_ev_with_driver(
             VehicleId.tesla_model_y_lr(),
             EvArchetypeId.daily_commuter_l2(),
-            seed=42,
+            seed=1,
         )
 
         soc_values: list[float] = []

@@ -694,7 +694,7 @@ impl HeatPumpWH {
         self.appliance_draw_source = c
             .appliance_draw_flow_rate_source
             .clone()
-            .map(|s| s.into_runtime());
+            .map(|s| s.into_runtime(&format!("{}:appliance_draw_flow_rate_source", config.name)));
         self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.compressor_on_since_s = None;

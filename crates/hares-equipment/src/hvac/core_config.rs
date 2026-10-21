@@ -138,7 +138,7 @@ fn typed_value<'a>(config: &'a EquipmentConfig, key: &str) -> Option<&'a serde_j
 fn extract_schedule_source(config: &EquipmentConfig, key: &str) -> Option<ScheduleSource> {
     typed_value(config, key)
         .and_then(|value| serde_json::from_value::<ScheduleSourceConfig>(value.clone()).ok())
-        .map(ScheduleSourceConfig::into_runtime)
+        .map(|source| source.into_runtime(&format!("{}:{key}", config.name)))
 }
 
 #[cfg(not(test))]

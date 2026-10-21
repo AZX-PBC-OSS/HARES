@@ -293,12 +293,18 @@ impl IndirectTank {
 
         self.mains_temp_c = super::require_mains_temp_c(env, "Indirect Tank")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
-        self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
+        self.draw_l_per_min_source = c
+            .draw_flow_rate_source
+            .clone()
+            .map(|s| s.into_runtime(&format!("{}:draw_flow_rate_source", config.name)));
+        self.mains_temp_c_source = c
+            .mains_temp_c_source
+            .clone()
+            .map(|s| s.into_runtime(&format!("{}:mains_temp_c_source", config.name)));
         self.appliance_draw_source = c
             .appliance_draw_flow_rate_source
             .clone()
-            .map(|s| s.into_runtime());
+            .map(|s| s.into_runtime(&format!("{}:appliance_draw_flow_rate_source", config.name)));
 
         self.target_setpoint_c = self.setpoint_c;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);

@@ -373,12 +373,18 @@ impl GasWH {
 
         self.mains_temp_c = super::require_mains_temp_c(env, "Gas Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.draw_l_per_min_source = c.draw_flow_rate_source.clone().map(|s| s.into_runtime());
-        self.mains_temp_c_source = c.mains_temp_c_source.clone().map(|s| s.into_runtime());
+        self.draw_l_per_min_source = c
+            .draw_flow_rate_source
+            .clone()
+            .map(|s| s.into_runtime(&format!("{}:draw_flow_rate_source", config.name)));
+        self.mains_temp_c_source = c
+            .mains_temp_c_source
+            .clone()
+            .map(|s| s.into_runtime(&format!("{}:mains_temp_c_source", config.name)));
         self.appliance_draw_source = c
             .appliance_draw_flow_rate_source
             .clone()
-            .map(|s| s.into_runtime());
+            .map(|s| s.into_runtime(&format!("{}:appliance_draw_flow_rate_source", config.name)));
         self.zip = crate::config::resolve_reactive_zip(config)?;
         self.fixture_delivery_temp_c = c.fixture_delivery_temp_c.unwrap_or(40.6);
         self.hot_draw_temp_c = c.hot_draw_temp_c;
@@ -1764,6 +1770,141 @@ mod tests {
             flow_after_save.to_bits(),
             "the restored run's next draw must be the saved run's next draw: the draw \
              source's position rides in the checkpoint"
+        );
+    }
+
+    /// The same continuation for an unspecified-seed noisy draw source:
+    /// the identity-derived key is stored on the source at init, and the
+    /// restore replays from it - the capture and restore carry positions
+    /// only, never a re-derivation. The warm-up boundary's rewind and the
+    /// checkpoint's restore ride the same mechanism.
+    #[test]
+    fn checkpoint_restore_continues_an_unspecified_seed_draw_source() {
+        use hares_types::{DayFilter, DistributionKind, ScheduleSourceConfig, TimeWindow};
+
+        let mut typed: crate::GasWaterHeaterConfig = config().typed().unwrap();
+        typed.draw_flow_rate_source = Some(ScheduleSourceConfig::TimeWindows {
+            windows: vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                0.02,
+                DistributionKind::LogNormal {
+                    mu: 0.0,
+                    sigma: 0.5,
+                },
+                Some(0.0),
+                None,
+            )],
+            default: Some(0.02),
+            seed: None,
+        });
+        let wh_config =
+            EquipmentConfig::from_typed("GWH".to_string(), "Gas Water Heater".to_string(), typed)
+                .unwrap();
+        let step_env = env(21.0);
+        let mut wh = GasWH::new(wh_config.clone());
+        wh.init(&wh_config, &step_env).unwrap();
+
+        let mut p = ports();
+        for _ in 0..3 {
+            wh.step(&step_env, Duration::from_secs(60), &mut p).unwrap();
+        }
+        let saved = wh.save_state().unwrap();
+
+        // The saved run's next draw.
+        let mut p = ports();
+        wh.step(&step_env, Duration::from_secs(60), &mut p).unwrap();
+        let flow_after_save = wh
+            .telemetry()
+            .get(tk::DRAW_FLOW_RATE_KG_S)
+            .expect("draw flow");
+
+        // The restored run's next draw: the derived key's stream continues.
+        wh.load_state(&saved).unwrap();
+        let mut p = ports();
+        wh.step(&step_env, Duration::from_secs(60), &mut p).unwrap();
+        let flow_restored = wh
+            .telemetry()
+            .get(tk::DRAW_FLOW_RATE_KG_S)
+            .expect("draw flow");
+        assert_eq!(
+            flow_restored.to_bits(),
+            flow_after_save.to_bits(),
+            "the restored run's next draw must be the saved run's next draw: \
+             the restore continues the derived key's stream, it never \
+             re-derives the seed"
+        );
+    }
+
+    /// Two unspecified-seed noisy draw sources in two same-configured
+    /// heaters never share a keystream: the default key derives from the
+    /// source's identity (the heater's name and the source's role), so the
+    /// two heaters draw different flow series. The shared all-zero key
+    /// this replaced drew identical flows in both heaters, correlating
+    /// their hot-water use across the dwelling.
+    #[test]
+    fn two_unspecified_seed_draw_sources_draw_distinct_series() {
+        use hares_types::{DayFilter, DistributionKind, ScheduleSourceConfig, TimeWindow};
+
+        let noisy = || ScheduleSourceConfig::TimeWindows {
+            windows: vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                0.02,
+                DistributionKind::LogNormal {
+                    mu: 0.0,
+                    sigma: 0.5,
+                },
+                Some(0.0),
+                None,
+            )],
+            default: Some(0.02),
+            seed: None,
+        };
+        let build = |name: &str| {
+            let mut typed: crate::GasWaterHeaterConfig = config().typed().unwrap();
+            typed.draw_flow_rate_source = Some(noisy());
+            let wh_config = EquipmentConfig::from_typed(
+                name.to_string(),
+                "Gas Water Heater".to_string(),
+                typed,
+            )
+            .unwrap();
+            let mut wh = GasWH::new(wh_config.clone());
+            wh.init(&wh_config, &env(21.0)).unwrap();
+            wh
+        };
+        let mut a = build("GWH A");
+        let mut b = build("GWH B");
+        let step_env = env(21.0);
+
+        let mut any_differ = false;
+        for _ in 0..20 {
+            let mut p_a = ports();
+            let mut p_b = ports();
+            a.step(&step_env, Duration::from_secs(60), &mut p_a)
+                .unwrap();
+            b.step(&step_env, Duration::from_secs(60), &mut p_b)
+                .unwrap();
+            let flow_a = a
+                .telemetry()
+                .get(tk::DRAW_FLOW_RATE_KG_S)
+                .expect("draw flow");
+            let flow_b = b
+                .telemetry()
+                .get(tk::DRAW_FLOW_RATE_KG_S)
+                .expect("draw flow");
+            if flow_a.to_bits() != flow_b.to_bits() {
+                any_differ = true;
+                break;
+            }
+        }
+        assert!(
+            any_differ,
+            "two unspecified-seed noisy draw sources must not draw identical series: \
+             a shared keystream correlates the heaters' hot-water use"
         );
     }
 

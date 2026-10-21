@@ -287,7 +287,8 @@ impl TanklessWH {
             // A configured source's read failure is corrupt input, not the
             // absence of a source: the error names the heater, the same
             // contract the storage heaters' step reads follow.
-            let mut source = source_cfg.into_runtime();
+            let mut source =
+                source_cfg.into_runtime(&format!("{}:mains_temp_c_source", config.name));
             source.value_at(env).map_err(|err| {
                 HaresError::Equipment(format!("Tankless Water Heater '{}': {err}", config.name))
             })?
@@ -295,12 +296,15 @@ impl TanklessWH {
             super::require_mains_temp_c(env, "Tankless Water Heater")?
         };
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.draw_flow_rate_kg_s_source =
-            c.draw_flow_rate_source.map(|source| source.into_runtime());
-        self.mains_temp_c_source = c.mains_temp_c_source.map(|source| source.into_runtime());
-        self.appliance_draw_source = c
-            .appliance_draw_flow_rate_source
-            .map(|source| source.into_runtime());
+        self.draw_flow_rate_kg_s_source = c
+            .draw_flow_rate_source
+            .map(|source| source.into_runtime(&format!("{}:draw_flow_rate_source", config.name)));
+        self.mains_temp_c_source = c
+            .mains_temp_c_source
+            .map(|source| source.into_runtime(&format!("{}:mains_temp_c_source", config.name)));
+        self.appliance_draw_source = c.appliance_draw_flow_rate_source.map(|source| {
+            source.into_runtime(&format!("{}:appliance_draw_flow_rate_source", config.name))
+        });
         self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.dr_setpoint_offset_c = 0.0;

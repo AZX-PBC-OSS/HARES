@@ -1584,6 +1584,16 @@ impl PyDwelling {
             bytes
         };
 
+        // The day-roll stream rides the reserved EV-driver stream nonce,
+        // the same partition the registry path and the dwelling's built-in
+        // drivers draw from; the driving sources' tagged keys are
+        // stream-0 keys beside it - every consumer of the caller's key
+        // draws from its own keystream.
+        let day_roll = hares_core::rng::derive_sub_rng(
+            &hares_core::ChaCha8Rng::from_seed(seed_bytes),
+            hares_core::rng::RNG_STREAM_EV_DRIVER_BASE,
+        );
+
         // The canonical built-in actor name ("EvDriver:<equipment>") takes
         // the place of the driver the EV's actor seed would build, now and
         // on every later rebuild of the built-in actors (set_tariff).
@@ -1591,7 +1601,7 @@ impl PyDwelling {
             &format!("EvDriver:{}", spec.label),
             spec.label,
             ev_driver_params(spec, preset, seed_bytes, max_power_w),
-            hares_core::ChaCha8Rng::from_seed(seed_bytes),
+            day_roll,
         );
 
         dwelling

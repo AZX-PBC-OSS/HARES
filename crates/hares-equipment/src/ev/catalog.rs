@@ -553,6 +553,10 @@ impl ArchetypePreset {
         const MILE_M: f64 = 1_609.344;
         let miles_to_m_shift = MILE_M.ln();
 
+        // The miles source's key carries its own tag, the same derivation
+        // `reseed` applies: no two consumers of the driver's key ever draw
+        // from one keystream.
+        let miles_seed = Self::derive_miles_seed(seed);
         let scale = |min: f64| -> Option<f64> { (min > 0.0).then_some(min * MILE_M) };
         if let (Some(wd_mu), Some(wd_sigma), Some(we_mu), Some(we_sigma)) = (
             self.weekday_miles_mu,
@@ -594,7 +598,7 @@ impl ArchetypePreset {
                     ),
                 ],
                 Some(0.0),
-                seed,
+                miles_seed,
             )
         } else {
             let clamp_min = scale(self.daily_drive_miles_min);
@@ -603,17 +607,21 @@ impl ArchetypePreset {
                     mu: self.daily_drive_miles_mu + miles_to_m_shift,
                     sigma: self.daily_drive_miles_sigma,
                 },
-                seed,
+                seed: miles_seed,
                 draw_count: 0,
-                rng: ChaCha8Rng::from_seed(seed),
+                rng: ChaCha8Rng::from_seed(miles_seed),
                 clamp_min,
                 clamp_max: None,
             }
         }
     }
 
-    /// The miles source's key: the base seed unmodified.
-    pub fn derive_miles_seed(seed: [u8; 32]) -> [u8; 32] {
+    /// The miles source's key: the driver's key with byte 3 flipped, the
+    /// miles source's own tag beside the departure, duration and arrival
+    /// tags. The identity this once was would give the day-roll stream and
+    /// the miles source one keystream.
+    pub fn derive_miles_seed(mut seed: [u8; 32]) -> [u8; 32] {
+        seed[3] ^= 0x5E;
         seed
     }
 
@@ -1426,6 +1434,35 @@ mod tests {
         let s1 = preset.build_distance_schedule(seed);
         let s2 = preset.build_distance_schedule(seed);
         assert_eq!(s1, s2);
+    }
+
+    /// The four driving sources' key derivations are pairwise distinct and
+    /// none is the identity: one driver key feeds the day-roll stream and
+    /// four schedule sources, and any two consumers sharing a (key, stream)
+    /// pair draw the same words, correlating their decisions.
+    #[test]
+    fn driving_source_key_derivations_are_pairwise_distinct() {
+        let key = [3u8; 32];
+        let derived = [
+            ("miles", ArchetypePreset::derive_miles_seed(key)),
+            ("departure", ArchetypePreset::derive_departure_seed(key)),
+            ("duration", ArchetypePreset::derive_duration_seed(key)),
+            ("arrival", ArchetypePreset::derive_arrival_seed(key)),
+        ];
+        for (i, (name, derived_seed)) in derived.iter().enumerate() {
+            assert_ne!(
+                *derived_seed, key,
+                "the {name} source's key derivation is the identity: its \
+                 keystream collides with the driver key's other consumer"
+            );
+            for (j, (other_name, other_seed)) in derived.iter().enumerate().skip(i + 1) {
+                assert_ne!(
+                    derived_seed, other_seed,
+                    "the {name} and {other_name} sources share a keystream \
+                     (derivations {i} and {j})"
+                );
+            }
+        }
     }
 
     #[test]

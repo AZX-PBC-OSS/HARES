@@ -427,10 +427,18 @@ impl Equipment for IdealHvac {
             };
         }
         if let Some(source) = &typed.setpoint.heating_setpoint_source {
-            self.thermostat_fsm.heating_setpoint_source = Some(source.clone().into_runtime());
+            self.thermostat_fsm.heating_setpoint_source = Some(
+                source
+                    .clone()
+                    .into_runtime(&format!("{}:heating_setpoint_source", config.name)),
+            );
         }
         if let Some(source) = &typed.setpoint.cooling_setpoint_source {
-            self.thermostat_fsm.cooling_setpoint_source = Some(source.clone().into_runtime());
+            self.thermostat_fsm.cooling_setpoint_source = Some(
+                source
+                    .clone()
+                    .into_runtime(&format!("{}:cooling_setpoint_source", config.name)),
+            );
         }
         if let Some(fraction) = typed
             .fraction_heating_load_served

@@ -5678,3 +5678,93 @@ no recorded number).
 
 **Dependencies:** the envelope crate, plus the observe-gated
 `EnvelopeDiagnostics` literal updates in the core crate's tests.
+
+## Hardening 14: schedule sources never share a random keystream
+
+**Kind:** numeric fix (the hardening phase's RNG stream hygiene entry).
+
+**Problem:** the schedule sources' seeds had three sharing defects. The
+actor registry's EvDriver factory built one 256-bit key from the caller's
+`seed` parameter and handed it unmodified to both the driver's day-roll
+generator and the miles source's builder, so the day-roll uniform and the
+miles log-normal consumed the same keystream words (the departure,
+duration and arrival sources took single-byte XORs of the same key; the
+miles derivation was the identity). The Python `add_ev_with_driver` path
+carried the identical collision. And `ScheduleSourceConfig::into_runtime`
+keyed every noisy TimeWindows source with no configured seed to the
+all-zero key: two same-configured sources in one dwelling (the review's
+two water heaters) drew identical noise series, correlated across sources
+and, for identical unspecified configurations, across homes. Exactly the
+correlation the RNG module's docs promise the stream partitioning
+prevents.
+
+**Change:** the derivation convention the codebase already uses, applied
+to every source key. A new `hares_types::rng::schedule_source_key`
+derives a schedule source's key from its identity (`<owner name>:<source
+role>`) with domain-separated FNV-1a words filling the key the way
+`RngStream::event_load` fills its stream nonce: an explicit seed wins
+unchanged, the default is never the shared zero key, distinct identities
+never share a keystream, the same identity is reproducible run to run.
+`ScheduleSourceConfig::into_runtime` takes the identity and passes it
+through, and every conversion site names its owner and role (the five
+water heaters' draw, mains and appliance sources, the thermostat
+setpoint sources, the ideal HVAC's setpoint sources). The catalogue's
+miles builder tags its own key beside the departure, duration and
+arrival tags (byte 3), so the day-roll stream and the four driving
+sources draw from disjoint keystreams under one driver key, at
+construction and at reseed alike; the registry and Python day-roll
+generators ride `derive_sub_rng` at the reserved EV-driver stream nonce
+(stream 0 under the caller's key is the dwelling rng's own stream,
+`dwelling_seed` with building id 0). The event-load stream nonce space
+is untouched (the plain identity hash, pinned by test).
+
+**Acceptance test:** the review's pinned probe, three levels deep.
+`unspecified_seed_noisy_sources_do_not_share_a_keystream`
+(`hares-types`): two identical noisy TimeWindows configs with no seed
+converted under distinct identities draw different series bitwise, the
+same identity reproduces, and an explicit seed draws the seeded
+constructor's series. `two_unspecified_seed_draw_sources_draw_distinct_series`
+(`hares-equipment`, the gas water heater): two same-configured heaters
+step in lockstep and their drawn flow series diverge.
+`driving_source_key_derivations_are_pairwise_distinct`: the four driving
+sources' key derivations are pairwise distinct and none is the identity.
+`registry_ev_driver_day_roll_rides_a_reserved_stream_nonce`: the
+registry driver's day-roll stream state reads the reserved nonce.
+Composition with the warm-up neutrality (the row 109 machinery):
+`checkpoint_restore_continues_an_unspecified_seed_draw_source` (the
+restore continues the derived key's stream from the captured position;
+the capture and restore carry positions only, never a re-derivation),
+and `warmup_day_count_neutrality_holds_with_the_ev_drivers_noisy_sources`
+(the warm-up 2-day and 4-day runs of the EV-archetype dwelling whose
+production carries the noisy TimeWindows miles source beside the event
+load produce bit-identical production telemetry). RED first: all the
+distinctness witnesses failed at the parent (identical series at both
+levels, the miles derivation the identity, the day-roll at stream 0),
+the machinery tests passed before and after.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. The fixture sweep found no shipped fixture
+carrying any schedule source configuration at all: the fixtures'
+schedule columns resolve to deterministic ColumnRef sources, the water
+heaters' draw and mains sources in the CSV path are ColumnRefs, and the
+EV drivers in the fixtures are the dwelling's built-in Constant-source
+drivers. No unspecified-seed noisy source exists in any fixture or
+shipped default, so no fixture's stream changes. The one Python test
+whose day-cycle assert depended on the day-roll's specific draw
+(`test_ev_full_day_cycle`, seed 42) rolled a non-driving day under the
+new stream - the honest movement of the fix; the test now uses a seed
+that rolls a driving day, with the roll's role documented at the seed.
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean, the touched crates also clean on
+default features; nextest `--workspace --all-features -j 2` 8311/8311
+passed (8 skipped), the touched crates also green on default features
+5120/5120 (5 skipped); `pytest -m '' -n 4` after `maturin develop`
+1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0 errors; the
+goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `fix: schedule sources never share a random keystream`
+
+**Dependencies:** none outside the types, equipment, core and Python
+crates; the `into_runtime` signature change is compile-guided at every
+conversion site.

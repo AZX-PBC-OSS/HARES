@@ -357,12 +357,18 @@ impl ActorRegistry {
                     b[..8].copy_from_slice(&seed.to_le_bytes());
                     b
                 };
-                let actor = EvDriverActor::new(
-                    &config.name,
-                    &target,
-                    params,
-                    ChaCha8Rng::from_seed(seed_bytes),
+                // The day-roll stream rides the reserved EV-driver stream
+                // nonce, the same partition the dwelling's built-in
+                // drivers draw from: the caller's key at stream 0 is the
+                // dwelling rng's own stream (`dwelling_seed` with building
+                // id 0), and the driving sources' tagged keys are stream-0
+                // keys beside it - every consumer of the caller's key
+                // draws from its own keystream.
+                let day_roll = crate::rng::derive_sub_rng(
+                    &ChaCha8Rng::from_seed(seed_bytes),
+                    crate::rng::RNG_STREAM_EV_DRIVER_BASE,
                 );
+                let actor = EvDriverActor::new(&config.name, &target, params, day_roll);
                 Ok(Box::new(actor))
             }),
         );
@@ -663,6 +669,29 @@ mod tests {
             .create(config)
             .expect("create ev driver with preset");
         assert_eq!(actor.name(), "Driver2");
+    }
+
+    /// The registry driver's day-roll stream rides the reserved EV-driver
+    /// stream nonce, the same partition the dwelling's built-in drivers
+    /// draw from: stream 0 under the caller's key is the dwelling rng's
+    /// own stream (`dwelling_seed` with building id 0), and a day-roll
+    /// keyed there would replay the dwelling's draws.
+    #[test]
+    fn registry_ev_driver_day_roll_rides_a_reserved_stream_nonce() {
+        let registry = ActorRegistry::new();
+        let config = ActorConfig::new("Driver1", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(42.0));
+        let actor = registry.create(config).expect("create ev driver");
+        let state = actor
+            .rng_stream_state()
+            .expect("the driver reports its stream state");
+        assert_eq!(
+            state.stream,
+            crate::rng::RNG_STREAM_EV_DRIVER_BASE,
+            "the registry driver's day-roll must ride the reserved EV-driver \
+             stream nonce, not the dwelling stream the caller's key also feeds"
+        );
     }
 
     #[test]

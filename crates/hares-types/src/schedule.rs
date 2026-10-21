@@ -616,8 +616,17 @@ pub enum ScheduleSourceConfig {
 }
 
 impl ScheduleSourceConfig {
+    /// Converts the config into the runtime source.
+    ///
+    /// `identity` is the source's identity within its owner, in the form
+    /// `<owner name>:<source role>` (for example
+    /// `"Gas Water Heater 1:draw_flow_rate_source"`). A noisy TimeWindows
+    /// config with no explicit seed derives its keystream key from the
+    /// identity (`hares_types::rng::schedule_source_key`): every
+    /// unspecified-seed source keyed to the shared all-zero key would
+    /// draw identical noise. An explicit seed always wins.
     #[must_use]
-    pub fn into_runtime(self) -> ScheduleSource {
+    pub fn into_runtime(self, identity: &str) -> ScheduleSource {
         match self {
             Self::Constant(v) => ScheduleSource::Constant(v),
             Self::DailyProfile {
@@ -658,7 +667,7 @@ impl ScheduleSourceConfig {
             } => {
                 let has_noise = windows.iter().any(|w| w.noise.is_some());
                 if has_noise {
-                    let seed = seed.unwrap_or([0_u8; 32]);
+                    let seed = crate::rng::schedule_source_key(seed, identity);
                     ScheduleSource::noisy_time_windows(windows, default, seed)
                 } else {
                     ScheduleSource::TimeWindows {
@@ -1393,7 +1402,8 @@ mod tests {
 
     use super::{
         BillingCycle, BoundaryPolicy, DayFilter, DistributionKind, SCHEDULE_DOMAIN_ID,
-        ScheduleSource, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod, season_contains_month,
+        ScheduleSource, ScheduleSourceConfig, SeasonFilter, SeasonalSplit, TimeWindow, TouPeriod,
+        season_contains_month,
     };
 
     #[test]
@@ -2255,6 +2265,78 @@ mod tests {
             any_differ,
             "different seeds should produce different values"
         );
+    }
+
+    /// Two noisy TimeWindows sources built from the same config with no
+    /// seed configured never share a keystream: the unspecified-seed
+    /// default derives from the source's identity, so two same-configured
+    /// sources in one dwelling draw different noise series. The shared
+    /// all-zero key this replaced drew identical values in every
+    /// unspecified-seed source, perfectly correlating their noise. The
+    /// same identity is reproducible, and an explicit seed wins.
+    #[test]
+    fn unspecified_seed_noisy_sources_do_not_share_a_keystream() {
+        let env = default_env();
+        let windows = || {
+            vec![TimeWindow::with_noise(
+                DayFilter::Any,
+                0,
+                1440,
+                10.0,
+                DistributionKind::Gaussian {
+                    mean: 0.0,
+                    std_dev: 3.0,
+                },
+                None,
+                None,
+            )]
+        };
+        let config = ScheduleSourceConfig::TimeWindows {
+            windows: windows(),
+            default: None,
+            seed: None,
+        };
+
+        let mut a = config
+            .clone()
+            .into_runtime("Water Heater 1:draw_flow_rate_source");
+        let mut b = config
+            .clone()
+            .into_runtime("Water Heater 2:draw_flow_rate_source");
+        let mut c = config.into_runtime("Water Heater 1:draw_flow_rate_source");
+
+        let mut any_differ = false;
+        for _ in 0..10 {
+            let va = a.value_at(&env).unwrap();
+            let vb = b.value_at(&env).unwrap();
+            let vc = c.value_at(&env).unwrap();
+            assert_eq!(va, vc, "the same identity is reproducible");
+            if va.to_bits() != vb.to_bits() {
+                any_differ = true;
+            }
+        }
+        assert!(
+            any_differ,
+            "two unspecified-seed noisy sources must not draw identical series: \
+             a shared keystream correlates every source built without a seed"
+        );
+
+        // An explicit seed wins: the source draws the seeded constructor's
+        // series.
+        let mut explicit = ScheduleSourceConfig::TimeWindows {
+            windows: windows(),
+            default: None,
+            seed: Some([12_u8; 32]),
+        }
+        .into_runtime("Water Heater 1:draw_flow_rate_source");
+        let mut seeded = ScheduleSource::noisy_time_windows(windows(), None, [12_u8; 32]);
+        for _ in 0..10 {
+            assert_eq!(
+                explicit.value_at(&env).unwrap(),
+                seeded.value_at(&env).unwrap(),
+                "an explicit seed must draw the seeded constructor's series"
+            );
+        }
     }
 
     #[test]
