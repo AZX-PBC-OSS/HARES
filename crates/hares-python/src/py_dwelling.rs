@@ -62,6 +62,17 @@ pyo3::create_exception!(
 pub(crate) static TEST_BUILD_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// The construction counter's probe exclusivity: the probes assert exact
+/// deltas on the process-global `TEST_BUILD_COUNT` (which every test
+/// construction bumps), so no sibling construction may run between a
+/// probe's samples. nextest's process isolation gives each probe its own
+/// process, where the lock is uncontended; in-process runners (the
+/// coverage job's llvm-cov cargo test) execute the tests on shared
+/// threads, so every test in this file's modules holds the lock for its
+/// whole body and the samples read the counter alone.
+#[cfg(test)]
+pub(crate) static TEST_COUNT_EXCLUSIVITY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use crate::conversions::naive_chrono_to_py_datetime;
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
@@ -3100,6 +3111,9 @@ mod tests {
     /// equipment's warnings.
     #[test]
     fn rejected_equipment_raises_the_exception_of_its_reason() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use hares_types::HaresError;
         let rejected = |reason: HaresError| HaresError::RejectedEquipment {
             reason: Box::new(reason),
@@ -3122,6 +3136,9 @@ mod tests {
     /// of the simulation error, naming the report in its message.
     #[test]
     fn callback_error_maps_to_python_error() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use hares_types::HaresError;
         Python::attach(|py| {
             let py_err = super::to_py_err(HaresError::Callback {
@@ -3142,6 +3159,9 @@ mod tests {
     /// variant's fields.
     #[test]
     fn health_policy_violation_maps_to_python_error() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use hares_types::{HaresError, HealthEvent};
         Python::attach(|py| {
             let violation = HaresError::HealthPolicyViolation {
@@ -3192,6 +3212,9 @@ mod tests {
 
     #[test]
     fn test_lock_dwelling_string_returns_error_on_poisoned_mutex() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mutex: Mutex<TestDwelling> = Mutex::new(TestDwelling { _data: 0 });
         let mutex_static: &'static Mutex<TestDwelling> = Box::leak(Box::new(mutex));
 
@@ -3217,6 +3240,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_rfc3339_with_z_suffix() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2019-01-01T00:00:00Z");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3228,6 +3254,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_rfc3339_with_positive_offset() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2019-01-01T00:00:00+05:00");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3239,6 +3268,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_rfc3339_with_negative_offset() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2019-06-15T12:30:00-08:00");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3250,6 +3282,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_naive_fallback_assumes_utc() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2019-01-01T00:00:00");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3261,18 +3296,27 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_rejects_invalid_string() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("not-a-date");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_datetime_str_rejects_invalid_month() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2019-13-01T00:00:00");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_datetime_str_naive_fractional_seconds() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2024-01-15T14:30:00.123456");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3285,6 +3329,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_naive_single_digit_fractional() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2024-01-15T14:30:00.5");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3293,6 +3340,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_naive_zero_fractional() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2024-01-15T14:30:00.0");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3301,6 +3351,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_date_only_midnight_utc() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2024-01-15");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3312,6 +3365,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_date_only_leap_day() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2024-02-29");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3323,6 +3379,9 @@ mod tests {
 
     #[test]
     fn test_parse_datetime_str_date_only_year_end() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = parse_datetime_str("2024-12-31");
         assert!(result.is_ok());
         let dt = result.unwrap();
@@ -3334,6 +3393,9 @@ mod tests {
 
     #[test]
     fn extract_datetime_handles_naive_datetime_with_microseconds() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let datetime_cls = py.import("datetime").unwrap().getattr("datetime").unwrap();
             // datetime.datetime(2024, 1, 15, 14, 30, 0, 123456)
@@ -3353,6 +3415,9 @@ mod tests {
 
     #[test]
     fn extract_datetime_handles_naive_datetime_zero_microseconds() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let datetime_cls = py.import("datetime").unwrap().getattr("datetime").unwrap();
             // datetime.datetime(2024, 1, 15, 14, 30, 0)
@@ -3372,6 +3437,9 @@ mod tests {
 
     #[test]
     fn extract_datetime_handles_aware_datetime() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let datetime_mod = py.import("datetime").unwrap();
             let datetime_cls = datetime_mod.getattr("datetime").unwrap();
@@ -3445,6 +3513,9 @@ mod tests {
 
     #[test]
     fn pypv_sam_lut_path_round_trips_into_typed_config() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pv = PyPv {
             name: "PV LUT".to_string(),
             capacity_w: 5000.0,
@@ -3460,6 +3531,9 @@ mod tests {
 
     #[test]
     fn pypv_without_sam_lut_path_initializes_normally() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pv = PyPv {
             name: "PV No LUT".to_string(),
             capacity_w: 5000.0,
@@ -3481,6 +3555,9 @@ mod tests {
 
     #[test]
     fn pypv_invalid_sam_lut_path_fails_init() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|_py| {
             let dir = tempfile::tempdir().expect("temp dir");
             let bad_lut_path = dir.path().join("bad_pv_lut.txt");
@@ -3548,6 +3625,9 @@ mod tests {
 
     #[test]
     fn mutex_poison_detected_after_panic() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _guard = PoisonGuard::new();
         let lock_static: &'static Mutex<i32> = Box::leak(Box::new(Mutex::new(0)));
         let _ = std::thread::spawn(move || {
@@ -3563,6 +3643,9 @@ mod tests {
 
     #[test]
     fn acquire_fails_fast_when_poisoned_flag_set() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let guard = PoisonGuard::new();
         guard.mark_poisoned();
         assert!(guard.poisoned.load(Ordering::Acquire));
@@ -3576,6 +3659,9 @@ mod tests {
 
     #[test]
     fn acquire_fails_on_poisoned_mutex_even_without_flag() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let lock: Mutex<i32> = Mutex::new(0);
         let lock_static: &'static Mutex<i32> = Box::leak(Box::new(lock));
         let _ = std::thread::spawn(move || {
@@ -3593,6 +3679,9 @@ mod tests {
 
     #[test]
     fn mark_poisoned_is_idempotent() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let guard = PoisonGuard::new();
         assert!(!guard.poisoned.load(Ordering::Acquire));
         guard.mark_poisoned();
@@ -3604,6 +3693,9 @@ mod tests {
 
     #[test]
     fn invariant_flag_implies_mutex_poisoned_holds() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // After a panic while locked → mutex is poisoned → flag should be set
         let lock: Mutex<i32> = Mutex::new(0);
         let lock_static: &'static Mutex<i32> = Box::leak(Box::new(lock));
@@ -3623,6 +3715,9 @@ mod tests {
 
     #[test]
     fn fatal_dwelling_prefix_detectable_by_callers() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let guard = PoisonGuard::new();
         guard.mark_poisoned();
         let err = guard.acquire().unwrap_err();
@@ -3667,6 +3762,9 @@ mod tests {
 
     #[test]
     fn step_core_string_returns_fatal_prefix_when_poisoned() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let guard = StepGuard::new();
         guard.mark_poisoned();
         let err = guard.step_core_string().unwrap_err();
@@ -3679,6 +3777,9 @@ mod tests {
 
     #[test]
     fn step_core_string_succeeds_when_not_poisoned() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let guard = StepGuard::new();
         let result = guard.step_core_string();
         assert_eq!(result.unwrap(), 42);
@@ -3697,6 +3798,9 @@ mod tests {
 
     #[test]
     fn solar_dict_valid_produces_correct_result() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let dict = make_valid_solar_dict(py);
             let result = parse_solar_override_from_dict(py, dict.as_any()).unwrap();
@@ -3716,6 +3820,9 @@ mod tests {
 
     #[test]
     fn solar_dict_missing_direct_key_returns_valueerror() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let dict = PyDict::new(py);
             let surface = PyDict::new(py);
@@ -3733,6 +3840,9 @@ mod tests {
 
     #[test]
     fn solar_dict_missing_diffuse_key_returns_valueerror() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let dict = PyDict::new(py);
             let surface = PyDict::new(py);
@@ -3750,6 +3860,9 @@ mod tests {
 
     #[test]
     fn solar_dict_missing_reflected_key_returns_valueerror() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let dict = PyDict::new(py);
             let surface = PyDict::new(py);
@@ -3767,6 +3880,9 @@ mod tests {
 
     #[test]
     fn solar_dict_missing_aoi_key_returns_valueerror() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let dict = PyDict::new(py);
             let surface = PyDict::new(py);
@@ -3784,6 +3900,9 @@ mod tests {
 
     #[test]
     fn solar_list_valid_produces_correct_result() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let surface_dict = PyDict::new(py);
             surface_dict.set_item("surface_id", 1_u32).unwrap();
@@ -3806,6 +3925,9 @@ mod tests {
 
     #[test]
     fn solar_list_missing_surface_id_returns_valueerror() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let surface_dict = PyDict::new(py);
             surface_dict.set_item("direct_w_m2", 100.0_f64).unwrap();
@@ -3824,6 +3946,9 @@ mod tests {
 
     #[test]
     fn solar_list_missing_direct_w_m2_returns_valueerror() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let surface_dict = PyDict::new(py);
             surface_dict.set_item("surface_id", 1_u32).unwrap();
@@ -3842,6 +3967,9 @@ mod tests {
 
     #[test]
     fn solar_list_missing_diffuse_w_m2_returns_valueerror() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let surface_dict = PyDict::new(py);
             surface_dict.set_item("surface_id", 1_u32).unwrap();
@@ -3860,6 +3988,9 @@ mod tests {
 
     #[test]
     fn solar_list_missing_reflected_w_m2_returns_valueerror() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let surface_dict = PyDict::new(py);
             surface_dict.set_item("surface_id", 1_u32).unwrap();
@@ -3878,6 +4009,9 @@ mod tests {
 
     #[test]
     fn extract_seconds_rejects_inf() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let test_values = [f64::INFINITY, f64::NEG_INFINITY, f64::NAN];
             for val in test_values {
@@ -3898,6 +4032,9 @@ mod tests {
 
     #[test]
     fn extract_seconds_rejects_overflow() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let test_values = [1e20_f64, -1e20_f64];
             for val in test_values {
@@ -3918,6 +4055,9 @@ mod tests {
 
     #[test]
     fn extract_seconds_accepts_negative_finite_f64() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let cases: [(f64, i64); 2] = [(-100.0, -100), (-1e15_f64, -1_000_000_000_000_000)];
             for (input, expected) in cases {
@@ -3933,6 +4073,9 @@ mod tests {
 
     #[test]
     fn extract_seconds_returns_correct_i64_for_finite_f64() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let cases: [(f64, i64); 5] =
                 [(3600.0, 3600), (3600.7, 3601), (2.3, 2), (2.7, 3), (0.0, 0)];
@@ -3954,6 +4097,9 @@ mod tests {
 
     #[test]
     fn add_ev_with_driver_away_charge_power_matches_the_seed_path() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use hares_control::DispatchRequest;
         use hares_core::Actor;
         use hares_core::actors::ev_driver::EvDriverActor;
@@ -4026,6 +4172,9 @@ mod tests {
 
     #[test]
     fn add_ev_with_driver_fuel_economy_matches_the_catalogue() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use hares_equipment::ev::catalog::{EvArchetypeId, VehicleId};
 
         let spec = VehicleId::ChevyBoltEv.spec();
@@ -4091,6 +4240,9 @@ mod profiling_summary_tests {
 
     #[test]
     fn profiling_summary_lists_actors() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             root.push("../..");
@@ -4217,6 +4369,9 @@ mod profiling_summary_tests {
     /// shows a zero that reads as a measurement.
     #[test]
     fn profiling_summary_reports_finish() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Python::attach(|py| {
             let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             root.push("../..");
@@ -4383,6 +4538,9 @@ mod construction_gil_tests {
     /// buys, above scheduler noise.
     #[test]
     fn concurrent_construction_scales() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Warm the file cache once, untimed, so the probe times parse+resolve.
         construct_one();
 
@@ -4426,6 +4584,9 @@ mod construction_gil_tests {
     /// threads, no timing.
     #[test]
     fn construction_runs_detached() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (hpxml, schedule, weather, defaults) = fixture_paths();
         let hpxml = hpxml.to_string_lossy().into_owned();
         let schedule = schedule.to_string_lossy().into_owned();
@@ -4509,6 +4670,9 @@ mod construction_gil_tests {
     /// the restored dwelling's warm-up health is the snapshot's.
     #[test]
     fn gym_reset_builds_nothing_and_runs_no_warmup() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let fixture = root.join("tests/fixtures/parity/cz5a_ev_charging");
         Python::attach(|py| {
@@ -4614,6 +4778,9 @@ mod construction_gil_tests {
     /// with that seed, so no input was re-parsed.
     #[test]
     fn reset_with_seed_reuses_blueprint() {
+        let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (hpxml, schedule, weather, defaults) = fixture_paths();
         Python::attach(|py| {
             let (hpxml_bound, schedule_bound, weather_bound, defaults_bound) = (
