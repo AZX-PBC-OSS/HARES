@@ -4846,3 +4846,87 @@ not scheduled work):**
 | The end-of-step equipment snapshot writes in place instead of re-inserting | `state_snapshot` (18 percent, the measured second) | `snapshot_equipment_entry` (`crates/hares-core/src/dwelling/mod.rs:6341`) `insert`s a fresh `core_output().clone()` per equipment per step and the phase `collect`s two fresh per-zone delivery vectors and a zone-temp clone per step; retain the map entries and buffers and write them in place (the telemetry `clone_from` pattern), allocation-free after the first step | M | paired ladder: the fold's capture wall against its same-sitting control on the previous pin, and the site's counting-allocator delta reading zero after the first step |
 | The per-surface Perez irradiance computed once per blueprint and shared | `environment` (10 percent here; the fired condition measured 7.3 to 7.5 percent of simulate) | `EnvironmentManager::update_in_place` (`crates/hares-core/src/environment.rs:1514`) recomputes per-surface Perez and incidence every step for every dwelling (twelve azimuth samples per omnidirectional surface); build the per-blueprint per-surface table the RT-2 record names, once from the blueprint's surfaces, shared by every dwelling the blueprint builds, so the fit path's per-candidate homes read it | M | paired ladder, with the frames bitwise equal (the table computes the same functions of the same inputs) |
 | The envelope state-space step exploits the RC network's locality | `envelope` (37 percent, the measured largest) | `StateSpaceModel::step_with_identity_coupling_into_scratch` and `step_into` (`crates/hares-envelope/src/state_space.rs`) run dense O(n^2) products while the RC couplings are local (each boundary to its neighbours and its zone); a block-structured or sparse step cuts the product count. Bits will move (a reassociated sum), so the row carries the numeric-entry delta record | L | paired ladder, with any bit movement recorded through the delta procedure at the parent before the fold |
+
+### P1, 2026-10-22, commit `23e13ce8` (the end-of-step equipment snapshot writes in place)
+
+Load average at write time: 1.78/1.95/2.38 (28 cores; the before and
+after sets below were taken back to back in one sitting, the host
+otherwise quiet).
+
+The `state_snapshot` phase's own allocations: the two per-zone HVAC
+delivery vectors (`step_hvac_heating_by_zone`, `step_hvac_cooling_by_zone`,
+each a fresh `collect` per step) and the step result's zone-temperature
+clone. The equipment snapshot itself was already allocation-free after
+the first step (`CoreOutput` holds only `Copy` members, so the map
+re-insert copies bytes in place; the `snapshot_equipment` site test
+pins it); the phase's remaining three sites are what this row removed.
+
+1. The allocation delta witness (new): `state_snapshot_phase_allocation_free_after_first_step`
+   steps the OCHRE sample home (`base.xml`, the counting allocator
+   installed) into one reused step result, the shape `simulate()` steps
+   in. At the parent `68f43ec3` the phase allocated 12 times over the
+   4 steps after the first (3 per step): RED. At `23e13ce8` the delta
+   is zero on every step after the first: GREEN. The existing
+   per-site test is unchanged and green.
+
+2. The profiling count (the phase-share record's instrument:
+   `frame_golden run tests/fixtures/golden/consumer_shape_900s.toml
+   --repeat 1 --discard-output`, built with the profiling feature,
+   three runs in separate processes per side). Hot-path allocations
+   over the year-run of 35,040 steps: before `743,849` on every run,
+   after `638,732` on every run. The drop is 105,117: the phase's
+   three sites times 35,040 steps less the first step's three
+   first-time allocations. `hot_path_alloc_violations` stays 35,040 on
+   both sides: the step still allocates in other phases (about 18.2
+   allocations per step after this row, down from about 21.2).
+
+3. The paired wall, same sitting, same sides: `step_total` medians
+   1.246 s (1.246/1.265/1.225) before, 1.220 s (1.245/1.220/1.205)
+   after, a 2.1 percent drop, inside the 5 percent noise band: no
+   measurable wall change at this resolution. The `state_snapshot`
+   share moved 18 to 17 percent (the printed percents carry about half
+   a point of rounding). `VmHWM` 148.4 MB on both sides. Read
+   honestly: the phase's cost sits in the telemetry `clone_from`'s
+   per-key hashing and the map writes, not in the three small
+   allocations; the fold's paired capture wall is the gate for the
+   step-loop program's cumulative effect, and this row's proof is the
+   allocator delta plus the count above.
+
+The goldens: `compare-all` identical in both feature sets at the tip
+(10 dwelling and fleet fixtures without features, the dst fixture with
+`-F dst`); checkpoints, pytest (1801 passed, 0 failed) and pyright (0)
+green.
+
+The design: `run_timestep_into` writes the step result in place (the
+zone temperatures through `Vec::clone_from`, which reuses the buffer's
+allocation once it holds the zone count) and the two delivery vectors
+are `clear` + `extend` on persistent buffers. `simulate_inner` reuses
+one result across the run's steps. `step()` and the warm-up loop keep
+the by-value wrapper, so their per-call allocations are unchanged from
+the parent; they are the follow-ups.
+
+The follow-up census (the per-step clone and fresh-vector sites the
+step path still carries; each registered as its own row, none fixed
+here):
+
+- `stepped_stage_ranks` (`dwelling/mod.rs`, the step's equipment
+  phase): a fresh `Vec::with_capacity` per step for the unconditional
+  stage-ordering invariant. One allocation per step, every build.
+  Row 42.
+- The warm-up loop's per-step result: each warm-up step returns a
+  fresh `StepResult` the loop drops unread on success. One allocation
+  per warm-up step. Row 41.
+- The by-value `step()` handoff: the Python single-step path and the
+  fleet's per-dwelling step loop (`hares-fleet/src/fleet.rs:2023`)
+  each pay one zone-temperature vector per step. Row 43.
+- Observe-gated copies (present only in observe builds, invisible to
+  the profiling build): the port snapshots taken per stage pass
+  (`ports.clone()` three times when observing), the thermal-update
+  buffer clone and the actor telemetry key collects. Noted for the
+  observe build's own measurement; no row yet.
+
+Found along the way, pre-existing at the parent: the default-feature
+clippy gate was red (`iterative_wall_solver` and `iterative_wall_env`
+in `hares-envelope`'s longwave tests called only by observe-gated
+tests); the helpers are now gated with their callers. Test-only, no
+golden risk; the all-features gate was green before and after.
