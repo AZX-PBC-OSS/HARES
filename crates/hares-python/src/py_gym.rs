@@ -945,6 +945,17 @@ mod tests {
     use super::*;
     use numpy::PyArrayMethods;
     use pyo3::types::PyString;
+    use std::sync::{Mutex, PoisonError};
+
+    /// The observation-fault injection sets a process-global flag for one
+    /// batch step's window: a sibling test's observation call inside the
+    /// window would see the fault and fail its own assertions. nextest's
+    /// process isolation gives each test its own process, where the lock
+    /// is uncontended; in-process runners (the coverage job's llvm-cov
+    /// cargo test) execute the tests on shared threads, so every test
+    /// here holds the lock for its whole body and the flag's window is
+    /// the test's alone.
+    static OBSERVATION_FAULT_EXCLUSIVITY: Mutex<()> = Mutex::new(());
 
     /// A stepable base.xml dwelling for the batch health tests.
     fn base_dwelling(py: Python<'_>) -> Py<PyDwelling> {
@@ -1019,6 +1030,9 @@ mod tests {
     /// is inside and does not. In every build.
     #[test]
     fn batch_step_records_clamped_actions() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         Python::attach(|py| {
             let first = base_dwelling(py);
             let second = base_dwelling(py);
@@ -1078,6 +1092,9 @@ mod tests {
     /// substitute vector is produced.
     #[test]
     fn observation_failure_terminates_the_environment() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         Python::attach(|py| {
             let first = base_dwelling(py);
             let second = base_dwelling(py);
@@ -1154,6 +1171,9 @@ mod tests {
     /// the count on the dwelling's run health, in every build.
     #[test]
     fn clip_action_records_and_returns_clamped_values() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         Python::attach(|py| {
             let dwelling = base_dwelling(py);
             let bound_dwelling = base_dwelling(py);
@@ -1192,6 +1212,9 @@ mod tests {
     /// dwelling's run health records nothing.
     #[test]
     fn clip_action_refuses_a_non_finite_action() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         Python::attach(|py| {
             for raw in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
                 let dwelling = base_dwelling(py);
@@ -1219,6 +1242,9 @@ mod tests {
     /// neither names falls through to the broad bounds.
     #[test]
     fn field_bounds_table_and_lookup_agree() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert!(!field_bounds_entries().is_empty(), "the table is not empty");
         for (field, bounds) in field_bounds_entries() {
             assert_eq!(field_bounds(field), *bounds, "{field}");
@@ -1260,6 +1286,9 @@ mod tests {
     /// held to its target's thermostat class.
     #[test]
     fn each_action_is_clipped_to_its_resolved_bounds() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let layout = vec![
             ("HVAC".to_string(), "deadband_c".to_string()),
             ("HVAC".to_string(), "heat_c".to_string()),
@@ -1292,6 +1321,9 @@ mod tests {
     /// never a clamp panic.
     #[test]
     fn a_bad_bounds_pair_is_an_error_not_a_panic() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0, 25.0];
         for (pair, reason) in [
@@ -1311,6 +1343,9 @@ mod tests {
 
     #[test]
     fn build_thermal_setpoint_rejects_a_deadband_without_a_setpoint() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("deadband_c".to_string(), 1.0);
         let err = build_control_signal("ThermalSetpoint", &values).unwrap_err();
@@ -1319,6 +1354,9 @@ mod tests {
 
     #[test]
     fn build_thermal_setpoint_with_all_fields() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("heating_setpoint_c".to_string(), 20.0);
         values.insert("cooling_setpoint_c".to_string(), 24.0);
@@ -1336,6 +1374,9 @@ mod tests {
 
     #[test]
     fn build_thermal_setpoint_with_aliases() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("heat_c".to_string(), 18.0);
         let sig = build_control_signal("ThermalSetpoint", &values).unwrap();
@@ -1351,6 +1392,9 @@ mod tests {
 
     #[test]
     fn build_power_setpoint() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("active_power_w".to_string(), 3500.0);
         let sig = build_control_signal("PowerSetpoint", &values).unwrap();
@@ -1367,6 +1411,9 @@ mod tests {
 
     #[test]
     fn build_power_setpoint_defaults_to_zero() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let values = HashMap::new();
         let sig = build_control_signal("PowerSetpoint", &values).unwrap();
         assert_eq!(
@@ -1382,6 +1429,9 @@ mod tests {
 
     #[test]
     fn build_power_limit() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("max_power_w".to_string(), 5000.0);
         let sig = build_control_signal("PowerLimit", &values).unwrap();
@@ -1396,6 +1446,9 @@ mod tests {
 
     #[test]
     fn build_rejects_a_removed_action_key_naming_its_replacement() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // The gym's old action-layout keys are `ControlSignal` removed-key
         // rows: an action dict carrying one fails naming the replacement
         // instead of reading as 0.0 under the renamed key.
@@ -1424,6 +1477,9 @@ mod tests {
 
     #[test]
     fn build_soc_target() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("target_soc".to_string(), 0.7);
         values.insert("min_soc".to_string(), 0.2);
@@ -1441,6 +1497,9 @@ mod tests {
 
     #[test]
     fn build_soc_target_alias_soc() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("soc".to_string(), 0.5);
         let sig = build_control_signal("SOCTarget", &values).unwrap();
@@ -1456,6 +1515,9 @@ mod tests {
 
     #[test]
     fn build_load_fraction() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("load_fraction".to_string(), 0.8);
         let sig = build_control_signal("LoadFraction", &values).unwrap();
@@ -1464,6 +1526,9 @@ mod tests {
 
     #[test]
     fn build_duty_cycle() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("on_fraction".to_string(), 0.5);
         values.insert("period_s".to_string(), 900.0);
@@ -1480,6 +1545,9 @@ mod tests {
 
     #[test]
     fn build_humidity_setpoint() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("target_rh".to_string(), 0.45);
         let sig = build_control_signal("HumiditySetpoint", &values).unwrap();
@@ -1495,6 +1563,9 @@ mod tests {
 
     #[test]
     fn build_grid_connect_threshold() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("connected".to_string(), 0.7);
         let sig = build_control_signal("GridConnect", &values).unwrap();
@@ -1508,6 +1579,9 @@ mod tests {
 
     #[test]
     fn build_self_consumption() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("enabled".to_string(), 0.9);
         values.insert("solar_only_charging".to_string(), 0.1);
@@ -1523,6 +1597,9 @@ mod tests {
 
     #[test]
     fn build_unknown_signal_type_errors() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let values = HashMap::new();
         let err = build_control_signal("UnknownSignal", &values).unwrap_err();
         assert!(
@@ -1533,6 +1610,9 @@ mod tests {
 
     #[test]
     fn map_single_equipment_thermal_action() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0, 26.0];
         let (signals, _clamped_count) =
@@ -1551,6 +1631,9 @@ mod tests {
 
     #[test]
     fn map_action_clips_to_bounds() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (layout, sig_map) = therm_layout();
         let action = vec![-100.0, 200.0];
         let (signals, _clamped_count) =
@@ -1567,6 +1650,9 @@ mod tests {
 
     #[test]
     fn map_empty_action_is_noop() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (layout, sig_map) = therm_layout();
         let action: Vec<f64> = vec![];
         let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
@@ -1575,6 +1661,9 @@ mod tests {
 
     #[test]
     fn map_multi_equipment_action() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let layout = vec![
             ("HVAC".to_string(), "heat_c".to_string()),
             ("Battery".to_string(), "active_power_w".to_string()),
@@ -1609,6 +1698,9 @@ mod tests {
 
     #[test]
     fn map_action_dimension_mismatch_errors() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0];
         let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
@@ -1617,6 +1709,9 @@ mod tests {
 
     #[test]
     fn map_missing_signal_type_errors() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let layout = vec![("UnknownEquip".to_string(), "fraction".to_string())];
         let sig_map = HashMap::new();
         let action = vec![0.5];
@@ -1626,6 +1721,9 @@ mod tests {
 
     #[test]
     fn build_thermal_setpoint_with_setpoint_c_alias() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("setpoint_c".to_string(), 22.0);
         let sig = build_control_signal("ThermalSetpoint", &values).unwrap();
@@ -1641,6 +1739,9 @@ mod tests {
 
     #[test]
     fn build_thermal_setpoint_case_insensitive_keys() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("Heating_Setpoint_C".to_string(), 20.0);
         values.insert("Cooling_Setpoint_C".to_string(), 24.0);
@@ -1657,6 +1758,9 @@ mod tests {
 
     #[test]
     fn build_grid_connect_exactly_at_threshold() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut values = HashMap::new();
         values.insert("connected".to_string(), 0.5);
         let sig = build_control_signal("GridConnect", &values).unwrap();
@@ -1665,6 +1769,9 @@ mod tests {
 
     #[test]
     fn build_self_consumption_defaults_to_false() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let values: HashMap<String, f64> = HashMap::new();
         let sig = build_control_signal("SelfConsumption", &values).unwrap();
         assert_eq!(
@@ -1678,6 +1785,9 @@ mod tests {
 
     #[test]
     fn map_soctarget_full_layout() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let layout = vec![
             ("EV".to_string(), "target_soc".to_string()),
             ("EV".to_string(), "min_soc".to_string()),
@@ -1701,6 +1811,9 @@ mod tests {
 
     #[test]
     fn map_dutycycle_full_layout() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let layout = vec![
             ("HPWH".to_string(), "on_fraction".to_string()),
             ("HPWH".to_string(), "period_s".to_string()),
@@ -1723,6 +1836,9 @@ mod tests {
 
     #[test]
     fn map_humidity_setpoint_layout() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let layout = vec![("Dehumidifier".to_string(), "target_rh".to_string())];
         let mut sig_map = HashMap::new();
         sig_map.insert("Dehumidifier".to_string(), "HumiditySetpoint".to_string());
@@ -1741,6 +1857,9 @@ mod tests {
 
     #[test]
     fn map_action_rejects_nan() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0, f64::NAN];
         let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
@@ -1749,6 +1868,9 @@ mod tests {
 
     #[test]
     fn map_action_rejects_infinity() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (layout, sig_map) = therm_layout();
         let action = vec![f64::INFINITY, 26.0];
         let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
@@ -1757,6 +1879,9 @@ mod tests {
 
     #[test]
     fn map_action_rejects_negative_infinity() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (layout, sig_map) = therm_layout();
         let action = vec![21.0, f64::NEG_INFINITY];
         let err = map_action_to_signals(&action, &layout, &sig_map, &bounds(&layout)).unwrap_err();
@@ -1765,6 +1890,9 @@ mod tests {
 
     #[test]
     fn map_action_rejects_duplicate_fields_per_equipment() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let layout = vec![
             ("HVAC".to_string(), "heat_c".to_string()),
             ("HVAC".to_string(), "heat_c".to_string()),
@@ -1781,6 +1909,9 @@ mod tests {
 
     #[test]
     fn map_action_rejects_nan_in_multi_equipment() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let layout = vec![
             ("HVAC".to_string(), "heat_c".to_string()),
             ("Battery".to_string(), "active_power_w".to_string()),
@@ -1808,6 +1939,9 @@ mod tests {
     #[test]
     #[ignore]
     fn batch_step_allocation_counts() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         use hares_types::alloc_count::thread_allocations;
 
         Python::attach(|py| {
