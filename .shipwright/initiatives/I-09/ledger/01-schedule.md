@@ -61,6 +61,7 @@ Columns: # | axis | row | title | size | spec | depends on | state
 | 41 | E | P4 | the warm-up loop's per-step result writes in place | S | the follow-up census (02-measurement.md, measurement log, the row 38 entry) | P1 | draft |
 | 42 | E | P5 | the stage-rank scratch persists across steps instead of a fresh vector each step | S | the follow-up census (02-measurement.md, measurement log, the row 38 entry) | P1 | draft |
 | 43 | E | P6 | the single-step and fleet bindings step through a reused result | M | the follow-up census (02-measurement.md, measurement log, the row 38 entry) | P1 | draft |
+| 44 | E | E10 | the test job's three feature passes run as parallel matrix arms on the runner's own thread count; the why: the sequential job measured 2h37m on a 2-core runner, the split's wall is one pass; the threads: the per-invocation --test-threads "$(nproc)" override rather than deleting the ci profile's test-threads = 8, because a nextest profile inherits the default profile's settings, so deleting only the ci line would still run the inherited 8 on the runner, while the override keeps the default profile's local memory bound and gives each arm the runner's own logical cores (the counter probes hold process-wide mutexes and read thread-local mirrors, correct at any thread count) | S | the operator's directive (2026-10-22) | none | in flight |
 
 Rows 38 to 40 are the performance program's opening rows, taken from the
 three proposals the phase-share record closes with. Row 38 is the first
@@ -71,3 +72,11 @@ implemented and measured in its own row. The observe build's per-step
 copies (the port snapshots, the thermal-update buffer clone, the actor
 telemetry key collects) are noted in the same census and need their own
 measurement before they become rows.
+
+Row 44 is the operator's CI restructure: the test job's three feature
+passes (default, dst, profiling) run as three parallel matrix arms, each
+on the runner's own thread count, instead of sequential passes on one
+runner. The old job's other passes (observe, release,
+equipment-release, core-observe-profiling) left the gate with the
+restructure, per the directive's three-arm enumeration, and need a home
+of their own if they are wanted.
