@@ -233,7 +233,7 @@ impl CapacityDerateModel {
                 let inv_diff = 1.0 / t_k - 1.0 / t_ref_k;
                 let exponent = -e_ad1_j_mol / R_GAS_J_MOL_K * inv_diff
                     - e_ad2_j2_mol2 / R_GAS_J_MOL_K * inv_diff * inv_diff;
-                (d0_ref * exponent.exp()).clamp(0.0, 1.06)
+                (d0_ref * libm::exp(exponent)).clamp(0.0, 1.06)
             }
             Self::PiecewiseLinear { points } => {
                 if points.is_empty() {

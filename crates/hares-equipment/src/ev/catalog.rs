@@ -577,7 +577,7 @@ impl ArchetypePreset {
         // mean (mu + ln factor, sigma unchanged), so the drawn distances
         // are the drawn miles times the metre factor.
         const MILE_M: f64 = 1_609.344;
-        let miles_to_m_shift = MILE_M.ln();
+        let miles_to_m_shift = libm::log(MILE_M);
 
         // The miles source's key carries its own tag, the same derivation
         // `reseed` applies: no two consumers of the driver's key ever draw

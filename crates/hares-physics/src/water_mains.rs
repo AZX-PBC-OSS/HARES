@@ -123,7 +123,7 @@ pub fn water_mains_temperature_c(
     let angle_deg = DEG_PER_DAY * (day - 15.0 - lag) + sign * 90.0;
     let amplitude = ratio * (dt_annual_range_f / 2.0);
 
-    let t_mains_f = t_avg_f + OFFSET_F + amplitude * (angle_deg * DEG_TO_RAD).sin();
+    let t_mains_f = t_avg_f + OFFSET_F + amplitude * libm::sin(angle_deg * DEG_TO_RAD);
 
     // EnergyPlus WeatherManager.cc:7206-7208: enforce 32 °F minimum.
     // Buried water mains remain above freezing regardless of air temperature.
@@ -191,7 +191,7 @@ pub fn water_mains_raw_fahrenheit(
     let angle_deg = DEG_PER_DAY * (day - 15.0 - lag) + sign * 90.0;
     let amplitude = ratio * (dt_annual_range_f / 2.0);
 
-    t_avg_f + OFFSET_F + amplitude * (angle_deg * DEG_TO_RAD).sin()
+    t_avg_f + OFFSET_F + amplitude * libm::sin(angle_deg * DEG_TO_RAD)
 }
 
 /// Hemisphere selector for [`water_mains_temperature_c`].

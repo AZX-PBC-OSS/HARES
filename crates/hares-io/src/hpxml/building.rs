@@ -2110,10 +2110,10 @@ fn parse_boundary(
                     boundary_id = id,
                     pitch_source = pitch_source,
                     pitch_value = pitch_value,
-                    tilt_deg = (pitch_value / 12.0).atan().to_degrees(),
+                    tilt_deg = libm::atan(pitch_value / 12.0).to_degrees(),
                 );
             }
-            Some((pitch_value / 12.0).atan().to_degrees())
+            Some(libm::atan(pitch_value / 12.0).to_degrees())
         }
         BoundaryType::Wall | BoundaryType::FoundationWall | BoundaryType::RimJoist => Some(90.0),
         BoundaryType::Floor => Some(0.0),
@@ -3908,7 +3908,7 @@ fn infer_roof_tilt_from_geometry(boundaries: &mut [Boundary], pitch_absent_ids: 
         return;
     }
 
-    let inferred_tilt_deg = tan_tilt.atan().to_degrees();
+    let inferred_tilt_deg = libm::atan(tan_tilt).to_degrees();
 
     // Cap to plausible residential range: 1:12 (4.8°) to 12:12 (45°).
     // Values outside this range indicate the square-plan assumption is

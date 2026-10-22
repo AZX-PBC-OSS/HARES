@@ -1803,7 +1803,7 @@ impl StartDraws {
         if p_hour >= 1.0 {
             return true;
         }
-        let p_step = 1.0 - (1.0 - p_hour).powf(dt_s / SECONDS_PER_HOUR);
+        let p_step = 1.0 - libm::pow(1.0 - p_hour, dt_s / SECONDS_PER_HOUR);
         self.draws = self.draws.saturating_add(1);
         self.rng.random::<f64>() < p_step
     }

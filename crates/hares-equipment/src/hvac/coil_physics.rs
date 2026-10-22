@@ -175,7 +175,7 @@ pub(super) fn effective_shr_with_latent_degradation(
     // removal resumes after an off-cycle).
     let mut to = aa + tau;
     for _ in 0..HR_TO_MAX_ITER {
-        let to_new = aa - tau * ((-to / tau).exp() - 1.0);
+        let to_new = aa - tau * (libm::exp(-to / tau) - 1.0);
         let rel_err = (to_new - to).abs() / to.abs().max(HR_TO_MIN);
         to = to_new;
         if rel_err < HR_TO_REL_TOL {
@@ -185,7 +185,7 @@ pub(super) fn effective_shr_with_latent_degradation(
 
     // Latent heat ratio multiplier: fraction of the on-cycle during which the
     // coil actually performs latent removal (after moisture has re-condensed).
-    let aa_exp = (-ton / tau).exp();
+    let aa_exp = libm::exp(-ton / tau);
     let denominator = ton + tau * (aa_exp - 1.0);
     let lhr_mult = if denominator.abs() > EPSILON {
         ((ton - to) / denominator).max(0.0)
@@ -233,7 +233,7 @@ pub(super) fn calculate_shr(
     }
 
     let mfr = calculate_mass_flow_rate(db_in_c, w_in, p_kpa, flow_m3_s);
-    let bf = if mfr > 0.0 { (-ao / mfr).exp() } else { 0.0 };
+    let bf = if mfr > 0.0 { libm::exp(-ao / mfr) } else { 0.0 };
 
     let h_in = moist_air_enthalpy(db_in_c, w_in);
     let d_h = if mfr > 0.0 { q_w / mfr } else { 0.0 };
@@ -325,7 +325,7 @@ pub(super) fn coil_ao_factor(
 ) -> crate::Result<f64> {
     let bf = coil_bypass_factor(db_in_c, w_in, p_kpa, q_w, flow_m3_s, shr)?;
     let mfr = calculate_mass_flow_rate(db_in_c, w_in, p_kpa, flow_m3_s);
-    Ok(-bf.ln() * mfr)
+    Ok(-libm::log(bf) * mfr)
 }
 
 pub(super) fn coil_bypass_factor(

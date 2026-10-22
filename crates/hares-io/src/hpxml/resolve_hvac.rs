@@ -3517,7 +3517,7 @@ fn scale_mshp_cooler_capacity_ratios_for_seer(seer: f64, caps: &[f64]) -> Vec<f6
     // provides this specific exponent; it was calibrated to the ERM-quoted
     // range.
     const BETA: f64 = 0.35;
-    let scale = (seer / REFERENCE_SEER).powf(BETA);
+    let scale = libm::pow(seer / REFERENCE_SEER, BETA);
     caps.iter()
         .enumerate()
         .map(|(i, &c)| {

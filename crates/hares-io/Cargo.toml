@@ -12,6 +12,7 @@ observe = []
 hares-physics = { workspace = true }
 hares-envelope = { workspace = true }
 hares-control = { workspace = true }
+libm = { workspace = true }
 hares-equipment = { workspace = true }
 hares-types = { workspace = true }
 uom = { workspace = true }

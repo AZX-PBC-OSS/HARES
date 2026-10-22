@@ -49,14 +49,14 @@ pub fn saturation_pressure_pa(t_c: f64) -> f64 {
             + 6.221_570_1e-7 * t_k * t_k
             + 2.074_782_5e-9 * t_k * t_k * t_k
             - 9.484_024e-13 * t_k * t_k * t_k * t_k
-            + 4.163_501_9 * t_k.ln()
+            + 4.163_501_9 * libm::log(t_k)
     } else {
         -5.800_220_6e3 / t_k + 1.391_499_3 - 4.864_023_9e-2 * t_k + 4.176_476_8e-5 * t_k * t_k
             - 1.445_209_3e-8 * t_k * t_k * t_k
-            + 6.545_967_3 * t_k.ln()
+            + 6.545_967_3 * libm::log(t_k)
     };
 
-    ln_p_ws.exp()
+    libm::exp(ln_p_ws)
 }
 
 /// Typed `uom` boundary variant of [`saturation_pressure_pa`].

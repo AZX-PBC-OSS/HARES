@@ -286,7 +286,7 @@ impl DistributionKind {
         match self {
             Self::Gaussian { mean, .. } => *mean,
             Self::Uniform { low, high } => (low + high) / 2.0,
-            Self::LogNormal { mu, sigma } => (*mu + sigma * sigma / 2.0).exp(),
+            Self::LogNormal { mu, sigma } => libm::exp(*mu + sigma * sigma / 2.0),
             Self::Exponential { lambda } => 1.0 / lambda,
             Self::Poisson { lambda } => *lambda,
             Self::Bernoulli { p } => *p,

@@ -1624,19 +1624,19 @@ fn solar_altitude_spencer(latitude_deg: f64, longitude_deg: f64, hour: u32) -> f
         * (day - 1.0 + (minutes_utc - SOLAR_NOON_MINUTES_F64) / MINUTES_PER_DAY_F64);
 
     // Spencer (1971) Fourier series for declination.
-    let decl_rad = 0.006_918 - 0.399_912 * gamma.cos() + 0.070_257 * gamma.sin()
-        - 0.006_758 * (2.0 * gamma).cos()
-        + 0.000_907 * (2.0 * gamma).sin()
-        - 0.002_697 * (3.0 * gamma).cos()
-        + 0.001_48 * (3.0 * gamma).sin();
+    let decl_rad = 0.006_918 - 0.399_912 * libm::cos(gamma) + 0.070_257 * libm::sin(gamma)
+        - 0.006_758 * libm::cos(2.0 * gamma)
+        + 0.000_907 * libm::sin(2.0 * gamma)
+        - 0.002_697 * libm::cos(3.0 * gamma)
+        + 0.001_48 * libm::sin(3.0 * gamma);
 
     // Spencer (1971) equation of time [minutes].
     let eq_time_min = EOT_SCALE
         * (EOT_C0
-            + EOT_C1 * gamma.cos()
-            + EOT_C2 * gamma.sin()
-            + EOT_C3 * (2.0 * gamma).cos()
-            + EOT_C4 * (2.0 * gamma).sin());
+            + EOT_C1 * libm::cos(gamma)
+            + EOT_C2 * libm::sin(gamma)
+            + EOT_C3 * libm::cos(2.0 * gamma)
+            + EOT_C4 * libm::sin(2.0 * gamma));
 
     let true_solar_time_min =
         minutes_utc + eq_time_min + MINUTES_PER_DEGREE_LONGITUDE * longitude_deg;
@@ -1650,10 +1650,10 @@ fn solar_altitude_spencer(latitude_deg: f64, longitude_deg: f64, hour: u32) -> f
     let lat_rad = latitude_deg.to_radians();
     let hour_angle_rad = hour_angle_deg.to_radians();
 
-    let cos_zenith = (lat_rad.sin() * decl_rad.sin()
-        + lat_rad.cos() * decl_rad.cos() * hour_angle_rad.cos())
+    let cos_zenith = (libm::sin(lat_rad) * libm::sin(decl_rad)
+        + libm::cos(lat_rad) * libm::cos(decl_rad) * libm::cos(hour_angle_rad))
     .clamp(-1.0, 1.0);
-    let zenith_rad = cos_zenith.acos();
+    let zenith_rad = libm::acos(cos_zenith);
     90.0 - zenith_rad.to_degrees()
 }
 
@@ -1775,7 +1775,8 @@ pub(crate) fn build_synthetic_weather(
                 let altitude_deg =
                     solar_altitude_spencer(meta.latitude, meta.longitude, hour as u32);
                 let zenith_deg = 90.0 - altitude_deg;
-                let ghi_check = dni_w_m2[hour] * zenith_deg.to_radians().cos() + dhi_w_m2[hour];
+                let ghi_check =
+                    dni_w_m2[hour] * libm::cos(zenith_deg.to_radians()) + dhi_w_m2[hour];
                 assert!(
                     dni_w_m2[hour] >= 0.0,
                     "step {hour}: DNI ({}) is negative while GHI > 0",
@@ -1859,11 +1860,13 @@ pub(crate) fn build_synthetic_weather(
                 // cos(TAU * (doy − 172) / 365) = 1 at doy 172, −1 at doy 355.
                 let season_factor = 1.0
                     + seasonal_mod
-                        * (std::f64::consts::TAU * (day_of_year as f64 - 172.0) / 365.0).cos();
+                        * libm::cos(std::f64::consts::TAU * (day_of_year as f64 - 172.0) / 365.0);
                 let a_effective = diurnal_amp * season_factor;
                 outdoor_temp_c
                     + a_effective
-                        * (std::f64::consts::TAU * (hour_of_day - 6.0 - thermal_lag_h) / 24.0).sin()
+                        * libm::sin(
+                            std::f64::consts::TAU * (hour_of_day - 6.0 - thermal_lag_h) / 24.0,
+                        )
             })
             .collect()
     } else {

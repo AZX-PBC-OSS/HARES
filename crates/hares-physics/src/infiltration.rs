@@ -107,7 +107,7 @@ pub const NATURAL_TO_50PA_EXPONENT: f64 = N_I_DEFAULT;
 /// assert!((ach50 - 5.164).abs() < 0.01);
 /// ```
 pub fn ach_nat_to_ach50(q_nat: f64, n: f64) -> f64 {
-    q_nat * (50.0 / 4.0_f64).powf(n)
+    q_nat * libm::pow(50.0 / 4.0_f64, n)
 }
 
 /// Canonical terrain classes from the architecture appendix.
@@ -178,8 +178,8 @@ pub fn ashrae_wind_stack(
         );
     }
     let n_i = n_i.clamp(N_I_MIN, N_I_MAX);
-    let q_temp = c_s * delta_t_c.abs().powf(n_i);
-    let q_wind = c_w * (shelter_coeff.max(0.0) * wind_speed_m_s).powf(2.0 * n_i);
+    let q_temp = c_s * libm::pow(delta_t_c.abs(), n_i);
+    let q_wind = c_w * libm::pow(shelter_coeff.max(0.0) * wind_speed_m_s, 2.0 * n_i);
     (q_temp * q_temp + q_wind * q_wind).sqrt()
 }
 
@@ -229,8 +229,11 @@ pub fn terrain_wind_speed(u_met: f64, alpha_site: f64, delta_site: f64, height: 
     }
 
     u_met
-        * (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
-        * (height / delta_site).powf(alpha_site)
+        * libm::pow(
+            MET_STATION_DELTA_M / MET_STATION_HEIGHT_M,
+            MET_STATION_ALPHA,
+        )
+        * libm::pow(height / delta_site, alpha_site)
 }
 
 /// Terrain-correct meteorological wind speed for a standard terrain class.
@@ -530,13 +533,13 @@ pub fn duct_leakage_infiltration_m3_s(
 
     let adjusted = if supply_leakage_m3_s > return_leakage_m3_s {
         // Pressurisation: infiltration increases above baseline.
-        (infil_fan_off.powf(1.5) + imb.powf(1.5)).powf(0.67)
+        libm::pow(libm::pow(infil_fan_off, 1.5) + libm::pow(imb, 1.5), 0.67)
     } else if imb > infil_fan_off {
         // Large depressurisation dominates: all envelope leakage becomes exfiltration.
         0.0
     } else {
         // Partial depressurisation: baseline partially suppressed.
-        (infil_fan_off.powf(1.5) - imb.powf(1.5)).powf(0.67)
+        libm::pow(libm::pow(infil_fan_off, 1.5) - libm::pow(imb, 1.5), 0.67)
     };
 
     // The ASHRAE 152 formula replaces the `infil_fan_off` term.  We scale the
@@ -708,7 +711,7 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     // Step 1: Flow coefficient C [m³/s/Pa^n_i]
     // Q_50 = ACH50 × V / 3600 [m³/s], ΔP = 50 Pa
     // Q_50 = C × 50^n_i  →  C = Q_50 / 50^n_i
-    let c_flow = (params.ach50 * params.volume_m3) / (SECONDS_PER_HOUR * 50.0_f64.powf(n_i));
+    let c_flow = (params.ach50 * params.volume_m3) / (SECONDS_PER_HOUR * libm::pow(50.0_f64, n_i));
 
     // Step 2: Leakage distribution -- Walker & Wilson (1998) Table 1
     let (leak_ceil, leak_floor) = match params.foundation {
@@ -737,21 +740,25 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
         let ncfl = params.floors_above_grade.max(1.0);
         let z_f = (ncfl + 0.5) / ncfl;
         // Critical ceiling-floor leakage difference (Eq. 13)
-        let x_c = r_i + (2.0 * (1.0 - r_i - y_i)) / (n_i + 1.0) - 2.0 * y_i * (z_f - 1.0).powf(n_i);
+        let x_c =
+            r_i + (2.0 * (1.0 - r_i - y_i)) / (n_i + 1.0) - 2.0 * y_i * libm::pow(z_f - 1.0, n_i);
         // Additive flue function (Eq. 12)
         n_i * y_i
-            * (z_f - 1.0).powf((3.0 * n_i - 1.0) / 3.0)
-            * (1.0 - (3.0 * (x_c - x_i_raw).powi(2) * r_i.powf(1.0 - n_i)) / (2.0 * (z_f + 1.0)))
+            * libm::pow(z_f - 1.0, (3.0 * n_i - 1.0) / 3.0)
+            * (1.0
+                - (3.0 * (x_c - x_i_raw).powi(2) * libm::pow(r_i, 1.0 - n_i)) / (2.0 * (z_f + 1.0)))
     } else {
         0.0
     };
 
     // Walker & Wilson (1998) Eq. 9
-    let f_s = ((1.0 + n_i * r_i) / (n_i + 1.0)) * (0.5 - 0.5 * m_i.powf(1.2)).powf(n_i + 1.0) + f_i;
+    let f_s = ((1.0 + n_i * r_i) / (n_i + 1.0))
+        * libm::pow(0.5 - 0.5 * libm::pow(m_i, 1.2), n_i + 1.0)
+        + f_i;
 
     // Step 4: Stack coefficient Cs -- pure SI
     // Cs = f_s × (ρ·g·H / T_in)^n_i  [(Pa/K)^n_i]
-    let cs = f_s * (RHO * G * params.infiltration_height_m / T_IN_K).powf(n_i);
+    let cs = f_s * libm::pow(RHO * G * params.infiltration_height_m / T_IN_K, n_i);
 
     // Step 5: Wind factor -- Walker & Wilson (1998) Eq. 15-25
     let f_w = if matches!(params.foundation, FoundationLeakageClass::VentedCrawlspace) {
@@ -767,18 +774,18 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
         let r_x = 1.0 - r_i * (n_i / 2.0 + 0.2); // Eq. 21
         let y_x = 1.0 - y_i / 4.0; // Eq. 22
         let x_s = (1.0 - r_i) / 5.0 - 1.5 * y_i; // Eq. 24
-        let x_x = 1.0 - (((x_i - x_s) / (2.0 - r_i)).powi(2)).powf(0.75); // Eq. 23
+        let x_x = 1.0 - libm::pow(((x_i - x_s) / (2.0 - r_i)).powi(2), 0.75); // Eq. 23
         0.19 * (2.0 - n_i) * x_x * r_x * y_x // Eq. 20
     } else {
         // Non-crawlspace wind factor (Eq. 15-19)
         let j_i = (x_i_raw + r_i + 2.0 * y_i) / 2.0;
-        0.19 * (2.0 - n_i) * (1.0 - ((x_i_raw + r_i) / 2.0).powf(1.5 - y_i))
+        0.19 * (2.0 - n_i) * (1.0 - libm::pow((x_i_raw + r_i) / 2.0, 1.5 - y_i))
             - y_i / 4.0 * (j_i - 2.0 * y_i * j_i.powi(4))
     };
 
     // Step 6: Wind coefficient Cw -- pure SI
     // Cw = f_w × (ρ/2)^n_i  [(Pa/(m/s)²)^n_i]
-    let cw = f_w * (RHO / 2.0).powf(n_i);
+    let cw = f_w * libm::pow(RHO / 2.0, n_i);
 
     // Step 7: Combined coefficients
     let c_s = c_flow * cs;
@@ -835,8 +842,12 @@ pub fn sherman_grimsrud_terrain_factor(terrain: TerrainClass, height_m: f64) -> 
         TerrainClass::Urban => (0.47, 0.35),
     };
     let station =
-        STATION_MULTIPLIER * (STATION_HEIGHT_FT / REFERENCE_HEIGHT_FT).powf(STATION_EXPONENT);
-    multiplier * (crate::units::length_m_to_ft(height_m) / REFERENCE_HEIGHT_FT).powf(exponent)
+        STATION_MULTIPLIER * libm::pow(STATION_HEIGHT_FT / REFERENCE_HEIGHT_FT, STATION_EXPONENT);
+    multiplier
+        * libm::pow(
+            crate::units::length_m_to_ft(height_m) / REFERENCE_HEIGHT_FT,
+            exponent,
+        )
         / station
 }
 
@@ -909,7 +920,7 @@ pub fn calculate_ela_coefficients(
     let f_t = sherman_grimsrud_terrain_factor(terrain, zone_height_m + zone_height_above_ground_m);
 
     // Wind shape factor f_w (Walker-Wilson 1998, Eq. 13).
-    let f_w = shielding * (1.0 - hor_lk_frac).powf(1.0 / 3.0) * f_t;
+    let f_w = shielding * libm::pow(1.0 - hor_lk_frac, 1.0 / 3.0) * f_t;
 
     // Wind coefficient: Cw = f_w² / 100 [(L/s)²/(cm⁴·(m/s)²)].
     let wind_coeff = f_w * f_w / 100.0;
@@ -1018,7 +1029,8 @@ pub fn garage_ela_coefficients(
 /// `ACH50 × 0.283316 × 4^n × h / (50^n × 60 × 144)` with `h` in ft.
 pub fn sla_from_ach50(ach50: f64, average_ceiling_height_m: f64, n_i: f64) -> f64 {
     let height_ft = crate::units::length_m_to_ft(average_ceiling_height_m);
-    ach50 * 0.283316 * 4.0_f64.powf(n_i) * height_ft / (50.0_f64.powf(n_i) * 60.0 * 144.0)
+    ach50 * 0.283316 * libm::pow(4.0_f64, n_i) * height_ft
+        / (libm::pow(50.0_f64, n_i) * 60.0 * 144.0)
 }
 
 #[cfg(test)]
