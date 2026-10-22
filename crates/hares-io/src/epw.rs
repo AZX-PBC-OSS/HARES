@@ -852,18 +852,18 @@ pub(crate) fn doe2_ground_temp_from_monthly_avg(monthly_avg: &[f64; 12]) -> [f64
     let beta = (std::f64::consts::PI / (DOE2_GROUND_HOURS_PER_YEAR * DOE2_GROUND_DIFFUSIVITY))
         .sqrt()
         * DOE2_GROUND_REFERENCE_DEPTH_M;
-    let x = (-beta).exp();
-    let cos_beta = beta.cos();
-    let sin_beta = beta.sin();
+    let x = libm::exp((-beta));
+    let cos_beta = libm::cos(beta);
+    let sin_beta = libm::sin(beta);
     let y = (x * x - 2.0 * x * cos_beta + 1.0) / (2.0 * beta * beta);
     let gm = y.sqrt();
     let z = (1.0 - x * (cos_beta + sin_beta)) / (1.0 - x * (cos_beta - sin_beta));
-    let phase = DOE2_GROUND_PHASE_OFFSET_RAD + z.atan();
+    let phase = DOE2_GROUND_PHASE_OFFSET_RAD + libm::atan(z);
 
     let mut result = [0.0_f64; 12];
     for (i, &day) in DOE2_MID_MONTH_DAYS.iter().enumerate() {
         let argument = 2.0 * std::f64::consts::PI / DOE2_GROUND_DAYS_PER_YEAR * day - phase;
-        result[i] = t_avg - dt_monthly * gm * argument.cos();
+        result[i] = t_avg - dt_monthly * gm * libm::cos(argument);
     }
 
     // Observer capture: record the DOE-2 fallback configuration and resulting
@@ -942,7 +942,7 @@ pub fn compute_sky_temp_c(
 ) -> f64 {
     if horizontal_infrared_w_m2 >= INFRARED_FALLBACK_THRESHOLD {
         // Stefan-Boltzmann inversion — model-independent (direct measurement).
-        let t_sky_k = (horizontal_infrared_w_m2 / STEFAN_BOLTZMANN).powf(0.25);
+        let t_sky_k = libm::pow((horizontal_infrared_w_m2 / STEFAN_BOLTZMANN), 0.25);
         t_sky_k - KELVIN_OFFSET_C
     } else {
         let eps_clear = match model {
@@ -975,7 +975,7 @@ pub fn compute_sky_temp_c(
 #[must_use]
 pub fn clark_allen_sky_emissivity(dew_point_c: f64) -> f64 {
     let dew_point_k = dew_point_c + KELVIN_OFFSET_C;
-    0.787 + 0.764 * (dew_point_k / KELVIN_OFFSET_C).ln()
+    0.787 + 0.764 * libm::log((dew_point_k / KELVIN_OFFSET_C))
 }
 
 /// Clark & Allen (1978) sky temperature from dry bulb and dew point.
@@ -1056,7 +1056,7 @@ pub(crate) fn brunt_sky_emissivity(t_db_c: f64, rel_humidity_pct: f64) -> f64 {
 pub(crate) fn idso_sky_emissivity(t_db_c: f64, rel_humidity_pct: f64) -> f64 {
     let p_wv_hpa = magnus_saturation_pressure_hpa(t_db_c) * (rel_humidity_pct / 100.0);
     let t_db_k = t_db_c + KELVIN_OFFSET_C;
-    0.685 + 3.2e-5 * p_wv_hpa * (1699.0 / t_db_k).exp()
+    0.685 + 3.2e-5 * p_wv_hpa * libm::exp((1699.0 / t_db_k))
 }
 
 /// Walton (1983) cloud cover correction applied to clear-sky emissivity.
@@ -1079,14 +1079,14 @@ pub(crate) fn walton_cloud_correction(epsilon_clear: f64, opaque_sky_cover: f64)
 #[must_use]
 pub fn sky_temp_from_emissivity(t_db_c: f64, epsilon: f64) -> f64 {
     let t_db_k = t_db_c + KELVIN_OFFSET_C;
-    t_db_k * epsilon.powf(0.25) - KELVIN_OFFSET_C
+    t_db_k * libm::pow(epsilon, 0.25) - KELVIN_OFFSET_C
 }
 
 /// Magnus formula saturation pressure at temperature `t_c` [deg C].
 /// Returns pressure in hPa (hectopascals / millibars).
 #[must_use]
 fn magnus_saturation_pressure_hpa(t_c: f64) -> f64 {
-    6.1078 * (17.27 * t_c / (t_c + 237.3)).exp()
+    6.1078 * libm::exp((17.27 * t_c / (t_c + 237.3)))
 }
 
 pub(crate) fn interpolate_ground_temp_c(

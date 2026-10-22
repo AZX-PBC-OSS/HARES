@@ -195,7 +195,7 @@ pub(super) fn roof_height_and_footprint_m(
     let slope = pitches.iter().sum::<f64>() / pitches.len() as f64;
     let footprint_m2 = area_m2 / (slope * slope + 1.0).sqrt();
     let height_m = if slope > 0.0 {
-        0.5 * slope.atan().sin() * footprint_m2.sqrt()
+        0.5 * libm::sin(libm::atan(slope)) * footprint_m2.sqrt()
     } else if *zone_type == ZoneType::Attic {
         conv::length_ft_to_m(2.0)
     } else {

@@ -233,7 +233,7 @@ impl ZipLoad {
 
     /// Reactive/active power ratio `tan(acos(pf))`.
     ///
-    /// OCHRE Equipment.py:74 constructs `pf_mult = np.tan(np.arccos(kwargs["pf"]))`.
+    /// OCHRE Equipment.py:74 constructs `pf_mult = libm::tan(np, np.arccos(kwargs["pf"]))`.
     /// Returns `0.0` when `pf ≈ 0` — the sentinel for "no ZIP reactive
     /// coefficients configured" — skipping `tan(acos(0.0))` which diverges.
     pub fn tan_phi(&self) -> f64 {
@@ -269,7 +269,7 @@ impl ZipLoad {
         let reactive_var = if self.pf.abs() < 1e-9 {
             0.0
         } else {
-            let tan_phi = self.pf.clamp(-1.0, 1.0).acos().tan();
+            let tan_phi = libm::tan(libm::acos(self.pf.clamp(-1.0, 1.0)));
             real_w * tan_phi * reactive_base
         };
         (real_w, reactive_var)

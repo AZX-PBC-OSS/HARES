@@ -1637,7 +1637,7 @@ fn ashrae_design_day_dry_bulb(design_db_c: f64, daily_range_c: f64, hour_of_day:
         return design_db_c;
     }
     // f(h) = 0.5 - 0.5 × sin(2π × (h − 9) / 24)
-    let fraction = 0.5 - 0.5 * (std::f64::consts::TAU * (hour_of_day - 9.0) / 24.0).sin();
+    let fraction = 0.5 - 0.5 * libm::sin((std::f64::consts::TAU * (hour_of_day - 9.0) / 24.0));
     design_db_c - daily_range_c * fraction
 }
 

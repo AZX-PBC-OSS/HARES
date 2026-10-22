@@ -200,7 +200,7 @@ fn pipe_conduction_resistance_per_unit_length(
     if outer_radius_m <= inner_radius_m || pipe_conductivity_w_per_m_k <= 0.0 {
         return 0.0;
     }
-    (outer_radius_m / inner_radius_m).ln() / (2.0 * PI * pipe_conductivity_w_per_m_k)
+    libm::log((outer_radius_m / inner_radius_m)) / (2.0 * PI * pipe_conductivity_w_per_m_k)
 }
 
 /// Compute the dimensionless multipole parameters for a single U-tube.
@@ -297,8 +297,8 @@ pub fn borehole_resistance_first_order_multipole(config: &BoreholeConfig) -> f64
     let one_minus_theta1_4 = 1.0 - theta1_4;
 
     // Final term 1: ln(θ₂ / (2 · θ₁ · (1 − θ₁⁴)^σ))
-    let denom_ft1 = 2.0 * p.theta1 * one_minus_theta1_4.powf(p.sigma).max(f64::MIN_POSITIVE);
-    let ft1 = (p.theta2 / denom_ft1).ln();
+    let denom_ft1 = 2.0 * p.theta1 * libm::pow(one_minus_theta1_4, p.sigma).max(f64::MIN_POSITIVE);
+    let ft1 = libm::log((p.theta2 / denom_ft1));
 
     // Numerator of final term 2: θ₃² · [1 − 4σ·θ₁⁴ / (1 − θ₁⁴)]²
     let inner_num = 1.0 - (4.0 * p.sigma * theta1_4) / one_minus_theta1_4;
@@ -383,7 +383,7 @@ fn exp_int_e1(x: f64) -> f64 {
         // Series expansion for small x:
         // E₁(x) = -γ - ln(x) - Σ_{k=1}^∞ (-x)^k / (k · k!)
         // Reference: Abramowitz & Stegun 1964, Eq. 5.1.11
-        let mut e1 = -EULER_GAMMA - x.ln();
+        let mut e1 = -EULER_GAMMA - libm::log(x);
         let mut x_pow = 1.0_f64; // (-x)^k
         let mut factorial: f64 = 1.0; // k!
 
@@ -409,7 +409,7 @@ fn exp_int_e1(x: f64) -> f64 {
         let b1 = 1.681_534;
         let numer = x * x + a1 * x + a0;
         let denom = x * x + b1 * x + b0;
-        (-x).exp() * numer / (x * denom)
+        libm::exp((-x)) * numer / (x * denom)
     }
 }
 

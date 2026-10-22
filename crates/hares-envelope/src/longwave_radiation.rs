@@ -104,7 +104,7 @@ pub fn sky_view_factor(tilt_deg: f64) -> f64 {
         (-1e-6..=180.0 + 1e-6).contains(&tilt_deg),
         "sky_view_factor: tilt_deg={tilt_deg} outside [0°, 180°]"
     );
-    let cos_phi = tilt_deg.to_radians().cos();
+    let cos_phi = libm::cos(tilt_deg.to_radians());
     0.5 * (1.0 + cos_phi)
 }
 

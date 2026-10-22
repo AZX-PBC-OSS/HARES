@@ -5821,7 +5821,7 @@ impl Dwelling {
         let t = &self.latest_env.current_time;
         let fhour = t.hour() as f64 + t.minute() as f64 / 60.0 + t.second() as f64 / 3600.0;
         let phase = 2.0 * std::f64::consts::PI * fhour / 24.0;
-        if cos { phase.cos() } else { phase.sin() }
+        if cos { libm::cos(phase) } else { libm::sin(phase) }
     }
 
     /// The value one actor's published telemetry holds for `channel`: the
@@ -8204,13 +8204,13 @@ impl Dwelling {
                     let fhour = self.latest_env.current_time.hour() as f64
                         + self.latest_env.current_time.minute() as f64 / 60.0
                         + self.latest_env.current_time.second() as f64 / 3600.0;
-                    (2.0 * std::f64::consts::PI * fhour / 24.0).sin()
+                    libm::sin((2.0 * std::f64::consts::PI * fhour / 24.0))
                 },
                 time_cos: {
                     let fhour = self.latest_env.current_time.hour() as f64
                         + self.latest_env.current_time.minute() as f64 / 60.0
                         + self.latest_env.current_time.second() as f64 / 3600.0;
-                    (2.0 * std::f64::consts::PI * fhour / 24.0).cos()
+                    libm::cos((2.0 * std::f64::consts::PI * fhour / 24.0))
                 },
                 actor_telemetry_keys: self
                     .actors

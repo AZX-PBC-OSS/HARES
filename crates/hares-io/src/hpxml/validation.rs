@@ -634,8 +634,8 @@ fn haversine_km(lat1_deg: f64, lon1_deg: f64, lat2_deg: f64, lon2_deg: f64) -> f
 
     let dlat = lat2 - lat1;
     let dlon = lon2 - lon1;
-    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    let c = 2.0 * a.sqrt().asin();
+    let a = libm::sin((dlat / 2.0)).powi(2) + libm::cos(lat1) * libm::cos(lat2) * libm::sin((dlon / 2.0)).powi(2);
+    let c = 2.0 * libm::asin(a.sqrt());
     6_371.0 * c
 }
 

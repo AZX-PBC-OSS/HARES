@@ -106,10 +106,10 @@ pub fn kusuda_achenbach_temp(
     }
     let depth = depth_m.max(0.0);
     let decay = (PI / (diffusivity_m2_per_day * TAU_DAYS)).sqrt();
-    let attenuation = (-depth * decay).exp();
+    let attenuation = libm::exp((-depth * decay));
     let phase = 2.0 * PI * (day_of_year - phase_day) / TAU_DAYS - depth * decay;
 
-    t_mean_annual_c - t_amplitude_c * attenuation * phase.cos()
+    t_mean_annual_c - t_amplitude_c * attenuation * libm::cos(phase)
 }
 
 /// ASHRAE slab perimeter heat loss (W).

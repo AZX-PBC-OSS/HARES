@@ -111,7 +111,7 @@ pub fn compute_ground_loop_pump_power_w(
     } else {
         let rel_roughness = HDPE_ROUGHNESS_M / (3.7 * pipe_diameter_m);
         // Swamee-Jain uses log10, not ln.
-        let denom = (rel_roughness + 5.74 / reynolds.powf(0.9)).log10();
+        let denom = libm::log10((rel_roughness + 5.74 / libm::pow(reynolds, 0.9)));
         // denom is negative (log10 of a small number), squared produces positive f.
         0.25 / (denom * denom)
     };

@@ -205,7 +205,7 @@ pub fn distribution_daily_hot_water_l(
     distribution: &DistributionSystem,
 ) -> f64 {
     // Reference waste water rate [gal/day]; power law from ANSI/RESNET 301.
-    let ref_w_gpd = RESNET_WASTE_COEFF_GPD * n_bedrooms.powf(RESNET_WASTE_EXPONENT);
+    let ref_w_gpd = RESNET_WASTE_COEFF_GPD * libm::pow(n_bedrooms, RESNET_WASTE_EXPONENT);
 
     // Fraction of reference that is "on-demand" (off-fixture cold drain).
     const O_FRAC: f64 = 0.25;
@@ -309,7 +309,7 @@ pub fn ansi_resnet_daily_hot_water_l(
     let fixture_l = gal_to_l(fixture_ref_gpd) * fixture_efficiency;
 
     // Distribution waste: OCHRE formula, scaled by distribution_loss_factor.
-    let ref_w_gpd = RESNET_WASTE_COEFF_GPD * n_bedrooms.powf(RESNET_WASTE_EXPONENT);
+    let ref_w_gpd = RESNET_WASTE_COEFF_GPD * libm::pow(n_bedrooms, RESNET_WASTE_EXPONENT);
     const O_FRAC: f64 = 0.25;
     const O_CD_EFF: f64 = 0.0;
     let o_w_gpd = ref_w_gpd * O_FRAC * (1.0 - O_CD_EFF);

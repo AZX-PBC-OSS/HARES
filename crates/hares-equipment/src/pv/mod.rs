@@ -597,12 +597,12 @@ impl PV {
                     // OCHRE: max_q_capacity = min_pf_factor * min_pf * inverter_capacity
                     // where min_pf_factor = tan(acos(min_pf)) / min_pf
                     // simplifies to: max_q_capacity = tan(acos(min_pf)) * inverter_capacity
-                    let max_q_cap = min_pf.acos().sin() * inv_cap;
+                    let max_q_cap = libm::sin(libm::acos(min_pf)) * inv_cap;
                     // OCHRE: max_q_pf = min_pf_factor * |p|
                     // simplifies to: max_q_pf = tan(acos(min_pf)) * |p| / min_pf... no
                     // Actually from OCHRE: max_q_pf = self.inverter_min_pf_factor * -p
                     // where min_pf_factor = tan(acos(min_pf)) (the ratio Q/P at min PF)
-                    let max_q_pf = min_pf.acos().tan() * p_w;
+                    let max_q_pf = libm::tan(libm::acos(min_pf)) * p_w;
                     q_abs = q_abs.min(max_q_cap).min(max_q_pf);
                 } else {
                     q_abs = q_abs.min(inv_cap);
@@ -633,7 +633,7 @@ fn enforce_min_pf(p: f64, q: f64, min_pf: f64) -> f64 {
     if p < 0.0 || min_pf >= 1.0 {
         return q;
     }
-    let max_q_abs = p * (min_pf.acos().tan());
+    let max_q_abs = p * (libm::tan(libm::acos(min_pf)));
     q.clamp(-max_q_abs, max_q_abs)
 }
 

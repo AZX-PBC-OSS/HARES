@@ -132,7 +132,7 @@ impl RainflowCounter {
                 let dod_pow = if beta == 2.0 {
                     range * range
                 } else {
-                    range.powf(beta)
+                    libm::pow(range, beta)
                 };
                 count * dod_pow
             })
@@ -449,15 +449,15 @@ impl DegradationState {
         }
 
         // Mechanism 1: calendar (Arrhenius only; Tafel+DOD corrections are applied daily)
-        self.b1_accum += B1_REF * (-(EA_B1 / R_GAS) * inv_diff).exp() * dt_day;
+        self.b1_accum += B1_REF * libm::exp((-(EA_B1 / R_GAS) * inv_diff)) * dt_day;
 
         // Mechanism 2: cycle (Arrhenius temperature factor)
-        self.b2_accum += (-(EA_B2 / R_GAS) * inv_diff).exp() * dt_day;
+        self.b2_accum += libm::exp((-(EA_B2 / R_GAS) * inv_diff)) * dt_day;
 
         // Mechanism 3: BOL break-in loss -- use running dod_max_today as best estimate
-        let tafel_b3 = ((ALPHA_B3 * F_FARADAY / R_GAS) * (v_oc / t - V_REF / T_REF)).exp();
+        let tafel_b3 = libm::exp(((ALPHA_B3 * F_FARADAY / R_GAS) * (v_oc / t - V_REF / T_REF)));
         self.b3_accum +=
-            B3_REF * (-(EA_B3 / R_GAS) * inv_diff).exp() * tafel_b3 * (1.0 + THETA * dod) * dt_day;
+            B3_REF * libm::exp((-(EA_B3 / R_GAS) * inv_diff)) * tafel_b3 * (1.0 + THETA * dod) * dt_day;
 
         // Negative-electrode branch (Eq. 8-11): the site-loss damage-rate
         // integral (c2 carries its reference coefficient, exactly as b1
@@ -465,7 +465,7 @@ impl DegradationState {
         // integral — it is evaluated at the T-reference ratio in
         // `update_daily` (see the `deg_const` notes on the factored
         // reversible-temperature architecture).
-        self.c2_accum += C2_REF_AH_PER_CYCLE * (-(EA_C2 / R_GAS) * inv_diff).exp() * dt_day;
+        self.c2_accum += C2_REF_AH_PER_CYCLE * libm::exp((-(EA_C2 / R_GAS) * inv_diff)) * dt_day;
         Ok(())
     }
 
@@ -534,8 +534,8 @@ impl DegradationState {
 
         // ---- Li branch, mechanism 1: Tafel and DOD corrections ----
         let u_neg = u_neg_table.potential_at_soc(self.soc_at_max_dod);
-        let tafel_b1 = ((ALPHA_B1 * F_FARADAY / R_GAS) * (u_neg / t_day - U_NEG_REF / T_REF)).exp();
-        let b1_eff = self.b1_accum * tafel_b1 * (GAMMA_B1 * dod_max.powf(BETA_B1)).exp();
+        let tafel_b1 = libm::exp(((ALPHA_B1 * F_FARADAY / R_GAS) * (u_neg / t_day - U_NEG_REF / T_REF)));
+        let b1_eff = self.b1_accum * tafel_b1 * libm::exp((GAMMA_B1 * libm::pow(dod_max, BETA_B1)));
 
         // ---- Li branch: the day's loss increments ----
 

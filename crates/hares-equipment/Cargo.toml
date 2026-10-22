@@ -21,6 +21,7 @@ arrow = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
 uom = { workspace = true }
+libm = { workspace = true }
 
 [features]
 # The clamp census's recording sites live in the leaf's observe-gated

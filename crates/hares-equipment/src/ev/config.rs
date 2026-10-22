@@ -168,7 +168,7 @@ pub(super) fn default_thermal_mass_j_per_k(capacity_j: f64) -> f64 {
 /// is re-derived jointly if a cited derivation exceeds it; the test is
 /// never widened.
 pub(super) fn default_ua_w_per_k(capacity_j: f64) -> f64 {
-    UA_BASE_W_PER_K * (capacity_j.max(0.0) / UA_REFERENCE_CAPACITY_J).powf(2.0 / 3.0)
+    UA_BASE_W_PER_K * libm::pow((capacity_j.max(0.0) / UA_REFERENCE_CAPACITY_J), 2.0 / 3.0)
 }
 
 /// Default parallel string count, derived from rated capacity so the

@@ -43,7 +43,7 @@ fn beam_cosine_factor(
     let alpha = altitude_deg.to_radians();
     let tau = tilt_deg.to_radians();
     let delta = (sun_azimuth_deg - azimuth_deg).to_radians();
-    (-alpha.cos() * tau.sin() * delta.cos() - alpha.sin() * tau.cos()).max(0.0)
+    (-libm::cos(alpha) * libm::sin(tau) * libm::cos(delta) - libm::sin(alpha) * libm::cos(tau)).max(0.0)
 }
 
 impl ThermalSolver {

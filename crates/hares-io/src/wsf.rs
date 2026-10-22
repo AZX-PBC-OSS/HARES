@@ -78,16 +78,16 @@ fn lbnl_5795e_wsf<'a>(hours: impl Iterator<Item = (&'a f64, &'a f64)>) -> f64 {
     let c_w = 0.142; // wind coefficient ((Pa s^2/m^2)^n)
     let rho_kg_m3 = 1.2;
 
-    let c = c_d * ela_m2 * (2.0_f64 / rho_kg_m3).sqrt() * delta_p_pa.powf(0.5 - n);
+    let c = c_d * ela_m2 * (2.0_f64 / rho_kg_m3).sqrt() * libm::pow(delta_p_pa, 0.5 - n);
     let mut tau_sum = 0.0;
     let mut count = 0usize;
     let mut previous_tau = 0.0;
     for (dry_bulb_c, wind_m_s) in hours {
-        let q_s = c * c_s * (t_indoor_c - dry_bulb_c).abs().powf(n);
-        let q_w = c * c_w * (s * g * wind_m_s.max(u_min_m_s)).powf(2.0 * n);
+        let q_s = c * c_s * libm::pow((t_indoor_c - dry_bulb_c).abs(), n);
+        let q_w = c * c_w * libm::pow((s * g * wind_m_s.max(u_min_m_s)), 2.0 * n);
         let q_tot = (q_s * q_s + q_w * q_w).sqrt();
         let ach = 3600.0 * q_tot / (height_m * cfa_m2);
-        let tau = (1.0 - (-ach).exp()) / ach + previous_tau * (-ach).exp();
+        let tau = (1.0 - libm::exp((-ach))) / ach + previous_tau * libm::exp((-ach));
         tau_sum += tau;
         count += 1;
         previous_tau = tau;

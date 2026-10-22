@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 hares-types = { workspace = true }
 hares-physics = { workspace = true }
+libm = { workspace = true }
 nalgebra = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

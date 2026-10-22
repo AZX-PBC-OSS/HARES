@@ -106,18 +106,18 @@ pub fn solar_position(
         * (day - 1.0 + (minutes_utc - SOLAR_NOON_MINUTES) / MINUTES_PER_DAY);
 
     // Spencer (1971) Fourier series for declination and equation of time.
-    let decl_rad = 0.006_918 - 0.399_912 * gamma.cos() + 0.070_257 * gamma.sin()
-        - 0.006_758 * (2.0 * gamma).cos()
-        + 0.000_907 * (2.0 * gamma).sin()
-        - 0.002_697 * (3.0 * gamma).cos()
-        + 0.001_48 * (3.0 * gamma).sin();
+    let decl_rad = 0.006_918 - 0.399_912 * libm::cos(gamma) + 0.070_257 * libm::sin(gamma)
+        - 0.006_758 * libm::cos((2.0 * gamma))
+        + 0.000_907 * libm::sin((2.0 * gamma))
+        - 0.002_697 * libm::cos((3.0 * gamma))
+        + 0.001_48 * libm::sin((3.0 * gamma));
 
     let eq_time_min = EOT_SCALE_FACTOR
         * (EOT_C0
-            + EOT_C1 * gamma.cos()
-            + EOT_C2 * gamma.sin()
-            + EOT_C3 * (2.0 * gamma).cos()
-            + EOT_C4 * (2.0 * gamma).sin());
+            + EOT_C1 * libm::cos(gamma)
+            + EOT_C2 * libm::sin(gamma)
+            + EOT_C3 * libm::cos((2.0 * gamma))
+            + EOT_C4 * libm::sin((2.0 * gamma)));
 
     let true_solar_time_min =
         minutes_utc + eq_time_min + MINUTES_PER_DEGREE_LONGITUDE * longitude_deg;
@@ -130,17 +130,17 @@ pub fn solar_position(
     }
     let hour_angle_rad = hour_angle_deg.to_radians();
 
-    let cos_zenith = (lat_rad.sin() * decl_rad.sin()
-        + lat_rad.cos() * decl_rad.cos() * hour_angle_rad.cos())
+    let cos_zenith = (libm::sin(lat_rad) * libm::sin(decl_rad)
+        + libm::cos(lat_rad) * libm::cos(decl_rad) * libm::cos(hour_angle_rad))
     .clamp(-1.0, 1.0);
-    let zenith_rad = cos_zenith.acos();
+    let zenith_rad = libm::acos(cos_zenith);
     let altitude_deg = 90.0 - zenith_rad.to_degrees();
 
-    let numerator = hour_angle_rad.sin();
-    let denominator = hour_angle_rad.cos() * lat_rad.sin() - decl_rad.tan() * lat_rad.cos();
+    let numerator = libm::sin(hour_angle_rad);
+    let denominator = libm::cos(hour_angle_rad) * libm::sin(lat_rad) - libm::tan(decl_rad) * libm::cos(lat_rad);
     // South-referenced azimuth; shift to north-referenced then normalise to [0, 2π).
     let azimuth_rad =
-        (numerator.atan2(denominator) + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU);
+        (libm::atan2(numerator, denominator) + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU);
     let azimuth_deg = azimuth_rad.to_degrees();
 
     SolarPosition {
@@ -160,8 +160,8 @@ pub fn angle_of_incidence(
     let alt = solar_alt.to_radians();
     let az_delta = (solar_az - surface_azimuth_deg).to_radians();
     let cos_aoi =
-        (alt.sin() * tilt.cos() + alt.cos() * tilt.sin() * az_delta.cos()).clamp(-1.0, 1.0);
-    cos_aoi.acos().to_degrees()
+        (libm::sin(alt) * libm::cos(tilt) + libm::cos(alt) * libm::sin(tilt) * libm::cos(az_delta)).clamp(-1.0, 1.0);
+    libm::acos(cos_aoi).to_degrees()
 }
 
 /// Extraterrestrial normal irradiance using Spencer's (1971) formula.
@@ -170,10 +170,10 @@ pub fn extraterrestrial_irradiance(day_of_year: u32) -> f64 {
     let b = 2.0 * std::f64::consts::PI * (day_of_year as f64 - 1.0) / 365.0;
     SOLAR_CONSTANT
         * (1.00011
-            + 0.034221 * b.cos()
-            + 0.00128 * b.sin()
-            + 0.000719 * (2.0 * b).cos()
-            + 0.000077 * (2.0 * b).sin())
+            + 0.034221 * libm::cos(b)
+            + 0.00128 * libm::sin(b)
+            + 0.000719 * libm::cos((2.0 * b))
+            + 0.000077 * libm::sin((2.0 * b)))
 }
 
 /// Extraterrestrial normal irradiance -- alias for [`extraterrestrial_irradiance`].
@@ -232,14 +232,14 @@ pub fn clear_sky_irradiance(day_of_year: u32, solar_altitude_deg: f64) -> (f64, 
 
     // ASHRAE 2013 clear-sky beam normal irradiance:
     // E_bn = E_ext × exp(-τ_b × m^ab)
-    let dni = etr * (-BEAM_OPTICAL_DEPTH * am.powf(ab)).exp();
+    let dni = etr * libm::exp((-BEAM_OPTICAL_DEPTH * libm::pow(am, ab)));
 
     // ASHRAE 2013 clear-sky diffuse horizontal irradiance:
     // E_dh = E_ext × exp(-τ_d × m^ad)
-    let dhi = etr * (-DIFFUSE_OPTICAL_DEPTH * am.powf(ad)).exp();
+    let dhi = etr * libm::exp((-DIFFUSE_OPTICAL_DEPTH * libm::pow(am, ad)));
 
     // Global horizontal = beam normal × cos(zenith) + diffuse horizontal
-    let ghi = dni * zenith_deg.to_radians().cos() + dhi;
+    let ghi = dni * libm::cos(zenith_deg.to_radians()) + dhi;
 
     (dni, dhi.max(0.0), ghi.max(0.0))
 }
@@ -276,14 +276,14 @@ pub fn clear_sky_irradiance_params(
 
     // ASHRAE 2013 clear-sky beam normal irradiance:
     // E_bn = E_ext × exp(-τ_b × m^ab)
-    let dni = etr * (-beam_optical_depth * am.powf(ab)).exp();
+    let dni = etr * libm::exp((-beam_optical_depth * libm::pow(am, ab)));
 
     // ASHRAE 2013 clear-sky diffuse horizontal irradiance:
     // E_dh = E_ext × exp(-τ_d × m^ad)
-    let dhi = etr * (-diffuse_optical_depth * am.powf(ad)).exp();
+    let dhi = etr * libm::exp((-diffuse_optical_depth * libm::pow(am, ad)));
 
     // Global horizontal = beam normal × cos(zenith) + diffuse horizontal
-    let ghi = dni * zenith_deg.to_radians().cos() + dhi;
+    let ghi = dni * libm::cos(zenith_deg.to_radians()) + dhi;
 
     (dni, dhi.max(0.0), ghi.max(0.0))
 }
@@ -319,7 +319,7 @@ pub fn perez_sky_diffuse(
     if zenith_deg > PEREZ_ZENITH_LIMIT_DEG {
         // Near-horizon: fall back to isotropic sky-diffuse view factor
         let tilt_rad = tilt_deg.to_radians();
-        return (dhi * (1.0 + tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
+        return (dhi * (1.0 + libm::cos(tilt_rad)) * ISOTROPIC_VIEW_FACTOR).max(0.0);
     }
 
     let zenith_rad = zenith_deg.to_radians();
@@ -353,13 +353,13 @@ pub fn perez_sky_diffuse(
     let f2 = c[3] + c[4] * delta + c[5] * zenith_rad;
 
     // Geometric factors
-    let a = aoi_rad.cos().max(0.0);
-    let b = zenith_rad.cos().max(COS_85_DEG);
+    let a = libm::cos(aoi_rad).max(0.0);
+    let b = libm::cos(zenith_rad).max(COS_85_DEG);
 
     // Three-component Perez sky diffuse
-    let term_iso = 0.5 * (1.0 - f1) * (1.0 + tilt_rad.cos());
+    let term_iso = 0.5 * (1.0 - f1) * (1.0 + libm::cos(tilt_rad));
     let term_cs = f1 * a / b;
-    let term_hz = f2 * tilt_rad.sin();
+    let term_hz = f2 * libm::sin(tilt_rad);
 
     (dhi * (term_iso + term_cs + term_hz)).max(0.0)
 }
@@ -393,7 +393,7 @@ pub fn perez_sky_diffuse(
 #[must_use]
 pub fn relative_airmass(zenith_deg: f64) -> f64 {
     let z = zenith_deg.min(89.9);
-    1.0 / (z.to_radians().cos() + 0.50572 * (96.07995 - z).powf(-1.6364))
+    1.0 / (libm::cos(z.to_radians()) + 0.50572 * libm::pow((96.07995 - z), -1.6364))
 }
 
 /// Relative airmass for the Perez (1990) sky brightness coefficient delta term.
@@ -429,12 +429,12 @@ pub fn relative_airmass(zenith_deg: f64) -> f64 {
 #[must_use]
 pub fn perez_airmass(zenith_deg: f64, elevation_m: f64) -> f64 {
     let z = zenith_deg.clamp(0.0, 90.0);
-    let cos_z = z.to_radians().cos().max(f64::EPSILON);
+    let cos_z = libm::cos(z.to_radians()).max(f64::EPSILON);
     let am_h = (1.0 - 0.1 * elevation_m / 1000.0).max(0.1);
     if z <= 75.0 {
         am_h / cos_z
     } else {
-        am_h / (cos_z + 0.15 * (93.9_f64 - z).powf(-1.253))
+        am_h / (cos_z + 0.15 * libm::pow((93.9_f64 - z), -1.253))
     }
 }
 
@@ -635,21 +635,21 @@ pub fn perez_tilted_irradiance(
     let f2 = c[3] + c[4] * delta + c[5] * zenith_rad;
 
     // Geometric factors
-    let a = aoi_rad.cos().max(0.0);
-    let b = zenith_rad.cos().max(COS_85_DEG);
+    let a = libm::cos(aoi_rad).max(0.0);
+    let b = libm::cos(zenith_rad).max(COS_85_DEG);
 
     // Diffuse on tilted surface (Perez decomposition)
     let diffuse = (dhi
-        * ((1.0 - f1) * (1.0 + tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR
+        * ((1.0 - f1) * (1.0 + libm::cos(tilt_rad)) * ISOTROPIC_VIEW_FACTOR
             + f1 * a / b
-            + f2 * tilt_rad.sin()))
+            + f2 * libm::sin(tilt_rad)))
     .max(0.0);
 
     // Direct on tilted surface
-    let direct = (dni * aoi_rad.cos()).max(0.0);
+    let direct = (dni * libm::cos(aoi_rad)).max(0.0);
 
     // Ground-reflected (same as isotropic)
-    let reflected = (ghi * ground_albedo * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
+    let reflected = (ghi * ground_albedo * (1.0 - libm::cos(tilt_rad)) * ISOTROPIC_VIEW_FACTOR).max(0.0);
 
     SurfaceIrradiance {
         surface_id,
@@ -686,9 +686,9 @@ pub fn isotropic_tilted_irradiance(
     let aoi_rad = aoi.to_radians();
     let tilt_rad = surface_tilt.to_radians();
 
-    let direct = (dni * aoi_rad.cos()).max(0.0);
-    let diffuse = (dhi * (1.0 + tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
-    let reflected = (ghi * ground_albedo * (1.0 - tilt_rad.cos()) * ISOTROPIC_VIEW_FACTOR).max(0.0);
+    let direct = (dni * libm::cos(aoi_rad)).max(0.0);
+    let diffuse = (dhi * (1.0 + libm::cos(tilt_rad)) * ISOTROPIC_VIEW_FACTOR).max(0.0);
+    let reflected = (ghi * ground_albedo * (1.0 - libm::cos(tilt_rad)) * ISOTROPIC_VIEW_FACTOR).max(0.0);
 
     SurfaceIrradiance {
         surface_id,
@@ -835,7 +835,7 @@ pub fn window_iam(theta_rad: f64, curve: GlazingCurve) -> f64 {
         return 0.0;
     }
 
-    let cos_th = theta_rad.cos();
+    let cos_th = libm::cos(theta_rad);
     let c = curve.coefficients();
     // Horner's method for numerically stable degree-4 polynomial evaluation.
     let raw = c[0] + cos_th * (c[1] + cos_th * (c[2] + cos_th * (c[3] + cos_th * c[4])));
@@ -869,7 +869,7 @@ pub fn window_u_factor_decomposition(u_factor_w_m2_k: f64) -> Result<(f64, f64, 
         )));
     }
     let r_int = if u_factor_w_m2_k < 5.85 {
-        1.0 / (0.359073 * u_factor_w_m2_k.ln() + 6.949915)
+        1.0 / (0.359073 * libm::log(u_factor_w_m2_k) + 6.949915)
     } else {
         1.0 / (1.788041 * u_factor_w_m2_k - 2.886625)
     };

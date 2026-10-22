@@ -404,11 +404,11 @@ pub fn typical_zone_temps(avg_ground_c: f64, avg_ambient_c: f64) -> [f64; 6] {
 ///
 /// `delta_t_k` must be non-negative; `tilt_deg` is measured from horizontal.
 pub fn tarp_h_natural(tilt_deg: f64, delta_t_k: f64, above_hotter: bool) -> f64 {
-    let cbrt_dt = delta_t_k.cbrt();
+    let cbrt_dt = libm::cbrt(delta_t_k);
     if (tilt_deg - 90.0).abs() < 1e-9 {
         1.31 * cbrt_dt
     } else {
-        let cos_tilt = tilt_deg.to_radians().cos().abs();
+        let cos_tilt = libm::cos(tilt_deg.to_radians()).abs();
         if above_hotter {
             9.482 * cbrt_dt / (7.238 - cos_tilt)
         } else {
@@ -447,7 +447,7 @@ pub fn ashrae_simple_interior_h_conv(
     _t_int_c: f64,
     above_hotter: bool,
 ) -> f64 {
-    let cos_tilt = tilt_deg.to_radians().cos().abs();
+    let cos_tilt = libm::cos(tilt_deg.to_radians()).abs();
     if cos_tilt < 0.3827 {
         3.076
     } else if cos_tilt >= 0.9239 {
@@ -536,7 +536,7 @@ pub fn film_resistances(
         }
         let delta_t = delta_t_unfloored.max(0.1);
         let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
-        let h_glass = (h_natural.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
+        let h_glass = (h_natural.powi(2) + (3.40 * libm::pow(avg_wind_speed_m_s, 0.75)).powi(2)).sqrt();
         let h_forced = roughness.factor() * (h_glass - h_natural);
         // Floor the exterior convection coefficient to 1.0 W/(m²·K) — the
         // natural convection floor for a vertical surface at ΔT ≈ 0.4°C

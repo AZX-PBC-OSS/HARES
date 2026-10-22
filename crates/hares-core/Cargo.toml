@@ -15,6 +15,7 @@ dst = []
 hares-types = { workspace = true }
 hares-physics = { workspace = true }
 hares-envelope = { workspace = true }
+libm = { workspace = true }
 hares-control = { workspace = true }
 hares-equipment = { workspace = true }
 hares-io = { workspace = true }

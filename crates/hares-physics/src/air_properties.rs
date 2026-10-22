@@ -11,7 +11,7 @@ use uom::si::length::meter;
 
 /// ISA standard pressure at altitude (Pa).
 pub fn standard_pressure_pa(elevation_m: f64) -> f64 {
-    SEA_LEVEL_PRESSURE_PA * (1.0 - ISA_LAPSE_COEFFICIENT * elevation_m).powf(ISA_PRESSURE_EXPONENT)
+    SEA_LEVEL_PRESSURE_PA * libm::pow((1.0 - ISA_LAPSE_COEFFICIENT * elevation_m), ISA_PRESSURE_EXPONENT)
 }
 
 /// Dry-air-basis density of moist air [kg_da/m³].

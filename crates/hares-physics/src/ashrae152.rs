@@ -328,9 +328,9 @@ fn parse_climate_csv() -> Vec<ClimateStation> {
 fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let dlat = (lat2 - lat1).to_radians();
     let dlon = (lon2 - lon1).to_radians();
-    let a = (dlat / 2.0).sin().powi(2)
-        + lat1.to_radians().cos() * lat2.to_radians().cos() * (dlon / 2.0).sin().powi(2);
-    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+    let a = libm::sin((dlat / 2.0)).powi(2)
+        + libm::cos(lat1.to_radians()) * libm::cos(lat2.to_radians()) * libm::sin((dlon / 2.0)).powi(2);
+    let c = 2.0 * libm::atan2(a.sqrt(), (1.0 - a).sqrt());
     6_373.0 * c
 }
 
@@ -397,7 +397,7 @@ fn soil_temp_at_burial_depth_f(
     // The exponential decay shape is not derived from steady-state
     // conduction for this boundary condition. See T-0415 Known Limitations.
     let damping_depth_m = (alpha_m2_per_s * tau_s / PI).sqrt();
-    let attenuation = (-burial_depth_m / damping_depth_m).exp();
+    let attenuation = libm::exp((-burial_depth_m / damping_depth_m));
     gnd_temp_f + (t_conditioned_f - gnd_temp_f) * attenuation
 }
 
@@ -863,11 +863,11 @@ pub fn calculate_dse(input: &DuctDseInput) -> Result<f64, HaresError> {
     // Infiltration (based on high-speed leakage imbalance)
     let imb_flow = (supply_duct_leakage - return_duct_leakage).abs();
     let infil = if supply_duct_leakage > return_duct_leakage {
-        (infil_fan_off.powf(1.5) + imb_flow.powf(1.5)).powf(0.67)
+        libm::pow((libm::pow(infil_fan_off, 1.5) + libm::pow(imb_flow, 1.5)), 0.67)
     } else if imb_flow > infil_fan_off {
         0.0
     } else {
-        (infil_fan_off.powf(1.5) - imb_flow.powf(1.5)).powf(0.67)
+        libm::pow((libm::pow(infil_fan_off, 1.5) - libm::pow(imb_flow, 1.5)), 0.67)
     };
 
     // ------------------------------------------------------------------
@@ -953,10 +953,10 @@ pub fn calculate_dse(input: &DuctDseInput) -> Result<f64, HaresError> {
     } else {
         // Cooling; TXV control assumed throughout
         if input.n_speeds == 1 {
-            1.62 - 0.62 * fan_flow_cfm / manu_fan_flow + 0.647 * (fan_flow_cfm / manu_fan_flow).ln()
+            1.62 - 0.62 * fan_flow_cfm / manu_fan_flow + 0.647 * libm::log((fan_flow_cfm / manu_fan_flow))
         } else {
             (0.82 + 0.18 * seas_uncorr_de) * (1.62 - 0.62 * fan_flow_cfm / manu_fan_flow)
-                + 0.647 * (fan_flow_cfm / manu_fan_flow).ln()
+                + 0.647 * libm::log((fan_flow_cfm / manu_fan_flow))
         }
     };
 
