@@ -55,3 +55,19 @@ Columns: # | axis | row | title | size | spec | depends on | state
 | 35 | D | D7 | the small-commercial acceptance scenario | M | 12-axis-d-e.md | D1-D6; E1 first | draft |
 | 36 | E | E4 | the phase-share re-record | M | 12-axis-d-e.md | I-08 Task 4.2 | draft |
 | 37 | E | E9 | the contributor chapters | L | 12-axis-d-e.md | I-08 Tasks 4.1, 4.2; last | draft |
+| 38 | E | P1 | the end-of-step equipment snapshot writes in place instead of re-inserting | M | the phase-share record (02-measurement.md PHASE-SHARES at 68f43ec3) | none | review |
+| 39 | E | P2 | the per-surface Perez irradiance computed once per blueprint and shared | M | the phase-share record (02-measurement.md PHASE-SHARES at 68f43ec3) | none | draft |
+| 40 | E | P3 | the envelope state-space step exploits the RC network's locality | L | the phase-share record (02-measurement.md PHASE-SHARES at 68f43ec3) | none | draft |
+| 41 | E | P4 | the warm-up loop's per-step result writes in place | S | the follow-up census (02-measurement.md, measurement log, the row 38 entry) | P1 | draft |
+| 42 | E | P5 | the stage-rank scratch persists across steps instead of a fresh vector each step | S | the follow-up census (02-measurement.md, measurement log, the row 38 entry) | P1 | draft |
+| 43 | E | P6 | the single-step and fleet bindings step through a reused result | M | the follow-up census (02-measurement.md, measurement log, the row 38 entry) | P1 | draft |
+
+Rows 38 to 40 are the performance program's opening rows, taken from the
+three proposals the phase-share record closes with. Row 38 is the first
+step of the charter's second criterion (the step loop allocation-free
+end to end). Rows 41 to 43 are P1's follow-ups: the per-step clone
+sites its census finds on the rest of the step path, each to be
+implemented and measured in its own row. The observe build's per-step
+copies (the port snapshots, the thermal-update buffer clone, the actor
+telemetry key collects) are noted in the same census and need their own
+measurement before they become rows.

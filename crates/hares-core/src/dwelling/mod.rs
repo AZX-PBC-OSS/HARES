@@ -1641,7 +1641,11 @@ fn build_zone_column_caches(
 }
 
 /// Single-step observable output.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// A caller that steps in a loop reuses one result and lets the step
+/// write it in place (`run_timestep_into`), so the loop's steady state
+/// allocates nothing for it; `step()` returns a fresh value per call.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StepResult {
     /// The step row's own time: the naive local wall clock at the step's
     /// interval start, the value the output frame's `Time` column carries
@@ -2613,7 +2617,11 @@ fn validate_equipment_loops(
 /// this crate's own test build: the step path brackets each site with
 /// `thread_allocations()` reads and adds the difference to the site's
 /// field. `dwelling_snapshot_allocation_free_after_first_step` asserts
-/// every field grows by zero on every step after the first.
+/// every field grows by zero on every step after the first; the
+/// `state_snapshot_phase` accumulator is bracketed around the whole
+/// profiling phase of the same name instead of one site, and
+/// `state_snapshot_phase_allocation_free_after_first_step` asserts it
+/// the same way against a reused step-result buffer.
 #[cfg(test)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct SnapshotAllocations {
@@ -2627,6 +2635,10 @@ struct SnapshotAllocations {
     fluid_set_from: u64,
     /// Every custom slot's `set_custom`, once per installed solver.
     custom_set_from: u64,
+    /// The whole `state_snapshot` phase, from its clock entry to its
+    /// handoff to `output`: the equipment snapshot, the per-zone delivery
+    /// vectors and the step result's zone temperatures.
+    state_snapshot_phase: u64,
 }
 
 #[cfg(test)]
@@ -2654,6 +2666,8 @@ enum SnapshotAllocSite {
     HumiditySetFrom,
     ElectricalSetFrom,
     FluidSetFrom,
+    /// The whole `state_snapshot` phase, not one site.
+    StateSnapshotPhase,
 }
 
 #[cfg(test)]
@@ -2681,6 +2695,9 @@ impl Dwelling {
                 SnapshotAllocSite::HumiditySetFrom => accumulators.humidity_set_from += delta,
                 SnapshotAllocSite::ElectricalSetFrom => accumulators.electrical_set_from += delta,
                 SnapshotAllocSite::FluidSetFrom => accumulators.fluid_set_from += delta,
+                SnapshotAllocSite::StateSnapshotPhase => {
+                    accumulators.state_snapshot_phase += delta;
+                }
             }
         }
     }
@@ -4664,8 +4681,13 @@ impl Dwelling {
     }
 
     fn simulate_inner(&mut self) -> Result<Arc<RunResult>> {
+        // One step result for the whole run: every step writes it in
+        // place, so the loop's steady state allocates nothing for it
+        // (the zone-temperature vector's `clone_from` reuses the
+        // allocation from the first step on).
+        let mut step_result = StepResult::default();
         while self.clock.current_step() < self.clock.total_steps() {
-            self.run_timestep(self.recording_enabled())?;
+            self.run_timestep_into(self.recording_enabled(), &mut step_result)?;
         }
 
         // The finalisation is timed once, around the first finalising
@@ -6940,10 +6962,23 @@ impl Dwelling {
     }
 
     fn run_timestep(&mut self, record_output: bool) -> Result<StepResult> {
+        let mut out = StepResult::default();
+        self.run_timestep_into(record_output, &mut out)?;
+        Ok(out)
+    }
+
+    /// The by-value [`Self::run_timestep`]'s body, writing the step
+    /// result in place into `out`: the zone-temperature vector is copied
+    /// through `clone_from`, so a caller reusing one result across steps
+    /// pays the allocation once, at the first step, and the loop's
+    /// steady state allocates nothing here. Every field is overwritten
+    /// on the success path, so a reused buffer carries nothing from the
+    /// step before.
+    fn run_timestep_into(&mut self, record_output: bool, out: &mut StepResult) -> Result<()> {
         // Every warning the step's dispatch and equipment drains raise
         // carries the step it was raised in: the step's own index.
         self.warnings.set_step(Some(self.clock.current_step()));
-        let result = self.run_timestep_inner(record_output);
+        let result = self.run_timestep_inner(record_output, out);
         self.warnings.set_step(None);
         if result.is_ok() {
             crate::step_counts::bump();
@@ -6951,7 +6986,7 @@ impl Dwelling {
         result
     }
 
-    fn run_timestep_inner(&mut self, record_output: bool) -> Result<StepResult> {
+    fn run_timestep_inner(&mut self, record_output: bool, out: &mut StepResult) -> Result<()> {
         if let Some(ended) = &self.terminal_error {
             return Err(HaresError::Simulation(format!(
                 "the run ended at an earlier step and cannot continue: {ended}"
@@ -8179,6 +8214,8 @@ impl Dwelling {
         // (`state_snapshot` phase) follows.
         #[cfg(feature = "profiling")]
         phase_clock.enter(&mut self.profiling, ProfilePhase::StateSnapshot);
+        #[cfg(test)]
+        let state_snapshot_alloc_before = thread_allocations();
 
         // Push observer step snapshot after invariant checks so moisture invariant
         // capture data (populated in check_step_invariants) is available for the snapshot.
@@ -8320,31 +8357,27 @@ impl Dwelling {
         self.step_hvac_cooling_w = hvac_cooling_w;
         // The per-zone delivery, the per-zone columns' own values: the
         // thermal port accumulators still hold the step's equipment
-        // contributions (ports.zero() runs after record_step).
-        self.step_hvac_heating_by_zone = self
-            .ports
-            .thermal
-            .iter()
-            .map(|thermal| {
+        // contributions (ports.zero() runs after record_step). The
+        // vectors are reused: `clear` keeps their capacity, so a
+        // steady-state step allocates nothing here.
+        self.step_hvac_heating_by_zone.clear();
+        self.step_hvac_heating_by_zone
+            .extend(self.ports.thermal.iter().map(|thermal| {
                 (
                     thermal.zone,
                     thermal.sensible_for_category(ThermalCategory::HvacHeating),
                 )
-            })
-            .collect();
-        self.step_hvac_cooling_by_zone = self
-            .ports
-            .thermal
-            .iter()
-            .map(|thermal| {
+            }));
+        self.step_hvac_cooling_by_zone.clear();
+        self.step_hvac_cooling_by_zone
+            .extend(self.ports.thermal.iter().map(|thermal| {
                 (
                     thermal.zone,
                     thermal
                         .sensible_for_category(ThermalCategory::HvacCooling)
                         .abs(),
                 )
-            })
-            .collect();
+            }));
         if hvac_heating_w < 0.0 {
             tracing::warn!(
                 hvac_heating_w = hvac_heating_w,
@@ -8355,14 +8388,22 @@ impl Dwelling {
 
         let gas_power_w = self.ports.fuel.get(hares_types::FuelType::Gas);
 
-        let step_result = StepResult {
-            timestamp: self.latest_env.current_time.naive_local(),
-            net_electric_power_w: self.electrical_solver.net_active_w(),
-            zone_temperatures_c: self.roster.zone_temp_scratch.clone(),
-            hvac_heating_w,
-            hvac_cooling_w,
-            gas_power_w,
-        };
+        // The step result written in place: the zone temperatures copy
+        // through `clone_from`, which reuses the buffer's allocation
+        // once it holds the zone count, so a reused result allocates
+        // nothing here after the first step.
+        out.timestamp = self.latest_env.current_time.naive_local();
+        out.net_electric_power_w = self.electrical_solver.net_active_w();
+        out.zone_temperatures_c
+            .clone_from(&self.roster.zone_temp_scratch);
+        out.hvac_heating_w = hvac_heating_w;
+        out.hvac_cooling_w = hvac_cooling_w;
+        out.gas_power_w = gas_power_w;
+        #[cfg(test)]
+        self.record_snapshot_allocations(
+            state_snapshot_alloc_before,
+            SnapshotAllocSite::StateSnapshotPhase,
+        );
 
         // End of the `state_snapshot` phase (observer push, diagnostic
         // accumulation, end-of-step equipment snapshot, step result).
@@ -8370,7 +8411,7 @@ impl Dwelling {
         phase_clock.enter(&mut self.profiling, ProfilePhase::Output);
 
         // Step 5: record outputs to disk (when enabled) and accumulate step results.
-        if record_output && let Err(err) = self.record_step(&step_result) {
+        if record_output && let Err(err) = self.record_step(out) {
             // A callback error ends the run the way the failure budget
             // does: latched, so every later step returns it without
             // stepping anything.
@@ -8521,7 +8562,7 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         phase_clock.finish(&mut self.profiling);
 
-        Ok(step_result)
+        Ok(())
     }
 
     /// Fingerprints the frozen output state for the rejected-roster-change
@@ -9858,6 +9899,57 @@ destination = "memory"
                 after - before
             );
         }
+    }
+
+    /// The `state_snapshot` phase's allocation delta, the witness for the
+    /// phase's own allocations (the profiling record's second-heaviest
+    /// phase): the equipment snapshot, the two per-zone HVAC delivery
+    /// vectors and the step result's zone temperatures. A fully loaded
+    /// dwelling (the OCHRE sample home's roster) is stepped through the
+    /// same counting allocator the site test above reads, into one
+    /// reused step result (the shape `simulate()` steps in), and the
+    /// phase must allocate nothing on any step after the first.
+    #[test]
+    fn state_snapshot_phase_allocation_free_after_first_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        let mut step_result = StepResult::default();
+        dwelling
+            .run_timestep_into(false, &mut step_result)
+            .expect("first step");
+        let baseline = dwelling.snapshot_allocation_totals().state_snapshot_phase;
+        for _ in 0..4 {
+            dwelling
+                .run_timestep_into(false, &mut step_result)
+                .expect("step");
+        }
+        let after = dwelling.snapshot_allocation_totals().state_snapshot_phase;
+        assert_eq!(
+            after,
+            baseline,
+            "the state_snapshot phase allocated {} times over 4 steps after the first",
+            after - baseline
+        );
     }
 
     /// A custom solver's slot is resolved once at installation: the

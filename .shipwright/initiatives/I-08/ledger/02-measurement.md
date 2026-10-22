@@ -4724,3 +4724,210 @@ per-step rows of the resampled series bitwise the source table's
 zero-order hold (`to_bits`), before and after. The consumer-side
 before/after (the ladder's DE-trace capture wall) lands with the
 ladder's next fold row; the engine-side proof is this record.
+
+## PHASE-SHARES, 2026-10-22, the step pipeline on the Wave 2 head `93c22b54`
+
+The eleven phases the profiler's phase clock partitions the step into
+(`07-profiler.md` PR-1), measured on the head of `feat/output-results`
+(`93c22b54`, the tree `dff2b8d0` built; the later commits docs-only).
+The instrument: `frame_golden run` built with the profiling feature,
+`CARGO_BUILD_JOBS=2 cargo build --release -p frame_golden --features
+profiling`. M-1's `-F profiling` maps to that cargo feature (the tool's
+`Cargo.toml` forwards it to `hares-core/profiling`; the counting
+allocator installs only under it, PR-3). The CLI has no `--help` flag;
+the usage line prints on a parse error. The workload is the ladder's
+shape: `tests/fixtures/golden/consumer_shape_900s.toml`, the manifest
+that mirrors the consumer's call (bldg0176227, full year 2018 at 900 s,
+35,040 steps, warm-up disabled, metrics on), run `--discard-output` so
+the wall is step work. Three runs in separate processes in one sitting.
+
+The three runs' `step_total`: 1.217 s, 1.214 s, 1.204 s (the median
+1.214 s, 34.6 us per step); construct+simulate walls 1.604 s, 1.532 s,
+1.508 s; user CPU 1.22, 1.21, 1.20 s; sys 0.20, 0.17, 0.16 s; process
+peak RSS (VmHWM) 148,588 / 148,460 / 148,404 kB. Hot-path allocations
+743,849 across 35,040 steps on every run (every step violating; the
+PR-3-era figure at the same fixture was 8,473,313, so the runtime and
+observation rows since cut allocations per step about 11x). The fleet
+fold's own high-water (the multi-gigabyte capture peak) is not
+reachable from this single-dwelling bench without re-running the
+consumer capture, so it is skipped here; the bench's own high-water is
+the 148.5 MB above.
+
+The shares, the median of the three runs per phase (the per-run
+disagreement is at most one point on `environment` and `invariants`):
+
+| phase | seconds | percent |
+| ---- | ---- | ---- |
+| environment | 0.121 | 10 |
+| control | 0.097 | 8 |
+| ideal_capacity | 0.061 | 5 |
+| actors | 0.000 | 0 |
+| dispatch | 0.012 | 1 |
+| equipment | 0.170 | 14 |
+| envelope | 0.449 | 37 |
+| invariants | 0.012 | 1 |
+| state_snapshot | 0.219 | 18 |
+| output | 0.061 | 5 |
+| accounting | 0.012 | 1 |
+| **sum** | | **100** |
+
+The seconds are derived from the instrument's integer percents times
+the median `step_total` (each percent figure is itself rounded to a
+whole point, so a second's figure carries about half a point of
+rounding; `actors` prints 0 because it is under the half point, not
+because it is empty). The sum-equals-total check is exact in the
+instrument's own arithmetic, not in this table's rounding: the phases
+are differences of the same `Instant` readings, and
+`profiling_phases_partition_the_step` (the `Duration`-equality
+acceptance test, 96 steps of the cz2a fixture) is green on this build.
+The printed percents of the median run sum to 100.
+
+Host: 28 cores, load average 1.60/0.95/0.60 at the first run's start
+and 1.05/0.88/0.58 at the second's, the host otherwise idle (the
+exclusive-host rule; the residual load is this session's own build
+tail). Profiled wall over the ladder's unprofiled per-run cost stays
+near parity (PR-2's 0.98x): the profiled capture is the release run.
+
+Context against the PR-1-era record (2026-10-02, the same fixture):
+the partition is stable while the composition moved with the landed
+rows. The `invariants` and `accounting` shares (16 and 16 then) fell to
+1 and 1 when PR-2 removed the four per-step `/proc` reads; `dispatch`
+(15 then) is 1 now after the shared-term resolve and the runtime rows;
+the `envelope` phase's absolute cost is unchanged (13 percent of that
+run's 3.36 s `step_total` is the same 0.44 s it holds today) and its
+share grew because the rest of the step got cheaper around it; the
+`state_snapshot` share grew to 18 for the same reason. The single
+dwelling's 1.21 s `step_total` is the per-run cost whose fleet shape
+(the ladder's capture, 1.74 CPU-s per run over 1,891 runs) makes the
+capture's 188 s wall.
+
+**The top three phases:**
+
+1. `envelope`, 37 percent (0.449 s). `ThermalSolver::integrate`, whose
+   step body `integrate_inner` lives in
+   `crates/hares-envelope/src/thermal_solver/stepping.rs`, runs the
+   state-space step over the RC network: `build_input_vector`,
+   `build_coupling` and `apply_convection_forcing` assemble the step's
+   input column and identity coupling, then
+   `StateSpaceModel::step_with_identity_coupling_into_scratch` or
+   `step_into` (`crates/hares-envelope/src/state_space.rs`) takes the
+   dense matrix-vector products and `output_into` computes the
+   outputs, all in persistent scratch (RT-3's allocation-free shape).
+   Fundamentally compute bound: dense linear algebra over the boundary
+   state, allocation-free after the first step, no IO.
+2. `state_snapshot`, 18 percent (0.219 s). The phase's span is the
+   observer push (compiled out without the observe feature here), the
+   equipment-mode baseline copy, the end-of-step equipment snapshot
+   and the step result. The dominant site is `snapshot_equipment_entry`
+   (`crates/hares-core/src/dwelling/mod.rs:6341`): per equipment it
+   `insert`s a fresh `core_output().clone()` into
+   `latest_env.equipment_core` (a new map entry and its heap per
+   equipment per step, the old one dropped) beside the in-place
+   telemetry `clone_from`, and the phase builds two fresh per-zone
+   delivery vectors (`step_hvac_heating_by_zone`,
+   `step_hvac_cooling_by_zone`, `collect` per step) and clones
+   `zone_temp_scratch` for the `StepResult`. Allocation and memory
+   movement bound: map churn and small-vector reallocation, not
+   arithmetic; no IO.
+3. `equipment`, 14 percent (0.170 s). Step 3's three stage-rank passes
+   (`crates/hares-core/src/dwelling/mod.rs`, the `Equipment` phase
+   span) call `update_control` and `step` on every equipment each
+   step, then `validate_equipment_contract` and
+   `validate_port_core_electrical_consistency`; the time sits in the
+   equipment models' own `step` bodies in `crates/hares-equipment`
+   (the HVAC coil's duty-cycle and COP evaluation, the water heater's
+   tank model, the battery's power electronics). Compute bound:
+   per-model arithmetic with small fixed allocations, no IO.
+
+**Proposed PERFORMANCE rows (proposals for the next planning round,
+not scheduled work):**
+
+| title | phase | expected mechanism | size | acceptance |
+| ---- | ---- | ---- | ---- | ---- |
+| The end-of-step equipment snapshot writes in place instead of re-inserting | `state_snapshot` (18 percent, the measured second) | `snapshot_equipment_entry` (`crates/hares-core/src/dwelling/mod.rs:6341`) `insert`s a fresh `core_output().clone()` per equipment per step and the phase `collect`s two fresh per-zone delivery vectors and a zone-temp clone per step; retain the map entries and buffers and write them in place (the telemetry `clone_from` pattern), allocation-free after the first step | M | paired ladder: the fold's capture wall against its same-sitting control on the previous pin, and the site's counting-allocator delta reading zero after the first step |
+| The per-surface Perez irradiance computed once per blueprint and shared | `environment` (10 percent here; the fired condition measured 7.3 to 7.5 percent of simulate) | `EnvironmentManager::update_in_place` (`crates/hares-core/src/environment.rs:1514`) recomputes per-surface Perez and incidence every step for every dwelling (twelve azimuth samples per omnidirectional surface); build the per-blueprint per-surface table the RT-2 record names, once from the blueprint's surfaces, shared by every dwelling the blueprint builds, so the fit path's per-candidate homes read it | M | paired ladder, with the frames bitwise equal (the table computes the same functions of the same inputs) |
+| The envelope state-space step exploits the RC network's locality | `envelope` (37 percent, the measured largest) | `StateSpaceModel::step_with_identity_coupling_into_scratch` and `step_into` (`crates/hares-envelope/src/state_space.rs`) run dense O(n^2) products while the RC couplings are local (each boundary to its neighbours and its zone); a block-structured or sparse step cuts the product count. Bits will move (a reassociated sum), so the row carries the numeric-entry delta record | L | paired ladder, with any bit movement recorded through the delta procedure at the parent before the fold |
+
+### P1, 2026-10-22, commit `23e13ce8` (the end-of-step equipment snapshot writes in place)
+
+Load average at write time: 1.78/1.95/2.38 (28 cores; the before and
+after sets below were taken back to back in one sitting, the host
+otherwise quiet).
+
+The `state_snapshot` phase's own allocations: the two per-zone HVAC
+delivery vectors (`step_hvac_heating_by_zone`, `step_hvac_cooling_by_zone`,
+each a fresh `collect` per step) and the step result's zone-temperature
+clone. The equipment snapshot itself was already allocation-free after
+the first step (`CoreOutput` holds only `Copy` members, so the map
+re-insert copies bytes in place; the `snapshot_equipment` site test
+pins it); the phase's remaining three sites are what this row removed.
+
+1. The allocation delta witness (new): `state_snapshot_phase_allocation_free_after_first_step`
+   steps the OCHRE sample home (`base.xml`, the counting allocator
+   installed) into one reused step result, the shape `simulate()` steps
+   in. At the parent `68f43ec3` the phase allocated 12 times over the
+   4 steps after the first (3 per step): RED. At `23e13ce8` the delta
+   is zero on every step after the first: GREEN. The existing
+   per-site test is unchanged and green.
+
+2. The profiling count (the phase-share record's instrument:
+   `frame_golden run tests/fixtures/golden/consumer_shape_900s.toml
+   --repeat 1 --discard-output`, built with the profiling feature,
+   three runs in separate processes per side). Hot-path allocations
+   over the year-run of 35,040 steps: before `743,849` on every run,
+   after `638,732` on every run. The drop is 105,117: the phase's
+   three sites times 35,040 steps less the first step's three
+   first-time allocations. `hot_path_alloc_violations` stays 35,040 on
+   both sides: the step still allocates in other phases (about 18.2
+   allocations per step after this row, down from about 21.2).
+
+3. The paired wall, same sitting, same sides: `step_total` medians
+   1.246 s (1.246/1.265/1.225) before, 1.220 s (1.245/1.220/1.205)
+   after, a 2.1 percent drop, inside the 5 percent noise band: no
+   measurable wall change at this resolution. The `state_snapshot`
+   share moved 18 to 17 percent (the printed percents carry about half
+   a point of rounding). `VmHWM` 148.4 MB on both sides. Read
+   honestly: the phase's cost sits in the telemetry `clone_from`'s
+   per-key hashing and the map writes, not in the three small
+   allocations; the fold's paired capture wall is the gate for the
+   step-loop program's cumulative effect, and this row's proof is the
+   allocator delta plus the count above.
+
+The goldens: `compare-all` identical in both feature sets at the tip
+(10 dwelling and fleet fixtures without features, the dst fixture with
+`-F dst`); checkpoints, pytest (1801 passed, 0 failed) and pyright (0)
+green.
+
+The design: `run_timestep_into` writes the step result in place (the
+zone temperatures through `Vec::clone_from`, which reuses the buffer's
+allocation once it holds the zone count) and the two delivery vectors
+are `clear` + `extend` on persistent buffers. `simulate_inner` reuses
+one result across the run's steps. `step()` and the warm-up loop keep
+the by-value wrapper, so their per-call allocations are unchanged from
+the parent; they are the follow-ups.
+
+The follow-up census (the per-step clone and fresh-vector sites the
+step path still carries; each registered as its own row, none fixed
+here):
+
+- `stepped_stage_ranks` (`dwelling/mod.rs`, the step's equipment
+  phase): a fresh `Vec::with_capacity` per step for the unconditional
+  stage-ordering invariant. One allocation per step, every build.
+  Row 42.
+- The warm-up loop's per-step result: each warm-up step returns a
+  fresh `StepResult` the loop drops unread on success. One allocation
+  per warm-up step. Row 41.
+- The by-value `step()` handoff: the Python single-step path and the
+  fleet's per-dwelling step loop (`hares-fleet/src/fleet.rs:2023`)
+  each pay one zone-temperature vector per step. Row 43.
+- Observe-gated copies (present only in observe builds, invisible to
+  the profiling build): the port snapshots taken per stage pass
+  (`ports.clone()` three times when observing), the thermal-update
+  buffer clone and the actor telemetry key collects. Noted for the
+  observe build's own measurement; no row yet.
+
+Found along the way, pre-existing at the parent: the default-feature
+clippy gate was red (`iterative_wall_solver` and `iterative_wall_env`
+in `hares-envelope`'s longwave tests called only by observe-gated
+tests); the helpers are now gated with their callers. Test-only, no
+golden risk; the all-features gate was green before and after.

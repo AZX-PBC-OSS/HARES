@@ -1185,8 +1185,9 @@ mod tests {
     /// Build a minimal one-zone `ThermalSolver` with a single OPAQUE
     /// exterior surface on the iterative skin-solve path (rad_frac > 0),
     /// with the caller's iteration budget and parallel rad_res.
-    /// Serves only the observe-gated diagnostics tests below; ungated it
-    /// is dead code under default features and fails the -D warnings build.
+    ///
+    /// Observe-gated like the only tests that call it, so the
+    /// default-feature clippy gate sees no dead helper.
     #[cfg(feature = "observe")]
     fn iterative_wall_solver(
         n_iter: u32,
@@ -1248,8 +1249,6 @@ mod tests {
     /// temperatures the caller picks: the mild case settles the warm start,
     /// the swung case displaces the skin's fixed point far past what one
     /// damped iteration can cross.
-    /// Serves only the observe-gated diagnostics tests below; ungated it
-    /// is dead code under default features and fails the -D warnings build.
     #[cfg(feature = "observe")]
     fn iterative_wall_env(t_air_c: f64, t_sky_c: f64) -> EnvironmentState {
         let mut env = window_lwr_env();
