@@ -240,6 +240,11 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+      # The override tests read the OS-HPXML sample documents the vendored
+      # reference carries (the HPXML's own samples, inputs the tests use
+      # directly); without the submodule the paths do not exist.
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v10.2.0
         with:
@@ -304,7 +309,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --group dev --extra helics --group ochre
+      - run: uv sync --group dev --extra helics --group ochre --extra rl
       - run: uv run maturin develop --release
       # --fail-on-skip (tests/python/skip_gate.py): an OCHRE install that
       # cannot run the comparison fails the job instead of skipping it.
