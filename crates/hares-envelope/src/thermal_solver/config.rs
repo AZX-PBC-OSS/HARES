@@ -198,8 +198,8 @@ pub struct MechanicalVentilationParams {
 /// - `zone_height_m`: 2.5 m (typical residential ceiling height)
 ///
 /// # References
-/// - EnergyPlus `ZoneEquipmentManager.cc:5988–6033` — `WindAndStack` runtime calculation
-/// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct (DH, DiscCoef)
+/// - EnergyPlus `ZoneEquipmentManager.cc:5716-5806` (v24.2.0): the `WindAndStack` runtime calculation
+/// - EnergyPlus v26.2.0 `DataHeatBalance.hh:1207-1214` (the vendored copy) — `WindandStackOpenArea` struct (DH, DiscCoef)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: `Q = Cw × A × U`
 /// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: `Q = sqrt(Qw² + Qst²)`
 #[derive(Debug, Clone, PartialEq)]
@@ -259,6 +259,36 @@ impl NaturalVentilationConfig {
             max_outdoor_humidity_ratio: Self::DEFAULT_MAX_OUTDOOR_HUMIDITY_RATIO,
             opening_azimuth_deg: Self::DEFAULT_OPENING_AZIMUTH_DEG,
         }
+    }
+}
+
+impl WindowSolarProperties {
+    /// A window's SHGC must be at least its transmittance: SHGC decomposes
+    /// into the transmitted share plus a glass-absorbed share, so an
+    /// inverted (or non-finite) pair is self-contradictory configuration.
+    /// The check is construction-time and covers both seasons' pairs (the
+    /// per-step path reads only the active season's), naming the surface.
+    pub fn validate(&self, surface_id: u32) -> std::result::Result<(), String> {
+        for (season, shgc, transmittance) in [
+            ("summer", self.shgc, self.transmittance),
+            ("winter", self.winter_shgc, self.winter_transmittance),
+        ] {
+            // `partial_cmp` keeps the non-finite cases in the rejection path:
+            // a NaN on either side never satisfies the comparison, matching
+            // the assertion this construction check replaces.
+            let holds = shgc
+                .partial_cmp(&(transmittance - 1e-6))
+                .is_some_and(|ord| ord != std::cmp::Ordering::Less);
+            if !holds {
+                return Err(format!(
+                    "window {surface_id}: {season} SHGC ({shgc}) is below the {season} \
+                     transmittance ({transmittance}); the solar heat gain coefficient \
+                     decomposes into the transmitted share plus an absorbed share, \
+                     so it must be at least the transmittance"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -792,6 +822,9 @@ impl ThermalSolverConfig {
                 ));
             }
         }
+        for (&surface_id, window) in &self.window_properties {
+            window.validate(surface_id)?;
+        }
         Ok(())
     }
 }
@@ -1104,6 +1137,28 @@ pub struct EnvelopeComponentGains {
     /// Angle between wind direction and opening normal [°], in [0, 180].
     #[cfg(feature = "observe")]
     pub natural_ventilation_wind_angle_deg: f64,
+    /// Exterior-skin fixed-point iterations that exited on the iteration
+    /// cap this step: the iterative-path (rad_frac > 0) surfaces whose
+    /// budget ran out without the 0.01 K step tolerance break. The
+    /// budget is each surface's own `n_iter`, wired per surface - the
+    /// solver never derives it from dt: the production wiring
+    /// (`solver_builder`'s thermal-solver construction) supplies
+    /// `floor(dt/300) + 1`, which at the 60 s production timestep is
+    /// one damped iteration, and this solver's own fixtures hardcode
+    /// the same `n_iter: 1`. The warm-start design converges across
+    /// timesteps mid-transient, so a cap exit is intended behavior -
+    /// but a run whose skins cap every step is a run whose skins never
+    /// close, and this count is where that shows.
+    #[cfg(feature = "observe")]
+    pub skin_iteration_cap_exits: u64,
+    /// The largest exterior-skin residual this step (K): the greatest
+    /// |t_skin − F| against the skin's own fixed point
+    /// F = t_init + (solar + lwr)·rad_res over the iterative-path
+    /// surfaces, converged or not. Zero when no iterative-path surface
+    /// exists. A residual above 1 K means the delivered skin temperature
+    /// sits far from the balance the injection assumed.
+    #[cfg(feature = "observe")]
+    pub max_skin_residual_k: f64,
     /// Outdoor moist-air density used for infiltration/ventilation mass flow conversion [kg/m³].
     /// Computed per timestep from outdoor T, P, and humidity ratio via ASHRAE HoF 2021 Ch.1 Eq.28.
     /// Included in diagnostic CSV (verbosity ≥ 4) for altitude-aware density verification.
@@ -1182,6 +1237,59 @@ pub struct WindowSolarDiag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window_props(shgc: f64, transmittance: f64) -> WindowSolarProperties {
+        WindowSolarProperties {
+            shgc,
+            winter_shgc: shgc,
+            u_factor_w_m2_k: 1.8,
+            area_m2: 2.0,
+            transmittance,
+            winter_transmittance: transmittance,
+            radiation_frac: 0.2,
+            glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, shgc),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+        }
+    }
+
+    /// A window's SHGC must be at least its transmittance: SHGC decomposes
+    /// into the transmitted share plus an absorbed share, so the inverted
+    /// pair is self-contradictory configuration. The check covers both
+    /// seasons' pairs (the per-step path reads only the active season's).
+    #[test]
+    fn window_solar_properties_reject_shgc_below_transmittance() {
+        assert!(window_props(0.5, 0.4).validate(42).is_ok());
+        // Exactly equal (within the epsilon the per-step check used) passes.
+        assert!(window_props(0.4, 0.4).validate(42).is_ok());
+
+        let bad_summer = window_props(0.3, 0.4);
+        let err = bad_summer
+            .validate(7)
+            .expect_err("an inverted summer pair must fail");
+        assert!(err.to_string().contains("7"), "names the surface: {err}");
+        assert!(
+            err.to_string().contains("summer"),
+            "names the season: {err}"
+        );
+
+        let mut bad_winter = window_props(0.5, 0.4);
+        bad_winter.winter_shgc = 0.3;
+        bad_winter.winter_transmittance = 0.4;
+        let err = bad_winter
+            .validate(7)
+            .expect_err("an inverted winter pair must fail");
+        assert!(
+            err.to_string().contains("winter"),
+            "names the season: {err}"
+        );
+
+        // A non-finite SHGC satisfies no comparison: rejected.
+        let err = window_props(f64::NAN, 0.4)
+            .validate(7)
+            .expect_err("a non-finite SHGC must fail");
+        assert!(err.to_string().contains("7"), "names the surface: {err}");
+    }
 
     #[test]
     fn the_enum_default_is_the_production_pin() {

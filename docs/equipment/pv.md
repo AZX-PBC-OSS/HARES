@@ -66,6 +66,11 @@ dc_w *= (1 - system_losses_fraction)
 
 ## Inverter Priority Modes
 
+The constructed default is **Watt** priority: real power is never curtailed
+to hold vars. Battery and EV kVA clamps are active-power-priority by the
+same contract, so a PV defaulting to Var priority would silently differ
+from the rest of the DER fleet at the first apparent-power overload.
+
 ```mermaid
 graph TD
     subgraph "Watt Priority"
@@ -80,6 +85,16 @@ graph TD
 ```
 
 Min power factor enforcement (default 0.8) in Watt and Var modes: `|Q| <= |P| * tan(acos(min_pf))`
+
+**Behavior at zero real power (P = 0)** - with the reactive request
+overloading the inverter (within the rating every mode passes the
+request unchanged), the modes disagree:
+
+| Mode | Q at P = 0 |
+|------|------------|
+| Watt | Q falls to zero with P (the min-pf bound `|Q| <= |P|·tan(acos(min_pf))` is zero) |
+| Var | Q falls to zero with P (the Q ceiling is proportional to P) |
+| Constant PF | the request is scaled to the rating preserving the power factor: the full reactive output up to the apparent-power cap (full Q at zero P) |
 
 ## Control Signals
 

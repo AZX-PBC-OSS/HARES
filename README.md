@@ -124,6 +124,10 @@ tries `httpx` -> `boto3` -> `urllib` in order. With `httpx`, Ctrl-C ends a
 fleet at once, cutting the downloads in flight; on the other transports a
 download already in flight finishes or times out first.
 
+## Reproducibility
+
+The engine's transcendental math is pinned to the `libm` crate, so the same input run on any platform produces bit-identical output, verified against the committed golden fixtures on every pull request (`.github/workflows/reproducibility.yml`).
+
 ## Crate layout
 
 ```

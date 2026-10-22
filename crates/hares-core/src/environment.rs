@@ -734,8 +734,15 @@ pub struct EnvironmentManager {
     /// The schedule at the step resolution, owned per build: the
     /// assembly's unavailable-period zeroing and the schedule injection
     /// add columns to the build's own copy, cloned from the blueprint's
-    /// shared series.
+    /// shared series. An upsampled series holds its source-resolution
+    /// rows; `schedule_upsample_factor` is the rows' expansion.
     schedule: ScheduleTimeSeries,
+    /// The schedule rows' expansion: each held row stands for this many
+    /// consecutive steps of the sim grid. 1 when the rows are per-step (a
+    /// no-op resample, a downsample, or a stamp unaligned to its own step,
+    /// which materialises the expansion); the source-to-sim step ratio for
+    /// an upsampled series holding its source rows.
+    schedule_upsample_factor: u32,
     zone_types: Vec<hares_io::hpxml::ZoneType>,
     /// The building's one conditioned zone, if it has one.
     conditioned_zone: Option<ZoneId>,
@@ -979,7 +986,23 @@ impl EnvironmentManager {
             .iter()
             .map(|zone| zone.zone_type.clone())
             .collect();
-        let unavailable_flags = unavailable_period_flags(building, &schedule);
+        // The schedule rows' expansion: an upsample resample holds the
+        // source-resolution rows (each standing for `factor` sim steps)
+        // instead of materialising an expanded copy, so every per-step read
+        // divides by it to reach the held row. A no-op resample, a
+        // downsample or a materialised expansion carries per-step rows and
+        // the factor is 1.
+        let schedule_upsample_factor = (schedule.source_step_secs / step_secs).max(1);
+        // The flags are per-step state (the environment publishes them by
+        // the step's schedule row): the held rows' flags expand, each flag
+        // standing for the `factor` steps its row covers. The resample's
+        // hour-uniformity guard is what makes the expansion exact -- a
+        // row's sub-steps share its hour-of-day, so the expanded flags are
+        // the per-sub-step flags the materialised rows carried.
+        let unavailable_flags = unavailable_period_flags(building, &schedule)
+            .into_iter()
+            .flat_map(|flag| std::iter::repeat_n(flag, schedule_upsample_factor as usize))
+            .collect::<Vec<_>>();
         let conditioned_zone = building
             .conditioned_zone_index()?
             .map(|idx| ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)));
@@ -1038,6 +1061,7 @@ impl EnvironmentManager {
 
         Ok(Self {
             schedule,
+            schedule_upsample_factor,
             zone_types,
             conditioned_zone,
             ambient_locations: Vec::new(),
@@ -1207,8 +1231,17 @@ impl EnvironmentManager {
     /// the table's span"). After a spring-forward the civil clock runs up
     /// to 3600 s past a run-spanning table's end and the run's last steps
     /// read the cycle's opening rows.
+    ///
+    /// The returned index is the sim grid's per-step row: the published
+    /// `schedule_row`, which the occupant's presence and the event replay
+    /// also address. An upsampled table holds its source-resolution rows,
+    /// each standing for `schedule_upsample_factor` steps, so the column
+    /// reads divide it once more to reach the held row (the step 3 read in
+    /// `update_in_place`); the span arithmetic uses the rows' own step so
+    /// the cycle covers the same seconds either representation holds.
     fn compute_schedule_idx(&self, clock: &SimClock) -> usize {
         let schedule_len = self.schedule.len();
+        let row_secs = self.schedule.source_step_secs;
 
         #[cfg(feature = "dst")]
         if let Some(tz) = self.civil_tz {
@@ -1225,13 +1258,12 @@ impl EnvironmentManager {
             if step_secs == 0 {
                 return 0;
             }
-            let year_secs = schedule_len as u64 * step_secs;
+            let year_secs = schedule_len as u64 * u64::from(row_secs);
             return (civil_secs % year_secs / step_secs) as usize;
         }
 
         // Fallback: derive the schedule row from the current sim time with
-        // the same 365-day-calendar ordinal as the DST path and
-        // compute_schedule_offset.
+        // the same 365-day-calendar ordinal as the DST path.
         let sim_time = clock.current_time();
         let doy0 = u64::from(hares_types::schedule_day_ordinal(&sim_time)) - 1;
         let h = sim_time.hour() as u64;
@@ -1242,7 +1274,7 @@ impl EnvironmentManager {
         if step_secs == 0 {
             return 0;
         }
-        let year_secs = schedule_len as u64 * step_secs;
+        let year_secs = schedule_len as u64 * u64::from(row_secs);
         (civil_secs % year_secs / step_secs) as usize
     }
     #[must_use]
@@ -1253,6 +1285,17 @@ impl EnvironmentManager {
     /// Mutably borrow the parsed schedule time series.
     pub fn schedule_mut(&mut self) -> &mut ScheduleTimeSeries {
         &mut self.schedule
+    }
+
+    /// The schedule rows' expansion: each held row stands for this many
+    /// consecutive steps of the sim grid. The per-step schedule row divides
+    /// by it to reach the held row; 1 when the rows are per-step. The
+    /// build's series consumers (the unavailable-period application, the
+    /// schedule injection, the premise ZIP mean) take their per-step sums
+    /// and series lengths through it.
+    #[must_use]
+    pub fn schedule_upsample_factor(&self) -> u32 {
+        self.schedule_upsample_factor
     }
 
     /// Zone types aligned with [`EnvironmentState::zones`].
@@ -1526,10 +1569,14 @@ impl EnvironmentManager {
             &mut self.solar_irradiance_buf,
         );
 
-        // Step 3: schedule values (reuse self.schedule_values_buf)
+        // Step 3: schedule values (reuse self.schedule_values_buf). An
+        // upsampled table holds its source-resolution rows: the per-step
+        // row divides by the expansion once, and every column reads the
+        // held row -- the zero-order hold the materialised rows carried.
+        let held_row = schedule_idx / self.schedule_upsample_factor as usize;
         self.schedule_values_buf.clear();
         self.schedule_values_buf
-            .extend(self.schedule.columns.iter().map(|col| col[schedule_idx]));
+            .extend(self.schedule.columns.iter().map(|col| col[held_row]));
 
         // Step 4: zones -- written from self.zones (already updated by feed_zones or update).
         state.zones.clear();
@@ -1579,11 +1626,20 @@ impl EnvironmentManager {
         mains_payload.clear();
         mains_payload.push(weather.mains_temp_c);
         state.schedule_row = Some(schedule_idx);
-        state.unavailable_periods = self
-            .unavailable_flags
-            .get(schedule_idx)
-            .copied()
-            .unwrap_or_default();
+        // The flags carry one entry per schedule step when unavailable
+        // periods are configured; an empty vec means every step is
+        // available. Any other length mismatch is a construction desync.
+        state.unavailable_periods = if self.unavailable_flags.is_empty() {
+            UnavailablePeriodState::default()
+        } else {
+            assert!(
+                schedule_idx < self.unavailable_flags.len(),
+                "the unavailable-period flags cover {} steps against schedule step {}: the flags and the schedule diverged at construction",
+                self.unavailable_flags.len(),
+                schedule_idx
+            );
+            self.unavailable_flags[schedule_idx]
+        };
         #[cfg(test)]
         if let (Some(before), Some(after)) =
             (alloc_before, hares_types::alloc_count::thread_allocations())
@@ -1793,34 +1849,6 @@ fn build_forcing_table(
         })
         .collect();
     Ok(ForcingTable::from_rows(rows?))
-}
-
-/// Compute offset into the schedule time series.
-/// Schedules from ResStock/BEopt are annual, indexed from Jan 1 in local time.
-/// ResStock/BEopt schedules are always 365-day non-leap-year data; the row
-/// lookup's day-of-year is the shared 365-day-calendar ordinal, whose
-/// leap-year rule keeps calendar dates after Feb 29 on the same schedule
-/// rows as in a non-leap year.
-#[cfg(test)]
-fn compute_schedule_offset(
-    schedule: &ScheduleTimeSeries,
-    start_time: DateTime<FixedOffset>,
-    step_secs: u32,
-) -> usize {
-    if step_secs == 0 || schedule.is_empty() {
-        return 0;
-    }
-    let doy0 = u64::from(hares_types::schedule_day_ordinal(&start_time)) - 1;
-    let h = start_time.hour() as u64;
-    let m = start_time.minute() as u64;
-    let s = start_time.second() as u64;
-    let seconds_into_year = doy0 * 86400 + h * 3600 + m * 60 + s;
-    // Derive year length from the actual schedule array size so wrapping is
-    // correct regardless of whether the schedule is hourly, sub-hourly, etc.
-    // An empty schedule is rejected at load (`EmptySchedule`), so the length
-    // here is positive and the former debug re-check is deleted.
-    let year_secs = schedule.len() as u64 * step_secs as u64;
-    (seconds_into_year % year_secs / step_secs as u64) as usize
 }
 
 fn compute_mains_inputs(weather: &WeatherTimeSeries, step_secs: u32) -> (f64, f64) {
@@ -2223,7 +2251,7 @@ fn determine_initial_indoor_temp_c(
 /// and `Hot Water Mains Temperature (C)`.
 ///
 /// The rows are the run's internal series: the evaluation is the same
-/// [`StepWeatherEvaluator`] the environment update calls, so the exposed
+/// `StepWeatherEvaluator` the environment update calls, so the exposed
 /// channels match the run's own on bits. The wind direction is not one
 /// of them: a direction has no mean over a period, so it is not a
 /// catalogue variable.
@@ -3691,75 +3719,6 @@ mod tests {
         // caller (the evaluator's interpolate layout), so here the
         // record is asserted.
         assert_eq!(addressing.record_at(t).expect("addressable"), 1);
-    }
-
-    // ----- compute_schedule_offset leap-year tests (T-0032) -----
-
-    /// Schedule offset for Feb 29 in a leap year.
-    /// Feb 29 ordinal0=59, same as non-leap Mar 1. The schedule has 8760 rows
-    /// (365-day non-leap) so Feb 29 maps to row 59*24=1416 (March 1 data).
-    /// No adjustment needed since ordinal0 <= 59, but year_secs wrapping
-    /// protects against out-of-bounds.
-    #[test]
-    fn compute_schedule_offset_leap_year_feb_29() {
-        let schedule = hourly_schedule(8760);
-        let start = utc_offset().with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
-        let offset = compute_schedule_offset(&schedule, start, 3600);
-        assert_eq!(offset, 1416, "Feb 29 should index row 1416 (day 59)");
-    }
-
-    /// Schedule offset for March 1 in a leap year.
-    /// ordinal0=60, adjusted -1 → 59 so the schedule row matches the non-leap
-    /// index for March 1 (59*24=1416).
-    #[test]
-    fn compute_schedule_offset_leap_year_mar_1() {
-        let schedule = hourly_schedule(8760);
-        let start = utc_offset().with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
-        let offset = compute_schedule_offset(&schedule, start, 3600);
-        assert_eq!(offset, 1416, "March 1 leap year should index day 59 (1416)");
-    }
-
-    /// Regression: same calendar date across leap and non-leap years produces
-    /// identical schedule offsets. The one-day shift after Feb 29 is the
-    /// defect T-0032 fixes.
-    #[test]
-    fn compute_schedule_offset_same_date_leap_vs_non_leap() {
-        let schedule = hourly_schedule(8760);
-        let start_leap = utc_offset()
-            .with_ymd_and_hms(2024, 7, 4, 12, 30, 0)
-            .unwrap();
-        let start_non_leap = utc_offset()
-            .with_ymd_and_hms(2023, 7, 4, 12, 30, 0)
-            .unwrap();
-        let leap_offset = compute_schedule_offset(&schedule, start_leap, 3600);
-        let non_leap_offset = compute_schedule_offset(&schedule, start_non_leap, 3600);
-        assert_eq!(
-            leap_offset, non_leap_offset,
-            "same calendar date (Jul 4) must produce identical schedule offset"
-        );
-    }
-
-    /// Leap year Dec 31 wraps correctly. ordinal0=365, adjusted -1 → 364.
-    /// Row = 364*24 = 8736.
-    #[test]
-    fn compute_schedule_offset_leap_year_dec_31() {
-        let schedule = hourly_schedule(8760);
-        let start = utc_offset()
-            .with_ymd_and_hms(2024, 12, 31, 0, 0, 0)
-            .unwrap();
-        let offset = compute_schedule_offset(&schedule, start, 3600);
-        assert_eq!(offset, 8736, "Dec 31 leap year → adjusted ordinal 364");
-    }
-
-    /// Sub-hourly schedule (15-min steps, 35040 rows) in a leap year.
-    /// Mar 1 ordinal0=60, adjusted -1 → 59. seconds = 59*86400=5097600.
-    /// index = 5097600/900 = 5664.
-    #[test]
-    fn compute_schedule_offset_leap_year_15min() {
-        let schedule = hourly_schedule(35040);
-        let start = utc_offset().with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
-        let offset = compute_schedule_offset(&schedule, start, 900);
-        assert_eq!(offset, 5664, "15-min March 1 leap year");
     }
 
     /// Regression: non-DST running path produces correct schedule index after Feb 29.

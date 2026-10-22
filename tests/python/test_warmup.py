@@ -147,7 +147,9 @@ def test_docs_warmup_example() -> None:
     """The docs' "Warm-up" section example runs as written."""
     import re
 
-    import pandas as pd
+    # The docs' example hands its frames through pandas, which ships only
+    # with the ochre dependency group.
+    pd = pytest.importorskip("pandas")
 
     docs = (Path("docs") / "python.md").read_text()
     section = re.search(r"^## Warm-up\n(.*?)(?=^## )", docs, re.S | re.M)

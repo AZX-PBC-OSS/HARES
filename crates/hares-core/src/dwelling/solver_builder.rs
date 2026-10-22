@@ -1182,7 +1182,7 @@ pub(crate) fn build_default_solvers(
                     let diag = diag_by_idx.get(&sb.surface_idx);
                     let r_total = diag.map(|d| d.r_total_m2_k_w).unwrap_or(0.5);
                     let u_window = if r_total > 1e-9 { 1.0 / r_total } else { 2.0 };
-                    let res_int = 1.0 / (0.359073 * u_window.ln() + 6.949915);
+                    let res_int = 1.0 / (0.359073 * libm::log(u_window) + 6.949915);
                     let rad_frac = (res_int / r_total).clamp(0.0, 1.0);
                     // Exact eliminated-skin resistance for the window
                     // interior film — the shared derivation
@@ -1786,7 +1786,7 @@ fn foundation_infiltration_method(
                 zone.height_m
                     .ok_or_else(|| HaresError::Dwelling(format!("'{location}' has no height")))?,
             );
-            1000.0 * sla * (height_ft / ASHRAE_622_REFERENCE_HEIGHT_FT).powf(0.4) * wsf
+            1000.0 * sla * libm::pow(height_ft / ASHRAE_622_REFERENCE_HEIGHT_FT, 0.4) * wsf
         }
         "crawlspace - unvented" | "basement - unconditioned" => UNVENTED_SPACE_ACH,
         "crawlspace - conditioned" | "basement - conditioned" => 0.0,
@@ -1901,7 +1901,7 @@ fn unit_exterior_ach50(building: &Building) -> Result<Option<f64>> {
     let cfm50 = building.infiltration_cfm50.or_else(|| {
         building
             .infiltration_ela_cm2
-            .map(|ela_cm2| ela_cm2 * 0.0524 * 50.0_f64.powf(N_I_DEFAULT))
+            .map(|ela_cm2| ela_cm2 * 0.0524 * libm::pow(50.0_f64, N_I_DEFAULT))
     });
     let Some(ach50) = building.infiltration_ach50.or_else(|| {
         cfm50.map(|cfm50| {
@@ -3555,6 +3555,8 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
+            #[cfg(feature = "observe")]
+            min_capacitance_clamp_count: 0,
         };
 
         let rc = RCContext {
@@ -3763,6 +3765,8 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
+            #[cfg(feature = "observe")]
+            min_capacitance_clamp_count: 0,
         };
 
         let rc = RCContext {
@@ -4008,6 +4012,8 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
+            #[cfg(feature = "observe")]
+            min_capacitance_clamp_count: 0,
         };
 
         let rc = RCContext {
@@ -4255,6 +4261,8 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
+            #[cfg(feature = "observe")]
+            min_capacitance_clamp_count: 0,
         };
 
         let rc = RCContext {
@@ -4555,6 +4563,8 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
+            #[cfg(feature = "observe")]
+            min_capacitance_clamp_count: 0,
         };
 
         let rc = RCContext {
@@ -4834,6 +4844,8 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
+            #[cfg(feature = "observe")]
+            min_capacitance_clamp_count: 0,
         };
 
         let rc = RCContext {
@@ -5106,6 +5118,8 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
+            #[cfg(feature = "observe")]
+            min_capacitance_clamp_count: 0,
         };
 
         let rc = RCContext {

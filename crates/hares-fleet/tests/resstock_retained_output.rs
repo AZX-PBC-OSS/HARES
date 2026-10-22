@@ -21,6 +21,7 @@ fn fleet() -> hares_fleet::Fleet {
         None,
         Some(chrono::Duration::seconds(3600)),
         &root.join("python/hares/defaults"),
+        None,
     )
     .expect("fleet construction")
 }

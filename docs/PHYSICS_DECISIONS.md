@@ -349,8 +349,8 @@ The active source per side is recorded where the setpoints resolve
 `heating_setpoint_source` / `cooling_setpoint_source`), so the run's
 provenance names where each thermostat's setpoints came from: the schedule
 column, the HPXML control, or the default profile. OCHRE lets the column
-win silently (`vendors/OCHRE/ochre/utils/schedule.py:408-427`); the
-warning follows OS-HPXML, not OCHRE.
+take precedence without a warning (`vendors/OCHRE/ochre/utils/schedule.py:408-427`);
+the warning follows OS-HPXML, not OCHRE.
 
 ## A constant setpoint override replaces the resolved setpoint sources
 
@@ -997,3 +997,132 @@ reporting name, the value under it is SI, and the row plan converts
 once. The EV driver's behavioural defaults are named SI constants
 (`ev_driver::defaults`) written from the documented values (30 mi,
 30 mph, 20 mi, 6.6 kW); no value moved.
+
+## Natural ventilation keeps the fixed geometry discharge coefficient
+
+The natural-ventilation model in
+`crates/hares-physics/src/infiltration.rs`
+(`natural_ventilation_flow_m3_s`) is a stated hybrid of three sources,
+and the discharge coefficient stays the ASHRAE fixed geometry values
+(single-sided 0.20, cross 0.60), not EnergyPlus's AutoCalculate
+correlation.
+
+The three sources:
+
+- EnergyPlus `ZoneVentilation:WindandStackOpenArea` supplies the
+  structure: the wind and stack flow components computed separately and
+  combined in quadrature (`VVF = sqrt(Qw² + Qst²)`,
+  `ZoneEquipmentManager.cc`'s WindAndStack block, v24.2.0 lines
+  5716-5806), and the auto opening effectiveness (Cw: 0.55 for
+  perpendicular wind, linear to 0.30 at 45°, zero leeward). HARES's
+  `compute_natural_ventilation_cw` implements the same auto-Cw exactly.
+- ASHRAE HoF 2009 Ch. 16.14 supplies the discharge coefficient, fixed by
+  opening geometry: single-sided openings 0.15-0.25 (turbulent buoyancy,
+  no well-defined pressure head; HARES holds the midpoint 0.20),
+  cross-ventilation 0.60-0.65 (HARES holds 0.60).
+- OCHRE supplies the comfort gating: the three flow conditions and the
+  adjustment factor `adj = (T_zone - T_base)/(T_zone - T_outdoor)`
+  clamped to [0, 1], and the 20-ACH cap
+  (`Envelope.py`'s `_natural_ventilation`, lines 28-55, itself ResStock's
+  `apply_natural_ventilation_and_whole_house_fan`).
+
+The decision - why not E+'s auto Cd
+(`Cd = 0.40 + 0.0045|T_ext - T_mat|`, the `DiscCoef` AutoCalculate arm
+of the same E+ block):
+
+1. E+'s auto correlation is geometry-blind. The `WindandStackOpenArea`
+   object takes the discharge coefficient as an input and offers the
+   correlation as the default for objects that specify nothing; the
+   ASHRAE chapter the model cites gives the coefficient BY GEOMETRY
+   (single-sided versus cross), and the ASHRAE ranges are the measured
+   evidence. HARES's geometry-aware split is more physical than either
+   E+'s object default or a single flat value: adopting the auto
+   correlation erases the single-sided/cross distinction the module
+   models, and one flat value erases the single-sided leg's refinement.
+   At a 6 K delta-T the auto Cd (0.427)
+   more than doubles the single-sided stack flow (0.20 -> 0.427) and cuts
+   the cross flow by about 30% (0.60 -> 0.427).
+2. E+'s own literal for the gravitational acceleration in the same block
+   is 9.81; HARES holds the standard 9.80665. The divergence pin holds
+   both literals' effect.
+
+A note on OCHRE, not a reason: OCHRE uses a fixed coefficient itself,
+the ResStock convention's flat 0.6 multiplier on the window area
+(`Envelope.py:48`, `area = open_window_area * 0.6`), with no auto
+correlation anywhere. The cross leg's 0.60 is consistent with that
+value; the single-sided leg refines it with the ASHRAE single-sided
+physics.
+
+The docstring's former claim ("Implements the EnergyPlus
+`ZoneVentilation:WindandStackOpenArea` model") was wrong by omission -
+the gating and the discharge coefficient are not E+'s - and now names
+the hybrid. The magnitude is pinned:
+`infiltration::tests::natural_ventilation_pin_matches_the_recorded_divergence_vector`
+ports the E+ AutoCalculate arms verbatim (from the upstream source,
+including the 9.81 literal), pins HARES's reference-case vector at 1e-9,
+pins the port's own vector, and holds the stack terms' ratio - the
+recorded divergence's magnitude. The pin ran at the parent in its
+agreement form (HARES == the E+ port at 1e-9) and failed: HARES
+0.5779 m³/s against the port's 0.8465 m³/s on the reference case
+(a 0.5 m² south-facing cross-ventilated opening, perpendicular 3 m/s
+wind, 26 °C zone over 20 °C outdoor, 22 °C comfort base) - the
+disagreement the decision records.
+
+## The runtime transcendental math is pinned to the libm crate
+
+Every runtime `f64` transcendental the physics evaluates (`sin`, `cos`,
+`tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `ln`, `log2`, `log10`,
+`powf`, `cbrt`) is computed by the `libm` crate's pure-Rust
+implementation, never the platform's libm. The same input run on any
+platform produces the same bits.
+
+The mechanism: glibc (Linux) and Apple's libm (macOS) both compute
+these functions to high accuracy, but not to the same bits; on some
+inputs the results differ by one ULP. The engine's step amplifies that:
+a one-ULP difference in a solar-geometry cosine becomes a last-bit
+difference in the step's fluxes, and the step repeats tens of thousands
+of times in a run, so the drift surfaces in sparse rows as multi-ULP
+differences in the products. Two proofs fixed the mechanism. The
+six-leg bisect: the macOS leg of the golden-agreement workflow is red
+at every tree it can test, back to the first commit that carries golden
+manifests, so the divergence predates every state the goldens could
+have pinned on a code change. The reactive path's causal proof: pinning
+the single transcendental on `resstock_2025_fleet`'s only transcendental
+surface (the ZIP load's `tan_phi`, `c432d527`) made that fixture
+identical on the macOS leg while every Linux golden stayed bitwise.
+
+The scope: 162 runtime call sites across 44 files (the probe branch's
+census, `d1e56d9f`) plus the four ASHRAE 152 `f64::exp` sites in
+`calculate_dse` the census missed. Every substitution is
+argument-for-argument into the same function family: no algebraic
+rewrite, no fma introduction, no precomputation. A runtime scan after
+the pin finds zero platform-math call sites in `crates/*/src` outside
+test modules. The operations that cannot differ across platforms stay
+unpinned: `sqrt` (IEEE 754 correctly rounded), `powi` (composed
+multiplications), `abs`, `floor`, `ceil`, `to_radians`, `mul_add` (fma
+is exactly defined).
+
+The cost, paid once: the golden corpus and the B1 baseline re-captured
+at the pinned tree with every movement attributed to the mechanism (the
+measurement ladder's re-anchor row, 2026-10-22). Nine of the ten
+default manifests' digests moved plus the dst manifest's;
+`resstock_2025_fleet` stayed bitwise. All 13 calibration losses moved
+within the last bits (the worst 5,155 ULP, 9.4e-13 relative). The
+pinned libm's pure-Rust transcendentals cost about 15 percent more wall
+on the capture workload than glibc's optimized assembly, compute-bound
+(the CPU time rose the same fraction): the accepted price of
+cross-platform bit-identity.
+
+The alternatives, rejected:
+
+1. Capture the goldens per platform. Each platform then compares
+   against its own capture, and the claim the workflow exists to make
+   (the same bits everywhere) is unachievable by construction: nothing
+   would ever compare Linux's bits to macOS's. A checkpoint written on
+   one platform could not be resumed bit-exactly on another.
+2. Scope the workflow's contract to a tolerance. The contract weakens
+   from bitwise to within-epsilon, and the one-ULP amplifier becomes an
+   accepted slow drift that no fixture can catch.
+
+The pin keeps the contract bitwise and pays once.
+

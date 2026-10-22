@@ -404,6 +404,15 @@ pub const HEATER_POWER_W: &str = "heater_power_w";
 /// scope: internal
 pub const DISCHARGE_DERATE: &str = "discharge_derate";
 
+/// The pack's live AC discharge ceiling (W, SI): the tighter of each
+/// enabled discharge leg's rating and that leg's energy above its
+/// effective discharge floor, over the step. The EV driver's dispatch
+/// votes read it as the decision context's discharge ceiling; zero when
+/// neither leg is enabled.
+///
+/// scope: internal
+pub const DISCHARGE_CEILING_W: &str = "discharge_ceiling_w";
+
 /// scope: internal
 pub const CAPACITY_DERATE: &str = "capacity_derate";
 
@@ -612,6 +621,7 @@ pub const ER_SETPOINT_OFFSET_C: &str = "er_setpoint_offset_c";
 
 /// scope: internal
 pub const ER_HARD_LOCKOUT_TIME_S: &str = "er_hard_lockout_time_s";
+pub const ER_SOFT_LOCKOUT_TIME_S: &str = "er_soft_lockout_time_s";
 
 /// ER soft lockout `zone_rising` flag: 1.0 when zone temperature has not yet
 /// declined after the hard lockout expired; 0.0 otherwise. Captured only under
@@ -1170,6 +1180,7 @@ mod tests {
             STANDBY_POWER_W,
             HEATER_POWER_W,
             DISCHARGE_DERATE,
+            DISCHARGE_CEILING_W,
             CAPACITY_DERATE,
             CHARGE_DERATE,
             CYCLE_COUNT,
@@ -1225,6 +1236,7 @@ mod tests {
             ER_LOCKOUT_TEMP_C,
             ER_SETPOINT_OFFSET_C,
             ER_HARD_LOCKOUT_TIME_S,
+            ER_SOFT_LOCKOUT_TIME_S,
             ZONE_RISING,
             BACKUP_CAPACITY_W,
             BACKUP_EIR,
@@ -1429,6 +1441,7 @@ mod tests {
             STANDBY_POWER_W,
             HEATER_POWER_W,
             DISCHARGE_DERATE,
+            DISCHARGE_CEILING_W,
             CAPACITY_DERATE,
             CHARGE_DERATE,
             CYCLE_COUNT,
@@ -1484,6 +1497,7 @@ mod tests {
             ER_LOCKOUT_TEMP_C,
             ER_SETPOINT_OFFSET_C,
             ER_HARD_LOCKOUT_TIME_S,
+            ER_SOFT_LOCKOUT_TIME_S,
             ZONE_RISING,
             BACKUP_CAPACITY_W,
             BACKUP_EIR,

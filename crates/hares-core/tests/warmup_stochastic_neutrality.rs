@@ -14,7 +14,9 @@
 //!    driving sources included.
 
 use hares_core::{Dwelling, DwellingCheckpoint, WarmupOutcome};
+use hares_equipment::ev::catalog::EvArchetypeId;
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 
 /// A minimal synthetic dwelling with a stochastic event load: no HVAC, no
 /// internal gains, constant weather with the clear-sky solar off. The
@@ -149,21 +151,21 @@ fn production_telemetry_is_invariant_to_the_warmup_day_count() {
     );
 }
 
-/// An EV-archetype dwelling: the EV equipment with the canonical driver
+/// The EV-archetype dwelling: the EV equipment with the canonical driver
 /// actor carrying a catalogue archetype's stochastic driving sources (the
 /// Python `add_ev_with_driver` construction), beside a stochastic event
-/// load. The gym's `reset(seed)`: the step-0 checkpoint restored, the
-/// streams reseeded, the episode run again - bit-identical the second time.
-#[test]
-fn gym_style_reset_seed_twice_is_bit_identical_on_an_ev_archetype_dwelling() {
-    use hares_core::ChaCha8Rng;
+/// load. The driver's day-roll rides the reserved EV-driver stream nonce
+/// the way the registry and Python paths derive it, and its four driving
+/// sources carry the archetype's tagged keys.
+fn ev_archetype_dwelling(archetype: EvArchetypeId, min_days: u32, max_days: u32) -> Dwelling {
     use hares_core::actors::{EvDriverActor, EvDriverParams};
+    use hares_core::rng;
     use hares_equipment::Equipment;
     use hares_equipment::config::EquipmentConfig;
     use hares_equipment::ev::Ev;
-    use hares_equipment::ev::catalog::{EvArchetypeId, archetype_by_id};
+    use hares_equipment::ev::catalog::archetype_by_id;
 
-    let tmp = write_toml(&neutrality_toml(2, 2));
+    let tmp = write_toml(&neutrality_toml(min_days, max_days));
     let mut dwelling = Dwelling::from_toml_config(tmp.path()).expect("the dwelling builds");
 
     // The EV equipment, the way the Python add-ev-with-driver path builds
@@ -216,15 +218,10 @@ fn gym_style_reset_seed_twice_is_bit_identical_on_an_ev_archetype_dwelling() {
     ev.init(&ev_config, dwelling.latest_env()).expect("EV init");
 
     // The driver: the archetype's own stochastic sources (miles, departure,
-    // duration, arrival), the caller's seed the way the registry path's
-    // `seed` parameter lands.
-    let preset = archetype_by_id(EvArchetypeId::DailyCommuterL2.to_string().as_str())
-        .expect("the archetype exists");
-    let seed_bytes = {
-        let mut b = [0u8; 32];
-        b[..8].copy_from_slice(&7_u64.to_le_bytes());
-        b
-    };
+    // duration, arrival), the caller's seed mixed with the dwelling's
+    // identity the way the Python add-ev-with-driver path derives it.
+    let preset = archetype_by_id(archetype.to_string().as_str()).expect("the archetype exists");
+    let seed_bytes = hares_core::actors::ev_driver::driver_key_material(7, dwelling.bldg_id);
     let params = EvDriverParams {
         strategy: preset.strategy.clone(),
         plug_in_policy: preset.plug_in_policy.clone(),
@@ -245,12 +242,26 @@ fn gym_style_reset_seed_twice_is_bit_identical_on_an_ev_archetype_dwelling() {
         "EvDriver:EV1",
         "EV1",
         params,
-        ChaCha8Rng::from_seed(seed_bytes),
+        rng::derive_sub_rng(
+            &ChaCha8Rng::from_seed(seed_bytes),
+            rng::RNG_STREAM_EV_DRIVER_BASE,
+        ),
     );
 
     dwelling
         .add_equipment_with_actors(Box::new(ev), vec![Box::new(driver)])
         .expect("the EV and its driver join");
+    dwelling
+}
+
+/// The gym's `reset(seed)` on the EV-archetype dwelling: the step-0
+/// checkpoint restored, the streams reseeded, the episode run again -
+/// bit-identical the second time. The checkpoint carries the four driving
+/// sources' positions beside the day-roll's (seed, stream, word) triple,
+/// so the tagged source keys ride the snapshot unchanged.
+#[test]
+fn gym_style_reset_seed_twice_is_bit_identical_on_an_ev_archetype_dwelling() {
+    let mut dwelling = ev_archetype_dwelling(EvArchetypeId::DailyCommuterL2, 2, 2);
 
     // Episode one: the step-0 state, the streams reseeded, one episode run.
     let initial: DwellingCheckpoint = dwelling.save_checkpoint().expect("the step-0 checkpoint");
@@ -271,5 +282,30 @@ fn gym_style_reset_seed_twice_is_bit_identical_on_an_ev_archetype_dwelling() {
         "reset(seed) twice must replay the episode bit-identically: a \
          difference is stochastic state the checkpoint did not carry or \
          the reseed did not re-derive"
+    );
+}
+
+/// The warm-up day count never reaches production when the dwelling's
+/// production phase carries the EV driver's noisy sources (the noisy
+/// TimeWindows miles beside the Gaussian departure, duration and arrival)
+/// drawing over the event load's own stream: two noisy sources across
+/// perturbed warm-up lengths give bit-identical production telemetry.
+#[test]
+fn warmup_day_count_neutrality_holds_with_the_ev_drivers_noisy_sources() {
+    let run = |min_days: u32| {
+        let mut dwelling = ev_archetype_dwelling(EvArchetypeId::WfhOccasional, min_days, min_days);
+        let steps = (86_400 / 900) * 2;
+        (0..steps)
+            .map(|_| step_bits(&mut dwelling))
+            .collect::<Vec<_>>()
+    };
+
+    let at_two_days = run(2);
+    let at_four_days = run(4);
+    assert_eq!(
+        at_two_days, at_four_days,
+        "production telemetry must be bit-identical whatever the warm-up \
+         day count was: a difference is stochastic state the warm-up \
+         carried into production"
     );
 }

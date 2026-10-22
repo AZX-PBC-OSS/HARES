@@ -1,0 +1,337 @@
+//! The census of the physics clamps: the per-step value clamps whose
+//! clamped result is delivered are counted at their site; the clamps
+//! outside that scope (the numerical-epsilon and domain guards, the
+//! construction-time validation, the solver-internal iteration
+//! stability clamps) are listed with their classes in the Hardening 18
+//! entry's scope table in the I-08 ledger.
+//!
+//! A physics clamp keeps a model inside its valid domain by overwriting
+//! the value it is given (a range clamp, a cap, a floor, a truncation).
+//! The clamp is intended behavior, but a clamp firing is information the
+//! run's consumer needs: a pressure exponent that keeps falling outside
+//! its band, a draw that never fits the tank, a humidity ratio that
+//! outruns saturation all say something about the inputs. Each firing is
+//! recorded on the calling thread's per-step tally; the dwelling drains
+//! the tally once per timestep the way it drains the equipment health
+//! counts, and the per-site run totals surface through the dwelling's
+//! diagnostics. The census is observe-gated: without the `observe`
+//! feature no counting code exists, and with it the census rides the
+//! diagnostics accessor alone, never the run result's health totals or
+//! the output frames.
+
+use serde::{Deserialize, Serialize};
+
+/// The named surfaces where a physics clamp can fire.
+///
+/// Every member names one clamp the physics applies: the site the count
+/// answers "how often did this clamp fire over the run". The enum's
+/// variants are the census's keys; [`ClampSite::ALL`] carries the same
+/// sites in a stable order for iteration and serialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClampSite {
+    /// The AIM-2 pressure exponent `n_i` clamped into [0.5, 0.7]
+    /// (`N_I_MIN`/`N_I_MAX`): the model's wind and stack terms scale
+    /// with `ΔP^n_i`, so an out-of-band exponent from the input's
+    /// blower-door interpretation is held to the band. Recorded at both
+    /// clamp sites: the per-step ASHRAE wind-stack evaluation and the
+    /// ACH50-to-coefficients conversion.
+    Aim2PressureExponent,
+    /// The AIM-2 leakage-distribution factors clamped into their valid
+    /// ranges: the stack factor `m_i` (Walker & Wilson Eq. 10-11) and
+    /// the ceiling asymmetry `x_i` (Eq. 25). With the fixed leakage-class
+    /// table these are guards that valid inputs cannot trip; a change to
+    /// the table that lets them fire is counted.
+    Aim2LeakageDistribution,
+    /// The natural ventilation's comfort-base adjustment ratio clamped
+    /// into [0, 1]: the fraction of the indoor-outdoor difference that
+    /// lies above the comfort base, held when the base sits below the
+    /// outdoor temperature.
+    NaturalVentilationAdj,
+    /// The natural ventilation flow capped at 20 air changes per hour
+    /// (OCHRE's `max_nat_flow`): an open area large enough to ventilate
+    /// more is held to the cap.
+    NaturalVentilationAchCap,
+    /// Relative humidity clamped into [0, 1]: a humidity ratio above
+    /// saturation at the local pressure is held to saturation.
+    RelativeHumidity,
+    /// The humidity solver's zone humidity ratio held into [0, w_sat]:
+    /// latent gains that drive the zone past saturation (or below zero)
+    /// are held there, and the clamped mass is the solver's condensation
+    /// and frost bookkeeping.
+    ZoneHumiditySaturation,
+    /// The TARP exterior natural-convection model's temperature
+    /// difference floored at 0.1 K: a surface within 0.1 K of its zone
+    /// evaluates the model at the floor, the same delivered film
+    /// resistance the 1.0 W/(m²·K) floor below protects.
+    FilmDeltaTFloor,
+    /// The exterior film coefficient floored at 1.0 W/(m²·K): at zero
+    /// wind and a near-zero surface temperature difference the DOE-2
+    /// model's convection coefficient approaches zero, and the floor
+    /// keeps the film resistance finite.
+    ExteriorFilmFloor,
+    /// A step's tank draw truncated to the tank's volume: the requested
+    /// withdrawal exceeds what the tank holds, so the delivered draw is
+    /// the volume.
+    TankDrawTruncation,
+    /// A biquadratic flow fraction outside the configured
+    /// `[ff_min, ff_max]` bounds, held to the bounds before the
+    /// part-load-fraction quadratic evaluates.
+    FlowFractionBounds,
+    /// A biquadratic curve index out of bounds, clamped to the last
+    /// same-type curve. The same events the equipment health counter
+    /// `curve_index_clamps` drains: that counter carries the policy
+    /// limit and the run result's totals, this site carries the census.
+    CurveIndex,
+}
+
+impl ClampSite {
+    /// Every clamp site, in a stable order.
+    pub const ALL: [ClampSite; Self::COUNT] = [
+        Self::Aim2PressureExponent,
+        Self::Aim2LeakageDistribution,
+        Self::NaturalVentilationAdj,
+        Self::NaturalVentilationAchCap,
+        Self::RelativeHumidity,
+        Self::ZoneHumiditySaturation,
+        Self::FilmDeltaTFloor,
+        Self::ExteriorFilmFloor,
+        Self::TankDrawTruncation,
+        Self::FlowFractionBounds,
+        Self::CurveIndex,
+    ];
+
+    /// The number of clamp sites.
+    pub const COUNT: usize = 11;
+
+    /// The site's own name: the key the census reports the site's count
+    /// under.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Aim2PressureExponent => "aim2_pressure_exponent",
+            Self::Aim2LeakageDistribution => "aim2_leakage_distribution",
+            Self::NaturalVentilationAdj => "natural_ventilation_adj",
+            Self::NaturalVentilationAchCap => "natural_ventilation_ach_cap",
+            Self::RelativeHumidity => "relative_humidity",
+            Self::ZoneHumiditySaturation => "zone_humidity_saturation",
+            Self::FilmDeltaTFloor => "film_delta_t_floor",
+            Self::ExteriorFilmFloor => "exterior_film_floor",
+            Self::TankDrawTruncation => "tank_draw_truncation",
+            Self::FlowFractionBounds => "flow_fraction_bounds",
+            Self::CurveIndex => "curve_index",
+        }
+    }
+}
+
+/// Per-site clamp counts for one run.
+///
+/// The dwelling drains the recording threads' per-step tallies into this
+/// struct once per timestep and holds the run totals; read them through
+/// [`ClampCensus::count`] or serialize the census to report it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClampCensus {
+    counts: [u64; ClampSite::COUNT],
+}
+
+impl ClampCensus {
+    /// Records one clamp firing at `site`.
+    pub fn record(&mut self, site: ClampSite) {
+        self.counts[site as usize] += 1;
+    }
+
+    /// The run total recorded at `site`.
+    #[must_use]
+    pub fn count(&self, site: ClampSite) -> u64 {
+        self.counts[site as usize]
+    }
+
+    /// The run total across every site.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.counts.iter().sum()
+    }
+
+    /// Whether no clamp fired at any site.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    /// Adds `other`'s counts into `self`: the per-step drain's merge into
+    /// the run totals.
+    pub fn merge(&mut self, other: &ClampCensus) {
+        for (site, added) in other.iter() {
+            self.counts[site as usize] += added;
+        }
+    }
+
+    /// Takes the counts out: returns them and resets every site to zero,
+    /// the take-and-reset the per-step drain uses.
+    pub fn take(&mut self) -> ClampCensus {
+        let taken = *self;
+        *self = Self::default();
+        taken
+    }
+
+    /// Iterates the sites and their counts, in [`ClampSite::ALL`]'s
+    /// order, including the sites whose count is zero.
+    pub fn iter(&self) -> impl Iterator<Item = (ClampSite, u64)> + '_ {
+        ClampSite::ALL
+            .map(|site| (site, self.counts[site as usize]))
+            .into_iter()
+    }
+}
+
+impl Serialize for ClampCensus {
+    /// Serializes the census as a map from each site's name to its
+    /// count: every site appears, so the reported shape is stable
+    /// whether or not a site fired.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(ClampSite::COUNT))?;
+        for (site, count) in self.iter() {
+            map.serialize_entry(site.name(), &count)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ClampCensus {
+    /// Reads the census back from the site-name map [`ClampCensus`]'s
+    /// `Serialize` writes: an unknown site name is a deserialization
+    /// error naming it.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::deserialize(deserializer)?;
+        let mut census = ClampCensus::default();
+        for (key, count) in map {
+            let site = ClampSite::ALL
+                .iter()
+                .copied()
+                .find(|site| site.name() == key)
+                .ok_or_else(|| serde::de::Error::custom(format!("unknown clamp site '{key}'")))?;
+            census.counts[site as usize] = count;
+        }
+        Ok(census)
+    }
+}
+
+thread_local! {
+    static STEP_TALLY: std::cell::Cell<ClampCensus> = std::cell::Cell::new(ClampCensus::default());
+}
+
+/// Records one clamp firing at `site` on the calling thread's per-step
+/// tally. The dwelling drains the tally once per timestep.
+pub fn record(site: ClampSite) {
+    STEP_TALLY.with(|tally| {
+        let mut updated = tally.get();
+        updated.record(site);
+        tally.set(updated);
+    });
+}
+
+/// Drains the calling thread's clamp tally since the last drain: returns
+/// the per-site counts and resets the tally to zero.
+#[must_use]
+pub fn take() -> ClampCensus {
+    STEP_TALLY.with(|tally| {
+        // `ClampCensus` is `Copy`, so take-and-reset on the temporary
+        // copy `tally.get()` hands out would leave the tally itself
+        // untouched: every later drain would re-merge the full history.
+        // Take on a local and write the reset state back into the cell.
+        let mut current = tally.get();
+        let taken = current.take();
+        tally.set(current);
+        taken
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClampCensus, ClampSite, record, take};
+
+    /// The two-drain-cycle probe: two firing cycles in one process, with
+    /// an empty drain between and after them. `ClampCensus` is `Copy`, so
+    /// a drain that takes-and-resets the temporary copy `Cell::get()`
+    /// hands out, without writing the reset state back into the `Cell`,
+    /// leaves the full history on the tally: every later drain re-merges
+    /// it, and this empty second drain returns the first cycle's counts.
+    #[test]
+    fn the_step_tally_resets_between_drain_cycles() {
+        // Cycle 1: one firing, drained once.
+        record(ClampSite::CurveIndex);
+        let first = take();
+        assert_eq!(first.count(ClampSite::CurveIndex), 1);
+
+        // Cycle 2: nothing fires since the last drain, so the drain
+        // reads empty.
+        let second = take();
+        assert!(
+            second.is_empty(),
+            "an empty cycle's drain reads empty, got curve_index={}",
+            second.count(ClampSite::CurveIndex)
+        );
+
+        // Cycle 3: the next firing drains its own cycle's count only,
+        // not the cycle-1 history.
+        record(ClampSite::RelativeHumidity);
+        let third = take();
+        assert_eq!(third.count(ClampSite::RelativeHumidity), 1);
+        assert_eq!(
+            third.total(),
+            1,
+            "the drain carries no earlier cycle's count"
+        );
+    }
+
+    #[test]
+    fn every_site_names_itself_and_appears_in_the_stable_order() {
+        for (idx, site) in ClampSite::ALL.iter().enumerate() {
+            assert_eq!(*site, ClampSite::ALL[idx]);
+            assert!(!site.name().is_empty(), "every site names itself");
+        }
+        assert_eq!(ClampSite::ALL.len(), ClampSite::COUNT);
+    }
+
+    #[test]
+    fn record_count_take_and_merge_follow_the_take_and_reset_pattern() {
+        let mut census = ClampCensus::default();
+        assert!(census.is_empty());
+        assert_eq!(census.total(), 0);
+
+        census.record(ClampSite::RelativeHumidity);
+        census.record(ClampSite::RelativeHumidity);
+        census.record(ClampSite::TankDrawTruncation);
+        assert_eq!(census.count(ClampSite::RelativeHumidity), 2);
+        assert_eq!(census.count(ClampSite::TankDrawTruncation), 1);
+        assert_eq!(census.total(), 3);
+
+        let taken = census.take();
+        assert_eq!(taken.count(ClampSite::RelativeHumidity), 2);
+        assert!(census.is_empty(), "take resets the tally");
+
+        census.merge(&taken);
+        assert_eq!(census.total(), 3);
+        assert_eq!(census.count(ClampSite::TankDrawTruncation), 1);
+    }
+
+    #[test]
+    fn the_census_serializes_as_a_map_of_site_names_to_counts() {
+        let mut census = ClampCensus::default();
+        census.record(ClampSite::CurveIndex);
+        census.record(ClampSite::CurveIndex);
+        let json = serde_json::to_string(&census).expect("serialize ClampCensus");
+        let decoded: std::collections::BTreeMap<String, u64> =
+            serde_json::from_str(&json).expect("deserialize ClampCensus");
+        assert_eq!(decoded.len(), ClampSite::COUNT, "every site appears");
+        for site in ClampSite::ALL {
+            assert_eq!(
+                decoded.get(site.name()).copied(),
+                Some(census.count(site)),
+                "{}'s key is its own name",
+                site.name()
+            );
+        }
+        assert_eq!(decoded.get("curve_index"), Some(&2));
+    }
+}

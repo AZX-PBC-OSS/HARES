@@ -41,7 +41,9 @@ use hares_io::{
     },
 };
 use hares_physics::ashrae152::design_temperatures_f;
-use hares_physics::constants::{OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W};
+use hares_physics::constants::{
+    BTU_PER_HR_PER_W, OCCUPANT_LATENT_GAIN_W, OCCUPANT_SENSIBLE_GAIN_W,
+};
 use hares_physics::units::{temperature_c_to_f, temperature_f_to_c};
 use hares_types::ZoneId;
 use serde_json::json;
@@ -118,16 +120,12 @@ const USABLE_TANK_FRACTION: f64 = 0.7;
 /// introduces <2% error in the capacity calculation.
 const WATER_DENSITY_LB_PER_GAL: f64 = 8.33;
 
-/// BTU per hour per watt (= 3.412 BTU/hr per W).
-/// ASHRAE HoF 2021 Ch.1 Table 1.
-const BTU_PER_HR_PER_W: f64 = 3.412;
-
 /// Conversion: 1 °C = 1.8 °F.
 const DEG_F_PER_DEG_C: f64 = 1.8;
 
 /// Pre-computed water energy factor for FHR capacity formula:
 ///   `WATER_DENSITY_LB_PER_GAL * DEG_F_PER_DEG_C / BTU_PER_HR_PER_W`
-///   = 8.33 × 1.8 / 3.412 ≈ 4.395
+///   = 8.33 × 1.8 / 3.412141633 ≈ 4.3943
 ///
 /// Used in: capacity_w = max(0, FHR_gph − usable_volume_gal) × factor × ΔT_C
 const WATER_ENERGY_FACTOR: f64 = WATER_DENSITY_LB_PER_GAL * DEG_F_PER_DEG_C / BTU_PER_HR_PER_W;
@@ -636,7 +634,7 @@ pub fn autosize_equipment_capacities(
 /// 3. Heating capacity [W] is computed as the power needed to recover the
 ///    FHR deficit at the design temperature rise:
 ///    `capacity_w = max(0, FHR_gph − usable_vol_gal) × W.E.F × ΔT_°C`
-///    where `W.E.F = 8.33 × 1.8 / 3.412 ≈ 4.395`.
+///    where `W.E.F = 8.33 × 1.8 / 3.412141633 ≈ 4.3943`.
 /// 4. A zero-bedroom home (a studio) sizes from the 50 gal default tank; an
 ///    unavailable bedroom count, a negative or non-finite mains temperature
 ///    or a non-positive capacity fail the autosizing naming the input.
@@ -3057,7 +3055,7 @@ mod tests {
         // 3 bedrooms → tank 50 gal, FHR 48 GPH
         // mains = 50 °F (10 °C), setpoint = 120 °F (48.89 °C) → ΔT = 38.89 °C
         // usable vol = 0.7 × 50 = 35 gal
-        // capacity = (48 − 35) × 4.395 × 38.89 ≈ 13 × 170.9 ≈ 2222 W
+        // capacity = (48 − 35) × 4.3943 × 38.89 ≈ 13 × 170.9 ≈ 2222 W
         let setpoint_c = hares_physics::units::temperature_f_to_c(120.0);
         let mut specs = vec![wh_spec(
             "Electric Resistance Water Heater",
@@ -3105,12 +3103,12 @@ mod tests {
 
         // ΔT = 120 °F − 50 °F = 70 °F = 38.89 °C (setpoint 120 °F, mains 50 °F)
         // usable = 0.7 × 50 = 35 gal
-        // capacity = (48 − 35) × 4.395 × 38.89 = 13 × 170.9 ≈ 2222 W
+        // capacity = (48 − 35) × 4.3943 × 38.89 = 13 × 170.9 ≈ 2222 W
         let expected_cap = (48.0 - 0.7 * 50.0) * WATER_ENERGY_FACTOR * (setpoint_c - 10.0);
         assert!(
             (capacity_w - expected_cap).abs() < 1e-3,
             "capacity {capacity_w:.2} W should match computed {expected_cap:.2} W \
-             (13 gal deficit × 4.395 factor × 38.89 K ΔT)"
+             (13 gal deficit × 4.3943 factor × 38.89 K ΔT)"
         );
         assert!(
             capacity_w > 2000.0,
@@ -3340,7 +3338,7 @@ mod tests {
             .expect("capacity must be set");
 
         // Base: 3 BR → FHR = 48, tank = 50 → deficit 13 gal
-        // capacity_base = 13 × 4.395 × 41.67 ≈ 2380 W
+        // capacity_base = 13 × 4.3943 × 41.67 ≈ 2380 W
         // With factor 1.5: 2380 × 1.5 = 3570 W
         let base_cap = (48.0 - 0.7 * 50.0) * WATER_ENERGY_FACTOR * (DEFAULT_WH_SETPOINT_C - 10.0);
         let expected = base_cap * 1.5;
@@ -3366,7 +3364,7 @@ mod tests {
             &[("autosize_water_heater_min_w", json!(10000.0))],
         )];
         // 1 BR → tank = 40 gal, FHR = 36 GPH, usable = 28 gal, deficit = 8 gal
-        // capacity = 8 × 4.395 × 41.67 ≈ 1465 W, below 10kW min
+        // capacity = 8 × 4.3943 × 41.67 ≈ 1465 W, below 10kW min
         autosize_water_heater_capacities(&mut specs, Some(1.0), 10.0).unwrap();
 
         let result = &specs[0];
@@ -3501,6 +3499,20 @@ mod tests {
         assert!(
             (volume_m3 - 0.1).abs() < 1e-6,
             "explicit volume 0.1 m3 must not be overridden, got {volume_m3}"
+        );
+    }
+
+    /// The conversion factor's one home is the physics constants: the
+    /// autosize module imports `BTU_PER_HR_PER_W` from there and defines
+    /// no local copy. The witness pins the value identity: the module's
+    /// factor is the physics constant's number, so re-homing the import
+    /// changes no number the sizing computes.
+    #[test]
+    fn btu_per_hr_per_w_is_the_physics_constant_not_a_local_copy() {
+        assert_eq!(
+            BTU_PER_HR_PER_W,
+            hares_physics::constants::BTU_PER_HR_PER_W,
+            "the autosize conversion factor is the physics constant's value"
         );
     }
 }

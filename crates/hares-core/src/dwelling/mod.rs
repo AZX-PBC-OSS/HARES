@@ -1641,7 +1641,11 @@ fn build_zone_column_caches(
 }
 
 /// Single-step observable output.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// A caller that steps in a loop reuses one result and lets the step
+/// write it in place (`run_timestep_into`), so the loop's steady state
+/// allocates nothing for it; `step()` returns a fresh value per call.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StepResult {
     /// The step row's own time: the naive local wall clock at the step's
     /// interval start, the value the output frame's `Time` column carries
@@ -2613,7 +2617,11 @@ fn validate_equipment_loops(
 /// this crate's own test build: the step path brackets each site with
 /// `thread_allocations()` reads and adds the difference to the site's
 /// field. `dwelling_snapshot_allocation_free_after_first_step` asserts
-/// every field grows by zero on every step after the first.
+/// every field grows by zero on every step after the first; the
+/// `state_snapshot_phase` accumulator is bracketed around the whole
+/// profiling phase of the same name instead of one site, and
+/// `state_snapshot_phase_allocation_free_after_first_step` asserts it
+/// the same way against a reused step-result buffer.
 #[cfg(test)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct SnapshotAllocations {
@@ -2627,6 +2635,10 @@ struct SnapshotAllocations {
     fluid_set_from: u64,
     /// Every custom slot's `set_custom`, once per installed solver.
     custom_set_from: u64,
+    /// The whole `state_snapshot` phase, from its clock entry to its
+    /// handoff to `output`: the equipment snapshot, the per-zone delivery
+    /// vectors and the step result's zone temperatures.
+    state_snapshot_phase: u64,
 }
 
 #[cfg(test)]
@@ -2654,6 +2666,8 @@ enum SnapshotAllocSite {
     HumiditySetFrom,
     ElectricalSetFrom,
     FluidSetFrom,
+    /// The whole `state_snapshot` phase, not one site.
+    StateSnapshotPhase,
 }
 
 #[cfg(test)]
@@ -2681,6 +2695,9 @@ impl Dwelling {
                 SnapshotAllocSite::HumiditySetFrom => accumulators.humidity_set_from += delta,
                 SnapshotAllocSite::ElectricalSetFrom => accumulators.electrical_set_from += delta,
                 SnapshotAllocSite::FluidSetFrom => accumulators.fluid_set_from += delta,
+                SnapshotAllocSite::StateSnapshotPhase => {
+                    accumulators.state_snapshot_phase += delta;
+                }
             }
         }
     }
@@ -3015,6 +3032,16 @@ pub struct Dwelling {
     diagnostic_accum: Option<DiagnosticAccumulator>,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     envelope_diagnostics: EnvelopeDiagnostics,
+    /// The run's clamp census: the counted physics clamps the run
+    /// applied, per site, drained per step from the recording thread's
+    /// tally. The census's scope is the per-step value clamps whose
+    /// clamped result is delivered; the excluded classes and their
+    /// members are the Hardening 18 entry's scope table. Diagnostics
+    /// only: the census surfaces through the dwelling's `clamp_census`
+    /// accessor, never the run result's health totals or the output
+    /// frames.
+    #[cfg(feature = "observe")]
+    clamp_census: hares_types::clamp_census::ClampCensus,
 }
 
 /// Borrowed view of per-step actor-interest filter state passed to
@@ -3292,20 +3319,55 @@ impl Dwelling {
     }
 }
 
+/// The number of steps a 24-hour day holds at the run's resolution,
+/// computed in milliseconds so a sub-second resolution is measured as
+/// itself instead of truncating to zero or one second. The day divides
+/// into whole steps only when the resolution is a positive whole number
+/// of seconds that divides the day exactly; anything else is a
+/// construction error naming the resolution. The day-over-day comparisons
+/// that address a day by its step count (warm-up's convergence check, the
+/// forcing horizon's warm-up floor) would read misaligned windows on any
+/// other resolution.
+pub(crate) fn steps_per_day_exact(time_res_ms: i64) -> Result<u64> {
+    if time_res_ms <= 0 || time_res_ms % 1000 != 0 {
+        return Err(HaresError::Dwelling(format!(
+            "time resolution {time_res_ms} ms is not a positive whole number of seconds: \
+             the day's step count must be exact"
+        )));
+    }
+    let res_secs = u64::try_from(time_res_ms / 1000).map_err(|_| {
+        HaresError::Dwelling(format!("time resolution {time_res_ms} ms is out of range"))
+    })?;
+    match (24u64 * 3600).checked_div(res_secs) {
+        Some(steps) if steps > 0 => Ok(steps),
+        _ => Err(HaresError::Dwelling(format!(
+            "time resolution {res_secs} s does not divide the 24-hour day into whole steps"
+        ))),
+    }
+}
+
 /// The horizon rule for the shared forcing table: every step index a run
 /// can read. Warm-up replays the first day and the production run restarts
 /// the clock, so a warm-up run's horizon is its duration's steps and at
 /// least one day's; without warm-up it is the duration's steps alone. The
 /// step counts match the clock's own (`SimClock::total_steps`, and
-/// `run_warmup_converged`'s per-day count).
-fn forcing_horizon_steps(duration: Duration, time_res: StdDuration, warmup: bool) -> u64 {
-    let res_secs = time_res.as_secs().max(1);
-    let duration_steps = u64::try_from(duration.num_seconds()).unwrap_or(0) / res_secs;
+/// `run_warmup_converged`'s per-day count). A resolution that cannot
+/// divide the day into whole steps raises the construction error
+/// `steps_per_day_exact` names.
+fn forcing_horizon_steps(duration: Duration, time_res: StdDuration, warmup: bool) -> Result<u64> {
+    let time_res_ms = i64::try_from(time_res.as_millis()).map_err(|_| {
+        HaresError::Dwelling(format!(
+            "time resolution {} ms is out of range",
+            time_res.as_millis()
+        ))
+    })?;
+    let steps_per_day = steps_per_day_exact(time_res_ms)?;
+    let duration_steps =
+        u64::try_from(duration.num_milliseconds()).unwrap_or(0) / time_res_ms as u64;
     if !warmup {
-        return duration_steps;
+        return Ok(duration_steps);
     }
-    let steps_per_day = 24 * 3600 / res_secs;
-    duration_steps.max(steps_per_day)
+    Ok(duration_steps.max(steps_per_day))
 }
 
 /// EnergyPlus's `MinLoad` for the warm-up convergence check: both days'
@@ -3738,7 +3800,7 @@ fn assemble_from_blueprint_with_seed(
                 config.sim_config.duration,
                 bp.time_res,
                 config.sim_config.warmup.config().is_some(),
-            )),
+            )?),
             first_hour_interpolation: config.sim_config.first_hour_interpolation,
             weather_year: config.sim_config.weather_year,
         },
@@ -3938,10 +4000,12 @@ fn assemble_from_blueprint_with_seed(
         environment.schedule_mut(),
         &bp.building.unavailable_periods,
     )?;
+    let schedule_upsample_factor = environment.schedule_upsample_factor();
     hares_io::inject_schedule_into_specs_with_pre_period(
         &mut equipment_specs,
         environment.schedule_mut(),
         pre_period_columns.as_deref(),
+        schedule_upsample_factor,
         Some(&bp.inputs.defaults.profiles()),
         &defaults,
         &mut schedule_warnings,
@@ -4190,6 +4254,11 @@ fn assemble_from_blueprint_with_seed(
         // constructor and `init` both read, so every constructor-time
         // decision sees the same config the step's flows follow.
         let mut merged_cfg = merged_equipment_config(spec, &override_root)?;
+        // The dwelling identity the schedule-source key derivations key
+        // on: the config-stable building id, attached before the
+        // constructor and init both read the config, so every conversion
+        // site keys its sources on this dwelling.
+        merged_cfg.bldg_id = config.bldg_id;
         let mut eq = create_equipment_from_config(&registry, merged_cfg.clone())?;
 
         // Entrance-1 identity validation runs before `init` so an unassigned
@@ -4567,6 +4636,8 @@ fn assemble_from_blueprint_with_seed(
         diagnostic_accum: None,
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         envelope_diagnostics: solvers.envelope_diagnostics,
+        #[cfg(feature = "observe")]
+        clamp_census: hares_types::clamp_census::ClampCensus::default(),
     };
 
     // The post-hoc diagnostic accumulator: part of the diagnostics report,
@@ -4610,8 +4681,13 @@ impl Dwelling {
     }
 
     fn simulate_inner(&mut self) -> Result<Arc<RunResult>> {
+        // One step result for the whole run: every step writes it in
+        // place, so the loop's steady state allocates nothing for it
+        // (the zone-temperature vector's `clone_from` reuses the
+        // allocation from the first step on).
+        let mut step_result = StepResult::default();
         while self.clock.current_step() < self.clock.total_steps() {
-            self.run_timestep(self.recording_enabled())?;
+            self.run_timestep_into(self.recording_enabled(), &mut step_result)?;
         }
 
         // The finalisation is timed once, around the first finalising
@@ -5047,7 +5123,11 @@ impl Dwelling {
     /// expected draw — never a silent constant-power answer.
     #[must_use]
     pub fn premise_zip(&self) -> Option<PremiseZip> {
-        premise_zip::aggregate_premise_zip(self.equipment(), self.environment.schedule())
+        premise_zip::aggregate_premise_zip(
+            self.equipment(),
+            self.environment.schedule(),
+            self.environment.schedule_upsample_factor(),
+        )
     }
 
     /// Returns per-equipment HPXML setpoint reconciliation records, keyed by
@@ -5217,6 +5297,17 @@ impl Dwelling {
     pub fn envelope_diagnostics_json(&self) -> Result<String> {
         serde_json::to_string_pretty(&self.envelope_diagnostics)
             .map_err(|e| HaresError::Io(format!("EnvelopeDiagnostics serialization: {e}")))
+    }
+
+    /// The run's clamp census: per-site counts of the counted physics
+    /// clamps the run applied (the per-step value clamps; the excluded
+    /// classes are the Hardening 18 entry's scope table), drained per
+    /// step. Diagnostics only: the census rides this accessor, never
+    /// the health totals the frames serialize.
+    #[cfg(feature = "observe")]
+    #[must_use]
+    pub fn clamp_census(&self) -> &hares_types::clamp_census::ClampCensus {
+        &self.clamp_census
     }
 
     /// Stores the active price signal for equipment controllers.
@@ -5752,7 +5843,11 @@ impl Dwelling {
         let t = &self.latest_env.current_time;
         let fhour = t.hour() as f64 + t.minute() as f64 / 60.0 + t.second() as f64 / 3600.0;
         let phase = 2.0 * std::f64::consts::PI * fhour / 24.0;
-        if cos { phase.cos() } else { phase.sin() }
+        if cos {
+            libm::cos(phase)
+        } else {
+            libm::sin(phase)
+        }
     }
 
     /// The value one actor's published telemetry holds for `channel`: the
@@ -6432,13 +6527,7 @@ impl Dwelling {
     /// [`Self::run_warmup_converged`] records the state-restored replay
     /// blocker first, the build's own warm-up records nothing).
     fn run_warmup_converged_inner(&mut self, warmup: &hares_io::WarmupConfig) -> Result<u32> {
-        let time_res_s = u64::try_from(self.clock.time_res.num_seconds())
-            .map_err(|_| HaresError::Io("invalid time resolution".to_string()))?;
-        let steps_per_day = (24u64 * 3600).checked_div(time_res_s).unwrap_or(0);
-
-        if steps_per_day == 0 {
-            return Ok(1);
-        }
+        let steps_per_day = steps_per_day_exact(self.clock.time_res.num_milliseconds())?;
 
         self.is_warming_up = true;
 
@@ -6873,10 +6962,23 @@ impl Dwelling {
     }
 
     fn run_timestep(&mut self, record_output: bool) -> Result<StepResult> {
+        let mut out = StepResult::default();
+        self.run_timestep_into(record_output, &mut out)?;
+        Ok(out)
+    }
+
+    /// The by-value [`Self::run_timestep`]'s body, writing the step
+    /// result in place into `out`: the zone-temperature vector is copied
+    /// through `clone_from`, so a caller reusing one result across steps
+    /// pays the allocation once, at the first step, and the loop's
+    /// steady state allocates nothing here. Every field is overwritten
+    /// on the success path, so a reused buffer carries nothing from the
+    /// step before.
+    fn run_timestep_into(&mut self, record_output: bool, out: &mut StepResult) -> Result<()> {
         // Every warning the step's dispatch and equipment drains raise
         // carries the step it was raised in: the step's own index.
         self.warnings.set_step(Some(self.clock.current_step()));
-        let result = self.run_timestep_inner(record_output);
+        let result = self.run_timestep_inner(record_output, out);
         self.warnings.set_step(None);
         if result.is_ok() {
             crate::step_counts::bump();
@@ -6884,7 +6986,7 @@ impl Dwelling {
         result
     }
 
-    fn run_timestep_inner(&mut self, record_output: bool) -> Result<StepResult> {
+    fn run_timestep_inner(&mut self, record_output: bool, out: &mut StepResult) -> Result<()> {
         if let Some(ended) = &self.terminal_error {
             return Err(HaresError::Simulation(format!(
                 "the run ended at an earlier step and cannot continue: {ended}"
@@ -7759,6 +7861,21 @@ impl Dwelling {
         // nothing: the warning is the signal).
         self.health.cross_tier_deadband_events += step_cross_tier_deadband_events;
 
+        // The clamp census: once per timestep, after the physics and
+        // equipment steps complete, drain the recording thread's per-step
+        // tally into the run totals, the same take-and-reset the
+        // equipment health counts above use. Diagnostics only: no policy
+        // limit and no warning ride the census; the counts surface
+        // through the dwelling's `clamp_census` accessor, never through
+        // the health totals the frames serialize.
+        #[cfg(feature = "observe")]
+        {
+            let step_clamps = hares_types::clamp_census::take();
+            if !step_clamps.is_empty() {
+                self.clamp_census.merge(&step_clamps);
+            }
+        }
+
         // Step 3c: propagate per-timestep ventilation recovery effectiveness
         // from equipment to the thermal solver config.  The Ventilation equipment
         // computes effective sensible/latent effectiveness accounting for bypass
@@ -8097,6 +8214,8 @@ impl Dwelling {
         // (`state_snapshot` phase) follows.
         #[cfg(feature = "profiling")]
         phase_clock.enter(&mut self.profiling, ProfilePhase::StateSnapshot);
+        #[cfg(test)]
+        let state_snapshot_alloc_before = thread_allocations();
 
         // Push observer step snapshot after invariant checks so moisture invariant
         // capture data (populated in check_step_invariants) is available for the snapshot.
@@ -8126,13 +8245,13 @@ impl Dwelling {
                     let fhour = self.latest_env.current_time.hour() as f64
                         + self.latest_env.current_time.minute() as f64 / 60.0
                         + self.latest_env.current_time.second() as f64 / 3600.0;
-                    (2.0 * std::f64::consts::PI * fhour / 24.0).sin()
+                    libm::sin(2.0 * std::f64::consts::PI * fhour / 24.0)
                 },
                 time_cos: {
                     let fhour = self.latest_env.current_time.hour() as f64
                         + self.latest_env.current_time.minute() as f64 / 60.0
                         + self.latest_env.current_time.second() as f64 / 3600.0;
-                    (2.0 * std::f64::consts::PI * fhour / 24.0).cos()
+                    libm::cos(2.0 * std::f64::consts::PI * fhour / 24.0)
                 },
                 actor_telemetry_keys: self
                     .actors
@@ -8238,31 +8357,27 @@ impl Dwelling {
         self.step_hvac_cooling_w = hvac_cooling_w;
         // The per-zone delivery, the per-zone columns' own values: the
         // thermal port accumulators still hold the step's equipment
-        // contributions (ports.zero() runs after record_step).
-        self.step_hvac_heating_by_zone = self
-            .ports
-            .thermal
-            .iter()
-            .map(|thermal| {
+        // contributions (ports.zero() runs after record_step). The
+        // vectors are reused: `clear` keeps their capacity, so a
+        // steady-state step allocates nothing here.
+        self.step_hvac_heating_by_zone.clear();
+        self.step_hvac_heating_by_zone
+            .extend(self.ports.thermal.iter().map(|thermal| {
                 (
                     thermal.zone,
                     thermal.sensible_for_category(ThermalCategory::HvacHeating),
                 )
-            })
-            .collect();
-        self.step_hvac_cooling_by_zone = self
-            .ports
-            .thermal
-            .iter()
-            .map(|thermal| {
+            }));
+        self.step_hvac_cooling_by_zone.clear();
+        self.step_hvac_cooling_by_zone
+            .extend(self.ports.thermal.iter().map(|thermal| {
                 (
                     thermal.zone,
                     thermal
                         .sensible_for_category(ThermalCategory::HvacCooling)
                         .abs(),
                 )
-            })
-            .collect();
+            }));
         if hvac_heating_w < 0.0 {
             tracing::warn!(
                 hvac_heating_w = hvac_heating_w,
@@ -8273,14 +8388,22 @@ impl Dwelling {
 
         let gas_power_w = self.ports.fuel.get(hares_types::FuelType::Gas);
 
-        let step_result = StepResult {
-            timestamp: self.latest_env.current_time.naive_local(),
-            net_electric_power_w: self.electrical_solver.net_active_w(),
-            zone_temperatures_c: self.roster.zone_temp_scratch.clone(),
-            hvac_heating_w,
-            hvac_cooling_w,
-            gas_power_w,
-        };
+        // The step result written in place: the zone temperatures copy
+        // through `clone_from`, which reuses the buffer's allocation
+        // once it holds the zone count, so a reused result allocates
+        // nothing here after the first step.
+        out.timestamp = self.latest_env.current_time.naive_local();
+        out.net_electric_power_w = self.electrical_solver.net_active_w();
+        out.zone_temperatures_c
+            .clone_from(&self.roster.zone_temp_scratch);
+        out.hvac_heating_w = hvac_heating_w;
+        out.hvac_cooling_w = hvac_cooling_w;
+        out.gas_power_w = gas_power_w;
+        #[cfg(test)]
+        self.record_snapshot_allocations(
+            state_snapshot_alloc_before,
+            SnapshotAllocSite::StateSnapshotPhase,
+        );
 
         // End of the `state_snapshot` phase (observer push, diagnostic
         // accumulation, end-of-step equipment snapshot, step result).
@@ -8288,7 +8411,7 @@ impl Dwelling {
         phase_clock.enter(&mut self.profiling, ProfilePhase::Output);
 
         // Step 5: record outputs to disk (when enabled) and accumulate step results.
-        if record_output && let Err(err) = self.record_step(&step_result) {
+        if record_output && let Err(err) = self.record_step(out) {
             // A callback error ends the run the way the failure budget
             // does: latched, so every later step returns it without
             // stepping anything.
@@ -8439,7 +8562,7 @@ impl Dwelling {
         #[cfg(feature = "profiling")]
         phase_clock.finish(&mut self.profiling);
 
-        Ok(step_result)
+        Ok(())
     }
 
     /// Fingerprints the frozen output state for the rejected-roster-change
@@ -9776,6 +9899,57 @@ destination = "memory"
                 after - before
             );
         }
+    }
+
+    /// The `state_snapshot` phase's allocation delta, the witness for the
+    /// phase's own allocations (the profiling record's second-heaviest
+    /// phase): the equipment snapshot, the two per-zone HVAC delivery
+    /// vectors and the step result's zone temperatures. A fully loaded
+    /// dwelling (the OCHRE sample home's roster) is stepped through the
+    /// same counting allocator the site test above reads, into one
+    /// reused step result (the shape `simulate()` steps in), and the
+    /// phase must allocate nothing on any step after the first.
+    #[test]
+    fn state_snapshot_phase_allocation_free_after_first_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        let mut step_result = StepResult::default();
+        dwelling
+            .run_timestep_into(false, &mut step_result)
+            .expect("first step");
+        let baseline = dwelling.snapshot_allocation_totals().state_snapshot_phase;
+        for _ in 0..4 {
+            dwelling
+                .run_timestep_into(false, &mut step_result)
+                .expect("step");
+        }
+        let after = dwelling.snapshot_allocation_totals().state_snapshot_phase;
+        assert_eq!(
+            after,
+            baseline,
+            "the state_snapshot phase allocated {} times over 4 steps after the first",
+            after - baseline
+        );
     }
 
     /// A custom solver's slot is resolved once at installation: the
@@ -21455,7 +21629,12 @@ latent_gain_fraction = 0.08
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
                 setpoint: HvacSetpointConfig {
-                    cooling_setpoint_c: Some(0.0),
+                    // The band's minimum, an in-band value that still
+                    // drives the AC to its highest stage against a
+                    // ~20 C zone: the 0 C this placeholder once carried
+                    // is outside the setpoint plausibility band, and the
+                    // init gate refuses it.
+                    cooling_setpoint_c: Some(5.0),
                     // Cooling alone is named: a heating constant below it
                     // would be the both-named deadband violation the init
                     // errors on, and the unnamed heating axis opens the
@@ -21491,7 +21670,8 @@ latent_gain_fraction = 0.08
             .expect("init AC with one shared curve pair across three stages");
         replace_equipment_for_test(&mut dwelling, vec![Box::new(ac)]);
 
-        // Max cooling demand (setpoint 0 °C against a ~20 °C zone) drives
+        // Max cooling demand (the 5 C setpoint, the plausibility band's
+        // minimum, against a ~20 °C zone) drives
         // the AC to its highest stage, whose curve index (speed 2 → 4)
         // exceeds the single shared cap+EIR pair. The step itself may fail
         // the temperature-bounds invariant from the deliberately absurd
@@ -21503,6 +21683,111 @@ latent_gain_fraction = 0.08
             dwelling.health().curve_index_clamps >= 1,
             "the out-of-bounds curve evaluation must land in the dwelling's run total; got {:?}",
             dwelling.health()
+        );
+
+        // The clamp census drains the same events per step into its own
+        // diagnostics-scoped totals: the site's count equals the health
+        // counter's (both drain the same clamp events), and the census
+        // surfaces through the dwelling's accessor alone, never the
+        // health totals the output frames serialize.
+        #[cfg(feature = "observe")]
+        assert_eq!(
+            dwelling
+                .clamp_census()
+                .count(hares_types::clamp_census::ClampSite::CurveIndex),
+            dwelling.health().curve_index_clamps,
+            "the census site counts the same clamp events the health total drains"
+        );
+    }
+
+    /// The multi-timestep drain witness: a dwelling run of three steps
+    /// whose AC clamps its curve index on the step it runs (two
+    /// out-of-bounds curve evaluations at the highest stage, then the
+    /// 5 °C setpoint is satisfied and the AC stays off) drains each
+    /// step's own firings, the per-step census growth reading [2, 0, 0]
+    /// and the run total 2. A drain that took-and-reset only the
+    /// temporary copy `Cell::get()` hands out left the firings on the
+    /// thread tally: steps 2 and 3 fired nothing, yet their drains
+    /// re-merged the stale tally and the run total read 6 - the reviewer's
+    /// probe number, there with one firing per step (drained per-step
+    /// counts [1, 2, 3], total 6 where the truth is 3).
+    #[cfg(feature = "observe")]
+    #[test]
+    fn the_census_drains_each_steps_own_clamps() {
+        use hares_equipment::hvac::air_conditioner::AirConditioner;
+        use hares_equipment::{CentralAirConditionerConfig, DuctConfig, HvacSetpointConfig};
+
+        let mut dwelling = bestest_dwelling();
+        let config = EquipmentConfig::from_typed(
+            "AC1".to_string(),
+            "Air Conditioner".to_string(),
+            CentralAirConditionerConfig {
+                equipment_id: None,
+                zone_id: Some(1),
+                capacity_w: 8_000.0,
+                eir: 0.33,
+                shr: Some(0.75),
+                number_of_speeds: 4,
+                stage_capacities_w: Some(vec![2_000.0, 4_000.0, 6_000.0, 8_000.0]),
+                stage_eirs: None,
+                stage_shrs: None,
+                fan_power_w: None,
+                fan_power_w_per_cfm: None,
+                setpoint: HvacSetpointConfig {
+                    cooling_setpoint_c: Some(5.0),
+                    heating_setpoint_c: None,
+                    heating_setpoint_source: None,
+                    cooling_setpoint_source: None,
+                },
+                hysteresis_c: Some(1.0),
+                airflow_m3_s_per_w: Some(hares_equipment::hvac::AIRFLOW_CENTRAL_AC_M3_S_PER_W),
+                fraction_load_served: None,
+                crankcase_heater_w: None,
+                crankcase_heater_threshold_c: None,
+                crankcase_capacity_curve_coeffs: None,
+                duct: DuctConfig::default(),
+                system_type: None,
+                startup_cd: None,
+                biquadratic_x1_min: None,
+                biquadratic_x1_max: None,
+                biquadratic_x2_min: None,
+                biquadratic_x2_max: None,
+                ff_min: None,
+                ff_max: None,
+                plf_min: None,
+                plf_max: None,
+                charge_defect_ratio: None,
+                min_oat_compressor_cooling_c: None,
+            },
+        )
+        .expect("typed AC config");
+        let mut ac = AirConditioner::new(config.clone());
+        ac.init(&config, &dwelling.latest_env)
+            .expect("init AC with one shared curve pair across three stages");
+        replace_equipment_for_test(&mut dwelling, vec![Box::new(ac)]);
+
+        // The step itself may fail the temperature-bounds invariant from
+        // the deliberately absurd one-step cool-down; the census drain is
+        // the subject, and it is drained before the invariant pass.
+        let mut per_step: Vec<u64> = Vec::new();
+        let mut prev = 0;
+        for _ in 0..3 {
+            let _ = dwelling.run_timestep(false);
+            let total = dwelling
+                .clamp_census()
+                .count(hares_types::clamp_census::ClampSite::CurveIndex);
+            per_step.push(total - prev);
+            prev = total;
+        }
+        assert_eq!(
+            per_step,
+            vec![2, 0, 0],
+            "each step's drain carries its own firings only; a later drain \
+             re-merged the tally's history"
+        );
+        assert_eq!(
+            prev, 2,
+            "the run total is the two firings' count, not the re-merged history"
         );
     }
 
@@ -21591,6 +21876,114 @@ latent_gain_fraction = 0.08
                 }
             }
             other => panic!("expected WarmupOutcome::Ran, got {other:?}"),
+        }
+    }
+
+    /// The shipped resolutions divide the day into whole steps: 60 s gives
+    /// 1440 steps per day, 900 s gives 96, 3600 s gives 24, and a
+    /// day-long step gives 1.
+    #[test]
+    fn steps_per_day_at_the_shipped_resolutions() {
+        assert_eq!(
+            steps_per_day_exact(60_000).expect("60 s divides the day"),
+            1440
+        );
+        assert_eq!(
+            steps_per_day_exact(900_000).expect("900 s divides the day"),
+            96
+        );
+        assert_eq!(
+            steps_per_day_exact(3_600_000).expect("3600 s divides the day"),
+            24
+        );
+        assert_eq!(
+            steps_per_day_exact(86_400_000).expect("86400 s divides the day"),
+            1
+        );
+    }
+
+    /// A resolution that is zero, negative, a fraction of a second, or not
+    /// a whole number of seconds holds no whole step count for the day:
+    /// the construction error names the resolution in milliseconds. A
+    /// whole-second resolution longer than the day is named in seconds.
+    #[test]
+    fn steps_per_day_rejects_a_resolution_that_cannot_divide_the_day() {
+        for res_ms in [0, -1_000, 500, 1_500, 86_400_001] {
+            let err = steps_per_day_exact(res_ms)
+                .expect_err("the resolution cannot divide the day into whole steps");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("{res_ms} ms")),
+                "the error must name the resolution {res_ms} ms: {msg}"
+            );
+        }
+        let err = steps_per_day_exact(90_000_000).expect_err("90000 s holds no whole day of steps");
+        assert!(
+            err.to_string().contains("90000 s"),
+            "the error must name the resolution in seconds: {err}"
+        );
+    }
+
+    /// A sub-second resolution reaching the warm-up entry fails the run
+    /// naming the resolution instead of silently running zero warm-up
+    /// days: a day holds a whole number of such steps only at
+    /// whole-second resolutions that divide it exactly, and the
+    /// day-over-day comparison the convergence check makes needs whole
+    /// days of steps.
+    #[test]
+    fn warmup_rejects_a_sub_second_resolution_naming_it() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.clock.time_res = chrono::Duration::milliseconds(500);
+
+        let err = dwelling
+            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .expect_err("a 500 ms resolution cannot divide the day");
+        assert!(
+            err.to_string().contains("500 ms"),
+            "the error must name the resolution: {err}"
+        );
+    }
+
+    /// The forcing horizon's warm-up floor: a duration shorter than a day
+    /// still reads a day's steps, a longer duration reads its own, and a
+    /// resolution that cannot divide the day into whole steps is the
+    /// construction error the day count raises.
+    #[test]
+    fn forcing_horizon_floors_at_a_day_of_steps_and_validates_the_resolution() {
+        let day = chrono::Duration::seconds(86_400);
+        let res = StdDuration::from_secs(900);
+        assert_eq!(
+            forcing_horizon_steps(day, res, true).expect("900 s divides the day"),
+            96
+        );
+        assert_eq!(
+            forcing_horizon_steps(day, res, false).expect("900 s divides the day"),
+            96
+        );
+        assert_eq!(
+            forcing_horizon_steps(chrono::Duration::seconds(43_200), res, true)
+                .expect("900 s divides the day"),
+            96,
+            "half a day floors at the full day of steps under warm-up"
+        );
+        assert_eq!(
+            forcing_horizon_steps(chrono::Duration::seconds(43_200), res, false)
+                .expect("900 s divides the day"),
+            48
+        );
+        assert_eq!(
+            forcing_horizon_steps(chrono::Duration::seconds(7 * 86_400), res, true)
+                .expect("900 s divides the day"),
+            672
+        );
+
+        for res_ms in [500u64, 1_500] {
+            let err = forcing_horizon_steps(day, StdDuration::from_millis(res_ms), true)
+                .expect_err("the resolution cannot divide the day into whole steps");
+            assert!(
+                err.to_string().contains(&format!("{res_ms} ms")),
+                "the error must name the resolution {res_ms} ms: {err}"
+            );
         }
     }
 
@@ -22352,7 +22745,12 @@ occupancy = 1.0
                 fan_power_w: None,
                 fan_power_w_per_cfm: None,
                 setpoint: HvacSetpointConfig {
-                    cooling_setpoint_c: Some(0.0),
+                    // The band's minimum, an in-band value that still
+                    // drives the AC to its highest stage against a
+                    // ~20 C zone: the 0 C this placeholder once carried
+                    // is outside the setpoint plausibility band, and the
+                    // init gate refuses it.
+                    cooling_setpoint_c: Some(5.0),
                     // Cooling alone is named: a heating constant below it
                     // would be the both-named deadband violation the init
                     // errors on, and the unnamed heating axis opens the
@@ -22933,14 +23331,14 @@ occupancy = 1.0
 
     /// Helper: write a synthetic TOML with a stochastic CookingRange event
     /// load so the reproducibility test exercises RNG-dependent behaviour.
-    fn write_event_load_toml(path: &PathBuf, master_seed: u64) {
+    fn write_event_load_toml(path: &PathBuf, master_seed: u64, duration_s: u64) {
         let content = format!(
             r#"building_id = 9001
 
 [simulation]
 start_time = "2024-06-15T12:00:00Z"
 time_res = 60
-duration = 600
+duration = {duration_s}
 output_chunk_size = 1000
 master_seed = {master_seed}
 [geometry]
@@ -22987,7 +23385,7 @@ latent_gain_fraction = 0.08
     #[test]
     fn identical_dwellings_with_stochastic_load_produce_reproducible_results() {
         let (_dir_a, toml_path_a) = temp_toml("rng_stoch_repro_a");
-        write_event_load_toml(&toml_path_a, 42);
+        write_event_load_toml(&toml_path_a, 42, 600);
         let (_dir_b, toml_path_b) = temp_toml("rng_stoch_repro_b");
         fs::copy(&toml_path_a, &toml_path_b).expect("copy TOML");
 
@@ -23049,17 +23447,19 @@ latent_gain_fraction = 0.08
 
     /// Smoke test: two dwellings with the same stochastic event-load config
     /// but different `master_seed` values MUST produce meaningfully different
-    /// output trajectories.  The event load draws from the dwelling's
-    /// hierarchical RNG at each step to decide whether to start an event;
-    /// with `event_probability = 0.5`, different seeds produce different
-    /// event sequences, proving the RNG is actually consumed (not just a
-    /// fixed sequence) and that the stochastic pipeline is live.
+    /// output trajectories. The event load draws from the dwelling's
+    /// hierarchical RNG at each idle step to decide whether to start an
+    /// event; the start probability is the per-hour basis, so a day of
+    /// one-minute steps at `event_probability = 0.5` starts the load about
+    /// seven times, and different seeds produce different event sequences,
+    /// proving the RNG is actually consumed (not just a fixed sequence)
+    /// and that the stochastic pipeline is live.
     #[test]
     fn different_master_seeds_produce_different_event_load_outputs() {
         let (_dir_a, toml_path_a) = temp_toml("rng_smoke_seed_a");
-        write_event_load_toml(&toml_path_a, 42);
+        write_event_load_toml(&toml_path_a, 42, 86_400);
         let (_dir_b, toml_path_b) = temp_toml("rng_smoke_seed_b");
-        write_event_load_toml(&toml_path_b, 99);
+        write_event_load_toml(&toml_path_b, 99, 86_400);
 
         let mut a = Dwelling::from_toml_config(&toml_path_a).expect("build dwelling A (seed 42)");
         let mut b = Dwelling::from_toml_config(&toml_path_b).expect("build dwelling B (seed 99)");
@@ -23073,10 +23473,9 @@ latent_gain_fraction = 0.08
             "both dwellings must produce the same number of steps"
         );
 
-        // At least one timestep must have a different net electric power.
-        // With event_probability = 0.5 and 10 independent RNG draws per
-        // dwelling, the chance of two different ChaCha8Rng seeds producing
-        // identical sequences is astronomically low (≈ 2^-10 < 0.1%).
+        // At least one timestep must have a different net electric power:
+        // two different ChaCha8 seeds' draw sequences agreeing start for
+        // step across a day is astronomically unlikely.
         let any_differ = results_a.iter().zip(results_b.iter()).any(|(sa, sb)| {
             (sa.net_electric_power_w - sb.net_electric_power_w).abs() > f64::EPSILON
         });

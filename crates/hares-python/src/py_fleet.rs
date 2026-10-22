@@ -198,8 +198,19 @@ impl PyFleet {
     /// needs ``typical_year`` (the run's calendar year; there is no
     /// built-in year). Every home starts Jan 1 00:00 local standard time
     /// at its own site's standard offset.
+    ///
+    /// ``master_seed`` seeds each home's event-load streams (they derive
+    /// from the seed and the home's building id); ``None``
+    /// keeps the documented default seed of 0. The construction report
+    /// names the seed the fleet runs under. The seed does not reach the
+    /// DR compliance driver's draw, the EV driver's key material or a
+    /// noisy TimeWindows source's keystream key: each keys on its own
+    /// configured seed or identity, and the fleet path constructs none
+    /// of them today. If the fleet path gains actor or noisy-source
+    /// construction, the master seed must thread into their
+    /// unspecified-seed derivations the same way.
     #[classmethod]
-    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, typical_year=None, duration_s=None, defaults_path=None, *, alignment=None, **unexpected))]
+    #[pyo3(signature = (metadata_path, buildings_dir, weather_dir, filter=None, resstock_version=None, typical_year=None, duration_s=None, defaults_path=None, *, alignment=None, master_seed=None, **unexpected))]
     #[allow(clippy::too_many_arguments)]
     pub fn from_resstock(
         _cls: &Bound<'_, PyType>,
@@ -212,6 +223,7 @@ impl PyFleet {
         duration_s: Option<i64>,
         defaults_path: Option<String>,
         alignment: Option<PyAlignment>,
+        master_seed: Option<u64>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         check_unexpected_kwargs("from_resstock", unexpected)?;
@@ -253,6 +265,7 @@ impl PyFleet {
             parsed_filter,
             duration,
             &defaults,
+            master_seed,
         )
         .map_err(to_py_err)?;
         let fleet = match alignment {

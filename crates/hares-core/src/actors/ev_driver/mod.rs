@@ -61,7 +61,8 @@ use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::telemetry_keys as tk;
 use hares_types::{
     ChargingStrategy, ControlCapabilities, ControlSignal, EnvironmentState, EquipmentId,
-    EvConnectionState, HaresError, PlugInPolicy, ScheduleSource, Telemetry, TelemetryField,
+    EvConnectionState, HaresError, PlugInPolicy, PriceSignal, ScheduleSource, Telemetry,
+    TelemetryField,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -325,11 +326,7 @@ impl EvDriverParams {
         };
 
         let seed = config.get_f64("seed").unwrap_or(0.0) as u64;
-        let seed_bytes = {
-            let mut b = [0u8; 32];
-            b[..8].copy_from_slice(&seed.to_le_bytes());
-            b
-        };
+        let seed_bytes = driver_key_material(seed, config.dwelling_id);
 
         let strategy = preset
             .map(|p| p.strategy.clone())
@@ -390,6 +387,21 @@ impl EvDriverParams {
                 .unwrap_or(defaults::AWAY_CHARGE_POWER_W),
         })
     }
+}
+
+/// The EV driver's key material: the configured `seed` with the dwelling's
+/// identity in bytes 8..16 (the slot [`hares_types::rng::dwelling_seed`]
+/// puts the building id in). The day-roll generator and the four driving
+/// sources' tagged derivations all key off this one derivation, so two
+/// dwellings' identically-configured drivers - the same configured seed,
+/// and no per-driver identity beyond it - never draw the same driving
+/// series. The dwelling id is the config-stable per-dwelling value every
+/// per-dwelling stream derivation keys on.
+pub fn driver_key_material(seed: u64, dwelling_id: i64) -> [u8; 32] {
+    let mut bytes = [0_u8; 32];
+    bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    bytes[8..16].copy_from_slice(&dwelling_id.to_le_bytes());
+    bytes
 }
 
 /// Behavioral inputs for [`EvDriverActor::new`], grouped so the constructor
@@ -468,10 +480,18 @@ pub struct EvDriverActor {
     drive_cancelled: u32,
     /// Actor telemetry: observable decision state for diagnostics.
     telemetry: Telemetry,
-    /// First estimate-contract error (a non-finite or negative
-    /// needed-charge-hours result): the actor reports unhealthy and the step
-    /// fails at the post-decide health check.
-    estimate_error: Option<String>,
+    /// The actor's first contract failure: a driving schedule the driver
+    /// cannot read (the day roll's departure, arrival, duration or miles
+    /// source) or a non-finite or negative needed-charge-hours estimate.
+    /// The actor reports unhealthy and the step fails at the post-decide
+    /// health check. The failure is sticky (no clearing path): a read's
+    /// cause can be calendar-transient (a TimeWindows source with no
+    /// window matching the day's weekday is unreadable that day and
+    /// readable on a later one), and stickiness trades the transient's
+    /// missed days for a fail-fast signal the run cannot silently resume
+    /// past - the driver does not rejoin mid-run on a day the source
+    /// would read.
+    health_error: Option<String>,
 }
 
 use efficiency::temp_efficiency_multiplier;
@@ -513,7 +533,7 @@ impl EvDriverActor {
 
     /// Builds a driver actor with its own RNG stream.
     /// Takes over the decision state (its RNG stream and position, the
-    /// strategy's gate latches and the sticky estimate failure included)
+    /// strategy's gate latches and the sticky health failure included)
     /// and telemetry of the driver this one is rebuilt to replace with new
     /// prices.
     pub(crate) fn take_over(&mut self, predecessor: &dyn Actor) -> Result<(), HaresError> {
@@ -605,7 +625,7 @@ impl EvDriverActor {
             needs_away_charge: false,
             drive_cancelled: 0,
             telemetry,
-            estimate_error: None,
+            health_error: None,
         }
     }
 
@@ -763,10 +783,22 @@ impl EvDriverActor {
     }
 
     /// Roll a daily event for a new day if needed.
-    fn maybe_roll_daily_event(&mut self, env: &EnvironmentState) {
+    ///
+    /// A driving schedule the driver cannot read is a typed error naming
+    /// the actor and the source; no day is invented from defaults (the
+    /// departure, arrival, duration and miles values a failed read used
+    /// to substitute drove and charged the vehicle on invented times).
+    /// The caller records the cause: the actor reports unhealthy and the
+    /// step fails at the post-decide health check.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError::Equipment`] naming the actor and the source whose
+    /// read failed, carrying the source's own cause.
+    fn maybe_roll_daily_event(&mut self, env: &EnvironmentState) -> Result<(), HaresError> {
         let ordinal = env.current_time.ordinal0() as i32 + env.current_time.year() * 366;
         if ordinal == self.current_day_ordinal {
-            return;
+            return Ok(());
         }
         self.current_day_ordinal = ordinal;
 
@@ -779,18 +811,28 @@ impl EvDriverActor {
             self.reconcile_soc(env, "day_start");
         }
 
+        // The read-failure error for one of the driver's schedule sources:
+        // the actor and the source are named here, the source's own cause
+        // rides along, so the step error is self-sufficient.
+        let read_failed = |source: &str, err: HaresError| {
+            HaresError::Equipment(format!(
+                "EV driver actor '{}': the {source} schedule read failed: {err}",
+                self.name
+            ))
+        };
+
         // Decide if today is a driving day
         let roll: f64 = self.rng.random();
         if roll >= self.event_day_ratio {
             self.todays_event = None;
-            return;
+            return Ok(());
         }
 
         // Sample departure time from ScheduleSource (seeded, reproducible)
         let departure_min = self
             .departure_time
             .value_at(env)
-            .unwrap_or(480.0)
+            .map_err(|err| read_failed("departure-time", err))?
             .clamp(0.0, 1439.0) as u16;
 
         let arrival = if let Some(ref mut arrival_src) = self.arrival_time {
@@ -800,7 +842,7 @@ impl EvDriverActor {
             // unconditional arrival distribution shape.
             let mut arrival_raw = arrival_src
                 .value_at(env)
-                .unwrap_or(1080.0)
+                .map_err(|err| read_failed("arrival-time", err))?
                 .clamp(0.0, 1439.0) as u16;
             for _ in 0..5 {
                 if arrival_raw > departure_min {
@@ -808,12 +850,14 @@ impl EvDriverActor {
                 }
                 arrival_raw = arrival_src
                     .value_at(env)
-                    .unwrap_or(1080.0)
+                    .map_err(|err| read_failed("arrival-time", err))?
                     .clamp(0.0, 1439.0) as u16;
             }
             // Guard: if re-sampling fails (extremely unlikely given the
             // ~540-minute gap between commuter departure and arrival means),
-            // clamp to departure+1 to keep the invariant.
+            // clamp to departure+1 to keep the invariant. This is the
+            // documented re-sample-exhausted arrival guard: it repairs the
+            // ordering constraint, it never substitutes a schedule value.
             if arrival_raw <= departure_min {
                 (departure_min as u32 + 1).min(1439) as u16
             } else {
@@ -824,7 +868,7 @@ impl EvDriverActor {
             let dur = self
                 .trip_duration
                 .value_at(env)
-                .unwrap_or(600.0)
+                .map_err(|err| read_failed("trip-duration", err))?
                 .clamp(30.0, 1200.0) as u16;
             (departure_min as u32 + dur as u32).min(1439) as u16
         };
@@ -833,7 +877,7 @@ impl EvDriverActor {
         let distance_m = self
             .daily_drive_distance_m
             .value_at(env)
-            .unwrap_or(defaults::DAILY_DRIVE_DISTANCE_M)
+            .map_err(|err| read_failed("daily-miles", err))?
             .max(0.0);
 
         #[cfg(feature = "observe")]
@@ -880,6 +924,7 @@ impl EvDriverActor {
             arrival_minute: arrival,
             drive_j,
         });
+        Ok(())
     }
 
     /// Check if current minute-of-day matches a target minute within time resolution.
@@ -1187,7 +1232,7 @@ impl EvDriverActor {
             // check, and the override stays inactive for that step.
             let Ok(needed) = needed_charge_hours_to_target(anxiety_soc, CHARGING_EFFICIENCY, &ctx)
             else {
-                self.estimate_error =
+                self.health_error =
                     Some("needed_charge_hours estimate is not a valid number".to_string());
                 return None;
             };
@@ -1215,16 +1260,55 @@ impl EvDriverActor {
         env: &'a EnvironmentState,
         current_minute: u16,
     ) -> DecisionContext<'a> {
+        // The pack's live discharge ceiling is the equipment's published
+        // `DISCHARGE_CEILING_KW` telemetry when the equipment is
+        // observable - the leg ratings and the energy above the effective
+        // discharge floor, the ceiling the equipment's own discharge step
+        // will enforce. Sizing a discharge vote on the charge rating
+        // overstates the pack's capability: the equipment clamps the
+        // export, and dispatch and delivery diverge exactly where a
+        // consumer regresses on the pack. The unobservable-equipment
+        // fallback stays the charge rating (the warned unresolved-equipment
+        // mode, the same fallback the needed-hours estimate carries).
+        // allowed: DISCHARGE_CEILING_W is the equipment's published live
+        // discharge ceiling, telemetry-only (CoreOutput has no ceiling
+        // field); the same name-keyed telemetry contract
+        // `observed_charge_derate` reads under.
+        let observed_discharge_ceiling_w = env
+            .equipment_telemetry
+            .get(self.target_name())
+            .and_then(|t| t.get(tk::DISCHARGE_CEILING_W));
         DecisionContext {
             current_soc: self.perceived_soc(),
             capacity_j: self.capacity_j,
             max_charge_w: self.max_charge_w,
-            max_discharge_w: self.max_charge_w,
+            max_discharge_w: observed_discharge_ceiling_w.unwrap_or(self.max_charge_w),
             env,
             current_minute,
             next_departure_minute: self.todays_event.map(|e| e.departure_minute),
             time_res_minutes: self.time_res_minutes,
             observed_charge_derate: self.observed_charge_derate(env),
+        }
+    }
+
+    /// The price channel the strategy's votes read that the run does not
+    /// publish: the export rate drives the export decisions (the V2G
+    /// vote and the price optimizer's discharge leg), the import rate
+    /// drives the price optimizer's charge leg. `None` when every
+    /// channel the strategy reads is published.
+    fn missing_price_channel(&self, price: &PriceSignal) -> Option<&'static str> {
+        match self.strategy {
+            ChargingStrategy::V2G { .. } => price.export_price.is_none().then_some("export"),
+            ChargingStrategy::TouAware { .. } => {
+                if price.electricity_price.is_none() {
+                    Some("import")
+                } else if price.export_price.is_none() {
+                    Some("export")
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1279,7 +1363,7 @@ impl EvDriverActor {
         let Ok(hours) =
             needed_charge_hours_to_target(anxiety_soc.clamp(0.0, 1.0), CHARGING_EFFICIENCY, &ctx)
         else {
-            self.estimate_error =
+            self.health_error =
                 Some("needed_charge_hours estimate is not a valid number".to_string());
             return;
         };
@@ -1300,7 +1384,7 @@ impl EvDriverActor {
                     ..ctx.clone()
                 },
             ) else {
-                self.estimate_error =
+                self.health_error =
                     Some("needed_charge_hours estimate is not a valid number".to_string());
                 return;
             };
@@ -1364,8 +1448,8 @@ struct EvDriverSnapshot {
     drive_cancelled: u32,
     /// The charging strategy's gate hysteresis latches, in stack order.
     gate_latches: Vec<bool>,
-    /// The sticky health failure; see `EvDriverActor::estimate_error`.
-    estimate_error: Option<String>,
+    /// The sticky health failure; see `EvDriverActor::health_error`.
+    health_error: Option<String>,
     /// The composer's carried decision state (the last action, the last
     /// resolved target, rate and cap, the last needed-charge-hours
     /// estimate).
@@ -1395,11 +1479,11 @@ impl Actor for EvDriverActor {
     }
 
     fn healthy(&self) -> bool {
-        self.estimate_error.is_none()
+        self.health_error.is_none()
     }
 
     fn health_detail(&self) -> Option<&str> {
-        self.estimate_error.as_deref()
+        self.health_error.as_deref()
     }
 
     fn telemetry(&self) -> Option<&Telemetry> {
@@ -1466,7 +1550,30 @@ impl Actor for EvDriverActor {
         let res_seconds = env.time_res.num_seconds();
         debug_assert!(res_seconds >= 1, "time_res must be >= 1 second");
         self.time_res_minutes = (res_seconds.max(1) as f64) / 60.0;
-        self.maybe_roll_daily_event(env);
+        // A schedule the driver cannot read fails the day roll: the actor
+        // records the cause and reports unhealthy, so the step fails at
+        // the post-decide health check. No day is invented from defaults;
+        // the day's plan is dropped, and the failure is sticky - a
+        // schedule that cannot be read cannot become readable by drawing
+        // on.
+        if let Err(err) = self.maybe_roll_daily_event(env) {
+            self.health_error = Some(err.to_string());
+            self.todays_event = None;
+        }
+
+        // A price-driven strategy prices its votes against the channels
+        // the run publishes: charging pays the import rate, exporting
+        // earns the export rate. A run that publishes no channel the
+        // strategy reads is never decided on a fabricated $0/kWh price
+        // (the old substitution made charging free and the export votes
+        // inert): the actor records the cause and reports unhealthy, and
+        // the step fails at the post-decide health check.
+        if let Some(channel) = self.missing_price_channel(&env.price_signal) {
+            self.health_error = Some(format!(
+                "the {channel} price channel is not published; the strategy's votes \
+                 price against it and never on a substituted $0/kWh"
+            ));
+        }
 
         let before_out = out.len();
         let current_minute = (env.current_time.hour() * 60 + env.current_time.minute()) as u16;
@@ -1488,7 +1595,7 @@ impl Actor for EvDriverActor {
         // fails at the post-decide health check); the channel keeps its
         // previous value for that step.
         if let Err(err) = self.composer.refresh_needed_charge_hours(&ctx) {
-            self.estimate_error = Some(err.to_string());
+            self.health_error = Some(err.to_string());
         }
 
         // A non-driving day changes only *future* departures. An in-flight
@@ -1539,6 +1646,16 @@ impl Actor for EvDriverActor {
                         // back to expected miles, the honest basis for a
                         // trip that will not happen).
                         self.todays_event = None;
+                        // The day's ready-by deadline dies with the trip:
+                        // a deadline the driver latched for this departure
+                        // must not keep raising the charging destination,
+                        // pacing the pack, or holding the discharge floor
+                        // ready for a departure that will not happen.
+                        out.push(DispatchRequest {
+                            target: self.vehicle.target.clone(),
+                            signal: ControlSignal::EvClearReadyBy,
+                            priority: PriorityTier::Schedule,
+                        });
                         tracing::warn!(
                             actor = %self.name,
                             target = self.target_name(),
@@ -1797,7 +1914,7 @@ impl Actor for EvDriverActor {
             needs_away_charge: self.needs_away_charge,
             drive_cancelled: self.drive_cancelled,
             gate_latches: self.composer.gate_latches(),
-            estimate_error: self.estimate_error.clone(),
+            health_error: self.health_error.clone(),
             composer_carried: self.composer.carried_state(),
             sources: EvDriverSourceStates {
                 miles: self.daily_drive_distance_m.capture_state(),
@@ -1827,7 +1944,7 @@ impl Actor for EvDriverActor {
         self.needs_away_charge = snap.needs_away_charge;
         self.drive_cancelled = snap.drive_cancelled;
         self.composer.restore_gate_latches(&snap.gate_latches)?;
-        self.estimate_error = snap.estimate_error;
+        self.health_error = snap.health_error;
         self.composer.restore_carried_state(snap.composer_carried);
         self.daily_drive_distance_m
             .restore_state(&snap.sources.miles)?;
@@ -1854,7 +1971,7 @@ impl Actor for EvDriverActor {
     /// boundary, instead of postcard failing inside `load_state`.
     ///
     /// v3: the snapshot carries the charging strategy's gate hysteresis
-    /// latches and the sticky estimate failure.
+    /// latches and the sticky health failure.
     ///
     /// v4: the carried energies (`DayEvent.drive_j`, `Driving.remaining_j`)
     /// hold J (SI) where v3 held kWh - a v3 blob's energies would read
@@ -1989,6 +2106,344 @@ mod tests {
             },
             ChaCha8Rng::seed_from_u64(42),
         )
+    }
+
+    /// An unreadable driving schedule fails the day roll naming the actor
+    /// and the source; the step then fails at the post-decide health
+    /// check. No day may be invented from a schedule the driver could not
+    /// read: the fabricated-default fallback this replaced drove and
+    /// charged the vehicle on invented times (an 8:00 departure, a
+    /// 30-mile trip) whenever a source failed to resolve.
+    #[test]
+    fn unreadable_schedule_source_fails_the_day_roll_naming_the_actor() {
+        use chrono::Weekday;
+        use hares_types::{DayFilter, TimeWindow};
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        // The departure source cannot resolve a value in this env: its
+        // only window matches Mondays and the env steps a Thursday, and
+        // no default is set.
+        actor.departure_time = ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(
+                DayFilter::Day(Weekday::Mon),
+                0,
+                1440,
+                480.0,
+            )],
+            default: None,
+            rng_state: None,
+        };
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "a schedule read failure must mark the actor unhealthy; the \
+             fabricated-default fallback instead invented the day"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("departure"),
+            "the failure must name the actor and the source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from a schedule the driver could not read"
+        );
+    }
+
+    /// The daily-miles read site's own failure-propagation witness: an
+    /// unreadable miles source fails the day roll naming the actor and
+    /// the daily-miles source, no day invented. Each read site's witness
+    /// fails under its own revert to the fabricated default, so a
+    /// reverted site cannot hide behind another site's witness.
+    #[test]
+    fn unreadable_miles_source_fails_the_day_roll_naming_the_miles_source() {
+        use chrono::Weekday;
+        use hares_types::{DayFilter, TimeWindow};
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        // The other reads resolve; only the miles source cannot: its only
+        // window matches Mondays and the env steps a Thursday, and no
+        // default is set.
+        actor.departure_time = ScheduleSource::Constant(360.0);
+        actor.daily_drive_distance_m = ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(
+                DayFilter::Day(Weekday::Mon),
+                0,
+                1440,
+                30_000.0,
+            )],
+            default: None,
+            rng_state: None,
+        };
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "the miles read failure must mark the actor unhealthy"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("daily-miles"),
+            "the failure must name the actor and the daily-miles source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from a miles source the driver could not read"
+        );
+    }
+
+    /// The decision context's discharge ceiling is the equipment's
+    /// published live discharge ceiling when the equipment is observable -
+    /// not the charge rating. A vote sized off the charge rating
+    /// overstates the pack's capability: the equipment clamps the export
+    /// to its own leg rating and the energy above its discharge floor, so
+    /// dispatch and delivery diverge exactly where a consumer regresses on
+    /// the pack's capability. The unobservable-equipment fallback stays
+    /// the charge rating (the warned unresolved-equipment mode).
+    #[test]
+    fn decision_context_carries_the_equipment_s_discharge_ceiling() {
+        let actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_w: 5_000.0,
+                price_threshold: 0.20,
+            },
+            0.7,
+        );
+        let mut env = env_at_minute(18 * 60 + 1);
+        // The equipment publishes its live discharge ceiling: 3000 W,
+        // below the driver's 7200 W charge rating the context used to
+        // carry.
+        let mut telemetry = hares_types::Telemetry::with_capacity(2);
+        telemetry.insert(tk::DISCHARGE_CEILING_W, 3000.0);
+        env.equipment_telemetry
+            .insert(actor.target_name().to_string(), telemetry);
+
+        let ctx = actor.decision_context(&env, 18 * 60 + 1);
+        assert!(
+            (ctx.max_discharge_w - 3000.0).abs() < 1e-9,
+            "the decision context must carry the equipment's published \
+             discharge ceiling (3000 W), got {} W (the charge rating is 7200 W)",
+            ctx.max_discharge_w
+        );
+    }
+
+    #[test]
+    fn decision_context_discharge_ceiling_falls_back_to_the_charge_rating() {
+        let actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_w: 5_000.0,
+                price_threshold: 0.20,
+            },
+            0.7,
+        );
+        let env = env_at_minute(18 * 60 + 1);
+
+        let ctx = actor.decision_context(&env, 18 * 60 + 1);
+        assert!(
+            (ctx.max_discharge_w - 7200.0).abs() < 1e-9,
+            "with no equipment telemetry the context falls back to the charge \
+             rating, got {} W",
+            ctx.max_discharge_w
+        );
+    }
+
+    /// A cancelled trip clears the equipment's ready-by deadline: the
+    /// driver dispatches the clear beside consuming the day's event, so
+    /// the deadline's target, pacing and discharge-floor effects do not
+    /// linger on a pack whose trip will never happen.
+    #[test]
+    fn cancelled_trip_clears_the_ready_by_deadline() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+        // A trip the pack cannot cover: 300 miles against a 60 kWh pack
+        // (300 mi x 1609.344 m/mi x 671.08 J/m ~ 3.24e8 J). The departure
+        // minute must match the step.
+        actor.todays_event = Some(DayEvent {
+            departure_minute: 8 * 60,
+            arrival_minute: 18 * 60,
+            drive_j: 300.0 * 1609.344 * 671.080_887_616_320_6,
+        });
+        let event_drive_j = {
+            let event = actor.todays_event.expect("event set");
+            event.drive_j
+        };
+        assert!(
+            event_drive_j > 216_000_000.0,
+            "the test's trip must exceed the pack to force the cancellation path"
+        );
+
+        let env = env_at_minute(8 * 60);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            actor.todays_event.is_none(),
+            "the cancelled trip consumes the day's event"
+        );
+        assert_eq!(actor.drive_cancelled, 1);
+        assert!(
+            out.iter()
+                .any(|r| matches!(r.signal, ControlSignal::EvClearReadyBy)),
+            "the cancellation must dispatch the ready-by clear so the \
+             equipment's latched deadline does not outlive the trip, got {out:?}"
+        );
+    }
+
+    /// The trip-duration read site's own failure-propagation witness (the
+    /// fallback branch: no direct arrival source, the arrival derived
+    /// from departure plus the duration).
+    #[test]
+    fn unreadable_duration_source_fails_the_day_roll_naming_the_duration_source() {
+        use chrono::Weekday;
+        use hares_types::{DayFilter, TimeWindow};
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.departure_time = ScheduleSource::Constant(360.0);
+        actor.arrival_time = None;
+        actor.trip_duration = ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(
+                DayFilter::Day(Weekday::Mon),
+                0,
+                1440,
+                600.0,
+            )],
+            default: None,
+            rng_state: None,
+        };
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "the duration read failure must mark the actor unhealthy"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("trip-duration"),
+            "the failure must name the actor and the trip-duration source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from a duration source the driver could not read"
+        );
+    }
+
+    /// The direct-arrival read site's own failure-propagation witness:
+    /// the arrival source fails on its first read.
+    #[test]
+    fn unreadable_arrival_source_fails_the_day_roll_naming_the_arrival_source() {
+        use chrono::Weekday;
+        use hares_types::{DayFilter, TimeWindow};
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.departure_time = ScheduleSource::Constant(360.0);
+        actor.arrival_time = Some(ScheduleSource::TimeWindows {
+            windows: vec![TimeWindow::new(
+                DayFilter::Day(Weekday::Mon),
+                0,
+                1440,
+                1080.0,
+            )],
+            default: None,
+            rng_state: None,
+        });
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "the arrival read failure must mark the actor unhealthy"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("arrival"),
+            "the failure must name the actor and the arrival source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from an arrival source the driver could not read"
+        );
+    }
+
+    /// The arrival re-sample read site's own failure-propagation witness:
+    /// the first arrival read resolves (a value at or before the
+    /// departure, forcing the re-sample loop) and the loop's own read
+    /// then fails - the first read's success alone cannot carry the
+    /// site's witness.
+    #[test]
+    fn failing_arrival_resample_read_fails_the_day_roll_naming_the_arrival_source() {
+        use std::sync::Arc as StdArc;
+
+        let mut actor = make_actor(
+            ChargingStrategy::Immediate { target_soc: 1.0 },
+            PlugInPolicy::Always,
+            42,
+        );
+        actor.departure_time = ScheduleSource::Constant(360.0);
+        // One readable sample (before the departure, forcing a re-sample),
+        // then the data is exhausted and the re-sample read errors.
+        actor.arrival_time = Some(ScheduleSource::Shared {
+            data: StdArc::from([5.0]),
+            cursor: 0,
+            boundary: hares_types::BoundaryPolicy::Error,
+        });
+
+        let env = env_at_minute(0);
+        let mut out = Vec::new();
+        actor.decide(&env, &mut out);
+
+        assert!(
+            !actor.healthy(),
+            "the re-sample read failure must mark the actor unhealthy"
+        );
+        let detail = actor
+            .health_detail()
+            .expect("the failure carries its cause into the step error");
+        assert!(
+            detail.contains("TestDriver") && detail.contains("arrival"),
+            "the re-sample read's failure must name the actor and the \
+             arrival source, got: {detail}"
+        );
+        assert!(
+            actor.todays_event.is_none(),
+            "no day may be invented from a re-sample read the driver could not read"
+        );
     }
 
     /// Reseed re-derives every driving source from the new dwelling key:
@@ -2556,6 +3011,7 @@ mod tests {
                 if needs_price_schedule {
                     env.price_signal = PriceSignal {
                         electricity_price: Some(0.02),
+                        export_price: Some(0.02),
                         ..Default::default()
                     };
                 }
@@ -2773,6 +3229,7 @@ mod tests {
         let mut env = env_at_minute(19 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.30),
+            export_price: Some(0.30),
             ..Default::default()
         };
         // Previous-step equipment flow says +3600 W (charging); this step
@@ -3772,7 +4229,7 @@ mod tests {
     fn take_over_keeps_the_estimate_failure_latch() {
         let strategy = ChargingStrategy::Immediate { target_soc: 1.0 };
         let mut failed = make_actor(strategy.clone(), PlugInPolicy::Always, 42);
-        failed.estimate_error = Some("needed-hours estimate failed".to_string());
+        failed.health_error = Some("needed-hours estimate failed".to_string());
         assert!(!failed.healthy());
         assert_eq!(
             failed.health_detail(),
@@ -4382,6 +4839,7 @@ mod tests {
         let mut env = env_at_minute(2 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.01),
+            export_price: Some(0.01),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4416,6 +4874,7 @@ mod tests {
         let mut env = env_at_minute(12 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.10),
+            export_price: Some(0.10),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4678,6 +5137,7 @@ mod tests {
         let mut env = env_at_minute(19 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.30),
+            export_price: Some(0.30),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4717,6 +5177,7 @@ mod tests {
         let mut env = env_at_minute(19 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.10),
+            export_price: Some(0.10),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -4998,6 +5459,7 @@ mod tests {
         let mut env = env_at_minute(23 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(prices[23]),
+            export_price: Some(prices[23]),
             ..Default::default()
         };
         let mut out = Vec::new();
@@ -5055,6 +5517,7 @@ mod tests {
         let mut env = env_at_minute(0);
         env.price_signal = PriceSignal {
             electricity_price: Some(prices[0]),
+            export_price: Some(prices[0]),
             ..Default::default()
         };
         let mut out = Vec::new();
@@ -5413,6 +5876,7 @@ mod tests {
         let mut env = env_at_minute(6 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.40), // expensive
+            export_price: Some(0.40),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -5557,6 +6021,7 @@ mod tests {
         let mut env = env_at_minute(19 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.50), // well above threshold
+            export_price: Some(0.50),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -5594,6 +6059,7 @@ mod tests {
         let mut env_cheap = env_at_minute(2 * 60);
         env_cheap.price_signal = PriceSignal {
             electricity_price: Some(0.02),
+            export_price: Some(0.02),
             ..Default::default()
         };
         let out_cheap = plugged_in_step_with_env(&mut actor, &env_cheap);
@@ -5621,6 +6087,7 @@ mod tests {
         let mut env_expensive = env_at_minute(20 * 60);
         env_expensive.price_signal = PriceSignal {
             electricity_price: Some(0.44),
+            export_price: Some(0.44),
             ..Default::default()
         };
         let out_expensive = plugged_in_step_with_env(&mut actor, &env_expensive);
@@ -5811,8 +6278,14 @@ mod tests {
 
     // ======= Edge case tests =======
 
+    /// A price-driven strategy deciding against a run that publishes no
+    /// price channel is never decided on a fabricated $0/kWh: the actor
+    /// records the cause and reports unhealthy, the step failing at the
+    /// post-decide health check. The old fallback substituted 0.0 and the
+    /// price optimizer's charge leg fired every step - electricity
+    /// silently free.
     #[test]
-    fn ev_missing_price_signal_tou_falls_back() {
+    fn missing_price_marks_the_tou_actor_unhealthy_not_free() {
         let prices: Vec<f64> = (0..24).map(|i| i as f64 * 0.02).collect();
         let mut actor = make_plugged_in_actor(
             ChargingStrategy::TouAware {
@@ -5826,25 +6299,78 @@ mod tests {
         actor.estimated_soc = 0.4;
         actor.phase = DriverPhase::HomePluggedIn;
 
-        // No price signal (None) -- should not panic
+        // No price channel published at all.
         let mut env = env_at_minute(12 * 60);
         env.price_signal = PriceSignal {
             electricity_price: None,
+            export_price: None,
             ..Default::default()
         };
-        let out = plugged_in_step_with_env(&mut actor, &env);
-        // PriceOptimizer uses unwrap_or(0.0) for None, so price=0.0 <= charge_threshold.
-        // With SOC=0.4 and target=0.9, SocTarget fallback should still emit.
-        let has_signal = out.iter().any(|r| {
-            matches!(
-                r.signal,
-                ControlSignal::SOCTarget { .. } | ControlSignal::PowerSetpoint { .. }
-            )
-        });
+        let _out = plugged_in_step_with_env(&mut actor, &env);
         assert!(
-            has_signal,
-            "TOU with missing price should still emit via fallback, got {} signals: {out:?}",
-            out.len()
+            !actor.healthy(),
+            "a TOU actor deciding on a missing price channel must report unhealthy, \
+             not decide on a substituted $0/kWh"
+        );
+        let detail = actor.health_detail().unwrap_or_default();
+        assert!(
+            detail.contains("import"),
+            "the health failure must name the missing channel (the import rate the \
+             charge leg prices against); got: {detail}"
+        );
+    }
+
+    /// The V2G strategy's whole decision prices the export rate: a run
+    /// that publishes no export price cannot decide export votes on a
+    /// fabricated $0/kWh (the old substitution meant the vote never
+    /// fired, silently) - the actor reports unhealthy naming the
+    /// channel.
+    #[test]
+    fn missing_export_price_marks_the_v2g_actor_unhealthy() {
+        let mut actor = make_plugged_in_actor(
+            ChargingStrategy::V2G {
+                min_soc: 0.3,
+                max_export_w: 5000.0,
+                price_threshold: 0.20,
+            },
+            0.7,
+        );
+        let mut env = env_at_minute(19 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: Some(0.30),
+            export_price: None,
+            ..Default::default()
+        };
+        let _out = plugged_in_step_with_env(&mut actor, &env);
+        assert!(
+            !actor.healthy(),
+            "a V2G actor deciding on a missing export price must report unhealthy, \
+             not decide on a substituted $0/kWh"
+        );
+        let detail = actor.health_detail().unwrap_or_default();
+        assert!(
+            detail.contains("export"),
+            "the health failure must name the missing channel (the export rate the \
+             export vote prices against); got: {detail}"
+        );
+    }
+
+    /// A strategy that reads no price channel (Immediate) stays healthy
+    /// whatever the signal carries: the gate is the price-driven
+    /// strategies' contract, not a global price requirement.
+    #[test]
+    fn immediate_strategy_stays_healthy_without_any_price() {
+        let mut actor = make_plugged_in_actor(ChargingStrategy::Immediate { target_soc: 0.9 }, 0.5);
+        let mut env = env_at_minute(12 * 60);
+        env.price_signal = PriceSignal {
+            electricity_price: None,
+            export_price: None,
+            ..Default::default()
+        };
+        let _out = plugged_in_step_with_env(&mut actor, &env);
+        assert!(
+            actor.healthy(),
+            "a strategy that reads no price channel has no price contract to fail"
         );
     }
 
@@ -6014,6 +6540,7 @@ mod tests {
         let mut env = env_at_minute(6 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.40),
+            export_price: Some(0.40),
             ..Default::default()
         };
         let _out = plugged_in_step_with_env(&mut actor, &env);
@@ -6064,6 +6591,7 @@ mod tests {
         let mut env = env_at_minute(12 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.10),
+            export_price: Some(0.10),
             ..Default::default()
         };
 
@@ -6123,6 +6651,7 @@ mod tests {
         let mut env = env_at_minute(2 * 60);
         env.price_signal = PriceSignal {
             electricity_price: Some(0.50), // expensive
+            export_price: Some(0.50),
             ..Default::default()
         };
         let out = plugged_in_step_with_env(&mut actor, &env);
@@ -8144,6 +8673,7 @@ mod tests {
             let mut env = env_at_minute(minute);
             env.price_signal = PriceSignal {
                 electricity_price: Some(0.50), // well above the 0.20 threshold
+                export_price: Some(0.50),
                 ..Default::default()
             };
             let mut out = Vec::new();

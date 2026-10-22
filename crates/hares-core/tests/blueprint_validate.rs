@@ -5,7 +5,18 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
+
+/// The step-count probes (`validate_runs_no_step`,
+/// `blueprint_catalogue_equals_built_dwelling_catalogue`) reset the
+/// process-global step counter and assert absolute reads: the samples
+/// assume no sibling dwelling steps between them. nextest's process
+/// isolation gives each probe its own process, where the lock is
+/// uncontended; in-process runners (the coverage job's llvm-cov cargo
+/// test) execute the tests on shared threads, so every test here holds
+/// the lock for its whole body and the samples read the counter alone.
+static STEP_COUNT_EXCLUSIVITY: Mutex<()> = Mutex::new(());
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{
@@ -103,6 +114,9 @@ fn full_year_blueprint() -> Arc<DwellingBlueprint> {
 /// their `Display`.
 #[test]
 fn validate_rejects_afue_above_one_with_run_time_message() {
+    let _step_count_exclusive = STEP_COUNT_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let config = afue_above_one_config();
     let blueprint = DwellingBlueprint::from_config(config.clone()).expect("the blueprint builds");
     let validated = blueprint.validate().expect_err("the AFUE is infeasible");
@@ -124,6 +138,9 @@ fn validate_rejects_afue_above_one_with_run_time_message() {
 /// dwelling, so the pin discriminates.
 #[test]
 fn validate_runs_no_step() {
+    let _step_count_exclusive = STEP_COUNT_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let blueprint = full_year_blueprint();
     hares_core::step_counts::reset();
     blueprint.validate().expect("the blueprint validates");
@@ -140,6 +157,9 @@ fn validate_runs_no_step() {
 /// the same `ResolvedModel`.
 #[test]
 fn validate_equals_built_dwelling_resolved_model() {
+    let _step_count_exclusive = STEP_COUNT_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let blueprint = full_year_blueprint();
     let validated: ResolvedModel = blueprint.validate().expect("the blueprint validates");
     let dwelling = blueprint.build().expect("the dwelling builds");
@@ -152,6 +172,9 @@ fn validate_equals_built_dwelling_resolved_model() {
 /// 8760 steps at a -25200 s offset.
 #[test]
 fn resolved_clock_reports_steps() {
+    let _step_count_exclusive = STEP_COUNT_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let blueprint = full_year_blueprint();
     let model = blueprint.validate().expect("the blueprint validates");
     let clock: ResolvedClock = model.clock;
@@ -169,6 +192,9 @@ fn resolved_clock_reports_steps() {
 /// and no step.
 #[test]
 fn blueprint_catalogue_equals_built_dwelling_catalogue() {
+    let _step_count_exclusive = STEP_COUNT_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let blueprint = full_year_blueprint();
     hares_core::step_counts::reset();
     let from_blueprint: Arc<Catalogue> = blueprint.catalogue().expect("the catalogue builds");
@@ -185,6 +211,9 @@ fn blueprint_catalogue_equals_built_dwelling_catalogue() {
 /// from the LUT report the layers the physics consumes.
 #[test]
 fn resolved_boundaries_carry_identity_and_layers() {
+    let _step_count_exclusive = STEP_COUNT_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let blueprint = full_year_blueprint();
     let model = blueprint.validate().expect("the blueprint validates");
     let boundaries: &[ResolvedBoundary] = &model.boundaries;
@@ -224,6 +253,9 @@ fn resolved_boundaries_carry_identity_and_layers() {
 #[test]
 #[ignore = "the validate-only path's wall time, run by hand in the release build"]
 fn validate_wall_time() {
+    let _step_count_exclusive = STEP_COUNT_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let cz4a = project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh");
     let config = DwellingConfig {
         hpxml: InputSource::Path(cz4a.join("building.xml")),

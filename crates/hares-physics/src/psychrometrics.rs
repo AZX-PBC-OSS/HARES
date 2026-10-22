@@ -49,14 +49,14 @@ pub fn saturation_pressure_pa(t_c: f64) -> f64 {
             + 6.221_570_1e-7 * t_k * t_k
             + 2.074_782_5e-9 * t_k * t_k * t_k
             - 9.484_024e-13 * t_k * t_k * t_k * t_k
-            + 4.163_501_9 * t_k.ln()
+            + 4.163_501_9 * libm::log(t_k)
     } else {
         -5.800_220_6e3 / t_k + 1.391_499_3 - 4.864_023_9e-2 * t_k + 4.176_476_8e-5 * t_k * t_k
             - 1.445_209_3e-8 * t_k * t_k * t_k
-            + 6.545_967_3 * t_k.ln()
+            + 6.545_967_3 * libm::log(t_k)
     };
 
-    ln_p_ws.exp()
+    libm::exp(ln_p_ws)
 }
 
 /// Typed `uom` boundary variant of [`saturation_pressure_pa`].
@@ -120,7 +120,14 @@ pub fn relative_humidity(t_db_c: f64, w: f64, p_pa: f64) -> f64 {
     let w_eff = w.max(MIN_HUMIDITY_RATIO);
     let p_v = p_pa * w_eff / (EPSILON + w_eff);
     let p_sat = saturation_pressure_pa(t_db_c);
-    (p_v / p_sat).clamp(0.0, 1.0)
+    // The clamp's firing is counted, never silent: a humidity ratio
+    // above saturation is held to saturation.
+    let rh_raw = p_v / p_sat;
+    #[cfg(feature = "observe")]
+    if !(0.0..=1.0).contains(&rh_raw) {
+        hares_types::clamp_census::record(hares_types::clamp_census::ClampSite::RelativeHumidity);
+    }
+    rh_raw.clamp(0.0, 1.0)
 }
 
 /// Typed `uom` boundary variant of [`relative_humidity`].
@@ -924,5 +931,32 @@ mod tests {
                 "psat at {t_c}°C: computed={computed:.2} Pa, ASHRAE HOF 2021 Table 2={expected_pa:.2} Pa, rel_err={rel_err:.5}"
             );
         }
+    }
+
+    /// The clamp census counts the relative-humidity clamp: a humidity
+    /// ratio above saturation at the local pressure drives the ratio
+    /// past one, and the clamp holds it there. A firing that went
+    /// uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_relative_humidity_clamp() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        // 25 °C saturates near 0.0196 kg/kg; double it and the ratio
+        // lands well above one.
+        let rh = relative_humidity(25.0, 0.04, 101_325.0);
+        approx_eq(rh, 1.0, 1e-12);
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::RelativeHumidity),
+            1,
+            "the supersaturated evaluation records its clamp"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
     }
 }

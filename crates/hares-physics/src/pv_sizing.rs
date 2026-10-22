@@ -368,7 +368,7 @@ fn plane_solar_score(
             let deviation_rad =
                 (south_distance(azimuth_deg).to_radians()).min(std::f64::consts::PI / 2.0);
             let exponent = 1.0 + 0.005 * (latitude - 35.0);
-            df + (1.0 - df) * deviation_rad.cos().powf(exponent)
+            df + (1.0 - df) * libm::pow(libm::cos(deviation_rad), exponent)
         }
         None => azimuth_production_factor(azimuth_deg, latitude),
     };
@@ -435,7 +435,7 @@ fn flat_roof_gcr(latitude: Option<f64>, tilt_deg: f64) -> f64 {
     let lat = latitude.unwrap_or(35.0);
     let min_elev_rad = min_solar_elevation_deg(lat).to_radians();
     let tilt_rad = tilt_deg.to_radians();
-    let gcr = 1.0 / (tilt_rad.cos() + tilt_rad.sin() / min_elev_rad.tan());
+    let gcr = 1.0 / (libm::cos(tilt_rad) + libm::sin(tilt_rad) / libm::tan(min_elev_rad));
     gcr.clamp(0.25, 0.65)
 }
 

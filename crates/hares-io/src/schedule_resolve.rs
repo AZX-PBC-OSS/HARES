@@ -12,7 +12,9 @@ use hares_equipment::{
     ConfigPayload, ElectricResistanceWaterHeaterConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_physics::constants::SECONDS_PER_YEAR;
+use hares_physics::constants::{
+    SECONDS_PER_YEAR, SETPOINT_PLAUSIBILITY_MAX_C, SETPOINT_PLAUSIBILITY_MIN_C,
+};
 use hares_physics::water_density_kg_m3;
 use hares_types::{
     BoundaryPolicy, FuelType, HaresError, ScheduleSourceConfig, Warning, normalize_ascii,
@@ -683,21 +685,33 @@ pub fn inject_schedule_into_specs(
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
-    inject_schedule_into_specs_with_pre_period(specs, schedule, None, profiles, defaults, warnings)
+    inject_schedule_into_specs_with_pre_period(
+        specs, schedule, None, 1, profiles, defaults, warnings,
+    )
 }
 
 /// [`inject_schedule_into_specs`] with the schedule's pre-period columns:
-/// the columns as loaded, before [`apply_unavailable_periods`] zeroed the
-/// periods' steps (`apply_unavailable_periods` returns them). The draw and
+/// the columns as loaded, before
+/// [`apply_unavailable_periods`](crate::unavailable_periods::apply_unavailable_periods)
+/// zeroed the periods' steps (`apply_unavailable_periods` returns them). The draw and
 /// power normalizations take their mean from the pre-period column and
 /// their shape from the zeroed one, OpenStudio-HPXML's shape: the peak
 /// comes from the pre-period schedule (`schedules.rb:1051-1052`) and the
 /// zeroing removes the period's volume instead of spreading it over the
 /// remaining days. `None` when no period ran.
+///
+/// `upsample_factor` is the schedule rows' expansion: an upsample resample
+/// holds the source-resolution rows, each standing for that many sim steps,
+/// so the per-step means and series this injects (the event replay's power
+/// series, the normalizations' means) take the rows' values at the
+/// expansion's step count -- the same values in the same order the
+/// materialised rows carried. 1 when the rows are per-step.
+#[allow(clippy::too_many_arguments)]
 pub fn inject_schedule_into_specs_with_pre_period(
     specs: &mut Vec<EquipmentSpec>,
     schedule: &mut ScheduleTimeSeries,
     pre_period_columns: Option<&[Vec<f64>]>,
+    upsample_factor: u32,
     profiles: Option<&DefaultProfiles>,
     defaults: &DefaultsStore,
     warnings: &mut Vec<Warning>,
@@ -805,12 +819,13 @@ pub fn inject_schedule_into_specs_with_pre_period(
                     mapping,
                     &csv_col_map,
                     schedule,
+                    upsample_factor,
                     profiles,
                     pre_period_columns,
                 )?;
             }
             ScheduleCategory::EventWindow => {
-                inject_event_schedule(spec, mapping, &csv_col_map, schedule)?;
+                inject_event_schedule(spec, mapping, &csv_col_map, schedule, upsample_factor)?;
             }
             ScheduleCategory::Occupancy => {
                 inject_occupancy_schedule(spec, schedule, profiles);
@@ -826,7 +841,14 @@ pub fn inject_schedule_into_specs_with_pre_period(
     // When neither a schedule CSV column nor HPXML-derived setpoints are
     // present, the unit takes OS-HPXML's manual-thermostat default
     // (68 °F heating, 78 °F cooling), recorded as a warning naming it.
-    inject_setpoint_schedules(specs, &csv_col_map, schedule, pre_period_columns, warnings)?;
+    inject_setpoint_schedules(
+        specs,
+        &csv_col_map,
+        schedule,
+        upsample_factor,
+        pre_period_columns,
+        warnings,
+    )?;
     Ok(())
 }
 
@@ -887,6 +909,13 @@ fn inject_default_setpoint(
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     let setpoint_c = hares_physics::units::temperature_f_to_c(default_f);
+    if setpoint_value_is_implausible(setpoint_c) {
+        return Err(HaresError::Equipment(format!(
+            "the {prefix} setpoint default {default_f} °F resolves to {setpoint_c:.2} °C, \
+             outside the plausible range \
+             [{SETPOINT_PLAUSIBILITY_MIN_C}, {SETPOINT_PLAUSIBILITY_MAX_C}] °C"
+        )));
+    }
     // The config enum is internally tagged, so a constant travels as a flat
     // daily profile.
     let source = serde_json::to_value(ScheduleSourceConfig::DailyProfile {
@@ -936,6 +965,70 @@ fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Valu
     }
 }
 
+/// The resolved setpoint's plausibility band: a value outside
+/// [`SETPOINT_PLAUSIBILITY_MIN_C`, `SETPOINT_PLAUSIBILITY_MAX_C`] °C
+/// fails the construction naming the source and the value. The band's
+/// purpose is the unit-convention mistake (a Celsius file read under the
+/// OS-HPXML Fahrenheit convention lands an order of magnitude outside
+/// every habitable setpoint) and any corrupt value, not a style opinion:
+/// the OS-HPXML defaults sit far inside it.
+pub(crate) fn setpoint_value_is_implausible(value: f64) -> bool {
+    !(SETPOINT_PLAUSIBILITY_MIN_C..=SETPOINT_PLAUSIBILITY_MAX_C).contains(&value)
+}
+
+/// The applied setpoint column's plausibility: the first value outside
+/// the plausible band fails the construction naming the column and the
+/// value. The column is already in Celsius here (the parser converted
+/// the Fahrenheit convention), so the named value is the value the
+/// thermostat would see.
+fn validate_setpoint_column(
+    schedule: &ScheduleTimeSeries,
+    col_idx: usize,
+    column: &str,
+) -> Result<(), HaresError> {
+    let values = schedule.columns.get(col_idx).ok_or_else(|| {
+        HaresError::Equipment(format!(
+            "schedule CSV column '{column}': the column index {col_idx} is not in the \
+                 schedule's columns"
+        ))
+    })?;
+    if let Some(&value) = values
+        .iter()
+        .find(|&value| setpoint_value_is_implausible(*value))
+    {
+        return Err(HaresError::Equipment(format!(
+            "schedule CSV column '{column}': the resolved setpoint {value:.2} °C is outside \
+             the plausible range [{SETPOINT_PLAUSIBILITY_MIN_C}, {SETPOINT_PLAUSIBILITY_MAX_C}] °C; \
+             the OS-HPXML detailed-schedule convention carries these columns in degrees \
+             Fahrenheit, and a file written in Celsius read under it is the usual cause"
+        )));
+    }
+    Ok(())
+}
+
+/// The HPXML setpoint profile's plausibility: the first value outside
+/// the plausible band fails the construction naming the side, the
+/// elements the profile came from and the value.
+pub(crate) fn validate_setpoint_profile(prefix: &str, values: &[f64]) -> Result<(), HaresError> {
+    if let Some(&value) = values
+        .iter()
+        .find(|&value| setpoint_value_is_implausible(*value))
+    {
+        return Err(HaresError::Equipment(format!(
+            "the HPXML {prefix} setpoints (the HVACControl's SetpointTemp{side}Season element \
+             or its Weekday/WeekendSetpointTemps{side}Season arrays): the resolved setpoint \
+             {value:.2} °C is outside the plausible range \
+             [{SETPOINT_PLAUSIBILITY_MIN_C}, {SETPOINT_PLAUSIBILITY_MAX_C}] °C",
+            side = if prefix == "heating" {
+                "Heating"
+            } else {
+                "Cooling"
+            },
+        )));
+    }
+    Ok(())
+}
+
 /// Resolve each HVAC side's thermostat setpoints by the OpenStudio-HPXML
 /// rule and record the active source on the spec.
 ///
@@ -968,6 +1061,7 @@ fn inject_setpoint_schedules(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    upsample_factor: u32,
     pre_period_columns: Option<&[Vec<f64>]>,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
@@ -988,6 +1082,27 @@ fn inject_setpoint_schedules(
     // timestep from the environment's schedule domain payload. No materialization.
     let heating_col = csv_col_map.get("heating_setpoint").copied();
     let cooling_col = csv_col_map.get("cooling_setpoint").copied();
+
+    // The applied column's plausibility, checked once per side before any
+    // spec consumes it: every value the run could resolve must lie in the
+    // plausible band, and the failure names the column and the value. A
+    // file written in Celsius and read under the Fahrenheit convention
+    // lands an order of magnitude outside the band, which is the check's
+    // purpose to catch at construction.
+    if let Some(col_idx) = heating_col
+        && specs
+            .iter()
+            .any(|spec| HEATING_EQUIPMENT.contains(&spec.name.as_str()))
+    {
+        validate_setpoint_column(schedule, col_idx, "heating_setpoint")?;
+    }
+    if let Some(col_idx) = cooling_col
+        && specs
+            .iter()
+            .any(|spec| COOLING_EQUIPMENT.contains(&spec.name.as_str()))
+    {
+        validate_setpoint_column(schedule, col_idx, "cooling_setpoint")?;
+    }
 
     // One warning per side when the column and the HPXML setpoints are
     // both given: the overlap is an input property, not a per-unit one.
@@ -1023,7 +1138,13 @@ fn inject_setpoint_schedules(
         ));
     }
 
-    inject_water_heater_schedule_columns(specs, csv_col_map, schedule, pre_period_columns)?;
+    inject_water_heater_schedule_columns(
+        specs,
+        csv_col_map,
+        schedule,
+        upsample_factor,
+        pre_period_columns,
+    )?;
 
     for spec in specs.iter_mut() {
         if HEATING_EQUIPMENT.contains(&spec.name.as_str()) {
@@ -1044,6 +1165,8 @@ fn inject_setpoint_schedules(
                 }
                 None => match hpxml_setpoint_profile(spec, "heating") {
                     Some((weekday_c, weekend_c)) => {
+                        validate_setpoint_profile("heating", &weekday_c)?;
+                        validate_setpoint_profile("heating", &weekend_c)?;
                         let source = SetpointSource::Hpxml {
                             weekday_c,
                             weekend_c,
@@ -1095,6 +1218,8 @@ fn inject_setpoint_schedules(
                 }
                 None => match hpxml_setpoint_profile(spec, "cooling") {
                     Some((weekday_c, weekend_c)) => {
+                        validate_setpoint_profile("cooling", &weekday_c)?;
+                        validate_setpoint_profile("cooling", &weekend_c)?;
                         let source = SetpointSource::Hpxml {
                             weekday_c,
                             weekend_c,
@@ -1242,6 +1367,7 @@ fn inject_water_heater_schedule_columns(
     specs: &mut [EquipmentSpec],
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    upsample_factor: u32,
     pre_period_columns: Option<&[Vec<f64>]>,
 ) -> Result<(), HaresError> {
     let draw_col = first_present_column(csv_col_map, &["hot_water_fixtures"]);
@@ -1319,7 +1445,7 @@ fn inject_water_heater_schedule_columns(
             // The normalization's mean comes from the pre-period column
             // (the peak OpenStudio-HPXML computes), the shape from the
             // zeroed one: the period removes volume.
-            let mean = column_mean(pre_period_columns, col_idx, &raw_values);
+            let mean = column_mean(pre_period_columns, col_idx, &raw_values, upsample_factor);
             let kg_s_series: Vec<f64> =
                 normalize_draw_profile_at_mean(&raw_values, mean, avg_daily_l, rho_kg_per_l);
 
@@ -1354,7 +1480,12 @@ fn inject_water_heater_schedule_columns(
             if let (Some(col_idx), Some(volume_l)) =
                 (washer_col, washer_share.map(|share| washer.daily_l * share))
             {
-                let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
+                let mean = column_mean(
+                    pre_period_columns,
+                    col_idx,
+                    &schedule.columns[col_idx],
+                    upsample_factor,
+                );
                 let series = normalize_draw_profile_at_mean(
                     &schedule.columns[col_idx],
                     mean,
@@ -1367,7 +1498,12 @@ fn inject_water_heater_schedule_columns(
                 dishwasher_col,
                 dishwasher_share.map(|share| dishwasher.daily_l * share),
             ) {
-                let mean = column_mean(pre_period_columns, col_idx, &schedule.columns[col_idx]);
+                let mean = column_mean(
+                    pre_period_columns,
+                    col_idx,
+                    &schedule.columns[col_idx],
+                    upsample_factor,
+                );
                 let series = normalize_draw_profile_at_mean(
                     &schedule.columns[col_idx],
                     mean,
@@ -1701,14 +1837,24 @@ fn column_mean(
     pre_period_columns: Option<&[Vec<f64>]>,
     col_idx: usize,
     live_column: &[f64],
+    upsample_factor: u32,
 ) -> f64 {
+    debug_assert!(upsample_factor >= 1, "the rows' expansion is at least 1");
     let column: &[f64] = pre_period_columns
         .and_then(|pre| pre.get(col_idx))
         .map_or(live_column, |pre: &Vec<f64>| pre.as_slice());
     if column.is_empty() {
         return 0.0;
     }
-    column.iter().sum::<f64>() / column.len() as f64
+    // The rows' expansion: a held row stands for that many sim steps, so
+    // the mean runs over the per-step sequence -- each row's value repeated
+    // in order, the sum and count the materialised rows produced.
+    let factor = upsample_factor as usize;
+    column
+        .iter()
+        .flat_map(|v| std::iter::repeat_n(*v, factor))
+        .sum::<f64>()
+        / (column.len() * factor) as f64
 }
 
 fn inject_power_schedule(
@@ -1716,6 +1862,7 @@ fn inject_power_schedule(
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &mut ScheduleTimeSeries,
+    upsample_factor: u32,
     profiles: &DefaultProfiles,
     pre_period_columns: Option<&[Vec<f64>]>,
 ) -> Result<(), HaresError> {
@@ -1741,7 +1888,12 @@ fn inject_power_schedule(
         // The design level's mean comes from the pre-period column
         // (OpenStudio-HPXML's calc_design_level_from_daily_kwh reads the
         // pre-period schedules), the column's shape from the zeroed one.
-        let mean_fraction: f64 = column_mean(pre_period_columns, col_idx, &fraction_series);
+        let mean_fraction: f64 = column_mean(
+            pre_period_columns,
+            col_idx,
+            &fraction_series,
+            upsample_factor,
+        );
 
         let max_w = resolve_max_w(
             spec,
@@ -2080,6 +2232,7 @@ fn inject_event_schedule(
     mapping: &ColumnMapping,
     csv_col_map: &HashMap<String, usize>,
     schedule: &ScheduleTimeSeries,
+    upsample_factor: u32,
 ) -> Result<(), HaresError> {
     // Skip if equipment already has event source keys.
     if spec.parameters.keys().any(|k| {
@@ -2099,6 +2252,13 @@ fn inject_event_schedule(
             return Ok(());
         }
 
+        // The event replay addresses its rows by the environment's per-step
+        // schedule row, and a held row stands for `upsample_factor` steps:
+        // the series expands, each row's value repeated in order -- the
+        // sequence the materialised rows carried, bitwise.
+        debug_assert!(upsample_factor >= 1, "the rows' expansion is at least 1");
+        let factor = upsample_factor as usize;
+
         // Always inject the column index for the stochastic path.
         spec.parameters.insert(
             "event_window_schedule_col".to_string(),
@@ -2106,13 +2266,17 @@ fn inject_event_schedule(
         );
 
         // Compute kW time series from fractions × max_w for deterministic event extraction.
-        let mean_fraction: f64 =
-            fraction_series.iter().copied().sum::<f64>() / fraction_series.len() as f64;
+        let mean_fraction: f64 = fraction_series
+            .iter()
+            .flat_map(|f| std::iter::repeat_n(*f, factor))
+            .sum::<f64>()
+            / (fraction_series.len() * factor) as f64;
         if let Some(max_w) = determine_max_w(spec, mean_fraction) {
             // The series values are fractions x the W maximum: W (SI).
             let w_series: Vec<Value> = fraction_series
                 .iter()
-                .map(|f| Value::from(f * max_w))
+                .flat_map(|f| std::iter::repeat_n(f * max_w, factor))
+                .map(Value::from)
                 .collect();
             spec.parameters
                 .insert("event_power_w_series".to_string(), Value::Array(w_series));
@@ -4350,14 +4514,14 @@ mod tests {
         let mut schedule = make_schedule(24);
 
         let hpxml_heating_source = hares_types::ScheduleSourceConfig::DailyProfile {
-            weekday: [1.0; 24],
-            weekend: [1.0; 24],
+            weekday: [22.0; 24],
+            weekend: [22.0; 24],
             month_multipliers: [1.0; 12],
             max_value: 22.0,
         };
         let hpxml_cooling_source = hares_types::ScheduleSourceConfig::DailyProfile {
-            weekday: [1.0; 24],
-            weekend: [1.0; 24],
+            weekday: [26.0; 24],
+            weekend: [26.0; 24],
             month_multipliers: [1.0; 12],
             max_value: 26.0,
         };

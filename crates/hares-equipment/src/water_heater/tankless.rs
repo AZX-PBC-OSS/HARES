@@ -13,10 +13,7 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use hares_physics::constants::{
-    CP_LIQUID_WATER_J_KG_K, GALLONS_PER_MINUTE_TO_KG_PER_SECOND, UEF_TO_EF_GAS_INTERCEPT,
-    UEF_TO_EF_GAS_SLOPE,
-};
+use hares_physics::constants::{CP_LIQUID_WATER_J_KG_K, GALLONS_PER_MINUTE_TO_KG_PER_SECOND};
 use hares_physics::water_density_kg_m3;
 
 use crate::schedule_helpers::{capture_schedule_source_state, restore_optional_source};
@@ -238,15 +235,19 @@ impl TanklessWH {
 
         // Fallback chain for efficiency factor:
         // 1. energy_factor — pre-2015 EF test procedure value (direct use).
-        // 2. uniform_energy_factor — post-2015 UEF test procedure value;
-        //    converted to EF-equivalent using the RESNET EF Calculator 2017 /
-        //    OCHRE HPXML parser (vendors/OCHRE/ochre/utils/hpxml.py:1115):
-        //      EF = UEF_TO_EF_GAS_SLOPE * UEF + UEF_TO_EF_GAS_INTERCEPT
+        // 2. uniform_energy_factor - post-2015 UEF test procedure value,
+        //    taken as the energy factor directly: OCHRE's
+        //    instantaneous-water-heater branch (hpxml.py:1055-1058) reads
+        //    `energy_factor = uniform_energy_factor` with no conversion -
+        //    the RESNET storage-tank conversion (`EF = 0.9066·UEF +
+        //    0.0711`, which the gas storage heater here applies) is the
+        //    storage branch's alone, and the RESNET calculator defines a
+        //    separate instantaneous form OCHRE does not use.
         // 3. DEFAULT_EF — 0.9, a plausible tankless WH efficiency.
         let raw_ef = if let Some(ef) = c.energy_factor {
             ef
         } else if let Some(uef) = c.uniform_energy_factor {
-            UEF_TO_EF_GAS_SLOPE * uef + UEF_TO_EF_GAS_INTERCEPT
+            uef
         } else {
             DEFAULT_EF
         };
@@ -287,7 +288,10 @@ impl TanklessWH {
             // A configured source's read failure is corrupt input, not the
             // absence of a source: the error names the heater, the same
             // contract the storage heaters' step reads follow.
-            let mut source = source_cfg.into_runtime();
+            let mut source = source_cfg.into_runtime(
+                &config.bldg_id.to_string(),
+                &format!("{}:mains_temp_c_source", config.name),
+            );
             source.value_at(env).map_err(|err| {
                 HaresError::Equipment(format!("Tankless Water Heater '{}': {err}", config.name))
             })?
@@ -295,12 +299,24 @@ impl TanklessWH {
             super::require_mains_temp_c(env, "Tankless Water Heater")?
         };
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.draw_flow_rate_kg_s_source =
-            c.draw_flow_rate_source.map(|source| source.into_runtime());
-        self.mains_temp_c_source = c.mains_temp_c_source.map(|source| source.into_runtime());
-        self.appliance_draw_source = c
-            .appliance_draw_flow_rate_source
-            .map(|source| source.into_runtime());
+        self.draw_flow_rate_kg_s_source = c.draw_flow_rate_source.map(|source| {
+            source.into_runtime(
+                &config.bldg_id.to_string(),
+                &format!("{}:draw_flow_rate_source", config.name),
+            )
+        });
+        self.mains_temp_c_source = c.mains_temp_c_source.map(|source| {
+            source.into_runtime(
+                &config.bldg_id.to_string(),
+                &format!("{}:mains_temp_c_source", config.name),
+            )
+        });
+        self.appliance_draw_source = c.appliance_draw_flow_rate_source.map(|source| {
+            source.into_runtime(
+                &config.bldg_id.to_string(),
+                &format!("{}:appliance_draw_flow_rate_source", config.name),
+            )
+        });
         self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.dr_setpoint_offset_c = 0.0;
@@ -975,6 +991,28 @@ mod tests {
             cfg,
         )
         .unwrap()
+    }
+
+    /// The UEF a tankless unit declares is its energy factor: OCHRE's
+    /// instantaneous-water-heater branch (hpxml.py:1055-1058) reads
+    /// `energy_factor = uniform_energy_factor` with no conversion - the
+    /// RESNET storage-tank conversion (EF = 0.9066·UEF + 0.0711) is the
+    /// storage branch's alone and understated the instantaneous fuel
+    /// meter's efficiency by about 2 percent at UEF 0.95.
+    #[test]
+    fn the_uef_is_the_energy_factor_for_a_tankless_unit() {
+        let mut typed = typed_config();
+        typed.energy_factor = None;
+        typed.uniform_energy_factor = Some(0.95);
+        typed.performance_adjustment = None;
+        let config = config_from_typed(typed);
+        let mut eq = TanklessWH::new(config.clone());
+        eq.init(&config, &env()).unwrap();
+        assert!(
+            (eq.efficiency_factor - 0.95).abs() < 1e-9,
+            "a tankless unit's UEF is its EF (the OCHRE instantaneous branch), got {}",
+            eq.efficiency_factor
+        );
     }
 
     fn typed_config() -> TanklessWaterHeaterConfig {

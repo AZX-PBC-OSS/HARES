@@ -326,7 +326,7 @@ impl PV {
             effective_system_losses_fraction: DEFAULT_SYSTEM_LOSSES_FRACTION,
             power_limit_w: None,
             curtailment_fraction: 0.0,
-            inverter_priority: InverterPriority::Var,
+            inverter_priority: InverterPriority::Watt,
             inverter_min_pf: Some(0.8),
             q_setpoint_var: None,
             q_setpoint_active: false,
@@ -597,12 +597,12 @@ impl PV {
                     // OCHRE: max_q_capacity = min_pf_factor * min_pf * inverter_capacity
                     // where min_pf_factor = tan(acos(min_pf)) / min_pf
                     // simplifies to: max_q_capacity = tan(acos(min_pf)) * inverter_capacity
-                    let max_q_cap = min_pf.acos().sin() * inv_cap;
+                    let max_q_cap = libm::sin(libm::acos(min_pf)) * inv_cap;
                     // OCHRE: max_q_pf = min_pf_factor * |p|
                     // simplifies to: max_q_pf = tan(acos(min_pf)) * |p| / min_pf... no
                     // Actually from OCHRE: max_q_pf = self.inverter_min_pf_factor * -p
                     // where min_pf_factor = tan(acos(min_pf)) (the ratio Q/P at min PF)
-                    let max_q_pf = min_pf.acos().tan() * p_w;
+                    let max_q_pf = libm::tan(libm::acos(min_pf)) * p_w;
                     q_abs = q_abs.min(max_q_cap).min(max_q_pf);
                 } else {
                     q_abs = q_abs.min(inv_cap);
@@ -633,7 +633,7 @@ fn enforce_min_pf(p: f64, q: f64, min_pf: f64) -> f64 {
     if p < 0.0 || min_pf >= 1.0 {
         return q;
     }
-    let max_q_abs = p * (min_pf.acos().tan());
+    let max_q_abs = p * (libm::tan(libm::acos(min_pf)));
     q.clamp(-max_q_abs, max_q_abs)
 }
 
@@ -3254,6 +3254,74 @@ mod tests {
         pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
         let clipping = pv.telemetry().get(tk::INVERTER_CLIPPING_KW).unwrap();
         approx_eq(clipping, 0.0);
+    }
+
+    #[test]
+    fn default_inverter_priority_is_active_power() {
+        // The constructed default is Watt priority: active power is never
+        // curtailed to hold vars. Battery and EV kVA clamps are
+        // active-power-priority by contract, so a PV that defaults to Var
+        // priority silently differs from the rest of the DER fleet: the
+        // first apparent-power overload would curtail real generation to
+        // hold reactive output no controller asked for.
+        let (pv, _env) = make_inverter_pv(4000.0);
+        assert_eq!(pv.inverter_priority, InverterPriority::Watt);
+    }
+
+    #[test]
+    fn default_priority_preserves_real_power_through_an_overload() {
+        // Behavioral witness for the default: with no configured priority
+        // an apparent-power overload must preserve real power (Watt
+        // priority), not curtail it to hold vars.
+        let (mut pv, env) = make_inverter_pv(4000.0);
+        pv.q_setpoint_var = Some(3000.0);
+        let mut ports = PortSlots::default();
+        pv.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let p = pv.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let (mut pv_unlimited, env_unlimited) = make_inverter_pv(6000.0);
+        pv_unlimited.q_setpoint_var = Some(3000.0);
+        let mut ports_unlimited = PortSlots::default();
+        pv_unlimited
+            .step(
+                &env_unlimited,
+                Duration::from_secs(60),
+                &mut ports_unlimited,
+            )
+            .unwrap();
+        let p_raw = pv_unlimited.telemetry().get(tk::AC_POWER_KW).unwrap();
+        let p_expected = p_raw.min(4000.0);
+        approx_eq(p, p_expected);
+    }
+
+    #[test]
+    fn inverter_priority_zero_power_semantics_per_mode() {
+        // The three modes' documented behavior at zero real power with a
+        // reactive request that overloads the inverter (the modes only
+        // diverge past the apparent-power rating: within it the request
+        // passes unchanged), the shipped min-pf default 0.8 in force:
+        // - Watt: the min-pf enforcement bounds Q against P; at P = 0 the
+        //   bound is zero, so Q falls to zero with the real power.
+        // - Var: the Q ceiling is proportional to P (|Q| <= |P| tan(acos(pf)));
+        //   at P = 0 the ceiling is zero, so Q falls to zero with the real power.
+        // - Cpf: the apparent power is scaled to the rating preserving the
+        //   power factor, which at P = 0 delivers the full reactive request
+        //   up to the rating (full Q at zero P, capped at S).
+        let q_requested = 5000.0;
+        let mut pv = make_inverter_pv(4000.0).0;
+        pv.inverter_priority = InverterPriority::Watt;
+        let (p_watt, q_watt) = pv.apply_inverter_limits(0.0, q_requested);
+        approx_eq(p_watt, 0.0);
+        approx_eq(q_watt, 0.0);
+
+        pv.inverter_priority = InverterPriority::Var;
+        let (p_var, q_var) = pv.apply_inverter_limits(0.0, q_requested);
+        approx_eq(p_var, 0.0);
+        approx_eq(q_var, 0.0);
+
+        pv.inverter_priority = InverterPriority::Cpf;
+        let (p_cpf, q_cpf) = pv.apply_inverter_limits(0.0, q_requested);
+        approx_eq(p_cpf, 0.0);
+        approx_eq(q_cpf, 4000.0);
     }
 
     // --- Control signal tests ---

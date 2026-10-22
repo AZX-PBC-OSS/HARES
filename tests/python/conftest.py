@@ -72,7 +72,7 @@ REMOVED_SITE_KEYWORD_MESSAGES: dict[str, str] = {
 # A collected module imports OCHRE, so without the ochre dependency group the
 # run fails with a collection error: it never skips.
 OCHRE_MODULES = frozenset(
-    {"test_ochre_parity.py", "test_thermal_trace.py", "test_ashrae_reference.py"}
+    {"test_ochre_parity.py", "test_thermal_trace.py", "test_ashrae_reference.py", "test_ochre_units.py"}
 )
 
 

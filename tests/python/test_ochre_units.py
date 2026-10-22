@@ -12,9 +12,17 @@ from __future__ import annotations
 
 import re
 
-import pint
 import pytest
+
+# pint ships only with the ochre dependency group, and the module pins the
+# vendored OCHRE reference's unit alias: without the group the tests skip
+# (the guard fires at collection), and the ochre job runs them.
+pytest.importorskip("pint")
+
+import pint
 from ochre_units import register_removed_units
+
+pytestmark = pytest.mark.ochre
 
 # 0.0254 m * 999.972 kg/m^3 * 9.80665 m/s^2: the value pint 0.24.4 gives
 # for both inch_H2O_39F and inch_H2O_4C.

@@ -16,6 +16,7 @@ pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert(tk::HEATER_POWER_W, 0.0);
     t.insert(tk::OHMIC_LOSS_W, 0.0);
     t.insert(tk::CHARGE_DERATE, 1.0);
+    t.insert(tk::DISCHARGE_CEILING_W, 0.0);
     t.insert(tk::CC_CV_DERATE, 1.0);
     t.insert(tk::V2L_ACTIVE, 0.0);
     t.insert(tk::V2L_POWER_KW, 0.0);
@@ -68,6 +69,13 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
                          applied capability when no charging-curve LUT is \
                          configured; with a LUT, the LUT's temperature axis is \
                          the capability and this reports the ramp only",
+        ),
+        TelemetryField::power_w(
+            tk::DISCHARGE_CEILING_W,
+            "The pack's live AC discharge ceiling - the tighter of each \
+                         enabled leg's rating and its energy above the \
+                         effective discharge floor over the step; 0 when \
+                         neither discharge leg is enabled",
         ),
         TelemetryField::ratio(
             tk::CC_CV_DERATE,

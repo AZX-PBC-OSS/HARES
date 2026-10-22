@@ -404,11 +404,11 @@ pub fn typical_zone_temps(avg_ground_c: f64, avg_ambient_c: f64) -> [f64; 6] {
 ///
 /// `delta_t_k` must be non-negative; `tilt_deg` is measured from horizontal.
 pub fn tarp_h_natural(tilt_deg: f64, delta_t_k: f64, above_hotter: bool) -> f64 {
-    let cbrt_dt = delta_t_k.cbrt();
+    let cbrt_dt = libm::cbrt(delta_t_k);
     if (tilt_deg - 90.0).abs() < 1e-9 {
         1.31 * cbrt_dt
     } else {
-        let cos_tilt = tilt_deg.to_radians().cos().abs();
+        let cos_tilt = libm::cos(tilt_deg.to_radians()).abs();
         if above_hotter {
             9.482 * cbrt_dt / (7.238 - cos_tilt)
         } else {
@@ -447,7 +447,7 @@ pub fn ashrae_simple_interior_h_conv(
     _t_int_c: f64,
     above_hotter: bool,
 ) -> f64 {
-    let cos_tilt = tilt_deg.to_radians().cos().abs();
+    let cos_tilt = libm::cos(tilt_deg.to_radians()).abs();
     if cos_tilt < 0.3827 {
         3.076
     } else if cos_tilt >= 0.9239 {
@@ -523,9 +523,21 @@ pub fn film_resistances(
         let ext_above = exterior_zone.height_order() > interior_zone.height_order();
         let t_ext_hotter = t_ext >= t_int;
         let above_hotter = !(ext_above ^ t_ext_hotter);
-        let delta_t = (t_ext - t_int).abs().max(0.1);
+        let delta_t_unfloored = (t_ext - t_int).abs();
+        // The ΔT floor's firing is counted, never silent: the TARP
+        // natural-convection model evaluates at no less than 0.1 K, the
+        // same delivered film resistance the 1.0 W/(m2 K) floor below
+        // protects.
+        #[cfg(feature = "observe")]
+        if delta_t_unfloored < 0.1 {
+            hares_types::clamp_census::record(
+                hares_types::clamp_census::ClampSite::FilmDeltaTFloor,
+            );
+        }
+        let delta_t = delta_t_unfloored.max(0.1);
         let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
-        let h_glass = (h_natural.powi(2) + (3.40 * avg_wind_speed_m_s.powf(0.75)).powi(2)).sqrt();
+        let h_glass =
+            (h_natural.powi(2) + (3.40 * libm::pow(avg_wind_speed_m_s, 0.75)).powi(2)).sqrt();
         let h_forced = roughness.factor() * (h_glass - h_natural);
         // Floor the exterior convection coefficient to 1.0 W/(m²·K) — the
         // natural convection floor for a vertical surface at ΔT ≈ 0.4°C
@@ -535,7 +547,15 @@ pub fn film_resistances(
         // exterior LWR T_eff correction to diverge (h_out appears in the
         // denominator at longwave.rs:106). A minimum of 1.0 protects all
         // consumers of exterior film resistance, not just the window path.
-        let h_ext = (h_natural + h_forced).max(1.0);
+        // The floor's firing is counted, never silent.
+        let h_ext_unfloored = h_natural + h_forced;
+        #[cfg(feature = "observe")]
+        if h_ext_unfloored < 1.0 {
+            hares_types::clamp_census::record(
+                hares_types::clamp_census::ClampSite::ExteriorFilmFloor,
+            );
+        }
+        let h_ext = h_ext_unfloored.max(1.0);
         1.0 / h_ext
     } else if exterior_zone == ZoneLabel::Ground {
         1.0 / h_conv
@@ -1118,5 +1138,84 @@ mod tests {
             "at 2 m/s wind, r_ext={r_ext_typical:.6} should be well below 1.0 — \
              floor must not override valid values"
         );
+    }
+
+    /// The clamp census counts the exterior film coefficient's floor: at
+    /// zero wind and a ΔT just above the TARP model's 0.1 K floor (so
+    /// the counted ΔT site stays silent) the DOE-2 model's convection
+    /// coefficient lands below 1.0 W/(m²·K) and the floor holds it
+    /// there. A firing that went uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_exterior_film_floor() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        // The zero-wind, near-equal-temperature conditions the floor
+        // exists for: avg_ambient 14.89 puts the outdoor anchor at
+        // 19.89, ΔT = 0.11 K, and the DOE-2 model produces
+        // h ≈ 0.63 < 1.0.
+        let (_, r_ext) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            0.0,
+            10.0,
+            14.89,
+            SurfaceRoughness::Smooth,
+        );
+        assert_approx(r_ext, 1.0, 1e-10);
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::ExteriorFilmFloor),
+            1,
+            "the floored exterior film records its clamp"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
+    }
+
+    /// The clamp census counts the TARP model's ΔT floor: a surface
+    /// within 0.1 K of its zone evaluates the natural-convection model
+    /// at the floor, and the firing is recorded. At 4 m/s wind the
+    /// exterior film's own 1.0 W/(m²·K) floor stays silent, so the
+    /// probe's total pins the ΔT site alone. A firing that went
+    /// uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_film_delta_t_floor() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        // avg_ambient 15.0 puts the outdoor anchor at 20.0, the
+        // conditioned zone's own temperature: ΔT = 0.0, floored to
+        // 0.1 K.
+        let (_, r_ext) = film_resistances(
+            90.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Outdoor,
+            4.0,
+            10.0,
+            15.0,
+            SurfaceRoughness::Smooth,
+        );
+        assert!(
+            r_ext < 1.0,
+            "at 4 m/s wind the film resistance stays below the floored 1.0 W/(m2 K): {r_ext}"
+        );
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::FilmDeltaTFloor),
+            1,
+            "the floored film ΔT records its clamp"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
     }
 }

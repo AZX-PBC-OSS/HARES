@@ -78,7 +78,7 @@ Gaussian parameterisation.
 Applied in priority order:
 1. **Immediate Charge Hold**: if `immediate_target_soc` set and SOC >= threshold, charge blocked until `delay_until_hour`
 2. **TOU Peak Avoidance**: charging blocked during peak window `[start_hour, end_hour)` (wrap-around supported)
-3. **Ready-By Mandate**: calculates required power to hit `ready_target_soc` by `ready_by_hour`
+3. **Ready-By Mandate**: paces the deficit at the average power that lands `ready_target_soc` by `ready_by_hour` (clamped to the rated power; a deadline in the past reads as tomorrow's - the departure recurs daily). A cancelled trip's deadline is cleared by the driver (`EvClearReadyBy`), so the mandate never outlives its trip.
 
 ## V2L / V2G Discharge
 
@@ -94,6 +94,8 @@ Applied in priority order:
 | `PowerSetpoint` | Direct charge/discharge target (negative = V2L) |
 | `PowerLimit` | Maximum charging power cap |
 | `SOCTarget` | Primary SOC goal with optional min/max bounds |
+| `EvSetReadyBy` | Latch the ready-by deadline (departure hour + target SOC) |
+| `EvClearReadyBy` | Clear the latched ready-by deadline (the driver's trip cancellation) |
 
 ## Port Interactions
 

@@ -60,8 +60,9 @@ pub struct DwellingBlueprint {
 impl DwellingBlueprint {
     /// Build the blueprint from a config by parsing every input once: the
     /// one construction path through
-    /// [`DwellingBlueprintBuilder::from_config`] and [`freeze`]
-    /// (DwellingBlueprintBuilder::freeze).
+    /// [`DwellingBlueprintBuilder::from_config`] and
+    /// [`DwellingBlueprintBuilder::freeze`], the one construction path
+    /// through the builder.
     ///
     /// # Errors
     ///
@@ -327,8 +328,8 @@ impl DwellingBlueprintBuilder {
     }
 
     /// Build the builder from a config by parsing every input once: the
-    /// config's validation, [`ParsedInputs::parse`] and [`new`]
-    /// (DwellingBlueprintBuilder::new), the one construction path.
+    /// config's validation, [`ParsedInputs::parse`] and
+    /// [`DwellingBlueprintBuilder::new`], the one construction path.
     ///
     /// # Errors
     ///

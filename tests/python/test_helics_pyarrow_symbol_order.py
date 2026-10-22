@@ -24,8 +24,7 @@ BAD_ORDER_PROBE = """
 import helics
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pandas as pd
-table = pa.Table.from_pandas(pd.DataFrame({"a": [1.0, 2.0]}))
+table = pa.table({"a": [1.0, 2.0]})
 pq.write_table(table, "/tmp/opencode/helics-pyarrow-canary.parquet")
 print("write ok")
 """

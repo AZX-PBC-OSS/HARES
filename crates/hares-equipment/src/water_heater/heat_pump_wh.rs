@@ -691,10 +691,12 @@ impl HeatPumpWH {
             parse_element_hp_control_mode(c.element_hp_control_mode.as_deref())?;
         self.mains_temp_c = super::require_mains_temp_c(env, "Heat Pump Water Heater")?;
         self.draw_flow_rate_kg_s = c.draw_flow_rate_kg_s.unwrap_or(0.0);
-        self.appliance_draw_source = c
-            .appliance_draw_flow_rate_source
-            .clone()
-            .map(|s| s.into_runtime());
+        self.appliance_draw_source = c.appliance_draw_flow_rate_source.clone().map(|s| {
+            s.into_runtime(
+                &config.bldg_id.to_string(),
+                &format!("{}:appliance_draw_flow_rate_source", config.name),
+            )
+        });
         self.zip = crate::config::resolve_reactive_zip(config)?;
 
         self.compressor_on_since_s = None;

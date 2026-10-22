@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, TimeZone, Timelike};
 use thiserror::Error;
 
 use crate::weather::WeatherMeta;
@@ -232,7 +232,10 @@ impl ScheduleTimeSeries {
     /// Resample to `target_step_secs`.
     ///
     /// - **Upsampling** (`target_step_secs < source_step_secs`): zero-order hold -- each source
-    ///   value is repeated for the sub-steps it covers.
+    ///   value stands for the sub-steps it covers. The series holds its
+    ///   source-resolution rows (the readers index by division) unless a
+    ///   stamp is unaligned to its own step, which materialises the expanded
+    ///   rows; see the guard in the body.
     /// - **Downsampling** (`target_step_secs > source_step_secs`): groups of consecutive source
     ///   values are reduced per [`ColumnAggregation`]: averaged for `Mean` columns, summed for
     ///   `Sum` columns.
@@ -261,6 +264,45 @@ impl ScheduleTimeSeries {
             }
 
             let repeat = (self.source_step_secs / target_step_secs) as usize;
+
+            // The upsample does not materialise an expanded copy. The readers
+            // address the rows by division (the environment's
+            // `compute_schedule_idx` divides the sim grid's per-step row by
+            // the expansion), so the series holds its source-resolution rows
+            // and the zero-order hold the readers see is unchanged: each
+            // source value stands for the `repeat` sub-steps its row covers.
+            //
+            // The hold is exact only while every row's sub-steps stay inside
+            // the row timestamp's civil hour: the unavailable-period flags
+            // and the generated occupancy columns read hour-of-day (and the
+            // day ordinal, which only changes with the hour) from the row
+            // timestamps, and a sub-step spilling into the next hour would
+            // read a different hour than this row's value stands for.
+            // Stamps aligned to their own step -- the shipped fixtures,
+            // ResStock, OCHRE and the generated schedules -- never spill; a
+            // stamp that does cannot hold its per-sub-step values in one row
+            // and falls through to the materialised expansion, the
+            // pre-change behaviour, exactly. The nanoseconds are the row
+            // timestamp's own and constant across its sub-steps, so the
+            // whole-second sum decides the hour boundary.
+            let hour_uniform = self.timestamps.iter().all(|ts| {
+                i64::from(ts.minute()) * 60
+                    + i64::from(ts.second())
+                    + i64::from(target_step_secs) * (repeat as i64 - 1)
+                    < 3600
+            });
+
+            if hour_uniform {
+                return Ok(ScheduleTimeSeries {
+                    timestamps: self.timestamps.clone(),
+                    column_names: self.column_names.clone(),
+                    columns: self.columns.clone(),
+                    column_index: self.column_index.clone(),
+                    source_step_secs: self.source_step_secs,
+                    column_aggregations: self.column_aggregations.clone(),
+                });
+            }
+
             let step = Duration::seconds(i64::from(target_step_secs));
 
             let mut timestamps = Vec::with_capacity(self.timestamps.len() * repeat);
@@ -838,25 +880,38 @@ mod tests {
     }
 
     #[test]
-    fn resample_from_15min_to_60s_is_zoh() {
+    fn resample_from_15min_to_60s_holds_source_rows() {
         let csv = schedule_csv_15min_with_tz();
         let series = parse_schedule_csv_str(&csv, &[], None, None).expect("schedule should parse");
         let upsampled = series.resample(60).expect("upsample should work");
 
-        assert_eq!(upsampled.len(), 60);
+        // The held source-resolution rows: no expanded copy, the rows' own
+        // step unchanged. The per-step read divides by the expansion the
+        // environment derives (the rows' step over the sim step), the
+        // zero-order hold the readers see.
+        assert_eq!(upsampled.source_step_secs, 900);
+        assert_eq!(upsampled.len(), 4);
+        let factor = upsampled.source_step_secs / 60;
+        assert_eq!(factor, 15);
         assert!(
             upsampled.columns[0]
                 .iter()
-                .take(15)
+                .take(1)
                 .all(|v| (*v - 0.1).abs() < 1e-9)
         );
         assert!(
             upsampled.columns[0]
                 .iter()
-                .skip(15)
-                .take(15)
+                .skip(1)
+                .take(1)
                 .all(|v| (*v - 0.2).abs() < 1e-9)
         );
+        // Every per-step read is the held row's value, bitwise.
+        for step in 0..upsampled.len() * factor as usize {
+            let read = upsampled.columns[0][step / factor as usize];
+            let expected = series.columns[0][step / factor as usize];
+            assert_eq!(read.to_bits(), expected.to_bits());
+        }
     }
 
     /// Build a 1-minute schedule with 10 rows.

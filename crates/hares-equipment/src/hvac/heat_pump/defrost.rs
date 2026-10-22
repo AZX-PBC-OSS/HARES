@@ -332,7 +332,7 @@ impl DefrostCycleTracker {
                     // interval from varying wildly between steps.
                     // HARES-specific — EnergyPlus uses instantaneous conditions
                     // in its continuous defrost model (ERM 26.1).
-                    let alpha = 1.0 - (-dt_s / DEFROST_EWMA_TAU_S).exp();
+                    let alpha = 1.0 - libm::exp(-dt_s / DEFROST_EWMA_TAU_S);
                     self.ewma_time_fraction =
                         alpha * time_fraction + (1.0 - alpha) * self.ewma_time_fraction;
 
@@ -359,7 +359,7 @@ impl DefrostCycleTracker {
                     let fraction = (outdoor_db_c / 10.0).clamp(0.0, 1.0);
                     let tau_s = FROST_DECAY_TAU_AT_0C_S
                         - fraction * (FROST_DECAY_TAU_AT_0C_S - FROST_DECAY_TAU_AT_10C_S);
-                    self.accumulated_frost_s *= (-dt_s / tau_s).exp();
+                    self.accumulated_frost_s *= libm::exp(-dt_s / tau_s);
                 }
             }
             DefrostCycleState::Defrosting => {

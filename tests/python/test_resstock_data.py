@@ -1356,6 +1356,12 @@ class TestFleetResilience:
         import signal
         import subprocess
 
+        # The 60 s bound rides the cuttable transport: with httpx the abort
+        # closes the connections in flight and the fetch ends at once.
+        # Without it the fallback reads on until the socket timeout (the
+        # documented 120 s bound), which this test's bound does not carry.
+        pytest.importorskip("httpx")
+
         meta = self._metadata_file(tmp_path, [1, 2, 3, 4])
         with _StallingServer() as server:
             child = subprocess.Popen(

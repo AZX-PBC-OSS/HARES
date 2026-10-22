@@ -62,7 +62,7 @@ impl From<&ControlSignal> for PriorityTier {
     /// | Safety (3)    | (reserved — no signal maps here)                                        |
     /// | Grid (2)      | DemandResponse, CurtailmentPercent, ReactiveSetpoint, PowerFactorSetpoint, InverterPriorityMode, PowerLimit |
     /// | UserOverride (1) | ThermalSetpoint, HumiditySetpoint, ModeOverride, ModeOverrideRelease, ThermalSetpointDelta |
-    /// | Schedule (0)  | PowerSetpoint, SOCTarget, DutyCycle, LoadFraction, GridConnect, SelfConsumption, ProtocolNative, IdealCapacity, IdealCapacityModeOverride, EvPlugIn, EvDrive, EvAwayCharge, EvSetReadyBy, EventDelay, MaxCapacityFraction, NonHvacZoneInput |
+    /// | Schedule (0)  | PowerSetpoint, SOCTarget, DutyCycle, LoadFraction, GridConnect, SelfConsumption, ProtocolNative, IdealCapacity, IdealCapacityModeOverride, EvPlugIn, EvDrive, EvAwayCharge, EvSetReadyBy, EvClearReadyBy, EventDelay, MaxCapacityFraction, NonHvacZoneInput |
     fn from(signal: &ControlSignal) -> Self {
         match signal {
             ControlSignal::ThermalSetpoint { .. }
@@ -91,6 +91,7 @@ impl From<&ControlSignal> for PriorityTier {
             | ControlSignal::EvDrive { .. }
             | ControlSignal::EvAwayCharge { .. }
             | ControlSignal::EvSetReadyBy { .. }
+            | ControlSignal::EvClearReadyBy
             | ControlSignal::EventDelay { .. }
             | ControlSignal::MaxCapacityFraction { .. }
             | ControlSignal::NonHvacZoneInput { .. } => PriorityTier::Schedule,
@@ -276,7 +277,7 @@ mod tier_mapping_tests {
     use crate::ControlSignalConstructors;
     use hares_types::{
         ControlSignal, DRLevel, EvConnectionState, IdealCapacityMode, InverterPriority,
-        OperatingMode, ProtocolId,
+        OperatingMode, ProtocolId, ZoneId,
     };
 
     #[test]
@@ -322,7 +323,7 @@ mod tier_mapping_tests {
 
     #[test]
     fn schedule_signals_map_to_schedule_tier() {
-        let signals: [ControlSignal; 15] = [
+        let signals: [ControlSignal; 17] = [
             ControlSignal::power_setpoint(3.0, None),
             ControlSignal::soc_target(0.7, Some(0.2), Some(0.9)),
             ControlSignal::duty_cycle(0.5, Some(900.0), None),
@@ -346,8 +347,13 @@ mod tier_mapping_tests {
                 departure_hour: 7.0,
                 target_soc: 0.8,
             },
+            ControlSignal::EvClearReadyBy,
             ControlSignal::EventDelay { delay_s: 300.0 },
             ControlSignal::MaxCapacityFraction { fraction: 0.5 },
+            ControlSignal::NonHvacZoneInput {
+                zone: ZoneId(1),
+                watts: 100.0,
+            },
         ];
         for s in &signals {
             assert_eq!(
@@ -359,16 +365,17 @@ mod tier_mapping_tests {
     }
 
     #[test]
-    fn all_25_variants_are_covered_by_mapping() {
+    fn all_28_variants_are_covered_by_mapping() {
         // If this test compiles, the exhaustive match covers all variants.
         // We construct every variant to prove the match arms compile.
-        let all: [ControlSignal; 25] = [
+        let all: [ControlSignal; 28] = [
             ControlSignal::thermal_setpoint(Some(20.0), Some(24.0), Some(1.0)),
             ControlSignal::humidity_setpoint(0.45, Some(0.30), Some(0.60)),
             ControlSignal::power_setpoint(3.0, None),
             ControlSignal::power_limit(5.0, Some(0.1)),
             ControlSignal::soc_target(0.7, Some(0.2), Some(0.9)),
             ControlSignal::mode_override(OperatingMode::Off),
+            ControlSignal::ModeOverrideRelease,
             ControlSignal::duty_cycle(0.5, Some(900.0), None),
             ControlSignal::load_fraction(0.8),
             ControlSignal::grid_connect(true),
@@ -401,8 +408,13 @@ mod tier_mapping_tests {
                 departure_hour: 7.0,
                 target_soc: 0.8,
             },
+            ControlSignal::EvClearReadyBy,
             ControlSignal::EventDelay { delay_s: 300.0 },
             ControlSignal::MaxCapacityFraction { fraction: 0.5 },
+            ControlSignal::NonHvacZoneInput {
+                zone: ZoneId(1),
+                watts: 100.0,
+            },
         ];
 
         let mut tiers_seen = std::collections::HashSet::new();
@@ -431,8 +443,8 @@ mod tier_mapping_tests {
 
         assert_eq!(
             all.len(),
-            25,
-            "verify the array has exactly 25 elements — one per ControlSignal variant"
+            28,
+            "verify the array has exactly 28 elements, one per ControlSignal variant"
         );
     }
 

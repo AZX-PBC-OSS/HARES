@@ -31,6 +31,7 @@ use hares_physics::units as conv;
 
 use super::elements::*;
 use crate::defaults::DefaultsStore;
+use crate::schedule_resolve::validate_setpoint_profile;
 
 /// SEER2→SEER factor for ducted split/package systems.
 /// RESNET MINHERS Addendum 71f / ANSI/RESNET 301-2022:
@@ -1621,6 +1622,7 @@ fn try_build_heat_pump_heater_config(
         max_oat_supplemental_c: params.get("max_oat_supplemental_c").and_then(Value::as_f64),
         er_setpoint_offset_c: params.get("er_setpoint_offset_c").and_then(Value::as_f64),
         er_hard_lockout_time_s: params.get("er_hard_lockout_time_s").and_then(Value::as_f64),
+        er_soft_lockout_time_s: params.get("er_soft_lockout_time_s").and_then(Value::as_f64),
         heating_shr: None,
         capacity_ratio_at_17f: params.get("capacity_ratio_at_17f").and_then(Value::as_f64),
         defrost: {
@@ -2187,7 +2189,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
-        apply_building_setpoint_profiles(building, &mut params, true, name == "Ideal HVAC");
+        apply_building_setpoint_profiles(building, &mut params, true, name == "Ideal HVAC")?;
         if name == "Ideal HVAC"
             && let Some(deadband) = building.hvac_deadband_c
         {
@@ -2383,7 +2385,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
-        apply_building_setpoint_profiles(building, &mut params, false, true);
+        apply_building_setpoint_profiles(building, &mut params, false, true)?;
         // Room AC and MSHP Cooler are ductless — skip duct params.
         if name != "Room AC" && name != "MSHP Cooler" {
             duct_params.insert_into_map(&mut params);
@@ -2694,7 +2696,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
-        apply_building_setpoint_profiles(building, &mut params, true, true);
+        apply_building_setpoint_profiles(building, &mut params, true, true)?;
         if heat_pump_type != "mini-split" {
             duct_params.insert_into_map(&mut params);
         }
@@ -3515,7 +3517,7 @@ fn scale_mshp_cooler_capacity_ratios_for_seer(seer: f64, caps: &[f64]) -> Vec<f6
     // provides this specific exponent; it was calibrated to the ERM-quoted
     // range.
     const BETA: f64 = 0.35;
-    let scale = (seer / REFERENCE_SEER).powf(BETA);
+    let scale = libm::pow(seer / REFERENCE_SEER, BETA);
     caps.iter()
         .enumerate()
         .map(|(i, &c)| {
@@ -3913,6 +3915,20 @@ fn parse_hvac_setpoint_params(
         }
     }
 
+    // Each side validates where it resolves, before the source can reach
+    // any spec: every system kind (the Ideal HVAC included) takes these
+    // params, so an out-of-band profile fails here, naming the side, the
+    // HVACControl elements and the value, instead of reaching a
+    // thermostat that no name list happens to cover.
+    if let Some((wd, we)) = heating.as_ref() {
+        validate_setpoint_profile("heating", &wd[..])?;
+        validate_setpoint_profile("heating", &we[..])?;
+    }
+    if let Some((wd, we)) = cooling.as_ref() {
+        validate_setpoint_profile("cooling", &wd[..])?;
+        validate_setpoint_profile("cooling", &we[..])?;
+    }
+
     if let Some((wd, we)) = heating {
         out.push((
             "heating_setpoint_source".to_string(),
@@ -3987,7 +4003,7 @@ fn apply_building_setpoint_profiles(
     params: &mut Map<String, Value>,
     include_heating: bool,
     include_cooling: bool,
-) {
+) -> std::result::Result<(), HpxmlError> {
     let mut heating = building.heating_weekday_setpoints_c.as_ref().map(|wd| {
         let mut weekday = [0.0; 24];
         weekday.copy_from_slice(&wd[..24]);
@@ -4032,18 +4048,29 @@ fn apply_building_setpoint_profiles(
         }
     }
 
+    // Each included side validates before the source reaches a spec: this
+    // is the distribution point every setpoint-consuming spec takes (the
+    // Ideal HVAC included, whose heating and cooling sources both ride
+    // it), so an out-of-band profile fails the construction naming the
+    // side, the HVACControl elements and the value, whatever spec the
+    // next new system type resolves into.
     if include_heating && let Some((weekday, weekend)) = heating {
+        validate_setpoint_profile("heating", &weekday)?;
+        validate_setpoint_profile("heating", &weekend)?;
         params.insert(
             "heating_setpoint_source".to_string(),
             daily_profile_source(weekday, weekend),
         );
     }
     if include_cooling && let Some((weekday, weekend)) = cooling {
+        validate_setpoint_profile("cooling", &weekday)?;
+        validate_setpoint_profile("cooling", &weekend)?;
         params.insert(
             "cooling_setpoint_source".to_string(),
             daily_profile_source(weekday, weekend),
         );
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5295,7 +5322,8 @@ mod tests {
         );
 
         let mut params = Map::new();
-        apply_building_setpoint_profiles(&building, &mut params, true, true);
+        apply_building_setpoint_profiles(&building, &mut params, true, true)
+            .expect("the in-band profiles distribute");
 
         let heating_source: ScheduleSourceConfig = serde_json::from_value(
             params
@@ -5361,7 +5389,8 @@ mod tests {
         );
 
         let mut params = Map::new();
-        apply_building_setpoint_profiles(&building, &mut params, true, true);
+        apply_building_setpoint_profiles(&building, &mut params, true, true)
+            .expect("the in-band profiles distribute");
 
         let heating_source: ScheduleSourceConfig = serde_json::from_value(
             params
@@ -5612,7 +5641,8 @@ mod tests {
             building_with_setpoint_profiles([20.0; 24], [19.0; 24], [26.0; 24], [25.0; 24]);
         let mut params = Map::new();
         params.insert("heating_capacity_w".to_string(), json!(9_000.0));
-        apply_building_setpoint_profiles(&building, &mut params, true, true);
+        apply_building_setpoint_profiles(&building, &mut params, true, true)
+            .expect("the in-band profiles distribute");
         let ec = try_build_ideal_hvac_config("Ideal HVAC", &params)
             .expect("Ideal HVAC typed config should be built");
 
@@ -6035,7 +6065,8 @@ mod tests {
         );
 
         let mut params = Map::new();
-        apply_building_setpoint_profiles(&building, &mut params, true, true);
+        apply_building_setpoint_profiles(&building, &mut params, true, true)
+            .expect("the in-band profiles distribute");
 
         let reconciliations = params
             .get("setpoints_reconciled")
@@ -6118,7 +6149,8 @@ mod tests {
         );
 
         let mut params = Map::new();
-        apply_building_setpoint_profiles(&building, &mut params, true, true);
+        apply_building_setpoint_profiles(&building, &mut params, true, true)
+            .expect("the in-band profiles distribute");
 
         assert!(
             !params.contains_key("setpoints_reconciled"),

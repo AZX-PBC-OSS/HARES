@@ -331,6 +331,17 @@ pub struct EquipmentConfig {
     /// `master_seed` / `building_id` / `name`.
     #[serde(skip, default)]
     pub rng_stream: Option<RngStream>,
+    /// The dwelling's building id, attached by the dwelling when it builds
+    /// the config for this equipment. The schedule-source key derivations
+    /// key on it: the config-stable per-dwelling value every per-dwelling
+    /// stream derivation (`dwelling_seed`) keys on, so two homes carrying
+    /// an identically-configured unspecified-seed noisy source never
+    /// derive the same keystream key. Not runtime state: the checkpoint
+    /// restore rebuilds the configs, and the derivation must stay
+    /// config-stable across rebuilds. `0` for configs no dwelling has
+    /// built (synthetic and test configs).
+    #[serde(skip, default)]
+    pub bldg_id: i64,
     /// Zone thermal capacitance [kWh/K] for the equivalent battery model.
     /// Populated by the dwelling from envelope solver zone capacitances at
     /// construction time; 0.0 means EBM is disabled for this equipment.
@@ -351,10 +362,23 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_stream: None,
+            bldg_id: 0,
             zone_capacitance_j_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
         }
+    }
+
+    /// The dwelling identity and owner-and-role identity a schedule
+    /// source's key derivation keys on: the dwelling's building id (the
+    /// config-stable per-dwelling value every per-dwelling stream
+    /// derivation keys on) and `<owner name>:<source role>`. Every
+    /// conversion site passes both to
+    /// [`hares_types::ScheduleSourceConfig::into_runtime`], so two homes carrying an
+    /// identically-configured unspecified-seed source (HPXML names
+    /// equipment by generic type string) never derive the same key.
+    pub fn source_identity(&self, role: &str) -> (String, String) {
+        (self.bldg_id.to_string(), format!("{}:{role}", self.name))
     }
 
     /// Attach setpoint reconciliation records extracted from HPXML parsing.
@@ -371,7 +395,6 @@ impl EquipmentConfig {
         self.rng_stream = Some(stream);
         self
     }
-
     /// Deserialize a built-in equipment payload, surfacing a clearer error when
     /// a caller accidentally passes a raw payload to a typed-only init path.
     pub fn require_typed<T: EquipmentTypedConfig>(
@@ -571,6 +594,7 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_stream: None,
+            bldg_id: 0,
             zone_capacitance_j_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),
@@ -588,6 +612,7 @@ impl EquipmentConfig {
             zip: None,
             zone_map: None,
             rng_stream: None,
+            bldg_id: 0,
             zone_capacitance_j_per_k: 0.0,
             #[cfg(test)]
             test_extras: HashMap::new(),

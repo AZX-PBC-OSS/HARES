@@ -15,6 +15,7 @@ dst = []
 hares-types = { workspace = true }
 hares-physics = { workspace = true }
 hares-envelope = { workspace = true }
+libm = { workspace = true }
 hares-control = { workspace = true }
 hares-equipment = { workspace = true }
 hares-io = { workspace = true }
@@ -94,6 +95,10 @@ path = "../../tests/envelope_opaque_loads.rs"
 [[test]]
 name = "wiring_properties"
 path = "tests/wiring_properties.rs"
+
+[[test]]
+name = "bench_construction"
+path = "../../tests/bench_construction.rs"
 
 [[bench]]
 name = "single_building"

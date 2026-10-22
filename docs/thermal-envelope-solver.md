@@ -272,7 +272,10 @@ For each window surface in `env.weather.solar_irradiance`:
      θ ≥ π/2.
    - Diffuse: `iam_diffuse = curve.diffuse_iam()` — hemispherical average
 3. POA irradiance: `poa = direct·iam_beam + diffuse·iam_diffuse`
-   (ground-reflected is excluded for windows by design)
+   (the diffuse share includes ground-reflected for windows: the
+   ground-reflected irradiance rides the diffuse term through the same
+   incidence modifier, matching `solar.rs`'s
+   `poa_diffuse = (diffuse + reflected) · iam_diffuse`)
 4. Decompose SHGC:
    - Transmitted: `T_sol · area · poa`
    - Absorbed inward: `(SHGC − T_sol) · area · poa`

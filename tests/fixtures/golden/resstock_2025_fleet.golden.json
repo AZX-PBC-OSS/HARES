@@ -3,8 +3,8 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "44deba5c38080234880f4a628be48f02aa5ee0ab",
-  "git_dirty": true,
+  "git_head": "22deb4a455817ea9ec6e2d3cc8efbcd62caf21fe",
+  "git_dirty": false,
   "metrics": [],
   "products": {
     "aggregate": {

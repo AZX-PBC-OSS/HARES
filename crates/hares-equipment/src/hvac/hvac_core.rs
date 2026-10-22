@@ -661,7 +661,6 @@ impl HvacEquipment {
             deadband_offset: extract_numeric(config, "deadband_offset").unwrap_or(0.2),
             band_class: hares_types::ThermostatBandClass::Cycling,
         };
-        self.thermostat_fsm.validate_configuration(env)?;
 
         if let Some(value) = extract_numeric(config, "heating_setpoint_c") {
             self.thermostat_fsm.static_setpoints.heating_c = value;
@@ -704,6 +703,11 @@ impl HvacEquipment {
             extract_numeric(config, "heating_setpoint_c").is_some() && !heating_seeded;
         let cooling_named =
             extract_numeric(config, "cooling_setpoint_c").is_some() && !cooling_seeded;
+        // The FSM's init gate runs after this unit's setpoints have landed
+        // on it (the constants above, the sources beside them), so its
+        // plausibility sweep reads what this config brought, and before
+        // the deadband reconciliation opens on it.
+        self.thermostat_fsm.validate_configuration(env)?;
         self.thermostat_fsm.static_setpoints = self
             .thermostat_fsm
             .static_setpoints
@@ -1137,6 +1141,13 @@ impl HvacEquipment {
                     None => return DEFAULT_BIQUADRATIC_COEFFS,
                 };
                 if clamped != curve_index {
+                    // The clamp's firing is counted, never silent: the
+                    // census site rides the equipment health counter's
+                    // own count, and the dwelling drains both per step.
+                    #[cfg(feature = "observe")]
+                    hares_types::clamp_census::record(
+                        hares_types::clamp_census::ClampSite::CurveIndex,
+                    );
                     if !self
                         .config
                         .biquadratic_clamp
@@ -1233,6 +1244,15 @@ impl HvacEquipment {
         flow_fraction: f64,
     ) -> (f64, f64) {
         let raw = self.evaluate_biquadratic(curve_index, t_indoor_c, t_outdoor_c);
+        // The bounds clamp's firing is counted, never silent: a flow
+        // fraction outside the configured bounds is held to them before
+        // the part-load-fraction quadratic evaluates.
+        #[cfg(feature = "observe")]
+        if !(self.config.ff_bounds.0..=self.config.ff_bounds.1).contains(&flow_fraction) {
+            hares_types::clamp_census::record(
+                hares_types::clamp_census::ClampSite::FlowFractionBounds,
+            );
+        }
         let ff_clamped = flow_fraction.clamp(self.config.ff_bounds.0, self.config.ff_bounds.1);
         // Use cap_ff for capacity curves (even index), eir_ff for EIR curves (odd index).
         let ff_coeffs = if curve_index.is_multiple_of(2) {
@@ -1431,6 +1451,29 @@ mod tests {
             "the unnamed pair re-centers on its midpoint: 21 and 22 to 20.5 and 22.5"
         );
         assert_eq!(hvac.thermostat_fsm.static_setpoints.cooling_c, 22.5);
+    }
+
+    /// The constant setpoints the config names (`heating_setpoint_c=` on
+    /// the Python surface, through `setpoint_config`) land on the
+    /// thermostat FSM's static setpoints, so the plausibility band holds
+    /// at the FSM: 68 typed into a `_c` key is 68 C, an absurd
+    /// thermostat, and the init fails naming the value and the band
+    /// instead of driving the HVAC at it.
+    #[test]
+    fn an_implausible_constant_setpoint_fails_init_at_the_fsm() {
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::GasFurnace, ZoneId(1));
+        let mut config = EquipmentConfig::default();
+        config
+            .test_extras_mut()
+            .insert("heating_setpoint_c".to_string(), 68.0.into());
+        let err = hvac
+            .init(&config, &env(20.0, 60, 0))
+            .expect_err("68 in a Celsius key is outside the plausible band");
+        let message = err.to_string();
+        assert!(
+            message.contains("68") && message.contains("plausible"),
+            "the error names the value and the band: {message}"
+        );
     }
 
     #[test]
@@ -1966,6 +2009,60 @@ mod tests {
             (result - (-10.0)).abs() < 1e-9,
             "input -200°C must clamp to -10°C x1 lower bound; got {result}"
         );
+    }
+
+    /// The clamp census counts the curve-index clamp: an evaluation
+    /// past the configured curve set clamps to the last same-type
+    /// curve, and the firing is recorded at the site whose count the
+    /// dwelling's census drains beside the equipment health counter.
+    /// A firing that went uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_curve_index_clamp() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.config.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        let _ = hvac.evaluate_biquadratic(4, 20.0, 30.0);
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::CurveIndex),
+            1,
+            "the out-of-bounds curve evaluation records its clamp"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
+    }
+
+    /// The clamp census counts the part-load flow fraction's bounds: a
+    /// flow fraction outside the configured `[ff_min, ff_max]` is held
+    /// to the bounds before the ff quadratic evaluates, and the firing
+    /// is recorded. A firing that went uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_flow_fraction_bounds() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        let mut hvac = HvacEquipment::new(HvacEquipmentType::Other, ZoneId(1));
+        hvac.config.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        hvac.config.ff_bounds = (0.7, 1.3);
+        let _ = hvac.evaluate_biquadratic_with_flow(0, 19.0, 35.0, 0.6);
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::FlowFractionBounds),
+            1,
+            "the out-of-bounds flow fraction records its clamp"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
     }
 
     #[test]

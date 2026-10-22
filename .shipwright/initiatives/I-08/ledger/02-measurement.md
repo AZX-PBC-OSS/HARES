@@ -4663,3 +4663,271 @@ the declared -2 per premise); row 75's and row 77's removals are inside the 2.20
 at its recorded wall cost on the busy host; row 77's threads kept their memory
 target, and this record is the first wall measurement of the thread shape at the
 production set.
+
+## The measurement ladder (the consumer as the instrument, per the operator's mandate)
+
+Every fold re-syncs the consumer and appends a row: the capture wall, the per-run
+CPU cost where recorded, the 13 losses' verdict, the suite counts. The goldens prove
+the engine did not change what it computes; the ladder proves the end-to-end workload
+holds. A capture-wall regression over 5 percent without an attributed, accepted trade
+halts the pipeline until investigated.
+
+| date | engine | the capture wall | the 13 losses | the suite | note |
+| ---- | ------ | ---------------- | ------------- | --------- | ---- |
+| 2026-10-19 | `cb7f7ba11` (B1, row 97) | 179.9 / 180.8 s | re-pinned, 13/13 | 383/0/7 | the baseline; 1.74 CPU-s/run (was 2.20) |
+| 2026-10-20 | `ea46b1f2` (row 112) | 181.7 s | IDENTICAL 13/13 | 383/0/7 | +0.5-1 percent vs the baseline: the docs + the macro-forwarding delta, within noise; the compare vs B1 bitwise identical; the build_info stale-cache catch recorded in row 112's State |
+| 2026-10-20 | `e3bb5257` (rows 113/114, the package A fold) | 186.8 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat within noise expected: the compare vs B1 bitwise identical; the wall +2.8 percent vs row 112, inside the 5 percent band; the build_info reports `e3bb5257`, dirty False, release |
+| 2026-10-20 | `da1767f1c` (row 115, the package B fold) | 179.1 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the envelope ceilings, the floor counting and the solar/init guards, physics untouched; the compare vs B1 bitwise identical; the wall under every prior row (0.4 to 0.9 percent under the B1 baseline, 4.1 percent under row 113's), the host quiet (load 0.82 at the start); the build_info reports `da1767f1c`, dirty False, release |
+| 2026-10-20 | `b46c9c83` (rows 116/117, the package C fold) | 181.3 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the RNG stream hygiene and the EV driver's failure propagation, and the shipped fixtures carry no schedule source configs and run Constant-source drivers, so the goldens were bitwise at the tip; the compare vs B1 bitwise identical; the wall +1.2 percent vs row 115, inside the 5 percent band, the host quiet (load 0.97 at the start); NOTE: the noise series for the UNSPECIFIED-seed sources changed key derivation (the dwelling identity now keys it), irrelevant to the shipped fixtures, which declare no such sources; the build_info reports `b46c9c83`, dirty False, release |
+| 2026-10-21 | `b17d267b` (rows 118/119, the package D fold) | 177.3 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the fleet seed/DR latch/event-rate normalization and the setpoint plausibility band, and the shipped fixtures carry no schedule setpoint columns while the moved test CSVs are test-only; the setpoint band validated at the FSM boundary, the shipped ResStock profiles 49-84 F in-band; the compare vs B1 bitwise identical; the wall under every prior row (1.4 percent under the B1 baseline, 2.2 percent under row 117's), the host quiet (load 0.80 at the start); the build_info reports `b17d267b`, dirty False, release |
+| 2026-10-21 | `c668dc25` (rows 120/121, the package E fold) | 176.4 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the clamp census and the constant/dead-code sweep package, the census diagnostics-scoped and proven pure with observe on/off, the sweep dead expected; the compare vs B1 bitwise identical; the wall under every prior row (1.9 percent under the B1 baseline, 0.5 percent under row 119's), the host quiet (load 1.58 at the start); the build_info reports `c668dc25`, dirty False, release |
+| 2026-10-21 | `dce26f77` (rows 122/123, the package F fold) | 176.7 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the grid/equipment batch and the ventilation contract decision, and the fixture sweep was bitwise at the tip, so the package carried no inverter-overload, self-discharge, V2G or setpoint-override surface; the compare vs B1 bitwise identical; the wall +0.2 percent vs row 121's, 1.8 to 2.3 percent under the B1 baseline, the host quiet (load 1.08 at the start); the build_info reports `dce26f77`, dirty False, release |
+| 2026-10-21 | `fe3fde8a` (rows 124/125/126, the package G fold) | 215.1 s | skipped (the heavy pass at the boundary) | 383/0/7 | flat expected: the skin convergence self-report, the stage validation and the COP honesty, the export-price honesty, and the fixture sweep found no shipped golden exercising any changed surface (the fixtures carry no ER lockout config, no per-stage EIR table, no COP telemetry column, no tankless WH, and Immediate EV drivers over constant sources); the compare vs B1 bitwise identical; WALL CONTEXT: the fold's quiet-start wall 215.1 s (load 0.27) is +2.0 percent vs a same-day quiet-start control on the previous pin `dce26f77` run through the same instrument (210.9 s, load 0.24), inside the 5 percent band, while both pins measure 19 to 22 percent over their own recorded rows from hours earlier (row 123's 176.7 s, the B1 baseline 179.9/180.8 s), so the absolute shift is the host's era (a sibling session's build waves on the shared box), not the engine; the build_info reports `fe3fde8a`, dirty False, release |
+| 2026-10-21 | `dff2b8d0` (rows 128/129, the package H fold: the schedule resample memory) | 188.1 s (the paired control on `fe3fde8a`: 189.6 s; the fold's repeat leg: 186.5 s) | skipped (the heavy pass at the boundary) | 383/0/7 | the PAIRED VERDICT, the standing method's first row: the fold's wall 188.1 s vs its same-sitting control on the previous pin `fe3fde8a` at 189.6 s is 0.8 percent under paired, the repeat leg 186.5 s puts the two-run mean 1.2 percent under the control, no wall regression in any leg; the CPU times beside each wall: the fold 3412.8 user + 18.7 sys s, the control 3441.8 user + 18.2 sys s, the repeat 3384.2 user + 18.3 sys s, compute flat with the walls (about 18.2 cores of the capture's own fleet in every leg), so the paired delta is compute, not waiting; the peak RSS: the fold 6,352,244 KB vs the control 6,403,648 KB (51 MB under, 0.8 percent), the repeat 6,280,708 KB (the mean 85 MB under, 1.4 percent), the memory proof's consumer-side echo: the capture's four premises exercise the resample path and the fold's peak RSS moved DOWN, a small aggregate echo of the engine-side 15.0x per-dwelling saving against the capture's 6.3 GB peak; the mid-run load samples at about 90 s and 150 s: 19.5/19.9 (fold), 20.4/21.2 (control), 18.4/20.5 (repeat), all of it the capture's own fleet, the external residual 1 to 3 under the quiet bar, the start loads 1.08/7.77/9.71 with the later starts carrying the prior leg's decay tail; the compare vs B1 bitwise identical on ALL THREE legs (exit 0); ruff clean; the contract check PASS (two informational NEW catalogue end uses, pre-existing); the build_info reports `dff2b8d0`, dirty False, release, for both fold legs and `fe3fde8a` for the control leg |
+| 2026-10-21 | `dff2b8d0` (the Wave 2 boundary, the heavy pass: the packages A through H all landed) | 187.5 / 190.3 s (the two back-to-back legs, the mean 188.9 s) | 13/13 IDENTICAL, exit 0 | 383/0/7 | the boundary heavy pass, check_losses and the B-record re-capture back-to-back on the same build in one sitting: check_losses 13/13 IDENTICAL exit 0, wall 9:28.84 (2.6 percent over row 112's 9:14.68 recorded wall), 11545.9 user + 52.7 sys s, peak RSS 5,992,900 KB, no moved loss, no re-pin; the DE-trace capture two legs at the boundary head, walls 187.52 and 190.32 s, CPU 3393.1 / 3454.0 user + 20.4 / 21.3 sys s beside them (compute flat with the walls, about 18.2 cores of the capture's own fleet in both legs), peak RSS 6,183,556 / 6,293,704 KB (the mean 6,238,630, about 112 MB under row 129's three-leg mean), mid-run loads 15.8-20.8 all the capture's own fleet, the start loads 0.51 and 4.39 (the second carrying the first leg's decay tail), the external residual 1 to 3 under the quiet bar; the compare vs the standing `B1-de-trace.json` exit 0 bitwise on BOTH legs and mutual, the standing baselines untouched (the payload is the gate; a replacement would re-record an identical payload's header only, row 112's precedent), the de-trace capture's file sha256 `6624d2b9d428d73c` (leg 1); the paired verdict: the two-leg mean 0.4 percent under row 129's same-day control leg (189.6 s) and 0.9 percent over its fold mean (187.3 s), inside the 5 percent band, no wall regression; the pin is unchanged since row 129 (the fold head `dff2b8d0` IS the boundary head, the tip's `47d6efee` docs-only), so the paired control is a same-build leg and the verdict is the legs' mutual agreement plus the row 129 comparison; the suite 383/0/7, ruff clean, the contract PASS (the same two informational NEW items, pre-existing); the build_info reports `dff2b8d0`, dirty False, release, the freshness check `--reinstall-package hares-py` then `maturin develop --release` against the consumer environment |
+| 2026-10-22 | `3f03a3ee` (the pinned-libm re-anchor: the pin `22deb4a4`, the corpus and the B1-prime re-records `3f03a3ee` and `11f1881d`; the later tips carry no compiled change) | 222.8 / 211.7 s (the two back-to-back legs, the mean 217.2 s) | 13/13 MOVED, re-pinned (last bits, attributed) | 383/0/7 | the RE-ANCHOR ROW, the operator's decided reproducibility resolution executed: the engine's runtime transcendental functions are pinned to the libm crate (the pure-Rust implementations), the full 162-site, 44-file pin from the probe branch's `d1e56d9f` plus the four ASHRAE 152 `f64::exp` sites in `calculate_dse` that the probe's census missed (the same mechanical substitution, argument-for-argument; every site of the applied diff verified mechanical: no algebraic rewrite, no fma introduction, no precomputation; the probe's one non-mechanical hunk, a doc comment's OCHRE citation its sed mangled, rejected; the runtime scan after the pin: zero platform-math call sites in `crates/*/src` outside test modules), landed as `22deb4a4`; THE CORPUS RE-CAPTURED ONCE: the ten default manifests and the dst manifest each captured twice from the pinned tree with byte-identical files both passes, the compare-all green at the new record (10 + 1); at the digest level nine of the ten default manifests' products moved plus the dst manifest's, and `resstock_2025_fleet`'s products are bitwise (its only transcendental surface is the reactive path the earlier pin `c432d527` covered), the eleven files' hashes also move through the header's `git_head` (provenance only); the probe tree at `d1e56d9f` reproduces the moved manifests' products exactly, so the movement is the 162-site pin's and the four exp sites are inert on the corpus; every movement attributed to the mechanism, not physics: the platform libm (glibc on the capturing host) and the libm crate disagree by one ULP on some solar-geometry, psychrometric, infiltration and ASHRAE 152 inputs, amplified through the step; THE B1-PRIME RECORD: the de-trace capture twice byte-identical (file sha256 `c843530089389c98` both passes), the compare against the pre-pin payload exit 1 (191 differing field paths across the four premises, the mechanism's last-bit drifts amplified through the fit's early exits), the standing `B1-de-trace.json`, `B1-losses.json` and `B1-record.json` re-recorded with the attribution (`11f1881d`); the new baseline's numbers: walls 222.77 and 211.71 s (the mean 217.2 s), CPU 4056.9 and 3885.9 user + 23.8 and 23.8 sys s (about 18.3 to 18.5 cores, compute-bound), peak RSS 5,964,308 and 6,276,372 KB (the mean 6,120,340 KB, 2 percent under the boundary row's two-leg mean); the mean wall is +15 percent over the boundary row's 188.9 s and the CPU time rose the same fraction: the pinned libm's pure-Rust transcendentals replace the platform libm's optimized assembly on the hot path, the accepted and attributed cost of cross-platform bit-identity (not a waiting or a workload change); check_losses at the same sitting: wall 10:24.5 (12747.1 user + 48.9 sys s, peak RSS 6,201,004 KB), all 13 losses moved within the last bits (the worst 5,155 ULP, 9.4e-13 relative, the first 40 of 52 mantissa bits identical in every pair), re-pinned with the attribution, no loss beyond last-bit scale; the start loads 4.46 and 3.70 (the decay tail of this row's own builds) and the end loads 16.11 and 14.34 all the capture's own fleet; the freshness: `uv sync --locked --all-extras --all-groups --reinstall-package hares-py` then `maturin develop --release`, the build_info reports `3f03a3ee`, dirty False, release, rustc 1.99.0; the suite 383 passed, 0 failed, 7 skipped, ruff clean, the contract PASS (the same two informational NEW items, pre-existing); THE LADDER'S BITWISE CHAIN RE-ANCHORED to B1-prime from this row forward: every later row's compare runs against the re-recorded `B1-de-trace.json` and the goldens' chain re-anchors at `3f03a3ee`'s corpus; the mac leg of the reproducibility workflow compares the committed goldens with the pinned math and captures nothing, so this row's record is the platform's baseline |
+
+## The schedule resample's memory, 2026-10-21 (row 129, Hardening 25)
+
+The instrument is the I-08 allocation-accounting machinery: the
+counting allocator (`crates/hares-types/src/alloc_count.rs`) gained a
+byte channel beside its call count - `thread_alloc_bytes`, the
+calling thread's live requested bytes, the net of every allocating
+call's size and every deallocation's size, read as a delta across a
+measured region. The workload is the fleet's own shape: the 15-minute,
+16-column ResStock schedule (`bldg0000006`, 35040 rows) parsed once,
+resampled to the fleet's 1-minute step, then cloned ten times for the
+per-dwelling copies the environment builds hold. The measurement binary
+is `crates/hares-core/tests/schedule_resample_memory.rs` (its own test
+executable, the counting allocator installed); the pin runs in the
+suite and prints the numbers under `--nocapture`.
+
+| quantity | before (materialised expansion) | after (held source rows) |
+| ---- | ---- | ---- |
+| the resample to 60 s | 75,688,714 B (53 calls) | 5,048,074 B (53 calls) |
+| one dwelling's table (resample + one copy) | 83,257,737 B | 5,553,033 B |
+| the 10-dwelling fixture scale | 832,577,374 B | 55,530,334 B |
+| the ratio | 1x | 15.0x less |
+
+The before columns are the RED run's printed values at the parent
+shape; the after columns the GREEN run's, the same counters, the same
+workload, the same machine. The plan's ~50 MB/dwelling estimate
+understated the true per-dwelling cost (about 83 MB): 67.3 MB of
+expanded columns plus 8.4 MB of per-row stamps, and the per-dwelling
+copy pays it again. The call count does not witness the defect (the
+expansion is a handful of large allocations); the byte channel is the
+witness, and the counter's call-count semantics are untouched (its own
+exact-count tests pass unchanged).
+
+The value identity is pinned alongside: all 16 columns x all 525600
+per-step rows of the resampled series bitwise the source table's
+zero-order hold (`to_bits`), before and after. The consumer-side
+before/after (the ladder's DE-trace capture wall) lands with the
+ladder's next fold row; the engine-side proof is this record.
+
+## PHASE-SHARES, 2026-10-22, the step pipeline on the Wave 2 head `93c22b54`
+
+The eleven phases the profiler's phase clock partitions the step into
+(`07-profiler.md` PR-1), measured on the head of `feat/output-results`
+(`93c22b54`, the tree `dff2b8d0` built; the later commits docs-only).
+The instrument: `frame_golden run` built with the profiling feature,
+`CARGO_BUILD_JOBS=2 cargo build --release -p frame_golden --features
+profiling`. M-1's `-F profiling` maps to that cargo feature (the tool's
+`Cargo.toml` forwards it to `hares-core/profiling`; the counting
+allocator installs only under it, PR-3). The CLI has no `--help` flag;
+the usage line prints on a parse error. The workload is the ladder's
+shape: `tests/fixtures/golden/consumer_shape_900s.toml`, the manifest
+that mirrors the consumer's call (bldg0176227, full year 2018 at 900 s,
+35,040 steps, warm-up disabled, metrics on), run `--discard-output` so
+the wall is step work. Three runs in separate processes in one sitting.
+
+The three runs' `step_total`: 1.217 s, 1.214 s, 1.204 s (the median
+1.214 s, 34.6 us per step); construct+simulate walls 1.604 s, 1.532 s,
+1.508 s; user CPU 1.22, 1.21, 1.20 s; sys 0.20, 0.17, 0.16 s; process
+peak RSS (VmHWM) 148,588 / 148,460 / 148,404 kB. Hot-path allocations
+743,849 across 35,040 steps on every run (every step violating; the
+PR-3-era figure at the same fixture was 8,473,313, so the runtime and
+observation rows since cut allocations per step about 11x). The fleet
+fold's own high-water (the multi-gigabyte capture peak) is not
+reachable from this single-dwelling bench without re-running the
+consumer capture, so it is skipped here; the bench's own high-water is
+the 148.5 MB above.
+
+The shares, the median of the three runs per phase (the per-run
+disagreement is at most one point on `environment` and `invariants`):
+
+| phase | seconds | percent |
+| ---- | ---- | ---- |
+| environment | 0.121 | 10 |
+| control | 0.097 | 8 |
+| ideal_capacity | 0.061 | 5 |
+| actors | 0.000 | 0 |
+| dispatch | 0.012 | 1 |
+| equipment | 0.170 | 14 |
+| envelope | 0.449 | 37 |
+| invariants | 0.012 | 1 |
+| state_snapshot | 0.219 | 18 |
+| output | 0.061 | 5 |
+| accounting | 0.012 | 1 |
+| **sum** | | **100** |
+
+The seconds are derived from the instrument's integer percents times
+the median `step_total` (each percent figure is itself rounded to a
+whole point, so a second's figure carries about half a point of
+rounding; `actors` prints 0 because it is under the half point, not
+because it is empty). The sum-equals-total check is exact in the
+instrument's own arithmetic, not in this table's rounding: the phases
+are differences of the same `Instant` readings, and
+`profiling_phases_partition_the_step` (the `Duration`-equality
+acceptance test, 96 steps of the cz2a fixture) is green on this build.
+The printed percents of the median run sum to 100.
+
+Host: 28 cores, load average 1.60/0.95/0.60 at the first run's start
+and 1.05/0.88/0.58 at the second's, the host otherwise idle (the
+exclusive-host rule; the residual load is this session's own build
+tail). Profiled wall over the ladder's unprofiled per-run cost stays
+near parity (PR-2's 0.98x): the profiled capture is the release run.
+
+Context against the PR-1-era record (2026-10-02, the same fixture):
+the partition is stable while the composition moved with the landed
+rows. The `invariants` and `accounting` shares (16 and 16 then) fell to
+1 and 1 when PR-2 removed the four per-step `/proc` reads; `dispatch`
+(15 then) is 1 now after the shared-term resolve and the runtime rows;
+the `envelope` phase's absolute cost is unchanged (13 percent of that
+run's 3.36 s `step_total` is the same 0.44 s it holds today) and its
+share grew because the rest of the step got cheaper around it; the
+`state_snapshot` share grew to 18 for the same reason. The single
+dwelling's 1.21 s `step_total` is the per-run cost whose fleet shape
+(the ladder's capture, 1.74 CPU-s per run over 1,891 runs) makes the
+capture's 188 s wall.
+
+**The top three phases:**
+
+1. `envelope`, 37 percent (0.449 s). `ThermalSolver::integrate`, whose
+   step body `integrate_inner` lives in
+   `crates/hares-envelope/src/thermal_solver/stepping.rs`, runs the
+   state-space step over the RC network: `build_input_vector`,
+   `build_coupling` and `apply_convection_forcing` assemble the step's
+   input column and identity coupling, then
+   `StateSpaceModel::step_with_identity_coupling_into_scratch` or
+   `step_into` (`crates/hares-envelope/src/state_space.rs`) takes the
+   dense matrix-vector products and `output_into` computes the
+   outputs, all in persistent scratch (RT-3's allocation-free shape).
+   Fundamentally compute bound: dense linear algebra over the boundary
+   state, allocation-free after the first step, no IO.
+2. `state_snapshot`, 18 percent (0.219 s). The phase's span is the
+   observer push (compiled out without the observe feature here), the
+   equipment-mode baseline copy, the end-of-step equipment snapshot
+   and the step result. The dominant site is `snapshot_equipment_entry`
+   (`crates/hares-core/src/dwelling/mod.rs:6341`): per equipment it
+   `insert`s a fresh `core_output().clone()` into
+   `latest_env.equipment_core` (a new map entry and its heap per
+   equipment per step, the old one dropped) beside the in-place
+   telemetry `clone_from`, and the phase builds two fresh per-zone
+   delivery vectors (`step_hvac_heating_by_zone`,
+   `step_hvac_cooling_by_zone`, `collect` per step) and clones
+   `zone_temp_scratch` for the `StepResult`. Allocation and memory
+   movement bound: map churn and small-vector reallocation, not
+   arithmetic; no IO.
+3. `equipment`, 14 percent (0.170 s). Step 3's three stage-rank passes
+   (`crates/hares-core/src/dwelling/mod.rs`, the `Equipment` phase
+   span) call `update_control` and `step` on every equipment each
+   step, then `validate_equipment_contract` and
+   `validate_port_core_electrical_consistency`; the time sits in the
+   equipment models' own `step` bodies in `crates/hares-equipment`
+   (the HVAC coil's duty-cycle and COP evaluation, the water heater's
+   tank model, the battery's power electronics). Compute bound:
+   per-model arithmetic with small fixed allocations, no IO.
+
+**Proposed PERFORMANCE rows (proposals for the next planning round,
+not scheduled work):**
+
+| title | phase | expected mechanism | size | acceptance |
+| ---- | ---- | ---- | ---- | ---- |
+| The end-of-step equipment snapshot writes in place instead of re-inserting | `state_snapshot` (18 percent, the measured second) | `snapshot_equipment_entry` (`crates/hares-core/src/dwelling/mod.rs:6341`) `insert`s a fresh `core_output().clone()` per equipment per step and the phase `collect`s two fresh per-zone delivery vectors and a zone-temp clone per step; retain the map entries and buffers and write them in place (the telemetry `clone_from` pattern), allocation-free after the first step | M | paired ladder: the fold's capture wall against its same-sitting control on the previous pin, and the site's counting-allocator delta reading zero after the first step |
+| The per-surface Perez irradiance computed once per blueprint and shared | `environment` (10 percent here; the fired condition measured 7.3 to 7.5 percent of simulate) | `EnvironmentManager::update_in_place` (`crates/hares-core/src/environment.rs:1514`) recomputes per-surface Perez and incidence every step for every dwelling (twelve azimuth samples per omnidirectional surface); build the per-blueprint per-surface table the RT-2 record names, once from the blueprint's surfaces, shared by every dwelling the blueprint builds, so the fit path's per-candidate homes read it | M | paired ladder, with the frames bitwise equal (the table computes the same functions of the same inputs) |
+| The envelope state-space step exploits the RC network's locality | `envelope` (37 percent, the measured largest) | `StateSpaceModel::step_with_identity_coupling_into_scratch` and `step_into` (`crates/hares-envelope/src/state_space.rs`) run dense O(n^2) products while the RC couplings are local (each boundary to its neighbours and its zone); a block-structured or sparse step cuts the product count. Bits will move (a reassociated sum), so the row carries the numeric-entry delta record | L | paired ladder, with any bit movement recorded through the delta procedure at the parent before the fold |
+
+### P1, 2026-10-22, commit `23e13ce8` (the end-of-step equipment snapshot writes in place)
+
+Load average at write time: 1.78/1.95/2.38 (28 cores; the before and
+after sets below were taken back to back in one sitting, the host
+otherwise quiet).
+
+The `state_snapshot` phase's own allocations: the two per-zone HVAC
+delivery vectors (`step_hvac_heating_by_zone`, `step_hvac_cooling_by_zone`,
+each a fresh `collect` per step) and the step result's zone-temperature
+clone. The equipment snapshot itself was already allocation-free after
+the first step (`CoreOutput` holds only `Copy` members, so the map
+re-insert copies bytes in place; the `snapshot_equipment` site test
+pins it); the phase's remaining three sites are what this row removed.
+
+1. The allocation delta witness (new): `state_snapshot_phase_allocation_free_after_first_step`
+   steps the OCHRE sample home (`base.xml`, the counting allocator
+   installed) into one reused step result, the shape `simulate()` steps
+   in. At the parent `68f43ec3` the phase allocated 12 times over the
+   4 steps after the first (3 per step): RED. At `23e13ce8` the delta
+   is zero on every step after the first: GREEN. The existing
+   per-site test is unchanged and green.
+
+2. The profiling count (the phase-share record's instrument:
+   `frame_golden run tests/fixtures/golden/consumer_shape_900s.toml
+   --repeat 1 --discard-output`, built with the profiling feature,
+   three runs in separate processes per side). Hot-path allocations
+   over the year-run of 35,040 steps: before `743,849` on every run,
+   after `638,732` on every run. The drop is 105,117: the phase's
+   three sites times 35,040 steps less the first step's three
+   first-time allocations. `hot_path_alloc_violations` stays 35,040 on
+   both sides: the step still allocates in other phases (about 18.2
+   allocations per step after this row, down from about 21.2).
+
+3. The paired wall, same sitting, same sides: `step_total` medians
+   1.246 s (1.246/1.265/1.225) before, 1.220 s (1.245/1.220/1.205)
+   after, a 2.1 percent drop, inside the 5 percent noise band: no
+   measurable wall change at this resolution. The `state_snapshot`
+   share moved 18 to 17 percent (the printed percents carry about half
+   a point of rounding). `VmHWM` 148.4 MB on both sides. Read
+   honestly: the phase's cost sits in the telemetry `clone_from`'s
+   per-key hashing and the map writes, not in the three small
+   allocations; the fold's paired capture wall is the gate for the
+   step-loop program's cumulative effect, and this row's proof is the
+   allocator delta plus the count above.
+
+The goldens: `compare-all` identical in both feature sets at the tip
+(10 dwelling and fleet fixtures without features, the dst fixture with
+`-F dst`); checkpoints, pytest (1801 passed, 0 failed) and pyright (0)
+green.
+
+The design: `run_timestep_into` writes the step result in place (the
+zone temperatures through `Vec::clone_from`, which reuses the buffer's
+allocation once it holds the zone count) and the two delivery vectors
+are `clear` + `extend` on persistent buffers. `simulate_inner` reuses
+one result across the run's steps. `step()` and the warm-up loop keep
+the by-value wrapper, so their per-call allocations are unchanged from
+the parent; they are the follow-ups.
+
+The follow-up census (the per-step clone and fresh-vector sites the
+step path still carries; each registered as its own row, none fixed
+here):
+
+- `stepped_stage_ranks` (`dwelling/mod.rs`, the step's equipment
+  phase): a fresh `Vec::with_capacity` per step for the unconditional
+  stage-ordering invariant. One allocation per step, every build.
+  Row 42.
+- The warm-up loop's per-step result: each warm-up step returns a
+  fresh `StepResult` the loop drops unread on success. One allocation
+  per warm-up step. Row 41.
+- The by-value `step()` handoff: the Python single-step path and the
+  fleet's per-dwelling step loop (`hares-fleet/src/fleet.rs:2023`)
+  each pay one zone-temperature vector per step. Row 43.
+- Observe-gated copies (present only in observe builds, invisible to
+  the profiling build): the port snapshots taken per stage pass
+  (`ports.clone()` three times when observing), the thermal-update
+  buffer clone and the actor telemetry key collects. Noted for the
+  observe build's own measurement; no row yet.
+
+Found along the way, pre-existing at the parent: the default-feature
+clippy gate was red (`iterative_wall_solver` and `iterative_wall_env`
+in `hares-envelope`'s longwave tests called only by observe-gated
+tests); the helpers are now gated with their callers. Test-only, no
+golden risk; the all-features gate was green before and after.

@@ -173,6 +173,14 @@ graph LR
 - Capacity-limited: over-capacity -> reduced outlet temperature
 - Gas tankless: fuel input = `thermal_output / efficiency` + parasitic (7.38W ANSI RESNET 301)
 - Electric tankless: electrical input = `thermal_output / efficiency`
+- UEF handling: a declared UEF is the energy factor directly (OCHRE's
+  instantaneous-water-heater branch, `hpxml.py:1055-1058`, reads
+  `energy_factor = uniform_energy_factor` with no conversion); the
+  RESNET storage conversion (`EF = 0.9066·UEF + 0.0711`) applies to the
+  storage tank's branch only (`gas.rs`). An explicit `energy_factor`
+  wins over the UEF; the HPXML resolve's performance-adjustment
+  defaults follow OCHRE's instantaneous defaults (0.94 UEF-sourced,
+  0.92 EF-sourced).
 
 ## Grid Outage Behaviour
 

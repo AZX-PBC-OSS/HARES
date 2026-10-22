@@ -443,6 +443,13 @@ impl PyControlSignal {
     }
 
     #[staticmethod]
+    pub fn ev_clear_ready_by() -> PyResult<Self> {
+        Ok(Self {
+            signal: ControlSignal::EvClearReadyBy,
+        })
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (fraction))]
     pub fn max_capacity_fraction(fraction: f64) -> PyResult<Self> {
         validate_range(fraction, 0.0, 1.0, "fraction")?;
@@ -633,6 +640,7 @@ impl PyControlSignal {
                     target_soc,
                 }
             }
+            "EvClearReadyBy" => ControlSignal::EvClearReadyBy,
             "EventDelay" => ControlSignal::EventDelay {
                 delay_s: finite_f64_required(d, "delay_s")?,
             },
@@ -870,6 +878,9 @@ impl PyControlSignal {
                 dict.set_item("type", "EvSetReadyBy")?;
                 dict.set_item("departure_hour", departure_hour)?;
                 dict.set_item("target_soc", target_soc)?;
+            }
+            ControlSignal::EvClearReadyBy => {
+                dict.set_item("type", "EvClearReadyBy")?;
             }
             ControlSignal::EventDelay { delay_s } => {
                 dict.set_item("type", "EventDelay")?;

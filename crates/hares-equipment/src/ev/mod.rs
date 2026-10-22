@@ -98,6 +98,12 @@ pub struct Ev {
     v2g_soc_reserve: f64,
     v2g_max_discharge_w: f64,
     discharge_respects_deadline: bool,
+    /// The pack's live AC discharge ceiling [W] published for the driver
+    /// actor's dispatch votes: the tighter of each enabled leg's rating
+    /// and that leg's energy above its effective discharge floor over the
+    /// step. Recomputed each step; the constructor and init publish the
+    /// rated value (zero when neither leg is enabled).
+    discharge_ceiling_w: f64,
     /// Reversible temperature-capacity derate (the NREL SSC d0 Arrhenius —
     /// the same model the stationary Battery applies): a cold pack holds
     /// less charge. Applied in `refresh_usable_capacity` on top of the
@@ -327,6 +333,7 @@ impl Ev {
             v2g_soc_reserve: DEFAULT_V2G_SOC_RESERVE,
             v2g_max_discharge_w: DEFAULT_V2G_MAX_DISCHARGE_W,
             discharge_respects_deadline: true,
+            discharge_ceiling_w: 0.0,
             capacity_derate_model: crate::battery::CapacityDerateModel::default(),
             soc: DEFAULT_SOC.clamp(0.0, 1.0),
             battery_temp_c: DEFAULT_BATTERY_TEMP_C,
@@ -496,6 +503,9 @@ impl Ev {
                 .max(self.v2g_max_discharge_w)
                 .max(self.v2l_max_discharge_w)
         });
+        // The discharge ceiling's rated value for publication before the
+        // first step (recomputed live each step).
+        self.discharge_ceiling_w = self.rated_discharge_ceiling_w();
         self.q_setpoint_var = None;
 
         self.connection_state = match c.initial_connection_state.as_deref() {
@@ -919,11 +929,9 @@ impl Ev {
         };
 
         let eff_power = derated_rated * self.charging_efficiency * cc_cv_mult;
-        let hours_needed = if eff_power > 0.0 {
-            soc_deficit * self.battery_capacity_j / (eff_power * 3600.0)
-        } else {
+        if eff_power <= 0.0 {
             return derated_rated;
-        };
+        }
 
         #[cfg(debug_assertions)]
         {
@@ -941,7 +949,6 @@ impl Ev {
                 soc = self.soc,
                 transition_soc = self.cc_cv_transition_soc,
                 cc_cv_taper_mult = cc_cv_mult,
-                hours_needed,
                 "bms_ready_by_power: SOC‑based CC‑CV taper applied in no‑LUT path",
             );
         }
@@ -949,19 +956,35 @@ impl Ev {
         let current_hour =
             now.hour() as f64 + now.minute() as f64 / 60.0 + now.second() as f64 / 3600.0;
 
+        // A deadline in the future paces the deficit at the average power
+        // that lands it by the deadline (clamped to the rated power). A
+        // deadline in the past reads as tomorrow's: the ready-by departure
+        // recurs daily, so an earlier hour is the next day's departure.
+        // The pre-fix model was bang-bang with a ±1 h past-deadline grace
+        // window - full rate only when the deficit could not land in time,
+        // zero otherwise, and full rate for up to an hour past a latched
+        // deadline whose departure never fired. Proportional pacing
+        // trickles early and ramps as the deadline nears; past the
+        // departure, charging for it has no value (the vehicle departs, or
+        // the driver's cancellation clears the deadline).
         let hours_until_deadline = if ready_by_hour > current_hour {
             ready_by_hour - current_hour
-        } else if (current_hour - ready_by_hour).abs() < 1.0 {
-            return derated_rated;
         } else {
             24.0 - current_hour + ready_by_hour
         };
 
-        if hours_needed >= hours_until_deadline {
+        if hours_until_deadline <= 0.0 {
             return derated_rated;
         }
 
-        0.0
+        // The AC power that delivers the deficit's DC energy over the
+        // remaining hours: the DC rate is the deficit over the time left;
+        // the inverter conversion and the CC-CV taper apply on top. The
+        // pace recomputes every step, so the taper's deepening as the SOC
+        // rises self-corrects the pace.
+        let required_dc_w = soc_deficit * self.battery_capacity_j / (hours_until_deadline * 3600.0);
+        let conversion = (self.charging_efficiency * cc_cv_mult).max(f64::MIN_POSITIVE);
+        derated_rated.min(required_dc_w / conversion)
     }
 
     /// The discharge leg a latched negative setpoint resolves to: V2G when
@@ -1089,6 +1112,61 @@ impl Ev {
         )
     }
 
+    /// One discharge leg's live AC ceiling [W]: the tighter of the leg's
+    /// rating and the AC power the pack's energy above the leg's effective
+    /// discharge floor sustains over the step (the same budget
+    /// `compute_discharge` spends against). Zero at or below the floor.
+    fn leg_discharge_ceiling_w(&self, leg: DischargeLeg, dt_s: f64) -> f64 {
+        let rating = match leg {
+            DischargeLeg::V2G => self.v2g_max_discharge_w,
+            DischargeLeg::V2L => self.v2l_max_discharge_w,
+        };
+        let effective_floor = self.effective_discharge_floor(leg);
+        if self.soc <= effective_floor {
+            return 0.0;
+        }
+        let eta = self.charging_efficiency.max(0.01);
+        let available_dc_w = (self.soc - effective_floor) * self.battery_capacity_j / dt_s;
+        rating.min(available_dc_w * eta).max(0.0)
+    }
+
+    /// The pack's live AC discharge ceiling [W]: the tighter of the
+    /// enabled legs' live ceilings (a ceiling that can never overstate
+    /// either leg a vote might resolve to). Zero when neither leg is
+    /// enabled - the pack has no discharge capability, and a dispatch
+    /// vote sized on the charge rating would overstate it.
+    fn live_discharge_ceiling_w(&self, dt: Duration) -> f64 {
+        let dt_s = dt.as_secs_f64().max(MIN_TIMESTEP_HOURS * 3600.0);
+        let mut ceiling = f64::INFINITY;
+        let mut any_leg = false;
+        if self.v2g_enabled {
+            any_leg = true;
+            ceiling = ceiling.min(self.leg_discharge_ceiling_w(DischargeLeg::V2G, dt_s));
+        }
+        if self.v2l_enabled {
+            any_leg = true;
+            ceiling = ceiling.min(self.leg_discharge_ceiling_w(DischargeLeg::V2L, dt_s));
+        }
+        if any_leg { ceiling.max(0.0) } else { 0.0 }
+    }
+
+    /// The rated discharge ceiling for publication before the first step:
+    /// the tighter of the enabled legs' ratings, zero when neither leg is
+    /// enabled.
+    fn rated_discharge_ceiling_w(&self) -> f64 {
+        let mut ceiling = f64::INFINITY;
+        let mut any_leg = false;
+        if self.v2g_enabled {
+            any_leg = true;
+            ceiling = ceiling.min(self.v2g_max_discharge_w);
+        }
+        if self.v2l_enabled {
+            any_leg = true;
+            ceiling = ceiling.min(self.v2l_max_discharge_w);
+        }
+        if any_leg { ceiling.max(0.0) } else { 0.0 }
+    }
+
     fn dr_power_fraction(&self) -> f64 {
         match self.dr_level {
             DRLevel::Normal => 1.0,
@@ -1161,6 +1239,8 @@ impl Ev {
         self.telemetry.set(tk::OHMIC_LOSS_W, self.ohmic_loss_w);
         self.telemetry
             .set(tk::CHARGE_DERATE, self.charge_derate_factor());
+        self.telemetry
+            .set(tk::DISCHARGE_CEILING_W, self.discharge_ceiling_w);
         self.telemetry.set(tk::CC_CV_DERATE, self.cc_cv_derating);
         self.telemetry
             .set(tk::V2L_ACTIVE, if self.v2l_active { 1.0 } else { 0.0 });
@@ -1349,6 +1429,12 @@ impl Ev {
         env: &EnvironmentState,
         dt: Duration,
     ) -> crate::Result<ChargeStepPower> {
+        // The live discharge ceiling, recomputed for publication (the
+        // driver actor's dispatch votes read it). Published every step,
+        // whatever the commanded leg: a vote is cast before the leg
+        // resolves.
+        self.discharge_ceiling_w = self.live_discharge_ceiling_w(dt);
+
         // An unavailable period zeroing the EV's rows (`Vacancy` or
         // `Power Outage`, the `electric_vehicle_charging` and
         // `electric_vehicle_discharging` table rows) leaves the vehicle
@@ -2143,7 +2229,7 @@ impl Equipment for Ev {
         9
     }
 
-    /// The pack's stored charge [J], on the Battery reporter's exact
+    /// The pack's stored charge (J), on the Battery reporter's exact
     /// convention (`battery/mod.rs`: SOC × the nominal capacity): the
     /// fraction of the degradation-adjusted pack capacity
     /// (`degradation_adjusted_capacity_j`, rated × SOH) the SoC holds.
@@ -2432,6 +2518,17 @@ impl Equipment for Ev {
                 self.power_setpoint_w = None;
                 self.power_setpoint_min_soc = None;
                 self.power_setpoint_max_soc = None;
+            }
+            ControlSignal::EvClearReadyBy => {
+                // The deadline's trip is gone: the target, the pacing and
+                // the discharge-floor contribution all drop with it. The
+                // driver's cancellation path dispatches this beside
+                // consuming the day's event, so a cancelled departure does
+                // not keep charging the pack or blocking the discharge
+                // legs.
+                self.ready_by_hour = None;
+                self.ready_by_soc = None;
+                self.ready_by_power_warned = false;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
                 self.dr_level = *level;

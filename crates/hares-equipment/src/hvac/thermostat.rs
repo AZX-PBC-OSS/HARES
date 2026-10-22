@@ -1,6 +1,7 @@
 //! Thermostat types and FSM logic shared across HVAC equipment.
 
 use chrono::{DateTime, FixedOffset};
+use hares_physics::constants::{SETPOINT_PLAUSIBILITY_MAX_C, SETPOINT_PLAUSIBILITY_MIN_C};
 use hares_types::{
     ControlSignal, EnvironmentState, HaresError, ScheduleSource, ThermostatBandClass, ZoneId,
     thermal_setpoint_band_c, validate_thermostat_band_c,
@@ -419,11 +420,65 @@ impl ThermostatFsm {
 
     /// Validates the configured thermostat and records its band as the one
     /// the release form restores. Owners call it at init, after setting
-    /// `thermostat` from their configuration.
+    /// `thermostat` from their configuration and after their setpoints
+    /// have landed on the FSM.
     pub fn validate_configuration(&mut self, env: &EnvironmentState) -> crate::Result<()> {
         self.thermostat.validate(env)?;
         self.configured_hysteresis_c = self.thermostat.hysteresis_c;
+        self.validate_setpoint_band()?;
         Ok(())
+    }
+
+    /// The setpoint plausibility band at the thermostat boundary: every
+    /// setpoint value the FSM carries must lie inside
+    /// [`SETPOINT_PLAUSIBILITY_MIN_C`, `SETPOINT_PLAUSIBILITY_MAX_C`] C,
+    /// the same band the schedule resolution enforces on the HPXML
+    /// profiles and the schedule columns. The FSM is the one choke point
+    /// every setpoint surface lands on (the HPXML resolution's profiles,
+    /// the config's `*_setpoint_c` constants, the programmatic builders,
+    /// a user-authored typed config's source), and every owner calls
+    /// [`ThermostatFsm::validate_configuration`] at init after its
+    /// setpoints land and before the first step, so an out-of-band value
+    /// driving the HVAC at it. The sweep reads the literal values a
+    /// source declares, through
+    /// [`ScheduleSource::declared_literal_values`], whose match is
+    /// exhaustive where the enum is defined, so a source shape added
+    /// there fails to compile until its author states which of its
+    /// values the band reads.
+    ///
+    /// # Errors
+    ///
+    /// The first value outside the band, named with its side.
+    fn validate_setpoint_band(&self) -> crate::Result<()> {
+        Self::validate_setpoint_value("heating", self.static_setpoints.heating_c)?;
+        Self::validate_setpoint_value("cooling", self.static_setpoints.cooling_c)?;
+        for (side, source) in [
+            ("heating", &self.heating_setpoint_source),
+            ("cooling", &self.cooling_setpoint_source),
+        ] {
+            let Some(source) = source else {
+                continue;
+            };
+            for value in source.declared_literal_values() {
+                Self::validate_setpoint_value(side, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One setpoint value's plausibility: outside the band fails, naming
+    /// the side, the value and the band, with the unit mistake the band
+    /// exists to catch stated. A NaN fails the range check like any
+    /// other impossible value.
+    fn validate_setpoint_value(side: &str, value: f64) -> crate::Result<()> {
+        if (SETPOINT_PLAUSIBILITY_MIN_C..=SETPOINT_PLAUSIBILITY_MAX_C).contains(&value) {
+            return Ok(());
+        }
+        Err(HaresError::Equipment(format!(
+            "the {side} setpoint {value} °C is outside the plausible range \
+             [{SETPOINT_PLAUSIBILITY_MIN_C}, {SETPOINT_PLAUSIBILITY_MAX_C}] °C; setpoints \
+             are Celsius, and a Fahrenheit value in a Celsius field is the usual cause"
+        )))
     }
 
     /// Restores a checkpointed band, held to the thermostat's class like

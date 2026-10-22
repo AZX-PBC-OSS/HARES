@@ -11,7 +11,7 @@ per-timestep environmental state to equipment and solvers.
 hares-io/src/
 ├── epw.rs              EPW file parser, sky temp, ground temp models
 ├── psm3.rs             NREL PSM3/NSRDB CSV parser (5/15/30/60-min native solar)
-└── weather.rs          WeatherTimeSeries, WeatherFormat dispatch, PCHIP resampling
+└── weather.rs          WeatherTimeSeries, WeatherFormat dispatch, resampling
 
 hares-core/src/
 └── environment.rs      EnvironmentManager: offset alignment, per-timestep state, DST
@@ -152,31 +152,29 @@ below) converts to the simulation timestep before the run begins.
 
 ## Sub-Hourly Resampling
 
-`WeatherTimeSeries::resample(target_step_secs)` converts source data to the
-simulation timestep. Handles both upsampling (hourly EPW → 60s) and
-downsampling (5-min PSM3 → 15-min). Target step must divide 3600 evenly.
-No-op when source and target resolution match.
+`WeatherTimeSeries::resample(target_step_secs, first_hour, start, weather_year)`
+converts source data to the simulation timestep. No-op when source and
+target resolution match. The rules follow EnergyPlus's own weather
+handling (`WeatherManager.cc`), not a curve fit:
 
-| Field Type                   | Algorithm     | Rationale                              |
-|------------------------------|---------------|----------------------------------------|
-| Continuous instantaneous     | PCHIP         | Smooth C¹ curves, no overshoot         |
-| (dry-bulb, dew-point, pressure, infrared, sky_temp, ground_temp) | | |
-| Bounded continuous           | PCHIP + clamp | Preserve physical bounds after interp  |
-| (relative humidity [0–100%], sky cover [0–10]) | | |
-| Period-average energy flux   | Zero-order hold | Preserve integrated energy            |
-| (GHI, DNI, DHI)             |               |                                        |
-| Turbulent/stochastic         | Zero-order hold | Sub-hourly interpolation meaningless  |
-| (wind speed, wind direction) |               |                                        |
-| Accumulated depth            | Distribute    | `depth / factor` preserves total       |
-| (precipitation)              |               |                                        |
+| Case                                   | Algorithm                                                                                                                               |
+|----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| Sub-hourly file at any other step      | Error, naming both intervals - EnergyPlus refuses the run the same way ("Number of intervals per hour on Weather file does not match specified number of Time Steps Per Hour", `WeatherManager.cc:715-722`) |
+| Hourly file at a step longer than an hour | The interval mean of the records the step covers (EnergyPlus has no timestep longer than an hour, so this is a HARES convention)       |
+| Hourly file at a step shorter than an hour | EnergyPlus's interpolation (`WeatherManager.cc:3043-3128`), per field type in the table below                                          |
 
-**PCHIP** (implemented in `fritsch_carlson_slopes()` and `pchip_resample()`):
-Piecewise Cubic Hermite Interpolating Polynomial with Fritsch-Carlson
-monotonicity preservation (1980). Guarantees C¹ continuity, passes through
-original knots, and prevents overshoot in monotone regions. Uses Hermite basis
-functions for evaluation. Linear fallback for 2-element input. Flat
-extrapolation at year boundaries (no cyclic wrap). NaN propagation through
-affected intervals.
+| Field (hourly file, sub-hourly step)     | Algorithm                                                              |
+|------------------------------------------|------------------------------------------------------------------------|
+| Point fields (dry-bulb, dew-point, pressure, infrared, humidity ratio) | Linear last-hour interpolation evaluated at the step's end |
+| Wind direction                           | Interpolates on the circle                                             |
+| Precipitation                            | The weighted depth divided by the steps per hour (total preserved)     |
+| Solar flux (GHI, DNI, DHI)               | The hour's midpoint interpolation (the hourly average is the hour's midpoint value) |
+| Sky temperature                          | Recomputed from the step's interpolated inputs, never interpolated itself |
+| Ground temperature, surface albedo       | Hold the hour's record                                                 |
+
+The first hour of the run interpolates from hour 24 of the run's first day
+(`FirstHour::Hour24`, the default) or hour 1 (`FirstHour::Hour1`), never
+from a record before the run's first day.
 
 ---
 
@@ -326,7 +324,7 @@ The +6°F offset accounts for ground buffering above outdoor average.
 |------|---------|
 | `hares-io/src/epw.rs` | EPW parser, Clark-Allen sky temp, DOE-2 ground temp |
 | `hares-io/src/psm3.rs` | PSM3/NSRDB parser, sub-hourly native solar |
-| `hares-io/src/weather.rs` | WeatherTimeSeries, WeatherFormat dispatch, PCHIP resampling |
+| `hares-io/src/weather.rs` | WeatherTimeSeries, WeatherFormat dispatch, resampling |
 | `hares-core/src/environment.rs` | EnvironmentManager, offset alignment, DST schedule indexing |
 | `hares-physics/src/solar.rs` | Solar position (Spencer), Perez tilted irradiance |
 | `hares-physics/src/psychrometrics.rs` | Humidity ratio, wet-bulb, enthalpy |

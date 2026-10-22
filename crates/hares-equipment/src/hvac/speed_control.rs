@@ -169,7 +169,7 @@ impl StartupConfig {
             1.0
         } else {
             let t = self.time_since_start_min;
-            (-1.025_f64 * (-3.799_36_f64 * t / t_full).exp() + 1.025).clamp(0.0, 1.0)
+            (-1.025_f64 * libm::exp(-3.799_36_f64 * t / t_full) + 1.025).clamp(0.0, 1.0)
         }
     }
 
@@ -189,7 +189,7 @@ impl StartupConfig {
             1.0
         } else {
             let t = self.time_since_start_min;
-            (-1.025_f64 * (-3.799_36_f64 * t / t_full).exp() + 1.025).clamp(0.0, 1.0)
+            (-1.025_f64 * libm::exp(-3.799_36_f64 * t / t_full) + 1.025).clamp(0.0, 1.0)
         }
     }
 }

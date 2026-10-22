@@ -524,6 +524,32 @@ pub const L1_CAP_KW: f64 = 1.8;
 /// The same cap in W (SI), the value the SI config fills clamp against.
 pub const L1_CAP_W: f64 = 1800.0;
 
+/// The driving sources' key tags: one `(name, (byte index, tag byte))`
+/// row per source. Each source's key derivation flips its tag's byte into
+/// the driver's key, so the day-roll generator and the driving sources
+/// never draw from one keystream, at construction and at reseed alike.
+/// The day-roll itself rides the reserved EV-driver stream nonce, not a
+/// byte of this table. A fifth driving source's author names its row here
+/// and derives through [`apply_source_tag`]; the distinctness test
+/// (`driving_source_key_derivations_are_pairwise_distinct`) walks this
+/// table and pins every named derive function to its own row, so an
+/// added tag is checked against every existing one.
+const DRIVER_SOURCE_KEY_TAGS: &[(&str, (usize, u8))] = &[
+    ("miles", (3, 0x5E)),
+    ("departure", (0, 0xDE)),
+    ("duration", (1, 0xD0)),
+    ("arrival", (2, 0xAA)),
+];
+
+/// One driving source's tagged key: the driver's key with the source's
+/// tag byte flipped. The untagged key through (the derivation the miles
+/// builder once was) gave the day-roll stream and the miles source one
+/// keystream.
+fn apply_source_tag(mut seed: [u8; 32], (byte_index, tag): (usize, u8)) -> [u8; 32] {
+    seed[byte_index] ^= tag;
+    seed
+}
+
 impl ArchetypePreset {
     /// Build the runtime `ScheduleSource` for daily miles from this preset.
     ///
@@ -551,8 +577,12 @@ impl ArchetypePreset {
         // mean (mu + ln factor, sigma unchanged), so the drawn distances
         // are the drawn miles times the metre factor.
         const MILE_M: f64 = 1_609.344;
-        let miles_to_m_shift = MILE_M.ln();
+        let miles_to_m_shift = libm::log(MILE_M);
 
+        // The miles source's key carries its own tag, the same derivation
+        // `reseed` applies: no two consumers of the driver's key ever draw
+        // from one keystream.
+        let miles_seed = Self::derive_miles_seed(seed);
         let scale = |min: f64| -> Option<f64> { (min > 0.0).then_some(min * MILE_M) };
         if let (Some(wd_mu), Some(wd_sigma), Some(we_mu), Some(we_sigma)) = (
             self.weekday_miles_mu,
@@ -594,7 +624,7 @@ impl ArchetypePreset {
                     ),
                 ],
                 Some(0.0),
-                seed,
+                miles_seed,
             )
         } else {
             let clamp_min = scale(self.daily_drive_miles_min);
@@ -603,36 +633,37 @@ impl ArchetypePreset {
                     mu: self.daily_drive_miles_mu + miles_to_m_shift,
                     sigma: self.daily_drive_miles_sigma,
                 },
-                seed,
+                seed: miles_seed,
                 draw_count: 0,
-                rng: ChaCha8Rng::from_seed(seed),
+                rng: ChaCha8Rng::from_seed(miles_seed),
                 clamp_min,
                 clamp_max: None,
             }
         }
     }
 
-    /// The miles source's key: the base seed unmodified.
+    /// The miles source's key: the driver's key with the miles row's tag
+    /// byte flipped (`DRIVER_SOURCE_KEY_TAGS`).
     pub fn derive_miles_seed(seed: [u8; 32]) -> [u8; 32] {
-        seed
+        apply_source_tag(seed, DRIVER_SOURCE_KEY_TAGS[0].1)
     }
 
-    /// The departure source's key: the base seed with byte 0 flipped.
-    pub fn derive_departure_seed(mut seed: [u8; 32]) -> [u8; 32] {
-        seed[0] ^= 0xDE;
-        seed
+    /// The departure source's key: the driver's key with the departure
+    /// row's tag byte flipped (`DRIVER_SOURCE_KEY_TAGS`).
+    pub fn derive_departure_seed(seed: [u8; 32]) -> [u8; 32] {
+        apply_source_tag(seed, DRIVER_SOURCE_KEY_TAGS[1].1)
     }
 
-    /// The trip-duration source's key: the base seed with byte 1 flipped.
-    pub fn derive_duration_seed(mut seed: [u8; 32]) -> [u8; 32] {
-        seed[1] ^= 0xD0;
-        seed
+    /// The trip-duration source's key: the driver's key with the duration
+    /// row's tag byte flipped (`DRIVER_SOURCE_KEY_TAGS`).
+    pub fn derive_duration_seed(seed: [u8; 32]) -> [u8; 32] {
+        apply_source_tag(seed, DRIVER_SOURCE_KEY_TAGS[2].1)
     }
 
-    /// The arrival source's key: the base seed with byte 2 flipped.
-    pub fn derive_arrival_seed(mut seed: [u8; 32]) -> [u8; 32] {
-        seed[2] ^= 0xAA;
-        seed
+    /// The arrival source's key: the driver's key with the arrival row's
+    /// tag byte flipped (`DRIVER_SOURCE_KEY_TAGS`).
+    pub fn derive_arrival_seed(seed: [u8; 32]) -> [u8; 32] {
+        apply_source_tag(seed, DRIVER_SOURCE_KEY_TAGS[3].1)
     }
 
     /// Build a `ScheduleSource` for departure time (minute of day) with Gaussian noise.
@@ -1426,6 +1457,51 @@ mod tests {
         let s1 = preset.build_distance_schedule(seed);
         let s2 = preset.build_distance_schedule(seed);
         assert_eq!(s1, s2);
+    }
+
+    /// The four driving sources' key derivations are pairwise distinct and
+    /// none is the identity: one driver key feeds the day-roll stream and
+    /// four schedule sources, and any two consumers sharing a (key, stream)
+    /// pair draw the same words, correlating their decisions. The test
+    /// walks [`DRIVER_SOURCE_KEY_TAGS`], so a fifth source's table row is
+    /// checked against every existing one; each named derive function must
+    /// read its own table row.
+    #[test]
+    fn driving_source_key_derivations_are_pairwise_distinct() {
+        let key = [3u8; 32];
+        let derived: Vec<(&str, [u8; 32])> = DRIVER_SOURCE_KEY_TAGS
+            .iter()
+            .map(|(name, tag)| (*name, apply_source_tag(key, *tag)))
+            .collect();
+        // Each named derive function reads its own table row, so a
+        // hard-coded byte beside the table cannot drift.
+        for (name, from_table) in &derived {
+            let from_fn = match *name {
+                "miles" => ArchetypePreset::derive_miles_seed(key),
+                "departure" => ArchetypePreset::derive_departure_seed(key),
+                "duration" => ArchetypePreset::derive_duration_seed(key),
+                "arrival" => ArchetypePreset::derive_arrival_seed(key),
+                other => panic!("the tag table names an unbuilt source: {other}"),
+            };
+            assert_eq!(
+                from_fn, *from_table,
+                "the {name} derive function must read the tag table's row"
+            );
+        }
+        for (i, (name, derived_seed)) in derived.iter().enumerate() {
+            assert_ne!(
+                *derived_seed, key,
+                "the {name} source's key derivation is the identity: its \
+                 keystream collides with the driver key's other consumer"
+            );
+            for (j, (other_name, other_seed)) in derived.iter().enumerate().skip(i + 1) {
+                assert_ne!(
+                    derived_seed, other_seed,
+                    "the {name} and {other_name} sources share a keystream \
+                     (derivations {i} and {j})"
+                );
+            }
+        }
     }
 
     #[test]

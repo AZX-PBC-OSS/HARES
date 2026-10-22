@@ -908,6 +908,7 @@ fn half_year_vacancy_removes_volume_instead_of_redistributing_it() {
         &mut specs,
         &mut schedule,
         pre_period_columns.as_deref(),
+        1,
         Some(
             &hares_io::load_default_profiles(&project_root().join("python/hares/defaults"))
                 .expect("the profiles load"),

@@ -20,6 +20,7 @@ rand_distr = { workspace = true }
 strum = { workspace = true }
 tracing = { workspace = true }
 uom = { workspace = true }
+libm = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

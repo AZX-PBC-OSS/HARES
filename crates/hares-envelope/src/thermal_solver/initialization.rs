@@ -194,7 +194,19 @@ pub(crate) fn initialize_steady_state(
     if zone_fixes.is_empty() {
         return match model.steady_state(&u) {
             Some(x) => Ok(x),
-            None => Ok(DVector::from_element(model.state_dim(), indoor_temp_c)),
+            None => {
+                // The fallback is legitimate (a uniform-temperature start),
+                // but silently initialising every state at the indoor
+                // temperature would hide a broken model from the run.
+                tracing::warn!(
+                    state_dim = model.state_dim(),
+                    indoor_temp_c,
+                    "steady-state initialization: the steady-state solve failed \
+                     in initialize_steady_state; falling back to a uniform \
+                     {indoor_temp_c} C initial state for every state"
+                );
+                Ok(DVector::from_element(model.state_dim(), indoor_temp_c))
+            }
         };
     }
 
@@ -240,6 +252,19 @@ pub(crate) fn initialize_steady_state(
         match neg_a.try_inverse() {
             Some(inv) => inv * b_rhs,
             None => {
+                // The fallback is legitimate (a uniform-temperature start),
+                // but silently initialising every state at the indoor
+                // temperature would hide a broken model from the run. OCHRE
+                // raises on the singular solve (np.linalg.inv's LinAlgError)
+                // rather than silently substituting uniform temperatures.
+                tracing::warn!(
+                    state_dim = n,
+                    indoor_temp_c,
+                    "steady-state initialization: the continuous pinned-path \
+                     solve failed in initialize_steady_state (the reduced \
+                     -A_c matrix is singular); falling back to a uniform \
+                     {indoor_temp_c} C initial state for every state"
+                );
                 return Ok(DVector::from_element(n, indoor_temp_c));
             }
         }
@@ -250,6 +275,19 @@ pub(crate) fn initialize_steady_state(
         match lhs.try_inverse() {
             Some(inv) => inv * b_rhs,
             None => {
+                // The fallback is legitimate (a uniform-temperature start),
+                // but silently initialising every state at the indoor
+                // temperature would hide a broken model from the run. OCHRE
+                // raises on the singular solve (np.linalg.inv's LinAlgError)
+                // rather than silently substituting uniform temperatures.
+                tracing::warn!(
+                    state_dim = n,
+                    indoor_temp_c,
+                    "steady-state initialization: the discrete pinned-path \
+                     solve failed in initialize_steady_state (the reduced \
+                     I - A_d matrix is singular); falling back to a uniform \
+                     {indoor_temp_c} C initial state for every state"
+                );
                 return Ok(DVector::from_element(n, indoor_temp_c));
             }
         }
@@ -539,6 +577,220 @@ mod tests {
                 x[i]
             );
         }
+    }
+
+    /// A minimal tracing subscriber that counts the WARN-level events whose
+    /// message carries the needle, so a test can observe the initialization
+    /// fallback's warning.
+    struct WarnCounter {
+        needle: &'static str,
+        count: std::sync::atomic::AtomicUsize,
+        messages: std::sync::Mutex<Vec<String>>,
+    }
+
+    struct MessageVisitor(String);
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl tracing::Subscriber for WarnCounter {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().level() != &tracing::Level::WARN {
+                return;
+            }
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            if visitor.0.contains(self.needle) {
+                self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.messages.lock().unwrap().push(visitor.0);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn clone_span(&self, id: &tracing::span::Id) -> tracing::span::Id {
+            id.clone()
+        }
+    }
+
+    /// The uniform-temperature fallback (a failed steady-state solve) must
+    /// warn: the fallback is legitimate but silently initialising every
+    /// state at the indoor temperature would hide a broken model.
+    #[test]
+    fn steady_state_fallback_warns() {
+        let a_d = DMatrix::identity(2, 2);
+        let b_d = DMatrix::from_element(2, 1, 0.1);
+        let c = DMatrix::identity(2, 2);
+        let d = DMatrix::zeros(2, 1);
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::new(),
+            zone_output_indices: HashMap::new(),
+            zone_sensible_input_indices: HashMap::new(),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let indoor = 21.0;
+        let env = minimal_env(indoor, -5.0);
+
+        let counter = std::sync::Arc::new(WarnCounter {
+            needle: "steady-state initialization",
+            count: std::sync::atomic::AtomicUsize::new(0),
+            messages: std::sync::Mutex::new(Vec::new()),
+        });
+        let x = {
+            let _guard = tracing::subscriber::set_default(counter.clone());
+            initialize_steady_state(&model, &wiring, &env, indoor, &[]).unwrap()
+        };
+        assert_eq!(x.len(), 2);
+        assert!(
+            counter.count.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the uniform fallback must warn naming the site"
+        );
+    }
+
+    /// The pinned paths' singular-inverse fallbacks must warn too. The
+    /// production caller (`ThermalSolver::new`) always pins the indoor zone,
+    /// so the two `try_inverse`-None arms (the continuous reduced -A_c solve
+    /// and the discrete reduced I - A_d solve) are the reachable silent
+    /// fallback sites. OCHRE raises on the singular solve (np.linalg.inv's
+    /// LinAlgError) rather than substituting uniform temperatures; each arm
+    /// names its branch and the site in the warning.
+    #[test]
+    fn pinned_discrete_singular_solve_warns() {
+        // A_d = identity: after removing the pinned zone's row/col the
+        // reduced (I - A_d) is a zero matrix, so try_inverse returns None.
+        let a_d = DMatrix::identity(2, 2);
+        let b_d = DMatrix::from_element(2, 1, 0.1);
+        let c = DMatrix::identity(2, 2);
+        let d = DMatrix::zeros(2, 1);
+        let model = StateSpaceModel::from_discrete(a_d, b_d, c, d).unwrap();
+
+        let mut zone_state_indices = HashMap::new();
+        zone_state_indices.insert(ZoneId(1), 0_usize);
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices,
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::new(),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let indoor = 21.0;
+        let env = minimal_env(indoor, -5.0);
+
+        let counter = std::sync::Arc::new(WarnCounter {
+            needle: "steady-state initialization",
+            count: std::sync::atomic::AtomicUsize::new(0),
+            messages: std::sync::Mutex::new(Vec::new()),
+        });
+        let x = {
+            let _guard = tracing::subscriber::set_default(counter.clone());
+            initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]).unwrap()
+        };
+        // The fallback substitutes the uniform indoor temperature for every
+        // state: both the re-inserted pinned zone and the reduced state sit
+        // at 21 C.
+        assert_eq!(x.as_slice(), &[21.0, 21.0]);
+        assert_eq!(
+            counter.count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the discrete pinned arm's uniform fallback must warn exactly once"
+        );
+        let messages = counter.messages.lock().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("discrete") && m.contains("initialize_steady_state")),
+            "the warn must name the discrete branch and the site: {messages:?}"
+        );
+    }
+
+    /// The continuous pinned arm's singular-inverse fallback warns the same
+    /// way, naming the continuous branch.
+    #[test]
+    fn pinned_continuous_singular_solve_warns() {
+        // A_c with a zero at the free state's diagonal (the existing
+        // from_continuous_accepts_singular_a_c construction): after removing
+        // the pinned zone's row/col the reduced -A_c is [[0.0]], singular.
+        let a_c = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, 0.0, -1.0]);
+        let b_c = DMatrix::from_row_slice(2, 1, &[1.0, 2.0]);
+        let mapping = crate::state_space::OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 1.0, &mapping).unwrap();
+
+        let mut zone_state_indices = HashMap::new();
+        zone_state_indices.insert(ZoneId(1), 1_usize);
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices,
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::new(),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+
+        let indoor = 21.0;
+        let env = minimal_env(indoor, -5.0);
+
+        let counter = std::sync::Arc::new(WarnCounter {
+            needle: "steady-state initialization",
+            count: std::sync::atomic::AtomicUsize::new(0),
+            messages: std::sync::Mutex::new(Vec::new()),
+        });
+        let x = {
+            let _guard = tracing::subscriber::set_default(counter.clone());
+            initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]).unwrap()
+        };
+        assert_eq!(x.as_slice(), &[21.0, 21.0]);
+        assert_eq!(
+            counter.count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the continuous pinned arm's uniform fallback must warn exactly once"
+        );
+        let messages = counter.messages.lock().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("continuous") && m.contains("initialize_steady_state")),
+            "the warn must name the continuous branch and the site: {messages:?}"
+        );
     }
 
     #[test]

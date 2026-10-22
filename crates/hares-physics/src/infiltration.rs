@@ -107,7 +107,7 @@ pub const NATURAL_TO_50PA_EXPONENT: f64 = N_I_DEFAULT;
 /// assert!((ach50 - 5.164).abs() < 0.01);
 /// ```
 pub fn ach_nat_to_ach50(q_nat: f64, n: f64) -> f64 {
-    q_nat * (50.0 / 4.0_f64).powf(n)
+    q_nat * libm::pow(50.0 / 4.0_f64, n)
 }
 
 /// Canonical terrain classes from the architecture appendix.
@@ -168,9 +168,18 @@ pub fn ashrae_wind_stack(
     shelter_coeff: f64,
     n_i: f64,
 ) -> f64 {
+    // The clamp's firing is counted, never silent: an exponent outside
+    // the band is held to it (intended behavior) and the hold is
+    // recorded for the dwelling's per-step census drain.
+    #[cfg(feature = "observe")]
+    if !(N_I_MIN..=N_I_MAX).contains(&n_i) {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::Aim2PressureExponent,
+        );
+    }
     let n_i = n_i.clamp(N_I_MIN, N_I_MAX);
-    let q_temp = c_s * delta_t_c.abs().powf(n_i);
-    let q_wind = c_w * (shelter_coeff.max(0.0) * wind_speed_m_s).powf(2.0 * n_i);
+    let q_temp = c_s * libm::pow(delta_t_c.abs(), n_i);
+    let q_wind = c_w * libm::pow(shelter_coeff.max(0.0) * wind_speed_m_s, 2.0 * n_i);
     (q_temp * q_temp + q_wind * q_wind).sqrt()
 }
 
@@ -220,8 +229,11 @@ pub fn terrain_wind_speed(u_met: f64, alpha_site: f64, delta_site: f64, height: 
     }
 
     u_met
-        * (MET_STATION_DELTA_M / MET_STATION_HEIGHT_M).powf(MET_STATION_ALPHA)
-        * (height / delta_site).powf(alpha_site)
+        * libm::pow(
+            MET_STATION_DELTA_M / MET_STATION_HEIGHT_M,
+            MET_STATION_ALPHA,
+        )
+        * libm::pow(height / delta_site, alpha_site)
 }
 
 /// Terrain-correct meteorological wind speed for a standard terrain class.
@@ -240,7 +252,7 @@ pub fn terrain_wind_speed_for_class(u_met: f64, class: TerrainClass, height: f64
 /// - 180° = wind blowing from the opposite side (leeward).
 ///
 /// # References
-/// - EnergyPlus `ZoneEquipmentManager.cc:6007–6009`: angle = abs(wind_direction − eff_angle),
+/// - EnergyPlus `ZoneEquipmentManager.cc:5762` (v24.2.0): angle = abs(wind_direction - eff_angle),
 ///   corrected for > 180° wraparound.
 pub fn wind_incidence_angle_deg(opening_azimuth_deg: f64, wind_direction_deg: f64) -> f64 {
     let raw_diff = (wind_direction_deg - opening_azimuth_deg).abs() % 360.0;
@@ -254,7 +266,8 @@ pub fn wind_incidence_angle_deg(opening_azimuth_deg: f64, wind_direction_deg: f6
 /// Compute natural ventilation opening effectiveness (Cw) from the angle between
 /// wind direction and opening normal, following the EnergyPlus linear interpolation.
 ///
-/// EnergyPlus computes Cw at `ZoneEquipmentManager.cc:5988–6023` by calculating the
+/// EnergyPlus computes Cw at `ZoneEquipmentManager.cc`'s WindAndStack
+/// block (v24.2.0 lines 5762-5796) by calculating the
 /// absolute angle between wind direction and `EffAngle`, then linearly interpolating
 /// Cw between 0.55 at 0° and 0.3 at 45°, dropping to 0.0 at > 90°.
 ///
@@ -277,7 +290,7 @@ pub fn wind_incidence_angle_deg(opening_azimuth_deg: f64, wind_direction_deg: f6
 /// perpendicular winds and 0.0 means no effective flow (leeward or > 90°).
 ///
 /// # References
-/// - EnergyPlus `ZoneEquipmentManager.cc:6007–6023`: angle, slope, and intercept.
+/// - EnergyPlus `ZoneEquipmentManager.cc:5762-5778` (v24.2.0): angle, slope, and intercept.
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q = Cw × A × U.
 /// - ASHRAE HoF 2009 Table: Cw = 0.5–0.6 for perpendicular winds, 0.25–0.35 for diagonal.
 pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_deg: f64) -> f64 {
@@ -295,8 +308,8 @@ pub fn compute_natural_ventilation_cw(opening_azimuth_deg: f64, wind_direction_d
     }
 }
 
-/// Named inputs for [`natural_ventilation_flow_m3_s`], the EnergyPlus
-/// `ZoneVentilation:WindandStackOpenArea` model.
+/// Named inputs for [`natural_ventilation_flow_m3_s`] (the stated hybrid:
+/// see that function's doc).
 #[derive(Debug, Clone, Copy)]
 pub struct NaturalVentilationInputs {
     /// Ventilating open area (m²).
@@ -328,17 +341,33 @@ pub struct NaturalVentilationInputs {
 }
 
 /// Natural ventilation flow through operable windows (EnergyPlus
-/// `ZoneVentilation:WindandStackOpenArea` model).
+/// `ZoneVentilation:WindandStackOpenArea` comparator).
 ///
-/// Implements the EnergyPlus wind-and-stack natural ventilation model for
-/// operable windows. Wind and stack flow components are computed separately
-/// and combined in quadrature:
+/// The natural-ventilation model is a stated hybrid of three sources, not
+/// a pure EnergyPlus port (see `docs/PHYSICS_DECISIONS.md`, the
+/// natural-ventilation entry, and the pinned divergence in the tests):
+///
+/// - **EnergyPlus `ZoneVentilation:WindandStackOpenArea`** supplies the
+///   structure: the wind and stack components computed separately and
+///   combined in quadrature, and the auto opening effectiveness Cw
+///   (0.55 perpendicular → 0.30 at 45°, zero leeward):
 ///
 /// ```text
 /// Q_wind  = Cw × A × U_wind
 /// Q_stack = Cd × A × sqrt(2·g·dh_m·|ΔT|/T_zone)
 /// Q_total = sqrt(Q_wind² + Q_stack²)
 /// ```
+///
+/// - **ASHRAE HoF 2009 Ch. 16.14** supplies the discharge coefficient,
+///   FIXED BY OPENING GEOMETRY (single-sided 0.20, cross 0.60) - not
+///   E+'s AutoCalculate correlation (`Cd = 0.40 + 0.0045|ΔT|`), which
+///   carries no geometry split. The pinned divergence in this module's
+///   tests holds the magnitude against the ported E+ comparator.
+///
+/// - **OCHRE's comfort gating** supplies the three gating conditions and
+///   the adjustment factor, taken from OCHRE `Envelope.py`'s
+///   `_natural_ventilation` (itself ResStock's
+///   `apply_natural_ventilation_and_whole_house_fan`).
 ///
 /// Flow is gated by three conditions (all must hold for non-zero flow):
 /// 1. Zone temperature > outdoor temperature (stack buoyancy drives outward exhaust).
@@ -371,8 +400,9 @@ pub struct NaturalVentilationInputs {
 /// Returns volumetric flow [m³/s], or 0.0 when gating conditions are not met.
 ///
 /// # References
-/// - EnergyPlus `ZoneEquipmentManager.cc:5988–6033` — `WindAndStack` runtime calculation
-/// - EnergyPlus `DataHeatBalance.hh:1180–1187` — `WindandStackOpenArea` struct
+/// - EnergyPlus `ZoneEquipmentManager.cc`'s WindAndStack block (v24.2.0
+///   lines 5716-5806) - the runtime calculation and the AutoCalculate arms
+/// - EnergyPlus v26.2.0 `DataHeatBalance.hh:1207-1214` (the vendored copy) — `WindandStackOpenArea` struct
 /// - EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area: Q = sqrt(Qw² + Qst²)
 /// - ASHRAE HoF 2009 Ch. 16.14, Equation 37: Q_wind = Cw × A × U
 /// - ASHRAE HoF 2009 Ch. 16.14: single-sided Cd = 0.15–0.25; cross-ventilation Cd = 0.60–0.65
@@ -430,14 +460,31 @@ pub fn natural_ventilation_flow_m3_s(inputs: NaturalVentilationInputs) -> (f64, 
     };
 
     // Adjustment factor: how far above comfort base is the zone, relative to the delta
-    let adj = ((t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c)).clamp(0.0, 1.0);
+    // The clamp's firing is counted, never silent: the ratio is held
+    // into [0, 1] when the comfort base sits below the outdoor
+    // temperature.
+    let adj_raw = (t_zone_c - t_base_c) / (t_zone_c - t_outdoor_c);
+    #[cfg(feature = "observe")]
+    if !(0.0..=1.0).contains(&adj_raw) {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::NaturalVentilationAdj,
+        );
+    }
+    let adj = adj_raw.clamp(0.0, 1.0);
 
     // Quadrature combination: Q_total = adj × sqrt(Q_wind² + Q_stack²)
     // EnergyPlus ERM 26.1 — Zone Ventilation Wind and Stack Open Area; ASHRAE HoF 2009 Ch. 16.14
     let q_total = adj * (q_wind * q_wind + q_stack * q_stack).sqrt();
 
-    // Cap at 20 ACH (OCHRE `max_nat_flow = 20.0 * volume * m3hr_to_m3s`)
+    // Cap at 20 ACH (OCHRE `max_nat_flow = 20.0 * volume * m3hr_to_m3s`).
+    // The cap's firing is counted, never silent.
     let max_nat_flow = 20.0 * zone_volume_m3 / SECONDS_PER_HOUR;
+    #[cfg(feature = "observe")]
+    if q_total > max_nat_flow {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::NaturalVentilationAchCap,
+        );
+    }
     let q_nat = q_total.min(max_nat_flow);
 
     (q_nat, q_stack * adj, q_wind * adj, cd)
@@ -486,13 +533,13 @@ pub fn duct_leakage_infiltration_m3_s(
 
     let adjusted = if supply_leakage_m3_s > return_leakage_m3_s {
         // Pressurisation: infiltration increases above baseline.
-        (infil_fan_off.powf(1.5) + imb.powf(1.5)).powf(0.67)
+        libm::pow(libm::pow(infil_fan_off, 1.5) + libm::pow(imb, 1.5), 0.67)
     } else if imb > infil_fan_off {
         // Large depressurisation dominates: all envelope leakage becomes exfiltration.
         0.0
     } else {
         // Partial depressurisation: baseline partially suppressed.
-        (infil_fan_off.powf(1.5) - imb.powf(1.5)).powf(0.67)
+        libm::pow(libm::pow(infil_fan_off, 1.5) - libm::pow(imb, 1.5), 0.67)
     };
 
     // The ASHRAE 152 formula replaces the `infil_fan_off` term.  We scale the
@@ -650,12 +697,21 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
     /// Assumed indoor temperature [K] ≈ 23 °C (73.5 °F) -- matches OCHRE.
     const T_IN_K: f64 = 296.15;
 
+    // The clamp's firing is counted, never silent, at the conversion
+    // that interprets the input's exponent the same way the per-step
+    // evaluation holds it.
+    #[cfg(feature = "observe")]
+    if !(N_I_MIN..=N_I_MAX).contains(&params.n_i) {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::Aim2PressureExponent,
+        );
+    }
     let n_i = params.n_i.clamp(N_I_MIN, N_I_MAX);
 
     // Step 1: Flow coefficient C [m³/s/Pa^n_i]
     // Q_50 = ACH50 × V / 3600 [m³/s], ΔP = 50 Pa
     // Q_50 = C × 50^n_i  →  C = Q_50 / 50^n_i
-    let c_flow = (params.ach50 * params.volume_m3) / (SECONDS_PER_HOUR * 50.0_f64.powf(n_i));
+    let c_flow = (params.ach50 * params.volume_m3) / (SECONDS_PER_HOUR * libm::pow(50.0_f64, n_i));
 
     // Step 2: Leakage distribution -- Walker & Wilson (1998) Table 1
     let (leak_ceil, leak_floor) = match params.foundation {
@@ -670,6 +726,13 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
 
     // Step 3: Stack factor -- Walker & Wilson (1998) Eq. 9-12
     let m_o = (x_i_raw + (2.0 * n_i + 1.0) * y_i).powi(2) / (2.0 - r_i);
+    // The distribution clamps' firings are counted, never silent.
+    #[cfg(feature = "observe")]
+    if m_o > 1.0 {
+        hares_types::clamp_census::record(
+            hares_types::clamp_census::ClampSite::Aim2LeakageDistribution,
+        );
+    }
     let m_i = m_o.min(1.0); // Eq. 10-11
 
     let f_i = if params.has_flue {
@@ -677,41 +740,52 @@ pub fn aim2_coefficients_from_ach50(params: &Aim2Params) -> Aim2Coefficients {
         let ncfl = params.floors_above_grade.max(1.0);
         let z_f = (ncfl + 0.5) / ncfl;
         // Critical ceiling-floor leakage difference (Eq. 13)
-        let x_c = r_i + (2.0 * (1.0 - r_i - y_i)) / (n_i + 1.0) - 2.0 * y_i * (z_f - 1.0).powf(n_i);
+        let x_c =
+            r_i + (2.0 * (1.0 - r_i - y_i)) / (n_i + 1.0) - 2.0 * y_i * libm::pow(z_f - 1.0, n_i);
         // Additive flue function (Eq. 12)
         n_i * y_i
-            * (z_f - 1.0).powf((3.0 * n_i - 1.0) / 3.0)
-            * (1.0 - (3.0 * (x_c - x_i_raw).powi(2) * r_i.powf(1.0 - n_i)) / (2.0 * (z_f + 1.0)))
+            * libm::pow(z_f - 1.0, (3.0 * n_i - 1.0) / 3.0)
+            * (1.0
+                - (3.0 * (x_c - x_i_raw).powi(2) * libm::pow(r_i, 1.0 - n_i)) / (2.0 * (z_f + 1.0)))
     } else {
         0.0
     };
 
     // Walker & Wilson (1998) Eq. 9
-    let f_s = ((1.0 + n_i * r_i) / (n_i + 1.0)) * (0.5 - 0.5 * m_i.powf(1.2)).powf(n_i + 1.0) + f_i;
+    let f_s = ((1.0 + n_i * r_i) / (n_i + 1.0))
+        * libm::pow(0.5 - 0.5 * libm::pow(m_i, 1.2), n_i + 1.0)
+        + f_i;
 
     // Step 4: Stack coefficient Cs -- pure SI
     // Cs = f_s × (ρ·g·H / T_in)^n_i  [(Pa/K)^n_i]
-    let cs = f_s * (RHO * G * params.infiltration_height_m / T_IN_K).powf(n_i);
+    let cs = f_s * libm::pow(RHO * G * params.infiltration_height_m / T_IN_K, n_i);
 
     // Step 5: Wind factor -- Walker & Wilson (1998) Eq. 15-25
     let f_w = if matches!(params.foundation, FoundationLeakageClass::VentedCrawlspace) {
         // Crawlspace modified wind factor (Eq. 20-24)
+        // The distribution clamps' firings are counted, never silent.
+        #[cfg(feature = "observe")]
+        if x_i_raw > 1.0 - 2.0 * y_i {
+            hares_types::clamp_census::record(
+                hares_types::clamp_census::ClampSite::Aim2LeakageDistribution,
+            );
+        }
         let x_i = x_i_raw.min(1.0 - 2.0 * y_i); // Eq. 25 clamp
         let r_x = 1.0 - r_i * (n_i / 2.0 + 0.2); // Eq. 21
         let y_x = 1.0 - y_i / 4.0; // Eq. 22
         let x_s = (1.0 - r_i) / 5.0 - 1.5 * y_i; // Eq. 24
-        let x_x = 1.0 - (((x_i - x_s) / (2.0 - r_i)).powi(2)).powf(0.75); // Eq. 23
+        let x_x = 1.0 - libm::pow(((x_i - x_s) / (2.0 - r_i)).powi(2), 0.75); // Eq. 23
         0.19 * (2.0 - n_i) * x_x * r_x * y_x // Eq. 20
     } else {
         // Non-crawlspace wind factor (Eq. 15-19)
         let j_i = (x_i_raw + r_i + 2.0 * y_i) / 2.0;
-        0.19 * (2.0 - n_i) * (1.0 - ((x_i_raw + r_i) / 2.0).powf(1.5 - y_i))
+        0.19 * (2.0 - n_i) * (1.0 - libm::pow((x_i_raw + r_i) / 2.0, 1.5 - y_i))
             - y_i / 4.0 * (j_i - 2.0 * y_i * j_i.powi(4))
     };
 
     // Step 6: Wind coefficient Cw -- pure SI
     // Cw = f_w × (ρ/2)^n_i  [(Pa/(m/s)²)^n_i]
-    let cw = f_w * (RHO / 2.0).powf(n_i);
+    let cw = f_w * libm::pow(RHO / 2.0, n_i);
 
     // Step 7: Combined coefficients
     let c_s = c_flow * cs;
@@ -768,8 +842,12 @@ pub fn sherman_grimsrud_terrain_factor(terrain: TerrainClass, height_m: f64) -> 
         TerrainClass::Urban => (0.47, 0.35),
     };
     let station =
-        STATION_MULTIPLIER * (STATION_HEIGHT_FT / REFERENCE_HEIGHT_FT).powf(STATION_EXPONENT);
-    multiplier * (crate::units::length_m_to_ft(height_m) / REFERENCE_HEIGHT_FT).powf(exponent)
+        STATION_MULTIPLIER * libm::pow(STATION_HEIGHT_FT / REFERENCE_HEIGHT_FT, STATION_EXPONENT);
+    multiplier
+        * libm::pow(
+            crate::units::length_m_to_ft(height_m) / REFERENCE_HEIGHT_FT,
+            exponent,
+        )
         / station
 }
 
@@ -842,7 +920,7 @@ pub fn calculate_ela_coefficients(
     let f_t = sherman_grimsrud_terrain_factor(terrain, zone_height_m + zone_height_above_ground_m);
 
     // Wind shape factor f_w (Walker-Wilson 1998, Eq. 13).
-    let f_w = shielding * (1.0 - hor_lk_frac).powf(1.0 / 3.0) * f_t;
+    let f_w = shielding * libm::pow(1.0 - hor_lk_frac, 1.0 / 3.0) * f_t;
 
     // Wind coefficient: Cw = f_w² / 100 [(L/s)²/(cm⁴·(m/s)²)].
     let wind_coeff = f_w * f_w / 100.0;
@@ -951,7 +1029,8 @@ pub fn garage_ela_coefficients(
 /// `ACH50 × 0.283316 × 4^n × h / (50^n × 60 × 144)` with `h` in ft.
 pub fn sla_from_ach50(ach50: f64, average_ceiling_height_m: f64, n_i: f64) -> f64 {
     let height_ft = crate::units::length_m_to_ft(average_ceiling_height_m);
-    ach50 * 0.283316 * 4.0_f64.powf(n_i) * height_ft / (50.0_f64.powf(n_i) * 60.0 * 144.0)
+    ach50 * 0.283316 * libm::pow(4.0_f64, n_i) * height_ft
+        / (libm::pow(50.0_f64, n_i) * 60.0 * 144.0)
 }
 
 #[cfg(test)]
@@ -1673,7 +1752,7 @@ mod tests {
     }
 
     // Cw opening effectiveness -- wind-direction-dependent computation
-    // (ASHRAE HoF 2009 Ch. 16.14, Eq. 37; EnergyPlus ZoneEquipmentManager.cc:6007-6023)
+    // (ASHRAE HoF 2009 Ch. 16.14, Eq. 37; EnergyPlus ZoneEquipmentManager.cc:5762-5778, v24.2.0)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2660,5 +2739,201 @@ mod tests {
 
         // Ratio of shelter coefficients must equal ratio of f_t factors (terrain only differs there).
         approx_eq(actual_ratio, expected_ratio, 1e-10);
+    }
+
+    /// The clamp census counts this file's clamp firings: the AIM-2
+    /// pressure exponent at both of its clamp sites (the per-step
+    /// ASHRAE wind-stack evaluation and the ACH50 conversion), the
+    /// natural ventilation's comfort-base adjustment and its 20-ACH
+    /// cap. Each probe's inputs force the clamp it witnesses; a firing
+    /// that went uncounted fails the probe. The AIM-2
+    /// leakage-distribution guards cannot fire from valid inputs (the
+    /// leakage-class table fixes the ratios), so that site's counting
+    /// is pinned by the census module's own unit test.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_infiltration_clamps() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probes assert their own firings.
+        let _ = clamp_census::take();
+
+        // One per-step evaluation and one conversion, both with an
+        // exponent above the band: two firings at one site.
+        ashrae_wind_stack(1.0, 1.0, 10.0, 1.0, 0.5, 0.9);
+        let params = Aim2Params {
+            ach50: 7.0,
+            volume_m3: 400.0,
+            infiltration_height_m: 5.0,
+            foundation: FoundationLeakageClass::Other,
+            shielding: ShieldingClass::Normal,
+            terrain: TerrainClass::Suburban,
+            has_flue: false,
+            n_i: 0.9,
+            floors_above_grade: 2.0,
+        };
+        let _ = aim2_coefficients_from_ach50(&params);
+
+        // The comfort base sits below the outdoor temperature, so the
+        // adjustment ratio exceeds one and clamps; the enormous open
+        // area then hits the 20-ACH cap. One call, two sites.
+        let _ = natural_ventilation_flow_m3_s(NaturalVentilationInputs {
+            open_area_m2: 1000.0,
+            t_zone_c: 30.0,
+            t_outdoor_c: 25.0,
+            t_base_c: 20.0,
+            outdoor_humidity_ratio: 0.001,
+            max_outdoor_humidity_ratio: 0.0115,
+            wind_speed_m_s: 20.0,
+            zone_volume_m3: 100.0,
+            opening_azimuth_deg: 180.0,
+            wind_direction_deg: 180.0,
+            dh_m: 2.0,
+            opening_type: OpeningType::CrossVentilation,
+            zone_height_m: 2.5,
+        });
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::Aim2PressureExponent),
+            2,
+            "both n_i clamp surfaces record their firings"
+        );
+        assert_eq!(
+            census.count(ClampSite::NaturalVentilationAdj),
+            1,
+            "the comfort-base adjustment records its clamp"
+        );
+        assert_eq!(
+            census.count(ClampSite::NaturalVentilationAchCap),
+            1,
+            "the 20-ACH cap records its clamp"
+        );
+        assert!(
+            census.count(ClampSite::RelativeHumidity) == 0,
+            "a site's count only rises when that site's clamp fires"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The natural-ventilation contract: the EnergyPlus comparator and the
+    // recorded divergence
+    // -----------------------------------------------------------------------
+
+    /// EnergyPlus `ZoneEquipmentManager.cc`'s WindAndStack ventilation
+    /// block (v24.2.0, lines 5716-5806), the AutoCalculate arms, ported
+    /// verbatim from the upstream source: the auto opening effectiveness
+    /// (Cw: 0.55 at perpendicular, linear to 0.30 at 45°, zero leeward),
+    /// the auto discharge coefficient (`Cd = 0.40 + 0.0045|T_ext -
+    /// T_mat|` with E+'s own 9.81 literal), and the wind/stack quadrature
+    /// `VVF = sqrt(Qw² + Qst²)`. This is the comparator the divergence is
+    /// recorded against: HARES's wind term matches it exactly (the same
+    /// auto-Cw); the stack term's discharge coefficient is the recorded
+    /// divergence (recorded in docs/PHYSICS_DECISIONS.md under 'Natural ventilation keeps the fixed geometry discharge coefficient').
+    #[allow(clippy::too_many_arguments)]
+    fn energyplus_wind_and_stack_auto_m3_s(
+        open_area_m2: f64,
+        wind_speed_m_s: f64,
+        dh_m: f64,
+        t_zone_c: f64,
+        t_outdoor_c: f64,
+        incidence_angle_deg: f64,
+    ) -> f64 {
+        let angle = 180.0 - (incidence_angle_deg - 180.0).abs().abs(); // E+'s fold, verbatim shape
+        let cw = if angle > 90.0 {
+            0.0
+        } else {
+            0.55 + angle * ((0.3 - 0.55) / 45.0)
+        };
+        let cd = 0.40 + 0.0045 * (t_outdoor_c - t_zone_c).abs();
+        let qw = cw * open_area_m2 * wind_speed_m_s;
+        let qst = cd
+            * open_area_m2
+            * (2.0 * 9.81 * dh_m * (t_outdoor_c - t_zone_c).abs() / (t_zone_c + 273.15)).sqrt();
+        (qw * qw + qst * qst).sqrt()
+    }
+
+    /// The reference case: a south-facing cross-ventilated opening,
+    /// perpendicular 3 m/s wind, a 6 K warm zone over a 20 °C outdoor, the
+    /// OCHRE comfort base at 22 °C. The documented inputs every number in
+    /// the pins below is derived from.
+    fn reference_case() -> NaturalVentilationInputs {
+        NaturalVentilationInputs {
+            open_area_m2: 0.5,
+            t_zone_c: 26.0,
+            t_outdoor_c: 20.0,
+            t_base_c: 22.0,
+            outdoor_humidity_ratio: 0.008,
+            max_outdoor_humidity_ratio: 0.0115,
+            wind_speed_m_s: 3.0,
+            zone_volume_m3: 300.0,
+            opening_azimuth_deg: 180.0,
+            wind_direction_deg: 180.0,
+            dh_m: 2.0,
+            opening_type: OpeningType::CrossVentilation,
+            zone_height_m: 2.5,
+        }
+    }
+
+    #[test]
+    fn natural_ventilation_pin_matches_the_recorded_divergence_vector() {
+        // The divergence's own vector. The contract DECIDED (see
+        // docs/PHYSICS_DECISIONS.md, the natural-ventilation entry):
+        // HARES keeps the hybrid - the E+ auto opening effectiveness on
+        // the wind term, the ASHRAE HoF 2009 Ch. 16.14 fixed geometry
+        // discharge coefficient (0.60 cross) on the stack term, and the
+        // OCHRE comfort adjustment - against E+'s AutoCalculate block
+        // (auto Cd = 0.40 + 0.0045|dT|), which carries no geometry split
+        // and no comfort adjustment. The parent ran this pin in its
+        // agreement form (HARES == the E+ port at 1e-9) and it failed:
+        // HARES 0.5779 m³/s against the port's 0.8465 m³/s on the
+        // reference case - the recorded disagreement.
+        //
+        // Witness split: this pin holds the CROSS leg only (the reference
+        // case is cross-ventilated: Cd 0.60 pinned directly, and the stack
+        // ratio 0.60 against the auto 0.427). The single-sided 0.20 rides
+        // the pre-existing ratio witness
+        // `single_sided_lower_stack_than_cross_ventilation` (the
+        // 0.20/0.60 = 1/3 stack ratio); between them the two witnesses
+        // hold both legs of the geometry split.
+        let args = reference_case();
+        let (q, q_stack, q_wind, cd) = args.call();
+
+        // HARES's vector, hand-derived from the documented hybrid:
+        // the E+ auto-Cw wind term, the fixed geometry Cd, the OCHRE
+        // comfort adjustment, the wind/stack quadrature.
+        let cw = 0.55_f64; // perpendicular wind
+        let g = 9.806_65_f64;
+        let t_zone_k = 26.0 + 273.15;
+        let cd_expected = 0.60_f64;
+        let q_wind_expected = cw * 0.5 * 3.0;
+        let q_stack_expected =
+            cd_expected * 0.5 * (2.0 * g * 2.0 * (26.0 - 20.0) / t_zone_k).sqrt();
+        let adj = ((26.0_f64 - 22.0) / (26.0 - 20.0)).clamp(0.0, 1.0);
+        let q_expected =
+            adj * (q_wind_expected * q_wind_expected + q_stack_expected * q_stack_expected).sqrt();
+
+        approx_eq(q, q_expected, 1e-9);
+        approx_eq(q_wind, q_wind_expected * adj, 1e-9);
+        approx_eq(q_stack, q_stack_expected * adj, 1e-9);
+        approx_eq(cd, cd_expected, 1e-9);
+
+        // The comparator beside it: the ported E+ AutoCalculate block on
+        // the same inputs, its own vector pinned, so neither side can
+        // drift without the record moving. The stack terms' ratio is the
+        // recorded Cd choice's magnitude: the fixed 0.60 against E+'s
+        // auto 0.427 at 6 K, with the two gravity literals (9.80665
+        // standard, E+'s 9.81) under the square root.
+        let q_eplus = energyplus_wind_and_stack_auto_m3_s(0.5, 3.0, 2.0, 26.0, 20.0, 0.0);
+        let q_eplus_expected = 0.846_462_990_617_057_3_f64;
+        approx_eq(q_eplus, q_eplus_expected, 1e-9);
+
+        let stack_ratio = (q_stack / adj)
+            / (0.40 + 0.0045 * 6.0)
+            / 0.5
+            / (2.0 * 9.81 * 2.0 * 6.0 / t_zone_k).sqrt();
+        let expected_stack_ratio = 0.60 / (0.40 + 0.0045 * 6.0) * (9.806_65_f64 / 9.81).sqrt();
+        approx_eq(stack_ratio, expected_stack_ratio, 1e-9);
     }
 }

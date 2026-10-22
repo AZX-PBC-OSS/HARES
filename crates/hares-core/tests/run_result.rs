@@ -15,8 +15,12 @@ use arrow::record_batch::RecordBatch;
 use hares_control::DispatchRequest;
 use hares_control::PriorityTier;
 use hares_core::dwelling::DwellingBlueprint;
-use hares_core::{Actor, Dwelling, DwellingConfig, RunResult, SimulationEngine};
+use hares_core::{Actor, Dwelling, DwellingConfig, RunResult};
 use hares_types::{EnvironmentState, HaresError, Telemetry, TelemetryField, Warning};
+// The engine-run test is the import's only user, and it exists only under
+// debug assertions (the invariant failure it exercises panics in release).
+#[cfg(debug_assertions)]
+use hares_core::SimulationEngine;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

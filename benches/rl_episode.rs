@@ -66,44 +66,13 @@ fn wide_fields() -> Vec<&'static str> {
 const EPISODE_96: usize = 96;
 const EPISODE_8760: usize = 8760;
 
-fn synthetic_toml(duration_s: i64, time_res_s: i64) -> String {
-    format!(
-        r#"building_id = 1
-
-[simulation]
-start_time = "2024-01-01T00:00:00Z"
-time_res = {time_res_s}
-duration = {duration_s}
-output_chunk_size = 1000
-master_seed = 0
-[geometry]
-number_of_bedrooms = 3.0
-floor_area_m2 = 48.0
-zone_volume_m3 = 120.0
-
-[materials]
-wall_r_value_m2_k_w = 2.0
-
-[hvac]
-equipment_name = "Furnace"
-fuel = "electricity"
-heating_capacity_kbtu_h = 25.0
-
-[weather]
-outdoor_temp_c = 8.0
-dew_point_c = 4.0
-rel_humidity_pct = 55.0
-pressure_kpa = 101.325
-
-[schedule]
-occupancy = 1.0
-"#
-    )
-}
+// The bench's synthetic fixture is the shared one (benches/common.rs); its
+// one construction path is exercised by the bench_construction suite test.
+use common::synthetic_toml;
 
 fn make_dwelling(dir: &Path, duration_s: i64, time_res_s: i64) -> Dwelling {
     let path = common::numbered_path(dir, "hares-bench-rl-episode", "toml");
-    std::fs::write(&path, synthetic_toml(duration_s, time_res_s)).expect("write TOML");
+    std::fs::write(&path, common::synthetic_toml(duration_s, time_res_s)).expect("write TOML");
     Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("create dwelling")
 }
 

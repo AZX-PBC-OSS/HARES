@@ -16,6 +16,13 @@ use hares_physics::film_coefficients::H_OUT_ASHRAE_PEAK;
 
 use super::ThermalSolver;
 
+/// The skin-lag warning's threshold [K]: the first exterior-skin residual
+/// beyond it warns once per solver. The converged solve's own bound is
+/// 0.5 K (the fixed-point invariant below), so only a cap exit can cross
+/// this - and by more than the converged bound's 2x when it does.
+#[cfg(feature = "observe")]
+const SKIN_LAG_WARN_THRESHOLD_K: f64 = 1.0;
+
 impl ThermalSolver {
     /// Iterative exterior longwave radiation solver.
     ///
@@ -50,6 +57,14 @@ impl ThermalSolver {
         self.opaque_exterior_lwr_w = 0.0;
         self.opaque_exterior_solar_w = 0.0;
         self.lwr_coupling_buf.clear();
+        #[cfg(feature = "observe")]
+        {
+            // Per-step counters: the cap-exit count and the max residual
+            // describe THIS step's skin solve; the warn latch below is
+            // the only state that persists across steps.
+            self.skin_iteration_cap_exits = 0;
+            self.max_skin_residual_k = 0.0;
+        }
 
         for (i, info) in self.config.exterior_surfaces.iter().enumerate() {
             if info.input_index >= u.len() || info.state_index >= self.x.len() {
@@ -349,9 +364,41 @@ impl ThermalSolver {
             // caught that defect the day it was written. A violation is a
             // typed error in every build profile.
             let q_total = solar_w + q_lw;
+            // The skin's distance from its own fixed point: the lag the
+            // warm-start acceptance leaves. Computed for every
+            // iterative-path surface (one subtraction); where the
+            // iteration CONVERGED the same quantity is the fixed-point
+            // invariant's input below.
+            let skin_residual_k = (t_surf - (t_surf_init + q_total * info.rad_res_k_w)).abs();
+            #[cfg(feature = "observe")]
+            {
+                if !converged {
+                    self.skin_iteration_cap_exits += 1;
+                }
+                if skin_residual_k > self.max_skin_residual_k {
+                    self.max_skin_residual_k = skin_residual_k;
+                }
+                // Warn once per solver on a skin lag beyond 1 K: the
+                // warm-start acceptance is designed to lag mid-transient,
+                // so the warning fires on the first LARGE lag only - a
+                // skin that never closes its balance within a step's
+                // budget by more than the converged bound's 2x.
+                if !self.skin_lag_warned && skin_residual_k > SKIN_LAG_WARN_THRESHOLD_K {
+                    self.skin_lag_warned = true;
+                    tracing::warn!(
+                        surface_id = info.surface_id,
+                        skin_residual_k = skin_residual_k,
+                        converged = converged,
+                        "exterior skin {} lags its fixed point by {:.3} K after this step's \
+                         iteration (cap exit: {}); the warm start is accepted and the lag is \
+                         counted in the step's envelope component gains",
+                        info.surface_id,
+                        skin_residual_k,
+                        if converged { "no" } else { "yes" },
+                    );
+                }
+            }
             if converged {
-                let fixed_point_residual =
-                    (t_surf - (t_surf_init + q_total * info.rad_res_k_w)).abs();
                 // Tolerance 0.5 K: the derived bound, not a guess. At
                 // the break, |0.5·(F − t_prev) + 0.1·Δ_prev| < 0.01 with
                 // Δ_prev (the previous step) bounded by the ±2 K clamp,
@@ -362,10 +409,10 @@ impl ThermalSolver {
                 // defect class this guards is multi-kelvin (3.9 K under
                 // the bare-film rad_res), so the bound-derived tolerance
                 // keeps ≈8× sensitivity margin.
-                if fixed_point_residual > 0.5 {
+                if skin_residual_k > 0.5 {
                     return Err(HaresError::Envelope(format!(
                         "invariant violation: exterior skin {} off its fixed point by \
-                         {fixed_point_residual:.4} K (t_skin={t_surf:.3}, \
+                         {skin_residual_k:.4} K (t_skin={t_surf:.3}, \
                          t_init={t_surf_init:.3}, Q={q_total:.1} W, \
                          rad_res={} K/W)",
                         info.surface_id, info.rad_res_k_w
@@ -1132,6 +1179,171 @@ mod tests {
             (actual - expected).abs() < 1e-6,
             "h_out=0.0: window LWR correction should use ASHRAE fallback ({H_OUT_ASHRAE_PEAK} W/(m²·K)), \
              expected {expected:.6} W, got {actual:.6} W"
+        );
+    }
+
+    /// Build a minimal one-zone `ThermalSolver` with a single OPAQUE
+    /// exterior surface on the iterative skin-solve path (rad_frac > 0),
+    /// with the caller's iteration budget and parallel rad_res.
+    ///
+    /// Observe-gated like the only tests that call it, so the
+    /// default-feature clippy gate sees no dead helper.
+    #[cfg(feature = "observe")]
+    fn iterative_wall_solver(
+        n_iter: u32,
+        env: &EnvironmentState,
+    ) -> crate::thermal_solver::ThermalSolver {
+        use std::collections::HashMap;
+
+        use crate::state_space::{OutputMapping, StateSpaceModel};
+        use crate::thermal_solver::{
+            BoundaryCategory, ExteriorSurfaceInfo, StateSpaceWiring, ThermalSolverConfig,
+        };
+        use hares_types::ZoneId;
+        use nalgebra::DMatrix;
+
+        let r = 2.0;
+        let c = 50_000.0;
+        let a_c = DMatrix::from_row_slice(1, 1, &[-1.0 / (r * c)]);
+        let b_c = DMatrix::from_row_slice(1, 2, &[1.0 / (r * c), 1.0 / c]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ..Default::default()
+        };
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            exterior_surfaces: vec![ExteriorSurfaceInfo {
+                surface_id: 200,
+                state_index: 0,
+                input_index: 1,
+                area_m2: 12.0,
+                emissivity: 0.9,
+                tilt_deg: 90.0,
+                azimuth_deg: 180.0,
+                rad_frac: 0.5,
+                rad_res_k_w: 0.05,
+                n_iter,
+                absorptance: 0.8,
+                boundary_category: Some(BoundaryCategory::Wall),
+                u_factor_w_m2_k: 0.0,
+                h_out_w_m2_k: 0.0,
+            }],
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+
+        crate::thermal_solver::ThermalSolver::new(model, wiring, config, 60.0, env, 22.0).unwrap()
+    }
+
+    /// An environment like `window_lwr_env` with the sky and air
+    /// temperatures the caller picks: the mild case settles the warm start,
+    /// the swung case displaces the skin's fixed point far past what one
+    /// damped iteration can cross.
+    #[cfg(feature = "observe")]
+    fn iterative_wall_env(t_air_c: f64, t_sky_c: f64) -> EnvironmentState {
+        let mut env = window_lwr_env();
+        env.weather.outdoor_temp_c = t_air_c;
+        env.weather.sky_temp_c = t_sky_c;
+        env
+    }
+
+    /// The convergence self-report: an iteration run out its budget (the
+    /// 60 s production budget is one damped iteration, and a sky swing
+    /// that far displaces the fixed point) must be COUNTED in the step's
+    /// component gains with the skin's residual visible - never a silent
+    /// exit. Observe-gated like the rest of the diagnostics: the fields
+    /// do not exist without the feature.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn forced_iteration_cap_exit_is_counted_with_its_residual() {
+        // One iteration at 60 s (the production budget), warm start at the
+        // construction outdoor temperature (-15 C), then a sky swing that
+        // displaces the fixed point by tens of K: the single damped
+        // iteration cannot cross it, the loop exits on the cap.
+        let mild = iterative_wall_env(-15.0, -15.0);
+        let mut solver = iterative_wall_solver(1, &mild);
+        let swung = iterative_wall_env(-15.0, 40.0);
+        solver
+            .prepare_inputs(&hares_types::PortSlots::default(), &swung)
+            .unwrap();
+
+        let gains = solver.component_gains();
+        assert_eq!(
+            gains.skin_iteration_cap_exits, 1,
+            "the one-iteration budget against a far fixed point must exit on the cap and count the exit"
+        );
+        assert!(
+            gains.max_skin_residual_k > 1.0,
+            "the reported skin residual must carry the lag the cap exit left, got {}",
+            gains.max_skin_residual_k
+        );
+    }
+
+    /// The counter's specificity: a converged skin solve counts no cap
+    /// exit and reports a residual inside the converged bound.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn converged_skin_solve_counts_no_cap_exit() {
+        let mild = iterative_wall_env(-15.0, -15.0);
+        // The budget is the caller's knob: 60 damped iterations close the
+        // ~18 K warm-start-to-fixed-point gap this surface's constants
+        // give (movement < 0.01 K breaks the loop well inside it).
+        let mut solver = iterative_wall_solver(60, &mild);
+        solver
+            .prepare_inputs(&hares_types::PortSlots::default(), &mild)
+            .unwrap();
+
+        let gains = solver.component_gains();
+        assert_eq!(
+            gains.skin_iteration_cap_exits, 0,
+            "a solve that reached the tolerance must not count a cap exit"
+        );
+        assert!(
+            gains.max_skin_residual_k < 0.5,
+            "a converged skin's residual stays inside the invariant's own 0.5 K bound, got {}",
+            gains.max_skin_residual_k
+        );
+    }
+
+    /// The warn-once latch: the first step whose skin residual crosses the
+    /// 1 K report threshold sets it, and it never resets - a run whose
+    /// skins lag is one warning, not one per step.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn skin_lag_warning_latches_once() {
+        let mild = iterative_wall_env(-15.0, -15.0);
+        let mut solver = iterative_wall_solver(1, &mild);
+        assert!(
+            !solver.skin_lag_warned,
+            "no warning before any lagging step"
+        );
+        let swung = iterative_wall_env(-15.0, 40.0);
+        for _ in 0..2 {
+            solver
+                .prepare_inputs(&hares_types::PortSlots::default(), &swung)
+                .unwrap();
+        }
+        assert!(
+            solver.skin_lag_warned,
+            "the first lagging step latches the warning"
+        );
+        let calm = iterative_wall_env(-15.0, -15.0);
+        solver
+            .prepare_inputs(&hares_types::PortSlots::default(), &calm)
+            .unwrap();
+        assert!(
+            solver.skin_lag_warned,
+            "the latch never resets: the warning fired once for the run"
         );
     }
 

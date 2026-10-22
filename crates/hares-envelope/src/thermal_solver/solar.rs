@@ -43,7 +43,8 @@ fn beam_cosine_factor(
     let alpha = altitude_deg.to_radians();
     let tau = tilt_deg.to_radians();
     let delta = (sun_azimuth_deg - azimuth_deg).to_radians();
-    (-alpha.cos() * tau.sin() * delta.cos() - alpha.sin() * tau.cos()).max(0.0)
+    (-libm::cos(alpha) * libm::sin(tau) * libm::cos(delta) - libm::sin(alpha) * libm::cos(tau))
+        .max(0.0)
 }
 
 impl ThermalSolver {
@@ -97,14 +98,11 @@ impl ThermalSolver {
                 let transmitted_total_w = transmitted_beam_w + transmitted_diffuse_w;
                 through_glass_w += transmitted_total_w;
 
-                assert!(
-                    shgc >= transmittance - 1e-6,
-                    "SHGC ({}) < transmittance ({}): check window config",
-                    shgc,
-                    transmittance
-                );
                 // N_i: inward-flowing fraction of glass-absorbed solar (EnergyPlus window model).
                 // Distinct from surface radiation_frac used for LWR exchange.
+                // SHGC >= transmittance is validated at construction
+                // (ThermalSolverConfig::validate), so the clamp below only
+                // guards the arithmetic; an inverted pair never reaches a step.
                 let absorbed_inward = (shgc - transmittance).max(0.0) * win.radiation_frac;
                 let absorbed_zone_w = win.area_m2 * absorbed_inward * poa_w_m2;
 

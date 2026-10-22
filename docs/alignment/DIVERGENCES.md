@@ -6,10 +6,22 @@ derivation or a more authoritative reference (EnergyPlus Engineering
 Reference, ASHRAE) demands it. Anyone re-aligning with the reference
 implementation will "fix" these back — this ledger is what stops that.
 
+The two references are framed by their design goals. OCHRE is a
+controls-first residential co-simulation tool: its physics models are
+deliberately lightweight, in service of performance and simplicity for
+residential controls research, and a simpler model there is consistent
+with that design goal. EnergyPlus is the validated building-physics
+reference HARES measures itself against. The divergences below exist
+because HARES's charter is physics depth; OCHRE remains the parity
+corpus for control semantics, input conventions and fleet scheduling.
+
 Entry format: quantity → reference behavior → HARES behavior →
 justification → class → measured impact → pinning tests. The class is
-the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
-(c) architecture, (d) comparison.
+the triage taxonomy's: (a) the reference keeps this model simple, and
+HARES follows the deeper upstream reference (EnergyPlus, ASHRAE,
+OpenStudio-HPXML); (b) HARES's own model was defective, since fixed;
+(c) architecture, a HARES convention; (d) comparison, an artifact of
+the references' differing scopes.
 
 ---
 
@@ -35,9 +47,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   stucco, metal skins; the ASHRAE 140 case-600 wall). EnergyPlus
   `CalcOutsideSurfTemp` solves the outside face with every path carrying its
   own parallel conductance — no film-split approximation at all.
-- **Class:** (a). OCHRE's bare-film divider is its own approximation (its
-  comment's assumption `res_material >> res_film`); the exact parallel form is
-  the reference physics.
+- **Class:** (a). The reference's divider uses the bare film, exact when
+  `res_material >> res_film` (the condition its source's comment states);
+  HARES follows the exact parallel form, the deeper upstream physics.
 - **Measured impact:** steady-state free-float error 0.392 K on an assembled
   siding wall pre-fix, exact post-fix; freefloat-oracle opaque exterior gap
   vs OCHRE 30.9 % → 7.3 % once this fix and the absorbed-flux diagnostic
@@ -89,7 +101,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   Convection; the reported zone loads are the physically correct convective
   flux, not the discretization's artifact.
 - **Class:** (a). The per-step TARP model is the EnergyPlus default interior
-  convection algorithm; OCHRE's frozen film is its simplification. The frozen
+  convection algorithm; the reference keeps the frozen film its A-matrix
+  discretization needs. The frozen
   A-matrix discretization is a tracked limitation, not the divergence of
   record.
 - **Measured impact:** none recorded separately: the per-boundary columns'
@@ -151,8 +164,11 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   distributes the radiant part to the zone's surfaces, not the air. Radiant
   heat warms the room's mass first, so air-only injection overstates how
   fast the air temperature responds.
-- **Class:** (a). OCHRE's air-only injection is its own simplification (its
-  source's FUTURE note says the same); the radiant split is the reference's.
+- **Class:** (a). The reference keeps this model simple: the whole
+  sensible gain goes to the zone air (its source's FUTURE note names the
+  surface split as future work); HARES follows the deeper upstream
+  reference (OpenStudio-HPXML's radiant fractions, EnergyPlus's surface
+  distribution).
 - **Measured impact:** conditioned-zone temperature MAE against the OCHRE
   1-hour fixtures, all-convective then with this split:
   cz2a_gas_furnace_ac_res_wh 0.690 to 0.677 °C, cz2a_pv_ev 0.908 to 0.899,
@@ -193,8 +209,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   takes the convected part as the remainder of those fractions
   (`InternalHeatGains.cc:1393`) and the radiant part as
   `Q * FractionRadiant` (line 7639).
-- **Class:** (a). OCHRE's fractions are its own placeholder (its source's
-  TODO note says the same); the split is the reference's.
+- **Class:** (a). The reference's all-convective fractions are a
+  simplifying assumption (its source's TODO note asks for default
+  fractions); the split follows OpenStudio-HPXML's and EnergyPlus's.
 - **Measured impact:** conditioned-zone temperature MAE, appliance split only
   then with this lighting split: cz5a_minisplit_gas_wh 1.622 to 1.743 °C,
   cz6b_resistance_res_wh 0.696 to 0.708, resstock_bldg0112631_24h 0.421 to
@@ -278,8 +295,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   This follows OS-HPXML and departs from OCHRE.
 - **Justification:** the input states the terrain. A suburban house does
   not see open-country wind.
-- **Class:** (a). OCHRE's rural assumption is its own placeholder ("assumed
-  rural for now"); OS-HPXML reads the site's type, and so does HARES.
+- **Class:** (a). The reference holds one terrain class for every site
+  (a simplifying assumption its source's "assumed rural for now" note
+  states); OS-HPXML reads the site's type, and so does HARES.
 - **Measured impact:** `data/examples/BEopt_example.xml` is suburban. At
   its attic (2.36 m of hip above a 2.44 m walls top), f_t falls from 0.610
   (the ASHRAE power law HARES used before) to 0.558, against OCHRE's 0.741,
@@ -463,7 +481,7 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   record for the same material is the evidence for each class; every row
   departs from OS-HPXML's one `Rough`.
 - **Class:** (a). EnergyPlus's roughness-by-material is the physics;
-  OS-HPXML's single `Rough` is its simplification.
+  OS-HPXML gives every surface the one `Rough` class.
 - **Measured impact:** on `data/examples/BEopt_example.xml` (asphalt
   shingle roof, vinyl siding), attic MAE against the OCHRE conditioned
   oracle in the dynamic runs:
@@ -559,8 +577,10 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   at 6.5 % on the same window shape; its unheated variants at 0.5 %. The
   residual is the one-hour window's phase sensitivity to the two
   models' zone dynamics, not a missing end use or a one-sided input.
-- **Class:** (a). OCHRE's fitted RC network is its own simplification of
-  the constructions; HARES keeps the reference physics. No HARES change
+- **Class:** (a). The reference models the envelope as a fitted RC network
+  over the same multiplied capacitance, consistent with its controls-first
+  scope; HARES keeps the deeper upstream physics (the constructions and
+  film coefficients OS-HPXML builds). No HARES change
   is made toward OCHRE's numbers.
 - **Documented bound:** the fixture's bands in `tests/parity/mod.rs` are
   the measured residuals plus margin: 23.1 % HVAC energy, 21.9 % total
@@ -591,8 +611,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   0.5 that changes nothing is a silent substitution. Zeroing is the special
   case of scaling, so every input OCHRE gives meaning to means the same in
   HARES.
-- **Class:** (a) on the parameter's meaning: OCHRE's zero-only reading is
-  its own limitation (its source names it "for ceiling fans"); zeroing is
+- **Class:** (a) on the parameter's meaning: the reference implements the
+  zero-only case, scoped to ceiling fans in its source; zeroing is
   the special case of scaling.
 - **Measured impact:** none on the committed inputs: no resolver writes
   the per-month keys (an HPXML extension's `MonthlyScheduleMultipliers`
@@ -648,7 +668,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   0.485 and EIR 1.545 where the reference's anchor model reads 0.432 and
   1.785: the COP came out 16% optimistic at the temperature where this
   class of unit runs just above its -17.8 °C lockout. Class
-  (a): OCHRE's default curve set is outdated/simplified; HARES keeps the
+  (a): the reference's default curve set keeps the pre-v1.12.0 DOE-2
+  vintage the sentence above names; HARES keeps the current
   reference physics. OCHRE stays the bar for the rated-COP conversion
   (HSPF/3.412141633, `ochre/utils/hpxml.py:855-856`), which OS-HPXML
   v1.12.0 replaces with the Addendum 82 `cop47full` interpolation table
@@ -714,8 +735,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   HARES's `parse_zone_label` read any label containing "basement" as a
   Foundation zone before the conditioned check, so `base.xml`'s
   conditioned basement sat unheated at 7.6 °C on 15 January. The
-  reference merges the space; OCHRE's floating zone and 20% heater split
-  are its own workaround for the same zone it declines to condition.
+  reference merges the space; OCHRE keeps a separate floating Foundation
+  zone served by the 20% heater split, a model with no conditioned
+  basement setpoint.
 - **Measured impact:** base.xml, 15 January, ideal HVAC at the 68 °F
   heating setpoint: the basement's zone went from 7.3 °C (a separate
   floating Foundation zone, the ledger's 7.6 °C) to tracking the
@@ -753,8 +775,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   `solVMULT` (`:3749-3753`).
 - **OCHRE behavior:** the fork spreads ALL transmitted solar over the
   zone's surfaces by `Area × absorptivity` including the windows' own
-  absorptivity (`ochre/Models/Envelope.py:548-558`); its comment claims
-  "some heat is reflected back out of the windows and lost" but the
+  absorptivity (`ochre/Models/Envelope.py:548-558`); its comment says
+  "some heat is reflected back out of the windows and lost" while the
   window's own share is deposited (its `absorptivity` excludes the
   transmittance, and the whole pool is delivered: the view factors sum
   to 1 and `zone.radiation_heat` reaches the zone air, Envelope.py:1198).
@@ -832,8 +854,10 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   259 L over the measured day and the element delivers the closed form:
   draw enthalpy 9.14 kWh + standby 1.16 kWh + storage 0.00 kWh =
   10.27 kWh, measured to 0.3 %.
-- **Justification:** class (a): OCHRE is wrong (a dropped input, not a
-  physics choice). EnergyPlus-grade physics is the target; the
+- **Justification:** class (a): the fixtures' schedule column is absent
+  from the reference's tank implementation (the schedule builder names
+  the column, the tank model never reads it), a dropped input rather
+  than a physics choice. EnergyPlus-grade physics is the target; the
   dwelling's water-heating energy follows the HPXML's declared fixture
   demand.
 - **Measured impact:** the parity week's water heating is 78.56 kWh
@@ -881,10 +905,10 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   carried through the weather state; the deep ground term uses the
   Kusuda-Achenbach correlation whose parameters derive from the same
   table).
-- **Justification:** class (a): OCHRE substitutes an air-based
-  correlation for the measured station data the reference toolchain
-  uses. The EPW table is the OS-HPXML v1.12.0 source; the correlation
-  is OCHRE's simplification.
+- **Justification:** class (a): the reference derives its ground
+  temperature from an air-based DOE-2 correlation and does not read the
+  EPW's ground table. The EPW table is the OS-HPXML v1.12.0 source;
+  HARES follows the measured station data.
 - **Measured impact:** the slab's floor heat gain over the winter
   conditioned oracle: HARES -216.6 W mean against OCHRE -724.8 W
   (OCHRE's warmer correlated ground heats the slab; HARES's measured
@@ -1084,9 +1108,10 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   COP and capacity curve outputs over UEF in [4.8, 5.0]
   (`low_power_blend_factor`, `heat_pump_wh.rs`), with the widened
   ambient lockout bounds applied with the blend.
-- **Justification:** class (a). OCHRE's sentinel is its own temporary
-  flag for one SKU family, an exact-equality step discontinuity on a
-  continuous parameter; HARES keeps the coefficients (verified against
+- **Justification:** class (a). The reference triggers the low-power
+  coefficients by an exact-equality sentinel (its source's temporary
+  flag for one SKU family), a step discontinuity on a continuous
+  parameter; HARES keeps the coefficients (verified against
   `WaterHeater.py:469-470`) and generalizes the trigger to the UEF band
   the flag intended.
 - **Measured impact:** no committed fixture or golden carries a UEF in
@@ -1114,8 +1139,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   by the reactive coefficients `(zq, iq, pq)`, the physically correct
   wiring (the Z/I/P decomposition of each quantity's own voltage
   response).
-- **Justification:** class (a). OCHRE's cross-wiring is a bug (its own
-  arrays are documented per-quantity); no reference derives Q's voltage
+- **Justification:** class (a). The reference's wiring applies the two
+  coefficient arrays swapped against their documented per-quantity
+  meanings; no reference derives Q's voltage
   response from P's coefficients.
 - **Measured impact:** none on the committed frames: at nominal voltage
   the two wirings coincide (both coefficient arrays sum to about one),
@@ -1167,9 +1193,9 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   (`crates/hares-io/src/epw.rs`, the leap-year handling); annual
   simulations run 366 days and the schedule and weather indexing wrap
   modularly across the year boundary.
-- **Justification:** class (a). Dropping a real day's measurements is a
-  data loss the reference toolchain does not make (EnergyPlus runs
-  leap-year weather natively); the modular wrap makes the extra day a
+- **Justification:** class (a). The reference keeps the 8760-row year by
+  dropping Feb 29's records, where EnergyPlus runs
+  leap-year weather natively; the modular wrap makes the extra day a
   handled case, not an index error.
 - **Measured impact:** the leap-year golden
   (`tests/fixtures/golden/leap_year_february_900s`, a February window
@@ -1408,10 +1434,11 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   entirely at typical surface-air differences. Re-aligning the baseline to
   OCHRE's frozen form is the alternative reading; this entry keeps the
   choice recorded either way.
-- **Class:** (a) against OCHRE: its frozen film is its own simplification
-  of the TARP model it applies elsewhere (its docstring: "Using TARP
-  model for interior surfaces, constant deltaT"; the 12.9 K clamp is
-  OCHRE's own operating-point choice).
+- **Class:** (a) against OCHRE: the reference freezes the TARP model at
+  one clamped operating point (its source comment: "Using TARP
+  model for interior surfaces, constant deltaT"), a constant-film form
+  consistent with its A-matrix discretization; the 12.9 K clamp is
+  OCHRE's own operating-point choice.
 - **Measured impact:** on the winter conditioned oracle
   (`tests/conditioned_oracle.rs`, `beopt_winter_48h`), freezing OCHRE's
   TARP form in place of the ASHRAE Simple values moves the attic mean
@@ -1448,8 +1475,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   Parameters.csv`): whether the CSV's `Air Flow Ratio` columns set it.
 - **Reference behavior:** OCHRE never reads the columns. The string
   "Air Flow Ratio" appears nowhere in its Python; the multispeed loader's
-  comment claims it updates "capacity ratios, air flow ratio, EIR, SHR"
-  (`HVAC.py:790`) but the code updates only capacity, EIR and SHR
+  comment says it updates "capacity ratios, air flow ratio, EIR, SHR"
+  (`HVAC.py:790`) while the code updates only capacity, EIR and SHR
   (`HVAC.py:792-795`). The dispatch derives every stage's flow rate from
   the stage's capacity, `flow_rate_list = [cap / 1000 / rho_air /
   cp_air / delta_t for cap in self.capacity_list]` for the dynamic units
@@ -1519,8 +1546,8 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   list holds that survive the rewrite as conditioned, and no Adjacent
   survives to it (the parse_boundaries invariant).
 - **Justification:** class (a) against OS-HPXML, taken deliberately:
-  OCHRE's single adiabatic zone for the family is its simplification of
-  OS-HPXML's per-label split, and OCHRE is the parity reference; HARES
+  OCHRE keeps one adiabatic zone for the family rather than OS-HPXML's
+  per-label split, and OCHRE is the parity reference; HARES
   reproduces its zone model (as D-015 reproduces its conditioned-space
   merge) instead of the OS-HPXML rule OCHRE declines. The two labels'
   outcomes differ (a skylight over "other heated space" seats conditioned
@@ -1591,3 +1618,83 @@ the triage taxonomy's: (a) OCHRE wrong or simplified, (b) HARES wrong,
   `schedule_index_wraps_after_schedule_length`,
   `schedule_value_is_loaded_each_timestep`,
   `generated_schedule_dec31_wraps_to_the_jan1_profile`.
+
+## D-035: The HVAC `space_fraction` scales the metering, not the zone gains
+
+- **Quantity:** what the HVAC `space_fraction` multiplies: the unit's
+  metered electric/fuel powers and telemetry against the zone's thermal
+  gains - the two sides scale differently, and the asymmetry is the
+  OCHRE-faithful shape.
+- **Reference behavior:** OCHRE `HVAC.py:556-565` scales the RESULTS side
+  only - `delivered_heat`, `electric_kw`, `fan_power`,
+  `gas_therms_per_hour` each `*= self.space_fraction`, under the source's
+  own note "reduce delivered heat (only for results) and power output
+  based on space fraction / Note: sensible/latent gains to envelope are
+  not updated". The zone's heat arrives through `add_gains_to_zone`
+  (`HVAC.py:560-563`), which distributes `sensible_gain` /
+  `latent_gain` by the per-zone fractions - the space_fraction never
+  touches the envelope's gains.
+- **HARES behavior:** the heat-pump heater and the air conditioner
+  reproduce the asymmetry exactly. The metering scales:
+  `heater.rs`'s `scaled_electric_w = step.electric_w * sf` (and the
+  fuel, reactive, fan, pump, ER-backup and pan-heater telemetry the same
+  way), `air_conditioner.rs`'s
+  `electric_w = (compressor_w + fan_w + crankcase) * sf` with each
+  sub-meter scaled. The zone gains do not:
+  `heater.rs`'s `write_zone_thermal_contributions(ports, sensible_gain_w
+  = step.thermal_output_w - latent, latent)` and the air conditioner's
+  cooling-side equivalent pass the unit's unscaled delivered heat to the
+  zone.
+- **Justification:** the space_fraction splits a shared unit's METERING
+  among the spaces it serves (a downstairs unit metered 70/30 across two
+  zones) - the bill and the end-use rollups read the scaled meter; the
+  zone's physical heat input is what the unit delivers to the air, and
+  OCHRE's own note keeps the gains unsplit. Re-aligning either side
+  (scaling the gains, or unscaling the meter) would break the OCHRE
+  parity fixtures' meter-vs-gains reconciliation in both directions.
+- **Class:** (a). OCHRE's asymmetry is the reference; HARES reproduces
+  it.
+- **Measured impact:** none - this is the convention the parity
+  fixtures already pin; entry records it so a re-alignment cannot "fix"
+  it silently.
+- **Pinning tests:** the OCHRE parity fixtures' per-equipment end-use
+  reconciliation (`meter kW` vs zone heat) across
+  `tests/fixtures/parity/` and `tests/fixtures/ochre_hold/`.
+
+## D-036: The fuel HVAC units scale their zone delivery by `space_fraction`
+
+- **Quantity:** the same `space_fraction` applied on the ZONE side for
+  the furnace and the boiler - the opposite of D-035's meter-only
+  asymmetry, and internally consistent (both the meter and the delivery
+  scale together).
+- **Reference behavior:** none to cite. OCHRE's furnace is a resistance
+  element whose meter scales (`HVAC.py:556-565`, D-035) with the gains
+  arriving unscaled; OCHRE's gas boiler is a stub - there is no OCHRE
+  boiler convention to diverge from, and no OCHRE furnace delivers its
+  zone heat scaled.
+- **HARES behavior:** the furnace computes
+  `gross_capacity_w = rated_capacity_w * duty * sf` (`furnace.rs`'s gas
+  and direct-fuel step paths), so the zone's delivered heat - and the
+  fan/electric meter and the fuel input derived from it - all scale by
+  sf together. The electric boiler does the same
+  (`thermal_output_w = rated_capacity_w * duty * sf` in `boiler.rs`),
+  with `element_w` and the pump draw following it.
+- **Justification:** the fuel units were never OCHRE parity targets for
+  the gains side (the boiler stub carries no contract; the furnace's
+  OCHRE twin is the resistance element, not a fuel burner), so there is
+  no upstream convention to reproduce, and the symmetric scaling is the
+  internally consistent choice: a unit metered at `sf` of its draw
+  delivers `sf` of its heat, and the end-use rollups reconcile without
+  a special case. Unifying on D-035's asymmetric shape would be a
+  physics change (the fuel units' zone gains would jump by `1/sf`) with
+  no parity contract behind it and no fixture asking for it; unifying
+  the HVAC units on THIS shape would break the OCHRE parity the review
+  verified. The two conventions are deliberate per unit class.
+- **Class:** (d). Comparison-artifact: the fuel units' symmetric
+  convention exists because their reference implementations differ from
+  the OCHRE HVAC units'.
+- **Measured impact:** none on the shipped fixtures - their
+  space_fraction values are 1.0 (single-zone units), where both
+  conventions coincide.
+- **Pinning tests:** the parity fixtures' fuel-unit end-use
+  reconciliation (the same suite as D-035's).

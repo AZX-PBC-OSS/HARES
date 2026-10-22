@@ -5400,3 +5400,1657 @@ behind the same-zone boundary row's commit. The EV reporter follow-up
 (the disclosure's reporter list extended, the EV probe added) landed
 behind it on the same branch: no physics number moves, the goldens are
 bitwise the prior captures.
+
+## Hardening 11: a resolution that cannot divide the day fails at construction
+
+**Kind:** numeric fix (the hardening phase's warm-up arithmetic entry:
+the silent truncation and the silent zero-warm-up degeneracy).
+
+**Problem:** the warm-up loop's day count divided the 24-hour day by the
+resolution's whole seconds (`run_warmup_converged_inner`,
+`crates/hares-core/src/dwelling/mod.rs`): `num_seconds()` truncates, so
+(a) a sub-second resolution read as zero seconds, `checked_div`'s
+zero-denominator `unwrap_or(0)` fell into the
+`if steps_per_day == 0 { return Ok(1) }` arm, and warm-up ran zero steps
+and reported one day run; and (b) a resolution that is not a whole
+number of seconds (1500 ms) truncated to 1 s and computed 86 400 steps
+per day where the day at 1.5 s steps holds 57 600, so each warm-up "day"
+spanned 129 600 s of simulated time and the day-over-day convergence
+comparison compared misaligned windows. The forcing horizon's setup
+arithmetic carried the same truncation (`forcing_horizon_steps`,
+`as_secs().max(1)`), silently flooring sub-second resolutions to 1 s in
+the horizon's warm-up day floor (the same 86 400 instead of 57 600 at
+1500 ms; the duration's own step count likewise divided by the floored
+second). Both silent. Verified at the parent: a 1500 ms resolution
+computed the horizon 86 400 (the truncated count), and
+`run_warmup_converged` at 500 ms returned `Ok(1)` with no warm-up step
+run. The Python binding's constructor constrains `time_res` to whole
+seconds (`WholeSeconds`), so the sub-second case is unreachable from
+Python; the hole is the direct Rust `SimulationConfig` construction,
+whose own `validate()` also lets 1500 ms through (it truncates to 1 s,
+which divides the hour and the duration).
+
+**Change:** `steps_per_day_exact(time_res_ms)` computes the day's step
+count in milliseconds and accepts exactly a positive whole number of
+seconds that divides 86 400 s; zero, negative, sub-second and
+non-integral-second resolutions fail with `HaresError::Dwelling` naming
+the resolution in milliseconds (a whole-second resolution longer than
+the day is named in seconds). The warm-up entry and the horizon setup
+both compute through it, and the horizon call propagates the error with
+`?` inside the dwelling build, so the failure is the construction the
+config layer's whole-seconds contract already implies. Whole-second
+resolutions compute the same counts the truncated arithmetic did (the
+millisecond division is the seconds division scaled by 1000 exactly).
+
+**Acceptance tests:** `steps_per_day_at_the_shipped_resolutions` (60,
+900 and 3600 s give 1440, 96 and 24; a day-long step gives 1),
+`steps_per_day_rejects_a_resolution_that_cannot_divide_the_day` (0,
+-1000, 500, 1500 and 86 400 001 ms each rejected with the value named in
+milliseconds; 90 000 s rejected named in seconds),
+`warmup_rejects_a_sub_second_resolution_naming_it` (a 500 ms resolution
+through `run_warmup_converged` fails the run naming "500 ms"),
+`forcing_horizon_floors_at_a_day_of_steps_and_validates_the_resolution`
+(the floor's 96, 48 and 672 step pins; 500 ms and 1500 ms rejected with
+the value named). All in `crates/hares-core/src/dwelling/mod.rs` tests.
+
+**Review corrections (2026-10-20):** two reach notes the entry omitted.
+First, the day-long arm of `steps_per_day_at_the_shipped_resolutions`
+(86 400 s giving 1) is arithmetic-valid but practically unreachable:
+the tank invariant fires first, and every real 86 400 s run dies at
+build with `InvariantViolation { tank_temperature_bounds, 234.696 C }`
+(the day-long init step overheats the tank). That named-invariant death
+is the loud failure, not a silent path. Second, the named 500 ms error
+arm is reachable only past `validate()`: `SimulationConfig::validate()`
+intercepts 500 ms first with the truncation-blind message "time_res
+must be greater than zero" (`num_seconds()` truncates 500 ms to 0), so
+an error naming the resolution in milliseconds is met only past
+validate (the acceptance test reaches it by mutating the dwelling's
+clock directly).
+
+**RED first:** the two witnesses executed at the parent: the horizon at
+1500 ms computed 86 400 (the truncated count) and the warm-up entry at
+500 ms returned `Ok(1)` with no step run; the acceptance probes could
+not run at the parent (the helper did not exist; the warm-up-entry probe
+fails behaviorally at the parent, `Ok(1)` where the error is wanted).
+GREEN after the change on the same probes.
+
+**Movement:** none. Whole-second resolutions compute identical counts
+(the integer identity above); no golden runs a sub-second or
+non-integral-second resolution.
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+--build-jobs 2` 8282/8282 passed (8 skipped); `pytest -m '' -n 4` after
+`maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0
+errors; the goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `fix: a resolution that cannot divide the day fails at construction`
+
+**Dependencies:** none outside the core crate.
+
+## Hardening 12: the ASHP debug read leaves the per-step path
+
+**Kind:** hygiene (the hardening phase's equipment hot-path entry: the
+per-step environ read in the heat-pump heater's control resolution; per
+the measurement ladder in `02-measurement.md` this is the hygiene case,
+not a performance fix: 29 ns/step against a 900 s step budget, and no
+consumer-measured delta exists or is claimed).
+
+**Problem:** the ASHP control trace's gate read
+`std::env::var("HARES_DEBUG_ASHP_CONTROL")` inside
+`HeatPumpHeaterCore::resolve_control` (`crates/hares-equipment/src/hvac/
+heat_pump/heater.rs`) - every step for every heat-pump heater instance
+(the environ check preceded the ASHP-variant check, so the MSHP, GSHP
+and WSHP variants paid it too): an environ lock acquisition and a String
+allocation per read, release builds included, for a debug aid that is
+unset in every real run.
+
+**Change:** `ashp_control_trace_enabled()` reads the variable once per
+process into a `OnceLock<bool>` and the per-step gate reads the cache -
+one atomic load per step. The trace itself is unchanged: set the
+variable before the run and the same control dump prints; the read is
+settled by the first heat-pump step and later environment changes have
+no effect (documented on the helper). No test or fixture reads or
+toggles the variable, so no test-visible reset was needed. (INFO from
+the review: the sibling truncating day-division sites,
+`crates/hares-io/src/config.rs`'s `timestep_count`,
+`crates/hares-core/src/dwelling/roster.rs`'s per-day step count and
+`crates/hares-core/src/environment.rs`'s mains samples-per-day, are
+unreachable past Hardening 11's construction error and were never in
+scope here.)
+
+**RED first (the witness):** the per-call cost measured in release at
+the parent: 1 000 000 environ reads 29.4 ms (29 ns/read) against
+1 000 000 once-lock reads 0.2 ms (0.2 ns/read), about 145x, with the
+read firing per step per heater in `resolve_control`. The change is
+behavior-preserving (the variable unset in every test and fixture), so
+the gate is the unchanged suite.
+
+**Movement:** none (the trace's gate only; the dump never fires in a
+test or fixture).
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+--build-jobs 2` 8282/8282 passed (8 skipped); `pytest -m '' -n 4` after
+`maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0
+errors; the goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `perf: the ashp debug read leaves the per-step path`
+
+**Dependencies:** none outside the equipment crate.
+
+## Hardening 13: envelope index ceilings and capacitance floors fail or count loudly
+
+**Kind:** numeric fix (the hardening phase's envelope entry: the
+index-collision guards, the clamp counting, the panicking assert's
+construction-time replacement and the initialization fallbacks'
+warnings, from review 2's envelope findings).
+
+**Problem:** five silent-corruption sites in the envelope. (a) Zone air
+nodes are numbered 1..=n_zones and material-layer nodes start at
+`LAYER_NODE_BASE` (1000), and nothing kept the two ranges disjoint: at
+1000 zones the last zone's air node collides with the first layer node
+and `alloc_node` silently overwrites the zone's declared capacitance
+(the probe's 100 999 J/K zone entry became the wall node's 2 000 000
+J/K) while the zone's state row aliases the layer chain; some wirings
+trip the loud self-loop-edge guard, exterior-edge wirings corrupt
+silently, and the assembled-capacitance insurance added with
+Hardening 10 cannot catch it (the overwriting entry is positive). (b)
+The per-depth ground nodes are `GROUND_NODE_BASE + index`, a table of
+99 entries below `OUTDOOR_NODE_ID` (u32::MAX - 1), and the depth-table
+build indexed without a bound: at 100 unique foundation depths the
+100th node wraps onto the outdoor driving node itself and the assembly
+resolves the run's outdoor column against a ground boundary's column,
+driving a ground boundary with outdoor temperature (the probe assembled
+Ok with the outdoor column resolved on a model with no outdoor
+boundary). (c) The `MIN_CAPACITANCE_J_K` floor clamped silently at the
+assembler's three application sites (the declared zone caps, the
+material-layer path's halved caps, the precomputed path's scaled caps);
+the shipped construction tables carry zero-areal-capacitance fictitious
+layers (the Foundation Wall, Floor, Foundation Floor and Garage Floor
+fictitious-R rows), so the lift engages in production runs and inflates
+a thin or small-area layer's thermal mass invisibly. (d) The per-step
+solar path's `assert!(shgc >= transmittance - 1e-6)` panicked on
+invalid configuration: an SHGC below the transmittance is
+self-contradictory (the SHGC decomposes into the transmitted share plus
+a glass-absorbed share), so the rejection belongs at construction, not
+a panic mid-run. (e) `initialize_steady_state`'s uniform-temperature
+fallback was silent in all three arms: the no-pin steady-state solve
+failure and the two pinned paths' singular-inverse fallbacks (the
+continuous reduced -A_c solve and the discrete reduced I - A_d solve,
+where `try_inverse` returns None) each fell back to a uniform
+indoor-temperature initial state without a word - a legitimate
+fallback that would hide a broken model. The production constructor
+`ThermalSolver::new` is the sole non-test caller and always pins the
+indoor zone, so the pinned arms are the sites a real run reaches; the
+file's own comment records that OCHRE raises on the singular solve
+rather than silently substituting uniform temperatures.
+
+**Change:** (a) and (b) are construction ceilings in
+`assemble_building_rc`: a zone count that reaches the layer-node base
+and a depth table wider than the ground-node table's 99 entries each
+fail construction with the function's error naming the count, the
+colliding node and the corruption each prevents; the 99-entry capacity
+is a named constant (`MAX_UNIQUE_GROUND_DEPTHS`) on the depth table's
+own documentation. (c) The floor's three application sites count their
+lifts into `EnvelopeDiagnostics::min_capacitance_clamp_count`, shaped
+like `default_r_fallback_count` (behind the `observe` feature), the
+zone count drained together with the graph's layer and precomputed
+counts before the network is consumed; the clamp itself is unchanged
+intended behavior, the count makes it visible. The derive-path floor in
+`derive_zone_capacitances` stays uncounted (it returns a plain vector
+before any diagnostics exist, and its floored output is what the
+assembler's zone loop would see). (d) The assert is deleted and the
+check moves to construction: `WindowSolarProperties::validate` rejects
+an inverted pair or a NaN on either field for either season naming the
+surface and the season, wired through `ThermalSolverConfig::validate`
+into `ThermalSolver::new`'s typed `ThermalSolverError::Configuration`
+(the crate's config-error path); an infinity on either field passes,
+the per-step comparison's pre-existing acceptance, now documented
+here. The per-step arithmetic keeps its `.max`
+clamp. (e) All three uniform-fallback arms emit a `tracing::warn!`
+naming the branch (continuous or discrete for the pinned arms), the
+site (`initialize_steady_state`), the state count and the uniform
+substitution. The warning is not an error: raising on the singular
+pinned solve, as OCHRE does, would be a behavior change with golden
+risk and is a separate decision, not taken here.
+
+**Acceptance tests:** the two ceiling errors (1000 zones, 100 unique
+depths) and the two just-below cases assembling cleanly (999 zones with
+the declared capacitance intact, 99 depths with the outdoor column
+unresolved on an outdoor-free model) in `boundary_rc.rs` tests; the
+three clamp counts (a sub-floor material layer, a sub-floor precomputed
+layer, a sub-floor declared zone capacitance handed straight to the
+assembler) asserting the counter and the clamped value;
+`window_solar_properties_reject_shgc_below_transmittance` (both
+seasons, the equality case, the NaN case; an infinity passes, per the
+change note);
+`window_shgc_below_transmittance_is_a_construction_error` (the full
+solver construction names the surface and the pair);
+`steady_state_fallback_warns` (the warning observed through a counting
+subscriber); the two pinned arms' warns
+(`pinned_discrete_singular_solve_warns`,
+`pinned_continuous_singular_solve_warns`: the singular reduced matrix
+under the production pin returns the uniform [21, 21] initial state
+and exactly one warn naming the branch and the site).
+
+**RED first (the witnesses, executed at the parent 7576ec89):** at 1000
+zones the assembly returned Ok with zone 999's declared 100 999 J/K
+entry overwritten by the wall node; at 100 unique depths the assembly
+returned Ok with the outdoor column resolved on an outdoor-free model;
+the sub-floor material and declared zone capacitances assembled with
+the lift applied and nothing counting it; the inverted SHGC pair passed
+`ThermalSolver::new` and panicked in the per-step solar path
+(`prepare_inputs`); the fallback branch emitted nothing (no warn in the
+base source); the two pinned `try_inverse`-None arms were also silent
+(the review's probe `rev_pinned_path_singular_solve_is_silent`: a
+singular reduced matrix under the production pin returned the uniform
+[21, 21] state with a warn count of 0). GREEN after the change on the
+same inputs.
+
+**Movement:** none - the guards must be and are unreachable for every
+shipped fixture: the goldens compare-all 10 + dst 1 bitwise identical,
+no re-capture. `EnvelopeDiagnostics` is `observe`-gated and not
+serialized into the golden frames, so the new counter moves no recorded
+number; the fixture sweep (every capacitance row under the fixtures and
+the shipped defaults, 3040 rows) found the sub-floor capacitances
+where the count is expected to engage - the fictitious zero-mass
+insulation layers - and no boundary small enough to dip a nonzero
+layer's node below the floor.
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+-j 2` 8294/8294 passed (8 skipped), the touched crates also green on
+default features 2351/2351 (5 skipped); `pytest -m '' -n 4` after
+`maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright
+0 errors; the goldens compare-all 10 + dst 1 bitwise identical.
+The record correction's re-run (2026-10-20, the two pinned-arm warns
+and the zone-ceiling message fix added; commits `7f0b9ea9` and
+`9b50d81d`): fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean; nextest `--workspace --all-features
+-j 2` 8297/8297 passed (8 skipped); `pytest -m '' -n 4` after
+`maturin develop` 1800 passed + 6 xfailed, 0 failed, 0 errors; pyright
+0 errors; the goldens compare-all 10 + dst 1 bitwise identical (the
+`tracing` warn is not serialized into the golden frames, so it moves
+no recorded number).
+
+**Commit:** `fix: envelope index ceilings and capacitance floors fail or count loudly`
+
+**Dependencies:** the envelope crate, plus the observe-gated
+`EnvelopeDiagnostics` literal updates in the core crate's tests.
+
+## Hardening 14: schedule sources never share a random keystream
+
+**Kind:** numeric fix (the hardening phase's RNG stream hygiene entry).
+
+**Problem:** the schedule sources' seeds had three sharing defects. The
+actor registry's EvDriver factory built one 256-bit key from the caller's
+`seed` parameter and handed it unmodified to both the driver's day-roll
+generator and the miles source's builder, so the day-roll uniform and the
+miles log-normal consumed the same keystream words (the departure,
+duration and arrival sources took single-byte XORs of the same key; the
+miles derivation was the identity). The Python `add_ev_with_driver` path
+carried the identical collision. And `ScheduleSourceConfig::into_runtime`
+keyed every noisy TimeWindows source with no configured seed to the
+all-zero key: two same-configured sources in one dwelling (the review's
+two water heaters) drew identical noise series, correlated across sources
+and, for identical unspecified configurations, across homes. Exactly the
+correlation the RNG module's docs promise the stream partitioning
+prevents.
+
+**Residual (found in the row's independent review):** the first cut
+derived the unspecified-seed key from the owner-and-role identity alone
+(`"<owner name>:<source role>"`), and that does not close the across-homes
+half of the problem. HPXML names equipment by generic type string (the
+water heater is "Gas Water Heater", the heat pump water heater "Heat Pump
+Water Heater"), so every home carrying an identically-configured
+unspecified-seed noisy source derived the SAME identity string, the SAME
+key, and drew the SAME series - guaranteed, not probabilistic: the
+reviewer's probe produced bit-identical keys across homes by
+construction. This contradicted the rng module's own contract (every
+stream derived from a single PER-DWELLING master seed; the event-load
+convention keys per-dwelling via `dwelling_seed`) and the entry's own
+Problem statement above.
+
+**Change:** the derivation convention the codebase already uses, applied
+to every source key. A new `hares_types::rng::schedule_source_key`
+derives a schedule source's key from its identity with domain-separated
+FNV-1a words filling the key the way `RngStream::event_load` fills its
+stream nonce: an explicit seed wins unchanged, the default is never the
+shared zero key, distinct identities never share a keystream, the same
+identity is reproducible run to run. `ScheduleSourceConfig::into_runtime`
+takes the identity and passes it through, and every conversion site names
+its owner and role (the five water heaters' draw, mains and appliance
+sources, the thermostat setpoint sources, the ideal HVAC's setpoint
+sources). The catalogue's miles builder tags its own key beside the
+departure, duration and arrival tags (byte 3), so the day-roll stream and
+the four driving sources draw from disjoint keystreams under one driver
+key, at construction and at reseed alike; the registry and Python
+day-roll generators ride `derive_sub_rng` at the reserved EV-driver
+stream nonce (stream 0 under the caller's key is the dwelling rng's own
+stream, `dwelling_seed` with building id 0). The event-load stream nonce
+space is untouched (the plain identity hash, pinned by test).
+
+The across-homes closure (the review's fix): the identity keys on the
+dwelling too - `<dwelling identity>:<owner name>:<source role>` - where
+the dwelling identity is the config-stable per-dwelling value the
+per-dwelling stream derivations already key on, the building id
+(`dwelling_seed`'s own input, what `derive_sub_rng`'s per-dwelling
+streams derive from). `EquipmentConfig` carries it (`bldg_id`), the
+dwelling stamps it on every config it builds at assembly before the
+constructor and init read the config, and `into_runtime` takes it as an
+explicit parameter threaded from every conversion site (no
+default-to-empty escape hatch: the two-parameter signature is
+compile-guided at every site). The EV sources key the dwelling in the
+same way: one shared `driver_key_material` derivation mixes the
+configured seed with the building id (bytes 8..16, `dwelling_seed`'s
+slot), both the registry factory and the Python `add_ev_with_driver`
+path route their key material through it, and the Python
+`add_actor_by_name` surface stamps the dwelling id on the actor config.
+The derivation stays config-stable, never runtime state: the checkpoint
+restore rebuilds the configs from the same building id and re-derives
+the same keys (it carries positions only, never a re-derivation of the
+seed), so the restore and the gym-reset invariants hold unchanged.
+
+**Acceptance test:** the review's pinned probe, three levels deep.
+`unspecified_seed_noisy_sources_do_not_share_a_keystream`
+(`hares-types`): two identical noisy TimeWindows configs with no seed
+converted under distinct identities draw different series bitwise, the
+same identity reproduces, and an explicit seed draws the seeded
+constructor's series. `two_unspecified_seed_draw_sources_draw_distinct_series`
+(`hares-equipment`, the gas water heater): two same-configured heaters
+step in lockstep and their drawn flow series diverge.
+`driving_source_key_derivations_are_pairwise_distinct`: the four driving
+sources' key derivations are pairwise distinct and none is the identity.
+`registry_ev_driver_day_roll_rides_a_reserved_stream_nonce`: the
+registry driver's day-roll stream state reads the reserved nonce.
+Composition with the warm-up neutrality (the row 109 machinery):
+`checkpoint_restore_continues_an_unspecified_seed_draw_source` (the
+restore continues the derived key's stream from the captured position;
+the capture and restore carry positions only, never a re-derivation),
+and `warmup_day_count_neutrality_holds_with_the_ev_drivers_noisy_sources`
+(the warm-up 2-day and 4-day runs of the EV-archetype dwelling whose
+production carries the noisy TimeWindows miles source beside the event
+load produce bit-identical production telemetry). The across-homes
+probes (the review's shape, added with the closure): two dwelling
+configs differing only in the dwelling identity, the same unspecified
+noisy source config - `same_configured_sources_in_two_dwellings_do_not_share_a_keystream`
+(`hares-types`, the derivation under `"7"` and `"8"` building ids with
+the generic "Gas Water Heater" owner name),
+`two_homes_same_configured_draw_sources_draw_distinct_series`
+(`hares-equipment`, two same-configured gas water heaters both named
+"Gas Water Heater", `bldg_id` 1 and 2, stepping in lockstep, the drawn
+flow series diverging) and
+`ev_drivers_with_the_same_seed_in_two_dwellings_draw_distinct_series`
+(`hares-core`, the registry drivers' miles sources under the same
+configured seed and distinct dwelling ids), each verified RED under its
+own mutation (the dwelling identity unmixed, the series collapse to
+bit-identical). RED first: all the
+distinctness witnesses failed at the parent (identical series at both
+levels, the miles derivation the identity, the day-roll at stream 0,
+and the reviewer's across-homes probe bit-identical by construction),
+the machinery tests passed before and after.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. The fixture sweep found no shipped fixture
+carrying any schedule source configuration at all: the fixtures'
+schedule columns resolve to deterministic ColumnRef sources, the water
+heaters' draw and mains sources in the CSV path are ColumnRefs, and the
+EV drivers in the fixtures are the dwelling's built-in Constant-source
+drivers. No unspecified-seed noisy source exists in any fixture or
+shipped default, so no fixture's stream changes. The one Python test
+whose day-cycle assert depended on the day-roll's specific draw
+(`test_ev_full_day_cycle`) re-picked its seed twice with the cause
+documented at the seed: the owner-and-role key moved its roll (seed 42
+to 1), and the dwelling-identity mix moved it again (seed 1 to 2) - the
+day roll draws from the driver's key material, the configured seed mixed
+with the building id, so a seed's roll is what that derivation makes
+it.
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean, the touched crates also clean on
+default features; nextest `--workspace --all-features -j 2` 8311/8311
+passed (8 skipped), the touched crates also green on default features
+5120/5120 (5 skipped); `pytest -m '' -n 4` after `maturin develop`
+1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0 errors; the
+goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `fix: schedule sources never share a random keystream`
+
+**Dependencies:** none outside the types, equipment, core and Python
+crates; the `into_runtime` signature change is compile-guided at every
+conversion site.
+
+## Hardening 15: the EV driver fails on unreadable schedules instead of inventing a day
+
+**Kind:** numeric fix (the hardening phase's silent-fallback elimination
+entry).
+
+**Problem:** the EV driver's day-roll schedule reads substituted
+fabricated defaults on failure - a departure read that failed became
+480.0 (8:00), an arrival 1080.0, a trip duration 600.0 minutes, a miles
+read 30 miles. An unreadable schedule (a TimeWindows with no matching
+window and no default, a corrupt distribution the source's own
+validation rejects) therefore silently became a constant 8:00-departure,
+30-mile day: the vehicle departed, drove and charged on invented times,
+with no signal. This reopened the class `ScheduleSource::value_at`
+deliberately closes - it rejects non-finite and unmatched values with a
+typed error so corrupt input cannot under-report load unrecorded - and
+the driver, the one actor whose whole day hangs on these four reads, was
+the consumer that reopens it.
+
+**Change:** the five read sites (departure, the direct arrival draw and
+its re-samples, the trip duration, the daily miles) propagate the typed
+error, each naming the EV driver actor and the source whose read failed
+and carrying the source's own cause, so the step error is self-sufficient
+on the text path the batch boundary carries. The actor records the cause
+in its sticky health failure and reports unhealthy: the step fails at the
+post-decide health check, the existing actor step-failure machinery (the
+same path the needed-charge-hours estimate contract rides). No day is
+invented: the day's plan is dropped. The stickiness, named honestly:
+`health_error` has no clearing path, and a read failure's cause can be
+calendar-transient - a TimeWindows source whose no-matching-window day
+falls on a weekday its windows do not cover is unreadable that day and
+readable on a later one (a Mon-only window is unreadable Saturday,
+readable Monday). The stickiness does not distinguish that transient from
+a permanent one: one calendar-unreadable day removes the driver for the
+rest of the run, including the later days whose windows would read.
+Fail-fast is the choice defended here - the failure rides the same
+health-check machinery every actor contract failure rides, and a
+self-clearing failure would have the driver silently rejoin mid-run with
+no replay of the driving it never planned - but the permanent-death
+consequence is the record, not a property to lean on. The documented
+re-sample-exhausted arrival guard is kept as it stands: it repairs the
+arrival-after-departure ordering constraint after five re-samples (a
+clamp to departure+1), it never substitutes a schedule value for a failed
+read. The field carrying the actor's sticky failure was renamed
+`estimate_error` to `health_error` (its contract now covers both the
+estimate and the schedule reads); the checkpoint's wire format is
+positional and its shape is unchanged, the schema version stays 5.
+
+The kept-state-energy question (the row 111 accounting): nothing to
+count, and the reason is structural. The failed decide runs in the
+ActorDecide phase, before the dispatch pass and before any equipment
+steps - the signals the failed decide queued are never applied, the
+ports receive nothing, there is no rollback and no kept port draw. The
+driver actor itself holds no energy-bearing state (a draw position, a
+day plan and a battery belief; the pack is the EV equipment's, whose own
+step failures keep the row 111 reporter accounting).
+`Equipment::stored_energy_j` is the Equipment trait's reporter and does
+not apply to actors.
+
+**Acceptance test:** the unit witness
+(`unreadable_schedule_source_fails_the_day_roll_naming_the_actor`, the
+driver's own tests): a departure source no window resolves fails the day
+roll - the actor reports unhealthy, the cause names the actor and the
+departure source, and no day event exists. The dwelling-level witnesses
+(`ev_driver_schedule_failure.rs`): the failing-schedule dwelling's step
+errors naming the actor and the source, with the read's own cause in the
+text; a readable-schedule control steps; and the text carries the actor,
+the source and the cause without further context. RED first: at the
+parent the actor stayed healthy with the invented day in hand and the
+step succeeded - the probe run confirmed the invented-day behavior
+end to end (the failing-schedule dwelling stepped 96 steps with the EV
+charging on the invented times).
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. The fixtures' EV drivers are the dwelling's
+built-in Constant-source drivers; no fixture's schedule read can fail,
+and no fixture's driver reaches the day roll's reads with a failing
+source.
+
+**Verification:** fmt clean; clippy `--workspace --all-targets
+--all-features -D warnings` clean, the touched crates also clean on
+default features; nextest `--workspace --all-features -j 2` 8311/8311
+passed (8 skipped), the touched crates also green on default features
+5120/5120 (5 skipped); `pytest -m '' -n 4` after `maturin develop`
+1800 passed + 6 xfailed, 0 failed, 0 errors; pyright 0 errors; the
+goldens compare-all 10 + dst 1 bitwise identical.
+
+**Commit:** `fix: the ev driver fails on unreadable schedules instead of inventing a day`
+
+**Dependencies:** none outside the core crate's driver and the new
+integration test.
+
+## Hardening 16: fleets seed from the caller and dr compliance is per event
+
+**Kind:** numeric fix (the hardening phase's fleet seed and stochastic
+contract entry; three defects, one commit packages them: the fleet
+seed, the DR compliance draw, the event-start probability's basis).
+
+**Problem:** three stochastic contracts were broken at their surfaces.
+The ResStock fleet constructor hardcoded every home's master seed to
+zero (`resstock_sim_config` built every `SimulationConfig` with
+`master_seed: 0`) and its signature exposed no seed, so an ensemble or
+uncertainty study could not vary a fleet's stochastic behavior through
+the fleet entry point at all: the per-home streams derive from
+`(master_seed, bldg_id)` via `dwelling_seed`, but the first input was
+out of the caller's reach. The DR compliance actor's probabilistic
+model drew per step (`should_comply` hashed the step's timestamp): a
+0.8-rate home dispatched on about 80 percent of an event's STEPS
+instead of complying with 80 percent of EVENTS - intermittent coverage
+within a complied event, and the effective full-event compliance rate
+the rate names multiplied by the event's step count. The event-load
+start probability was applied per step as-is (`StartDraws::starts`
+thresholded each idle step at the configured value): the probability's
+basis was whatever step length the run happened to use, so the same
+config at a 900 s step started about four times as often per hour as
+at a 3600 s step, and the documented rate in the loads doc was
+resolution-dependent.
+
+**Change:** three closures, one per defect.
+
+The fleet seed: `Fleet::from_resstock` takes `master_seed: Option<u64>`
+(a `None` keeping the documented default of 0, a `Some` the caller's
+seed), threads the resolved value into every home's sim config through
+`resstock_sim_config`, and the build report names the seed the fleet
+runs under (`FleetBuildReport.master_seed`, the resolved value either
+way). The Python binding takes the same keyword (`master_seed=None` on
+`Fleet.from_resstock`, after `defaults_path`, the stub declaring it);
+the frame-golden adapter passes `None`, the captures it compares were
+taken with the documented default. The seed's reach is scoped to what
+actually threads it: the per-dwelling derivations
+(`dwelling_seed`), the key each home's event-load streams draw from.
+The later review found the CHANGELOG and the binding's doc claiming
+the seed drives "every home's stochastic streams", where the DR
+compliance driver's draw, the EV driver's key material and a noisy
+TimeWindows source's keystream key key on their own configured seed or
+identity, and the fleet path constructs none of them today; the claim
+now reads the event-load interiors, and the rng module's contract
+comment and the schedule-sources doc state the constraint: if the
+fleet path gains actor or noisy-source construction, the master seed
+must thread into their unspecified-seed derivations the same way.
+
+The DR compliance draw: the actor latches the compliance decision once
+at the event's entry (the first step it sees the level above Normal)
+and holds it for the event's duration; a level change within an event
+does not re-roll, the next event's entry re-draws, and the Normal
+branch clears the latch. The latched decision is part of the
+checkpoint: the snapshot's schema version moves to 5 carrying it, and a
+restore mid-event keeps the event's entry decision instead of
+re-drawing it. The rate's meaning is now the share of events the home
+complies with, as the severity-scaled effective rate always claimed.
+
+The event-start probability's basis: declared per hour, normalized per
+step. The configured probability (a constant or a schedule column
+value) is the probability of starting within one hour of open window;
+the per-step chance is `1 - (1 - p)^(dt / 3600 s)` (the physics
+constants' `SECONDS_PER_HOUR`), so the same hourly rate holds for any
+step of an hour or less (the hourly probability of at least one start
+is exact there; the start count runs a few percent high for
+sub-hourly steps, since starts can coincide within an hour, and low
+for supra-hourly steps, since a step longer than the hour starts at
+most once). The zero and one endpoints are exact at
+every resolution (never start, always start), every shipped default and
+fixture probability is an endpoint, and one draw is consumed per
+idle-open step whatever the resolution, so the checkpoint draw
+positions are unchanged in structure. The basis is stated where the
+probability is configured and read: the equipment's doc, the loads
+doc's event-triggering section, and the `<event_probability_constant>`
+element's published description, the rate's resolution scoping and
+residual stated in each.
+
+**Acceptance test:** RED first at the parent on all three shapes. The
+fleet seed: two stochastic ResStock fleets (the fixture building plus
+an injected Microwave whose event load draws every idle step) built
+with different caller seeds drew different aggregate power series, and
+the same seed rebuilt bitwise-identical series; before the parameter
+existed the new-API tests did not compile (the witness of the
+unreachable parameter), and the build report's seed field completed the
+contract. The dwelling's own seed smoke test moved its window in this
+commit (`write_event_load_toml` gained the `duration_s` parameter; the
+smoke run 600 s to 86,400 s): 600 s at the 0.5/h default started about
+8 percent of the time, and the day-long window gives the two seeds'
+series many steps to diverge on instead of one or two, the
+discriminating power the smoke test exists for. The DR draw: with the
+rate-0.5 seed-7 model, an event entered
+at 2026-01-01 01:00 dispatched at hours 2 and 5 and declined at hours
+1, 3 and 4 (a random walk within one event), where the contract holds
+the entry decision across the event and re-draws the next event's
+entry; and a save after a complying entry restored into a fresh body
+re-drew the decision. The event rate: the same config at 900 s and
+3600 s steps started 375 against 109 times in 2000 hours, where the
+normalized contract holds the hourly rate across resolutions (the
+normalized run agrees within a few sigma of the binomial spread).
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. No fixture carries a fleet master seed other
+than the documented default, a DR compliance actor, or an event-load
+probability that is not an endpoint; the stochastic contracts close on
+configs nothing shipped exercises.
+
+**Dependencies:** the fleet crate's constructor and build report, the
+Python binding's keyword surface (the stub updated), the core crate's
+DR actor and its checkpoint schema (version 5), the equipment crate's
+event-load draw.
+
+## Hardening 17: the setpoint columns' plausibility band fails the construction
+
+**Kind:** numeric fix (the hardening phase's setpoint unit-and-plausibility
+entry; the unit half landed in row 94b, this entry adds the plausibility
+half and the sweep that closes the task).
+
+**Problem:** the schedule-file thermostat setpoint columns convert from
+the OS-HPXML Fahrenheit convention at the parse since row 94b, and the
+HPXML setpoint profiles converted at their own parse, but nothing
+validated the RESOLVED values: a file written in Celsius and read under
+the Fahrenheit convention resolved its 20 C heating setpoint to -6.67 C
+(a thermostat that never heats; the same class in reverse as the
+pre-94b defect, undetectable), and any corrupt profile value reached
+the thermostat raw. The engine's own test suites demonstrated the
+residue: three of them carried schedule CSVs whose `heating_setpoint`
+column held Celsius-scale values (20.0-21.5) added before row 94b, so
+under the conversion they resolved to -6.67 C and the homes they built
+simply never heated - the tests kept passing because their assertions
+do not touch heating, which is exactly how the class survives silently.
+
+**Change:** construction-time plausibility validation at the schedule
+resolution, in the band the plan states: a resolved setpoint outside
+[5, 40] C fails the construction naming the source and the value. The
+band lives in the physics constants (`SETPOINT_PLAUSIBILITY_MIN_C` /
+`SETPOINT_PLAUSIBILITY_MAX_C`). Three paths validate, at the point each
+resolves: an applied schedule column sweeps its full converted column
+once per side before any spec consumes it; an HPXML profile sweeps its
+weekday and weekend arrays before the source is recorded; and the
+default-profile injection validates its own conversion. The column
+error names the CSV column and the offending Celsius value with the
+usual cause stated (a Celsius file read under the Fahrenheit
+convention); the profile error names the side and the HVACControl
+elements the profile came from. The band's edges are inclusive, and a
+NaN fails the range check like any other impossible value.
+
+**The band at every surface:** the entry's three paths validated the
+schedule resolution's surfaces, and the review found the paths that
+bypassed them. The Ideal HVAC spec name rides the building setpoint
+profiles (`apply_building_setpoint_profiles` hands the Ideal HVAC its
+heating and cooling sources from the HVACControl) while appearing in
+neither the heating nor the cooling equipment name set the per-spec
+injection validated against, so a 160 F heating setpoint that failed a
+gas-furnace home's construction built and ran an IdealHVAC home, the
+solver back-calculating whatever load holds 71.11 C, silently. The
+config's raw `*_setpoint_c` constants reached the thermostat FSM
+unvalidated (68 typed into a `_c` key passing for 68 C), and the
+programmatic builders (`with_setpoints`, `with_heating_setpoint_source`)
+and a user's typed-config sources (`extract_schedule_source` into
+`into_runtime`) landed sources on the FSM with no sweep. The fix is
+the band at the choke points, structural over list-append: the HPXML
+profiles validate at the distribution point every setpoint-consuming
+spec takes (the building profiles where they distribute, the
+HVACControl params where they parse, so the next new system type
+cannot bypass the band by being a new name), and the thermostat FSM
+sweeps every setpoint it carries at its init gate
+(`validate_configuration`, which every owner already calls after the
+setpoints land and before the first step): the static constants and
+each source shape's declared literals, through
+`ScheduleSource::declared_literal_values`, whose match is exhaustive
+where the enum is defined, so a source shape added there fails to
+compile until its author classifies its values. The rule is one: the
+band holds at the thermostat boundary regardless of the surface. Two
+dwelling curve-clamp tests' cooling placeholder moves in the same
+commit (0 C, a deliberately absurd max-drive placeholder the new FSM
+gate refuses, to 5 C, the band's minimum, which still drives the AC
+to its highest stage against a ~20 C zone); the validations fire on
+no other shipped fixture or test config.
+
+**Fixture sweep (the Fahrenheit reality):** no shipped data fixture or
+golden manifest carries a schedule setpoint column at all - the golden
+manifests' schedule CSVs (the ResStock `in.schedules.csv` files and the
+BEopt example) carry no setpoint column, and the only setpoint-headed
+CSVs in the tree are OCHRE reference OUTPUT tables ("HVAC Heating
+Setpoint (C)", the values Celsius and labelled so) that no engine
+schedule parser reads. The engine's own test CSVs were the one
+counterexample (three files, the Celsius-scale values above); they
+move in this commit to the documented convention, their values the
+Fahrenheit equivalents of the setpoints they state (68.0-70.7 F
+resolving to the same 20.0-21.5 C), with the conversion stated in a
+comment. One hares-io unit test's placeholder HPXML profile
+(`[1.0; 24]`, an arbitrary placeholder whose value is not the point)
+moves to a plausible value (22.0 C, the max_value it already declared).
+
+**Consumer-contract check:** PASS against this tree's engine
+(`[hares-contract] PASS`, the two informational NEW end-use items row
+96's gate recorded). The direction agrees: the engine publishes the two
+setpoint columns' unit as Fahrenheit - the unit it READS them in,
+converting to Celsius at the parse - and the consumer writes
+Fahrenheit values into them, so the conversion and the validation sit
+downstream of the published unit and nothing the consumer feeds moves.
+The published schema is untouched by this commit.
+
+**Acceptance test:** RED first at the parent: an applied heating column
+holding 150 F resolved to 65.56 C and the injection succeeded; after,
+the construction fails naming `heating_setpoint` and the value. The
+band's edges are pinned (41 F / 104 F build, 40.5 F / 110 F fail), and
+an HPXML heating-season constant of 160 F (71.11 C) fails naming the
+side, the elements and the value. The three repaired test CSVs are the
+sweep's own witnesses: their construction failed at the parent under
+the new check, and builds again with the same resolved setpoints the
+column's values state. The band at every surface is witnessed per
+surface: the Ideal HVAC home's 160 F heating setpoint fails
+`resolve_equipment` naming the side and the resolved value, identically
+to the gas-furnace home's; a 68 C constant typed into a `_c` config
+key fails the FSM's init naming the value and the band; and the
+builders' 68 C profiles, the 68 C constant source and the typed
+config's 68 C daily-profile source each fail the same FSM gate.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. No golden manifest's schedule carries a
+setpoint column and no fixture HPXML's setpoints fall outside the band
+(the shipped ResStock profiles span 49-84 F, 9.44-28.89 C, all inside
+it; the ochre samples' 68/78 F constants and the cz4a hourly arrays,
+65-76 F, sit inside that span).
+
+**Dependencies:** the physics constants' band, the hares-io schedule
+resolution's validation sites (the three original ones, moved to the
+distribution point every setpoint-consuming spec takes), the
+thermostat FSM's init gate and `ScheduleSource::declared_literal_values`,
+the three repaired test CSVs.
+
+## Hardening 18: the counted clamp census, and its scope
+
+**Kind:** hardening (the clamp census; diagnostics only, no physics
+moves).
+
+**Problem:** the physics clamps a value into its valid domain silently
+at every surface but one: the equipment's biquadratic curve-index clamp
+counted into `RunHealth::curve_index_clamps` (with its policy limit),
+while the AIM-2 pressure exponent's band, the relative-humidity
+saturation hold, the natural ventilation's comfort-base adjustment and
+its 20-ACH cap, the DOE-2 exterior film coefficient's floor and the
+tank's draw truncation all overwrote their values with no signal. A
+clamp firing is information the run's consumer needs: an exponent that
+keeps falling outside its band, a draw that never fits the tank, a
+humidity ratio that outruns saturation all say something about the
+inputs, and none of it was visible.
+
+**Change:** a counted clamp-site taxonomy, `hares_types::clamp_census`:
+the `ClampSite` enum names every counted physics clamp surface (each
+site is its own census key, serialized under its own name; the scope
+table below records what is counted and what is excluded, with the
+class and the reason), and `ClampCensus`
+holds the per-site run totals. The recording sites tally on the calling
+thread (a thread-local per-step tally, the same accumulate-at-the-source
+and take-and-reset-per-drain shape the equipment's
+`take_health_counts` uses); the dwelling drains the tally once per
+timestep beside the equipment health drain, into run totals read
+through `Dwelling::clamp_census()`. The census is observe-gated
+(`hares_types/observe`, carried by the physics and equipment crates'
+own observe features) and diagnostics-scoped like the envelope's
+diagnostics: it surfaces through the dwelling's accessor alone, never
+through the run result's health totals, the output frames or the
+policy.
+
+**The sites:** the plan named six surfaces; the census carries eleven
+sites (the grep of the clamp idioms found two more at the named
+surfaces, both from the review's own enumeration, and the scope
+triage's three joins below complete the counted set). Per site:
+`Aim2PressureExponent` (the `n_i.clamp(N_I_MIN, N_I_MAX)` at both of
+its clamp points, the per-step ASHRAE wind-stack evaluation and the
+ACH50-to-coefficients conversion), `Aim2LeakageDistribution` (the
+Walker & Wilson Eq. 10-11 stack-factor hold and the Eq. 25 ceiling
+asymmetry hold in the ACH50 conversion; with the fixed leakage-class
+table these are guards valid inputs cannot trip, counted so a table
+change that lets them fire is visible), `NaturalVentilationAdj` (the
+comfort-base adjustment ratio held into [0, 1] when the base sits
+below the outdoor temperature), `NaturalVentilationAchCap` (the
+20-ACH cap), `RelativeHumidity` (the saturation hold),
+`ZoneHumiditySaturation` (the humidity solver's zone humidity ratio
+held into [0, w_sat]; the clamped mass is the solver's condensation
+and frost bookkeeping), `FilmDeltaTFloor` (the TARP exterior
+natural-convection model's ΔT floored at 0.1 K, the same delivered
+film resistance the floor below protects), `ExteriorFilmFloor`
+(the 1.0 W/(m2 K) DOE-2 floor), `TankDrawTruncation` (the step draw
+truncated to the tank's volume), `FlowFractionBounds` (the biquadratic
+flow fraction held into the configured `[ff_min, ff_max]` before the
+part-load-fraction quadratic evaluates) and `CurveIndex` (the
+biquadratic curve-index clamp: the existing health counter stays the
+policy and run-result surface, and the site joins the census beside
+it). A site's
+count rises only when its clamp changes the value: the recording reads
+the pre-clamp value and the clamp expression is untouched, so no
+clamp's behavior moves.
+
+**Acceptance test:** RED first at the census wired but the sites
+silent: six witness probes (the AIM-2 exponent at both points, the
+ventilation adjustment and cap, the saturation hold, the film floor,
+the tank truncation, and the dwelling-level drain that asserts the
+census site equals the health counter on a clamping run) each failed
+at zero, GREEN after the recording calls landed. The scope triage's
+three joins each carried its own witness (the film ΔT floor, the
+flow-fraction bounds, the zone humidity hold), RED with the site
+muted and GREEN with it live. The census's own
+unit tests pin the record/take/merge shape and the name-keyed
+serialization.
+
+**The drain's own defect, fixed after the entry landed:** `ClampCensus`
+is `Copy`, and the tally drain's `tally.get().take()` took-and-reset
+the temporary copy `Cell::get()` hands out without writing the reset
+state back into the cell, so every drain after the first re-merged the
+tally's full history: a dwelling whose clamp fired on one step of
+three read a run total of 6 where the truth is 2 (the per-step census
+growth [2, 2, 2] where each step's own firings give [2, 0, 0]), and a
+process whose second drain cycle fired nothing read the first cycle's
+counts back out of an empty drain. The drain takes on a local and
+writes the reset state back into the cell, pinned by two witnesses:
+the two-drain-cycle probe in the census's own unit tests (an empty
+cycle's drain reads empty) and the three-timestep dwelling witness
+(the per-step growth [2, 0, 0], the run total 2).
+
+**The scope (site by site, what the census counts and what it
+excludes):** the counted set is the per-step physics clamps whose
+unclamped value is computable but outside the model's valid band and
+whose clamped result is delivered; a clamp guarding the expression's
+own mathematical domain (a NaN, epsilon or sign guard), a
+construction-time validation, or a solver-internal iteration bound is
+outside the census. Every surface the review's independent grep named
+carries a verdict with its reason.
+
+| Surface | Verdict | Class and reason |
+|---|---|---|
+| `infiltration.rs` `n_i.clamp(N_I_MIN, N_I_MAX)`, both points | counted (`Aim2PressureExponent`) | the exponent's band holds a delivered flow at two per-step/conversion points |
+| `infiltration.rs` `m_o.min(1.0)`, `x_i_raw.min(1.0 - 2 y_i)` | counted (`Aim2LeakageDistribution`) | the distribution holds on delivered coefficients |
+| `infiltration.rs` `adj_raw.clamp(0.0, 1.0)` | counted (`NaturalVentilationAdj`) | the comfort-base ratio scales the delivered ventilation flow |
+| `infiltration.rs` the 20-ACH cap | counted (`NaturalVentilationAchCap`) | the cap holds the delivered ventilation flow |
+| `psychrometrics.rs` the RH saturation hold | counted (`RelativeHumidity`) | a delivered humidity state held into [0, 1] |
+| `humidity_solver.rs` `w_new.clamp(0.0, w_sat)` | counted (`ZoneHumiditySaturation`) | the delivered zone humidity ratio, the clamped mass the condensation bookkeeping |
+| `film_coefficients.rs` `delta_t.max(0.1)` | counted (`FilmDeltaTFloor`) | the TARP model evaluates at the floor and the film resistance is delivered |
+| `film_coefficients.rs` `h_ext.max(1.0)` | counted (`ExteriorFilmFloor`) | the delivered exterior film resistance's floor |
+| `tank.rs` the draw truncation | counted (`TankDrawTruncation`) | the delivered draw held to the tank's volume |
+| `hvac_core.rs` `flow_fraction.clamp(ff_bounds)` | counted (`FlowFractionBounds`) | the flow fraction held into the configured bounds before the delivered PLF quadratic |
+| `hvac_core.rs` the curve-index clamp | counted (`CurveIndex`) | the delivered curve evaluation held to the configured set |
+| `psychrometrics.rs` `w.max(MIN_HUMIDITY_RATIO)` (the six w floors in the conversion functions) | excluded | a numerical-epsilon guard: the 1e-7 floor keeps the inverse psychrometric divisions and logs finite; a valid atmosphere never reaches it |
+| `tank.rs` `vol_ratio.clamp(0.0, 1.0)` at the two TMV sites | excluded | a domain guard on a degenerate mixing ratio: inside its branch the ratio is below 1 by construction, and it goes below 0 only when the configured delivery temperature sits below the mains, an input defect for construction-time validation; the sibling 1e-9 denominator epsilon guards the same expression |
+| `infiltration.rs` `shelter_coeff.max(0.0)` | excluded | a numerical guard: the AIM-2 conversion's shelter coefficient is nonnegative by its table construction, and the floor only keeps `powf`'s fractional power of a negative base out of the wind term |
+| `infiltration.rs` `floors_above_grade.max(1.0)` | excluded | construction-time validation: the flue correction runs once in the ACH50-to-coefficients conversion on the building description; a sub-one floor count is an input defect the blueprint should refuse, and the hold only keeps Eq. 12-13's flue correction finite |
+| `infiltration.rs` the ELA `driver.max(0.0)` | excluded | a numerical guard: the OS-HPXML stack and wind coefficients are nonnegative, and the floor only keeps `sqrt`'s argument nonnegative |
+| `air_conditioner.rs` the crankcase's `max_rtf.clamp(0.0, 1.0)` | excluded | inert: the runtime fraction is held into [0, 1] at every stage of its own production chain (the duty-cycle PLR clamp, the PLF clamp's `.max(plr)`, the RTF = PLR/PLF clamp), so no input the chain can produce fires the read site |
+| `thermal_solver/longwave.rs` the exterior skin's `t_new.clamp(t_surf ± 2 K)` and the interior's `t_new.clamp(t_surf_min, t_surf_max)` | excluded | solver-internal stability clamps protecting the fixed-point iterations (the heavy-ball damping's per-iteration step bound, OCHRE's designed behavior); the skin's own fixed-point invariant guards the converged result |
+| the envelope's vent adjustment and its 20-ACH cap | counted already | the envelope's production ventilation path calls the physics `natural_ventilation_flow_m3_s`, whose comfort-base adjustment and 20-ACH cap are the counted `NaturalVentilationAdj` and `NaturalVentilationAchCap` sites (the envelope's `infiltration.rs` copies of the formulas are the test's own expected-value computation) |
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture (the census is compiled out without the
+observe feature the golden build does not enable, and nothing in the
+frame path reads it with the feature on).
+
+**Dependencies:** the hares-types clamp-census module, the recording
+sites in the physics (infiltration, psychrometrics, film coefficients)
+and equipment (hvac core, tank) crates, and the dwelling's per-step
+drain beside the equipment health drain.
+
+## Hardening 19: one home for conversion factors and docs that match the code
+
+**Kind:** cleanup (the duplicated-constant and dead-code sweep; no
+physics moves).
+
+**The constant's one home:** the autosize module defined its own
+`BTU_PER_HR_PER_W = 3.412`, a lower-precision copy of the physics
+constants' `BTU_PER_HR_PER_W = 3.412_141_633`, and the copy had drifted:
+the water-heater FHR capacity formula read the truncated value while the
+same conversion everywhere else (the HVAC EIR resolutions, the defaults
+loader's COP checks, the Python binding) read the full-precision one.
+The local definition is deleted and the module imports the physics
+constant; the two walkthrough comments' factor restated from 4.395 to
+4.3943 (their products' rounded results unchanged). RED first: a test
+asserting the module's factor equals the physics constant failed at the
+parent (left 3.412, right 3.412141633), the witness of the drift itself.
+No golden moves: autosizing is opt-in (`autosize_heating`,
+`autosize_cooling`, `autosize_water_heater`) and no golden manifest
+enables it, so the factor's 4.15e-5 relative change (the constant's
+absolute delta is 1.416e-4) reaches no fixture.
+
+**The companion-RTF plumbing: deleted, and why.** The heat-pump heater
+recorded its last heating RTF every step and exposed it through four
+getters "so the HP system coordinator can pass it" to the companion
+cooler, whose setter refined the crankcase heater's draw to
+`rated * (1 - max(cooling_rtf, heating_rtf))` and fed a companion-aware
+branch of the Henderson-Rengarajan latent degradation. No coordinator
+exists: the setters and getters had zero callers in any crate, test
+suite or binding, every consumer read `None` through the whole chain,
+and the branch conditions were unreachable in production. The plumbing
+computed a value nothing consumes - the dead-code half of the
+wire-or-delete rule. WIRING it was the alternative (one dwelling-level
+pass), and it is rejected on the record: wiring makes the crankcase
+refinement and the companion SHR correction live, a physics behavior
+change with no parity contract behind it (OCHRE's crankcase is
+mode-gated, `HVAC.py:1076`, full draw when the compressor is off, with
+no runtime-fraction refinement at all), and this task's gate is the
+goldens bitwise. The deleted surface: the heater's field, recording and
+getters (ASHP, minisplit, GSHP, WSHP), the cooler's field, setter and
+its three mirror `last_cooling_rtf` getters, the AC step's
+`companion_heating_rtf` parameter, the crankcase internal's max
+refinement, and the latent-degradation function's `heating_rtf`
+parameter with its branch. The surviving crankcase model is the
+mode-off draw scaled by the cooling coil's own off fraction, which is
+what every shipped run computed before and after. The decision and the
+re-wiring recipe are recorded in `docs/equipment/hvac.md`'s crankcase
+section. The deleted tests (the companion SHR reduction, the two
+crankcase companion-RTF cases) tested the dead machinery through
+test-only entry points; the surviving crankcase tests cover the
+remaining model at the same power values.
+
+**compute_schedule_offset: deleted.** The test-only helper had no
+production caller (its own tests said the path was replaced): the
+non-DST fallback and the DST path both derive schedule rows from the
+calendar ordinal directly. The function and its five leap-year tests
+are deleted; the fallback comment that named it as a sibling now
+describes the surviving derivation. The deleted tests' leap-year
+coverage survives on the production path: the Feb 28 to Mar 1 2024
+walk (`typical_file_without_feb29_skips_the_day`), the leap-year
+acceptance file `crates/hares-core/tests/weather_year.rs`, and the
+`leap_year_february_900s` golden's bitwise pin. The compile check is
+the witness: any dangling reference fails the build, and none exists
+across the crates, the Python package and the tests.
+
+**The docs:** five claims fixed in this commit, each verified against
+the current behavior. `weather-pipeline.md` documented PCHIP
+resampling (`fritsch_carlson_slopes()`/`pchip_resample()` - no such
+functions exist in the tree); the resampling is EnergyPlus's own:
+sub-hourly files at a mismatched step are an error
+(`WeatherManager.cc:715-722`), an hourly file at a longer step takes
+the interval mean, and an hourly file at a shorter step interpolates
+per field type (point fields linear at the step's end, wind direction
+on the circle, precipitation's weighted depth over the steps per hour,
+solar at the hour's midpoint, sky temperature recomputed from the
+interpolated inputs, ground temperature and albedo holding the hour's
+record), with the first-hour rule stated. `schedule-sources.md`'s
+variant catalog listed a `SeededNoise` variant that does not exist; the
+catalog now documents the actual `Stochastic` variant (its
+`DistributionKind`, clamps and snapshot/reseed state) and points at the
+TimeWindows noise section's keystream derivation (the dwelling-keyed
+identity `<dwelling identity>:<owner name>:<source role>` with an
+explicit seed winning, the scheme row 116 shipped). 
+`thermal-envelope-solver.md` claimed ground-reflected irradiance is
+"excluded for windows by design"; the window path includes it in the
+diffuse POA (`solar.rs`'s
+`poa_diffuse = (diffuse + reflected) * iam_diffuse`, pinned by
+`window_solar_includes_ground_reflected`), and the doc now says so.
+`hvac.md` listed the crankcase heater in the heater's electrical port;
+the heater has no crankcase model (the cooler's, matching OCHRE's
+class layout), and the port list now splits the heater's and cooler's
+electrical contributions. `python.md`'s "Changes in this release"
+section carried a full stale duplicate of the itemized changelog
+behind a pointer to CHANGELOG.md; the duplicate is deleted and the
+section is the pointer.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture (the constant re-homes to a value no fixture
+reads, the deleted code was unreachable in production, the deleted
+tests tested it through test-only entry points, and the docs change no
+bytes of engine output).
+
+**Dependencies:** the physics constants' `BTU_PER_HR_PER_W`, the
+autosize water-heater capacity formula, the crankcase and latent
+degradation models' surviving forms, and the five docs.
+
+## Hardening 20: the grid and equipment edge behavior matches its documented contracts
+
+**Kind:** hardening (five minor grid/equipment defects; behavior changes
+only where the current behavior is the defect, plus two divergence
+records and one refutation recorded; no golden moves).
+
+**(a) The PV inverter's default priority.** The PV's constructed default
+inverter priority was Var: at the first apparent-power overload it
+curtailed real generation to hold reactive output no controller asked
+for, while the battery's and EV's kVA clamps are active-power-priority
+by contract - the default silently differed from the rest of the DER
+fleet's convention. The constructed default is Watt (active-power
+priority), and the three modes' behavior at zero real power - the place
+they disagree, past the apparent-power rating (within it every mode
+passes the request unchanged) - is documented on the `InverterPriority`
+enum and in `docs/equipment/pv.md`: Watt's min-pf bound is zero at
+P = 0, Var's Q ceiling is proportional to P and so zero at P = 0, and
+Cpf delivers the full reactive request up to the rating at P = 0. The
+P = 0 contract is pinned by
+`inverter_priority_zero_power_semantics_per_mode` (green at the parent:
+a doc-contract pin of the shipped semantics, written beside the RED
+default witnesses).
+
+**(b) The battery's efficiency convention and its floor.** Two defects.
+The constructor's default one-way efficiencies split the round-trip
+efficiency `sqrt()` per direction (round-trip 0.97) while the typed
+init's convention applies the inverter efficiency one-way each direction
+(round-trip 0.9409, the documented one): a battery stepped on its
+constructor defaults discharged at a different efficiency than a battery
+round-tripped through init with no configured efficiency - the same
+command moved the two packs' SOC by different amounts (the parent
+witness: discharge deltas 0.0376 against 0.0584 on the old comparison
+shape). The constructor and the typed init now share one
+`default_one_way_eta()` holding the documented convention. Second, the
+self-discharge subtraction ran BEFORE the charge/discharge update whose
+result is clamped back into the operating bounds, so an idle battery
+parked at `min_soc` ended every step exactly at the floor with zero
+metered power - its configured self-discharge loss restored free,
+indefinitely (the parent witness: 50 idle steps at a 2%/day rate held
+SOC at exactly 0.15). The self-discharge now applies AFTER the power
+update and its bounds clamp - OCHRE's own composition
+(`Battery.py`: `next_soc = soc + power_term - self_discharge`), which
+HARES's comment already cited - and the bounds clamp never lifts a pack
+that enters below the floor: a SOC eased below it by the passive loss is
+not recharged by the clamp (the loss would be refunded free every step,
+with zero metered power). The pack at the floor now eases below it by
+its real passive loss; the default rate is 0%/day and every shipped
+battery reads the default, so no recorded number moves.
+
+**(c) The EV driver's discharge ceiling, pacing and cancellation.** Three
+defects. The decision context's `max_discharge_w` carried the charge
+rating where the pack's live discharge ceiling belongs - a V2G/V2H vote
+sized off the charge rating overstates the pack's capability, and the
+equipment clamps the export, so dispatch and delivery diverge exactly
+where a consumer regresses on the pack. The EV equipment now publishes
+its live AC discharge ceiling (`DISCHARGE_CEILING_W`: the tighter of
+each enabled leg's rating and that leg's energy above its effective
+discharge floor over the step; zero when neither leg is enabled) and the
+driver's decision context carries it, falling back to the charge rating
+only in the warned unresolved-equipment mode. Second, the ready-by
+pacing was bang-bang with a ±1 h past-deadline grace window: full rated
+power only when the deficit could not land in time, zero otherwise, and
+full rate for up to an hour past a latched deadline whose departure
+never fired - a pack that could coast to its deadline charged at nothing
+for hours, then slammed to full rate at the buffer boundary. The pacing
+is now proportional: the average power that lands the deficit by the
+deadline, clamped to the rated power, recomputed every step so the
+CC-CV taper's deepening self-corrects; a deadline in the past reads as
+tomorrow's (the ready-by departure recurs daily; the pre-existing wrap
+semantics the tests encoded), and the grace window is gone. Third, a
+cancelled trip's deadline lingered: the driver consumed the day's event
+but dispatched nothing, so the equipment's latched ready-by kept
+raising the charging destination (`max(controller, deadline)` under
+DeadlineGuarantee) and holding the discharge floor ready for a departure
+that would not happen. The cancellation path now dispatches a typed
+`EvClearReadyBy` signal (the new `ControlSignal` variant, the
+`EV_SET_READY_BY` capability, Schedule tier, the Python
+`Signal.ev_clear_ready_by()` / `DispatchRequest.ev_clear_ready_by`
+surfaces and the dict round-trip alongside), and the equipment's arm
+drops the deadline's target, pacing and floor contribution together. The
+pre-existing witnesses the new pacing retuned, named: their assertions
+were re-derived from the proportional model -
+`ev_set_ready_by_delays_then_charges`, `ev_departure_at_step_boundary`,
+and `deadline_passed_charges_immediately` in
+`crates/hares-equipment/src/ev/tests.rs`, and
+`bms_delay_outputs_zero_power_before_start`, renamed
+`bms_paces_small_deficit_low_before_a_far_deadline` (its old
+zero-power-before-start assertion was the bang-bang model's behavior,
+not a contract).
+
+**(d) The scheduled load's setpoint override.** A `PowerSetpoint`
+override returned `(override_w, 0.0, 0.0)`, so a nonzero-pf load
+overriding its power for a step reported P with no Q - the reactive
+power of the load vanished for the step. The override keeps the ZIP
+model's Q at the commanded power (`ZipLoad::reactive_var`, Rule R1: the
+real side untouched, the reactive side the model's), exactly as the
+scheduled path's Q does.
+
+**(e) The divergence records.** `docs/alignment/DIVERGENCES.md` gains
+D-035 (the HVAC `space_fraction` scales the metering, not the zone
+gains: OCHRE `HVAC.py:556-565`'s own note keeps the envelope's gains
+unsplit while the results side scales; HARES's heat-pump heater and air
+conditioner reproduce the asymmetry, the sites named) and D-036 (the
+fuel units - furnace and boiler - scale their zone delivery by
+`space_fraction` symmetrically with their meters: no OCHRE contract
+covers them, the boiler being a stub in OCHRE, and the internally
+consistent choice is deliberate per unit class). Neither record moves
+code: the shipped fixtures' space_fraction values are 1.0, where both
+conventions coincide.
+
+**The review's core M3 refutation, recorded.** The review's core M3
+claimed the control-signal validation was debug-only and that the
+external
+`apply_control` path bypassed even that - a release-profile hazard
+where inverted setpoints or NaN powers reach the equipment. The
+verification refuted the claim: `Equipment::apply_control`
+(`crates/hares-equipment/src/lib.rs`) runs
+`ensure_signal_supported` (the equipment's declared control
+capabilities) and `ControlSignal::validate_numeric_bounds()` (the typed
+per-field domain checks: setpoint ranges, deadband ordering, finite
+powers) unconditionally, in every build profile, before dispatching to
+the equipment's own arm, and the dwelling's external path
+(`Dwelling::apply_control` -> the equipment trait method) rides the same
+boundary. The `debug_assert`s that remain live in the constructors
+(`hares-control/src/signal.rs`) are constructor-time ergonomics for test
+callers, not the validation layer; the runtime boundary validates in
+release. No code change: the claimed hazard does not exist.
+
+**RED first:** every behavior change carried its parent witness - the PV
+default's two (the constructed default reads Var; the overload curtails
+4000 W to 3200 W under the default), the battery's two (the discharge
+delta's convention split; the floor refund holding SOC at exactly
+`min_soc`), the driver's three (the context's ceiling reading the charge
+rating; the pacing returning bang-bang zero for a coasting deadline and
+the grace rate for a half-hour-past one; the cancellation dispatching no
+clear - the last a compile witness, the typed signal not existing at
+the parent), and the scheduled load's (the override reporting zero Q at
+pf 0.9). The natural-ventilation pin's RED arc is Hardening 21's record.
+
+**Movement:** none - the goldens compare-all 10 + dst 1 bitwise
+identical, no re-capture. The fixture sweep: the shipped fixtures carry
+no PV inverter-overload surface (the 1:1 DC/AC ratio with the pf-1
+baseline stays within the apparent rating, so the priority mode is
+inert), no battery self-discharge configuration (the default 0%/day and
+the fixture batteries read the defaults), no EV V2G/V2H strategy or
+ready-by deadline (the fixture drivers are the built-in Immediate
+strategy over constant sources), and no scheduled-load setpoint
+override (no controller dispatches in the golden runs). Why the eta
+unification specifically moves nothing, stated exactly: the golden runs
+build every battery through the dwelling path, which always runs
+`init()`, landing in `init_typed`, and the typed init overwrites
+whatever etas the constructor set (`crates/hares-core/src/dwelling/mod.rs:4295`
+into `crates/hares-equipment/src/battery/mod.rs`'s typed init); and the
+fixtures' HPXML batteries state no `RoundTripEfficiency`, so the typed
+resolution leaves `inverter_efficiency` None
+(`crates/hares-io/src/hpxml/resolve_der.rs:227`) and the one-way default
+applies identically before and after the change. The review's core M5 is
+the empirical proof: with the constructor's sqrt split restored,
+`constructor_defaults_match_the_post_init_efficiency_convention` fails
+and the goldens STILL come back bitwise.
+
+**Gates (run once on the branch tip carrying rows 122 and 123
+together, the two packages' files disjoint):** fmt clean, clippy
+`--workspace --all-targets --all-features -D warnings` clean, nextest
+`--workspace --all-features -j 2` 8349/8349 (8 skipped), `pytest -m ''
+-n 4` after `maturin develop` 1801 passed + 6 xfailed, 0 failed,
+0 errors, pyright 0, the goldens compare-all 10 + dst 1 bitwise
+identical.
+
+**Dependencies:** the `InverterPriority` enum, the PV, battery, EV and
+scheduled-load step paths, the EV telemetry, the `ControlSignal` enum
+and its Python surface, the two alignment docs, and the fixture suites
+unchanged.
+
+## Hardening 21: the natural ventilation model states and implements one contract
+
+**Kind:** decision + docstring + pin (the model's behavior is unchanged;
+the contract is stated, recorded and pinned).
+
+**The review's finding:** the natural-ventilation module's docstring
+claimed "Implements the EnergyPlus `ZoneVentilation:WindandStackOpenArea`
+model" while the code implements a hybrid the docstring did not name:
+the discharge coefficient deviates structurally from the cited model
+(fixed 0.20 single-sided / 0.60 cross against E+'s AutoCalculate
+`Cd = 0.40 + 0.0045|T_ext - T_mat|`), and the gating and adjustment
+factor are OCHRE's.
+
+**The decision (kept the fixed geometry Cd):** full reasoning and the
+three-source attribution in `docs/PHYSICS_DECISIONS.md` ("Natural
+ventilation keeps the fixed geometry discharge coefficient"). In brief:
+E+'s auto correlation is geometry-blind - the object takes `DiscCoef` as
+an input and offers the correlation as the default for objects that
+specify nothing - while the ASHRAE chapter the model cites gives the
+coefficient by geometry (single-sided 0.15-0.25, cross 0.60-0.65), which
+is the physics the module's `OpeningType` carries; OCHRE, the parity
+reference whose gating the module adopted, uses a fixed coefficient
+itself (the ResStock flat 0.6 window-area multiplier, `Envelope.py:48`),
+so the cross leg's 0.60 is OCHRE-aligned and the single-sided leg
+refines it with the ASHRAE physics; adopting the auto value would more
+than double the single-sided stack flow (0.20 -> 0.427 at 6 K) and cut
+the cross flow about 30% (0.60 -> 0.427) with no parity contract behind
+either shift. The docstring now names the hybrid and its three sources,
+and the stale E+ line references are corrected to the verified block
+(v24.2.0 lines 5716-5806; the plan's and the comments' 5988-6060 were
+another version's numbering).
+
+**The golden-vector pin:**
+`infiltration::tests::natural_ventilation_pin_matches_the_recorded_divergence_vector`.
+The EnergyPlus comparator is ported VERBATIM from the upstream source
+(`ZoneEquipmentManager.cc`'s WindAndStack block, v24.2.0 lines
+5716-5806, fetched from the NREL/EnergyPlus repository: the AutoCalculate
+Cw interpolation, the AutoCalculate Cd, the wind/stack quadrature,
+including E+'s own 9.81 gravity literal where HARES holds the standard
+9.80665). The pin ran at the parent in its AGREEMENT form (HARES ==
+the E+ port at 1e-9) and FAILED - the recorded disagreement witnessed:
+HARES 0.5779017617765289 m³/s against the port's 0.8464629906170573
+m³/s on the reference case (a 0.5 m² south-facing cross-ventilated
+opening, perpendicular 3 m/s wind, a 26 °C zone over a 20 °C outdoor,
+the 22 °C comfort base; the difference carries the auto-vs-fixed Cd AND
+the OCHRE adjustment factor the port does not model). The pin then
+settled into the recorded-divergence form the decision dictates: HARES's
+own vector hand-derived from the documented hybrid and pinned at 1e-9
+(all four returned channels), the port's own vector pinned at 1e-9
+beside it, and the stack terms' ratio held at 1e-9 - the recorded Cd
+choice's magnitude (0.60 against the auto 0.427, the two gravity
+literals under the square root). Neither side can drift without the
+record moving. The witness split, stated exactly: this pin holds the
+CROSS leg only (the reference case is cross-ventilated; its Cd 0.60 is
+pinned directly and through the stack ratio against the auto 0.427).
+The single-sided 0.20 rides the pre-existing ratio witness
+(`single_sided_lower_stack_than_cross_ventilation`, the single-sided
+stack over the cross stack at 0.20/0.60 = 1/3). Between them the two
+witnesses hold both legs of the geometry split; neither holds both.
+
+**Movement:** none - the model's behavior is unchanged by this entry
+(docstring, decision record and pin only); the goldens compare-all 10 +
+dst 1 bitwise identical, no re-capture.
+
+**Dependencies:** `crates/hares-physics/src/infiltration.rs` (docstring
+and tests only), `docs/PHYSICS_DECISIONS.md`, and the upstream E+ source
+pinned in the record.
+
+## Hardening 22: the exterior skin solve reports its own convergence
+
+**Kind:** hardening (diagnostics only, observe-gated; no physics moves).
+
+**The review's finding:** the exterior skin's fixed-point iteration
+(exterior longwave, the iterative path where rad_frac > 0) exits either
+on its 0.01 K step tolerance or on its iteration budget - and the budget
+exit was accepted with no counter, no residual and no signal. At the
+60 s production timestep the budget is one damped iteration
+(`n_iter = floor(dt/300) + 1`), so mid-transient (sunrise, cloud
+passage) the skin lags its fixed point and the non-converged skin rides
+silently; the fixed-point invariant guarded only the converged exits.
+
+**Change:** the step's component gains carry the solve's convergence
+self-report, both fields observe-gated like the natural-ventilation
+diagnostics they sit beside:
+
+- `skin_iteration_cap_exits: u64` - the count of iterative-path surfaces
+  whose iteration ran out its budget without the tolerance break, reset
+  per step like the other per-step gain accumulators;
+- `max_skin_residual_k: f64` - the greatest |t_skin − F| against the
+  surface's own fixed point F = t_init + (solar + lwr)·rad_res over the
+  iterative-path surfaces, converged or not (the converged bound is
+  0.5 K, the fixed-point invariant's own tolerance, so any residual
+  above it is a budget exit's lag).
+
+And the first step whose residual crosses 1 K warns once per solver
+(the one-time-warn pattern, the interior-LWR linearisation latch's
+shape): the warning names the surface, the residual and whether the
+exit was the cap, once for the run, never per step. The warn threshold
+is the converged bound's 2x, and its scope is a pathology alarm at the
+60 s resolution, not a normal-mid-transient alarm: the designed
+warm-start lag rides inside it (a real mid-transient sky moves well
+under 1 K per step), so a residual crossing it says the skin is not
+closing its balance - the cap-exit pathology is real - while the
+counting itself is magnitude-independent and rides every budget exit
+however small.
+
+**Acceptance test (RED first):** the forced-cap probe
+(`longwave::tests::forced_iteration_cap_exit_is_counted_with_its_residual`)
+builds a one-surface iterative-path solver with the 60 s production
+budget (one damped iteration, the budget the review's mechanism names)
+and swings the sky temperature 55 °C warmer against the same air (air
+at -15 °C, sky to +40 °C: a deliberately synthetic forcing, unreachable
+from any real weather file - a real sky runs 0-40 K below the air,
+never 55 K above it, and moves well under 1 K per 60 s step where this
+swing jumps 55 °C in one step; the magnitude isolates the counting,
+whose mechanics are magnitude-independent): the
+single damped iteration cannot cross the displaced fixed point, the
+loop exits on the cap. At the parent the probe could not be expressed  - 
+the fields do not exist, the compile failure the witness of the silence
+(the exit had no surface to report through); GREEN after the fields
+landed, the count 1 and the residual 71.4 K on the probe's constants
+(area 12 m², emissivity 0.9, rad_frac 0.5, rad_res 0.05 K/W, one
+iteration). The counter's specificity is pinned beside it: a 60-budget
+solve of the same surface counts no cap exit and reports a residual
+inside the 0.5 K converged bound, and the warn latch test holds the
+once-only semantics (set on the first lagging step, never reset).
+
+**Movement:** none - the counting reads the pre-existing residual
+quantity the converged branch already computed, no clamp or iteration
+behavior moves, and the fields are compiled out without the observe
+feature the golden build does not enable. The goldens compare-all 10 +
+dst 1 bitwise identical, no re-capture.
+
+**Dependencies:** `crates/hares-envelope/src/thermal_solver/longwave.rs`
+(the counting, the residual and the warn at the iteration's exit),
+`thermal_solver/mod.rs` (the per-step accumulators and the gains
+wiring), `thermal_solver/config.rs` (the two observe-gated fields).
+
+## Hardening 23: equipment stage validation and the backup heat's telemetry honesty
+
+**Kind:** hardening (one config surface added, two validations, two
+empty-table guards, one telemetry correction, one parity conversion).
+
+**The review's findings (equipment M4, m3, m4, m5), item by item:**
+
+**(a) The ER soft-lockout time was hardwired to twice the hard lockout.**
+`soft_lockout_max_s = er_hard_lockout_time_s * 2.0` with no config key:
+a user-configured hard lockout blocked the backup element during
+recovery ramps up to twice as long as OCHRE, whose
+`Backup Soft Lockout Time (minutes)` (HVAC.py:1216-1223) defaults to
+the hard value and clamps a below-hard soft time up to it. The new
+`er_soft_lockout_time_s` field rides the typed config
+(`HeatPumpHeaterConfig`, the deserialization schema, the published
+field list and the params/override path the HPXML resolve reads), the
+heater's telemetry (`er_soft_lockout_time_s` beside the hard key) and
+the OCHRE semantics: default = the hard lockout's own value (the soft
+stage inert, the ER engaging the step the hard lockout expires), a
+below-hard value warns and clamps up at init. The Python and TOML
+surfaces need no new plumbing beyond the typed field: both carry
+equipment overrides as the JSON object the typed config deserializes
+from, and the `.pyi` stub's override surface is `dict[str, Any]` with
+no per-key list to extend.
+
+**(b) The per-stage EIR count mismatch was silently clamped.** The heat
+pump heater accepted any `stage_heating_eirs` length; the staging index
+clamp reused the last EIR for every stage past the table's end and
+never read the extra rows of a longer table. The furnace fails
+construction on the same mismatch. The heater now runs the furnace's
+contract after its own stage expansion (the MSHP path's expansion
+included, so the check sees both tables in their final shape): a
+mismatched table fails construction naming the two counts. The
+no-explicit-table arm fills the default EIR to the stage count (the
+furnace's own convention; the same EIR every stage evaluated before,
+now stated instead of clamped). An empty table on either stage field
+also fails construction naming the field (an empty table is not a
+valid stage table): an empty `stage_heating_eirs` panicked the
+single-capacity mini-split's expansion indexing the base EIR, and an
+empty `stage_heating_capacities_w` at one speed built a zero-stage
+unit that passed every check (the config-level length checks run from
+two speeds up only).
+
+**The witness's shadowing, disclosed:** the wrong-length witness was
+first committed in a shadowed shape (a 3-EIR table against a 2-stage
+capacity table at `number_of_speeds` 2), where the config-level
+`stage_heating_eirs` length check (live from two speeds up) fails the
+construction first - the new init check never saw the mismatch, and
+the witness passed with the init check disabled (the mutation proof),
+so the original RED story here (construction SUCCEEDED at the parent)
+was false for that shape. The committed witness now uses the
+discriminating shape (the 3-EIR table against a single-speed unit,
+where the config check does not run) and asserts the init check's own
+wording; the RED story below is told from that shape.
+
+**(c) The reported COP inflated during ER backup.** The numerator was
+the step's total thermal output (the HP's heat plus the backup
+element's plus the fan's) over the compressor-only denominator: during
+combined HP+ER operation the reported COP could exceed the
+compressor's physical COP, the 10.0 clamp papering over the largest
+cases. The numerator is now the compressor's own delivered gross heat
+(the HP's capacity plus its fan heat, the AHRI convention's fan
+placement unchanged), so the reported COP is the heat pump's own in
+every mode.
+
+**(d) The tankless UEF conversion was the storage tank's.** The
+instantaneous unit applied the RESNET gas-storage conversion
+(`EF = 0.9066·UEF + 0.0711`) where OCHRE's instantaneous-water-heater
+branch (hpxml.py:1055-1058) reads `energy_factor =
+uniform_energy_factor` with no conversion; the parity-aligned choice
+is the identity, adopted (about 2 percent on the fuel meter at UEF
+0.95, the storage conversion understating it). The storage branch's
+conversion stays in `gas.rs` where OCHRE applies it. No DIVERGENCES
+entry: the parity-aligned choice leaves no divergence; the choice and
+its citation are stated at the conversion site and in
+`docs/equipment/water-heater.md`.
+
+**Acceptance tests (RED first, each at the parent):**
+
+- (a) The OCHRE-default behavioral witness
+  (`er_soft_lockout_defaults_to_the_hard_time_and_releases_at_its_expiry`)
+  ran at the parent and FAILED: a 600 s hard lockout, the zone trend
+  rising throughout, and the ER still off at the 660th second (the
+  hardwired 2x release holding it to 1200 s; mode `Off`). GREEN after:
+  the ER engages at the hard expiry. The configured-soft witness (the
+  field at 1800 s) could not be expressed at the parent, the missing
+  field the compile witness of the unconfigurable surface; GREEN after
+  it holds the ER past 1260 s and releases by 1860 s. The clamp-up
+  witness (soft 0 below hard 600 clamps to 600 at init) is GREEN-only
+  (the field's own semantics).
+- (b) The wrong-length witness
+  (`stage_heating_eirs_length_mismatch_fails_construction`), in the
+  discriminating shape (the 3-EIR table against a single-speed unit,
+  `number_of_speeds` at its default 1, where the config-level length
+  check does not run): with ONLY the new init check disabled the
+  witness FAILED - construction succeeded, the silent clamp's own
+  behavior, the RED witness (the shadowing disclosure above records
+  the first committed shape, where the config check fired first and
+  the witness passed with the init check disabled); with the check
+  live the construction fails and the error's own wording
+  (`stage_heating_eirs has 3 element(s) but the heating stage table
+  has 1 stage(s)`) is asserted. The two empty-table guards are pinned
+  beside it, RED at the pre-guard behavior: the empty
+  `stage_heating_eirs` probe panicked (the base EIR indexing position
+  0 of the empty table, index out of bounds) and the empty
+  `stage_heating_capacities_w` probe built the zero-stage unit (init
+  `Ok`); GREEN after the guards fail construction naming the field.
+- (c) The COP witness
+  (`reported_cop_during_combined_mode_is_the_compressors_own`) ran at
+  the parent against the old numerator and FAILED with the inflation
+  quantified: the forced combined step (HP 6896.5 W, ER 4000 W, fan 0,
+  compressor 2878.4 W) reported COP 3.7857 where the compressor's own
+  COP is 2.3960, +58 percent. GREEN after: the reported COP is
+  2.3960.
+- (d) The identity pin (`the_uef_is_the_energy_factor_for_a_tankless_unit`)
+  pins EF = UEF at 1e-9 with the citation in place; the pre-change
+  behavior (0.9066·0.95 + 0.0711 = 0.9324) is the movement this entry
+  records.
+
+**Existing test movement:** the three soft-lockout block/sequence tests
+pinned the hardwired 2x default (the soft stage blocking past the hard
+expiry with no soft time configured); they now configure the explicit
+soft time their scenario means (`er_soft_lockout_time_s` at 120 s
+beside the 60 s hard), the same behavior under the now-explicit
+configuration, their intent unchanged.
+
+**Fixture sweep:** no shipped golden or parity fixture exercises any of
+the four surfaces - no fixture configures an ER hard lockout (the
+default 0 s leaves the soft stage unreachable), supplies a per-stage
+EIR table (the expansion paths supply their own), records the COP
+telemetry column (verbosity 7; the golden frames record verbosity 2,
+and the run metrics' heating COP divides the envelope's delivered heat
+by the metered electric, not the telemetry channel), or configures a
+tankless water heater (the 19 resstock storage tanks and one heat pump
+WH, the storage conversion untouched). The goldens compare-all 10 +
+dst 1 bitwise identical, no re-capture.
+
+**Dependencies:** `crates/hares-equipment/src/hvac/heat_pump_config.rs`
+(the field, the schema, the validation),
+`hvac/heat_pump/heater.rs` (the init, the lockout release, the COP
+numerator, the stage validation),
+`water_heater/tankless.rs` (the identity),
+`crates/hares-types/src/telemetry_keys.rs` (the key),
+`crates/hares-io/src/hpxml/resolve_hvac.rs` (the params read),
+`docs/equipment/{hvac,water-heater}.md`.
+
+## Hardening 24: export decisions price the export rate, and a missing price is not zero dollars
+
+**Kind:** hardening (two vote-pricing corrections and the actor health
+gate; the discharge-ceiling item of this plan entry closed earlier by
+the Hardening 20 row - see the overlap note below).
+
+**Overlap verdict (checked first):** this entry's plan text carried a
+third item, "the driver's decision context carries a real discharge
+ceiling". That item is CLOSED by the Hardening 20 row: the decision
+context reads the equipment's published live `DISCHARGE_CEILING_W`
+telemetry (the tighter of each enabled leg's rating and its energy
+above the effective discharge floor over the step) into
+`max_discharge_w` at the context build, the charge-rating stand-in
+gone, the equipment's own clamp matching what the vote sized. Verified
+in the code before any of this entry's work started; no further work
+here.
+
+**The review's finding (grid M6):** the price-driven export votes read
+the import retail rate, while the run publishes a separate export rate
+(the tariff evaluator publishes `export_price` under every export
+mode: net metering's retail credit, the flat rate, the hourly schedule,
+the NetBilling TOU credits) - under net billing the V2G dispatch is
+systematically mistimed and overvalued. And a missing price signal was
+substituted with $0/kWh: the V2G vote never fired (silently inert) and
+the price optimizer's charge leg fired every step (electricity
+silently free).
+
+**Change:**
+
+- The V2G export vote prices `price_signal.export_price`: the rate the
+  export earns, the import rate never an export decision's input.
+- The price optimizer's legs price the rates they trade at: the charge
+  leg the import rate (what charging costs), the discharge leg the
+  export rate (what exporting earns). The day-shape thresholds stay
+  the wired schedule's percentiles; the per-step comparison is what
+  prices the decision.
+- A run that publishes no channel a strategy reads is never decided on
+  a fabricated $0/kWh: the actor's decide-time gate records the cause
+  and reports unhealthy, the step failing at the post-decide health
+  check (the row 116/117 machinery: the sticky `health_error`, the
+  cause naming the missing channel). The votes themselves stand down on
+  a missing channel (the V2G stand-down's own vote label
+  `v2g:no_export_price`, the discharge leg falling through to neutral);
+  no layer substitutes a price. Strategies that read no price channel
+  (Immediate, Nightly, LowSoc, QuickThenWait, PreDeparture,
+  SolarSurplus, V2H) have no price contract and stay healthy whatever
+  the signal carries.
+- The dwelling's own assembly needs no new guard: its factory already
+  falls a tariff-dependent strategy (TouAware, V2G) back to Immediate
+  when no tariff is attached, and a tariff evaluator publishes both
+  channels every step - the gate is the direct-construction path's
+  fail-fast.
+
+**Acceptance tests (RED first, each run at the parent against the old
+behavior):**
+
+- `v2g_responds_to_export_price_under_net_billing` (the plan's
+  acceptance test): the import price 0.10 below the 0.20 threshold, the
+  export credit 0.30 above it - at the parent the vote idled (it read
+  the import rate); GREEN after: it exports. The converse
+  (`v2g_ignores_the_import_rate_for_the_export_decision`: import 0.50,
+  export 0.10) ran at the parent and exported on the import rate's
+  level; GREEN after it idles. The threshold's strictness and the
+  no-export-price stand-down label are pinned beside them.
+- `discharge_votes_price_against_the_export_rate`: the import price at
+  the discharge threshold with the export credit far below it - at the
+  parent the vote discharged (the import rate priced the export);
+  GREEN after it stays neutral.
+- `missing_export_price_marks_the_v2g_actor_unhealthy` and
+  `missing_price_marks_the_tou_actor_unhealthy_not_free` ran at the
+  parent with the gate disabled and FAILED (both actors healthy while
+  deciding on missing channels); GREEN after: unhealthy, the cause
+  naming the channel. The no-price-contract control
+  (`immediate_strategy_stays_healthy_without_any_price`) pins the
+  gate's scope.
+- The replaced test `ev_missing_price_signal_tou_falls_back` pinned the
+  old defect itself (a missing price falling back to the $0 charge
+  vote); rewritten as the unhealthy witness above.
+
+**Existing test movement:** the price-driven test envs (the EV driver's
+V2G, TouAware and the floor/discharge witnesses) published only the
+import price; they now publish both channels at the same value, the
+votes pricing the export decision against the export rate at the same
+number the old code read from the import side - every test's intent
+unchanged, the channel the vote reads now the one it prices. The
+soc-floor and no-discharge witnesses keep their assertions under the
+mirrored channels (the floor is what blocks, not a missing price).
+
+**Fixture sweep:** the shipped fixtures' EV drivers are the built-in
+Immediate drivers over constant sources (no V2G, no TouAware, no
+price-driven vote anywhere in a golden run); the goldens compare-all
+10 + dst 1 bitwise identical, no re-capture.
+
+**Dependencies:** `crates/hares-core/src/actors/ev_driver/v2g.rs` (the
+export rate read, the stand-down label),
+`ev_driver/price.rs` (the two legs' rate split),
+`ev_driver/mod.rs` (the decide-time gate and the channel helper), and
+the three files' tests.
+
+## Hardening 25: the schedule table holds its source rows instead of an upsampled copy
+
+**Kind:** hardening (the schedule resample's per-dwelling memory).
+
+**The review's finding (schedules m4):** the schedule resample
+materialised the series at the run's step: the upsample branch expanded
+every resolved schedule to per-row values and per-row
+`DateTime<FixedOffset>` stamps, addressed by a direct index the runtime
+gets from pure arithmetic (`compute_schedule_idx` is arithmetic on the
+civil clock; the per-row stamps are read at generation time only) - so a
+15-minute, 16-column ResStock schedule at the fleet's 1-minute step paid
+the full expanded table per dwelling, multiplied across fleet workers.
+
+**RED (measured, not estimated):** the counting allocator gained a byte
+channel (`thread_alloc_bytes`, the live requested bytes on the thread,
+net of deallocations, beside the untouched call count; the same per-thread
+machinery, `crates/hares-types/src/alloc_count.rs`) and the measurement
+binary `crates/hares-core/tests/schedule_resample_memory.rs` pinned the
+workload: the 15-minute, 16-column ResStock schedule (`bldg0000006`,
+35040 rows) parsed, resampled to 60 s, then cloned ten times for the
+per-dwelling copies the environment builds hold (the blueprint's series
+is cloned per dwelling because the unavailable-period zeroing and the
+schedule injection write the build's own copy). At the parent shape the
+resample allocated **75,688,714 bytes** (525600 rows x 16 columns of
+f64, 67.3 MB, plus 525600 stamps of 16 bytes, 8.4 MB) in 53 allocation
+calls, the per-dwelling cost (resample + one copy) **83,257,737 bytes**,
+the 10-dwelling fixture scale **832,577,374 bytes**; the plan's ~50
+MB/dwelling estimate understated the true number. The GREEN pin asserts
+the per-dwelling cost stays under twice the held table's size (about
+5.05 MB) and failed at the parent shape as the RED witness; the value
+pin asserts the zero-order hold bitwise (all 16 columns x all 525600
+per-step rows against the source table, `to_bits`) and passed at the
+parent shape and after.
+
+**Change:** the resample's upsample path holds the source-resolution
+rows and the readers index by division - the plan's first option. The
+series keeps its rows, stamps, columns and `source_step_secs` (the
+rows' own step, 900) and adds nothing; the environment derives the
+expansion (`schedule_upsample_factor = source_step_secs / step_secs`,
+at least 1) at construction and:
+
+- `compute_schedule_idx` keeps returning the sim grid's per-step row
+  (the published `schedule_row` the occupant's presence and the event
+  replay address, unchanged); its cycle-span arithmetic uses the rows'
+  own step, the same product the materialised length times the sim step
+  produced, so the cyclic wrap, the DST civil addressing and the
+  365-day ordinal rule are unchanged;
+- the per-step column read divides the per-step row by the expansion
+  once and reads the held row - the zero-order hold the expanded rows
+  carried, bitwise;
+- the unavailable-period flags expand, each row's flag standing for the
+  steps its row covers, the same per-step vector the materialised rows
+  produced;
+- the build's consumers that sum columns (the draw and power
+  normalizations' means, the premise ZIP's mean) run over the expanded
+  sequence - each row's value repeated in order, the same addition
+  order the materialised column produced, so the means are bitwise the
+  old values - and the event replay's power series builds expanded to
+  the per-step length its row addressing requires.
+
+The plan's rejected option (drop the per-row stamps for a compact
+representation): rejected because the stamps are the smaller half of
+the defect (8.4 of 75.7 MB at the 1-minute step); the columns' 67.3 MB
+expansion is the cost the division indexing removes, and the stamps
+stay as the held rows' own generation-time record.
+
+**The exactness guard:** the hold is exact only while every row's
+sub-steps stay inside the row stamp's civil hour - the unavailable-period
+flags and the generated occupancy columns read hour-of-day (and the
+365-day ordinal, which only changes with the hour) from the row stamps,
+and a sub-step spilling into the next hour would read a different hour
+than the row's single value stands for. The resample checks this once
+per source series (a whole-second comparison per stamp, no allocation)
+and a stamp unaligned to its own step falls through to the materialised
+expansion, the pre-change behaviour exactly. Stamps aligned to their own
+step - the shipped fixtures, ResStock, OCHRE and the generated
+schedules - never spill; the guard's own test
+(`a_stamp_unaligned_to_its_own_step_still_expands`) pins the fallback
+shape and its bitwise zero-order hold.
+
+**Checkpoint decision: `CHECKPOINT_VERSION` 22 unchanged, no bump.**
+The checkpoint does not carry the schedule table: `DwellingCheckpoint`'s
+fields (reports, metrics, tariff, equipment states, actor states, the
+thermal and environment maps) hold no `ScheduleTimeSeries`, and the
+restore rebuilds the schedule from the dwelling's own inputs - the
+representation change moves no serialized shape. The checkpoint resume
+suites (checkpoint_resume, checkpoint_file_resume,
+checkpoint_regressions) pass unchanged.
+
+**Existing test movement:** `resample_from_15min_to_60s_is_zoh`
+rewritten as `resample_from_15min_to_60s_holds_source_rows` (the held
+shape pinned: the rows' own step unchanged, the per-step reads bitwise
+the source's zero-order hold through the division the environment
+runs); the two outside callers of
+`inject_schedule_into_specs_with_pre_period` (unavailable_period_rows,
+wet_appliance_hot_water) pass the parsed series' factor 1; the premise
+ZIP tests pass 1. Every other schedule, environment, parity and
+fixture test passes unchanged.
+
+**Tripwire verdicts:** the goldens compare-all 10 (default features) +
+dst 1 (the `dst` build) bitwise identical - the DST manifest
+`full_year_900s_dst` exercises the civil-time calendar paths and moved
+nothing; pytest 1801 passed + 6 xfailed, pyright 0 (no Python-visible
+schedule surface reads the materialized structure: the `ParsedSchedule`
+binding is opaque and the environment publishes the per-step values and
+row index exactly as before).
+
+**Dependencies:** `crates/hares-io/src/schedule.rs` (the hold and the
+guard), `crates/hares-core/src/environment.rs` (the expansion
+derivation, the division read, the flags' expansion),
+`crates/hares-core/src/dwelling/mod.rs` and
+`crates/hares-core/src/dwelling/premise_zip.rs` (the factor through the
+build's consumers), `crates/hares-io/src/schedule_resolve.rs` (the
+expanded means and the event series),
+`crates/hares-types/src/alloc_count.rs` (the byte channel), and the
+measurement binary.

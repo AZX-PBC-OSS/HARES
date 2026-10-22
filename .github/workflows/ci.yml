@@ -160,6 +160,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Init OCHRE submodule
         run: git submodule update --init vendors/OCHRE
+      # The py_gym tests bind the system python and import numpy for their
+      # array buffers; a runner image that ships without python3-numpy
+      # panics them at the C-API import. The distro package pins it
+      # independently of the image's included software.
+      - name: Install numpy for the py_gym tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-numpy
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-nextest
       - name: List stray files (before)
@@ -232,6 +240,11 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+      # The override tests read the OS-HPXML sample documents the vendored
+      # reference carries (the HPXML's own samples, inputs the tests use
+      # directly); without the submodule the paths do not exist.
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v10.2.0
         with:
@@ -267,6 +280,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The vendored OCHRE reference is pyright's `ochre` import: the
+      # execution environments point extraPaths at vendors/OCHRE (the
+      # ochre extra installs the package's dependencies only), so the
+      # submodule must be checked out or every ochre import fails to
+      # resolve.
+      - name: Init OCHRE submodule
+        run: git submodule update --init vendors/OCHRE
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v10.2.0
         with:
@@ -289,7 +309,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --group dev --extra helics --group ochre
+      - run: uv sync --group dev --extra helics --group ochre --extra rl
       - run: uv run maturin develop --release
       # --fail-on-skip (tests/python/skip_gate.py): an OCHRE install that
       # cannot run the comparison fails the job instead of skipping it.
@@ -334,6 +354,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Init OCHRE submodule
         run: git submodule update --init vendors/OCHRE
+      - name: Install numpy for the py_gym tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-numpy
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -382,6 +406,12 @@ jobs:
           key: bench-baseline-${{ env.BASE_SHA }}-${{ hashFiles('.github/workflows/ci.yml', 'benches/**', 'crates/*/benches/**') }}
       - name: Generate baseline
         if: steps.cache.outputs.cache-hit != 'true' && env.BASE_SHA != ''
+        # A baseline from a base whose benches cannot run (a construction
+        # guard the base's own fixtures predate) is unproducible: the step
+        # is tolerated, the comparison below notices the missing file and
+        # skips, and the PR's own benchmark run above still gates the job.
+        # The gate self-heals when a tree with runnable benches merges.
+        continue-on-error: true
         run: |
           git checkout "$BASE_SHA"
           cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver -- --save-baseline baseline

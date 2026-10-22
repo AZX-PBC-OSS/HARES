@@ -74,6 +74,6 @@ log, the ledger always current.
 - I-09 owns the capability program beyond that: co-simulation, Monte
   Carlo at scale, the RL/ML surfaces, small-commercial, the contributor
   platform. Its schedule seeds from the six-domain reviews and the three
-  surveys (docs/superpowers/plans/2026-10-17-hares-hardening-*), the
+  surveys (.shipwright/initiatives/I-08/plans/2026-10-17-hares-hardening-*), the
   planning agents' proposals, and the operator's vision statement
   (2026-10-17).

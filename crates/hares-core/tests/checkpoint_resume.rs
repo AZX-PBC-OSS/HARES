@@ -210,10 +210,13 @@ fn checkpoint_path(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("hares-r48-or10");
     std::fs::create_dir_all(&dir).expect("temp dir");
     // Nextest runs this binary's tests concurrently as separate processes,
-    // and every caller here saves, loads and removes the one name: a
-    // process-unique suffix keeps a parallel test's overwrite (or a half
-    // written file) out of another test's load.
-    dir.join(format!("{name}-{}.json", std::process::id()))
+    // and the coverage job's in-process cargo test runs them on shared
+    // threads of one process: the pid plus a per-call sequence keeps a
+    // parallel test's overwrite (or a half written file, or its remove) out
+    // of another test's load.
+    static CHECKPOINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = CHECKPOINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!("{name}-{}-{seq}.json", std::process::id()))
 }
 
 /// A run checkpointed mid-billing-period and resumed equals the

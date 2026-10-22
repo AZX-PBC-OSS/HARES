@@ -76,7 +76,8 @@ pub(super) struct CoolingCore {
     /// crankcase heater capacity: effective_w = rated_w * (c0 + c1*T + c2*T^2).
     crankcase_capacity_curve: Option<[f64; 3]>,
     /// Runtime fraction of the cooling coil in the most recent step (PLR value).
-    /// Used so the HP system can pass it as companion RTF to the heater side.
+    /// Scales the crankcase heater's draw by the coil's off fraction and answers
+    /// the cooler's compressor-ran read for its own step bookkeeping.
     pub(super) last_cooling_rtf: f64,
     /// Gross compressor power of the most recent step [kW], before the
     /// `space_fraction` scaling applied to telemetry. Used by the GSHP cooler
@@ -202,22 +203,14 @@ impl AirConditioner {
         }
     }
 
-    /// Calculate crankcase heater power accounting for companion coil operation.
+    /// Calculate crankcase heater power.
     ///
-    /// For heat pump systems, the crankcase heater only draws power when neither
-    /// the cooling nor the heating coil is running.
+    /// Draws power only when the cooling coil is not running and the
+    /// outdoor temperature is below the threshold.
     #[cfg(test)]
-    pub(super) fn crankcase_heater_power(
-        &self,
-        outdoor_temp_c: f64,
-        cooling_rtf: f64,
-        companion_heating_rtf: Option<f64>,
-    ) -> f64 {
-        self.core.crankcase_heater_power_internal(
-            outdoor_temp_c,
-            cooling_rtf,
-            companion_heating_rtf,
-        )
+    pub(super) fn crankcase_heater_power(&self, outdoor_temp_c: f64, cooling_rtf: f64) -> f64 {
+        self.core
+            .crankcase_heater_power_internal(outdoor_temp_c, cooling_rtf)
     }
 
     /// Set a numeric telemetry key on the inner cooling core.
@@ -320,7 +313,7 @@ impl Equipment for AirConditioner {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        self.core.step(env, dt, ports, None)
+        self.core.step(env, dt, ports)
     }
 
     fn telemetry(&self) -> &Telemetry {
@@ -422,7 +415,7 @@ impl Equipment for RoomAC {
         dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
-        self.core.step(env, dt, ports, None)
+        self.core.step(env, dt, ports)
     }
 
     fn telemetry(&self) -> &Telemetry {
@@ -1211,16 +1204,11 @@ impl CoolingCore {
     }
 
     /// Run one simulation step.
-    ///
-    /// `companion_heating_rtf` -- if `Some`, this AC is the cooling side of a
-    /// heat pump; the provided value is the heating coil's RTF from the previous
-    /// step, used to compute crankcase heater power correctly.
     pub(super) fn step(
         &mut self,
         env: &EnvironmentState,
         dt: Duration,
         ports: &mut PortSlots,
-        companion_heating_rtf: Option<f64>,
     ) -> std::result::Result<(), HaresError> {
         if let Some(err) = self.hvac.take_control_error() {
             return Err(err);
@@ -1317,17 +1305,12 @@ impl CoolingCore {
                 .apply_startup_capacity_degradation(0.0, dt_min, false);
         }
 
-        // Crankcase heater: draws power when outdoor temp is below threshold AND
-        // neither coil (cooling or companion heating) is running. For HP systems
-        // the max of both RTFs determines the off-time fraction.
+        // Crankcase heater: draws power when outdoor temp is below threshold
+        // AND the cooling coil is not running.
         // A de-energized bus (grid outage without backup) also removes the
         // crankcase heater's supply — it is a standby load, not a source.
         let crankcase_w = if env.grid.bus_energized() {
-            self.crankcase_heater_power_internal(
-                env.weather.outdoor_temp_c,
-                self.last_cooling_rtf,
-                companion_heating_rtf,
-            )
+            self.crankcase_heater_power_internal(env.weather.outdoor_temp_c, self.last_cooling_rtf)
         } else {
             0.0
         };
@@ -1569,21 +1552,13 @@ impl CoolingCore {
     /// Internal crankcase heater power computation.
     ///
     /// Returns 0 when OAT >= threshold. When below the threshold, power scales
-    /// with the fraction of time NEITHER coil is running: `rated * (1 - max_rtf)`.
-    /// For HP systems `companion_heating_rtf` is the heating side's RTF.
-    fn crankcase_heater_power_internal(
-        &self,
-        outdoor_temp_c: f64,
-        cooling_rtf: f64,
-        companion_heating_rtf: Option<f64>,
-    ) -> f64 {
+    /// with the fraction of time the cooling coil is not running:
+    /// `rated * (1 - cooling_rtf)`.
+    fn crankcase_heater_power_internal(&self, outdoor_temp_c: f64, cooling_rtf: f64) -> f64 {
         if outdoor_temp_c >= self.crankcase_threshold_c {
             return 0.0;
         }
-        let max_rtf = match companion_heating_rtf {
-            Some(heating_rtf) => cooling_rtf.max(heating_rtf),
-            None => cooling_rtf,
-        };
+        let max_rtf = cooling_rtf;
         let effective_rated = match self.crankcase_capacity_curve {
             Some([c0, c1, c2]) => {
                 let t = outdoor_temp_c;
@@ -1890,7 +1865,6 @@ impl CoolingCore {
                     actual_latent_capacity_w: actual_latent_w,
                 },
                 &self.latent_degradation,
-                None,
             )
         } else {
             steady_state_shr
@@ -6122,63 +6096,39 @@ mod crankcase_tests {
         assert_eq!(kw, 0.0, "no crankcase power above OAT threshold, got {kw}");
     }
 
-    // Test 3: HP system crankcase uses max(heating_RTF, cooling_RTF)
+    // Test 3: Crankcase power scales with the cooling coil's runtime fraction
     #[test]
-    fn hp_crankcase_uses_max_rtf() {
+    fn crankcase_uses_the_cooling_rtf() {
         let cfg = base_config();
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        // cooling_rtf=0.3, heating_rtf=0.7 -> max=0.7 -> power = 100*(1-0.7)=30 W
-        let w = eq.crankcase_heater_power(5.0, 0.3, Some(0.7));
-        assert!((w - 30.0).abs() < 1e-6, "expected 30 W, got {w}");
+        // cooling_rtf=0.3 -> power = 100*(1-0.3)=70 W
+        let w = eq.crankcase_heater_power(5.0, 0.3);
+        assert!((w - 70.0).abs() < 1e-6, "expected 70 W, got {w}");
     }
 
-    // Test 4: HP cooling mode active (RTF=0.6), heating off -> crankcase = rated * 0.4
+    // Test 4: Cooling mode active (RTF=0.6) -> crankcase = rated * 0.4
     #[test]
-    fn hp_cooling_active_reduces_crankcase_proportionally() {
+    fn cooling_active_reduces_crankcase_proportionally() {
         let cfg = base_config();
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        // cooling_rtf=0.6, heating off (0.0) -> max=0.6 -> power = 100*(1-0.6)=40 W
-        let w = eq.crankcase_heater_power(5.0, 0.6, Some(0.0));
+        // cooling_rtf=0.6 -> power = 100*(1-0.6)=40 W
+        let w = eq.crankcase_heater_power(5.0, 0.6);
         assert!((w - 40.0).abs() < 1e-6, "expected 40 W, got {w}");
     }
 
-    // Test 5: HP heating mode active (RTF=0.8), cooling off -> crankcase = rated * 0.2
+    // Test 6: Cooling coil off -> full crankcase power
     #[test]
-    fn hp_heating_active_reduces_crankcase_proportionally() {
+    fn cooling_off_gives_full_crankcase_power() {
         let cfg = base_config();
         let mut eq = AirConditioner::new(cfg.clone());
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
-        // cooling_rtf=0.0, heating_rtf=0.8 -> max=0.8 -> power = 100*(1-0.8)=20 W
-        let w = eq.crankcase_heater_power(5.0, 0.0, Some(0.8));
-        assert!((w - 20.0).abs() < 1e-6, "expected 20 W, got {w}");
-    }
-
-    // Test 6: Both coils off -> full crankcase power
-    #[test]
-    fn hp_both_coils_off_gives_full_crankcase_power() {
-        let cfg = base_config();
-        let mut eq = AirConditioner::new(cfg.clone());
-        let e = cold_env(5.0, 20.0);
-        eq.init(&cfg, &e).unwrap();
-        let w = eq.crankcase_heater_power(5.0, 0.0, Some(0.0));
+        let w = eq.crankcase_heater_power(5.0, 0.0);
         assert!((w - 100.0).abs() < 1e-6, "expected 100 W, got {w}");
-    }
-
-    // Test 7: Both coils have RTF -> uses the maximum
-    #[test]
-    fn hp_uses_maximum_rtf_when_both_coils_running() {
-        let cfg = base_config();
-        let mut eq = AirConditioner::new(cfg.clone());
-        let e = cold_env(5.0, 20.0);
-        eq.init(&cfg, &e).unwrap();
-        // cooling=0.4, heating=0.9 -> max=0.9 -> power = 100*(1-0.9)=10 W
-        let w = eq.crankcase_heater_power(5.0, 0.4, Some(0.9));
-        assert!((w - 10.0).abs() < 1e-6, "expected 10 W, got {w}");
     }
 
     // Test 8: Temperature curve modifies capacity correctly
@@ -6192,7 +6142,7 @@ mod crankcase_tests {
         let e = cold_env(5.0, 20.0);
         eq.init(&cfg, &e).unwrap();
         // crankcase_heater_power: rated=100 W * curve(5C)=1.5 * (1-0.0) = 150 W
-        let w = eq.crankcase_heater_power(5.0, 0.0, None);
+        let w = eq.crankcase_heater_power(5.0, 0.0);
         assert!(
             (w - 150.0).abs() < 1e-6,
             "expected 150 W with curve at T=5C, got {w}"

@@ -51,7 +51,7 @@ fn isa_pressure_kpa(elevation_m: f64) -> f64 {
     if base <= 0.0 {
         return 1.0; // Above ~44 km -- return a safe floor
     }
-    101.325 * base.powf(ISA_PRESSURE_EXPONENT)
+    101.325 * libm::pow(base, ISA_PRESSURE_EXPONENT)
 }
 
 /// Magnus formula dew point [°C] from dry-bulb [°C] and relative humidity [%].
@@ -64,7 +64,7 @@ fn isa_pressure_kpa(elevation_m: f64) -> f64 {
 /// Valid range: -40°C to +50°C dry bulb.
 fn magnus_dew_point_c(dry_bulb_c: f64, rh_pct: f64) -> f64 {
     let rh_frac = (rh_pct / 100.0).clamp(0.001, 1.0);
-    let alpha = rh_frac.ln() + (17.67 * dry_bulb_c) / (243.5 + dry_bulb_c);
+    let alpha = libm::log(rh_frac) + (17.67 * dry_bulb_c) / (243.5 + dry_bulb_c);
     (243.5 * alpha) / (17.67 - alpha)
 }
 

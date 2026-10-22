@@ -54,13 +54,25 @@ pub struct PremiseZip {
 /// as `mean_power_w: None` — distinguishable from a real weight — instead
 /// of silently skewing the mean (`f64::max` would drop a NaN operand and
 /// average it in as zero draw).
-fn schedule_column_mean_w(schedule: &ScheduleTimeSeries, col_idx: usize) -> Option<f64> {
+fn schedule_column_mean_w(
+    schedule: &ScheduleTimeSeries,
+    col_idx: usize,
+    upsample_factor: u32,
+) -> Option<f64> {
+    debug_assert!(upsample_factor >= 1, "the rows' expansion is at least 1");
     let column = schedule.columns.get(col_idx)?;
     if column.is_empty() || !column.iter().all(|v| v.is_finite()) {
         return None;
     }
-    let sum: f64 = column.iter().map(|v| v.max(0.0)).sum();
-    Some(sum / column.len() as f64)
+    // The rows' expansion: a held row stands for that many sim steps, so
+    // the mean runs over the per-step sequence -- each row's value repeated
+    // in order, the sum the materialised rows produced.
+    let factor = upsample_factor as usize;
+    let sum: f64 = column
+        .iter()
+        .flat_map(|v| std::iter::repeat_n(v.max(0.0), factor))
+        .sum();
+    Some(sum / (column.len() * factor) as f64)
 }
 
 /// Aggregate the premise-level ZIP over a dwelling's equipment. `None` when
@@ -71,6 +83,7 @@ fn schedule_column_mean_w(schedule: &ScheduleTimeSeries, col_idx: usize) -> Opti
 pub(crate) fn aggregate_premise_zip(
     equipment: &[Box<dyn Equipment>],
     schedule: &ScheduleTimeSeries,
+    upsample_factor: u32,
 ) -> Option<PremiseZip> {
     let mut governing: Vec<(String, Option<f64>)> = Vec::new();
     let mut constant_power: Vec<String> = Vec::new();
@@ -100,7 +113,7 @@ pub(crate) fn aggregate_premise_zip(
         let mean_power_w = match eq.expected_mean_power_w() {
             Some(ExpectedMeanPower::W(w)) => Some(w),
             Some(ExpectedMeanPower::ScheduleColumn(col_idx)) => {
-                schedule_column_mean_w(schedule, col_idx)
+                schedule_column_mean_w(schedule, col_idx, upsample_factor)
             }
             None => None,
         };
@@ -324,7 +337,7 @@ mod tests {
             pinned_load("Gas Furnace"),
         ];
         // Column mean = (1 + 3)/2 = 2 kW vs 3 kW for the constant load.
-        let premise = aggregate_premise_zip(&equipment, &empty_schedule())
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1)
             .expect("positive governing weights aggregate");
         let total = 5.0;
         assert_eq!(premise.zip.zp, (2.0 * lighting.zp + 3.0 * 0.0) / total);
@@ -351,7 +364,7 @@ mod tests {
                 Some(ExpectedMeanPower::W(2.0)),
             ),
         ];
-        let premise = aggregate_premise_zip(&equipment, &empty_schedule()).expect("aggregates");
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1).expect("aggregates");
         // Only the known-weight load shapes the aggregate: pure constant power.
         assert_eq!(
             (premise.zip.zp, premise.zip.ip, premise.zip.pp),
@@ -370,7 +383,7 @@ mod tests {
             governing_load("MELs", lighting, None),
             pinned_load("Air Conditioner"),
         ];
-        assert!(aggregate_premise_zip(&equipment, &empty_schedule()).is_none());
+        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1).is_none());
     }
 
     #[test]
@@ -381,14 +394,14 @@ mod tests {
             lighting,
             Some(ExpectedMeanPower::W(0.0)),
         )];
-        assert!(aggregate_premise_zip(&equipment, &empty_schedule()).is_none());
+        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1).is_none());
     }
 
     #[test]
     fn equipment_without_zip_concept_is_silent() {
         let equipment: Vec<Box<dyn Equipment>> =
             vec![Box::new(StubLoad::new("Generator", None, None))];
-        assert!(aggregate_premise_zip(&equipment, &empty_schedule()).is_none());
+        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1).is_none());
     }
 
     #[test]
@@ -402,8 +415,8 @@ mod tests {
             column_aggregations: Vec::new(),
         };
         // Negative placeholder values draw no power, matching load semantics.
-        assert_eq!(schedule_column_mean_w(&schedule, 0), Some(2.0));
-        assert_eq!(schedule_column_mean_w(&schedule, 1), None);
+        assert_eq!(schedule_column_mean_w(&schedule, 0, 1), Some(2.0));
+        assert_eq!(schedule_column_mean_w(&schedule, 1, 1), None);
     }
 
     #[test]
@@ -424,7 +437,7 @@ mod tests {
             column_aggregations: Vec::new(),
         };
         assert_eq!(
-            schedule_column_mean_w(&schedule, 0),
+            schedule_column_mean_w(&schedule, 0, 1),
             None,
             "NaN schedule data must degrade to 'no computable mean', not a \
              silently undercounted average"
@@ -444,7 +457,7 @@ mod tests {
                 source_step_secs: 60,
                 column_aggregations: Vec::new(),
             };
-            assert_eq!(schedule_column_mean_w(&schedule, 0), None);
+            assert_eq!(schedule_column_mean_w(&schedule, 0, 1), None);
         }
     }
 
@@ -476,7 +489,7 @@ mod tests {
                 Some(ExpectedMeanPower::W(2.0)),
             ),
         ];
-        let premise = aggregate_premise_zip(&equipment, &nan_schedule).expect("aggregates");
+        let premise = aggregate_premise_zip(&equipment, &nan_schedule, 1).expect("aggregates");
         assert_eq!(
             premise.governing[0],
             ("Indoor Lighting".to_string(), None),
@@ -520,7 +533,7 @@ mod tests {
                 Some(ExpectedMeanPower::W(1.0)),
             ),
         ];
-        match aggregate_premise_zip(&equipment, &empty_schedule()) {
+        match aggregate_premise_zip(&equipment, &empty_schedule(), 1) {
             None => {}
             Some(premise) => {
                 for (label, value) in [
@@ -575,7 +588,7 @@ mod tests {
             ),
             governing_load("Honest Load", honest, Some(ExpectedMeanPower::W(1.0))),
         ];
-        let premise = aggregate_premise_zip(&equipment, &empty_schedule())
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1)
             .expect("the honest load has a positive computable draw");
 
         // Caller-side audit: weighted mean over the rostered positive
@@ -624,6 +637,6 @@ mod tests {
             source_step_secs: 60,
             column_aggregations: Vec::new(),
         };
-        assert_eq!(schedule_column_mean_w(&schedule, 0), None);
+        assert_eq!(schedule_column_mean_w(&schedule, 0, 1), None);
     }
 }

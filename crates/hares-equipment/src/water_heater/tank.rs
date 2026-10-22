@@ -311,7 +311,7 @@ impl StratifiedTank {
         self.total_volume_m3
     }
 
-    /// The water's stored thermal energy [J], relative to 0 °C: the sum
+    /// The water's stored thermal energy (J), relative to 0 °C: the sum
     /// over nodes of mass times specific heat times temperature. The
     /// zero reference cancels in every use (the failed-step rollback
     /// counts the state's energy delta across the step).
@@ -478,6 +478,14 @@ impl StratifiedTank {
         };
 
         let total_draw_m3 = hot_draw_volume_m3 + tempered_draw_volume_m3;
+        // The truncation's firing is counted, never silent: a step's
+        // draw larger than the tank holds is delivered as the volume.
+        #[cfg(feature = "observe")]
+        if total_draw_m3 > self.total_volume_m3 {
+            hares_types::clamp_census::record(
+                hares_types::clamp_census::ClampSite::TankDrawTruncation,
+            );
+        }
         let clamped_draw = total_draw_m3.min(self.total_volume_m3);
 
         self.apply_conduction_and_standby(ambient_temp_c, dt)?;
@@ -2708,5 +2716,50 @@ mod tests {
              outlet_temp_c ({:.4}) must match 40.0",
             draw.outlet_temp_c
         );
+    }
+
+    /// The clamp census counts the tank's draw truncation: a step's
+    /// requested withdrawal larger than the tank holds is truncated to
+    /// the volume, and the firing is recorded. A truncation that went
+    /// uncounted fails the probe.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn clamp_census_counts_the_tank_draw_truncation() {
+        use hares_types::clamp_census::{self, ClampSite};
+
+        use super::TemperedDrawConfig;
+
+        // Drain whatever an earlier test left on this thread's tally:
+        // the probe asserts its own firing.
+        let _ = clamp_census::take();
+
+        let mut tank = test_tank(6, 55.0);
+        let tmv = TemperedDrawConfig {
+            tempered_draw_temp_c: 40.6,
+            hot_draw_temp_c: 51.7,
+            setpoint_temp_c: 51.7,
+        };
+        // The tank holds ~0.94 m3; a 0.1 m3/s flow over a minute asks
+        // for ~6 m3, several times the volume.
+        tank.step_tempered(
+            TemperedDrawInputs {
+                ambient_temp_c: 20.0,
+                tempered_flow_m3_s: 0.1,
+                hot_flow_m3_s: 0.0,
+                mains_temp_c: 15.0,
+            },
+            &[],
+            tmv,
+            Duration::from_secs(60),
+        )
+        .expect("step_tempered");
+
+        let census = clamp_census::take();
+        assert_eq!(
+            census.count(ClampSite::TankDrawTruncation),
+            1,
+            "the oversized draw records its truncation"
+        );
+        assert_eq!(census.total(), 1, "no other site fires in this probe");
     }
 }

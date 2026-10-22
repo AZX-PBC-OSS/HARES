@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::Datelike;
 
+use hares_physics::constants::SECONDS_PER_HOUR;
 use hares_types::rng::RngStream;
 use hares_types::{
     BoundaryPolicy, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput,
@@ -416,7 +417,12 @@ impl EventBasedLoad {
         }
     }
 
-    fn maybe_start_event(&mut self, window_open: bool, probability: f64) -> crate::Result<()> {
+    fn maybe_start_event(
+        &mut self,
+        window_open: bool,
+        probability: f64,
+        dt_s: f64,
+    ) -> crate::Result<()> {
         if self.phase != EventPhase::Idle || self.delay_remaining_s > 0.0 {
             return Ok(());
         }
@@ -426,7 +432,7 @@ impl EventBasedLoad {
             None => {
                 window_open
                     && require_stream(self.start_draws.as_mut(), &self.descriptor.name)?
-                        .starts(probability)
+                        .starts(probability, dt_s)
             }
         };
 
@@ -816,7 +822,7 @@ impl Equipment for EventBasedLoad {
             // Stochastic fallback (no schedule data).
             let window_open = self.event_window_source.value_at(env)? > 0.0;
             let probability = self.event_probability_source.value_at(env)?;
-            self.maybe_start_event(window_open, probability)?;
+            self.maybe_start_event(window_open, probability, dt_s)?;
         }
 
         let month_scale = self
@@ -1026,7 +1032,12 @@ impl WetAppliance {
         }
     }
 
-    fn maybe_start_cycle(&mut self, window_open: bool, probability: f64) -> crate::Result<()> {
+    fn maybe_start_cycle(
+        &mut self,
+        window_open: bool,
+        probability: f64,
+        dt_s: f64,
+    ) -> crate::Result<()> {
         if self.active || self.delay_remaining_s > 0.0 {
             return Ok(());
         }
@@ -1036,7 +1047,7 @@ impl WetAppliance {
             None => {
                 window_open
                     && require_stream(self.start_draws.as_mut(), &self.descriptor.name)?
-                        .starts(probability)
+                        .starts(probability, dt_s)
             }
         };
 
@@ -1381,7 +1392,7 @@ impl Equipment for WetAppliance {
             // Stochastic fallback.
             let window_open = self.event_window_source.value_at(env)? > 0.0;
             let probability = self.event_probability_source.value_at(env)?;
-            self.maybe_start_cycle(window_open, probability)?;
+            self.maybe_start_cycle(window_open, probability, dt_s)?;
         }
 
         let month_scale = self
@@ -1748,6 +1759,11 @@ fn parse_positive(config: &EquipmentConfig, key: &str) -> crate::Result<Option<f
 }
 
 /// An event load's random stream and the start draws taken from it.
+///
+/// The start probability the draws read is the probability of starting
+/// within one hour of open window (the probability's declared basis): the
+/// per-step chance is derived from it and the step length, so the same
+/// hourly rate holds for any step of an hour or less.
 #[derive(Clone, Debug)]
 struct StartDraws {
     stream: RngStream,
@@ -1764,18 +1780,32 @@ impl StartDraws {
         }
     }
 
-    /// Whether an idle load starts: certain at `probability` outside (0, 1),
-    /// otherwise one draw.
-    fn starts(&mut self, probability: f64) -> bool {
-        let p = probability.clamp(0.0, 1.0);
-        if p <= 0.0 {
-            false
-        } else if p >= 1.0 {
-            true
-        } else {
-            self.draws = self.draws.saturating_add(1);
-            self.rng.random::<f64>() < p
+    /// Whether an idle load starts: certain at a probability outside
+    /// (0, 1), otherwise one draw against the step's chance. The
+    /// probability is the per-hour basis (the value configured through
+    /// the probability source, a constant or a schedule column, is the
+    /// chance of starting within one hour of open window); the step's
+    /// chance is `1 - (1 - p)^(dt / SECONDS_PER_HOUR)`, the per-hour
+    /// probability compounded over the step, so the same hourly rate
+    /// holds for any step of an hour or less: the hourly probability of
+    /// at least one start is exact there, while the start count runs a
+    /// few percent high (starts can coincide within an hour, about 102
+    /// percent of the hourly rate's count at 900 s) and, for supra-hourly
+    /// steps, low (a step longer than the hour starts at most once,
+    /// about 88 percent at 6 h). The zero and one
+    /// endpoints are exact at every resolution (never start, always
+    /// start). A step draws once whatever its length.
+    fn starts(&mut self, probability: f64, dt_s: f64) -> bool {
+        let p_hour = probability.clamp(0.0, 1.0);
+        if p_hour <= 0.0 {
+            return false;
         }
+        if p_hour >= 1.0 {
+            return true;
+        }
+        let p_step = 1.0 - libm::pow(1.0 - p_hour, dt_s / SECONDS_PER_HOUR);
+        self.draws = self.draws.saturating_add(1);
+        self.rng.random::<f64>() < p_step
     }
 }
 
@@ -2081,6 +2111,67 @@ mod tests {
         slots.zero();
         eq.step(&env, Duration::from_secs(60), &mut slots).unwrap();
         assert!((slots.electrical.load_power_w - 1500.0).abs() < 1e-6);
+    }
+
+    /// The start probability is the probability of starting within an hour
+    /// of open window, so the same hourly rate holds at 3600 s and 900 s
+    /// steps, both within the hour (the hourly probability of at least
+    /// one start is exact there; the 900 s count runs about 2 percent
+    /// high, since starts can coincide within an hour - far inside the
+    /// test's tolerance). (Per-step application made the event
+    /// rate scale with the resolution: four times the steps, four times
+    /// the events.) The event is short against both step sizes, so every
+    /// step is idle and open when it begins, one draw decides it, and the
+    /// steps that start an event are exactly the steps whose power is on.
+    #[test]
+    fn the_start_probability_is_per_hour_across_resolutions() {
+        let config = {
+            let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+            raw.insert("zone_id".to_string(), 1.0.into());
+            raw.insert("event_window_source".to_string(), "constant".into());
+            raw.insert("event_probability_source".to_string(), "constant".into());
+            raw.insert("event_probability_constant".to_string(), 0.05.into());
+            raw.insert("active_power_w".to_string(), 1500.0.into());
+            raw.insert("active_duration_s".to_string(), 60.0.into());
+            raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+            raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+            raw.insert("latent_gain_fraction".to_string(), 0.0.into());
+            raw_config("rate".to_string(), "EventBasedLoad".to_string(), raw)
+        };
+        let hours = 2000_u64;
+        let starts_at = |dt_s: u64| {
+            let mut env = base_env();
+            set_schedule_payload(&mut env, vec![1.0]);
+            let mut eq = EventBasedLoad::new(config.clone());
+            eq.init(&config, &env).unwrap();
+            let mut slots = PortSlots::from_declarations(eq.ports());
+            let mut starts = 0_u64;
+            for _ in 0..(hours * 3600 / dt_s) {
+                eq.step(&env, Duration::from_secs(dt_s), &mut slots)
+                    .expect("the step runs");
+                if slots.electrical.load_power_w > 0.0 {
+                    starts += 1;
+                }
+                env.current_time += ChronoDuration::seconds(dt_s as i64);
+                slots.zero();
+            }
+            starts
+        };
+
+        let at_3600 = starts_at(3600);
+        let at_900 = starts_at(900);
+        // 2000 hours at a 0.05 hourly rate: 100 expected starts each, the
+        // two counts within a few sigma of the binomial spread. Per-step
+        // application starts the 900 s run about four times as often.
+        assert!(
+            at_3600.abs_diff(at_900) <= 60,
+            "the same config starts at the same hourly rate at 900 s and 3600 s, \
+             got {at_900} starts at 900 s against {at_3600} at 3600 s"
+        );
+        assert!(
+            (50..=150).contains(&at_3600),
+            "the 3600 s run starts at about the configured hourly rate, got {at_3600}"
+        );
     }
 
     #[test]

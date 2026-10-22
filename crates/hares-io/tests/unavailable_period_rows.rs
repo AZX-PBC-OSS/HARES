@@ -83,6 +83,7 @@ fn design_level_ignores_flagged_steps() {
         &mut specs,
         &mut schedule,
         Some(&pre_period),
+        1,
         None,
         &DefaultsStore::empty(),
         &mut Vec::new(),

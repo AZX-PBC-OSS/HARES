@@ -133,7 +133,10 @@ impl ComplianceModel for NeverComply {
 
 /// Compliance model that randomly decides with a configurable probability.
 ///
-/// Uses a fixed seed for reproducibility in simulation.
+/// Uses a fixed seed for reproducibility in simulation. The draw is
+/// sampled once per event, at the event's entry, and held for the
+/// event's duration: the rate is the share of events the home complies
+/// with, not the share of an event's steps.
 #[derive(Clone, Debug)]
 pub struct Probabilistic {
     /// Probability of compliance in [0.0, 1.0].
@@ -421,6 +424,13 @@ pub struct DrCompliance {
     /// Whether this event has already warned of a pre-conditioning delta
     /// it could not send.
     warned_unserved: bool,
+    /// This event's compliance decision: drawn once when the actor first
+    /// sees the event (the Normal-to-event transition) and held for the
+    /// event's duration, `None` when no event is under way. A per-step
+    /// re-roll would decide each step afresh - a rate-0.5 home dispatching
+    /// on half its steps instead of complying with half its events - so
+    /// the event entry's decision is the event's. Part of the checkpoint.
+    event_compliance: Option<bool>,
     /// Axis releases dispatched this step, each beside its target's delta.
     axis_releases_this_step: u64,
     /// Count of clear signals dispatched this timestep (observability gate).
@@ -508,6 +518,7 @@ impl DrCompliance {
             load_target_axes: Vec::new(),
             displaced_axes: Vec::new(),
             warned_unserved: false,
+            event_compliance: None,
             axis_releases_this_step: 0,
             #[cfg(feature = "observe")]
             clear_signals_dispatched_count: 0,
@@ -916,6 +927,7 @@ impl Actor for DrCompliance {
                 };
             self.displaced_axes.clear();
             self.warned_unserved = false;
+            self.event_compliance = None;
             self.telemetry.set("dr_complied", 0.0);
             self.telemetry.set("signals_count", clear_count as f64);
             self.telemetry.set("signals_rejected", 0.0);
@@ -930,7 +942,19 @@ impl Actor for DrCompliance {
             return;
         }
 
-        let should_comply = self.model.should_comply(self.current_dr_level, env);
+        // The event's compliance decision: drawn once at the event's
+        // entry (the first step the actor sees the level above Normal)
+        // and held for the event's duration, whatever its length. A level
+        // change within the event does not re-roll the decision; the next
+        // event's entry does.
+        let should_comply = match self.event_compliance {
+            Some(decision) => decision,
+            None => {
+                let decision = self.model.should_comply(self.current_dr_level, env);
+                self.event_compliance = Some(decision);
+                decision
+            }
+        };
 
         self.telemetry
             .set("dr_complied", if should_comply { 1.0 } else { 0.0 });
@@ -1152,13 +1176,15 @@ impl Actor for DrCompliance {
         }
     }
 
-    /// v4: the dispatched `PowerLimit` payloads hold W (SI) where v3 held
-    /// kW - a v3 blob's limits would read 1000x small; the version gate
-    /// rejects it here, at the checkpoint boundary. v3 carried the targets
-    /// whose thermostat the freeze guard forced, and v2 the axis each
-    /// target's pre-conditioning has displaced.
+    /// v5 carries the event's latched compliance decision, so a restore
+    /// mid-event keeps the event's entry decision instead of re-drawing
+    /// it. v4 held the dispatched `PowerLimit` payloads in W (SI) where
+    /// v3 held kW - a v3 blob's limits would read 1000x small; the
+    /// version gate rejects it here, at the checkpoint boundary. v3
+    /// carried the targets whose thermostat the freeze guard forced, and
+    /// v2 the axis each target's pre-conditioning has displaced.
     fn checkpoint_version(&self) -> u32 {
-        4
+        5
     }
 
     fn save_state(&self) -> Result<Vec<u8>, HaresError> {
@@ -1167,6 +1193,7 @@ impl Actor for DrCompliance {
             &self.last_dispatched,
             &self.displaced_axes,
             &self.freeze_guard_setpoints,
+            &self.event_compliance,
         );
         postcard::to_allocvec(&data)
             .map_err(|e| HaresError::Io(format!("DrCompliance save_state: {e}")))
@@ -1181,13 +1208,16 @@ impl Actor for DrCompliance {
             Vec<(DispatchTarget, DrAction)>,
             Vec<(DispatchTarget, ThermostatAxis)>,
             Vec<DispatchTarget>,
+            Option<bool>,
         );
-        let (level, dispatched, displaced, freeze_guarded): State = postcard::from_bytes(data)
-            .map_err(|e| HaresError::Io(format!("DrCompliance load_state: {e}")))?;
+        let (level, dispatched, displaced, freeze_guarded, event_compliance): State =
+            postcard::from_bytes(data)
+                .map_err(|e| HaresError::Io(format!("DrCompliance load_state: {e}")))?;
         self.current_dr_level = level;
         self.last_dispatched = dispatched;
         self.displaced_axes = displaced;
         self.freeze_guard_setpoints = freeze_guarded;
+        self.event_compliance = event_compliance;
         Ok(())
     }
 }
@@ -1889,9 +1919,15 @@ mod tests {
         actor.decide(&env_with(5.0), &mut Vec::new());
         assert_eq!(count(&actor), Some(0.0), "cleared when the event ends");
 
+        // The count clears when the actor stops complying: under the
+        // per-event contract the stop is the next event's entry, so the
+        // event ends and the non-complying model re-draws it.
         let mut actor = unresolved();
         assert!(decide_once(&mut actor, &env_with(5.0)).is_empty());
+        actor.set_dr_level(DRLevel::Normal);
+        actor.decide(&env_with(5.0), &mut Vec::new());
         actor.model = Box::new(NeverComply);
+        actor.set_dr_level(DRLevel::High);
         actor.decide(&env_with(5.0), &mut Vec::new());
         assert_eq!(count(&actor), Some(0.0), "cleared when not complying");
     }
@@ -1939,10 +1975,11 @@ mod tests {
         }
     }
 
-    /// The snapshot gained the displaced axes in v2 and the freeze guard's
-    /// forced setpoints in v3, so a blob of an earlier layout does not
-    /// decode and the schema version has moved past both: the dwelling
-    /// refuses such a blob by version before decoding it.
+    /// The snapshot gained the displaced axes in v2, the freeze guard's
+    /// forced setpoints in v3 and the event's latched compliance decision
+    /// in v5, so a blob of an earlier layout does not decode and the
+    /// schema version has moved past each: the dwelling refuses such a
+    /// blob by version before decoding it.
     #[test]
     fn the_snapshot_refuses_every_earlier_layout() {
         let first_layout =
@@ -1954,14 +1991,161 @@ mod tests {
             Vec::<(DispatchTarget, ThermostatAxis)>::new(),
         ))
         .unwrap();
+        let v4_layout = postcard::to_allocvec(&(
+            DRLevel::High,
+            Vec::<(DispatchTarget, DrAction)>::new(),
+            Vec::<(DispatchTarget, ThermostatAxis)>::new(),
+            Vec::<DispatchTarget>::new(),
+        ))
+        .unwrap();
         let mut actor = DrCompliance::new("Test");
         assert!(actor.load_state(&first_layout).is_err());
         assert!(actor.load_state(&second_layout).is_err());
-        // v4 changed no layout - the dispatched PowerLimit payloads hold W
-        // (SI) where v3 held kW, the same 4-tuple on the wire - so the
-        // refusal of a v3 blob sits at the checkpoint's per-actor
-        // schema_version gate, not at the decode.
-        assert_eq!(actor.checkpoint_version(), 4);
+        assert!(actor.load_state(&v4_layout).is_err());
+        assert_eq!(actor.checkpoint_version(), 5);
+    }
+
+    /// The per-event compliance contract: the probabilistic draw is taken
+    /// once at the event's entry and held for the event's duration, and
+    /// the next event's entry re-draws. (The per-step re-roll this
+    /// replaces decided every step afresh: with seed 7's rate-0.5 model,
+    /// an event entered at 2026-01-01 01:00 declines, dispatches at 02:00
+    /// and 05:00 and declines at 03:00 and 04:00 - a random walk, where
+    /// the contract wants one decision per event.)
+    #[test]
+    fn the_compliance_decision_is_per_event_not_per_step() {
+        let mut actor = DrCompliance::new("Test")
+            .with_compliance_model(Probabilistic::new(0.5).with_seed(7))
+            .with_load_target(
+                DispatchTarget::ByName("Lights".into()),
+                DrAction::LoadCurtailment { fraction: 0.5 },
+            );
+        let descriptors = descriptors();
+        let equipment = equipment(&descriptors);
+        actor
+            .validate_equipment(&equipment)
+            .expect("the event has a target");
+        actor.resolve_equipment(&equipment);
+
+        // One event, five hourly steps. The entry draw (hour 1) decides
+        // the whole event: it declines, so no step dispatches and the
+        // flag stays 0.
+        actor.set_dr_level(DRLevel::High);
+        for hour in 1..6_u8 {
+            let env = test_env()
+                .outdoor_temp(10.0)
+                .zone_temp(24.0)
+                .date(2026, 1, 1)
+                .hour(hour)
+                .build();
+            let mut requests = Vec::new();
+            actor.decide(&env, &mut requests);
+            assert!(
+                requests.is_empty(),
+                "hour {hour}: the entry draw declines the event, no step dispatches, \
+                 got {requests:?}"
+            );
+            assert_eq!(
+                actor
+                    .telemetry()
+                    .expect("the actor carries telemetry")
+                    .get("dr_complied"),
+                Some(0.0),
+                "hour {hour}: the event's compliance flag holds at the entry draw"
+            );
+        }
+
+        // The event ends; the next event's entry re-draws (hour 7's draw
+        // complies): every step of that event dispatches and the flag
+        // stays 1, mid-event hours included.
+        actor.set_dr_level(DRLevel::Normal);
+        let end = test_env()
+            .outdoor_temp(10.0)
+            .zone_temp(24.0)
+            .date(2026, 1, 1)
+            .hour(6)
+            .build();
+        let mut clear = Vec::new();
+        actor.decide(&end, &mut clear);
+
+        actor.set_dr_level(DRLevel::High);
+        for hour in 7..10_u8 {
+            let env = test_env()
+                .outdoor_temp(10.0)
+                .zone_temp(24.0)
+                .date(2026, 1, 1)
+                .hour(hour)
+                .build();
+            let mut requests = Vec::new();
+            actor.decide(&env, &mut requests);
+            assert!(
+                !requests.is_empty(),
+                "hour {hour}: the second event's entry draw complies, every step dispatches"
+            );
+            assert_eq!(
+                actor
+                    .telemetry()
+                    .expect("the actor carries telemetry")
+                    .get("dr_complied"),
+                Some(1.0),
+                "hour {hour}: the event's compliance flag holds at the entry draw"
+            );
+        }
+    }
+
+    /// The latched decision is part of the checkpoint: an actor saved
+    /// mid-event and restored into a fresh body keeps the event's entry
+    /// decision instead of re-drawing it.
+    #[test]
+    fn the_latched_decision_survives_a_checkpoint_roundtrip() {
+        let build = || {
+            let mut actor = DrCompliance::new("Test")
+                .with_compliance_model(Probabilistic::new(0.5).with_seed(7))
+                .with_load_target(
+                    DispatchTarget::ByName("Lights".into()),
+                    DrAction::LoadCurtailment { fraction: 0.5 },
+                );
+            let descriptors = descriptors();
+            let equipment = equipment(&descriptors);
+            actor
+                .validate_equipment(&equipment)
+                .expect("the event has a target");
+            actor.resolve_equipment(&equipment);
+            actor
+        };
+        // Seed 7, level High, hour 0: the entry draw complies; hour 1's
+        // per-step re-roll declines. A save after the entry and a restore
+        // keeps the entry decision through hour 1.
+        let mut original = build();
+        original.set_dr_level(DRLevel::High);
+        let entry = test_env()
+            .outdoor_temp(10.0)
+            .zone_temp(24.0)
+            .date(2026, 1, 1)
+            .hour(0)
+            .build();
+        let mut requests = Vec::new();
+        original.decide(&entry, &mut requests);
+        assert!(
+            !requests.is_empty(),
+            "the entry draw complies, the test's premise holds"
+        );
+
+        let blob = original.save_state().expect("the checkpoint saves");
+        let mut restored = build();
+        restored.load_state(&blob).expect("the checkpoint loads");
+        let mid_event = test_env()
+            .outdoor_temp(10.0)
+            .zone_temp(24.0)
+            .date(2026, 1, 1)
+            .hour(1)
+            .build();
+        let mut requests = Vec::new();
+        restored.decide(&mid_event, &mut requests);
+        assert!(
+            !requests.is_empty(),
+            "the restored actor holds the event's entry decision, it does not re-draw"
+        );
     }
 
     /// Relaxation widens the gap on both axes, which is valid for any unit.

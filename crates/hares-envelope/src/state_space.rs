@@ -1084,7 +1084,7 @@ pub fn matrix_exp(m: &DMatrix<f64>) -> Result<DMatrix<f64>> {
     }
 
     let theta_13 = 5.371_920_351_148_152_f64;
-    let s = ((norm_1 / theta_13).log2().ceil().max(0.0)) as u32;
+    let s = (libm::log2(norm_1 / theta_13).ceil().max(0.0)) as u32;
     let scale = 2_f64.powi(-(s as i32));
     let a = m * scale;
 

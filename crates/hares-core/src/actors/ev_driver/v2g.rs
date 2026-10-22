@@ -10,7 +10,17 @@ pub struct V2GExport {
 
 impl ChargingPreference for V2GExport {
     fn score(&mut self, ctx: &DecisionContext) -> PreferenceVote {
-        let price = ctx.env.price_signal.electricity_price.unwrap_or(0.0);
+        // The export decision prices the rate the export earns: the run's
+        // published export price (the tariff evaluator publishes it under
+        // every export mode, the NetBilling credits included). A run that
+        // publishes no export price never sees a fabricated $0/kWh here -
+        // the vote stands down and the actor's decide-time gate reports
+        // the missing channel unhealthy.
+        let price = ctx.env.price_signal.export_price;
+        if price.is_none() {
+            return PreferenceVote::idle("v2g:no_export_price");
+        }
+        let price = price.unwrap_or(0.0);
 
         // The soc floor is a constraint on *this preference's vote* — do not
         // export below `min_soc` — not on the whole stack. It must live here,
@@ -79,6 +89,7 @@ mod tests {
         let env = TestEnvBuilder::new()
             .with_price_signal(PriceSignal {
                 electricity_price: Some(0.50),
+                export_price: Some(0.50),
                 ..Default::default()
             })
             .build();
@@ -102,11 +113,67 @@ mod tests {
         );
     }
 
+    /// The plan's acceptance: under NetBilling the export vote responds to
+    /// the export credit rate, not the import retail rate. The import
+    /// price sits below the threshold; the export credit above it. The
+    /// vote prices the rate the export actually earns.
     #[test]
-    fn exports_when_price_above_threshold() {
+    fn v2g_responds_to_export_price_under_net_billing() {
         let env = TestEnvBuilder::new()
             .with_price_signal(PriceSignal {
-                electricity_price: Some(0.30),
+                electricity_price: Some(0.10),
+                export_price: Some(0.30),
+                ..Default::default()
+            })
+            .build();
+        let mut pref = V2GExport {
+            min_soc: 0.3,
+            max_export_w: 5.0,
+            price_threshold: 0.20,
+        };
+        let ctx = make_ctx(&env, 0.7);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(
+            vote.label, "v2g:exporting",
+            "the export vote prices the export credit (0.30 above the 0.20 \
+             threshold), not the import rate (0.10, below it)"
+        );
+        assert!((vote.power_w.unwrap() - (-5.0)).abs() < 1e-9);
+    }
+
+    /// The converse: the import rate's level is not the export decision's
+    /// input. A high import price with a low export credit idles the vote.
+    #[test]
+    fn v2g_ignores_the_import_rate_for_the_export_decision() {
+        let env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                electricity_price: Some(0.50),
+                export_price: Some(0.10),
+                ..Default::default()
+            })
+            .build();
+        let mut pref = V2GExport {
+            min_soc: 0.3,
+            max_export_w: 5.0,
+            price_threshold: 0.20,
+        };
+        let ctx = make_ctx(&env, 0.7);
+        let vote = pref.score(&ctx);
+
+        assert_eq!(
+            vote.label, "v2g:idle",
+            "the export credit (0.10) is below the threshold; the import rate's \
+             level does not price an export decision"
+        );
+        assert!(vote.power_w.is_none());
+    }
+
+    #[test]
+    fn exports_when_export_price_above_threshold() {
+        let env = TestEnvBuilder::new()
+            .with_price_signal(PriceSignal {
+                export_price: Some(0.30),
                 ..Default::default()
             })
             .build();
@@ -124,10 +191,10 @@ mod tests {
     }
 
     #[test]
-    fn idles_when_price_below_threshold() {
+    fn idles_when_export_price_below_threshold() {
         let env = TestEnvBuilder::new()
             .with_price_signal(PriceSignal {
-                electricity_price: Some(0.10),
+                export_price: Some(0.10),
                 ..Default::default()
             })
             .build();
@@ -144,10 +211,10 @@ mod tests {
     }
 
     #[test]
-    fn idles_when_price_exactly_at_threshold() {
+    fn idles_when_export_price_exactly_at_threshold() {
         let env = TestEnvBuilder::new()
             .with_price_signal(PriceSignal {
-                electricity_price: Some(0.20), // exactly at threshold
+                export_price: Some(0.20), // exactly at threshold
                 ..Default::default()
             })
             .build();
@@ -165,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn idles_when_no_price() {
+    fn idles_when_no_export_price() {
         let env = TestEnvBuilder::new().build();
         let mut pref = V2GExport {
             min_soc: 0.3,
@@ -175,6 +242,9 @@ mod tests {
         let ctx = make_ctx(&env, 0.7);
         let vote = pref.score(&ctx);
 
-        assert_eq!(vote.label, "v2g:idle");
+        // The vote stands down on a missing channel; the actor's
+        // decide-time gate is what reports the run unhealthy (no
+        // fabricated $0/kWh decision exists at any layer).
+        assert_eq!(vote.label, "v2g:no_export_price");
     }
 }

@@ -402,6 +402,9 @@ fn run_resstock_fleet(req: RunRequest) -> FrameGoldenResult<RunProducts> {
         None,
         Some(chrono::Duration::seconds(seconds)),
         defaults_tree.dir(),
+        // The documented default master seed: the captures this tool
+        // compares were taken with it.
+        None,
     )
     .map_err(|err| FrameGoldenError::Engine(err.to_string()))?;
     let report = *fleet

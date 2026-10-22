@@ -44,9 +44,19 @@ pub const GROUND_NODE_ID: u32 = u32::MAX;
 /// Each unique foundation depth gets its own ground node: `GROUND_NODE_BASE + i`
 /// where `i` is the depth index in ascending order. All ground nodes are assigned
 /// below `OUTDOOR_NODE_ID` so the sorted external-node list places ground columns
-/// before the outdoor column in the B-matrix. Up to 99 unique depths are supported.
+/// before the outdoor column in the B-matrix. The range holds `MAX_UNIQUE_GROUND_DEPTHS`
+/// entries (indices 0..=98); `assemble_building_rc` rejects a depth table wider than
+/// that, because the 100th entry's node would wrap onto `OUTDOOR_NODE_ID` itself.
 pub const GROUND_NODE_BASE: u32 = u32::MAX - 100;
+/// Maximum number of unique foundation depths the ground-node table can hold
+/// without its per-depth nodes colliding with the outdoor driving node
+/// (`OUTDOOR_NODE_ID`, one past the table's last ID at index 99).
+pub const MAX_UNIQUE_GROUND_DEPTHS: usize = 99;
 /// First NodeId used for material-layer nodes (above zone air node range).
+///
+/// Zone air nodes are numbered 1..=n_zones, so `assemble_building_rc` rejects
+/// a zone count that reaches this base: the two node-ID ranges must stay
+/// disjoint or a layer node overwrites a zone's declared capacitance.
 const LAYER_NODE_BASE: u32 = 1_000;
 
 // --- Depth encoding (metres → integer-millimetre key) ---
@@ -393,6 +403,14 @@ pub struct EnvelopeDiagnostics {
     /// R-value because no HPXML R-value data was present.
     #[cfg(feature = "observe")]
     pub default_r_fallback_count: usize,
+    /// Number of node capacitances the `MIN_CAPACITANCE_J_K` floor lifted
+    /// during assembly (zone air nodes, material-layer nodes and precomputed
+    /// per-layer nodes). The floor's lift is intended behavior (a node with
+    /// less than the floor capacitance would make the implicit solve's
+    /// timestep unstable) but it silently inflates a thin or small-area
+    /// layer's thermal mass, so every lift is counted here.
+    #[cfg(feature = "observe")]
+    pub min_capacitance_clamp_count: usize,
 }
 
 // ── Output ──────────────────────────────────────────────────────────────────
@@ -530,6 +548,11 @@ pub enum BoundaryRcError {
 ///
 /// Cite: ASHRAE HoF 2021 §1.8 Eq.28; EnergyPlus `PsyRhoAirFnPbTdbW`;
 /// ISA 1976 / ICAO Doc 7488.
+///
+/// The `MIN_CAPACITANCE_J_K` floor applied here is uncounted: this
+/// pre-assembly output feeds the assembler's zone loop, and the assembler's
+/// clamp lifts are what `EnvelopeDiagnostics::min_capacitance_clamp_count`
+/// counts.
 pub fn derive_zone_capacitances(
     zones: &[ZoneInput],
     site_pressure_pa: f64,
@@ -641,6 +664,22 @@ pub fn assemble_building_rc(
 ) -> Result<(BuildingRC, EnvelopeDiagnostics), String> {
     let outdoor_node = NodeId(OUTDOOR_NODE_ID);
 
+    // Zone air nodes are numbered 1..=n_zones and material-layer nodes start
+    // at LAYER_NODE_BASE, so a zone count that reaches the base makes the two
+    // ranges collide: the layer's alloc_node silently overwrites the zone's
+    // declared capacitance and the zone's state row aliases the layer chain.
+    // The assembled-capacitance insurance below cannot catch that (the
+    // overwriting entry is positive), so the count itself is the guard.
+    if n_zones >= LAYER_NODE_BASE as usize {
+        return Err(format!(
+            "zone count {n_zones} reaches the layer-node base {LAYER_NODE_BASE}: \
+             zone air nodes are numbered 1..={n_zones} and material-layer nodes \
+             start at {LAYER_NODE_BASE}, so the zone nodes {LAYER_NODE_BASE}..={n_zones} \
+             collide with the layer nodes allocated from {LAYER_NODE_BASE} and \
+             the first layer node overwrites a zone's declared capacitance"
+        ));
+    }
+
     let mut unique_depths: Vec<f64> = boundaries
         .iter()
         .filter(|b| b.exterior == ExteriorTarget::Ground && b.area_m2 > 0.0)
@@ -648,6 +687,23 @@ pub fn assemble_building_rc(
         .collect();
     unique_depths.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     unique_depths.dedup();
+
+    // The per-depth ground nodes are GROUND_NODE_BASE + index, a table of
+    // MAX_UNIQUE_GROUND_DEPTHS entries below OUTDOOR_NODE_ID. A wider table
+    // wraps onto the outdoor driving node: the assembly would then resolve
+    // the run's outdoor column against a ground boundary's column and drive
+    // that boundary with outdoor temperature.
+    if unique_depths.len() > MAX_UNIQUE_GROUND_DEPTHS {
+        return Err(format!(
+            "{} unique foundation depths exceed the ground-node table's \
+             {MAX_UNIQUE_GROUND_DEPTHS} entries: ground nodes are \
+             GROUND_NODE_BASE + index and depth {} would wrap onto the \
+             outdoor driving node, silently driving a ground boundary with \
+             outdoor temperature",
+            unique_depths.len(),
+            unique_depths[MAX_UNIQUE_GROUND_DEPTHS]
+        ));
+    }
     let depth_to_node: std::collections::HashMap<u64, NodeId> = unique_depths
         .iter()
         .enumerate()
@@ -673,7 +729,10 @@ pub fn assemble_building_rc(
     // not a silent floor: the thermal-balance invariant's gate runs on
     // all-zero terms and passes vacuously over a capacitance-less model,
     // so a zone node without capacitance would silence exactly the check
-    // that catches it. The floor below stays for the values above it.
+    // that catches it. The floor below stays for the values above it, and
+    // every sub-floor value it lifts is counted in the diagnostics.
+    #[cfg(feature = "observe")]
+    let mut min_capacitance_clamp_count = 0usize;
     for (zone_idx, cap) in zone_capacitances.iter().enumerate().take(n_zones) {
         if !(cap.is_finite() && *cap > 0.0) {
             return Err(format!(
@@ -683,6 +742,10 @@ pub fn assemble_building_rc(
             ));
         }
         let node = NodeId((zone_idx + 1) as u32);
+        #[cfg(feature = "observe")]
+        if *cap < MIN_CAPACITANCE_J_K {
+            min_capacitance_clamp_count += 1;
+        }
         initial_capacitances.insert(node, cap.max(MIN_CAPACITANCE_J_K));
     }
 
@@ -1260,6 +1323,12 @@ pub fn assemble_building_rc(
     // Ground nodes (GROUND_NODE_BASE + i) are all < OUTDOOR_NODE_ID,
     // so RCNetwork::from_elements will sort them: ground[0] < ground[1] < ... < outdoor.
 
+    // Drain the assembly's clamp counter before the graph is consumed: the
+    // zone-air count (declared sub-floor capacitances) plus every layer node
+    // the floor lifted during boundary construction.
+    #[cfg(feature = "observe")]
+    let min_capacitance_clamp_count =
+        min_capacitance_clamp_count + graph.min_capacitance_clamp_count;
     let (capacitances, resistances) = graph.into_elements();
 
     let rc = RCNetwork::from_elements(capacitances, resistances, external_nodes)
@@ -1508,6 +1577,8 @@ pub fn assemble_building_rc(
         total_ua_w_per_k: boundary_ua + fallback_ua,
         #[cfg(feature = "observe")]
         default_r_fallback_count,
+        #[cfg(feature = "observe")]
+        min_capacitance_clamp_count,
     };
 
     Ok((
@@ -1536,6 +1607,11 @@ struct RcGraphState {
     next_layer_id: u32,
     capacitances: HashMap<NodeId, f64>,
     resistances: HashMap<(NodeId, NodeId), f64>,
+    /// Count of node capacitances the `MIN_CAPACITANCE_J_K` floor lifted
+    /// while building this assembly's boundaries, drained into the
+    /// diagnostics so the floor's mass inflation is visible, not silent.
+    #[cfg(feature = "observe")]
+    min_capacitance_clamp_count: usize,
 }
 
 impl RcGraphState {
@@ -1544,6 +1620,8 @@ impl RcGraphState {
             next_layer_id: LAYER_NODE_BASE,
             capacitances: initial_capacitances,
             resistances: HashMap::with_capacity(est_edges),
+            #[cfg(feature = "observe")]
+            min_capacitance_clamp_count: 0,
         }
     }
 
@@ -1657,6 +1735,10 @@ impl RcGraphState {
                 raw_cap
             };
             let cap = halved.max(MIN_CAPACITANCE_J_K);
+            #[cfg(feature = "observe")]
+            if halved < MIN_CAPACITANCE_J_K {
+                self.min_capacitance_clamp_count += 1;
+            }
             layer_nodes.push(self.alloc_node(cap));
         }
 
@@ -1855,7 +1937,14 @@ impl RcGraphState {
         // Step 5: scale to absolute values
         let cap_abs: Vec<f64> = cap_list
             .iter()
-            .map(|c| (c * 1000.0 * params.boundary_area).max(MIN_CAPACITANCE_J_K))
+            .map(|&c| {
+                let raw_cap = c * 1000.0 * params.boundary_area;
+                #[cfg(feature = "observe")]
+                if raw_cap < MIN_CAPACITANCE_J_K {
+                    self.min_capacitance_clamp_count += 1;
+                }
+                raw_cap.max(MIN_CAPACITANCE_J_K)
+            })
             .collect();
         let mut res_abs: Vec<f64> = res_list
             .iter()
@@ -4862,6 +4951,250 @@ mod tests {
         let layers = vec![make_layer(0.1, 0.5, -1000.0, 800.0, 50.0)];
         let boundaries = vec![make_boundary(50.0, 0, ExteriorTarget::Outdoor, layers, 2.5)];
         let _ = assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF);
+    }
+
+    // ── Zone-count ceiling ──────────────────────────────────────────────
+    //
+    // Zone air nodes are numbered 1..=n_zones and material-layer nodes start
+    // at LAYER_NODE_BASE (1000), so a zone count that reaches the base makes
+    // the zone nodes from LAYER_NODE_BASE upward collide with the layer
+    // nodes allocated from LAYER_NODE_BASE: the layer's `alloc_node` then
+    // silently overwrites a zone's declared capacitance (a 100 999 J/K zone
+    // air node became a 2 000 000 J/K wall node in the probe) and the zone's
+    // state row aliases the wall chain. The assembled capacitance insurance
+    // above cannot catch this: the overwriting entry is positive. The
+    // ceiling is what keeps the two ID ranges disjoint.
+
+    /// A zone count at the layer-node base is a construction error naming
+    /// the count and the true collision pair, not a silently corrupted
+    /// assembly.
+    #[test]
+    fn zone_count_at_the_layer_node_base_is_a_construction_error() {
+        let caps: Vec<f64> = (0..1000).map(|i| 100_000.0 + i as f64).collect();
+        // Zone 999's air node is NodeId(1000), the first layer node ID; this
+        // boundary's sub-layers allocate exactly that ID.
+        let layer = make_layer(0.1, 0.5, 1000.0, 800.0, 50.0);
+        let boundaries = vec![make_boundary(
+            50.0,
+            999,
+            ExteriorTarget::Outdoor,
+            vec![layer],
+            2.5,
+        )];
+        let err = match assemble_building_rc(&boundaries, 1000, &caps, InteriorLwrMethod::ScriptF) {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "a zone count that collides with the layer-node base must fail at construction"
+            ),
+        };
+        assert!(err.contains("1000"), "the error must name the count: {err}");
+        assert!(
+            err.contains("zone"),
+            "the error must name the object: {err}"
+        );
+        assert!(
+            err.contains(&format!("zone nodes {LAYER_NODE_BASE}..=1000")),
+            "the error must name the true colliding range: {err}"
+        );
+        assert!(
+            err.contains("collide"),
+            "the error must name the collision: {err}"
+        );
+    }
+
+    /// Above the base the message stays truthful: at 1200 zones the last
+    /// zone's air node (node 1200) meets the 201st layer node, not the
+    /// first, so the message names the general colliding range (the zone
+    /// nodes LAYER_NODE_BASE..=n_zones) rather than a pair that only holds
+    /// at exactly 1000.
+    #[test]
+    fn zone_count_above_the_base_names_the_true_collision() {
+        let caps: Vec<f64> = vec![100_000.0; 1200];
+        let err = match assemble_building_rc(&[], 1200, &caps, InteriorLwrMethod::ScriptF) {
+            Err(e) => e,
+            Ok(_) => panic!("a zone count above the layer-node base must fail at construction"),
+        };
+        assert!(err.contains("1200"), "the error must name the count: {err}");
+        assert!(
+            err.contains(&format!("zone nodes {LAYER_NODE_BASE}..=1200")),
+            "the error must name the true colliding range: {err}"
+        );
+        assert!(
+            err.contains("collide"),
+            "the error must name the collision: {err}"
+        );
+    }
+
+    /// One zone below the ceiling stays inside the disjoint ID range and
+    /// assembles: the ceiling guards the range, not legitimate counts.
+    #[test]
+    fn zone_count_below_the_layer_node_base_assembles() {
+        let caps: Vec<f64> = (0..999).map(|i| 100_000.0 + i as f64).collect();
+        let layer = make_layer(0.1, 0.5, 1000.0, 800.0, 50.0);
+        let boundaries = vec![make_boundary(
+            50.0,
+            998,
+            ExteriorTarget::Outdoor,
+            vec![layer],
+            2.5,
+        )];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 999, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        // The zone air node keeps its declared capacitance: no layer node
+        // overwrote it.
+        assert_eq!(rc.node_capacitances[&NodeId(999)], caps[998]);
+    }
+
+    // ── Depth-table ceiling ─────────────────────────────────────────────
+    //
+    // Ground driving nodes are `GROUND_NODE_BASE + index`, a range of 99 IDs
+    // below OUTDOOR_NODE_ID. A depth table wider than that wraps the 100th
+    // unique depth onto the outdoor driving node: the probe assembled Ok and
+    // resolved `outdoor_col` to Some(99) on a model with no outdoor boundary,
+    // i.e. outdoor temperature would drive a ground column. The ceiling turns
+    // the wrap into a construction error naming the count.
+
+    #[test]
+    fn hundred_unique_ground_depths_is_a_construction_error() {
+        for n_depths in [100usize, 101] {
+            let caps = vec![100_000.0];
+            let boundaries: Vec<BoundaryInput> = (0..n_depths)
+                .map(|d| {
+                    let layer = make_layer(0.1, 0.5, 1000.0, 800.0, 50.0);
+                    make_ground_boundary(50.0, 0, 1.0 + 0.001 * d as f64, vec![layer], 2.5)
+                })
+                .collect();
+            let err = match assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF)
+            {
+                Err(e) => e,
+                Ok(_) => panic!(
+                    "{n_depths} unique depths: a depth table wider than the ground-node range must fail at construction"
+                ),
+            };
+            assert!(
+                err.contains(&n_depths.to_string()),
+                "the error must name the count: {err}"
+            );
+            assert!(
+                err.contains("depth"),
+                "the error must name the object: {err}"
+            );
+        }
+    }
+
+    /// 99 unique depths fill the ground-node range exactly and assemble.
+    #[test]
+    fn ninety_nine_unique_ground_depths_assemble() {
+        let caps = vec![100_000.0];
+        let boundaries: Vec<BoundaryInput> = (0..99)
+            .map(|d| {
+                let layer = make_layer(0.1, 0.5, 1000.0, 800.0, 50.0);
+                make_ground_boundary(50.0, 0, 1.0 + 0.001 * d as f64, vec![layer], 2.5)
+            })
+            .collect();
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        assert_eq!(rc.ground_cols.len(), 99);
+        // No ground node aliases the outdoor driving node, so the outdoor
+        // column resolves to nothing on this outdoor-free model.
+        assert_eq!(rc.outdoor_col, None);
+    }
+
+    // ── Capacitance-floor counting ──────────────────────────────────────
+
+    /// A declared capacitance below `MIN_CAPACITANCE_J_K` still assembles
+    /// (the floor's clamp is the intended behavior) but the lift is counted
+    /// in the run's diagnostics, so the silent mass inflation of a thin or
+    /// small-area layer is visible.
+    #[test]
+    fn sub_floor_material_capacitance_clamp_is_counted() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        // 1 mm, 1 m2, 50 kg/m3, 1000 J/(kg K): raw cap 50 J/K, far below the
+        // floor; conductivity low enough that no diurnal split applies.
+        let layer = make_layer(0.001, 0.02, 50.0, 1000.0, 1.0);
+        let boundaries = vec![make_boundary(
+            1.0,
+            0,
+            ExteriorTarget::Outdoor,
+            vec![layer],
+            2.5,
+        )];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        #[cfg(feature = "observe")]
+        assert_eq!(
+            _diag.min_capacitance_clamp_count, 1,
+            "the sub-floor layer capacitance the floor lifted must be counted"
+        );
+        let layer_node = NodeId(LAYER_NODE_BASE);
+        assert_eq!(
+            rc.node_capacitances[&layer_node], MIN_CAPACITANCE_J_K,
+            "the clamp still applies; the count records it"
+        );
+    }
+
+    /// The precomputed path's floor counts its lifts too.
+    #[test]
+    fn sub_floor_precomputed_capacitance_clamp_is_counted() {
+        let zones = vec![ZoneInput {
+            floor_area_m2: Some(100.0),
+            volume_m3: Some(250.0),
+            temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+        }];
+        let caps =
+            derive_zone_capacitances(&zones, hares_physics::constants::SEA_LEVEL_PRESSURE_PA)
+                .unwrap();
+        // 0.05 kJ/(m2 K) over 1 m2: raw cap 50 J/K, far below the floor.
+        let pre = vec![PrecomputedRCLayer {
+            resistance_m2_k_w: 0.5,
+            capacitance_kj_m2_k: 0.05,
+        }];
+        let boundaries = vec![make_precomputed_boundary(
+            1.0,
+            0,
+            ExteriorTarget::Outdoor,
+            pre,
+            2.5,
+        )];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+        #[cfg(feature = "observe")]
+        assert_eq!(
+            _diag.min_capacitance_clamp_count, 1,
+            "the sub-floor precomputed capacitance the floor lifted must be counted"
+        );
+        let layer_node = NodeId(LAYER_NODE_BASE);
+        assert_eq!(rc.node_capacitances[&layer_node], MIN_CAPACITANCE_J_K);
+    }
+
+    /// A zone capacitance below the floor handed straight to the assembler
+    /// counts its lift (the derived path floors before assembly; this guards
+    /// the assembler's own clamp for direct callers).
+    #[test]
+    fn sub_floor_zone_capacitance_clamp_is_counted() {
+        let layer = make_layer(0.1, 0.5, 1000.0, 800.0, 50.0);
+        let boundaries = vec![make_boundary(
+            50.0,
+            0,
+            ExteriorTarget::Outdoor,
+            vec![layer],
+            2.5,
+        )];
+        let (rc, _diag) =
+            assemble_building_rc(&boundaries, 1, &[500.0], InteriorLwrMethod::ScriptF).unwrap();
+        #[cfg(feature = "observe")]
+        assert_eq!(
+            _diag.min_capacitance_clamp_count, 1,
+            "the sub-floor zone capacitance the floor lifted must be counted"
+        );
+        assert_eq!(rc.node_capacitances[&NodeId(1)], MIN_CAPACITANCE_J_K);
     }
 
     #[test]

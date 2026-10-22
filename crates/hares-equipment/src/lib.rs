@@ -181,7 +181,7 @@ pub trait Equipment: Send + Sync {
     fn save_state(&self) -> crate::Result<Vec<u8>>;
     fn load_state(&mut self, state: &[u8]) -> Result<()>;
 
-    /// The energy the equipment's internal state carries [J], when that
+    /// The energy the equipment's internal state carries (J), when that
     /// state holds energy the port snapshot cannot see: the water a tank
     /// has heated, the charge a pack holds. `None` when the state carries
     /// no measurable energy (the default).
