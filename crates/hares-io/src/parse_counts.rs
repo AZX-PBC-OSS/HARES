@@ -14,9 +14,9 @@ static SCHEDULE_PARSES: AtomicU64 = AtomicU64::new(0);
 static DEFAULTS_LOADS: AtomicU64 = AtomicU64::new(0);
 static PROFILE_LOADS: AtomicU64 = AtomicU64::new(0);
 
-/// The calling thread's own mirror of the five counters: the snapshot the
-/// in-process probes read, because a sibling test on another thread parses
-/// concurrently and the process-global counters move under its samples.
+// The calling thread's own mirror of the five counters: the snapshot the
+// in-process probes read, because a sibling test on another thread parses
+// concurrently and the process-global counters move under its samples.
 thread_local! {
     static THREAD_PARSE_COUNTS: ParseCountsCell = ParseCountsCell::default();
 }
