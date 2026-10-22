@@ -26,6 +26,20 @@ from hares.rl.vec_env import VecDwellingGymEnv
 
 _OBS_FIELDS = ["total_power_w", "outdoor_temp"]
 
+
+@pytest.fixture(autouse=True)
+def _unresolved_start_method():
+    """The fork guard reads the process's resolved start method, and any
+    sibling suite's multiprocessing use resolves the Linux default (fork)
+    into the process state the guard then reads as explicit policy: the
+    guard cannot tell a resolved default from a set one. The vec tests
+    reset the resolution before each test, so the guard reads the
+    process's own policy alone; an explicitly-set fork still raises."""
+    import multiprocessing
+
+    multiprocessing.set_start_method(None, force=True)
+    yield
+
 # heat_c = 21 degC is a valid setpoint: the clean-step baseline.
 _CLEAN_ACTION_CONFIG = {"Gas Furnace": ["heat_c"]}
 # cool_c = 70 degC is inside the gym clip range (-50, 80) but outside

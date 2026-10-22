@@ -36,6 +36,21 @@ HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
 WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
 SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
 
+
+@pytest.fixture(autouse=True)
+def _unresolved_start_method():
+    """The fork guard reads the process's resolved start method, and any
+    sibling suite's multiprocessing use resolves the Linux default (fork)
+    into the process state the guard then reads as explicit policy: the
+    guard cannot tell a resolved default from a set one. The vec tests
+    reset the resolution before each test, so the guard reads the
+    process's own policy alone; the fork test's monkeypatched reader is
+    untouched by this."""
+    import multiprocessing
+
+    multiprocessing.set_start_method(None, force=True)
+    yield
+
 _DWELLING_CONFIG = GymDwellingConfig(
     hpxml=HPXML,
     schedule=SCHEDULE,
