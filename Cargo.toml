@@ -65,6 +65,7 @@ tzf-rs = "2.1"
 quick-xml = "0.42"
 rand = "0.10"
 rand_chacha = "0.10"
+libm = "0.2"
 rand_distr = "0.6"
 tracing = { version = "0.1", features = ["release_max_level_info"] }
 thiserror = "2"

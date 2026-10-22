@@ -240,7 +240,11 @@ impl ZipLoad {
         if self.pf.abs() < 1e-9 {
             0.0
         } else {
-            self.pf.clamp(-1.0, 1.0).acos().tan()
+            // The tan and acos come from the libm crate's pure-Rust
+            // implementations, not the platform's: the linux capture and the
+            // mac leg must evaluate the same bits, and the two platform
+            // libms disagree on the last bit for some inputs.
+            libm::tan(libm::acos(self.pf.clamp(-1.0, 1.0)))
         }
     }
 
