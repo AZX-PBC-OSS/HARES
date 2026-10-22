@@ -662,6 +662,12 @@ pub fn batch_step_py(
             dwellings.len(),
         )));
     }
+    // An empty fleet's result is an empty list: nothing to step, nothing to
+    // write, and the caller's buffer may be any shape they like (a
+    // zero-item stdlib array exposes no float64 format to validate).
+    if dwellings.is_empty() {
+        return Ok(Vec::new());
+    }
     // One plan per environment, all freezing the same field list: the
     // observation buffer's width is the plan's, one row per environment.
     let plan_handles: Vec<Arc<hares_core::ObservationPlan>> = plans
