@@ -1067,3 +1067,62 @@ agreement form (HARES == the E+ port at 1e-9) and failed: HARES
 (a 0.5 m² south-facing cross-ventilated opening, perpendicular 3 m/s
 wind, 26 °C zone over 20 °C outdoor, 22 °C comfort base) - the
 disagreement the decision records.
+
+## The runtime transcendental math is pinned to the libm crate
+
+Every runtime `f64` transcendental the physics evaluates (`sin`, `cos`,
+`tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `ln`, `log2`, `log10`,
+`powf`, `cbrt`) is computed by the `libm` crate's pure-Rust
+implementation, never the platform's libm. The same input run on any
+platform produces the same bits.
+
+The mechanism: glibc (Linux) and Apple's libm (macOS) both compute
+these functions to high accuracy, but not to the same bits; on some
+inputs the results differ by one ULP. The engine's step amplifies that:
+a one-ULP difference in a solar-geometry cosine becomes a last-bit
+difference in the step's fluxes, and the step repeats tens of thousands
+of times in a run, so the drift surfaces in sparse rows as multi-ULP
+differences in the products. Two proofs fixed the mechanism. The
+six-leg bisect: the macOS leg of the golden-agreement workflow is red
+at every tree it can test, back to the first commit that carries golden
+manifests, so the divergence predates every state the goldens could
+have pinned on a code change. The reactive path's causal proof: pinning
+the single transcendental on `resstock_2025_fleet`'s only transcendental
+surface (the ZIP load's `tan_phi`, `c432d527`) made that fixture
+identical on the macOS leg while every Linux golden stayed bitwise.
+
+The scope: 162 runtime call sites across 44 files (the probe branch's
+census, `d1e56d9f`) plus the four ASHRAE 152 `f64::exp` sites in
+`calculate_dse` the census missed. Every substitution is
+argument-for-argument into the same function family: no algebraic
+rewrite, no fma introduction, no precomputation. A runtime scan after
+the pin finds zero platform-math call sites in `crates/*/src` outside
+test modules. The operations that cannot differ across platforms stay
+unpinned: `sqrt` (IEEE 754 correctly rounded), `powi` (composed
+multiplications), `abs`, `floor`, `ceil`, `to_radians`, `mul_add` (fma
+is exactly defined).
+
+The cost, paid once: the golden corpus and the B1 baseline re-captured
+at the pinned tree with every movement attributed to the mechanism (the
+measurement ladder's re-anchor row, 2026-10-22). Nine of the ten
+default manifests' digests moved plus the dst manifest's;
+`resstock_2025_fleet` stayed bitwise. All 13 calibration losses moved
+within the last bits (the worst 5,155 ULP, 9.4e-13 relative). The
+pinned libm's pure-Rust transcendentals cost about 15 percent more wall
+on the capture workload than glibc's optimized assembly, compute-bound
+(the CPU time rose the same fraction): the accepted price of
+cross-platform bit-identity.
+
+The alternatives, rejected:
+
+1. Capture the goldens per platform. Each platform then compares
+   against its own capture, and the claim the workflow exists to make
+   (the same bits everywhere) is unachievable by construction: nothing
+   would ever compare Linux's bits to macOS's. A checkpoint written on
+   one platform could not be resumed bit-exactly on another.
+2. Scope the workflow's contract to a tolerance. The contract weakens
+   from bitwise to within-epsilon, and the one-ULP amplifier becomes an
+   accepted slow drift that no fixture can catch.
+
+The pin keeps the contract bitwise and pays once.
+
