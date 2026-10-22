@@ -1350,14 +1350,14 @@ mod tests {
         let schedule =
             InputSource::from_path(repo_root().join("data/examples/BEopt_example_schedule.csv"));
         let cache = ParsedInputsCache::new();
-        let before = crate::parse_counts::parse_counts();
+        let before = crate::parse_counts::parse_counts_thread();
         let first_inputs = cache
             .parsed_inputs(&first, Some(&schedule), &weather, &defaults, None)
             .expect("the first source parses");
         let second_inputs = cache
             .parsed_inputs(&second, Some(&schedule), &weather, &defaults, None)
             .expect("the second source parses");
-        let after = crate::parse_counts::parse_counts();
+        let after = crate::parse_counts::parse_counts_thread();
         assert!(
             Arc::ptr_eq(&first_inputs.hpxml, &second_inputs.hpxml),
             "equal contents share one parse"

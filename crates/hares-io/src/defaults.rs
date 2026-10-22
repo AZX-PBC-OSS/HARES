@@ -5535,14 +5535,14 @@ efficiency_ratio = 0.0
             .expect("the repo defaults load");
 
         let edited = "[probe_equipment]\nzp = 3.0\nip = 0.0\npp = 0.0\nzq = 1.0\niq = 0.0\npq = 0.0\npf = 1.0\n";
-        let before = crate::parse_counts::parse_counts();
+        let before = crate::parse_counts::parse_counts_thread();
         let replaced = source
             .with_file(
                 "zip_parameters.toml",
                 InputSource::Text(edited.to_string().into()),
             )
             .expect("the replacement loads");
-        let after = crate::parse_counts::parse_counts();
+        let after = crate::parse_counts::parse_counts_thread();
 
         assert_eq!(
             after.defaults - before.defaults,
