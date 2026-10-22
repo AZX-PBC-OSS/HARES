@@ -2344,7 +2344,7 @@ mod tests {
     use std::fs;
     use std::num::NonZeroU32;
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError};
     use std::thread;
 
     use arrow::array::{
@@ -2355,6 +2355,15 @@ mod tests {
     use parquet::arrow::arrow_writer::ArrowWriter;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// The parse-count probes (`*_parses_each_unique_input_once`) sample the
+    /// process-global `parse_counts` and assert exact deltas: the samples
+    /// assume no sibling construction parses inputs between them. nextest's
+    /// process isolation gives each probe its own process, where the lock is
+    /// uncontended; in-process runners (the coverage job's llvm-cov cargo
+    /// test) execute the tests on shared threads, so every test here holds
+    /// the lock for its whole body and the samples read the counters alone.
+    static PARSE_COUNT_EXCLUSIVITY: Mutex<()> = Mutex::new(());
 
     /// A root no test creates and a non-root user cannot: every path under it
     /// is missing, and nothing can be written there.
@@ -2544,6 +2553,9 @@ mod tests {
 
     #[test]
     fn simulate_runs_three_dwellings() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3))
             .expect("the configs carry no reserved report or shared destination");
@@ -2563,6 +2575,9 @@ mod tests {
 
     #[test]
     fn from_buildings_defaults_to_valid_weight() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = Fleet::from_buildings(build_missing_configs(3))
             .expect("the configs carry no reserved report or shared destination");
         let weights: Vec<f64> = fleet.entries.iter().map(|e| e.sample_weight).collect();
@@ -2571,6 +2586,9 @@ mod tests {
 
     #[test]
     fn with_sample_weights_accepts_zero_and_positive() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = Fleet::from_buildings(build_missing_configs(3))
             .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0, 0.0, 2.5])
@@ -2581,6 +2599,9 @@ mod tests {
 
     #[test]
     fn with_sample_weights_rejects_nan() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let err = Fleet::from_buildings(build_missing_configs(2))
             .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0, f64::NAN])
@@ -2596,6 +2617,9 @@ mod tests {
 
     #[test]
     fn with_sample_weights_rejects_negative() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let err = Fleet::from_buildings(build_missing_configs(2))
             .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0, -3.0])
@@ -2611,6 +2635,9 @@ mod tests {
 
     #[test]
     fn with_sample_weights_rejects_infinite() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let err = Fleet::from_buildings(build_missing_configs(1))
             .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![f64::INFINITY])
@@ -2626,6 +2653,9 @@ mod tests {
 
     #[test]
     fn with_sample_weights_rejects_length_mismatch() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let err = Fleet::from_buildings(build_missing_configs(2))
             .expect("the configs carry no reserved report or shared destination")
             .with_sample_weights(vec![1.0])
@@ -2641,6 +2671,9 @@ mod tests {
 
     #[test]
     fn panic_in_callback_is_isolated_to_one_result() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let panic_on = 2usize;
         let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3))
@@ -2670,6 +2703,9 @@ mod tests {
 
     #[test]
     fn panic_error_message_includes_file_and_line() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let panic_on = 2usize;
         let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 3))
@@ -2706,6 +2742,9 @@ mod tests {
 
     #[test]
     fn thread_count_configuration_and_global_pool_path_work() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let thread_ids = Arc::new(Mutex::new(HashSet::new()));
         let thread_ids_for_callback = Arc::clone(&thread_ids);
 
@@ -2784,6 +2823,9 @@ mod tests {
 
     #[test]
     fn progress_callback_is_invoked_and_can_lock_shared_state() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let progress_count = Arc::new(AtomicUsize::new(0));
         let progress_count_cb = Arc::clone(&progress_count);
         let lock = Arc::new(Mutex::new(()));
@@ -2806,6 +2848,9 @@ mod tests {
 
     #[test]
     fn weather_filename_matches_dataset_conventions() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assert_eq!(
             weather_filename_for_building("G0800130", ResStockVersion::V2024_1),
             "G0800130.epw"
@@ -2822,6 +2867,9 @@ mod tests {
 
     #[test]
     fn test_resolve_weather_path_with_fips_2024_epw() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let building = ResStockBuilding {
             bldg_id: 1,
             upgrade: 0,
@@ -2840,6 +2888,9 @@ mod tests {
 
     #[test]
     fn test_resolve_weather_path_with_fips_2025_csv() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let building = ResStockBuilding {
             bldg_id: 2,
             upgrade: 0,
@@ -2861,6 +2912,9 @@ mod tests {
 
     #[test]
     fn test_resolve_weather_path_without_fips_returns_none() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let building = ResStockBuilding {
             bldg_id: 1,
             upgrade: 0,
@@ -2881,12 +2935,18 @@ mod tests {
 
     #[test]
     fn path_is_readable_weather_file_rejects_zip() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // Even if the path doesn't exist, a .zip extension should be rejected.
         assert!(!path_is_readable_weather_file(Path::new("something.zip")));
     }
 
     #[test]
     fn resolve_weather_path_matches_fixture_files() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fixture_root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/resstock");
 
@@ -2967,6 +3027,9 @@ mod tests {
 
     #[test]
     fn steppable_fleet_steps_and_finishes() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let (mut fleet, build_errors) =
             SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
@@ -3003,6 +3066,9 @@ mod tests {
     /// fail, it finished.
     #[test]
     fn step_after_finish_is_already_finished_error() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let (mut fleet, build_errors) =
             SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
@@ -3029,6 +3095,9 @@ mod tests {
     /// and returning or reporting `None`.
     #[test]
     fn steppable_fleet_accessors_reject_a_missing_home() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let (mut fleet, build_errors) =
             SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 2)
@@ -3063,6 +3132,9 @@ mod tests {
 
     #[test]
     fn steppable_fleet_from_configs_returns_partial_success() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let mut configs = build_valid_configs(dir.path(), 2);
         let mut bad = build_missing_configs(1);
@@ -3083,6 +3155,9 @@ mod tests {
 
     #[test]
     fn steppable_fleet_empty_configs_returns_error() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let result = SteppableFleet::from_configs(vec![], 0);
         assert!(result.is_err());
         assert!(
@@ -3095,6 +3170,9 @@ mod tests {
 
     #[test]
     fn steppable_fleet_all_configs_fail_returns_error() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let bad_configs = build_missing_configs(3);
         let result = SteppableFleet::from_configs(bad_configs, 0);
         assert!(result.is_err());
@@ -3105,6 +3183,9 @@ mod tests {
 
     #[test]
     fn steppable_fleet_skips_failed_dwelling() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let (mut fleet, build_errors) =
             SteppableFleet::from_configs(build_valid_configs(dir.path(), 3), 2)
@@ -3150,6 +3231,9 @@ mod tests {
 
     #[test]
     fn steppable_fleet_ipc_isolation_after_failure() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         // Integration test: verify that a failed dwelling does not prevent
         // other dwellings from producing valid results over a full simulation.
@@ -3207,6 +3291,9 @@ mod tests {
 
     #[test]
     fn construction_panic_is_not_a_runtime_failure() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         // Regression test: a dwelling that fails during from_config is
         // never added to the fleet, so it cannot be marked as a runtime
@@ -3246,6 +3333,9 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn dwelling_panic_during_step_is_caught_and_marks_dwelling_failed() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         // End-to-end test of the panic→failed→skipped path in
         // step_dwellings_parallel.  A dwelling configured to panic during
@@ -3321,6 +3411,9 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn assert_panic_from_dwelling_step_includes_file_and_line() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         // Verifies the end-to-end chain when equipment/dwelling code panics
         // via assert! (as opposed to panic!()). The hook must capture
@@ -3371,6 +3464,9 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn single_panic_does_not_abort_fleet_and_other_dwellings_intact() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         // Integration test: verify that when one dwelling panics in a
         // steppable fleet, the process does not abort and the other
@@ -3428,6 +3524,9 @@ mod tests {
 
     #[test]
     fn double_panic_guard_fallback_constructs_valid_sim_error() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // Unit test: verify the double-panic guard pattern used in
         // simulate_parallel and step_dwellings_parallel. When the post-
         // catch_unwind error handler itself panics, the nested catch_unwind
@@ -3502,6 +3601,9 @@ mod tests {
 
     #[test]
     fn test_remap_weather_path_zone_validation() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let hpxml_path = dir.path().join("home.xml");
         write_temp_file(&hpxml_path, &build_hpxml_with_zone("5B"));
@@ -3686,6 +3788,9 @@ mod tests {
     /// dwellings and the resolved weather files of one build.
     #[test]
     fn fleet_report_counts_the_resstock_construction() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         write_resstock_parquet_v2025(&pq, 19_694);
@@ -3720,6 +3825,9 @@ mod tests {
     /// no weather files, so it carries no construction report.
     #[test]
     fn from_buildings_carries_no_construction_report() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let config = DwellingConfig {
             hpxml: InputSource::Path(PathBuf::from("no.xml")),
             schedule: None,
@@ -3749,6 +3857,9 @@ mod tests {
 
     #[test]
     fn from_resstock_default_duration() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         write_resstock_parquet_v2025(&pq, 1);
@@ -3791,6 +3902,9 @@ mod tests {
     /// config records the directory given, and the dwelling builds on it.
     #[test]
     fn from_resstock_passes_the_defaults_directory_to_each_dwelling() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         // bldg0019694 is a committed fixture building whose weather station
@@ -3825,6 +3939,9 @@ mod tests {
 
     #[test]
     fn from_resstock_with_custom_duration() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         write_resstock_parquet_v2025(&pq, 1);
@@ -3863,6 +3980,9 @@ mod tests {
     /// file: no file swaps.
     #[test]
     fn resstock_fleet_reads_the_extracted_layout() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         write_resstock_parquet_v2025(&pq, 19_694);
@@ -3905,6 +4025,9 @@ mod tests {
     /// resolved (no file swaps).
     #[test]
     fn resstock_fleet_builds_and_runs_a_dwelling_with_resolved_weather() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         write_resstock_parquet_v2025(&pq, 19_694);
@@ -3970,6 +4093,9 @@ mod tests {
     /// before the parameter existed), `Some(seed)` is the caller's.
     #[test]
     fn from_resstock_seed_reaches_the_configs_and_the_report() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (tmp, pq) = stochastic_fleet();
         let weather = resstock_fixtures_root().join("2025.1/weather");
         let defaults = repo_defaults_path();
@@ -4034,6 +4160,9 @@ mod tests {
     /// no caller could vary a draw.)
     #[test]
     fn from_resstock_seed_partitions_the_stochastic_draws() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (tmp, pq) = stochastic_fleet();
         let weather = resstock_fixtures_root().join("2025.1/weather");
         let defaults = repo_defaults_path();
@@ -4164,6 +4293,9 @@ mod tests {
     /// building directories belong) is a typed error naming the fix.
     #[test]
     fn resstock_fleet_rejects_the_dataset_zip() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         write_resstock_parquet_v2025(&pq, 19_694);
@@ -4219,6 +4351,9 @@ mod tests {
     /// never the removed 2019-01-01 UTC+0 assumption.
     #[test]
     fn resstock_actual_year_fleet_runs_the_weather_year() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (metadata, buildings, weather) = fleet3_inputs();
         let fleet = Fleet::from_resstock(
             &metadata,
@@ -4258,6 +4393,9 @@ mod tests {
     /// exist, so a metadata read would name the file instead).
     #[test]
     fn resstock_typical_year_needs_a_year() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (_metadata, buildings, _) = fleet3_inputs();
         let err = Fleet::from_resstock(
             &PathBuf::from(MISSING_ROOT).join("metadata.parquet"),
@@ -4287,6 +4425,9 @@ mod tests {
     /// 2024-01-02 00:00 local - read the file's own Jan 1 records.
     #[test]
     fn resstock_typical_year_fleet_wraps_by_day_of_year() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let tmp = tempdir().expect("tmp");
         let pq = tmp.path().join("test.parquet");
         // One home at the metadata's weight 1.0, so the aggregate's
@@ -4405,6 +4546,9 @@ mod tests {
     /// with its county, not a warned empty path.
     #[test]
     fn unresolved_resstock_weather_is_an_error() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (metadata, buildings, _) = fleet3_inputs();
         let empty_weather = tempdir().expect("tmp");
         let err = Fleet::from_resstock(
@@ -4549,6 +4693,9 @@ mod tests {
     /// 12-home scale the barrier actually stresses (six crossings).
     #[test]
     fn fleet_fold_matches_collect_then_aggregate() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = golden_fleet();
         let collected = fleet
             .simulate(&minutes_15(), 1, chunk(64))
@@ -4630,6 +4777,9 @@ mod tests {
     /// compared column by column with the floats on bits.
     #[test]
     fn fleet_result_identical_across_threads_and_chunks() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = golden_fleet();
         let reference = fleet
             .simulate(&minutes_15(), 1, chunk(64))
@@ -4667,6 +4817,9 @@ mod tests {
     /// at once is the chunk size.
     #[test]
     fn fleet_peak_live_home_results_bounded_by_chunk() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = golden_fleet();
         for (size, expected) in [(1usize, 1usize), (2, 2)] {
             let result = fleet
@@ -4683,6 +4836,9 @@ mod tests {
     /// same names in the same order.
     #[test]
     fn fleet_aggregate_columns_match_home_report_schema() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // The first home's own Timestep memory report of the same
         // selection, run standalone.
         let mut home_config = golden_fleet_config(1, "G0600770_2018.csv");
@@ -4752,6 +4908,9 @@ mod tests {
     /// period means, added in step order and divided once by 15.
     #[test]
     fn fleet_minutes_15_reduces_one_minute_steps() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let examples = repo_root().join("data/examples");
         let home = |bldg_id: i64, schedule: PathBuf| DwellingConfig {
             hpxml: InputSource::Path(fixture_hpxml_path()),
@@ -4895,6 +5054,9 @@ mod tests {
     /// two variables, and the daily frequency gives two rows.
     #[test]
     fn fleet_report_selects_columns_and_frequency() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = golden_fleet();
         let report = FleetReport {
             selection: hares_io::Selection::Named(vec![
@@ -4931,6 +5093,9 @@ mod tests {
     /// home neither fails nor folds a value for it.
     #[test]
     fn selection_missing_from_some_homes_does_not_fail_them() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         write_temp_file(&dir.path().join("schedule.csv"), &build_schedule_csv());
         write_temp_file(&dir.path().join("weather.epw"), &build_epw_8760());
@@ -4997,6 +5162,9 @@ mod tests {
     /// nothing in any home, are the unmatched-selection error.
     #[test]
     fn selection_matching_no_home_is_an_error() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let fleet = Fleet::from_buildings(build_valid_configs(dir.path(), 2))
             .expect("the configs carry no reserved report or shared destination");
@@ -5032,6 +5200,9 @@ mod tests {
     /// rejected at construction, both building ids named.
     #[test]
     fn fleet_homes_with_same_file_destination_are_rejected() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let shared = dir.path().join("shared.parquet");
         let report_for = |bldg_id: i64| DwellingConfig {
@@ -5076,6 +5247,9 @@ mod tests {
     /// construction error naming its building id.
     #[test]
     fn fleet_home_report_named_fleet_is_rejected() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let mut config = build_valid_configs(dir.path(), 1).remove(0);
         config
@@ -5103,6 +5277,9 @@ mod tests {
     /// of streaming its batches to nowhere. The other homes are unaffected.
     #[test]
     fn fleet_home_callback_report_fails_that_home_at_run_start() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let mut configs = build_valid_configs(dir.path(), 2);
         configs[1]
@@ -5155,6 +5332,9 @@ mod tests {
     /// labels in the homes' local wall clock (B-12).
     #[test]
     fn cross_offset_homes_align_on_the_start_instant() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let examples = repo_root().join("data/examples");
         let config = |bldg_id: i64,
                       start: chrono::DateTime<FixedOffset>,
@@ -5279,6 +5459,9 @@ mod tests {
     /// the home without the request reads null in both.
     #[test]
     fn mixed_metrics_homes_keep_the_columns_and_read_null() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut configs = vec![
             golden_fleet_config(1, "G0600770_2018.csv"),
             golden_fleet_config(2, "G0600650_2018.csv"),
@@ -5545,6 +5728,9 @@ mod tests {
     /// it enters no cell of the aggregate or the covered weight.
     #[test]
     fn flagged_home_is_not_counted_as_success() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let unread = schedule_with_unread_column(dir.path());
         let fleet = fl2_fleet(&unread, false);
@@ -5632,6 +5818,9 @@ mod tests {
     /// `HealthPolicyViolation` included, is `Failed` naming it.
     #[test]
     fn home_status_follows_health_and_warnings() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let run = |health: RunHealth, warnings: Vec<hares_types::Warning>| RunResult {
             reports: Vec::new(),
             metrics: None,
@@ -5834,6 +6023,9 @@ mod tests {
     /// home's, the battery column's covered weight its weight alone.
     #[test]
     fn home_with_no_selected_variable_is_ok_and_uncovered() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (fleet, battery_variable) = battery_fleet(false, false);
         let report = crate::fold::FleetReport {
             selection: hares_io::Selection::Named(vec![battery_variable]),
@@ -5968,6 +6160,9 @@ mod tests {
     /// in force.
     #[test]
     fn battery_home_and_plain_home_aggregate_together() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let (fleet, _battery_variable) = battery_fleet(true, false);
         let report = crate::fold::FleetReport {
             selection: hares_io::Selection::Verbosity(2),
@@ -6152,6 +6347,9 @@ mod tests {
     /// metrics columns.
     #[test]
     fn default_fleet_produces_aggregate_and_metrics() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let unread = schedule_with_unread_column(dir.path());
 
@@ -6204,6 +6402,9 @@ mod tests {
     /// homes table, so every home's status and reason survive the error.
     #[test]
     fn zero_ok_weight_raises() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let unread = schedule_with_unread_column(dir.path());
         let home = |bldg_id: i64| DwellingConfig {
@@ -6407,6 +6608,9 @@ mod tests {
     /// alignment fails before any home runs, naming the distinct offsets.
     #[test]
     fn mixed_offset_fleet_requires_declared_alignment() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = mixed_offset_fleet([0, 0, 0]).with_progress(move |_, _| {
             panic!("no home ran: the progress callback must stay silent");
         });
@@ -6427,6 +6631,9 @@ mod tests {
     /// runs at: the same resolution reads the same inputs.
     #[test]
     fn site_offset_pre_pass_matches_built_dwellings() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         for (bldg_id, home, weather) in [
             (2, "bldg0000002", "G0900090_2018.csv"),
             (4, "bldg0000004", "G4803030_2018.csv"),
@@ -6448,6 +6655,9 @@ mod tests {
     /// carries the header line only resolves the same offset.
     #[test]
     fn site_offset_pre_pass_reads_only_the_site_and_the_weather_header() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let config = mixed_offset_config(2, "bldg0000002", "G0900090_2018.csv", 0);
         let expected = hares_core::dwelling::site_offset(&config).expect("the site resolves");
 
@@ -6479,6 +6689,9 @@ mod tests {
     /// covered weight, labelled at the declared offset.
     #[test]
     fn instant_alignment_of_one_start_instant_covers_every_period() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // 03:00 local at UTC-5, 02:00 at UTC-6 and 00:00 at UTC-8 are one
         // instant (08:00Z).
         let fleet = mixed_offset_fleet([3, 2, 0]).with_alignment(Alignment::Instant(
@@ -6523,6 +6736,9 @@ mod tests {
     /// check's error, naming the home.
     #[test]
     fn instant_start_off_the_reference_step_grid_is_an_error() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut configs = vec![
             mixed_offset_config(2, "bldg0000002", "G0900090_2018.csv", 3),
             mixed_offset_config(4, "bldg0000004", "G4803030_2018.csv", 2),
@@ -6556,6 +6772,9 @@ mod tests {
     /// (B-12): no offset applies, so the schema records none.
     #[test]
     fn local_clock_labels_are_shared_naive_local_time() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = mixed_offset_fleet([0, 0, 0]).with_alignment(Alignment::LocalClock);
         let result = fleet
             .simulate(&hourly_named_common(), 1, chunk(64))
@@ -6606,6 +6825,9 @@ mod tests {
     /// `Timestamp` (B-12).
     #[test]
     fn instant_alignment_buckets_on_reference_boundaries() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         // The homes start at their local midnights: instants 05:00Z (UTC-5),
         // 06:00Z (UTC-6) and 08:00Z (UTC-8) - 22:00, 23:00 and 01:00 on the
         // -07:00 reference clock.
@@ -6660,6 +6882,9 @@ mod tests {
     /// is the compare-all gate.
     #[test]
     fn instant_utc_equals_todays_output() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let undeclared = golden_fleet()
             .simulate(&minutes_15(), 1, chunk(64))
             .expect("the fleet runs");
@@ -6799,6 +7024,9 @@ mod tests {
     /// metadata recording the offset (B-12).
     #[test]
     fn single_offset_fleet_is_labelled_in_local_time() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = Fleet::from_buildings(vec![
             single_offset_config(2, "bldg0000002", "G0900090_2018.csv"),
             single_offset_config(17, "bldg0000017", "G0900010_2018.csv"),
@@ -6856,6 +7084,9 @@ mod tests {
     /// row for: the first row is 2018-01-01 02:00, naive (B-12).
     #[test]
     fn instant_fleet_is_labelled_in_the_reference_zone() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = mixed_offset_fleet([0, 0, 0]).with_alignment(Alignment::Instant(
             FixedOffset::west_opt(6 * 3600).expect("valid offset"),
         ));
@@ -6902,6 +7133,9 @@ mod tests {
     /// hourly sequence, a naive `Timestamp` (B-12), not FL-4's text.
     #[test]
     fn local_clock_fleet_is_labelled_by_local_wall_clock() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let fleet = mixed_offset_fleet([0, 0, 0]).with_alignment(Alignment::LocalClock);
         let result = fleet
             .simulate(&hourly_named_common(), 1, chunk(64))
@@ -6938,6 +7172,9 @@ mod tests {
     /// the single-offset grid check fails before any home runs.
     #[test]
     fn heterogeneous_time_grid_is_an_error() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let examples = repo_root().join("data/examples");
         let config = |bldg_id: i64, start: DateTime<FixedOffset>| DwellingConfig {
             hpxml: InputSource::Path(fixture_hpxml_path()),
@@ -7007,6 +7244,9 @@ mod tests {
     /// proof instrument (`hares_io::parse_counts`).
     #[test]
     fn many_home_construction_parses_each_unique_input_once() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let configs = build_valid_configs(dir.path(), 3);
         let before = hares_io::parse_counts::parse_counts();
@@ -7043,6 +7283,9 @@ mod tests {
     /// fleet, not once per home.
     #[test]
     fn streaming_simulate_parses_each_unique_input_once() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let configs = build_valid_configs(dir.path(), 3);
         let before = hares_io::parse_counts::parse_counts();
@@ -7187,6 +7430,9 @@ mod tests {
     /// never the mean 4/3.
     #[test]
     fn home_mode_over_time_is_the_most_frequent_code() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut config = fleet_same_offset_config(1, "G0600770_2018.csv");
         // Verbosity(0): the actor registers after construction, so the
         // report cannot name the probe's column; the actor columns ride
@@ -7265,6 +7511,9 @@ mod tests {
     /// cells read non-codes instead.
     #[test]
     fn fleet_enum_cells_follow_mode() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let weathers = [
             "G0600770_2018.csv",
             "G0600650_2018.csv",
@@ -7416,6 +7665,9 @@ mod tests {
     /// never the mean 2.
     #[test]
     fn home_reducer_sums_a_quantity_declared_sum() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut config = fleet_same_offset_config(1, "G0600770_2018.csv");
         // Verbosity(0): the actor registers after construction, so the
         // report cannot name the probe's column; the actor columns ride
@@ -7541,6 +7793,9 @@ mod tests {
     /// tests carry it.
     #[test]
     fn fleet_cells_follow_declared_kinds() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let weights = [1.0, 2.5, 0.5];
         let (configs, selection) = declared_kinds_selection();
 
@@ -7650,6 +7905,9 @@ mod tests {
     /// covers is null.
     #[test]
     fn fleet_ratio_and_state_are_weighted_means() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let weights = [1.0, 2.5, 0.5];
         let (configs, selection) = declared_kinds_selection();
 
