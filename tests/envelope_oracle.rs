@@ -380,7 +380,7 @@ mod tests {
     /// BESTEST-validated indoor-temperature MAE bound, not in OCHRE parity.
     ///
     /// Measured OCHRE deltas (informational, 60 1-minute steps, May 5 noon Denver):
-    ///   - Indoor zone temp:       MAE 0.52 °C (passes BESTEST ±1 °C band)
+    ///   - Indoor zone temp:       MAE 0.52 °C (inside the suite's plausibility bounds)
     ///   - Attic zone temp:        mean 19.4 °C vs OCHRE 14.5 °C (+4.9 °C)
     ///   - Window heat gain:       mean -317 W vs OCHRE -52.5 W (+504 %)
     ///   - Attic infiltration:     mean -1305 W vs OCHRE -376 W (+247 %)
@@ -795,12 +795,14 @@ mod tests {
             );
         }
 
-        // Indoor-temperature timeseries MAE against OCHRE. ASHRAE 140-2017
-        // Table B8-3 reports ±1 °C acceptance bands for annual-mean zone
-        // temperatures across validated simulation tools. Taking 2 °C as a
-        // loose short-window MAE bound is conservative relative to that
-        // published residual and catches a fundamental RC construction bug
-        // without demanding OCHRE parity. The fixture's only hour is the
+        // Indoor-temperature timeseries MAE against OCHRE. ASHRAE 140-2023
+        // Table B8-5's example results show validated simulation tools'
+        // annual-mean zone temperatures spanning 24.3 to 26.1 °C for 600FF,
+        // a 1.8 °C inter-model spread, and the report itself notes those
+        // statistics are not acceptance criteria. This suite's own 2.5 °C
+        // short-window MAE bound is a plausibility gate: conservative
+        // against that inter-model spread, and it catches a fundamental RC
+        // construction bug without demanding OCHRE parity. The fixture's only hour is the
         // run's first hour, whose weather now blends from the first day's
         // hour-24 record under the EnergyPlus rules while OCHRE holds the
         // noon record: the driver difference adds to the model residual
@@ -814,8 +816,9 @@ mod tests {
             assert!(
                 timeseries_mae.is_finite() && timeseries_mae < 2.5,
                 "Indoor timeseries MAE {timeseries_mae:.3} °C exceeds 2.5 °C bound \
-                 (the ASHRAE 140-2017 ±1 °C residual, doubled for short-window cycling, \
-                 plus this first-hour fixture's measured weather-driver difference). \
+                 (this suite's plausibility bound, conservative against the example \
+                 results' 1.8 °C inter-model spread, plus this first-hour fixture's \
+                 measured weather-driver difference). \
                  HARES envelope construction likely regressed."
             );
         }

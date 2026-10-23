@@ -1,3 +1,35 @@
+//! The ASHRAE 140 reference bands the BESTEST cases validate against.
+//!
+//! Edition: ANSI/ASHRAE 140-2023, the current edition (the 140-2020 to
+//! 140-2023 revision is editorial renumbering; the fabric tests are
+//! Section 7 in this edition, Section 5.2 in 140-2017 and 140-2020). The
+//! nine bands are the current edition's Annex B8 example results, by
+//! table: B8-1 annual heating loads, B8-2 annual sensible cooling loads,
+//! B8-5 free-float temperature output. The values are converted from the
+//! report's MWh to kWh.
+//!
+//! Provenance: the public example-results report Std140_TF_Results.pdf
+//! (134 pages, "ASHRAE Standard 140-2023 Test Results Comparison for
+//! Section 7", Thermal Energy System Specialists, 19-Aug-2024), listed on
+//! ASHRAE's Standard 140 Section 7 accompanying-files page
+//! (<https://data.ashrae.org/standard140/AccompanyingSection7.html>) and
+//! hosted in full by the TRNSYS project
+//! (<https://trnsys.org/ASHRAE140/18_06_0002/Std140_TF_Results.pdf>),
+//! sha256 ebebff90bba76ee4971eb40e32fc0cc22a858abb311000ea833dc1dfdcde510e.
+//! Per data.ashrae.org, the 140-2023 file content is unchanged from
+//! 140-2020 beyond folder and file names, section numbering and headers.
+//!
+//! The standard's normative acceptance ranges (Normative Annex A3,
+//! "Software Acceptance Criteria", added by 140-2020 Addendum b) are
+//! UNVERIFIABLE-WEB until the standard's pages are supplied. Until then
+//! these informative Annex B8 example-result bands are the pinned
+//! contract, and the upgrade path (pinning the A3 ranges) stays open.
+//!
+//! The bands are the target, not the tests' whole pass condition:
+//! out-of-band metrics are drift-locked at measured baselines
+//! (`super::drift_baseline`), and the signed distance to the band prints
+//! on every run.
+
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,75 +69,85 @@ impl ReferenceBand {
 
 pub fn core_reference_bands(case_id: &str) -> Vec<ReferenceBand> {
     match case_id {
-        // ASHRAE 140-2017 Table B8-2: Case 600 annual heating/cooling loads (kWh).
+        // ANSI/ASHRAE 140-2023 Annex B8, Tables B8-1 and B8-2: Case 600
+        // annual heating and annual sensible cooling loads (kWh, the
+        // report's MWh converted).
         "600" => vec![
             ReferenceBand {
                 case_id: "600",
                 metric: BestestMetric::AnnualHeatingLoadKwh,
-                min: 4296.0,
-                max: 5709.0,
+                min: 3993.0,
+                max: 4504.0,
             },
             ReferenceBand {
                 case_id: "600",
                 metric: BestestMetric::AnnualCoolingLoadKwh,
-                min: 6137.0,
-                max: 7964.0,
+                min: 5432.0,
+                max: 6162.0,
             },
         ],
-        // ASHRAE 140-2017 Table B8-2: Case 900 annual heating/cooling loads (kWh).
+        // ANSI/ASHRAE 140-2023 Annex B8, Tables B8-1 and B8-2: Case 900
+        // annual heating and annual sensible cooling loads (kWh, the
+        // report's MWh converted).
         "900" => vec![
             ReferenceBand {
                 case_id: "900",
                 metric: BestestMetric::AnnualHeatingLoadKwh,
-                min: 1170.0,
-                max: 2041.0,
+                min: 1379.0,
+                max: 1814.0,
             },
             ReferenceBand {
                 case_id: "900",
                 metric: BestestMetric::AnnualCoolingLoadKwh,
-                min: 2132.0,
-                max: 3415.0,
+                min: 2267.0,
+                max: 2714.0,
             },
         ],
-        // ASHRAE 140-2017 Table B8-3a: Case 600FF free-float temperatures (°C).
-        // Peak: reference tool range 64.9–69.5°C.
-        // Min: reference value -18.8°C -- must not drop below this; upper bound of 0°C
-        // is generous given Denver winter outdoor lows.
+        // ANSI/ASHRAE 140-2023 Annex B8 Table B8-5: Case 600FF free-float
+        // temperatures (°C).
+        // Peak: reference-tool range 62.4–68.4°C.
+        // Min: reference-tool range -13.8 to -9.9°C, the report's own Min
+        // and Max (the 140-2017 pin's 0°C upper bound was a HARES
+        // relaxation this band does not carry).
         "600FF" => vec![
             ReferenceBand {
                 case_id: "600FF",
                 metric: BestestMetric::PeakZoneTempC,
-                min: 64.9,
-                max: 69.5,
+                min: 62.4,
+                max: 68.4,
             },
             ReferenceBand {
                 case_id: "600FF",
                 metric: BestestMetric::MinZoneTempC,
-                min: -18.8,
-                max: 0.0,
+                min: -13.8,
+                max: -9.9,
             },
         ],
-        // ASHRAE 140-2017 Table B8-3a: Case 900FF free-float temperatures (°C).
+        // ANSI/ASHRAE 140-2023 Annex B8 Table B8-5: Case 900FF free-float
+        // temperatures (°C).
         "900FF" => vec![
             ReferenceBand {
                 case_id: "900FF",
                 metric: BestestMetric::PeakZoneTempC,
-                min: 41.6,
-                max: 44.8,
+                min: 43.3,
+                max: 46.0,
             },
             ReferenceBand {
                 case_id: "900FF",
                 metric: BestestMetric::MinZoneTempC,
-                min: -6.4,
-                max: -1.6,
+                min: 0.6,
+                max: 2.2,
             },
         ],
-        // ASHRAE 140-2017 Table B8-2: Case 640 annual heating energy (kWh).
+        // ANSI/ASHRAE 140-2023 Annex B8 Table B8-1: Case 640 annual
+        // heating load (kWh, the report's MWh converted; the metric name
+        // keeps the earlier pin's "energy" wording, the band is the
+        // current table's annual heating quantity).
         "640" => vec![ReferenceBand {
             case_id: "640",
             metric: BestestMetric::AnnualHeatingEnergyKwh,
-            min: 2751.0,
-            max: 3803.0,
+            min: 2403.0,
+            max: 2682.0,
         }],
         _ => Vec::new(),
     }

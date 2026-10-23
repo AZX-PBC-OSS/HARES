@@ -8,8 +8,9 @@ but not necessarily corrected.
 
 For published-tool-validated correctness testing, see:
 
-- `tests/bestest/` — ANSI/ASHRAE 140-2017 Cases 600, 600FF, 640, 900, 900FF
-  against Table B8-2 / B8-3a published bands.
+- `tests/bestest/`: ANSI/ASHRAE 140-2023 Cases 600, 600FF, 640, 900,
+  900FF against the Annex B8 published bands (Tables B8-1, B8-2 and
+  B8-5).
 - `tests/fixtures/parity/ashrae_rc_reference.json` — independently derived RC
   reference (ASHRAE HoF + EnergyPlus Eng. Ref.) for static envelope checks.
 

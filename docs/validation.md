@@ -19,7 +19,7 @@ laws are enforced at runtime via invariant checks.
 | [Equipment parity](#ochre-parity-tests) | HVAC, water heater, DER, loads | OCHRE simulator | `hares-equipment/tests/*_parity.rs` |
 | [Envelope parity](#envelope-oracle-tests) | Zone temperatures, thermal response | OCHRE simulator | `tests/*_oracle.rs` |
 | [Whole-building parity](#ochre-parity-tests) | End-to-end energy, power columns | OCHRE simulator | `tests/python/test_ochre_parity.py` |
-| [BESTEST](#bestest-ashrae-140) | Annual loads, peak temperatures | ASHRAE 140-2017 | `tests/bestest/` |
+| [BESTEST](#bestest-ashrae-140) | Annual loads, peak temperatures | ASHRAE 140-2023 | `tests/bestest/` |
 | [Conservation laws](#conservation-of-energy) | Energy balance, temperature bounds | First principles | `hares-envelope/tests/solver_energy_conservation.rs` |
 | [Runtime invariants](#runtime-invariants) | Per-timestep numerical sanity | First principles | `hares-core/src/invariants.rs` |
 
@@ -39,7 +39,7 @@ file, and schedules) and compares output columns.
 `tests/python/test_ochre_parity.py` runs both engines on a BEopt example
 dwelling and compares aggregated energy (kWh) per output column.
 
-Tolerances are set per column, informed by ASHRAE 140-2017 §5.2
+Tolerances are set per column, informed by ASHRAE 140-2023 §7
 acceptance ranges:
 
 | Column | Tolerance | Rationale |
@@ -89,7 +89,7 @@ spring, summer, and winter runs at 48–72 hour durations.
 
 ## BESTEST (ASHRAE 140)
 
-HARES implements ASHRAE 140-2017 standard test cases to validate the
+HARES implements ASHRAE 140-2023 standard test cases to validate the
 thermal envelope solver against an internationally accepted reference.
 
 Location: `tests/bestest/`
@@ -106,18 +106,58 @@ Location: `tests/bestest/`
 
 ### Reference bands
 
-Each case has acceptance bounds from ASHRAE 140-2017 Table B8-2
-(loads) and Table B8-3a (temperatures). For example:
+Each case has acceptance bounds from ASHRAE 140-2023 Informative Annex
+B8: Table B8-1 (annual heating loads), Table B8-2 (annual sensible
+cooling loads) and Table B8-5 (free-float temperatures). For example:
 
-- Case 600 heating: 4,296–5,709 kWh/year
-- Case 600 cooling: 6,137–7,964 kWh/year
-- Case 600FF peak zone temp: 64.9–69.5 °C
+- Case 600 heating: 3,993–4,504 kWh/year
+- Case 600 cooling: 5,432–6,162 kWh/year
+- Case 600FF peak zone temp: 62.4–68.4 °C
 
 These bands represent the range of results from validated simulation
-engines (EnergyPlus, TRNSYS, ESP-r, etc.). A result within the band
+engines (the report's example-results programs: BSIMAC, CSE, DeST,
+EnergyPlus, ESP-r, TRNSYS). A result within the band
 confirms the model is producing physically reasonable output.
 
 Reference bands are defined in `tests/bestest/reference_bands.rs`.
+
+### The edition contract
+
+The bands pin the current edition, ANSI/ASHRAE 140-2023. The edition
+chain: 140-2017's fabric cases were updated by Addendum a (approved
+September 1, 2020; the document sometimes cited as "the 140-2017
+errata" is this addendum, and no separate errata sheet exists), which
+replaced the Annex B8 example results with the updated 52-case BESTEST
+suite (ANL-20/26, DOI 10.2172/1643690); 140-2020 carried that suite
+under the title 140-2017 Addendum b had introduced; 140-2023 renumbered the
+standard editorially, moving the fabric tests from Section 5.2
+(140-2017 and 140-2020) to Section 7. Per ASHRAE's own Standard 140
+resource-files page, 140-2020 to 140-2023 changed folder and file
+names, section numbering and headers only.
+
+The pinned values are the current edition's Annex B8 example results:
+the publicly fetchable Std140_TF_Results report (on ASHRAE's Section 7
+accompanying-files page, data.ashrae.org/standard140; the full copy
+hosted by the TRNSYS project has sha256
+ebebff90bba76ee4971eb40e32fc0cc22a858abb311000ea833dc1dfdcde510e),
+converted from the report's MWh to kWh. The standard's normative
+acceptance ranges (Normative Annex A3, "Software Acceptance Criteria",
+added by 140-2020 Addendum b) are UNVERIFIABLE-WEB until the standard's
+pages are supplied; until then these informative example-result bands
+are the pinned contract, and the upgrade path stays open.
+
+The suite's weather is Denver TMY3, station 725650
+(`data/examples/USA_CO_Denver.epw`, "TMY3,725650" in the EPW header),
+the weather file ASHRAE publishes for the Section 7 tests
+(725650TY.CSV). A public validation report labels it "TMY2 Station
+725650"; ASHRAE's own file list says TMY3, and the TMY3 file is what
+the engine runs.
+
+Reconciliation evidence: the engine's case 600 cooling drift baseline
+(5,506.8 kWh, a drift lock rather than a conformance claim) sits inside
+the current band (5,432–6,162) while outside the previously pinned
+140-2017 band (6,137–7,964). All nine previously pinned bands differed
+from the current edition's; none is shared.
 
 ### Running BESTEST
 
@@ -250,7 +290,7 @@ Different validation layers use different tolerance strategies:
 
 | Standard / Source | How it is used |
 |-------------------|----------------|
-| ASHRAE 140-2017 | BESTEST reference bands for envelope validation |
+| ASHRAE 140-2023 | BESTEST reference bands for envelope validation |
 | ASHRAE HOF 2021 Ch. 1 | Psychrometric equations, saturation pressure |
 | ASHRAE HOF 2021 Ch. 16 | Infiltration (AIM-2 wind-stack model) |
 | ASHRAE HOF 2021 Ch. 4 | Natural convection (TARP h formula) |

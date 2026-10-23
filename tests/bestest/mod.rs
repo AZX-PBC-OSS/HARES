@@ -106,7 +106,8 @@ fn run_single_case(case: &BestestCase) {
 fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     use BestestMetric::*;
     Some(match (case_id, metric) {
-        // 600: heating 3090.7 vs band 4296–5709; cooling 5506.8 vs 6137–7964.
+        // 600: heating 3090.7 vs band 3993–4504; cooling 5506.8 (inside
+        // the current band 5432–6162, the pin kept as the drift guard).
         // Re-measured 2026-10-07 at the combined tip: the diffuse short-wave
         // window loss (the zone's windows take their EnergyPlus share of the
         // enclosure's diffuse pool back out through the glazing,
@@ -125,7 +126,7 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
         // residual moves the annual sums by under 0.01 percent.
         ("600", AnnualHeatingLoadKwh) => 3090.700945,
         ("600", AnnualCoolingLoadKwh) => 5506.835817,
-        // 640: heating energy vs band 2751–3803 (the dispatch
+        // 640: heating energy vs band 2403–2682 (the dispatch
         // landing dominates the diffuse loss here). Re-measured
         // 2026-10-14: the weather reads follow the EnergyPlus rules (the
         // record of the hour the step ends in; the previous read lagged
@@ -135,7 +136,7 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
         // warm-up criteria (one more warm-up day than the old rule ran),
         // the sum under 0.001 percent moved.
         ("640", AnnualHeatingEnergyKwh) => 1995.574279,
-        // 900: heating vs band 1170–2041 (the heavy-mass case
+        // 900: heating vs band 1379–1814 (the heavy-mass case
         // gains heating from the dispatch's setpoint landing: the old
         // state-dependent offset under-delivered). Re-measured
         // 2026-10-15: the calendar-date weather addressing re-aligns the
@@ -144,7 +145,7 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
         // run this heavyweight case's warm-up 2 to 4 days: the annual
         // heating load moves 0.06 percent.
         ("900", AnnualHeatingLoadKwh) => 1068.706087,
-        // 600FF: peak 74.01 vs band 64.9–69.5 (min in band: strict).
+        // 600FF: peak 74.01 vs band 62.4–68.4 (min in band: strict).
         // Re-measured 2026-10-14: the weather reads follow the EnergyPlus
         // rules (the record of the hour the step ends in; the previous
         // read lagged one hour), one hour earlier solar on the peak.
@@ -154,7 +155,7 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
         // daily-min residual 0.426 still open), and the warmer initial
         // condition lifts the peak 0.36 K.
         ("600FF", PeakZoneTempC) => 74.369992,
-        // 900FF: peak 46.15 vs 41.6–44.8; min 3.26 vs −6.4…−1.6.
+        // 900FF: peak 46.15 vs 43.3–46.0; min 3.26 vs 0.6–2.2.
         // Re-measured 2026-10-14 for the same weather-phase correction
         // (the peak +0.19 K, the min +0.09 K against the 2026-10-07
         // locks). Re-measured 2026-10-15 again: the EnergyPlus warm-up
@@ -166,7 +167,7 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     })
 }
 
-// ASHRAE 140-2017 Case 600: lightweight conditioned building, annual loads.
+// BESTEST Case 600: lightweight conditioned building, annual loads.
 // Wood-frame walls (no significant thermal mass), insulated floor over
 // crawlspace, double-pane south-facing glazing. Low thermal capacitance means
 // zone air responds almost instantaneously to solar gains and infiltration —
@@ -175,8 +176,9 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
 // against which high-mass Case 900 is compared: the load difference between
 // the two isolates the thermal-mass effect. Denver TMY3 climate (cold winter,
 // hot summer, large diurnal swing) ensures both heating and cooling are
-// exercised. Metrics: annual heating load [4296, 5709] kWh, annual cooling
-// load [6137, 7964] kWh (ASHRAE 140-2017 Table B8-2).
+// exercised. Metrics: annual heating load [3993, 4504] kWh (ASHRAE
+// 140-2023 Annex B8 Table B8-1), annual cooling load [5432, 6162] kWh
+// (Table B8-2).
 //
 // Root-cause fixes applied (T-0301): free-float initialization uses outdoor
 // temperature (not 21°C default) when HVAC setpoints are absent; internal gains
@@ -185,8 +187,9 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
 // dropped because the keys appeared after a [section] header and were absorbed
 // into that section's table. The radiant fraction is now correctly parsed and
 // applied — 200 W × 0.3 = 60 W radiant to surfaces, 140 W convective to zone air.
-// IGNORED: annual_heating=3205 vs band [4296,5709] kWh (below) and
-// annual_cooling=5892 vs band [6137,7964] kWh (below). Additional physics fixes
+// IGNORED at the 140-2017 pins: annual_heating=3205 vs band [4296,5709]
+// kWh (below) and annual_cooling=5892 vs band [6137,7964] kWh (below).
+// Additional physics fixes
 // are needed; the radiant split alone does not account for the gap.
 #[test]
 // Drift lock: band deviations are locked at measured baselines
@@ -196,15 +199,16 @@ fn bestest_case_600() {
     run_single_case(&case);
 }
 
-// ASHRAE 140-2017 Case 900: heavyweight conditioned building, annual loads.
+// BESTEST Case 900: heavyweight conditioned building, annual loads.
 // 100 mm concrete walls, 80 mm concrete floor slab, 1.007 m floor insulation
 // (R≈25 m²·K/W). The floor slab's time constant τ≈33 days means annual results
 // are acutely sensitive to initialization — the slab carries thermal memory
 // across seasons; concrete inner nodes retain excess heat long after zone air
 // has equilibrated, shifting the seasonal load balance. Denver TMY3 climate
 // (large diurnal swing, cold winter) drives both heating and cooling loads.
-// Reference bands from ASHRAE 140 Table B8-2: annual heating load
-// [1170, 2041] kWh, annual cooling load [2132, 3415] kWh. ASHRAE 140 bands
+// Reference bands from ASHRAE 140-2023 Annex B8: annual heating load
+// [1379, 1814] kWh (Table B8-1), annual cooling load [2267, 2714] kWh
+// (Table B8-2). ASHRAE 140 bands
 // are published oracles and must NOT be widened.
 // Window interior LWR correction (q × (1 − radiation_frac) to zone air) offsets
 // the exterior LWR cooling regression, reducing heating load back within the
@@ -212,8 +216,8 @@ fn bestest_case_600() {
 //
 // Root-cause fixes applied (T-0301): see Case 600 comment.
 // T-0352: corrected TOML parse bug that silently dropped the radiant fraction.
-// IGNORED: annual_heating=987 vs band [1170,2041] kWh (below).
-// Annual cooling passes [2132,3415] kWh band.
+// IGNORED at the 140-2017 pins: annual_heating=987 vs band [1170,2041]
+// kWh (below). Annual cooling passes [2132,3415] kWh band.
 #[test]
 // Drift lock: see `drift_baseline`.
 fn bestest_case_900() {
@@ -221,7 +225,7 @@ fn bestest_case_900() {
     run_single_case(&case);
 }
 
-// ASHRAE 140-2017 Case 600FF: lightweight free-float envelope (no HVAC).
+// BESTEST Case 600FF: lightweight free-float envelope (no HVAC).
 // Same wood-frame construction as Case 600 but with the thermostat removed —
 // zone temperature floats freely under solar, infiltration, and internal gain
 // driving. Low thermal mass → short time constant (minutes to an hour), so
@@ -231,13 +235,13 @@ fn bestest_case_900() {
 // set by the coldest outdoor condition moderated only by the lightweight
 // envelope's modest resistance. No HVAC to mask errors in envelope
 // conductance, window transmittance, or infiltration. Metrics: peak zone
-// temperature [64.9, 69.5]°C, minimum zone temperature [-18.8, 0.0]°C
-// (ASHRAE 140-2017 Table B8-3a).
+// temperature [62.4, 68.4]°C, minimum zone temperature [-13.8, -9.9]°C
+// (ASHRAE 140-2023 Annex B8 Table B8-5).
 //
 // Root-cause fixes applied (T-0301): see Case 600 comment.
 // T-0352: corrected TOML parse bug that silently dropped the radiant fraction.
-// IGNORED: peak_zone_temp=72.3 vs band [64.9,69.5]°C (above).
-// Min temp (min=-12.0°C vs [-18.8,0.0]) passes.
+// IGNORED at the 140-2017 pins: peak_zone_temp=72.3 vs band
+// [64.9,69.5]°C (above). Min temp (min=-12.0°C vs [-18.8,0.0]) passes.
 #[test]
 // Drift lock: see `drift_baseline`.
 fn bestest_case_600ff() {
@@ -245,7 +249,7 @@ fn bestest_case_600ff() {
     run_single_case(&case);
 }
 
-// ASHRAE 140-2017 Case 900FF: heavyweight free-float envelope (no HVAC).
+// BESTEST Case 900FF: heavyweight free-float envelope (no HVAC).
 // 100 mm concrete walls and 80 mm concrete floor slab on 1.007 m insulation
 // (R≈25 m²·K/W) create a long thermal time constant — concrete stores heat
 // during the day and releases it overnight, damping the diurnal swing. With
@@ -257,8 +261,8 @@ fn bestest_case_600ff() {
 // in direct contact with zone air or mis-handling the RC node topology), the
 // simulated minimum temperature rises above the reference band. Peak zone
 // temperature is less sensitive because daytime solar gains overwhelm the
-// mass effect. Metrics: peak zone temperature [41.6, 44.8]°C, minimum zone
-// temperature [-6.4, -1.6]°C (ASHRAE 140-2017 Table B8-3a). ASHRAE 140
+// mass effect. Metrics: peak zone temperature [43.3, 46.0]°C, minimum zone
+// temperature [0.6, 2.2]°C (ASHRAE 140-2023 Annex B8 Table B8-5). ASHRAE 140
 // bands are published oracles and must NOT be widened.
 // Root-cause fixes applied (T-0301): free-float init now uses outdoor temp
 // and internal gains use 30% radiant fraction.  T-0352 corrected a TOML parse
@@ -266,8 +270,9 @@ fn bestest_case_600ff() {
 // effect.  However, the 21-day warmup already washes out initial-condition
 // effects, and the radiant fraction alone is insufficient to restore
 // min_zone_temp into the ASHRAE band.
-// IGNORED: peak_zone_temp=46.2 vs band [41.6,44.8]°C (above) and
-// min_zone_temp=3.37 vs band [-6.4,-1.6]°C (above). Additional physics fixes
+// IGNORED at the 140-2017 pins: peak_zone_temp=46.2 vs band
+// [41.6,44.8]°C (above) and min_zone_temp=3.37 vs band [-6.4,-1.6]°C
+// (above). Additional physics fixes
 // (S4/S5 warmup refinement, envelope conductance calibration, infiltration
 // model tuning) are needed alongside the applied root-cause corrections.
 #[test]
@@ -277,7 +282,7 @@ fn bestest_case_900ff() {
     run_single_case(&case);
 }
 
-// ASHRAE 140-2017 Case 640: setback thermostat on lightweight building.
+// BESTEST Case 640: setback thermostat on lightweight building.
 // Identical to Case 600 construction (wood-frame, low thermal mass) but with
 // a 10 °C night setback: heating setpoint drops from 20 °C to 10 °C from
 // 23:00–07:00. The thermostat schedule means the building is allowed to
@@ -289,12 +294,13 @@ fn bestest_case_900ff() {
 // predictable. Comparing Case 640 heating energy (~30–45% below Case 600)
 // against the reference band validates that the model correctly handles
 // thermostat scheduling, setpoint switching, and the transient thermal
-// response during recovery. Metric: annual heating energy [2751, 3803] kWh
-// (ASHRAE 140-2017 Table B8-2).
+// response during recovery. Metric: annual heating energy [2403, 2682] kWh
+// (ASHRAE 140-2023 Annex B8 Table B8-1).
 //
 // Root-cause fixes applied (T-0301): see Case 600 comment.
 // T-0352: corrected TOML parse bug that silently dropped the radiant fraction.
-// IGNORED: annual_heating_energy=2134 vs band [2751,3803] kWh (below).
+// IGNORED at the 140-2017 pins: annual_heating_energy=2134 vs band
+// [2751,3803] kWh (below).
 #[test]
 // Drift lock: see `drift_baseline`.
 fn bestest_case_640() {
