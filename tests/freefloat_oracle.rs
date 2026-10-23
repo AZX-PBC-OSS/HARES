@@ -883,12 +883,14 @@ mod tests {
         // physics. The bounds below are loose plausibility bands for a
         // free-floating envelope over 48–72 h in Denver weather.
         //
-        // ASHRAE 140-2023 Table B8-5 publishes ±1 °C residuals on annual-mean
-        // zone temperatures across validated simulation tools. For a short
-        // free-floating window with no HVAC to clamp zone behavior, infiltration
-        // and solar-distribution model differences broaden that residual; 5 °C
-        // MAE is a conservative bound that flags solver blow-ups while not
-        // demanding OCHRE parity.
+        // ASHRAE 140-2023 Table B8-5's example results show validated
+        // simulation tools' annual-mean zone temperatures spanning 24.5 to
+        // 25.7 °C for 900FF, a 1.2 °C inter-model spread, and the report
+        // itself notes those statistics are not acceptance criteria. For a
+        // short free-floating window with no HVAC to clamp zone behavior,
+        // infiltration and solar-distribution model differences broaden
+        // that spread; 5 °C MAE is this suite's own conservative plausibility
+        // bound that flags solver blow-ups while not demanding OCHRE parity.
         checks.push(Check::compare_mae(
             "indoor_temp_mae_c",
             indoor_mae,
