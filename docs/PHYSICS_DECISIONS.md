@@ -1126,3 +1126,35 @@ The alternatives, rejected:
 
 The pin keeps the contract bitwise and pays once.
 
+
+## The ASHRAE 140 validation bands pin the current edition
+
+The engine's BESTEST validation bands (tests/bestest/reference_bands.rs,
+docs/validation.md) pin the CURRENT edition's published Annex B8 example
+results (ANSI/ASHRAE 140-2023, the publicly fetchable Std140_TF_Results
+report, sha256 recorded in the research ledger), not a superseded
+edition's.
+
+The decision (2026-10-22, the operator's call): the research found the
+pinned bands were 140-2017's Tables B8-2 and B8-3a, that the current
+edition is 140-2023 (140-2020 to 140-2023 is editorial renumbering;
+addenda a and b exist), that all nine of the pinned bands differ from
+the current Annex B8 bands with none shared, and that the engine's case
+600 cooling drift baseline (5506.8 kWh) sits INSIDE the current band
+while outside the pinned one: the engine's physics is defensible under
+the current edition and the stale pin was the defect.
+
+The consequences: the fabric tests' citation is Section 5.2 in 140-2017
+and 140-2020 and Section 7 in 140-2023; the in-tree table citations
+resolve to the current B8-1, B8-2 and B8-5 numbering; the "140-2017
+errata" of earlier references is Addendum a (approved 2020-09-01),
+which replaced the Annex B8 example results, and no separate errata
+sheet exists; the suite's weather remains TMY3 725650 (the public
+report's "TMY2" label conflicts with ASHRAE's own file list; the engine
+runs the TMY3 file).
+
+The alternatives rejected: keeping the 140-2017 pins (validating
+against a superseded edition that the engine's own measured drift
+baseline fails while the current band passes); pinning the normative
+Annex A3 acceptance ranges (UNVERIFIABLE-WEB until the standard's pages
+are supplied; the row's record says so and the upgrade path stays open).
