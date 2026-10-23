@@ -3804,6 +3804,7 @@ fn assemble_from_blueprint_with_seed(
             first_hour_interpolation: config.sim_config.first_hour_interpolation,
             weather_year: config.sim_config.weather_year,
         },
+        Some(&bp.per_surface_irradiance),
     )
     .map_err(|err| HaresError::Io(format!("environment initialization failed: {err}")))?;
 
