@@ -2893,12 +2893,13 @@ mod tests {
     /// write went through `Telemetry::insert`, whose `impl
     /// Into<String>` key builds a fresh `String` every call, even when
     /// the map already holds the key (one allocation per cooling step,
-    /// every cooling step). RED at the parent, GREEN when the key is
-    /// registered at init and withdrawn (the NaN marker, so a
-    /// never-cooled unit's output cell stays null) and the step writes
-    /// through the allocation-free `set`: zero on every cooling step
-    /// after the first, and no key growth for the end-of-step snapshot
-    /// to absorb at the first cooling step.
+    /// every cooling step). RED at the parent, GREEN when the step
+    /// writes through the lazy `set_or_register`: the key registers at
+    /// the first cooling step (the contract's null-until-first-cooling
+    /// timeline kept, so a never-cooled unit's output cell stays null)
+    /// and updates in place after it, so every cooling step after the
+    /// first is zero, and the end-of-step snapshot has no new key to
+    /// absorb after the registration step.
     #[test]
     fn cooling_shr_telemetry_write_is_allocation_free() {
         let cfg = ac_config_with(|typed| typed.startup_cd = Some(0.0));

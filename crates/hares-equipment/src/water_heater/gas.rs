@@ -1439,13 +1439,6 @@ mod tests {
         assert!(eq.burner_on);
     }
 
-    /// Reactive-power contract for the gas WH draft-inducer fan: the class
-    /// row resolves to the FAN coefficients (pf 0.87), the REACTIVE
-    /// capability is declared, and port/CoreOutput/telemetry agree. This
-    /// config carries no `fan_power_w`, so the electric draw — and therefore
-    /// Q — is zero; the ZIP wiring itself is verified directly. See
-    /// `fan_power_config_drives_real_and_reactive_draw` for the configured
-    /// path.
     /// The gas water heater's heat-injection allocation, the witness for
     /// the census's per-water-heater-step site: the step built a fresh
     /// `heat_injections` vector every step (the burner's and the pilot's
@@ -1477,6 +1470,13 @@ mod tests {
         );
     }
 
+    /// Reactive-power contract for the gas WH draft-inducer fan: the class
+    /// row resolves to the FAN coefficients (pf 0.87), the REACTIVE
+    /// capability is declared, and port/CoreOutput/telemetry agree. This
+    /// config carries no `fan_power_w`, so the electric draw — and therefore
+    /// Q — is zero; the ZIP wiring itself is verified directly. See
+    /// `fan_power_config_drives_real_and_reactive_draw` for the configured
+    /// path.
     #[test]
     fn reactive_zip_resolves_draft_fan_row_and_channels_agree() {
         let config = config();

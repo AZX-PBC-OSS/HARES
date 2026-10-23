@@ -5080,10 +5080,19 @@ impl Dwelling {
     /// zone-temperature allocation; `step()` keeps its by-value signature
     /// for every external caller.
     ///
-    /// The reuse is semantics-neutral: `run_timestep_into` overwrites
-    /// every field of `out` on the success path, so a reused buffer
-    /// carries nothing from the step before, and a failed step leaves
-    /// `out` unread (the caller receives the error, never the buffer).
+    /// The reuse is semantics-neutral on the success path:
+    /// `run_timestep_into` overwrites every field of `out` there, so a
+    /// reused buffer carries nothing from the step before. On a failed
+    /// step the buffer's content depends on where the step failed: an
+    /// early-phase failure (a refused step, a failed solve, anything
+    /// before the state-snapshot phase writes the result) leaves `out`
+    /// holding the previous step's values; a failure at the output
+    /// phase's `record_step` leaves it holding the current step's
+    /// values, the result already written when the recorder raised. The
+    /// bindings discard the buffer whenever the step errors (the caller
+    /// receives the error, never the buffer), so the distinction is
+    /// safe there; a caller that reads `out` after a failed step reads
+    /// it at its own risk, on no contract.
     ///
     /// # Errors
     ///
@@ -25311,12 +25320,11 @@ occupancy = 1.0"#,
         );
     }
 
-    /// REV-P1 PROBE 1 (review only, reverted): a shared step result written
-    /// by `run_timestep_into` must hold EXACTLY the values the by-value
-    /// `run_timestep` returns at every step: no staleness from the
-    /// previous step, no partial writes. Two identically built dwellings
-    /// step in lockstep; one reuses one buffer, one takes a fresh result
-    /// per step.
+    /// A shared step result written by `run_timestep_into` must hold
+    /// EXACTLY the values the by-value `run_timestep` returns at every
+    /// step: no staleness from the previous step, no partial writes. Two
+    /// identically built dwellings step in lockstep; one reuses one
+    /// buffer, one takes a fresh result per step.
     #[test]
     fn rev_p1_into_matches_byvalue_every_step() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -25356,20 +25364,16 @@ occupancy = 1.0"#,
                 "step {step}: the reused buffer disagrees with the by-value result"
             );
             last_fresh_len = fresh.zone_temperatures_c.len();
-            // The buffer is overwritten, not stale: the timestamp advances.
-            for later in step + 1..6 {
-                let _ = later; // timestamps checked via the equality above per step
-            }
         }
         // The shared buffer's zone-temperature vector holds the LAST
         // step's values only (no history accumulates inside it).
         assert_eq!(shared.zone_temperatures_c.len(), last_fresh_len);
     }
 
-    /// REV-P1 PROBE 2 (review only, reverted): the step path's in-place
-    /// telemetry snapshot must leave the map content-identical to a fresh
-    /// insert per step, including when a foreign stale key and a
-    /// wrong-shaped, value-corrupted entry are injected between steps.
+    /// The step path's in-place telemetry snapshot must leave the map
+    /// content-identical to a fresh insert per step, including when a
+    /// foreign stale key and a wrong-shaped, value-corrupted entry are
+    /// injected between steps.
     #[test]
     fn rev_p1_telemetry_snapshot_rebuilds_content() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
