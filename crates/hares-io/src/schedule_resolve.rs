@@ -376,6 +376,18 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
 
 /// The file inside the defaults directory that holds the default schedule
 /// profiles.
+///
+/// Provenance: the file's fractions come from ANSI/RESNET/ICC 301-2022
+/// Addendum C and the 2010 Building America House Simulation Protocols
+/// (BAHSP), cited row by row in the file's own Data Source column, never
+/// from ATUS. The vendored upstream copy is
+/// `vendors/OCHRE/ochre/defaults/Default Schedule Parameters.csv`,
+/// sha256 beb779009391304122dca1dcb6345acd81c1df506e4db17d845a1eeadf7151c0,
+/// pinned by the `vendored_default_schedule_csv_matches_the_pinned_sha256`
+/// test in this module; the repo's own defaults directory
+/// `python/hares/defaults` carries the engine's copy of the same table,
+/// whose derived weekend rows cite their derivations in the same column.
+/// The occupancy provenance contract is on [`inject_occupancy_schedule`].
 pub const DEFAULT_SCHEDULES_CSV: &str = "Default Schedule Parameters.csv";
 
 #[derive(Debug, Clone)]
@@ -1972,6 +1984,69 @@ fn inject_power_schedule(
 ///
 /// The generated column uses the same "occupants" name so the dwelling picks it up
 /// via `occupancy_column_idx()` without any special-casing.
+///
+/// # Occupancy provenance contract
+///
+/// The ATUS-derived Markov chain does not run in this tree, and no
+/// in-tree text may claim it does. The engine consumes the chain's
+/// OUTPUT through schedule CSVs (tier 1: a user-supplied file, or a
+/// ResStock `in.schedules.csv` download through
+/// `python/hares/data/resstock.py`, which supports releases 2024.1,
+/// 2024.2 and 2025.1) and falls back to the ANSI/RESNET/ICC 301-2022
+/// Addendum C occupancy profile (tier 2's HPXML extension fractions,
+/// then tier 3's `Occupancy` profile from [`DEFAULT_SCHEDULES_CSV`]).
+///
+/// The upstream sources this contract pins:
+///
+/// - The vendored OCHRE submodule at NREL/OCHRE commit
+///   58f39d8746520786c26c02ce4c08618d3053c422 (publicly resolvable at
+///   github.com/NREL/OCHRE): its `ochre/utils/schedule.py`
+///   `import_occupancy_schedule` is the three-tier structure mirrored
+///   above, and its `ochre/defaults/Default Schedule Parameters.csv` is
+///   the tier-3 data file (sha256 and sources on
+///   [`DEFAULT_SCHEDULES_CSV`]).
+/// - The four OS-HPXML v1.12.0 reference sources vendored byte-identical
+///   at the repo root (sha256): `hotwater_appliances.rb`
+///   6e1eff6f0e58cd02818e00b29b88dd99a4900ed86bc3933905bd1ca0caa0cfc5,
+///   `hvac.rb`
+///   2365b4181cfd88561f4647ee20e18557c7aaf72251ef925b2535123757f93e5b,
+///   `misc_loads.rb`
+///   65da7711923555d973248daafa5cadcc37818682d7354452b0419d428184e777,
+///   `model.rb`
+///   3f3e46fe81e924969fd4b9a0246b5ef45c630093f42203f8cfd956151f343bd7.
+/// - The OS-HPXML `BuildResidentialScheduleFile` Markov data at the
+///   v1.12.0 tag, hash-pinned as DOCUMENTATION ONLY (not vendored; the
+///   raw files live under
+///   https://raw.githubusercontent.com/NREL/OpenStudio-HPXML/v1.12.0/BuildResidentialScheduleFile/resources/):
+///   weekday `mkv_chain_initial_prob.csv` (sha256
+///   72b1e43ceba4c816f67c79dbd2234fced507a2201efb0109ee949c93041c2302),
+///   weekday `mkv_chain_transition_prob.csv` (sha256
+///   36ae5c2f9595cf9c4f70e98b85c4edb7893f9cf194f57a8dfec0474efda873b6),
+///   weekend `mkv_chain_initial_prob.csv` (sha256
+///   6ef4bf7dd1b84616fdf28d5185054c47f561dcf1e5510115d74f25eb28457bb9),
+///   weekend `mkv_chain_transition_prob.csv` (sha256
+///   81df0d27b0df102254f4068e41dba9d682a073c3d54870a8cc88c74af3a8dbe4),
+///   weekday `state_and_monthly_schedule_shift.csv` (sha256
+///   223fe6718b986bb3e32a0aa4493105afab9d41d8787538ff4ab33fcfbbc4389c),
+///   weekend `state_and_monthly_schedule_shift.csv` (sha256
+///   31af18b38ab9bb97a88ff5358ac9c0522c997a761d3bedc0854fda8959816545).
+///
+/// Citations: Richardson, Thomson, Infield and Clifford (2010),
+/// "Domestic electricity use: a high-resolution energy demand model",
+/// Energy and Buildings 42(10), 1878-1887, DOI
+/// 10.1016/j.enbuild.2010.05.023 (the two-state active-occupancy Markov
+/// method ancestor); Malekpour Koupaei, Cetin and Passe (2022),
+/// "Stochastic residential occupancy schedules based on the American
+/// Time-Use Survey", Science and Technology for the Built Environment
+/// 28(6), 776-790, DOI 10.1080/23744731.2022.2087536 (the three-state
+/// ATUS re-estimation); Chen, Adhikari, Wilson, Robertson, Fontanini,
+/// Polly and Olawale (2022), "Stochastic simulation of occupant-driven
+/// energy use in a bottom-up residential building stock model", Applied
+/// Energy 325, 119890, DOI 10.1016/j.apenergy.2022.119890 (the deployed
+/// generator's own methodology, per the OS-HPXML v1.12.0 documentation);
+/// and the ResStock Technical Reference Guide 2025.1 for the deployed
+/// data vintage (ATUS 2013-2017, the seven-activity Markov chain, the
+/// preset occupant types clustered from the ATUS data).
 fn inject_occupancy_schedule(
     spec: &mut EquipmentSpec,
     schedule: &mut ScheduleTimeSeries,
@@ -6061,6 +6136,34 @@ mod tests {
             .collect::<Vec<String>>(),
             "the set of fixture HPXMLs that cannot resolve without their \
              run's data patches moved"
+        );
+    }
+
+    /// The occupancy provenance contract pins the vendored OCHRE defaults
+    /// CSV's bytes (see [`DEFAULT_SCHEDULES_CSV`]): a submodule bump or a
+    /// hand edit that moves the file fails here, so the hash the contract
+    /// documents and the tree stay the same. The file lives in the OCHRE
+    /// submodule; the test needs it checked out
+    /// (`git submodule update --init vendors/OCHRE`).
+    #[test]
+    fn vendored_default_schedule_csv_matches_the_pinned_sha256() {
+        use sha2::{Digest, Sha256};
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../vendors/OCHRE/ochre/defaults/Default Schedule Parameters.csv",
+        );
+        let bytes = std::fs::read(&path).unwrap_or_else(|err| {
+            panic!(
+                "the vendored OCHRE defaults CSV at {} is unreadable (is the \
+                 submodule checked out?): {err}",
+                path.display()
+            )
+        });
+        let digest = Sha256::digest(&bytes);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "beb779009391304122dca1dcb6345acd81c1df506e4db17d845a1eeadf7151c0"
         );
     }
 }

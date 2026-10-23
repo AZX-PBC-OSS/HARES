@@ -31,7 +31,10 @@ const COLUMN_TO_PROFILE: &[(&str, &str)] = &[
 /// Columns are generated in the same order and with the same names as a standard
 /// ResStock `in.schedules.csv`. Power, water, and occupancy columns use the
 /// weekday/weekend fraction profiles from the defaults CSV (occupancy follows
-/// the `Occupancy` profile). A missing profile is an error naming the profile
+/// the `Occupancy` profile; its provenance, the 301-2022 Addendum C default
+/// fractions, the vendored file's hash and the citations, is the occupancy
+/// provenance contract on `schedule_resolve::inject_occupancy_schedule`). A
+/// missing profile is an error naming the profile
 /// and the file, so a column is never a silent constant. No setpoint column
 /// is generated: a schedule column would override the HVAC's own setpoints,
 /// which come from the HPXML's hourly weekday and weekend profiles, or
