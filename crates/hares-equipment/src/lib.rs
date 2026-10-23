@@ -1,5 +1,13 @@
 //! Equipment trait, registry, and built-in equipment modules.
 
+// The unit-test binary installs the counting allocator so the per-site
+// allocation witnesses inside this crate's step bodies read real
+// per-thread counts; it applies to this crate's test build alone.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: hares_types::alloc_count::CountingAllocator =
+    hares_types::alloc_count::CountingAllocator;
+
 #[macro_use]
 mod macros;
 

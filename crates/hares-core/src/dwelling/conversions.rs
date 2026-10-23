@@ -648,14 +648,35 @@ pub(crate) fn apply_thermal_update_to_zones(env: &mut EnvironmentState, update: 
     }
 }
 
-pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update: &DomainUpdate) {
+pub(crate) fn apply_humidity_update_to_zones(
+    env: &mut EnvironmentState,
+    update: &DomainUpdate,
+    key_scratch: &mut String,
+) {
     let Some(payload) = &update.custom_payload else {
         return;
     };
-    let mut alpha_telemetry = env
+    // The alpha telemetry map lives in the environment's map across steps:
+    // its entry is taken out and put back today only to update it in
+    // place, so the in-place reads and writes below hold the same map
+    // content without the per-step remove/insert (whose reinsertion key
+    // was a fresh `String` every step) and without the fresh
+    // `format!`-built per-zone keys (built in the caller's reused
+    // scratch instead; a zone's key is registered only the first time
+    // that zone reports).
+    if !env
         .equipment_telemetry
-        .remove(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
-        .unwrap_or_default();
+        .contains_key(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
+    {
+        env.equipment_telemetry.insert(
+            hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY.to_string(),
+            hares_types::Telemetry::default(),
+        );
+    }
+    let alpha_telemetry = env
+        .equipment_telemetry
+        .get_mut(hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY)
+        .expect("the alpha telemetry entry was just seeded when absent");
     for chunk in payload.as_chunks::<7>().0 {
         let zone_raw = chunk[0];
         let humidity_ratio = chunk[1];
@@ -673,17 +694,30 @@ pub(crate) fn apply_humidity_update_to_zones(env: &mut EnvironmentState, update:
         if let Some(zone) = env.zones.iter_mut().find(|z| z.id == zone_id) {
             zone.humidity_ratio = humidity_ratio;
         }
-        let alpha_key = format!(
+        use std::fmt::Write as _;
+        key_scratch.clear();
+        let _ = write!(
+            key_scratch,
             "{}_zone_{}",
             hares_types::telemetry_keys::HUMIDITY_SEMI_IMPLICIT_ALPHA,
             zone_id.0
         );
-        alpha_telemetry.insert(alpha_key, alpha);
+        // The same write the fresh-key insert made: a finite alpha
+        // updates the zone's slot in place (the key registers the first
+        // time the zone reports); a non-finite alpha goes through
+        // `Telemetry::insert` so its rejection (the latch, the error
+        // log, the map left untouched) is exactly the old path's.
+        if alpha.is_finite() {
+            match alpha_telemetry.0.get_mut(key_scratch.as_str()) {
+                Some(slot) => *slot = alpha,
+                None => {
+                    alpha_telemetry.0.insert(key_scratch.clone(), alpha);
+                }
+            }
+        } else {
+            alpha_telemetry.insert(key_scratch.clone(), alpha);
+        }
     }
-    env.equipment_telemetry.insert(
-        hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY.to_string(),
-        alpha_telemetry,
-    );
 }
 
 pub(crate) fn equipment_config_from_spec(
@@ -3598,7 +3632,7 @@ mod tests {
             custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, alpha, 0.0, 0.0]),
         };
 
-        super::apply_humidity_update_to_zones(&mut env, &update);
+        super::apply_humidity_update_to_zones(&mut env, &update, &mut String::new());
 
         let telem = env
             .equipment_telemetry
@@ -3630,7 +3664,7 @@ mod tests {
             custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, 0.0, 0.0, 0.0]),
         };
 
-        super::apply_humidity_update_to_zones(&mut env, &update);
+        super::apply_humidity_update_to_zones(&mut env, &update, &mut String::new());
 
         let telem = env
             .equipment_telemetry
@@ -3670,7 +3704,7 @@ mod tests {
             custom_payload: Some(vec![f64::from(zone_id), 0.009, 0.50, 19.0, alpha, 0.0, 0.0]),
         };
 
-        super::apply_humidity_update_to_zones(&mut env, &update);
+        super::apply_humidity_update_to_zones(&mut env, &update, &mut String::new());
 
         let telem = env
             .equipment_telemetry

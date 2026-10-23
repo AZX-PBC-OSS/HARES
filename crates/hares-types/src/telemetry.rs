@@ -154,6 +154,31 @@ impl Telemetry {
         self.0.insert(key, value)
     }
 
+    /// Write a channel the owner registers lazily: the value updates the
+    /// registered slot in place (never allocating), and an unregistered
+    /// key registers through [`Self::insert`], whose finite-rejection and
+    /// sealed-map rules apply to the registration exactly as they do to
+    /// the by-value insert. A key registered this way keeps the
+    /// registered-from-then-on timeline its owner's contract states (a
+    /// lazily written channel's output cell reads null until its first
+    /// write), and the steady state pays nothing for the write: the
+    /// fresh `String` key's allocation is the registration's, paid once
+    /// per run, not the write's, paid per step.
+    ///
+    /// # Errors
+    ///
+    /// Never: a rejected write (non-finite value, sealed map) behaves
+    /// exactly as [`Self::insert`]'s rejection does.
+    pub fn set_or_register(&mut self, key: &str, value: f64) {
+        if value.is_finite() && self.0.contains_key(key) {
+            if let Some(slot) = self.0.get_mut(key) {
+                *slot = value;
+            }
+            return;
+        }
+        self.insert(key.to_string(), value);
+    }
+
     /// Update an existing key's value without allocating.
     ///
     /// All keys must be pre-populated via `insert()` at init time.

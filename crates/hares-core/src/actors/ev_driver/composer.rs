@@ -61,12 +61,30 @@ pub struct ChargingComposer {
 }
 
 impl ChargingComposer {
+    /// The longest vote label the preference vocabulary carries
+    /// ("solar:zero_surplus_with_target"): the label side of the
+    /// composed-action bound the label buffer pre-sizes for.
+    const LONGEST_VOTE_LABEL_LEN: usize = "solar:zero_surplus_with_target".len();
+
+    /// The composed label's bound for this stack: "override:" plus the
+    /// longest preference name plus ":" plus the vocabulary's longest
+    /// vote label.
+    fn label_bound(preferences: &[Box<dyn ChargingPreference>]) -> usize {
+        let longest_name = preferences
+            .iter()
+            .map(|p| p.name().len())
+            .max()
+            .unwrap_or(0);
+        "override:".len() + longest_name + 1 + Self::LONGEST_VOTE_LABEL_LEN
+    }
+
     pub fn new(preferences: Vec<Box<dyn ChargingPreference>>, target_name: &str) -> Self {
+        let label_capacity = Self::label_bound(&preferences);
         Self {
             preferences,
             scratch: Vec::with_capacity(8),
             dispatch_target: DispatchTarget::ByName(Arc::from(target_name)),
-            last_action: String::new(),
+            last_action: String::with_capacity(label_capacity),
             last_resolved_target_soc: None,
             last_resolved_power_w: None,
             last_resolved_max_soc: None,
@@ -165,6 +183,12 @@ impl ChargingComposer {
     /// Restores the state [`Self::carried_state`] saved.
     pub fn restore_carried_state(&mut self, state: ComposerCarriedState) {
         self.last_action = state.last_action;
+        // The restored label string round-trips at its own length (a
+        // serde round-trip carries no capacity), so the buffer re-sizes
+        // to the composed label's bound here, at the one-time restore,
+        // and the decisions after it allocate nothing for the label.
+        self.last_action
+            .reserve(Self::label_bound(&self.preferences).saturating_sub(self.last_action.len()));
         self.last_resolved_target_soc = state.last_resolved_target_soc;
         self.last_resolved_power_w = state.last_resolved_power_w;
         self.last_resolved_max_soc = state.last_resolved_max_soc;

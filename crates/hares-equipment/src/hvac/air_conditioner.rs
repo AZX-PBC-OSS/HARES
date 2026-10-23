@@ -3,6 +3,23 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+/// The cooling core's SHR telemetry-key allocation accumulator, read by
+/// the site's witness test only: the step's SHR write used
+/// `Telemetry::insert` (whose `impl Into<String>` key builds a fresh
+/// `String` every call, even when the map already holds the key), one
+/// allocation per cooling step. The counting allocator is installed by
+/// this crate's test build alone.
+#[cfg(test)]
+static COOLING_SHR_TELEMETRY_SITE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The accumulator's read-and-reset, for the witness test.
+#[cfg(test)]
+pub(crate) fn cooling_shr_telemetry_site() -> u64 {
+    use std::sync::atomic::Ordering;
+    COOLING_SHR_TELEMETRY_SITE.swap(0, Ordering::Relaxed)
+}
+
 use chrono::{DateTime, FixedOffset};
 use hares_physics::constants::LATENT_HEAT_VAPORISATION_0C_J_KG;
 use hares_physics::ground::SourceTemperature;
@@ -31,7 +48,7 @@ use super::coil_physics::{
     effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
-use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
+use super::speed_control::{SpeedSelection, interpolate_speed_stages};
 use super::staging::{DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
@@ -513,8 +530,10 @@ impl CoolingCore {
         &mut self,
         requested_capacity_fraction: f64,
     ) -> SpeedSelection {
-        let capacities = &self.hvac.config.cooling_capacities_w;
-        let cap_fracs = capacity_fractions_for(capacities);
+        // The fractions read through the runtime's cache (config-frozen
+        // data; see HvacEquipment::cooling_capacity_fractions_cached), so
+        // the per-step selection allocates nothing.
+        let cap_fracs = self.hvac.cooling_capacity_fractions_cached();
         if cap_fracs.is_empty() {
             let selection = SpeedSelection {
                 speed_index: 0,
@@ -536,7 +555,7 @@ impl CoolingCore {
             self.hvac.runtime.last_speed_frac = selection.speed_frac;
             return selection;
         }
-        let selection = interpolate_speed_stages(requested_capacity_fraction, &cap_fracs, true);
+        let selection = interpolate_speed_stages(requested_capacity_fraction, cap_fracs, true);
         self.hvac.runtime.last_speed_index = selection.speed_index;
         self.hvac.runtime.last_speed_frac = selection.speed_frac;
         selection
@@ -1372,14 +1391,25 @@ impl CoolingCore {
             compressor_w * self.hvac.config.space_fraction,
         );
         self.telemetry.set(tk::DUCT_LOSS_W, duct_loss_w);
-        // SHR is written only while the step's sensible cooling is above
-        // 0; the key is unregistered until the first cooling step (no init
-        // insert), so a never-cooled unit's SHR output cell is null, never
-        // a 1.0 sentinel. The record path pairs the value with the step's
-        // delivered sensible cooling, so an off step's stale last value
-        // stays output-invisible.
+        // SHR is written through `set_or_register`: the key registers at
+        // the first cooling step (the contract's null-until-first-cooling
+        // timeline, the record path pairing the value with the step's
+        // delivered sensible cooling) and updates in place after it, so
+        // the steady state pays nothing for the write.
         if sensible_cooling_w > 0.0 {
-            self.telemetry.insert(tk::SHR, self.hvac.config.shr);
+            #[cfg(test)]
+            let site_before = hares_types::alloc_count::thread_allocations();
+            self.telemetry
+                .set_or_register(tk::SHR, self.hvac.config.shr);
+            #[cfg(test)]
+            if let (Some(before), Some(after)) =
+                (site_before, hares_types::alloc_count::thread_allocations())
+            {
+                COOLING_SHR_TELEMETRY_SITE.fetch_add(
+                    after.saturating_sub(before),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
         }
         let original_mode = self.operating_mode;
         let post_dse_sensible_w = sensible_cooling_w * dse;
@@ -2856,6 +2886,50 @@ mod tests {
         eq.update_control(&env_zero_wb);
         eq.step(&env_zero_wb, Duration::from_secs(60), &mut ports)
             .expect("0.0°C wet-bulb is a valid winter condition and must not return an error");
+    }
+
+    /// The cooling core's SHR telemetry write, the witness for the
+    /// census's one-allocation-per-cooling-step site: the step's SHR
+    /// write went through `Telemetry::insert`, whose `impl
+    /// Into<String>` key builds a fresh `String` every call, even when
+    /// the map already holds the key (one allocation per cooling step,
+    /// every cooling step). RED at the parent, GREEN when the step
+    /// writes through the lazy `set_or_register`: the key registers at
+    /// the first cooling step (the contract's null-until-first-cooling
+    /// timeline kept, so a never-cooled unit's output cell stays null)
+    /// and updates in place after it, so every cooling step after the
+    /// first is zero, and the end-of-step snapshot has no new key to
+    /// absorb after the registration step.
+    #[test]
+    fn cooling_shr_telemetry_write_is_allocation_free() {
+        let cfg = ac_config_with(|typed| typed.startup_cd = Some(0.0));
+        let mut eq = AirConditioner::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let env = env(28.0, 0.012, 20.0, 35.0);
+        eq.init(&cfg, &env).unwrap();
+        eq.update_control(&env);
+
+        // The first cooling step pays the key's registration shape.
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            eq.telemetry().get(tk::SHR).is_some(),
+            "a cooling step publishes the sensible heat ratio"
+        );
+        let _ = super::cooling_shr_telemetry_site();
+
+        for _ in 0..4 {
+            eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        }
+        let total = super::cooling_shr_telemetry_site();
+        assert_eq!(
+            total, 0,
+            "the SHR telemetry write allocated {total} times over the 4 \
+             cooling steps after the first"
+        );
     }
 
     #[test]

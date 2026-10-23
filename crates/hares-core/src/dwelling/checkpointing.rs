@@ -146,6 +146,13 @@ impl Dwelling {
     /// finalises the restored run and returns its own result, never a
     /// result recorded before the restore.
     pub fn load_checkpoint(&mut self, cp: DwellingCheckpoint) -> Result<()> {
+        // The stage-rank scratch needs no invalidation here: the restore
+        // validates the checkpoint's equipment against this dwelling's
+        // live roster (`matched_equipment_states`) and never rebuilds the
+        // roster, the buffer is not checkpoint state, and the next step's
+        // equipment phase clears the buffer before its first push (the
+        // field's doc carries the full proof). A restored step therefore
+        // cannot read a rank from the pre-restore run.
         self.validate_building_state(&cp)?;
         // The run-surface sections validate against this dwelling before
         // anything changes: a report the dwelling cannot resume, a
@@ -270,6 +277,11 @@ impl Dwelling {
     /// is half-stepped and this restore keeps it (`load_checkpoint` resumes
     /// such a run).
     pub fn restore_building_state(&mut self, cp: &DwellingCheckpoint) -> Result<()> {
+        // The stage-rank scratch needs no invalidation here: the equipment
+        // set was freshly built by `DwellingBlueprint::build()` and is
+        // untouched by this restore, the buffer is not checkpoint state,
+        // and the next step's equipment phase clears it before its first
+        // push (the field's doc carries the full proof).
         if let Some(ended) = &self.terminal_error {
             return Err(HaresError::Simulation(format!(
                 "the run ended part way through a step and its equipment is half-stepped; \

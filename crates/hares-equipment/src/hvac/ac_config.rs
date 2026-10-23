@@ -32,7 +32,9 @@ pub(super) fn default_telemetry() -> Telemetry {
     // No SHR insert: the sensible heat ratio is undefined while the unit is
     // not cooling. The step writes it only when the step's sensible cooling
     // is above 0, so a never-cooled unit's SHR output cell is null, not a
-    // 1.0 sentinel.
+    // 1.0 sentinel. The step's write is `set_or_register`: in place once
+    // the key is registered (the first cooling step), so the steady state
+    // pays nothing for it.
     telemetry.insert(tk::OPERATING_MODE, 0.0);
     telemetry.insert(tk::SPEED_INDEX, 0.0);
     telemetry.insert(tk::COP, 0.0);

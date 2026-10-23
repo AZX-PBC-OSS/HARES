@@ -5,6 +5,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// The BMS's last-action allocation accumulator, read by the site's
+/// witness test only: the self-consumption re-evaluation reassigned
+/// `last_action` (a fresh `String`) on every charging and every
+/// discharging step, not only at the action's transition. The counting
+/// allocator is installed by this crate's test build alone.
+#[cfg(test)]
+static BMS_LAST_ACTION_SITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The accumulator's read-and-reset, for the witness test.
+#[cfg(test)]
+pub(crate) fn bms_last_action_site() -> u64 {
+    BMS_LAST_ACTION_SITE.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 use serde::{Deserialize, Serialize};
 
 use chrono::{Datelike, Timelike};
@@ -232,16 +246,29 @@ impl BatteryManagementActor {
         }
     }
 
+    /// Assigns the action string only when the content differs, so a
+    /// held action's steady state allocates nothing (the string is a
+    /// fresh `String` per assignment). Returns whether the action
+    /// changed: the decide's toggle test is exactly "an assignment
+    /// fired", because the guarded assignment fires only when the
+    /// content differs.
+    fn assign_action(&mut self, action: &'static str) -> bool {
+        if self.last_action != action {
+            self.last_action = action.into();
+            true
+        } else {
+            false
+        }
+    }
+
     fn evaluate_mode(
         &mut self,
         mode: &BmsMode,
         env: &EnvironmentState,
         out: &mut Vec<DispatchRequest>,
-    ) {
+    ) -> bool {
         match mode {
-            BmsMode::Manual => {
-                self.last_action = "idle".into();
-            }
+            BmsMode::Manual => self.assign_action("idle"),
 
             BmsMode::SelfConsumption {
                 min_soc,
@@ -250,8 +277,7 @@ impl BatteryManagementActor {
                 surplus_deadband_w,
             } => {
                 let Some(soc) = self.read_soc(env) else {
-                    self.last_action = "idle:no_soc".into();
-                    return;
+                    return self.assign_action("idle:no_soc");
                 };
                 let pv = env.electrical.actual_pv_w_or_fallback();
                 let load = env.electrical.base_load_w;
@@ -265,8 +291,7 @@ impl BatteryManagementActor {
 
                 if *solar_only_charging && env.electrical.actual_pv_w <= 0.0 {
                     self.emit(ControlSignal::GridConnect { connected: false }, out);
-                    self.last_action = "grid_disconnect:solar_only".into();
-                    return;
+                    return self.assign_action("grid_disconnect:solar_only");
                 }
 
                 let was_charging = self.last_action.contains("self_consumption:charge")
@@ -294,7 +319,7 @@ impl BatteryManagementActor {
                         },
                         out,
                     );
-                    self.last_action = "self_consumption:charge".into();
+                    self.assign_action("self_consumption:charge")
                 } else if should_discharge {
                     match self.grid_export_rule {
                         GridExportRule::Unrestricted => {
@@ -324,9 +349,9 @@ impl BatteryManagementActor {
                             );
                         }
                     }
-                    self.last_action = "self_consumption:discharge".into();
+                    self.assign_action("self_consumption:discharge")
                 } else {
-                    self.last_action = "idle:self_consumption".into();
+                    self.assign_action("idle:self_consumption")
                 }
             }
 
@@ -348,8 +373,7 @@ impl BatteryManagementActor {
                 }
 
                 let Some(soc) = self.read_soc(env) else {
-                    self.last_action = "idle:no_soc".into();
-                    return;
+                    return self.assign_action("idle:no_soc");
                 };
                 let price = env.price_signal.electricity_price.unwrap_or(0.0);
                 let deadband = *price_deadband;
@@ -393,8 +417,7 @@ impl BatteryManagementActor {
                     // Keep charging — re-instate the charge path.
                     if *solar_only_charging && env.electrical.actual_pv_w <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
-                        self.last_action = "grid_disconnect:tou_solar_only".into();
-                        return;
+                        return self.assign_action("grid_disconnect:tou_solar_only");
                     }
                     self.emit(
                         ControlSignal::PowerSetpoint {
@@ -405,7 +428,7 @@ impl BatteryManagementActor {
                         },
                         out,
                     );
-                    self.last_action = "tou:charge".into();
+                    self.assign_action("tou:charge")
                 } else if dwell_blocked && was_discharging && !should_discharge {
                     // Dwell suppressed an action change away from discharging.
                     self.dwell_blocked_count += 1.0;
@@ -429,12 +452,11 @@ impl BatteryManagementActor {
                         },
                         out,
                     );
-                    self.last_action = "tou:discharge".into();
+                    self.assign_action("tou:discharge")
                 } else if should_charge {
                     if *solar_only_charging && env.electrical.actual_pv_w <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
-                        self.last_action = "grid_disconnect:tou_solar_only".into();
-                        return;
+                        return self.assign_action("grid_disconnect:tou_solar_only");
                     }
                     self.emit(
                         ControlSignal::PowerSetpoint {
@@ -445,7 +467,7 @@ impl BatteryManagementActor {
                         },
                         out,
                     );
-                    self.last_action = "tou:charge".into();
+                    self.assign_action("tou:charge")
                 } else if should_discharge {
                     let clamped = self.clamp_discharge_for_export(
                         self.max_discharge_w,
@@ -461,9 +483,9 @@ impl BatteryManagementActor {
                         },
                         out,
                     );
-                    self.last_action = "tou:discharge".into();
+                    self.assign_action("tou:discharge")
                 } else {
-                    self.last_action = "idle:tou".into();
+                    self.assign_action("idle:tou")
                 }
             }
 
@@ -474,8 +496,7 @@ impl BatteryManagementActor {
                 soc_deadband,
             } => {
                 let Some(soc) = self.read_soc(env) else {
-                    self.last_action = "idle:no_soc".into();
-                    return;
+                    return self.assign_action("idle:no_soc");
                 };
                 let deadband = *soc_deadband;
                 let was_charging = self.last_action.contains("backup:charge");
@@ -489,8 +510,7 @@ impl BatteryManagementActor {
                 if need_charge {
                     if !charge_from_grid && env.electrical.actual_pv_w <= 0.0 {
                         self.emit(ControlSignal::GridConnect { connected: false }, out);
-                        self.last_action = "grid_disconnect:backup_no_pv".into();
-                        return;
+                        return self.assign_action("grid_disconnect:backup_no_pv");
                     }
                     self.emit(
                         ControlSignal::SOCTarget {
@@ -509,9 +529,9 @@ impl BatteryManagementActor {
                             out,
                         );
                     }
-                    self.last_action = "backup:charge".into();
+                    self.assign_action("backup:charge")
                 } else {
-                    self.last_action = "idle:backup_at_target".into();
+                    self.assign_action("idle:backup_at_target")
                 }
             }
 
@@ -544,8 +564,7 @@ impl BatteryManagementActor {
                     }
                     self.dr_active = true;
                     let Some(soc) = self.read_soc(env) else {
-                        self.last_action = "idle:no_soc".into();
-                        return;
+                        return self.assign_action("idle:no_soc");
                     };
                     if soc > *min_soc_during_dr {
                         let raw = dr_discharge_rate * self.max_discharge_w;
@@ -563,13 +582,13 @@ impl BatteryManagementActor {
                             },
                             out,
                         );
-                        self.last_action = "dr:discharge".into();
+                        self.assign_action("dr:discharge")
                     } else {
-                        self.last_action = "dr:soc_too_low".into();
+                        self.assign_action("dr:soc_too_low")
                     }
                 } else {
                     self.dr_active = false;
-                    self.evaluate_mode(base_mode, env, out);
+                    self.evaluate_mode(base_mode, env, out)
                 }
             }
 
@@ -590,7 +609,7 @@ impl BatteryManagementActor {
                                 },
                                 out,
                             );
-                            self.last_action = "scheduled:charge".into();
+                            self.assign_action("scheduled:charge")
                         }
                         BmsAction::Discharge { rate_fraction } => {
                             let raw = rate_fraction * self.max_discharge_w;
@@ -608,11 +627,9 @@ impl BatteryManagementActor {
                                 },
                                 out,
                             );
-                            self.last_action = "scheduled:discharge".into();
+                            self.assign_action("scheduled:discharge")
                         }
-                        BmsAction::Idle => {
-                            self.last_action = "scheduled:idle".into();
-                        }
+                        BmsAction::Idle => self.assign_action("scheduled:idle"),
                         BmsAction::Hold { target_soc } => {
                             self.emit(
                                 ControlSignal::SOCTarget {
@@ -622,11 +639,11 @@ impl BatteryManagementActor {
                                 },
                                 out,
                             );
-                            self.last_action = "scheduled:hold".into();
+                            self.assign_action("scheduled:hold")
                         }
                     }
                 } else {
-                    self.last_action = "idle:no_window".into();
+                    self.assign_action("idle:no_window")
                 }
             }
 
@@ -682,10 +699,10 @@ impl BatteryManagementActor {
                         },
                         out,
                     );
-                    self.last_action = "storm_watch:active".into();
+                    self.assign_action("storm_watch:active")
                 } else {
                     self.storm_watch_active = false;
-                    self.evaluate_mode(base_mode, env, out);
+                    self.evaluate_mode(base_mode, env, out)
                 }
             }
         }
@@ -798,14 +815,14 @@ impl BatteryManagementActor {
         if effective_solar_only && pv_w <= 0.0 {
             // No real PV: disconnect from grid regardless of last_action.
             self.emit(ControlSignal::GridConnect { connected: false }, out);
-            self.last_action = "grid_disconnect:solar_only".into();
+            self.assign_action("grid_disconnect:solar_only");
             return;
         }
 
         // Re-connect grid if PV is back and we were previously forced off.
         if effective_solar_only && pv_w > 0.0 && self.last_action.contains("grid_disconnect") {
             self.emit(ControlSignal::GridConnect { connected: true }, out);
-            self.last_action = "self_consumption:grid_reconnected".into();
+            self.assign_action("self_consumption:grid_reconnected");
             return;
         }
 
@@ -825,6 +842,12 @@ impl BatteryManagementActor {
         };
 
         if should_charge {
+            // The action's string is written only at the transition:
+            // when the guard's test already holds, `last_action` is
+            // exactly the string this branch writes ("self_consumption:
+            // charge" is the only string `is_last_action_charging`
+            // matches), so reassigning it every step refreshed the same
+            // content and paid a fresh `String` per charging step.
             if !self.is_last_action_charging() {
                 self.emit(
                     ControlSignal::SelfConsumption {
@@ -833,8 +856,8 @@ impl BatteryManagementActor {
                     },
                     out,
                 );
+                self.assign_action("self_consumption:charge");
             }
-            self.last_action = "self_consumption:charge".into();
         } else if should_discharge {
             if !self.is_last_action_discharging() {
                 match self.grid_export_rule {
@@ -861,8 +884,8 @@ impl BatteryManagementActor {
                         );
                     }
                 }
+                self.assign_action("self_consumption:discharge");
             }
-            self.last_action = "self_consumption:discharge".into();
         } else if self.is_last_action_charging() || self.is_last_action_discharging() {
             self.emit(
                 ControlSignal::SelfConsumption {
@@ -871,7 +894,7 @@ impl BatteryManagementActor {
                 },
                 out,
             );
-            self.last_action = "idle:self_consumption".into();
+            self.assign_action("idle:self_consumption");
         }
     }
 
@@ -1087,9 +1110,12 @@ impl Actor for BatteryManagementActor {
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {
         self.step_count += 1;
-        let action_before = self.last_action.clone();
         let mode = std::mem::take(&mut self.bms_mode);
-        self.evaluate_mode(&mode, env, out);
+        // The toggle is the evaluation's own answer: an action assignment
+        // fires only when the content differs (the assignments go
+        // through `assign_action`), so "an assignment fired" is exactly
+        // the string-changed test the per-step clone made.
+        let toggled = self.evaluate_mode(&mode, env, out);
         self.bms_mode = mode;
 
         // Populate telemetry: bms_action uses a numeric code from last_action.
@@ -1103,7 +1129,6 @@ impl Actor for BatteryManagementActor {
         self.telemetry.set("pv_kw", pv_stale);
         self.telemetry.set("bms_pv_stale_kw", pv_stale);
         self.telemetry.set("load_kw", env.electrical.base_load_w);
-        let toggled = self.last_action != action_before;
         if toggled {
             self.current_mode_entered_step = self.step_count;
         }
@@ -2654,6 +2679,53 @@ mod tests {
     }
 
     // ── adjust_for_pv re-evaluation tests ──
+
+    /// The BMS's last-action write, the witness for the census's
+    /// decision-path site: the self-consumption re-evaluation reassigned
+    /// `last_action` (a fresh `String`) on EVERY charging and every
+    /// discharging step, not only at the action's transition, one
+    /// allocation per charging step. RED at the parent, GREEN when the
+    /// reassignment moves inside the transition guard it already sits
+    /// beside (the held string is the exact string the guard's test
+    /// matches, so the held state's content is identical): zero on every
+    /// charging step after the first.
+    #[test]
+    fn bms_last_action_write_is_allocation_free_while_the_action_holds() {
+        let mut actor = bms(BmsMode::SelfConsumption {
+            min_soc: 0.1,
+            max_soc: 0.95,
+            solar_only_charging: false,
+            surplus_deadband_w: 0.0,
+        });
+        let mut env = TestEnvBuilder::new()
+            .with_electrical(ElectricalSummary {
+                pv_generation_w: 6000.0,
+                actual_pv_w: 6000.0,
+                base_load_w: 2000.0,
+                ..Default::default()
+            })
+            .build();
+        set_soc(&mut actor, &mut env, "bat1", 0.5);
+
+        let mut out = Vec::new();
+        // The first charging step takes the action.
+        actor.adjust_for_pv(6000.0, &env, &mut out);
+        assert_eq!(actor.last_action(), "self_consumption:charge");
+        let _ = bms_last_action_site();
+
+        // Holding the same charging action allocates nothing.
+        for _ in 0..4 {
+            out.clear();
+            actor.adjust_for_pv(6000.0, &env, &mut out);
+            assert_eq!(actor.last_action(), "self_consumption:charge");
+        }
+        let total = bms_last_action_site();
+        assert_eq!(
+            total, 0,
+            "the BMS's last-action write allocated {total} times over the \
+             4 charging steps after the first"
+        );
+    }
 
     #[test]
     fn adjust_for_pv_stale_surplus_actual_deficit_switches_to_discharge() {
