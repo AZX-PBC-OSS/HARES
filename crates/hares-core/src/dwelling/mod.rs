@@ -1663,6 +1663,14 @@ pub struct StepResult {
     pub gas_power_w: f64,
 }
 
+/// One step's queued-request bound: the construction-time capacity the
+/// actor dispatch buffer and each priority tier's queue pre-size for.
+/// An event's requests (the EV driver's arrival, the BMS's
+/// re-evaluation) queue inside the bound, so a steady-state event pays
+/// no first-growth fill; `clear` and `drain` keep the capacity, so the
+/// fills are once per buffer, per process.
+const ACTOR_DISPATCH_BOUND: usize = 16;
+
 /// Internal control queue and routing logic.
 ///
 /// # Tier ordering (across priority levels)
@@ -1766,7 +1774,14 @@ fn named_unit_addressed_by_end_use(
 impl Default for ControlDispatcher {
     fn default() -> Self {
         Self {
-            by_tier: std::array::from_fn(|_| VecDeque::new()),
+            // Each tier's queue pre-sizes at construction for one step's
+            // queued-request bound, the same bound the actor dispatch
+            // buffer's capacity carries: an event's requests (the EV
+            // driver's arrival, the BMS's re-evaluation) queue inside
+            // it, so a steady-state event never pays the queue's first
+            // growth. `drain` keeps the capacity, so the fill is once
+            // per queue, per process.
+            by_tier: std::array::from_fn(|_| VecDeque::with_capacity(ACTOR_DISPATCH_BOUND)),
             seen_targets: Vec::with_capacity(16),
         }
     }
@@ -4662,7 +4677,7 @@ fn assemble_from_blueprint_with_seed(
         scheduler: StepScheduler::default(),
         auto_registered_actor_names: HashSet::new(),
         next_ev_driver_stream: 0,
-        actor_dispatch_buf: Vec::with_capacity(16),
+        actor_dispatch_buf: Vec::with_capacity(ACTOR_DISPATCH_BOUND),
         solver_feedback_actor,
         prev_zone_temps: HashMap::new(),
         prior_zone_temps: HashMap::new(),

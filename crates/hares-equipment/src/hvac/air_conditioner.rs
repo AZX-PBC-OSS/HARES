@@ -48,7 +48,7 @@ use super::coil_physics::{
     effective_shr_with_latent_degradation,
 };
 use super::latent_degradation::compute_coil_ao_by_stage;
-use super::speed_control::{SpeedSelection, capacity_fractions_for, interpolate_speed_stages};
+use super::speed_control::{SpeedSelection, interpolate_speed_stages};
 use super::staging::{DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD};
 use super::{
     HvacEquipment, HvacEquipmentType, RuntimeSetpointOverride, SpeedControlMode, ThermostatMode,
@@ -530,8 +530,10 @@ impl CoolingCore {
         &mut self,
         requested_capacity_fraction: f64,
     ) -> SpeedSelection {
-        let capacities = &self.hvac.config.cooling_capacities_w;
-        let cap_fracs = capacity_fractions_for(capacities);
+        // The fractions read through the runtime's cache (config-frozen
+        // data; see HvacEquipment::cooling_capacity_fractions_cached), so
+        // the per-step selection allocates nothing.
+        let cap_fracs = self.hvac.cooling_capacity_fractions_cached();
         if cap_fracs.is_empty() {
             let selection = SpeedSelection {
                 speed_index: 0,
@@ -553,7 +555,7 @@ impl CoolingCore {
             self.hvac.runtime.last_speed_frac = selection.speed_frac;
             return selection;
         }
-        let selection = interpolate_speed_stages(requested_capacity_fraction, &cap_fracs, true);
+        let selection = interpolate_speed_stages(requested_capacity_fraction, cap_fracs, true);
         self.hvac.runtime.last_speed_index = selection.speed_index;
         self.hvac.runtime.last_speed_frac = selection.speed_frac;
         selection

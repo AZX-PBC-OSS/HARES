@@ -6,9 +6,7 @@
 use hares_physics::biquadratic::quadratic;
 
 use super::hvac_core::HvacEquipment;
-use super::speed_control::{
-    SpeedControlMode, SpeedSelection, capacity_fractions_for, interpolate_speed_stages,
-};
+use super::speed_control::{SpeedControlMode, SpeedSelection, interpolate_speed_stages};
 use super::thermostat::ThermostatMode;
 
 /// Default low-speed capacity fraction for two-speed equipment.
@@ -254,19 +252,23 @@ impl HvacEquipment {
         }
     }
 
-    fn select_multi_speed(&self, load_fraction: f64) -> SpeedSelection {
-        let caps = match self.thermostat_fsm.mode {
+    fn select_multi_speed(&mut self, load_fraction: f64) -> SpeedSelection {
+        // The fractions are the config's capacity lists normalized; they
+        // read through the runtime's caches (config-frozen data), so the
+        // step path's selections allocate nothing.
+        let cap_fracs: &[f64] = match self.thermostat_fsm.mode {
             ThermostatMode::Heating if !self.config.heating_capacities_w.is_empty() => {
-                &self.config.heating_capacities_w
+                self.heating_capacity_fractions_cached()
             }
             ThermostatMode::Cooling if !self.config.cooling_capacities_w.is_empty() => {
-                &self.config.cooling_capacities_w
+                self.cooling_capacity_fractions_cached()
             }
-            _ if !self.config.heating_capacities_w.is_empty() => &self.config.heating_capacities_w,
-            _ => &self.config.cooling_capacities_w,
+            _ if !self.config.heating_capacities_w.is_empty() => {
+                self.heating_capacity_fractions_cached()
+            }
+            _ => self.cooling_capacity_fractions_cached(),
         };
-        let cap_fracs = capacity_fractions_for(caps);
-        interpolate_speed_stages(load_fraction, &cap_fracs, false)
+        interpolate_speed_stages(load_fraction, cap_fracs, false)
     }
 
     fn apply_disabled_speeds_two_speed(&self, desired_index: usize) -> usize {
@@ -418,22 +420,24 @@ impl HvacEquipment {
     }
 
     /// Normalized capacity fractions `cap[i] / cap[last]` for the populated capacities array.
-    pub fn capacity_fractions(&self) -> Vec<f64> {
-        let caps = match self.thermostat_fsm.mode {
+    pub fn capacity_fractions(&mut self) -> Vec<f64> {
+        // The fractions read through the runtime's caches (config-frozen
+        // data; see the cached accessors).
+        let fracs: &[f64] = match self.thermostat_fsm.mode {
             ThermostatMode::Heating if !self.config.heating_capacities_w.is_empty() => {
-                &self.config.heating_capacities_w
+                self.heating_capacity_fractions_cached()
             }
             ThermostatMode::Cooling if !self.config.cooling_capacities_w.is_empty() => {
-                &self.config.cooling_capacities_w
+                self.cooling_capacity_fractions_cached()
             }
             _ if self.config.heating_capacities_w.len()
                 >= self.config.cooling_capacities_w.len() =>
             {
-                &self.config.heating_capacities_w
+                self.heating_capacity_fractions_cached()
             }
-            _ => &self.config.cooling_capacities_w,
+            _ => self.cooling_capacity_fractions_cached(),
         };
-        capacity_fractions_for(caps)
+        fracs.to_vec()
     }
 
     /// Interpolate capacity between two bracket stages using `speed_frac`.
