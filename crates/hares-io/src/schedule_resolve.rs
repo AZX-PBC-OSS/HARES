@@ -379,7 +379,9 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
 ///
 /// Provenance: the file's fractions come from ANSI/RESNET/ICC 301-2022
 /// Addendum C and the 2010 Building America House Simulation Protocols
-/// (BAHSP), cited row by row in the file's own Data Source column, never
+/// (BAHSP), cited in the file's own Data Source column where a row cites
+/// one (19 of the 87 rows, the all-1.0 monthly multipliers and the holiday
+/// and vehicle schedules among them, carry no citation), never
 /// from ATUS. The vendored upstream copy is
 /// `vendors/OCHRE/ochre/defaults/Default Schedule Parameters.csv`,
 /// sha256 beb779009391304122dca1dcb6345acd81c1df506e4db17d845a1eeadf7151c0,
@@ -1992,9 +1994,12 @@ fn inject_power_schedule(
 /// OUTPUT through schedule CSVs (tier 1: a user-supplied file, or a
 /// ResStock `in.schedules.csv` download through
 /// `python/hares/data/resstock.py`, which supports releases 2024.1,
-/// 2024.2 and 2025.1) and falls back to the ANSI/RESNET/ICC 301-2022
-/// Addendum C occupancy profile (tier 2's HPXML extension fractions,
-/// then tier 3's `Occupancy` profile from [`DEFAULT_SCHEDULES_CSV`]).
+/// 2024.2 and 2025.1) and falls back to the HPXML simple-schedule
+/// fractions (tier 2: whatever weekday/weekend/month fractions the
+/// input's extension carries; in the ResStock and OS-HPXML workflows
+/// those fractions are the ANSI/RESNET/ICC 301-2022 Addendum C defaults,
+/// an attribution the engine does not enforce), then tier 3's
+/// `Occupancy` profile from [`DEFAULT_SCHEDULES_CSV`]).
 ///
 /// The upstream sources this contract pins:
 ///
