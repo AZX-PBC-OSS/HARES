@@ -1635,6 +1635,16 @@ impl Dwelling {
     /// entrance commits its new equipment and actor rosters immediately
     /// before calling this.
     fn install_roster_caches(&mut self, plan: RosterPlan) {
+        // Every roster change funnels here (add, remove, replace, actor
+        // changes, the assembly install). The step path's persistent
+        // stage-rank scratch (`stepped_stage_ranks`) is deliberately NOT
+        // part of the plan and is not cleared here: the scratch is
+        // write-only within a step and re-derived before every read (the
+        // next step's equipment phase clears it before its first push),
+        // so no rank recorded under the departing roster can reach the
+        // stage-ordering check under the new one. Clearing here would
+        // not strengthen that guarantee, and the roster changes that
+        // arrive mid-run keep the buffer's capacity warm.
         self.equipment_id_by_name = plan.equipment_id_by_name;
         self.roster.catalogue = plan.catalogue;
         self.active_equipment_ids = plan.active_equipment_ids;

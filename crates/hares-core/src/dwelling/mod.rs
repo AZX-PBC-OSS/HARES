@@ -2621,7 +2621,11 @@ fn validate_equipment_loops(
 /// `state_snapshot_phase` accumulator is bracketed around the whole
 /// profiling phase of the same name instead of one site, and
 /// `state_snapshot_phase_allocation_free_after_first_step` asserts it
-/// the same way against a reused step-result buffer.
+/// the same way against a reused step-result buffer. The
+/// `stage_rank_scratch` accumulator brackets the equipment phase's
+/// stage-rank scratch site, and
+/// `stage_rank_scratch_allocation_free_after_first_step` asserts it the
+/// same way.
 #[cfg(test)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct SnapshotAllocations {
@@ -2635,6 +2639,10 @@ struct SnapshotAllocations {
     fluid_set_from: u64,
     /// Every custom slot's `set_custom`, once per installed solver.
     custom_set_from: u64,
+    /// The equipment phase's stage-rank scratch: the per-step buffer the
+    /// three phase loops push the stepped ranks into for the
+    /// stage-ordering invariant.
+    stage_rank_scratch: u64,
     /// The whole `state_snapshot` phase, from its clock entry to its
     /// handoff to `output`: the equipment snapshot, the per-zone delivery
     /// vectors and the step result's zone temperatures.
@@ -2644,7 +2652,7 @@ struct SnapshotAllocations {
 #[cfg(test)]
 impl SnapshotAllocations {
     /// The per-site totals as an ordered list a test can diff by name.
-    fn totals(&self) -> [(&'static str, u64); 7] {
+    fn totals(&self) -> [(&'static str, u64); 8] {
         [
             ("snapshot_equipment", self.snapshot_equipment),
             ("update_in_place_slots", self.update_in_place_slots),
@@ -2653,6 +2661,7 @@ impl SnapshotAllocations {
             ("electrical_set_from", self.electrical_set_from),
             ("fluid_set_from", self.fluid_set_from),
             ("custom_set_from", self.custom_set_from),
+            ("stage_rank_scratch", self.stage_rank_scratch),
         ]
     }
 }
@@ -2666,6 +2675,8 @@ enum SnapshotAllocSite {
     HumiditySetFrom,
     ElectricalSetFrom,
     FluidSetFrom,
+    /// The equipment phase's stage-rank scratch, not the snapshot path.
+    StageRankScratch,
     /// The whole `state_snapshot` phase, not one site.
     StateSnapshotPhase,
 }
@@ -2695,6 +2706,9 @@ impl Dwelling {
                 SnapshotAllocSite::HumiditySetFrom => accumulators.humidity_set_from += delta,
                 SnapshotAllocSite::ElectricalSetFrom => accumulators.electrical_set_from += delta,
                 SnapshotAllocSite::FluidSetFrom => accumulators.fluid_set_from += delta,
+                SnapshotAllocSite::StageRankScratch => {
+                    accumulators.stage_rank_scratch += delta;
+                }
                 SnapshotAllocSite::StateSnapshotPhase => {
                     accumulators.state_snapshot_phase += delta;
                 }
@@ -2787,6 +2801,38 @@ pub struct Dwelling {
     /// Reused scratch for the per-step warning drain: a step in which no
     /// equipment warns allocates nothing.
     warning_scratch: Vec<Warning>,
+    /// Reused scratch for the step's runtime stage-rank sequence: the
+    /// ranks the step's three equipment phase loops push, which the
+    /// stage-ordering invariant (`check_equipment_step_order`) reads at
+    /// the end of the equipment phase. The buffer persists across steps
+    /// so the steady state allocates nothing (the follow-up census's
+    /// site); it is cleared at the one place that fills it, before the
+    /// step's first push, so the check reads only this step's ranks.
+    ///
+    /// That clear-at-use is the buffer's whole invalidation story, and it
+    /// is airtight at every equipment-set mutation point because the
+    /// buffer is write-only scratch within a step and fully re-derived
+    /// before every read:
+    /// - Construction holds it empty (`Vec::new()`); the first step's
+    ///   clear is a no-op and the pushes fill it.
+    /// - Every roster change funnels through the roster's single
+    ///   `install_roster_caches` funnel (`add_equipment`,
+    ///   `remove_equipment`, `replace_equipment`, the actor changes):
+    ///   none of them reads or restores this buffer, and the next step's
+    ///   equipment phase clears it before the first push, so a rank
+    ///   recorded under a departed roster cannot reach the check (the
+    ///   proof lives in `install_roster_caches`).
+    /// - A checkpoint restore never rebuilds the roster (`load_checkpoint`
+    ///   validates the checkpoint's equipment against the dwelling's live
+    ///   roster; `restore_building_state` leaves the equipment set to the
+    ///   fresh build), and the buffer is not checkpoint state; the next
+    ///   step re-derives it from scratch before the check reads it (the
+    ///   proof lives in `load_checkpoint`).
+    /// - Mid-step reentrancy does not exist: the phase loops hand each
+    ///   equipment only `&latest_env` and `&mut ports`, never
+    ///   `&mut Dwelling`, so no nested step can observe the buffer
+    ///   half-filled.
+    stepped_stage_ranks: Vec<u8>,
     /// Per-equipment HPXML setpoint reconciliation records, keyed by instance name.
     /// Populated during `from_config()` / `from_preparsed()` from the typed configs
     /// attached to each `EquipmentSpec`.
@@ -4547,6 +4593,7 @@ fn assemble_from_blueprint_with_seed(
         seeded_stream_actors: Vec::new(),
         warnings: std::mem::take(warnings),
         warning_scratch: Vec::new(),
+        stepped_stage_ranks: Vec::new(),
         setpoints_reconciled_by_equipment,
         roof_info,
         wall_azimuths,
@@ -7547,8 +7594,27 @@ impl Dwelling {
         // Runtime stage-rank tracking: records the actual step execution
         // sequence so the invariant checker validates real loop ordering,
         // not just the static sort of equipment_execution_order.
-        let mut stepped_stage_ranks: Vec<u8> =
-            Vec::with_capacity(self.roster.equipment_execution_order.len());
+        //
+        // The scratch persists across steps (the dwelling's
+        // `stepped_stage_ranks` field) and is re-derived from scratch
+        // every step: this clear is the only place that empties it and
+        // the three phase loops below are the only places that fill it,
+        // so the stage-ordering check at the end of the phase reads this
+        // step's ranks and nothing else. That is also why no equipment-
+        // or state-mutation point needs to clear it: a stale rank cannot
+        // cross a step boundary, a roster change (`install_roster_caches`
+        // never reads or restores the buffer; the next step clears it
+        // before the first push), or a checkpoint restore (the restore
+        // never rebuilds the roster and the buffer is not checkpoint
+        // state). The field's doc carries the full invalidation proof.
+        #[cfg(test)]
+        let stage_rank_alloc_before = thread_allocations();
+        self.stepped_stage_ranks.clear();
+        #[cfg(test)]
+        self.record_snapshot_allocations(
+            stage_rank_alloc_before,
+            SnapshotAllocSite::StageRankScratch,
+        );
 
         // Phase 1: Independent-stage equipment (PV, generators).
         for _oi in 0..self.roster.equipment_execution_order.len() {
@@ -7578,7 +7644,7 @@ impl Dwelling {
                     &self.ports.electrical,
                 )?;
                 self.record_equipment_step_success(idx);
-                stepped_stage_ranks.push(stage_rank(stage));
+                self.stepped_stage_ranks.push(stage_rank(stage));
             }
 
             #[cfg(feature = "observe")]
@@ -7655,7 +7721,7 @@ impl Dwelling {
                     &self.ports.electrical,
                 )?;
                 self.record_equipment_step_success(idx);
-                stepped_stage_ranks.push(stage_rank(stage));
+                self.stepped_stage_ranks.push(stage_rank(stage));
             }
 
             #[cfg(feature = "observe")]
@@ -7706,7 +7772,8 @@ impl Dwelling {
                     &self.ports.electrical,
                 )?;
                 self.record_equipment_step_success(idx);
-                stepped_stage_ranks.push(stage_rank(ExecutionStage::Thermal));
+                self.stepped_stage_ranks
+                    .push(stage_rank(ExecutionStage::Thermal));
             }
 
             #[cfg(feature = "observe")]
@@ -7744,9 +7811,11 @@ impl Dwelling {
         }
 
         // Stage-ordering invariant: verify that equipment step execution order
-        // respects stage_rank ordering (non-decreasing ranks).
+        // respects stage_rank ordering (non-decreasing ranks). The slice is
+        // this step's own ranks only: the persistent scratch was cleared
+        // before the phase's first push and nothing else writes it.
         self.invariant_checker
-            .check_equipment_step_order(&stepped_stage_ranks)?;
+            .check_equipment_step_order(&self.stepped_stage_ranks)?;
 
         // Non-finite telemetry enforcement (always on): equipment
         // writes are rejected at the Telemetry boundary in every build, and
@@ -10005,6 +10074,55 @@ destination = "memory"
         );
     }
 
+    /// The step's stage-rank scratch allocation, the witness for the
+    /// census site the P1 record names (`stepped_stage_ranks`): a fresh
+    /// `Vec::with_capacity` per step for the unconditional stage-ordering
+    /// invariant, one allocation per step in every build. The site's
+    /// accumulator (`stage_rank_scratch`) brackets exactly the buffer's
+    /// acquisition, so the counts attribute to this site alone. RED at
+    /// the parent: the delta is one per step. GREEN with the scratch
+    /// persisted on the dwelling: zero on every step after the first.
+    #[test]
+    fn stage_rank_scratch_allocation_free_after_first_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.run_timestep(false).expect("first step");
+        let baseline = dwelling.snapshot_allocation_totals().stage_rank_scratch;
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("step");
+        }
+        let after = dwelling.snapshot_allocation_totals().stage_rank_scratch;
+        assert_eq!(
+            after,
+            baseline,
+            "the stage-rank scratch allocated {} times over 4 steps after the \
+             first ({} per step): the scratch must persist across steps and \
+             re-derive per step without allocating",
+            after - baseline,
+            (after - baseline) / 4,
+        );
+    }
+
     /// A custom solver's slot is resolved once at installation: the
     /// returned handle reads the solver's update after a step, and every
     /// installation that would drift the step path's fixed slot set is
@@ -10490,6 +10608,11 @@ fn cfg_gated_helper() {
         dwelling.ports = PortSlots::from_declarations(&declarations);
         dwelling.rollback_ports = PortSlots::from_declarations(&declarations);
         let equipment = equipment_refs(&dwelling.equipment);
+        // Direct roster mutation, outside the install_roster_caches
+        // funnel: like every equipment-set change it needs no explicit
+        // invalidation of the persistent stage-rank scratch, which the
+        // next step's equipment phase clears before its first push (the
+        // field's doc carries the proof).
         dwelling.roster.equipment_execution_order = compute_equipment_execution_order(&equipment);
         dwelling.roster.equipment_ids = equipment.iter().map(|eq| eq.descriptor().id).collect();
         dwelling.active_equipment_ids = equipment.iter().map(|eq| eq.descriptor().id).collect();
