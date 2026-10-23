@@ -293,6 +293,22 @@ impl FluidDomainPayload {
             return None;
         }
         let mut payload = Vec::with_capacity(states.len() * 7);
+        Self::encode_into(states, &mut payload);
+        Some(payload)
+    }
+
+    /// The in-place form of [`encode`]: clears `payload` and fills it
+    /// with the same seven values per state, so a caller reusing one
+    /// buffer across steps pays the allocation once. Returns `false`
+    /// (and leaves `payload` empty) when the states are empty; the
+    /// caller publishes the absence the same way `encode`'s `None` does.
+    pub fn encode_into(states: &[FluidLoopState], payload: &mut Vec<f64>) -> bool {
+        if states.is_empty() {
+            payload.clear();
+            return false;
+        }
+        payload.clear();
+        payload.reserve(states.len() * 7);
         for state in states {
             payload.push(f64::from(state.loop_id.0));
             payload.push(fluid_type_to_f64(state.fluid_type));
@@ -302,7 +318,7 @@ impl FluidDomainPayload {
             payload.push(state.mean_supply_temp_c);
             payload.push(state.mean_return_temp_c);
         }
-        Some(payload)
+        true
     }
 
     pub fn decode(payload: &[f64]) -> Result<Vec<FluidLoopState>, HaresError> {

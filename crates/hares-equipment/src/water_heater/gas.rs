@@ -19,6 +19,22 @@ use crate::schedule_helpers::{capture_schedule_source_state, restore_optional_so
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::siting::{self, Siting};
+
+/// The gas water heater's per-step heat-injection allocation accumulator,
+/// read by the site's witness test only: the step brackets the
+/// `heat_injections` buffer's construction (a fresh `vec![]` per step,
+/// the census's one-allocation-per-water-heater-step site). The counting
+/// allocator is installed by this crate's test build alone.
+#[cfg(test)]
+static GAS_WH_HEAT_INJECTIONS_SITE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The accumulator's read-and-reset, for the witness test.
+#[cfg(test)]
+pub(crate) fn gas_wh_heat_injections_site() -> u64 {
+    use std::sync::atomic::Ordering;
+    GAS_WH_HEAT_INJECTIONS_SITE.swap(0, Ordering::Relaxed)
+}
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
     hysteresis_call, parse_usize, resolve_storage_step_inputs, restored_tank_deadband_c,
@@ -112,6 +128,11 @@ pub struct GasWH {
     fan_power_w: f64,
     setpoint_c: f64,
     deadband_c: f64,
+    /// The step's heat injections (the burner's and the pilot's tank
+    /// nodes), built in the persistent scratch: cleared and refilled
+    /// per step, so the step's steady state allocates nothing. Read
+    /// only by the same step's `tank.step_tempered` call.
+    heat_injections_scratch: Vec<(usize, f64)>,
     /// The configured setpoint and deadband, which the release form restores.
     configured_setpoint_c: f64,
     configured_deadband_c: f64,
@@ -257,6 +278,7 @@ impl GasWH {
             hot_draw_temp_c: None,
             siting,
             draw_tracker: super::DrawVolumeTracker::new(),
+            heat_injections_scratch: Vec::new(),
         }
     }
 
@@ -635,16 +657,31 @@ impl Equipment for GasWH {
         let pilot_heat_to_water_w = self.pilot_power_w * self.pilot_fraction_to_tank;
         let pilot_heat_to_ambient_w = self.pilot_power_w * (1.0 - self.pilot_fraction_to_tank);
 
-        let heat_injections: Vec<(usize, f64)> = {
-            let mut injections = vec![];
-            if tank_heat_w > 0.0 {
-                injections.push((self.burner_node, tank_heat_w));
-            }
-            if pilot_heat_to_water_w > 0.0 {
-                injections.push((self.burner_node, pilot_heat_to_water_w));
-            }
-            injections
-        };
+        // The step's heat injections, built in the equipment's persistent
+        // scratch (cleared, refilled): the burner's and the pilot's tank
+        // injections are known up front, so the buffer allocates once and
+        // the step's steady state pays nothing.
+        #[cfg(test)]
+        let site_before = hares_types::alloc_count::thread_allocations();
+        self.heat_injections_scratch.clear();
+        if tank_heat_w > 0.0 {
+            self.heat_injections_scratch
+                .push((self.burner_node, tank_heat_w));
+        }
+        if pilot_heat_to_water_w > 0.0 {
+            self.heat_injections_scratch
+                .push((self.burner_node, pilot_heat_to_water_w));
+        }
+        #[cfg(test)]
+        if let (Some(before), Some(after)) =
+            (site_before, hares_types::alloc_count::thread_allocations())
+        {
+            GAS_WH_HEAT_INJECTIONS_SITE.fetch_add(
+                after.saturating_sub(before),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        let heat_injections = &self.heat_injections_scratch;
 
         // Conservation invariant: pilot thermal power must equal sum of routed
         // components. Debug-build check: the split is `p f + p (1 - f)`.
@@ -710,7 +747,7 @@ impl Equipment for GasWH {
                 hot_flow_m3_s,
                 mains_temp_c,
             },
-            &heat_injections,
+            heat_injections,
             tmv,
             dt,
         )?;
@@ -1409,6 +1446,37 @@ mod tests {
     /// Q — is zero; the ZIP wiring itself is verified directly. See
     /// `fan_power_config_drives_real_and_reactive_draw` for the configured
     /// path.
+    /// The gas water heater's heat-injection allocation, the witness for
+    /// the census's per-water-heater-step site: the step built a fresh
+    /// `heat_injections` vector every step (the burner's and the pilot's
+    /// tank injections are known up front, so the buffer is a scratch).
+    /// The site accumulator brackets exactly the vector's construction.
+    /// RED at the parent: one allocation per step, every step (the
+    /// pilot's tank share fires every step). GREEN when the buffer is a
+    /// persistent scratch: zero on every step after the first.
+    #[test]
+    fn gas_wh_heat_injections_are_allocation_free_after_the_first_step() {
+        let config = config();
+        let mut eq = GasWH::new(config.clone());
+        let env = env(21.0);
+        eq.init(&config, &env).unwrap();
+
+        let mut ports = ports();
+        // The first step pays the scratch's first fill.
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        let _ = super::gas_wh_heat_injections_site();
+
+        for _ in 0..4 {
+            eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+        }
+        let total = super::gas_wh_heat_injections_site();
+        assert_eq!(
+            total, 0,
+            "the gas water heater's heat-injection buffer allocated {total} \
+             times over the 4 steps after the first"
+        );
+    }
+
     #[test]
     fn reactive_zip_resolves_draft_fan_row_and_channels_agree() {
         let config = config();

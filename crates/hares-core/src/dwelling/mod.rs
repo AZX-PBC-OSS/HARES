@@ -2643,6 +2643,11 @@ struct SnapshotAllocations {
     /// three phase loops push the stepped ranks into for the
     /// stage-ordering invariant.
     stage_rank_scratch: u64,
+    /// The humidity alpha telemetry's per-step rebuild: the map the
+    /// humidity update applies to the zones' semi-implicit alphas with,
+    /// removed from and reinserted into `equipment_telemetry` with a
+    /// fresh format-built key per zone per step.
+    humidity_alpha_rebuild: u64,
     /// The whole `state_snapshot` phase, from its clock entry to its
     /// handoff to `output`: the equipment snapshot, the per-zone delivery
     /// vectors and the step result's zone temperatures.
@@ -2652,7 +2657,7 @@ struct SnapshotAllocations {
 #[cfg(test)]
 impl SnapshotAllocations {
     /// The per-site totals as an ordered list a test can diff by name.
-    fn totals(&self) -> [(&'static str, u64); 8] {
+    fn totals(&self) -> [(&'static str, u64); 9] {
         [
             ("snapshot_equipment", self.snapshot_equipment),
             ("update_in_place_slots", self.update_in_place_slots),
@@ -2662,6 +2667,7 @@ impl SnapshotAllocations {
             ("fluid_set_from", self.fluid_set_from),
             ("custom_set_from", self.custom_set_from),
             ("stage_rank_scratch", self.stage_rank_scratch),
+            ("humidity_alpha_rebuild", self.humidity_alpha_rebuild),
         ]
     }
 }
@@ -2677,6 +2683,9 @@ enum SnapshotAllocSite {
     FluidSetFrom,
     /// The equipment phase's stage-rank scratch, not the snapshot path.
     StageRankScratch,
+    /// The humidity alpha telemetry's per-step rebuild, in the humidity
+    /// update's zone application.
+    HumidityAlphaRebuild,
     /// The whole `state_snapshot` phase, not one site.
     StateSnapshotPhase,
 }
@@ -2708,6 +2717,9 @@ impl Dwelling {
                 SnapshotAllocSite::FluidSetFrom => accumulators.fluid_set_from += delta,
                 SnapshotAllocSite::StageRankScratch => {
                     accumulators.stage_rank_scratch += delta;
+                }
+                SnapshotAllocSite::HumidityAlphaRebuild => {
+                    accumulators.humidity_alpha_rebuild += delta;
                 }
                 SnapshotAllocSite::StateSnapshotPhase => {
                     accumulators.state_snapshot_phase += delta;
@@ -2801,6 +2813,19 @@ pub struct Dwelling {
     /// Reused scratch for the per-step warning drain: a step in which no
     /// equipment warns allocates nothing.
     warning_scratch: Vec<Warning>,
+    /// The step's executed-actor set, the debug-only EveryStep check's
+    /// scratch: cleared per step before the scheduler loop fills it, so
+    /// a debug build's steady state allocates nothing for the set
+    /// either. Debug-only: the check it feeds is a debug assertion.
+    #[cfg(debug_assertions)]
+    executed_actors_scratch: std::collections::HashSet<usize>,
+    /// Reused scratch for the humidity update's per-zone telemetry keys:
+    /// the zone's `humidity_semi_implicit_alpha_zone_N` key builds in the
+    /// scratch (cleared, refilled) instead of a fresh `format!` per zone
+    /// per step, so the step's steady state allocates nothing. The key
+    /// text is a pure function of the zone id; nothing outside the call
+    /// reads the scratch.
+    humidity_alpha_key_scratch: String,
     /// Reused scratch for the step's runtime stage-rank sequence: the
     /// ranks the step's three equipment phase loops push, which the
     /// stage-ordering invariant (`check_equipment_step_order`) reads at
@@ -4593,6 +4618,9 @@ fn assemble_from_blueprint_with_seed(
         seeded_stream_actors: Vec::new(),
         warnings: std::mem::take(warnings),
         warning_scratch: Vec::new(),
+        humidity_alpha_key_scratch: String::new(),
+        #[cfg(debug_assertions)]
+        executed_actors_scratch: std::collections::HashSet::new(),
         stepped_stage_ranks: Vec::new(),
         setpoints_reconciled_by_equipment,
         roof_info,
@@ -7327,8 +7355,12 @@ impl Dwelling {
         #[cfg(feature = "observe")]
         let mut actor_error_count: usize = 0;
         #[cfg(debug_assertions)]
-        let mut executed_actors: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
+        {
+            // The step's executed-actor set, the dwelling's persistent
+            // debug scratch: cleared per step, so a debug build's
+            // steady state allocates nothing for it either.
+            self.executed_actors_scratch.clear();
+        }
 
         self.actor_dispatch_buf.clear();
         for entry in self.scheduler.build() {
@@ -7405,7 +7437,7 @@ impl Dwelling {
                         scheduled_phases.push(format!("ActorDecide({})", entry.name));
                         #[cfg(debug_assertions)]
                         {
-                            executed_actors.insert(idx);
+                            self.executed_actors_scratch.insert(idx);
                         }
 
                         // The open `Actors` span (this entry's whole
@@ -7469,7 +7501,7 @@ impl Dwelling {
                     .any(|e| e.slot == Some(crate::scheduler::ActorSlot(i)));
                 if registered && is_every_step {
                     debug_assert!(
-                        executed_actors.contains(&i),
+                        self.executed_actors_scratch.contains(&i),
                         "EveryStep actor '{}' (index {}) was not called during ActorDecide phase",
                         actor.name(),
                         i,
@@ -8080,7 +8112,18 @@ impl Dwelling {
             &mut self.fluid_update_buf,
         )?;
 
-        apply_humidity_update_to_zones(&mut self.latest_env, &self.humidity_update_buf);
+        #[cfg(test)]
+        let humidity_alpha_before = thread_allocations();
+        apply_humidity_update_to_zones(
+            &mut self.latest_env,
+            &self.humidity_update_buf,
+            &mut self.humidity_alpha_key_scratch,
+        );
+        #[cfg(test)]
+        self.record_snapshot_allocations(
+            humidity_alpha_before,
+            SnapshotAllocSite::HumidityAlphaRebuild,
+        );
 
         // BMS PV staleness diagnostic: after the electrical solver runs at
         // Step 4 and the timestep is ≥ 5 min, compare the PV generation used
@@ -10156,6 +10199,55 @@ destination = "memory"
              re-derive per step without allocating",
             after - baseline,
             (after - baseline) / 4,
+        );
+    }
+
+    /// The humidity alpha telemetry's per-step rebuild, the witness for
+    /// the census's second-heaviest site: the humidity update removed
+    /// the alpha telemetry map from `equipment_telemetry`, rebuilt every
+    /// zone's `humidity_semi_implicit_alpha_zone_N` key through
+    /// `format!`, and reinserted the map under a fresh `String` key,
+    /// every step. RED at the parent: one allocation per zone per step
+    /// plus the map key per step (six zones on the OCHRE sample home:
+    /// seven per step). GREEN when the map's entry updates in place and
+    /// the zone keys build in a reused scratch: zero on every step after
+    /// the first.
+    #[test]
+    fn humidity_alpha_telemetry_rebuild_is_allocation_free_after_first_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.run_timestep(false).expect("first step");
+        let baseline = dwelling.snapshot_allocation_totals().humidity_alpha_rebuild;
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("step");
+        }
+        let after = dwelling.snapshot_allocation_totals().humidity_alpha_rebuild;
+        assert_eq!(
+            after,
+            baseline,
+            "the humidity alpha telemetry rebuild allocated {} times over 4 \
+             steps after the first: the alpha map must update in place",
+            after - baseline,
         );
     }
 
