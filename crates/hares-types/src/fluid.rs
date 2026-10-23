@@ -297,11 +297,12 @@ impl FluidDomainPayload {
         Some(payload)
     }
 
-    /// The in-place form of [`encode`]: clears `payload` and fills it
-    /// with the same seven values per state, so a caller reusing one
-    /// buffer across steps pays the allocation once. Returns `false`
-    /// (and leaves `payload` empty) when the states are empty; the
-    /// caller publishes the absence the same way `encode`'s `None` does.
+    /// The in-place form of [`FluidDomainPayload::encode`]: clears
+    /// `payload` and fills it with the same seven values per state, so a
+    /// caller reusing one buffer across steps pays the allocation once.
+    /// Returns `false` (and leaves `payload` empty) when the states are
+    /// empty; the caller publishes the absence the same way `encode`'s
+    /// `None` does.
     pub fn encode_into(states: &[FluidLoopState], payload: &mut Vec<f64>) -> bool {
         if states.is_empty() {
             payload.clear();
