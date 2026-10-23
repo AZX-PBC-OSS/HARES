@@ -6543,6 +6543,13 @@ impl Dwelling {
         let mut final_residuals: Option<WarmupResiduals> = None;
         let mut failing_zones: Vec<ZoneId> = Vec::new();
 
+        // One step result for the whole warm-up: the loop drops each
+        // step's result unread (the convergence reads the dwelling's own
+        // per-step fields below, never the step result), and every field
+        // is overwritten per step, so the loop's steady state allocates
+        // nothing for it (the `simulate_inner` loop's shape).
+        let mut step_result = StepResult::default();
+
         for day in 1..=warmup.max_days {
             // Record the day: per-zone daily extremes and daily peak HVAC
             // delivery, accumulated per step below.
@@ -6555,7 +6562,7 @@ impl Dwelling {
             self.clock.current_step = 0;
 
             for _ in 0..steps_per_day {
-                if let Err(err) = self.run_timestep(false) {
+                if let Err(err) = self.run_timestep_into(false, &mut step_result) {
                     // The run failed mid-warm-up: exit warm-up mode and
                     // record the outcome honestly (stopped during
                     // `day`, not converged) before propagating.
@@ -9949,6 +9956,52 @@ destination = "memory"
             baseline,
             "the state_snapshot phase allocated {} times over 4 steps after the first",
             after - baseline
+        );
+    }
+
+    /// The warm-up loop's step-result allocation, the witness for the
+    /// census site the P1 record names: each warm-up step returned a
+    /// fresh `StepResult` the loop dropped unread. The loop steps
+    /// through one reused result (the `simulate_inner` shape), so after
+    /// its first step every warm-up step's `state_snapshot` phase
+    /// allocates nothing. The convergence reads (the daily extremes and
+    /// the daily peak deliveries in `run_warmup_converged_inner`) come
+    /// from the dwelling's own per-step fields after each step returns
+    /// and never from the step result, so a reused buffer cannot feed a
+    /// stale step into the comparison. The measured window is a second
+    /// warm-up call: the construction's own default warm-up paid the
+    /// phase's first-ever allocations (the equipment maps' entries, the
+    /// delivery vectors' buffers), and the second call's single
+    /// remaining allocation is the reused buffer's first fill.
+    #[test]
+    fn warmup_loop_result_allocation_free_after_first_step() {
+        let config = parity_candidate(
+            "cz4a_ashp_hpwh",
+            "2024-02-27T00:00:00-07:00",
+            900,
+            hares_io::Warmup::default(),
+        );
+        let mut dwelling = Dwelling::from_config(config).expect("the candidate builds");
+
+        // The construction ran the default converging warm-up, so every
+        // first-ever allocation in the phase is already paid here.
+        dwelling
+            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .expect("the baseline warm-up runs");
+        let baseline = dwelling.snapshot_allocation_totals().state_snapshot_phase;
+
+        let days = dwelling
+            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .expect("the measured warm-up runs");
+        let after = dwelling.snapshot_allocation_totals().state_snapshot_phase;
+        assert_eq!(
+            after,
+            baseline + 1,
+            "the warm-up loop allocated {} times in the state_snapshot phase \
+             beyond the reused result's first fill over its {days} days of \
+             steps: every warm-up step after the first must write the \
+             reused result in place",
+            after - baseline,
         );
     }
 
