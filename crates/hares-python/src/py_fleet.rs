@@ -556,6 +556,28 @@ impl PyAlignment {
     }
 }
 
+/// The owned copy of one dwelling's successful step: the scalars the
+/// result dict carries and the per-zone temperature pairs. Built while
+/// the fleet's locks are held, read while the GIL is held.
+struct PyFleetStepData {
+    timestamp: chrono::NaiveDateTime,
+    net_electric_power_w: f64,
+    hvac_heating_w: f64,
+    hvac_cooling_w: f64,
+    gas_power_w: f64,
+    zone_temperatures_c: Vec<(hares_types::ZoneId, f64)>,
+}
+
+/// One dwelling's step copied out from the reused results under the
+/// fleet's locks: the dicts are built from this owned snapshot, never
+/// from a re-read of the buffer a concurrent `step` call could be
+/// overwriting.
+struct PyFleetStepEntry {
+    bldg_id: i64,
+    reactive_power_var: Result<f64, String>,
+    result: Result<PyFleetStepData, String>,
+}
+
 #[pyclass(name = "SteppableFleet")]
 pub struct PySteppableFleet {
     fleet: Mutex<hares_fleet::SteppableFleet>,
@@ -639,8 +661,8 @@ impl PySteppableFleet {
             Mutex(String),
             Fleet(hares_fleet::FleetError),
         }
-        let (bldg_ids, reactive_power_var) = py
-            .detach(|| {
+        let entries = py
+            .detach(|| -> Result<Vec<PyFleetStepEntry>, StepOutcome> {
                 let mut fleet = self.fleet.lock().map_err(|e| {
                     StepOutcome::Mutex(format!(
                         "steppable fleet state is corrupted (internal panic: {e}); \
@@ -661,11 +683,49 @@ impl PySteppableFleet {
                 // The building ids come from an infallible iterator over
                 // the homes; every home in the fleet has one.
                 let bldg_ids = fleet.bldg_ids();
-                let reactive_power_var = (0..fleet.len())
-                    .map(|idx| fleet.telemetry(idx).map(|t| t.reactive_power_var))
-                    .collect::<Vec<_>>();
+                let reactive_power_var: Vec<Result<f64, String>> = (0..fleet.len())
+                    .map(|idx| {
+                        fleet
+                            .telemetry(idx)
+                            .map(|t| t.reactive_power_var)
+                            .map_err(|err| err.to_string())
+                    })
+                    .collect();
+                // The per-dwelling step data is copied out into owned
+                // Rust values while both locks are held, and the dicts
+                // are built from those copies under the GIL below. The
+                // copies are the race fix, not an optimization trade:
+                // `step` takes `&self` and the GIL is released across
+                // the detach, so two Python threads can interleave, and
+                // a thread that re-read the reused buffer after
+                // releasing the locks would carry the other thread's
+                // step results paired with its own telemetry reads. The
+                // per-call copies are the binding layer's cost (the
+                // dict construction allocates regardless); the engine's
+                // internal step loop, the loop the allocation assertion
+                // measures, never runs them.
+                let entries: Vec<PyFleetStepEntry> = bldg_ids
+                    .into_iter()
+                    .zip(reactive_power_var)
+                    .zip(results.iter())
+                    .map(|((bldg_id, reactive_power_var), entry)| PyFleetStepEntry {
+                        bldg_id,
+                        reactive_power_var,
+                        result: match entry {
+                            Ok(step) => Ok(PyFleetStepData {
+                                timestamp: step.timestamp,
+                                net_electric_power_w: step.net_electric_power_w,
+                                hvac_heating_w: step.hvac_heating_w,
+                                hvac_cooling_w: step.hvac_cooling_w,
+                                gas_power_w: step.gas_power_w,
+                                zone_temperatures_c: step.zone_temperatures_c.clone(),
+                            }),
+                            Err(err) => Err(err.to_string()),
+                        },
+                    })
+                    .collect();
                 drop(results);
-                Ok::<_, StepOutcome>((bldg_ids, reactive_power_var))
+                Ok(entries)
             })
             .map_err(|outcome| match outcome {
                 StepOutcome::Mutex(message) => {
@@ -677,26 +737,14 @@ impl PySteppableFleet {
                 StepOutcome::Fleet(err) => steppable_error_to_py_err(err),
             })?;
 
-        // The dicts are built from reads of the reused results, which
-        // stay in place for the next step.
-        let step_results = self.step_results.lock().map_err(|e| {
-            PyRuntimeError::new_err(format!(
-                "steppable fleet results are corrupted (internal panic: {e}); \
-                 create a new SteppableFleet instance"
-            ))
-        })?;
+        // The dicts are built from the owned copies the detached step
+        // took under the fleet's locks: one step's data, whatever other
+        // Python threads did to the fleet meanwhile.
         let out = PyList::empty(py);
-        for (idx, entry) in step_results.iter().enumerate() {
+        for entry in &entries {
             let item = PyDict::new(py);
-            let outcome = match entry {
-                Ok(step) => match &reactive_power_var[idx] {
-                    Ok(reactive_power_var) => Ok((step, *reactive_power_var)),
-                    Err(err) => Err(err.to_string()),
-                },
-                Err(err) => Err(err.to_string()),
-            };
-            match outcome {
-                Ok((step, reactive)) => {
+            match (&entry.result, &entry.reactive_power_var) {
+                (Ok(step), Ok(reactive_power_var)) => {
                     let result = PyDict::new(py);
                     result.set_item(
                         "timestamp",
@@ -706,7 +754,7 @@ impl PySteppableFleet {
                     result.set_item("hvac_heating_w", step.hvac_heating_w)?;
                     result.set_item("hvac_cooling_w", step.hvac_cooling_w)?;
                     result.set_item("gas_power_w", step.gas_power_w)?;
-                    result.set_item("reactive_power_var", reactive)?;
+                    result.set_item("reactive_power_var", *reactive_power_var)?;
                     for (zone_id, temp_c) in &step.zone_temperatures_c {
                         let key = if zone_id.0 == 0 {
                             "Temperature - Indoor (C)".to_string()
@@ -716,13 +764,13 @@ impl PySteppableFleet {
                         result.set_item(key, *temp_c)?;
                     }
                     item.set_item("ok", true)?;
-                    item.set_item("bldg_id", bldg_ids[idx])?;
+                    item.set_item("bldg_id", entry.bldg_id)?;
                     item.set_item("result", result)?;
                 }
-                Err(message) => {
+                (Ok(_), Err(message)) | (Err(message), _) => {
                     item.set_item("ok", false)?;
                     item.set_item("error", message)?;
-                    item.set_item("bldg_id", bldg_ids[idx])?;
+                    item.set_item("bldg_id", entry.bldg_id)?;
                 }
             }
             out.append(item)?;
