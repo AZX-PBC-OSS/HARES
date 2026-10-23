@@ -1,9 +1,0 @@
-SKIPPED [1] tests/python/test_observer_diagnostics.py:86: OCHRE not installed
-SKIPPED [1] tests/python/test_ochre_parity.py:185: OCHRE not installed
-SKIPPED [1] tests/python/test_py_conversions.py:163: ResStock test fixtures not available
-SKIPPED [1] tests/python/test_py_conversions.py:171: ResStock test fixtures not available
-SKIPPED [1] tests/python/test_py_conversions.py:179: ResStock test fixtures not available
-SKIPPED [1] tests/python/test_py_conversions.py:187: ResStock test fixtures not available
-SKIPPED [1] tests/python/test_py_conversions.py:195: ResStock test fixtures not available
-SKIPPED [1] tests/python/test_py_conversions.py:213: ResStock test fixtures not available
-SKIPPED [1] tests/python/test_thermal_trace.py:44: OCHRE not installed

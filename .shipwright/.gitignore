@@ -1,9 +1,0 @@
-# ShipWright ephemeral operational state — local to each machine.
-# Sessions contain PTY PIDs and run statuses that are meaningless elsewhere.
-sessions/
-# Run sentinels and rendered prompts are transient; commit drafts and
-# other .md/.yaml artifacts under runs/ are intentionally committable.
-runs/**/*.done
-runs/**/prompt-*.md
-initiatives/**/*.done
-*.tmp
