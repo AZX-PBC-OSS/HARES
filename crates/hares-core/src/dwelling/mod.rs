@@ -5029,6 +5029,42 @@ impl Dwelling {
         self.run_timestep(self.recording_enabled())
     }
 
+    /// The by-value [`Self::step`]'s body, writing the step result in
+    /// place into `out`: the same checks, the same step, no fresh result
+    /// per call. The internal loops that step every timestep (the Python
+    /// single-step binding and the fleet's per-dwelling step loop) step
+    /// through one reused result this way, so their steady state pays no
+    /// zone-temperature allocation; `step()` keeps its by-value signature
+    /// for every external caller.
+    ///
+    /// The reuse is semantics-neutral: `run_timestep_into` overwrites
+    /// every field of `out` on the success path, so a reused buffer
+    /// carries nothing from the step before, and a failed step leaves
+    /// `out` unread (the caller receives the error, never the buffer).
+    ///
+    /// # Errors
+    ///
+    /// The same causes the by-value [`Self::step`] carries.
+    pub fn step_into(&mut self, out: &mut StepResult) -> Result<()> {
+        #[cfg(debug_assertions)]
+        if self.test_panic_on_step {
+            panic!("test-induced panic in Dwelling::step()");
+        }
+        #[cfg(debug_assertions)]
+        assert!(
+            !self.test_assert_panic_on_step,
+            "test-induced assert failure in Dwelling::step()"
+        );
+        if self.run_result.is_some() {
+            return Err(HaresError::Simulation(
+                "the run finished and cannot step further: the finished run's result is \
+                 fixed; read it with finish()"
+                    .to_string(),
+            ));
+        }
+        self.run_timestep_into(self.recording_enabled(), out)
+    }
+
     /// Queues a control signal for one equipment instance by name.
     ///
     /// Priority is derived from the signal type via the central

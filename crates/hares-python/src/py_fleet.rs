@@ -559,6 +559,13 @@ impl PyAlignment {
 #[pyclass(name = "SteppableFleet")]
 pub struct PySteppableFleet {
     fleet: Mutex<hares_fleet::SteppableFleet>,
+    /// The per-dwelling results the fleet's step loop writes in place:
+    /// the buffer the loop reuses across steps, so the binding's
+    /// steady state pays no zone-temperature allocation per
+    /// dwelling-step. The fleet's roster is fixed at construction and
+    /// every slot is fully overwritten before any read on the success
+    /// path, so no mutation point can leak a stale result.
+    step_results: Mutex<Vec<std::result::Result<hares_core::StepResult, hares_fleet::SimError>>>,
     poisoned: AtomicBool,
     build_errors: Vec<hares_fleet::DwellingBuildError>,
 }
@@ -615,6 +622,7 @@ impl PySteppableFleet {
         }
         Ok(Self {
             fleet: Mutex::new(fleet),
+            step_results: Mutex::new(Vec::new()),
             poisoned: AtomicBool::new(false),
             build_errors,
         })
@@ -631,7 +639,7 @@ impl PySteppableFleet {
             Mutex(String),
             Fleet(hares_fleet::FleetError),
         }
-        let (step_results, bldg_ids, reactive_power_var) = py
+        let (bldg_ids, reactive_power_var) = py
             .detach(|| {
                 let mut fleet = self.fleet.lock().map_err(|e| {
                     StepOutcome::Mutex(format!(
@@ -639,14 +647,25 @@ impl PySteppableFleet {
                          create a new SteppableFleet instance"
                     ))
                 })?;
-                let step_results = fleet.step().map_err(StepOutcome::Fleet)?;
+                // The fleet's lock guards the step and the reads beside
+                // it; the results' lock guards the reused buffer the
+                // loop writes in place. This is the only site that takes
+                // both, always in this order.
+                let mut results = self.step_results.lock().map_err(|e| {
+                    StepOutcome::Mutex(format!(
+                        "steppable fleet results are corrupted (internal panic: {e}); \
+                         create a new SteppableFleet instance"
+                    ))
+                })?;
+                fleet.step_into(&mut results).map_err(StepOutcome::Fleet)?;
                 // The building ids come from an infallible iterator over
                 // the homes; every home in the fleet has one.
                 let bldg_ids = fleet.bldg_ids();
                 let reactive_power_var = (0..fleet.len())
                     .map(|idx| fleet.telemetry(idx).map(|t| t.reactive_power_var))
                     .collect::<Vec<_>>();
-                Ok::<_, StepOutcome>((step_results, bldg_ids, reactive_power_var))
+                drop(results);
+                Ok::<_, StepOutcome>((bldg_ids, reactive_power_var))
             })
             .map_err(|outcome| match outcome {
                 StepOutcome::Mutex(message) => {
@@ -658,8 +677,16 @@ impl PySteppableFleet {
                 StepOutcome::Fleet(err) => steppable_error_to_py_err(err),
             })?;
 
+        // The dicts are built from reads of the reused results, which
+        // stay in place for the next step.
+        let step_results = self.step_results.lock().map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "steppable fleet results are corrupted (internal panic: {e}); \
+                 create a new SteppableFleet instance"
+            ))
+        })?;
         let out = PyList::empty(py);
-        for (idx, entry) in step_results.into_iter().enumerate() {
+        for (idx, entry) in step_results.iter().enumerate() {
             let item = PyDict::new(py);
             let outcome = match entry {
                 Ok(step) => match &reactive_power_var[idx] {

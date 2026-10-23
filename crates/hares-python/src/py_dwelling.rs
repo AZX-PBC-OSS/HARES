@@ -730,6 +730,14 @@ pub struct PyDwelling {
     registry: ActorRegistry,
     equipment_registry: EquipmentRegistry,
     zone_keys: Option<Vec<String>>,
+    /// The single-step loop's reused result: the step writes it in place
+    /// (the `step_into` form), so a Python loop calling `step()` per
+    /// timestep pays the zone-temperature allocation once, at the first
+    /// step, and the loop's steady state allocates nothing for the
+    /// result. The buffer is write-only within a step and re-derived
+    /// before every read (the `step_into` contract), so no mutation
+    /// point can leak a stale result.
+    step_scratch: hares_core::StepResult,
     gas_tariff: Option<crate::py_tariff::PyGasTariff>,
     /// The attached batch callbacks' cause slot: one slot the dwelling
     /// owns, shared by every attached callback's adapter. The adapter
@@ -796,6 +804,7 @@ impl PyDwelling {
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
+            step_scratch: hares_core::StepResult::default(),
             gas_tariff: None,
             callback_cause: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -1028,10 +1037,23 @@ impl PyDwelling {
                 "PyDwelling.step() called before initialize(). Call dwelling.initialize() first.",
             ));
         }
-        let step_result: Result<Result<hares_core::StepResult, HaresError>, _> =
-            py.detach(|| std::panic::catch_unwind(AssertUnwindSafe(|| self.step_core())));
-        let step = match step_result {
-            Ok(Ok(s)) => s,
+        // The loop scratch is taken out for the step and returned after
+        // it, so the GIL-free section touches no Python state. The step
+        // writes the reused result in place; on any error the dict is
+        // never built and the buffer is unread, and every field is
+        // overwritten on the success path, so a mutation point (a
+        // control signal, an equipment override, a checkpoint restore, a
+        // reseed or reset) cannot leak a stale result into a later dict.
+        let mut scratch = std::mem::take(&mut self.step_scratch);
+        let stepped: Result<Result<(), HaresError>, _> = py.detach(|| {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut dwelling = self.acquire_hares()?;
+                dwelling.step_into(&mut scratch)
+            }))
+        });
+        self.step_scratch = scratch;
+        match stepped {
+            Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 if self.poisoned.load(Ordering::Acquire) {
                     return Err(FatalDwellingError::new_err(e.to_string()));
@@ -1047,7 +1069,7 @@ impl PyDwelling {
                     panic_hook::panic_payload_to_string(payload)
                 )));
             }
-        };
+        }
 
         #[cfg(debug_assertions)]
         {
@@ -1058,14 +1080,14 @@ impl PyDwelling {
         }
 
         if self.zone_keys.is_none() {
-            self.zone_keys = Some(zone_keys_for_step(&step));
+            self.zone_keys = Some(zone_keys_for_step(&self.step_scratch));
         }
 
         let zone_keys = self
             .zone_keys
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("zone keys not initialized"))?;
-        step_result_to_py_dict(py, &step, zone_keys)
+        step_result_to_py_dict(py, &self.step_scratch, zone_keys)
     }
 
     #[pyo3(signature = (name, signal, priority=None))]
@@ -1925,6 +1947,7 @@ impl PyDwelling {
         self.config = config;
         self.initialized = false;
         self.zone_keys = None;
+        self.step_scratch = hares_core::StepResult::default();
         *self.callback_cause.lock().expect("cause slot mutex") = None;
 
         self.initialize()
@@ -2422,6 +2445,7 @@ impl PyDwelling {
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
             zone_keys: None,
+            step_scratch: hares_core::StepResult::default(),
             gas_tariff: None,
             callback_cause: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -2500,11 +2524,6 @@ impl PyDwelling {
         if !self.poisoned.swap(true, Ordering::SeqCst) {
             self.mutex_poison_events.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    pub(crate) fn step_core(&self) -> Result<hares_core::StepResult, HaresError> {
-        let mut dwelling = self.acquire_hares()?;
-        dwelling.step()
     }
 
     /// String-error variant for use in GIL-free Rayon contexts
