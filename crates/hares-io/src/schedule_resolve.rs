@@ -389,7 +389,8 @@ const COLUMN_MAPPINGS: &[ColumnMapping] = &[
 /// test in this module; the repo's own defaults directory
 /// `python/hares/defaults` carries the engine's copy of the same table,
 /// whose derived weekend rows cite their derivations in the same column.
-/// The occupancy provenance contract is on [`inject_occupancy_schedule`].
+/// The occupancy provenance contract is on the module's
+/// `inject_occupancy_schedule`.
 pub const DEFAULT_SCHEDULES_CSV: &str = "Default Schedule Parameters.csv";
 
 #[derive(Debug, Clone)]
@@ -6154,9 +6155,8 @@ mod tests {
     fn vendored_default_schedule_csv_matches_the_pinned_sha256() {
         use sha2::{Digest, Sha256};
 
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../vendors/OCHRE/ochre/defaults/Default Schedule Parameters.csv",
-        );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendors/OCHRE/ochre/defaults/Default Schedule Parameters.csv");
         let bytes = std::fs::read(&path).unwrap_or_else(|err| {
             panic!(
                 "the vendored OCHRE defaults CSV at {} is unreadable (is the \
