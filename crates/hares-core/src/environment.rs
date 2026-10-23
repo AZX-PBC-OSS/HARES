@@ -646,6 +646,148 @@ pub struct SurfaceGeometry {
     pub omni_directional: bool,
 }
 
+/// The per-surface irradiance table: one row per step index of the run's
+/// horizon, each row the blueprint's surfaces' irradiance for that step.
+///
+/// The blueprint's per-surface Perez and incidence are functions of the
+/// step's weather and solar position (which the forcing table already
+/// resolves per step for the whole grid) and of the blueprint's own
+/// surface geometry (which never varies within a blueprint), so the table
+/// is computed once per blueprint -- from its surfaces and its forcing
+/// table, by the same functions of the same inputs the per-step
+/// computation in [`EnvironmentManager::update_in_place`] runs -- and
+/// shared by every dwelling the blueprint builds. Two dwellings of one
+/// blueprint read identical bits (`Arc` shared); dwellings of different
+/// blueprints never share (each blueprint holds its own table; geometry
+/// is never part of a shared key). Immutable after construction, plain
+/// data (`Send + Sync`), read concurrently during stepping.
+///
+/// About 40 bytes per surface and step: about 21 MB for a year at 900 s
+/// on a 15-surface home (the RT-2 record's estimate).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceIrradianceTable {
+    /// Flat row-major storage: step index `s`'s row is
+    /// `[s * surfaces_per_row .. (s + 1) * surfaces_per_row]`.
+    rows: Vec<SurfaceIrradiance>,
+    surfaces_per_row: usize,
+}
+
+impl SurfaceIrradianceTable {
+    /// The number of rows (one per step index of the horizon).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len() / self.surfaces_per_row.max(1)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// The number of surfaces each row carries.
+    #[must_use]
+    pub fn surfaces_per_row(&self) -> usize {
+        self.surfaces_per_row
+    }
+
+    /// The table's own size in bytes: the row payload. The measurement log
+    /// records this per resolution and horizon.
+    #[must_use]
+    pub fn size_bytes(&self) -> usize {
+        self.rows.len() * std::mem::size_of::<SurfaceIrradiance>()
+    }
+
+    /// The row for one step index, when the index is inside the horizon.
+    #[must_use]
+    pub fn get_row(&self, step_index: usize) -> Option<&[SurfaceIrradiance]> {
+        let start = step_index.checked_mul(self.surfaces_per_row)?;
+        self.rows.get(start..start + self.surfaces_per_row)
+    }
+
+    /// Builds the table from the evaluator's per-step inputs and the
+    /// blueprint's surfaces: for each step index of the horizon, the step's
+    /// sky and sun (the resampled weather row's irradiance and albedo, the
+    /// forcing row's solar position and day of year -- the same reads the
+    /// step's [`StepWeather`] carries) and the same per-surface call the
+    /// per-step computation makes, in the same order. Each row entry is
+    /// bitwise the value the per-step computation produces for that step
+    /// and surface: the same function, the same arguments, memoized.
+    fn build(
+        evaluator: &StepWeatherEvaluator,
+        surfaces: &[SurfaceGeometry],
+    ) -> Result<Self, HaresError> {
+        let forcing = evaluator.forcing.as_ref().ok_or_else(|| {
+            HaresError::InvalidState(
+                "the per-surface irradiance table builds only over a forcing table; \
+                 the per-step forcing path computes the irradiance per step"
+                    .to_string(),
+            )
+        })?;
+        let horizon = forcing.len();
+        let elevation_m = evaluator.weather_meta.elevation_m;
+        let mut rows = Vec::with_capacity(horizon * surfaces.len());
+        for step in 0..horizon {
+            // The step's start time by the run's calendar and the weather
+            // row its read reaches: the same addressing the evaluator's
+            // `evaluate` runs for the step when the stepping clock's time
+            // base is the construction's (the guard
+            // `forcing_row` applies). A table built here therefore reads
+            // the weather rows a run over that clock reads.
+            let now = evaluator.time_at(step as u64);
+            let weather_idx = if evaluator.weather.is_empty() {
+                0
+            } else {
+                evaluator.row_at(now.naive_local())?
+            };
+            let sky = SkyIrradiance {
+                ghi: evaluator.weather.get(WeatherField::GhiWM2, weather_idx),
+                dni: evaluator.weather.get(WeatherField::DniWM2, weather_idx),
+                dhi: evaluator.weather.get(WeatherField::DhiWM2, weather_idx),
+            };
+            let ground_albedo = evaluator
+                .weather
+                .get(WeatherField::SurfaceAlbedo, weather_idx);
+            // The forcing row's solar position and zenith: the same values
+            // the step's `StepWeather` carries (the zenith is the forcing
+            // row's own `(90° − altitude).max(0.0)`, the expression the
+            // per-step path applies to the same altitude bits).
+            let row = forcing.row(step);
+            let sun = SunPosition {
+                zenith_deg: row.solar_zenith_deg,
+                azimuth_deg: row.solar_azimuth_deg,
+                day_of_year: row.day_of_year,
+            };
+            for surface in surfaces {
+                rows.push(compute_surface_irradiance(
+                    surface,
+                    sky.ghi,
+                    sky.dni,
+                    sky.dhi,
+                    sun.zenith_deg,
+                    sun.azimuth_deg,
+                    sun.day_of_year,
+                    ground_albedo,
+                    elevation_m,
+                ));
+            }
+        }
+        Ok(Self {
+            rows,
+            surfaces_per_row: surfaces.len(),
+        })
+    }
+
+    /// The empty table: a build failure's placeholder, filtered out before
+    /// it reaches a manager (the manager then computes per step as
+    /// before). Never read.
+    fn empty() -> Self {
+        Self {
+            rows: Vec::new(),
+            surfaces_per_row: 0,
+        }
+    }
+}
+
 /// Errors returned by [`EnvironmentManager`].
 #[derive(Debug, Error)]
 pub enum EnvironmentManagerError {
@@ -799,6 +941,14 @@ pub struct EnvironmentManager {
     /// [`crate::resample_weather`] evaluate steps through it, so the run's
     /// internal series and the exposed one are one computation.
     weather_evaluator: StepWeatherEvaluator,
+    /// The blueprint's shared per-surface irradiance table: built once per
+    /// blueprint from its surfaces and its forcing table, handed to every
+    /// dwelling the blueprint builds. `None` for a direct construction
+    /// (no blueprint behind the manager), when the per-step forcing path
+    /// was forced at the blueprint's first build, or when the table's own
+    /// build failed (the run then fails at the failing step exactly as it
+    /// would have, through the per-step computation).
+    shared_irradiance: Option<Arc<SurfaceIrradianceTable>>,
     /// The slot writes' allocation accumulator; this crate's test build
     /// only. The dwelling's snapshot-allocation test reads it.
     #[cfg(test)]
@@ -870,7 +1020,7 @@ impl EnvironmentManager {
         }
 
         Self::from_resampled(
-            file, weather, schedule, building, step_secs, start_time, None, None, options,
+            file, weather, schedule, building, step_secs, start_time, None, None, None, options,
         )
     }
 
@@ -884,6 +1034,19 @@ impl EnvironmentManager {
     /// weather handle the blueprint was built from, so every dwelling the
     /// blueprint builds on one grid reads one table, and the table's
     /// lifetime is the handle's.
+    /// The blueprint build's constructor: the weather and schedule already
+    /// resampled to the blueprint's step (shared parses, one resample per
+    /// unique input), the resolved site location the manager's own
+    /// metadata copy carries (the shared series are never mutated). The
+    /// schedule is the build's own copy, cloned from the blueprint's
+    /// shared series: the assembly's unavailable-period zeroing and the
+    /// schedule injection write it. The forcing table resolves on the
+    /// weather handle the blueprint was built from, so every dwelling the
+    /// blueprint builds on one grid reads one table, and the table's
+    /// lifetime is the handle's. The blueprint's per-surface irradiance
+    /// cell rides along: the table builds on the blueprint's first build
+    /// and every later construction shares it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_shared(
         weather_handle: &ParsedWeather,
         schedule: ScheduleTimeSeries,
@@ -892,6 +1055,9 @@ impl EnvironmentManager {
         start_time: DateTime<FixedOffset>,
         site_location: &SiteLocation,
         options: EnvironmentInitOptions<'_>,
+        per_surface_irradiance: Option<
+            &std::sync::OnceLock<std::sync::Arc<SurfaceIrradianceTable>>,
+        >,
     ) -> Result<Self, EnvironmentManagerError> {
         let step_secs = u32::try_from(time_res.as_secs()).unwrap_or(u32::MAX);
         if step_secs == 0 {
@@ -916,6 +1082,7 @@ impl EnvironmentManager {
             start_time,
             Some(site_location),
             Some(weather_handle),
+            per_surface_irradiance,
             options,
         )
     }
@@ -931,6 +1098,9 @@ impl EnvironmentManager {
         start_time: DateTime<FixedOffset>,
         site_location: Option<&SiteLocation>,
         weather_handle: Option<&ParsedWeather>,
+        per_surface_irradiance: Option<
+            &std::sync::OnceLock<std::sync::Arc<SurfaceIrradianceTable>>,
+        >,
         options: EnvironmentInitOptions<'_>,
     ) -> Result<Self, EnvironmentManagerError> {
         if weather.is_empty() {
@@ -1007,6 +1177,36 @@ impl EnvironmentManager {
             .conditioned_zone_index()?
             .map(|idx| ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX)));
         let surfaces = build_surface_geometry(building)?;
+        // The blueprint's per-surface irradiance table: built on the
+        // blueprint's first build from its surfaces and its forcing table
+        // (the same functions of the same inputs the per-step computation
+        // runs, so every row entry is bitwise the value the per-step path
+        // produces), held as an `Arc` on the blueprint, shared by every
+        // dwelling the blueprint builds. No table when the caller passed
+        // no blueprint cell, when the per-step forcing path was forced
+        // (the per-step irradiance computation is part of that path), or
+        // when the build failed (the per-step computation stays; the run
+        // fails at the failing step exactly as it would have). A manager
+        // whose clock later diverges from the construction's time base
+        // bypasses the table per step (the same guard the forcing row's
+        // read applies) -- never a stale row.
+        let shared_irradiance = per_surface_irradiance
+            .and_then(|cell| {
+                weather_evaluator.forcing.as_ref()?;
+                Some(Arc::clone(cell.get_or_init(
+                    || match SurfaceIrradianceTable::build(&weather_evaluator, &surfaces) {
+                        Ok(table) => Arc::new(table),
+                        Err(err) => {
+                            tracing::warn!(
+                                "the per-surface irradiance table's build failed ({err}); \
+                                 the per-surface irradiance computes per step as before"
+                            );
+                            Arc::new(SurfaceIrradianceTable::empty())
+                        }
+                    },
+                )))
+            })
+            .filter(|table| !table.is_empty());
         // The initial conditions read the weather at the run's start: the
         // record of the hour the start lies in, the same calendar-date
         // addressing every step's read uses.
@@ -1085,6 +1285,7 @@ impl EnvironmentManager {
             solar_irradiance_buf: Vec::with_capacity(num_surfaces),
             schedule_values_buf: Vec::with_capacity(num_schedule_cols),
             weather_evaluator,
+            shared_irradiance,
             #[cfg(test)]
             slot_write_allocations: 0,
         })
@@ -1507,47 +1708,58 @@ impl EnvironmentManager {
             let idx = (step + self.weather_evaluator.start_row) % overrides.len();
             self.solar_irradiance_buf.extend_from_slice(&overrides[idx]);
         } else {
-            self.solar_irradiance_buf
-                .extend(self.surfaces.iter().map(|surface| {
-                    if surface.omni_directional {
-                        // Omnidirectional (azimuth-averaged) Perez model for
-                        // walls/roofs with unknown orientation.  N=12 uniformly-
-                        // spaced azimuth samples avoid south-facing bias that a
-                        // single 180° default would introduce.
-                        // Perez et al. (1990) anisotropic diffuse model;
-                        // Duffie & Beckman (2020) Eq. 1.6.2 — azimuth appears in
-                        // three AOI terms.
-                        omni_directional_irradiance(
-                            surface.surface_id,
-                            SkyIrradiance { ghi, dni, dhi },
-                            SunPosition {
-                                zenith_deg: solar_zenith_deg,
-                                azimuth_deg: pos.azimuth_deg,
-                                day_of_year,
-                            },
-                            surface.tilt_deg,
+            // The blueprint's shared table: this step's per-surface
+            // irradiance was computed once per blueprint by the same
+            // functions of the same inputs the per-step computation below
+            // runs (the same call, the same arguments, memoized), so the
+            // copied row is bitwise the row that computation produces for
+            // this step. The read is guarded by the forcing row's own
+            // guard: a clock whose time base is not the construction's, a
+            // step past the horizon, or a forced per-step path computes
+            // below instead of reading a stale row. Rows only reach the
+            // table's width: a surface a PV registration appended after
+            // the blueprint's own (the table never carried it) computes
+            // with the tail below.
+            let shared_table = match self.shared_irradiance.as_ref() {
+                Some(table) if self.weather_evaluator.forcing_row(now, step).is_some() => {
+                    table.get_row(step).map(|row| (Arc::clone(table), row))
+                }
+                _ => None,
+            };
+            if let Some((_table, table_row)) = shared_table {
+                let base = table_row.len().min(self.surfaces.len());
+                self.solar_irradiance_buf
+                    .extend_from_slice(&table_row[..base]);
+                for surface in &self.surfaces[base..] {
+                    let irr = compute_surface_irradiance(
+                        surface,
+                        ghi,
+                        dni,
+                        dhi,
+                        solar_zenith_deg,
+                        pos.azimuth_deg,
+                        day_of_year,
+                        ground_albedo,
+                        self.weather_evaluator.weather_meta.elevation_m,
+                    );
+                    self.solar_irradiance_buf.push(irr);
+                }
+            } else {
+                self.solar_irradiance_buf
+                    .extend(self.surfaces.iter().map(|surface| {
+                        compute_surface_irradiance(
+                            surface,
+                            ghi,
+                            dni,
+                            dhi,
+                            solar_zenith_deg,
+                            pos.azimuth_deg,
+                            day_of_year,
                             ground_albedo,
-                            OMNI_AZIMUTH_SAMPLES,
                             self.weather_evaluator.weather_meta.elevation_m,
                         )
-                    } else {
-                        perez_tilted_irradiance(
-                            surface.surface_id,
-                            SkyIrradiance { ghi, dni, dhi },
-                            SunPosition {
-                                zenith_deg: solar_zenith_deg,
-                                azimuth_deg: pos.azimuth_deg,
-                                day_of_year,
-                            },
-                            SurfaceOrientation {
-                                tilt_deg: surface.tilt_deg,
-                                azimuth_deg: surface.azimuth_deg,
-                            },
-                            ground_albedo,
-                            self.weather_evaluator.weather_meta.elevation_m,
-                        )
-                    }
-                }));
+                    }));
+            }
         }
 
         // Apply PV roof shading in-place: reduce irradiance on covered roof surfaces.
@@ -1737,6 +1949,74 @@ impl EnvironmentManager {
     #[must_use]
     pub fn forcing_table(&self) -> Option<&Arc<ForcingTable>> {
         self.weather_evaluator.forcing.as_ref()
+    }
+
+    /// The blueprint's shared per-surface irradiance table this manager
+    /// reads, or `None` for a direct construction (no blueprint behind
+    /// the manager), a forced per-step path, or a failed table build.
+    /// The blueprint test's sharing witness reads it (`Arc::ptr_eq`
+    /// across two builds of one blueprint).
+    #[must_use]
+    pub fn shared_surface_irradiance(&self) -> Option<&Arc<SurfaceIrradianceTable>> {
+        self.shared_irradiance.as_ref()
+    }
+}
+
+/// One surface's irradiance: the same call, the same arguments, the
+/// per-step computation in [`EnvironmentManager::update_in_place`] runs --
+/// omnidirectional (azimuth-averaged) Perez for surfaces with unknown
+/// orientation, single-azimuth Perez otherwise. The blueprint table's
+/// build and the step's per-surface loop both go through this function, so
+/// a table row's entry is bitwise the per-step value for the same step.
+#[allow(clippy::too_many_arguments)]
+fn compute_surface_irradiance(
+    surface: &SurfaceGeometry,
+    ghi: f64,
+    dni: f64,
+    dhi: f64,
+    solar_zenith_deg: f64,
+    solar_azimuth_deg: f64,
+    day_of_year: u32,
+    ground_albedo: f64,
+    elevation_m: f64,
+) -> SurfaceIrradiance {
+    if surface.omni_directional {
+        // Omnidirectional (azimuth-averaged) Perez model for
+        // walls/roofs with unknown orientation.  N=12 uniformly-
+        // spaced azimuth samples avoid south-facing bias that a
+        // single 180° default would introduce.
+        // Perez et al. (1990) anisotropic diffuse model;
+        // Duffie & Beckman (2020) Eq. 1.6.2 -- azimuth appears in
+        // three AOI terms.
+        omni_directional_irradiance(
+            surface.surface_id,
+            SkyIrradiance { ghi, dni, dhi },
+            SunPosition {
+                zenith_deg: solar_zenith_deg,
+                azimuth_deg: solar_azimuth_deg,
+                day_of_year,
+            },
+            surface.tilt_deg,
+            ground_albedo,
+            OMNI_AZIMUTH_SAMPLES,
+            elevation_m,
+        )
+    } else {
+        perez_tilted_irradiance(
+            surface.surface_id,
+            SkyIrradiance { ghi, dni, dhi },
+            SunPosition {
+                zenith_deg: solar_zenith_deg,
+                azimuth_deg: solar_azimuth_deg,
+                day_of_year,
+            },
+            SurfaceOrientation {
+                tilt_deg: surface.tilt_deg,
+                azimuth_deg: surface.azimuth_deg,
+            },
+            ground_albedo,
+            elevation_m,
+        )
     }
 }
 
@@ -2446,6 +2726,7 @@ mod tests {
                     utc_offset_source: hares_io::FieldSource::WeatherFile,
                 },
                 options,
+                None,
             )
             .expect("the manager builds over the actual 2020 file");
             let table = manager
