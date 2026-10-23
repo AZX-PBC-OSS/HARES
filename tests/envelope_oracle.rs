@@ -795,8 +795,8 @@ mod tests {
             );
         }
 
-        // Indoor-temperature timeseries MAE against OCHRE. ASHRAE 140-2017
-        // Table B8-3 reports ±1 °C acceptance bands for annual-mean zone
+        // Indoor-temperature timeseries MAE against OCHRE. ASHRAE 140-2023
+        // Table B8-5 reports ±1 °C acceptance bands for annual-mean zone
         // temperatures across validated simulation tools. Taking 2 °C as a
         // loose short-window MAE bound is conservative relative to that
         // published residual and catches a fundamental RC construction bug
@@ -814,7 +814,7 @@ mod tests {
             assert!(
                 timeseries_mae.is_finite() && timeseries_mae < 2.5,
                 "Indoor timeseries MAE {timeseries_mae:.3} °C exceeds 2.5 °C bound \
-                 (the ASHRAE 140-2017 ±1 °C residual, doubled for short-window cycling, \
+                 (the ASHRAE 140-2023 ±1 °C residual, doubled for short-window cycling, \
                  plus this first-hour fixture's measured weather-driver difference). \
                  HARES envelope construction likely regressed."
             );

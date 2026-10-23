@@ -1,8 +1,9 @@
 //! BESTEST 900FF root-cause regression tests.
 //!
 //! Empirically confirmed root causes for the Case 900FF minimum-zone-temperature
-//! outlier (measured +0.90 °C vs ASHRAE 140-2017 band [−6.4, −1.6] °C,
-//! +2.50 °C above upper bound). All delta claims are backed by measured
+//! outlier (measured +0.90 °C against the 140-2017 band then pinned,
+//! [−6.4, −1.6] °C, +2.50 °C above upper bound; the current 140-2023 band
+//! is [0.6, 2.2] °C). All delta claims are backed by measured
 //! simulation runs with hack-test / revert cycles; no analytical-only estimates.
 //!
 //! Confirmed root causes, in descending order of measured impact:

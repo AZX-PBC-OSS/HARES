@@ -4,8 +4,8 @@ Instantiates an OCHRE ``Envelope`` with boundary materials matching
 ``tests/fixtures/bestest/600.toml`` exactly, loads the identical Denver TMY3
 EPW weather file, runs an annual simulation with ideal HVAC (thermostat at
 20 C heating / 27 C cooling, zero deadband), and compares the resulting
-annual heating and cooling loads against the ASHRAE 140-2017 Table B8-2
-reference bands for Case 600.
+annual heating and cooling loads against the ASHRAE 140-2023 Annex B8
+Tables B8-1 and B8-2 reference bands for Case 600.
 
 The script uses OCHRE's full envelope pipeline: multi-node RC network with
 material lookups from custom CSV files, TARP interior / DOE-2 exterior film
@@ -144,10 +144,11 @@ EPW_PATH = str(
     / "USA_CO_Denver.Intl.AP.725650_TMY3.epw"
 )
 
-# ASHRAE 140-2017 Table B8-2: Case 600 annual load reference bands (kWh)
+# ASHRAE 140-2023 Annex B8, Tables B8-1 and B8-2: Case 600 annual load
+# reference bands (kWh)
 ASHRAE_140_BANDS = {
-    "annual_heating_load_kwh": (4296.0, 5709.0),
-    "annual_cooling_load_kwh": (6137.0, 7964.0),
+    "annual_heating_load_kwh": (3993.0, 4504.0),
+    "annual_cooling_load_kwh": (5432.0, 6162.0),
 }
 
 

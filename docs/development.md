@@ -425,7 +425,7 @@ equations in HARES. The 2021 edition updated the dry-air molar mass from
 
 All code citations to "ASHRAE 2017" for these domains are superseded.
 Citations for standards where editions are independently meaningful (e.g.
-ASHRAE 140-2017 for BESTEST reference bands) are unaffected.
+ASHRAE 140-2023 for BESTEST reference bands) are unaffected.
 
 A helper script at `scripts/check-ashrae-edition.sh` can be run locally
 to check for remaining "ASHRAE 2017" references in `crates/` and fails if

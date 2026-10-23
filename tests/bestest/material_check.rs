@@ -31,7 +31,7 @@ fn fixture_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest")
 }
 
-/// ASHRAE 140-2017 Case 600 south-wall thermal capacitance derived from the
+/// BESTEST Case 600 south-wall thermal capacitance derived from the
 /// three material layers defined in `tests/fixtures/bestest/600.toml`:
 ///
 /// | Layer          | thickness [m] | density [kg/m³] | c_p [J/(kg·K)] | contribution [J/(m²·K)] |

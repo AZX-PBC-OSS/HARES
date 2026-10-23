@@ -4,7 +4,7 @@ Runs the completed OCHRE BESTEST runner and verifies that:
   1. The script produces a time-series CSV with the expected columns.
   2. Zone temperature stays within the thermostat setpoints (20-27 C).
   3. Annual heating and cooling loads are computed and comparable to
-     ASHRAE 140-2017 Table B8-2 reference bands.
+     ASHRAE 140-2023 Annex B8 Tables B8-1 and B8-2 reference bands.
 
 Requires the OCHRE dependency group::
 

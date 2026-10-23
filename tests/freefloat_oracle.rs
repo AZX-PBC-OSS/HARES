@@ -883,7 +883,7 @@ mod tests {
         // physics. The bounds below are loose plausibility bands for a
         // free-floating envelope over 48–72 h in Denver weather.
         //
-        // ASHRAE 140-2017 Table B8-3a publishes ±1 °C residuals on annual-mean
+        // ASHRAE 140-2023 Table B8-5 publishes ±1 °C residuals on annual-mean
         // zone temperatures across validated simulation tools. For a short
         // free-floating window with no HVAC to clamp zone behavior, infiltration
         // and solar-distribution model differences broaden that residual; 5 °C
