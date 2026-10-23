@@ -8,5 +8,11 @@
 test-threads = 8
 
 [profile.ci]
+# The CI matrix arms override this per invocation with
+# --test-threads "$(nproc)": each arm gets the runner's own logical
+# cores. This bound stays as the fallback for a --profile ci run the
+# override does not cover (and a profile inherits the default profile's
+# test-threads when its own is unset, so deleting the line alone would
+# not land).
 test-threads = 8
 junit.path = "nextest-results.xml"
