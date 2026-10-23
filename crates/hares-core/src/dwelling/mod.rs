@@ -25203,4 +25203,144 @@ occupancy = 1.0"#,
                 .any(|f| f.name() == "Total Electric Power (kW)")
         );
     }
+
+    /// REV-P1 PROBE 1 (review only, reverted): a shared step result written
+    /// by `run_timestep_into` must hold EXACTLY the values the by-value
+    /// `run_timestep` returns at every step: no staleness from the
+    /// previous step, no partial writes. Two identically built dwellings
+    /// step in lockstep; one reuses one buffer, one takes a fresh result
+    /// per step.
+    #[test]
+    fn rev_p1_into_matches_byvalue_every_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+        let build = || {
+            Dwelling::from_hpxml_with_reports(
+                HpxmlInputs {
+                    hpxml_path: &hpxml,
+                    schedule_path: &schedule,
+                    weather_path: &weather,
+                },
+                start_time,
+                chrono::Duration::minutes(15),
+                chrono::Duration::hours(2),
+                None,
+                Vec::new(),
+                root.join("python/hares/defaults"),
+            )
+            .expect("build the fixture dwelling")
+        };
+        let mut shared_dwelling = build();
+        let mut fresh_dwelling = build();
+
+        let mut shared = StepResult::default();
+        let mut last_fresh_len = 0usize;
+        for step in 0..6 {
+            shared_dwelling
+                .run_timestep_into(false, &mut shared)
+                .expect("shared-buffer step");
+            let fresh = fresh_dwelling.run_timestep(false).expect("fresh step");
+            assert_eq!(
+                shared, fresh,
+                "step {step}: the reused buffer disagrees with the by-value result"
+            );
+            last_fresh_len = fresh.zone_temperatures_c.len();
+            // The buffer is overwritten, not stale: the timestamp advances.
+            for later in step + 1..6 {
+                let _ = later; // timestamps checked via the equality above per step
+            }
+        }
+        // The shared buffer's zone-temperature vector holds the LAST
+        // step's values only (no history accumulates inside it).
+        assert_eq!(shared.zone_temperatures_c.len(), last_fresh_len);
+    }
+
+    /// REV-P1 PROBE 2 (review only, reverted): the step path's in-place
+    /// telemetry snapshot must leave the map content-identical to a fresh
+    /// insert per step, including when a foreign stale key and a
+    /// wrong-shaped, value-corrupted entry are injected between steps.
+    #[test]
+    fn rev_p1_telemetry_snapshot_rebuilds_content() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.run_timestep(false).expect("first step");
+        let names: Vec<String> = dwelling.equipment_id_by_name.keys().cloned().collect();
+        assert!(!names.is_empty(), "fixture has equipment");
+
+        // Inject: (a) a foreign stale name; (b) under a live name, a
+        // wrong-shaped telemetry (stale key + corrupted live value).
+        dwelling
+            .latest_env
+            .equipment_telemetry
+            .insert("rev_p1_stale_equipment".to_string(), Telemetry::new());
+        let victim = names[0].clone();
+        {
+            let entry = dwelling
+                .latest_env
+                .equipment_telemetry
+                .get_mut(&victim)
+                .expect("the first step inserted the live equipment's entry");
+            entry.0.insert("rev_p1_stale_key".to_string(), 42.0);
+            entry.0.insert("defrost_cycle_state".to_string(), 999.0);
+        }
+
+        dwelling.run_timestep(false).expect("step after injection");
+
+        // The snapshot must equal a fresh per-equipment snapshot: the
+        // foreign name is gone, every live equipment's map content is
+        // exactly its equipment's live telemetry (keys AND values AND
+        // latches, via the derived Debug).
+        assert!(
+            !dwelling
+                .latest_env
+                .equipment_telemetry
+                .contains_key("rev_p1_stale_equipment"),
+            "a stale foreign entry survived the step"
+        );
+        for name in &names {
+            let entry = dwelling
+                .latest_env
+                .equipment_telemetry
+                .get(name)
+                .unwrap_or_else(|| panic!("entry for {name} missing after the step"));
+            let idx = dwelling
+                .equipment
+                .iter()
+                .position(|eq| eq.as_ref().descriptor().name == *name)
+                .expect("name resolves to equipment");
+            let fresh = dwelling.equipment[idx].as_ref().telemetry();
+            assert_eq!(
+                format!("{entry:?}"),
+                format!("{fresh:?}"),
+                "the snapshot entry for {name} is not content-identical to a fresh snapshot"
+            );
+            assert!(
+                !entry.0.contains_key("rev_p1_stale_key"),
+                "a stale key survived the step in {name}'s entry"
+            );
+        }
+    }
 }
