@@ -1,14 +1,17 @@
-//! The per-surface irradiance table: computed once per blueprint, shared
-//! by every dwelling the blueprint builds, bitwise the values the per-step
-//! computation produces.
+//! The per-surface irradiance table: computed once per content, shared
+//! bitwise by every dwelling that content builds -- within one blueprint
+//! and, through the process's content registry, across independently
+//! constructed blueprints of identical content; different content never
+//! shares.
 //!
 //! These are the row's acceptance tests (the RT-2 record's per-surface
-//! paragraph, the phase-share record's second proposal). At the parent the
-//! table does not exist, so the sharing test fails to compile — the
-//! forcing table's RED shape — and the bitwise witnesses are the goldens'
-//! own compare-all.
+//! paragraph, the phase-share record's second proposal, the content
+//! registry the bench-gate diagnosis added). At the parent the table does
+//! not exist, so the sharing test fails to compile -- the forcing table's
+//! RED shape -- and the bitwise witnesses are the goldens' own
+//! compare-all.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -280,33 +283,120 @@ fn per_surface_table_shared_across_builds_of_one_blueprint() {
     assert_frames_bitwise_equal(&table_run, &per_step_run, "table run vs per-step run");
 }
 
-/// Dwellings of different blueprints never share: two blueprints over the
-/// same parsed weather each hold their own table (blueprint identity
-/// decides sharing; geometry is never part of a shared key).
+/// The synthetic bench fixture's shape: a dwelling from a written TOML,
+/// each construction an independent build (no shared handles, a fresh
+/// parse per construction). The `floor_area_m2` sets the envelope's
+/// surface areas, so two values are two different contents.
+fn synthetic_dwelling(dir: &Path, floor_area_m2: f64, name: &str) -> Dwelling {
+    let path = dir.join(format!("{name}.toml"));
+    std::fs::write(
+        &path,
+        format!(
+            r#"building_id = 1
+
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 86400
+output_chunk_size = 1000
+master_seed = 0
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = {floor_area_m2}
+zone_volume_m3 = 120.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "Furnace"
+fuel = "electricity"
+heating_capacity_kbtu_h = 25.0
+
+[weather]
+outdoor_temp_c = 8.0
+dew_point_c = 4.0
+rel_humidity_pct = 55.0
+pressure_kpa = 101.325
+
+[infiltration]
+ach = 3.0
+
+[schedule]
+occupancy = 1.0
+"#
+        ),
+    )
+    .expect("write the synthetic TOML");
+    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new())).expect("build")
+}
+
+/// The content contract across independent constructions: two dwellings
+/// built from independently parsed, byte-identical inputs (the benchmark
+/// batch's shape: one fixture, many constructions) hold ONE table
+/// instance (`Arc::ptr_eq` across blueprints, not only within one), and
+/// the table is the run's own horizon (a one-day 60 s run: 1,440 rows).
 #[test]
-fn dwellings_of_different_blueprints_never_share_the_table() {
+fn independently_constructed_blueprints_of_one_content_share_the_table() {
     let _counter_exclusive = COUNTER_EXCLUSIVITY
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let shared = SharedCz4a::new();
-    let bp_a = shared.blueprint(1);
-    let bp_b = shared.blueprint(2);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let dwelling_a = synthetic_dwelling(dir.path(), 48.0, "content-a");
+    let dwelling_b = synthetic_dwelling(dir.path(), 48.0, "content-b");
 
-    let dwelling_a = bp_a.build().expect("first blueprint's build");
-    let dwelling_b = bp_b.build().expect("second blueprint's build");
     let table_a = dwelling_a
         .environment
         .shared_surface_irradiance()
-        .expect("the first blueprint's build carries the table")
+        .expect("the first build carries the table")
         .clone();
     let table_b = dwelling_b
         .environment
         .shared_surface_irradiance()
-        .expect("the second blueprint's build carries the table")
+        .expect("the second build carries the table")
+        .clone();
+    assert!(
+        Arc::ptr_eq(&table_a, &table_b),
+        "two independently constructed dwellings of one content hold one table"
+    );
+    assert_eq!(
+        table_a.len(),
+        1_440,
+        "one row per step of the run's horizon"
+    );
+}
+
+/// Different content never shares: two independently constructed
+/// dwellings whose surfaces differ (different envelope areas) hold
+/// different tables. The key carries every bit the build reads, so no
+/// content difference collapses into a shared table.
+#[test]
+fn dwellings_of_different_content_never_share_the_table() {
+    let _counter_exclusive = COUNTER_EXCLUSIVITY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let dwelling_a = synthetic_dwelling(dir.path(), 48.0, "content-a");
+    let dwelling_b = synthetic_dwelling(dir.path(), 60.0, "content-b");
+
+    let table_a = dwelling_a
+        .environment
+        .shared_surface_irradiance()
+        .expect("the first build carries the table")
+        .clone();
+    let table_b = dwelling_b
+        .environment
+        .shared_surface_irradiance()
+        .expect("the second build carries the table")
         .clone();
     assert!(
         !Arc::ptr_eq(&table_a, &table_b),
-        "dwellings of different blueprints never share a per-surface table"
+        "dwellings of different content never share a per-surface table"
+    );
+    assert_ne!(
+        table_a.surfaces_per_row(),
+        0,
+        "both constructions built tables"
     );
 }
 

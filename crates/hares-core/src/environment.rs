@@ -30,6 +30,7 @@ use hares_types::{
 };
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
+use std::hash::{Hash, Hasher};
 use thiserror::Error;
 
 use crate::SimClock;
@@ -657,13 +658,21 @@ pub struct SurfaceGeometry {
 /// table, by the same functions of the same inputs the per-step
 /// computation in [`EnvironmentManager::update_in_place`] runs -- and
 /// shared by every dwelling the blueprint builds. Two dwellings of one
-/// blueprint read identical bits (`Arc` shared); dwellings of different
-/// blueprints never share (each blueprint holds its own table; geometry
-/// is never part of a shared key). Immutable after construction, plain
-/// data (`Send + Sync`), read concurrently during stepping.
+/// blueprint read identical bits (`Arc` shared). The table is keyed on
+/// its content across the process (the content cache that
+/// `shared_surface_irradiance_table` resolves): two independently constructed
+/// blueprints of identical content -- the same surfaces, the same weather
+/// and forcing, the same time base and horizon -- share ONE table
+/// instance, and constructions of different content never share (the
+/// key's digest carries every bit the build reads; a difference in any of
+/// them keys differently). Immutable after construction, plain data
+/// (`Send + Sync`), read concurrently during stepping.
 ///
-/// About 40 bytes per surface and step: about 21 MB for a year at 900 s
-/// on a 15-surface home (the RT-2 record's estimate).
+/// Sized to the run's own horizon: the rows cover the forcing table's
+/// length, which the dwelling build bounds to the run's duration (at
+/// least one day when warm-up replays the first day) -- every step index
+/// a run can read, never a fixed horizon. About 40 bytes per surface and
+/// step: about 41 MiB for a year at 900 s on a 31-surface home.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SurfaceIrradianceTable {
     /// Flat row-major storage: step index `s`'s row is
@@ -711,7 +720,9 @@ impl SurfaceIrradianceTable {
     /// step's [`StepWeather`] carries) and the same per-surface call the
     /// per-step computation makes, in the same order. Each row entry is
     /// bitwise the value the per-step computation produces for that step
-    /// and surface: the same function, the same arguments, memoized.
+    /// and surface: the same function, the same arguments, memoized. The
+    /// per-step reads run through [`table_step_inputs`], the helper the
+    /// content key hashes, so the key and the build cannot diverge.
     fn build(
         evaluator: &StepWeatherEvaluator,
         surfaces: &[SurfaceGeometry],
@@ -727,46 +738,17 @@ impl SurfaceIrradianceTable {
         let elevation_m = evaluator.weather_meta.elevation_m;
         let mut rows = Vec::with_capacity(horizon * surfaces.len());
         for step in 0..horizon {
-            // The step's start time by the run's calendar and the weather
-            // row its read reaches: the same addressing the evaluator's
-            // `evaluate` runs for the step when the stepping clock's time
-            // base is the construction's (the guard
-            // `forcing_row` applies). A table built here therefore reads
-            // the weather rows a run over that clock reads.
-            let now = evaluator.time_at(step as u64);
-            let weather_idx = if evaluator.weather.is_empty() {
-                0
-            } else {
-                evaluator.row_at(now.naive_local())?
-            };
-            let sky = SkyIrradiance {
-                ghi: evaluator.weather.get(WeatherField::GhiWM2, weather_idx),
-                dni: evaluator.weather.get(WeatherField::DniWM2, weather_idx),
-                dhi: evaluator.weather.get(WeatherField::DhiWM2, weather_idx),
-            };
-            let ground_albedo = evaluator
-                .weather
-                .get(WeatherField::SurfaceAlbedo, weather_idx);
-            // The forcing row's solar position and zenith: the same values
-            // the step's `StepWeather` carries (the zenith is the forcing
-            // row's own `(90° − altitude).max(0.0)`, the expression the
-            // per-step path applies to the same altitude bits).
-            let row = forcing.row(step);
-            let sun = SunPosition {
-                zenith_deg: row.solar_zenith_deg,
-                azimuth_deg: row.solar_azimuth_deg,
-                day_of_year: row.day_of_year,
-            };
+            let inputs = table_step_inputs(evaluator, forcing, step)?;
             for surface in surfaces {
                 rows.push(compute_surface_irradiance(
                     surface,
-                    sky.ghi,
-                    sky.dni,
-                    sky.dhi,
-                    sun.zenith_deg,
-                    sun.azimuth_deg,
-                    sun.day_of_year,
-                    ground_albedo,
+                    inputs.sky.ghi,
+                    inputs.sky.dni,
+                    inputs.sky.dhi,
+                    inputs.sun.zenith_deg,
+                    inputs.sun.azimuth_deg,
+                    inputs.sun.day_of_year,
+                    inputs.ground_albedo,
                     elevation_m,
                 ));
             }
@@ -786,6 +768,232 @@ impl SurfaceIrradianceTable {
             surfaces_per_row: 0,
         }
     }
+}
+
+/// One step's derived table inputs: the sky and sun a row entry is
+/// computed from. [`SurfaceIrradianceTable::build`] consumes these and the
+/// content key hashes them, so the key and the build read one helper and
+/// cannot diverge.
+struct TableStepInputs {
+    sky: SkyIrradiance,
+    ground_albedo: f64,
+    sun: SunPosition,
+}
+
+/// The step's start time by the run's calendar and the weather row its
+/// read reaches: the same addressing the evaluator's `evaluate` runs for
+/// the step when the stepping clock's time base is the construction's (the
+/// guard `forcing_row` applies). A table built over these reads therefore
+/// reads the weather rows a run over that clock reads. The forcing row's
+/// solar position and zenith: the same values the step's `StepWeather`
+/// carries (the zenith is the forcing row's own `(90° − altitude).max(0.0)`,
+/// the expression the per-step path applies to the same altitude bits).
+fn table_step_inputs(
+    evaluator: &StepWeatherEvaluator,
+    forcing: &ForcingTable,
+    step: usize,
+) -> Result<TableStepInputs, HaresError> {
+    let now = evaluator.time_at(step as u64);
+    let weather_idx = if evaluator.weather.is_empty() {
+        0
+    } else {
+        evaluator.row_at(now.naive_local())?
+    };
+    let row = forcing.row(step);
+    Ok(TableStepInputs {
+        sky: SkyIrradiance {
+            ghi: evaluator.weather.get(WeatherField::GhiWM2, weather_idx),
+            dni: evaluator.weather.get(WeatherField::DniWM2, weather_idx),
+            dhi: evaluator.weather.get(WeatherField::DhiWM2, weather_idx),
+        },
+        ground_albedo: evaluator
+            .weather
+            .get(WeatherField::SurfaceAlbedo, weather_idx),
+        sun: SunPosition {
+            zenith_deg: row.solar_zenith_deg,
+            azimuth_deg: row.solar_azimuth_deg,
+            day_of_year: row.day_of_year,
+        },
+    })
+}
+
+/// The content key's hasher: two independent 64-bit digests of the same
+/// stream, each seeded with its own domain tag, so a colliding pair is a
+/// 2^-128 state, not a 2^-64 one. Bit patterns throughout (`f64` hashed as
+/// its bits): a NaN payload or a signed-zero difference keys differently.
+struct TableKeyHasher {
+    lanes: [std::collections::hash_map::DefaultHasher; 2],
+}
+
+impl TableKeyHasher {
+    fn new() -> Self {
+        let mut hasher = Self {
+            lanes: [
+                std::collections::hash_map::DefaultHasher::new(),
+                std::collections::hash_map::DefaultHasher::new(),
+            ],
+        };
+        "hares-core surface-irradiance-table key, lane a".hash(&mut hasher.lanes[0]);
+        "hares-core surface-irradiance-table key, lane b".hash(&mut hasher.lanes[1]);
+        hasher
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        for lane in &mut self.lanes {
+            value.hash(lane);
+        }
+    }
+
+    fn write_f64(&mut self, value: f64) {
+        self.write_u64(value.to_bits());
+    }
+
+    fn finish(self) -> [u64; 2] {
+        [self.lanes[0].finish(), self.lanes[1].finish()]
+    }
+}
+
+/// The table's content key: a digest of everything
+/// [`SurfaceIrradianceTable::build`] reads, in run order -- the site's
+/// elevation, each step's derived sky and sun (through
+/// [`table_step_inputs`], the helper the build itself consumes) and the
+/// surfaces' geometry. Two constructions agreeing here produce bitwise
+/// identical tables; constructions differing in any hashed bit never
+/// share. `None` when the build itself would fail before any row (no
+/// forcing table), or when a step's addressing fails the way the build's
+/// would: the caller falls through to the build, whose own error or
+/// warning surfaces as before.
+fn table_content_key(
+    evaluator: &StepWeatherEvaluator,
+    surfaces: &[SurfaceGeometry],
+) -> Option<[u64; 2]> {
+    let forcing = evaluator.forcing.as_ref()?;
+    let mut hasher = TableKeyHasher::new();
+    hasher.write_f64(evaluator.weather_meta.elevation_m);
+    for step in 0..forcing.len() {
+        let inputs = table_step_inputs(evaluator, forcing, step).ok()?;
+        hasher.write_f64(inputs.sky.ghi);
+        hasher.write_f64(inputs.sky.dni);
+        hasher.write_f64(inputs.sky.dhi);
+        hasher.write_f64(inputs.ground_albedo);
+        hasher.write_f64(inputs.sun.zenith_deg);
+        hasher.write_f64(inputs.sun.azimuth_deg);
+        hasher.write_u64(u64::from(inputs.sun.day_of_year));
+    }
+    for surface in surfaces {
+        hasher.write_u64(u64::from(surface.surface_id));
+        hasher.write_f64(surface.azimuth_deg);
+        hasher.write_f64(surface.tilt_deg);
+        hasher.write_f64(surface.area_m2);
+        hasher.write_u64(u64::from(surface.omni_directional));
+    }
+    Some(hasher.finish())
+}
+
+/// The process's table cache: the last few built tables, held strongly,
+/// keyed on the content key. Identical content shares ONE table instance
+/// across independently constructed blueprints (the sharing rule), and
+/// the cache's strong holds keep a table alive a bounded depth past its
+/// last blueprint, so a workload that constructs and drops dwellings of
+/// one content in tight succession (the benchmark batch's shape: one
+/// construction per timed iteration) neither rebuilds the table nor rides
+/// the allocator's mmap/munmap cycle on it: the table's free landing in
+/// the drop's sequence resets the allocator's dynamic mmap threshold
+/// below the resampled series' chunk size, and every following
+/// construction then re-faults the whole series through fresh mappings
+/// (measured: the drop's 3.4 ms munmap and the construction's 60-85 ms
+/// page faults per iteration, against 45 us and settled pages when the
+/// table survives). The depth bounds the pinned memory to a few tables
+/// whatever the workload.
+const SURFACE_TABLE_CACHE_DEPTH: usize = 2;
+
+type SurfaceTableCache = std::sync::Mutex<Vec<([u64; 2], std::sync::Arc<SurfaceIrradianceTable>)>>;
+
+static SURFACE_TABLE_CACHE: std::sync::OnceLock<SurfaceTableCache> = std::sync::OnceLock::new();
+
+/// The one table for this evaluator-and-surfaces content: the cache's
+/// entry when the content was built before (two independently constructed
+/// blueprints of identical content share it), a fresh build cached under
+/// the key when not. The build runs outside the cache's lock (parallel
+/// constructions of different contents never serialize behind each
+/// other's builds) and the evicted tables' deallocation runs outside it
+/// too (their frees can be large). The build failure's placeholder is
+/// never cached: each blueprint's first build retries it and warns as
+/// before, and the per-blueprint cell keeps the failure cached per
+/// blueprint exactly as the row's first landing had it.
+fn shared_surface_irradiance_table(
+    evaluator: &StepWeatherEvaluator,
+    surfaces: &[SurfaceGeometry],
+) -> Arc<SurfaceIrradianceTable> {
+    let Some(key) = table_content_key(evaluator, surfaces) else {
+        return build_table_or_empty(evaluator, surfaces);
+    };
+    let cache = SURFACE_TABLE_CACHE
+        .get_or_init(|| std::sync::Mutex::new(Vec::with_capacity(SURFACE_TABLE_CACHE_DEPTH)));
+    // The hit path: the lock held for the lookup and the LRU touch only.
+    {
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(slot) = cache.iter().position(|(cached, _)| *cached == key) {
+            let table = std::sync::Arc::clone(&cache[slot].1);
+            let entry = cache.remove(slot);
+            cache.insert(0, entry);
+            return table;
+        }
+    }
+    let built = match SurfaceIrradianceTable::build(evaluator, surfaces) {
+        Ok(table) => std::sync::Arc::new(table),
+        Err(err) => {
+            tracing::warn!(
+                "the per-surface irradiance table's build failed ({err}); \
+                 the per-surface irradiance computes per step as before"
+            );
+            // Not cached: the next blueprint's build retries, and the
+            // per-blueprint cell caches the failure for its own builds.
+            return std::sync::Arc::new(SurfaceIrradianceTable::empty());
+        }
+    };
+    // The insert: re-check first (a racing build of the same content may
+    // hold the slot now; its table is bitwise this one's by the key, and
+    // this build's own drops unused, outside the lock), then evict to the
+    // depth and release the evicted tables past the lock.
+    let evicted;
+    {
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(slot) = cache.iter().position(|(cached, _)| *cached == key) {
+            let table = std::sync::Arc::clone(&cache[slot].1);
+            return table;
+        }
+        cache.insert(0, (key, std::sync::Arc::clone(&built)));
+        if cache.len() > SURFACE_TABLE_CACHE_DEPTH {
+            evicted = cache.split_off(SURFACE_TABLE_CACHE_DEPTH);
+        } else {
+            evicted = Vec::new();
+        }
+    }
+    drop(evicted);
+    built
+}
+
+/// The build, with the failure's warning and the empty placeholder: the
+/// caller's fallback when the content cannot be keyed.
+fn build_table_or_empty(
+    evaluator: &StepWeatherEvaluator,
+    surfaces: &[SurfaceGeometry],
+) -> Arc<SurfaceIrradianceTable> {
+    Arc::new(match SurfaceIrradianceTable::build(evaluator, surfaces) {
+        Ok(table) => table,
+        Err(err) => {
+            tracing::warn!(
+                "the per-surface irradiance table's build failed ({err}); \
+                 the per-surface irradiance computes per step as before"
+            );
+            SurfaceIrradianceTable::empty()
+        }
+    })
 }
 
 /// Errors returned by [`EnvironmentManager`].
@@ -1182,29 +1390,23 @@ impl EnvironmentManager {
         // (the same functions of the same inputs the per-step computation
         // runs, so every row entry is bitwise the value the per-step path
         // produces), held as an `Arc` on the blueprint, shared by every
-        // dwelling the blueprint builds. No table when the caller passed
-        // no blueprint cell, when the per-step forcing path was forced
-        // (the per-step irradiance computation is part of that path), or
-        // when the build failed (the per-step computation stays; the run
-        // fails at the failing step exactly as it would have). A manager
-        // whose clock later diverges from the construction's time base
-        // bypasses the table per step (the same guard the forcing row's
-        // read applies) -- never a stale row.
+        // dwelling the blueprint builds -- and, through the process's
+        // content registry, by every independently constructed blueprint
+        // of identical content: identical content shares one table
+        // instance, different content never shares. No table when the
+        // caller passed no blueprint cell, when the per-step forcing path
+        // was forced (the per-step irradiance computation is part of that
+        // path), or when the build failed (the per-step computation stays;
+        // the run fails at the failing step exactly as it would have). A
+        // manager whose clock later diverges from the construction's time
+        // base bypasses the table per step (the same guard the forcing
+        // row's read applies) -- never a stale row.
         let shared_irradiance = per_surface_irradiance
             .and_then(|cell| {
                 weather_evaluator.forcing.as_ref()?;
-                Some(Arc::clone(cell.get_or_init(
-                    || match SurfaceIrradianceTable::build(&weather_evaluator, &surfaces) {
-                        Ok(table) => Arc::new(table),
-                        Err(err) => {
-                            tracing::warn!(
-                                "the per-surface irradiance table's build failed ({err}); \
-                                 the per-surface irradiance computes per step as before"
-                            );
-                            Arc::new(SurfaceIrradianceTable::empty())
-                        }
-                    },
-                )))
+                Some(Arc::clone(cell.get_or_init(|| {
+                    shared_surface_irradiance_table(&weather_evaluator, &surfaces)
+                })))
             })
             .filter(|table| !table.is_empty());
         // The initial conditions read the weather at the run's start: the

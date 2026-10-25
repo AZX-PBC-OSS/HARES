@@ -61,8 +61,12 @@ pub struct DwellingBlueprint {
     /// table): the per-surface Perez and incidence are functions of the
     /// step's weather and solar position and of the blueprint's own
     /// surface geometry, so the table is one computation per blueprint.
-    /// Empty until the first build; never built when the per-step forcing
-    /// path was forced at the first build.
+    /// The process's content registry extends the sharing across
+    /// independently constructed blueprints of identical content: the
+    /// same surfaces, weather, forcing and time base resolve to one table
+    /// instance, different content never shares. Empty until the first
+    /// build; never built when the per-step forcing path was forced at
+    /// the first build.
     pub(super) per_surface_irradiance:
         std::sync::OnceLock<std::sync::Arc<crate::environment::SurfaceIrradianceTable>>,
 }
