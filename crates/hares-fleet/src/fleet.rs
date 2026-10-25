@@ -1822,16 +1822,63 @@ impl SteppableFleet {
     /// fleet finished, no home failed, and no per-home results are
     /// returned.
     ///
+    /// The per-dwelling results are built fresh per call (the by-value
+    /// form, unchanged for every external caller); a caller that steps in
+    /// a loop and holds its results buffer steps through the reused form
+    /// ([`Self::step_into`]) instead.
+    ///
     /// # Errors
     ///
     /// [`FleetError::AlreadyFinished`] when every configured step has
     /// already run.
     pub fn step(&mut self) -> Result<Vec<std::result::Result<StepResult, SimError>>> {
+        let mut results = Vec::new();
+        self.step_into(&mut results)?;
+        Ok(results)
+    }
+
+    /// The by-value [`Self::step`]'s body, writing the per-dwelling
+    /// results in place into `results`: the fleet's per-dwelling step
+    /// loop steps through the caller's reused results, so a caller that
+    /// holds the buffer across steps (the Python fleet binding) pays the
+    /// zone-temperature allocation once, at the first step, and the
+    /// loop's steady state allocates nothing for the results. `step()`
+    /// keeps its by-value signature for every external caller.
+    ///
+    /// The reuse cannot carry a stale result across a mid-episode
+    /// mutation: the fleet's roster is fixed at construction (no
+    /// add/remove/restore surface exists on this type), the mutations the
+    /// stepping path can hit mid-episode (`apply_control`,
+    /// `set_grid_voltage`, a dwelling's panic failure) never read a
+    /// slot's old content, and every slot is fully overwritten before any
+    /// read on the success path while a failed step leaves the slot
+    /// carrying the error instead.
+    ///
+    /// `results` is resized to the dwelling count: entries beyond the
+    /// count are dropped, missing entries are seeded fresh (their first
+    /// fill pays the buffer), and entries already in place are reused.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::AlreadyFinished`] when every configured step has
+    /// already run.
+    pub fn step_into(
+        &mut self,
+        results: &mut Vec<std::result::Result<StepResult, SimError>>,
+    ) -> Result<()> {
         if self.is_finished() {
             return Err(FleetError::AlreadyFinished {
                 total_steps: self.total_steps,
             });
         }
+
+        // The results' shape follows the fleet's fixed dwelling count:
+        // already-present entries keep their buffers (the reuse), the
+        // missing tail is seeded fresh.
+        if results.len() > self.dwellings.len() {
+            results.truncate(self.dwellings.len());
+        }
+        results.resize_with(self.dwellings.len(), || Ok(StepResult::default()));
 
         // Invariant: no dwelling that was ALREADY failed before this step had
         // step() called on it.  Capture pre-step failed state so that dwellings
@@ -1841,11 +1888,13 @@ impl SteppableFleet {
         #[cfg(debug_assertions)]
         let was_already_failed: Vec<bool> = self.dwellings.iter().map(|d| d.failed).collect();
 
-        let results = if let Some(pool) = &self.step_pool {
-            pool.install(|| step_dwellings_parallel(&mut self.dwellings))
+        if let Some(pool) = &self.step_pool {
+            pool.install(|| {
+                step_dwellings_parallel_into(&mut self.dwellings, results);
+            });
         } else {
-            step_dwellings_parallel(&mut self.dwellings)
-        };
+            step_dwellings_parallel_into(&mut self.dwellings, results);
+        }
 
         #[cfg(debug_assertions)]
         {
@@ -1862,7 +1911,7 @@ impl SteppableFleet {
         }
 
         self.current_step = self.current_step.saturating_add(1);
-        Ok(results)
+        Ok(())
     }
 
     /// Applies a grid voltage override to one dwelling.
@@ -1999,9 +2048,55 @@ impl SteppableFleet {
     }
 }
 
-fn step_dwellings_parallel(
+/// The test-only site accumulator for the fleet's per-dwelling step
+/// handoff: each per-dwelling closure brackets exactly the step call
+/// with `thread_allocations()` reads and adds the difference here, so
+/// the witness can attribute the handoff's allocations to the loop's
+/// own site (the counting allocator's counts are per thread, and the
+/// loop's closures may run on any worker).
+#[cfg(test)]
+static FLEET_STEP_HANDOFF_SITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The stepping tests' exclusivity lock: the coverage build runs the
+/// suite in one process on many threads, and the handoff site's
+/// accumulator is process-global (the loop's closures run on any rayon
+/// worker, so it cannot be thread-local). Every test that steps a fleet
+/// holds this guard across its body, so the differential witness's
+/// windows count only their own fleet's steps.
+#[cfg(test)]
+static FLEET_STEP_EXCLUSIVITY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Resets the handoff site's accumulator. Test-only.
+#[cfg(test)]
+fn reset_fleet_step_handoff_site() {
+    FLEET_STEP_HANDOFF_SITE.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reads the handoff site's accumulator. Test-only.
+#[cfg(test)]
+fn fleet_step_handoff_site() -> u64 {
+    FLEET_STEP_HANDOFF_SITE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The fleet's per-dwelling step loop, writing each dwelling's step
+/// result in place into its slot of `results`: the slots are the
+/// caller's persistent per-dwelling results, so a caller that holds the
+/// buffer across steps (the Python fleet binding) pays the
+/// zone-temperature allocation once, at the first step, and the loop's
+/// steady state allocates nothing for the result. The by-value
+/// [`SteppableFleet::step`] hands the same loop a fresh buffer per call,
+/// so its per-call allocations are unchanged.
+///
+/// Every field of a slot's result is overwritten on the success path
+/// (the `run_timestep_into` contract), and a slot that does not step
+/// successfully carries the error instead, so no mutation point can
+/// leak a stale result: the slots are write-only within a step and
+/// re-derived before every read.
+fn step_dwellings_parallel_into(
     dwellings: &mut [Dwelling],
-) -> Vec<std::result::Result<StepResult, SimError>> {
+    results: &mut [std::result::Result<StepResult, SimError>],
+) {
+    debug_assert_eq!(dwellings.len(), results.len());
     let _guard = PanicHookGuard::new();
     #[cfg(debug_assertions)]
     {
@@ -2013,28 +2108,60 @@ fn step_dwellings_parallel(
 
     dwellings
         .par_iter_mut()
-        .map(|dwelling| {
+        .zip(results.par_iter_mut())
+        .for_each(|(dwelling, slot)| {
             if dwelling.failed {
-                return Err(SimError::Skipped {
+                *slot = Err(SimError::Skipped {
                     bldg_id: dwelling.bldg_id,
                     message: "dwelling permanently failed after prior panic".to_string(),
                 });
+                return;
             }
-            match panic::catch_unwind(AssertUnwindSafe(|| dwelling.step())) {
-                Ok(Ok(step_result)) => Ok(step_result),
-                Ok(Err(err)) => Err(SimError::Engine {
-                    bldg_id: dwelling.bldg_id,
-                    message: err.to_string(),
-                }),
+            #[cfg(test)]
+            let site_before = hares_types::alloc_count::thread_allocations();
+            let stepped = panic::catch_unwind(AssertUnwindSafe(|| {
+                // The step writes the slot's Ok variant in place: the
+                // reused result the loop steps through. A slot holding
+                // Err from an earlier failed step has no buffer to
+                // reuse; the slot is re-seeded fresh and the new
+                // buffer's first fill is that recovery's own cost.
+                match slot {
+                    Ok(step_result) => dwelling.step_into(step_result),
+                    Err(_) => {
+                        *slot = Ok(StepResult::default());
+                        match slot {
+                            Ok(step_result) => dwelling.step_into(step_result),
+                            Err(_) => unreachable!("the slot was just re-seeded as Ok"),
+                        }
+                    }
+                }
+            }));
+            #[cfg(test)]
+            if let (Some(before), Some(after)) =
+                (site_before, hares_types::alloc_count::thread_allocations())
+            {
+                FLEET_STEP_HANDOFF_SITE.fetch_add(
+                    after.wrapping_sub(before),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            match stepped {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    *slot = Err(SimError::Engine {
+                        bldg_id: dwelling.bldg_id,
+                        message: err.to_string(),
+                    });
+                }
                 Err(payload) => {
                     dwelling.failed = true;
                     let handler_result = panic::catch_unwind(AssertUnwindSafe(|| {
-                        Err(SimError::Panic {
+                        Err::<(), SimError>(SimError::Panic {
                             bldg_id: dwelling.bldg_id,
                             message: panic_hook::panic_payload_to_string(payload),
                         })
                     }));
-                    match handler_result {
+                    let panic_result = match handler_result {
                         Ok(result) => result,
                         Err(_) => {
                             record_double_panic_prevented();
@@ -2048,11 +2175,13 @@ fn step_dwellings_parallel(
                                 message: "panic handling failed (double-panic prevented)".into(),
                             })
                         }
+                    };
+                    if let Err(err) = panic_result {
+                        *slot = Err(err);
                     }
                 }
             }
-        })
-        .collect()
+        });
 }
 
 /// The ResStock home's sim config: the constructor's one-minute step and
@@ -3027,6 +3156,9 @@ mod tests {
 
     #[test]
     fn steppable_fleet_steps_and_finishes() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -3066,6 +3198,9 @@ mod tests {
     /// fail, it finished.
     #[test]
     fn step_after_finish_is_already_finished_error() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -3088,6 +3223,250 @@ mod tests {
             matches!(err, FleetError::AlreadyFinished { total_steps: finished } if finished == total_steps),
             "got: {err:?}"
         );
+    }
+
+    /// The fleet's step-handoff zone-temperature allocation, the witness
+    /// for the census site the P1 record names (the by-value `step()`
+    /// handoff at the fleet's per-dwelling step loop): each dwelling-step
+    /// paid one fresh `StepResult`, one zone-temperature vector. The
+    /// loop steps through the caller's reused results (the into-form),
+    /// so the reused form's steady state pays nothing for the result.
+    ///
+    /// The site accumulator (`FLEET_STEP_HANDOFF_SITE`) brackets exactly
+    /// the step call inside the per-dwelling closure, so the counts
+    /// attribute to the handoff alone; the counting allocator is
+    /// per-thread and the loop's closures may run on any worker, so the
+    /// brackets feed one shared accumulator.
+    ///
+    /// The step's own allocations (every phase but the result's fill)
+    /// are identical between the two legs: two fleets built from
+    /// identical configs, stepped through the same step indices in the
+    /// same sitting, the only difference between the legs being the
+    /// result buffer the step writes into. The assertion is therefore
+    /// exact: the by-value leg's site total exceeds the reused leg's by
+    /// one zone-temperature vector per dwelling-step, and the reused
+    /// leg's own per-step delta is flat across its steps. RED with the
+    /// into-form delegating to the by-value body: the difference read
+    /// zero (126 and 126 over the 8 dwelling-steps) and every
+    /// dwelling-step still paid its fresh result. GREEN at the commit:
+    /// the difference is exactly the dwelling-steps' vectors.
+    #[test]
+    fn fleet_step_handoff_zone_temperature_allocation_free_after_first_step() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dwellings_per_fleet = 2;
+        let measured_steps = 4u64;
+        let dir = tempdir().expect("temp dir");
+
+        // One thread so the two legs' work runs the same closures on the
+        // same worker; the site's brackets are self-consistent on any
+        // thread either way.
+        std::fs::create_dir_all(dir.path().join("by-value")).expect("the by-value config dir");
+        std::fs::create_dir_all(dir.path().join("reused")).expect("the reused config dir");
+        let by_value_configs =
+            build_valid_configs(&dir.path().join("by-value"), dwellings_per_fleet);
+        let reused_configs = build_valid_configs(&dir.path().join("reused"), dwellings_per_fleet);
+        let (mut by_value_fleet, build_errors) =
+            SteppableFleet::from_configs(by_value_configs, 1).expect("build the by-value fleet");
+        let (mut reused_fleet, reused_build_errors) =
+            SteppableFleet::from_configs(reused_configs, 1).expect("build the reused fleet");
+        assert!(build_errors.is_empty());
+        assert!(reused_build_errors.is_empty());
+
+        // The reused leg's persistent results: the shape the Python fleet
+        // binding steps in.
+        let mut reused_results: Vec<std::result::Result<StepResult, SimError>> = Vec::new();
+
+        // The first step pays every first-ever allocation (the reused
+        // buffers' first fill included); the measured window follows it.
+        by_value_fleet.step().expect("the by-value first step");
+        reused_fleet
+            .step_into(&mut reused_results)
+            .expect("the reused first step");
+
+        // Leg 1: the by-value form, a fresh result per dwelling-step.
+        reset_fleet_step_handoff_site();
+        for _ in 0..measured_steps {
+            by_value_fleet.step().expect("the by-value steps run");
+        }
+        let by_value_site = fleet_step_handoff_site();
+
+        // Leg 2: the reused form, the same step indices over an identical
+        // fleet, the same site bracket.
+        reset_fleet_step_handoff_site();
+        for _ in 0..measured_steps {
+            reused_fleet
+                .step_into(&mut reused_results)
+                .expect("the reused steps run");
+        }
+        let reused_site = fleet_step_handoff_site();
+
+        let dwelling_steps = measured_steps * dwellings_per_fleet as u64;
+        assert_eq!(
+            by_value_site,
+            reused_site + dwelling_steps,
+            "the by-value handoff allocated {} times beyond the reused form's {} \
+             over {dwelling_steps} dwelling-steps (expected exactly one \
+             zone-temperature vector, {dwelling_steps}, per dwelling-step): \
+             the loop must step through the reused result",
+            by_value_site.saturating_sub(reused_site),
+            reused_site,
+        );
+
+        // The reused form's per-step delta is flat: the legs' step
+        // indices line up, so the reused leg's window carries no
+        // first-fill or growth of its own beyond the step's own
+        // allocations.
+        reset_fleet_step_handoff_site();
+        reused_fleet
+            .step_into(&mut reused_results)
+            .expect("the reused flatness step");
+        let one_step = fleet_step_handoff_site();
+        reset_fleet_step_handoff_site();
+        reused_fleet
+            .step_into(&mut reused_results)
+            .expect("the reused flatness step");
+        let next_step = fleet_step_handoff_site();
+        assert_eq!(
+            one_step, next_step,
+            "the reused form's handoff site moved between steps ({one_step} then \
+             {next_step}): the step result's buffer must be reused, not grown",
+        );
+    }
+
+    /// The P1 reviewer's lockstep shape: two identical fleets, one
+    /// stepped through the by-value form and one through the reused
+    /// results, steps side by side, every per-dwelling `StepResult`
+    /// content-identical every step.
+    #[test]
+    fn fleet_reused_results_match_the_by_value_form_step_for_step() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dir = tempdir().expect("temp dir");
+        let (mut by_value_fleet, by_value_build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 2)
+                .expect("build the by-value fleet");
+        let (mut reused_fleet, reused_build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 2)
+                .expect("build the reused fleet");
+        assert!(by_value_build_errors.is_empty());
+        assert!(reused_build_errors.is_empty());
+
+        let mut reused_results: Vec<std::result::Result<StepResult, SimError>> = Vec::new();
+        while !by_value_fleet.is_finished() {
+            let by_value = by_value_fleet.step().expect("the by-value steps run");
+            reused_fleet
+                .step_into(&mut reused_results)
+                .expect("the reused steps run");
+            assert_eq!(
+                by_value.len(),
+                reused_results.len(),
+                "the two forms return one result per dwelling"
+            );
+            for (index, (by_value_entry, reused_entry)) in
+                by_value.iter().zip(reused_results.iter()).enumerate()
+            {
+                assert_eq!(
+                    by_value_entry, reused_entry,
+                    "dwelling {index}: the reused form's step result must be \
+                     content-identical to the by-value form's"
+                );
+            }
+        }
+    }
+
+    /// The reuse cannot carry a stale result across a mid-episode
+    /// mutation. The mutations the fleet stepping path can hit
+    /// mid-episode are a grid-voltage override (the electrical
+    /// solution's input changes under the dwelling) and a dwelling's
+    /// panic failure (the dwelling leaves the stepping path); the
+    /// fleet's roster itself is fixed at construction, with no
+    /// add/remove/restore surface. The proof is the by-value form
+    /// itself: two identical fleets step the same episode side by side,
+    /// the mutations applied to both at the same steps, and every slot
+    /// of the reused form must stay content-identical to the by-value
+    /// form's fresh result every step, the failed dwelling's slot
+    /// carrying the panic and then the skip instead of any old content.
+    #[test]
+    fn fleet_reused_results_carry_nothing_across_a_mid_episode_mutation() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dir = tempdir().expect("temp dir");
+        let (mut by_value_fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 1)
+                .expect("build the by-value fleet");
+        let (mut reused_fleet, reused_build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 1)
+                .expect("build the reused fleet");
+        assert!(build_errors.is_empty());
+        assert!(reused_build_errors.is_empty());
+
+        let mut reused_results: Vec<std::result::Result<StepResult, SimError>> = Vec::new();
+        let mut step_index = 0u64;
+        while !by_value_fleet.is_finished() {
+            // The mutations, applied to both fleets at the same steps:
+            // the grid-voltage override after the first step; a
+            // dwelling's panic failure after the third (debug builds
+            // only, the hook the panic tests use).
+            step_index += 1;
+            if step_index == 2 {
+                by_value_fleet
+                    .set_grid_voltage_all(1.5)
+                    .expect("the by-value override applies");
+                reused_fleet
+                    .set_grid_voltage_all(1.5)
+                    .expect("the reused override applies");
+            }
+            #[cfg(debug_assertions)]
+            if step_index == 4 {
+                by_value_fleet.dwellings[0].set_test_panic();
+                reused_fleet.dwellings[0].set_test_panic();
+            }
+
+            let by_value = by_value_fleet.step().expect("the by-value steps run");
+            reused_fleet
+                .step_into(&mut reused_results)
+                .expect("the reused steps run");
+            assert_eq!(
+                by_value.len(),
+                reused_results.len(),
+                "the two forms return one result per dwelling"
+            );
+            for (index, (by_value_entry, reused_entry)) in
+                by_value.iter().zip(reused_results.iter()).enumerate()
+            {
+                assert_eq!(
+                    by_value_entry, reused_entry,
+                    "dwelling {index}, step {step_index}: the reused form's \
+                     slot must stay content-identical to the by-value \
+                     form's fresh result across the episode's mutations"
+                );
+            }
+        }
+
+        // The failed dwelling's slot carries the panic and then the
+        // skip: never a stale step result.
+        #[cfg(debug_assertions)]
+        {
+            assert!(
+                matches!(&reused_results[0], Err(SimError::Panic { .. }))
+                    || matches!(&reused_results[0], Err(SimError::Skipped { .. })),
+                "the failed dwelling's slot must carry the error states, got {:?}",
+                reused_results[0]
+            );
+        }
     }
 
     /// The per-home accessors reject a missing home with

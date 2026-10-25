@@ -28,7 +28,7 @@ use super::ocv::UNegTable;
 /// Tracks SOC reversals and counts completed cycles using the 3-point method.
 /// Per-cycle DOD amplitudes are stored separately so the degradation model can
 /// compute the `Σ(count_i × DOD_i²)` weighted cycle-damage term required by Smith 2017.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RainflowCounter {
     /// SOC values at detected reversals (peaks and valleys).
     pub(crate) reversals: Vec<f64>,
@@ -38,6 +38,41 @@ pub(crate) struct RainflowCounter {
     /// Count is 0.5 for half-cycles, 1.0 for full cycles per ASTM E1049-85.
     daily_cycle_dods: Vec<(f64, f64)>,
 }
+
+impl Default for RainflowCounter {
+    fn default() -> Self {
+        Self {
+            // Both buffers pre-size at construction for their working
+            // sets, so the first push of a charging session (the EV's
+            // first arrival, the battery's first cycle) pays no growth
+            // fill on the step path: the reversal residual holds the
+            // 3-point extraction's turning points, and the daily DOD
+            // list holds the day's completed cycles (the toggling BMS's
+            // micro-cycles included; the measured bounds below). A trace
+            // that outgrows the bounds still works (the vectors grow);
+            // the growth is then a named fill the whole-step assertion's
+            // window catches.
+            reversals: Vec::with_capacity(RAINFLOW_RESIDUAL_BOUND),
+            cycle_count: 0.0,
+            daily_cycle_dods: Vec::with_capacity(RAINFLOW_DAILY_CYCLE_BOUND),
+        }
+    }
+}
+
+/// The reversal residual's working-set bound, measured on the fixtures'
+/// SOC traces (the January and June weeks): the 3-point extraction's
+/// residual stack holds at most a handful of turning points (each
+/// reversal either extracts cycles back down or extends the current
+/// ramp in place); the weeks' traces reach sixteen. A trace that
+/// outgrows the bound still works (the vector grows, once) and the
+/// growth is then a named fill the whole-step assertion's window
+/// catches.
+const RAINFLOW_RESIDUAL_BOUND: usize = 16;
+
+/// A residential day's completed-cycle bound, measured on the same
+/// traces: the (range, count) pairs one day's SOC trace accumulates
+/// between the daily resets (the toggling BMS's micro-cycles included).
+const RAINFLOW_DAILY_CYCLE_BOUND: usize = 32;
 
 impl RainflowCounter {
     pub(crate) fn push(&mut self, soc: f64) {

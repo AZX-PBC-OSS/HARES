@@ -1,5 +1,13 @@
 //! RC network envelope model with state-space solvers.
 
+// The unit-test binary installs the counting allocator so the fluid
+// solver's per-site allocation witness reads real per-thread counts; it
+// applies to this crate's test build alone.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: hares_types::alloc_count::CountingAllocator =
+    hares_types::alloc_count::CountingAllocator;
+
 pub mod boundary_rc;
 pub mod electrical_solver;
 pub mod fluid_solver;

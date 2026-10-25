@@ -16,7 +16,7 @@ use super::core_config::{
 };
 use super::default_curves::{BiquadraticCurveSource, maybe_substitute_defaults};
 use super::helpers::{resolve_served_zone, validate_zone_id};
-use super::speed_control::{SpeedControlMode, StartupConfig};
+use super::speed_control::{SpeedControlMode, StartupConfig, capacity_fractions_for};
 use super::staging::{
     DEFAULT_LOW_SPEED_CAPACITY_FRACTION, DEFAULT_PLF_DEGRADATION_COEFF, DEFAULT_STARTUP_CD,
 };
@@ -452,6 +452,16 @@ pub struct HvacRuntimeState {
     /// checkpointed: the actor re-dispatches every step, so a restored run
     /// refills it before the next duty evaluation.
     pub non_hvac_input_w: f64,
+    /// The capacity-fraction caches ([`capacity_fractions_for`]'s output
+    /// for the config's heating and cooling capacity lists): config-frozen
+    /// data. The equipment-specific inits set the capacity lists after
+    /// `hvac_core::init` returns, so the caches fill lazily, at the first
+    /// speed selection whose lists' length the cache does not match, and
+    /// then the step path's speed selections read the cache and allocate
+    /// nothing. The length check re-derives the cache when a fresh
+    /// equipment object carries a fresh runtime.
+    pub heating_capacity_fractions: Vec<f64>,
+    pub cooling_capacity_fractions: Vec<f64>,
 }
 
 /// Control-signal state modified by external control signals.
@@ -509,6 +519,31 @@ impl HvacEquipment {
     /// from the construction position, whatever the warm-up drew.
     pub fn reset_stochastic_state(&mut self) {
         self.thermostat_fsm.reset_schedule_sources();
+    }
+
+    /// The cooling capacity fractions (`cap[i] / cap[last]`), read by the
+    /// step path's speed selections: config-frozen data, cached on the
+    /// runtime. The equipment-specific inits set the capacity lists after
+    /// `hvac_core::init` returns, so the cache fills lazily, at the first
+    /// selection whose lists' length the cache does not match, and then
+    /// the selections allocate nothing. The length check re-derives the
+    /// cache when a fresh equipment object carries a fresh runtime.
+    pub fn cooling_capacity_fractions_cached(&mut self) -> &[f64] {
+        let caps = &self.config.cooling_capacities_w;
+        if self.runtime.cooling_capacity_fractions.len() != caps.len() {
+            self.runtime.cooling_capacity_fractions = capacity_fractions_for(caps);
+        }
+        &self.runtime.cooling_capacity_fractions
+    }
+
+    /// The heating capacity fractions, the heating twin of
+    /// [`Self::cooling_capacity_fractions_cached`].
+    pub fn heating_capacity_fractions_cached(&mut self) -> &[f64] {
+        let caps = &self.config.heating_capacities_w;
+        if self.runtime.heating_capacity_fractions.len() != caps.len() {
+            self.runtime.heating_capacity_fractions = capacity_fractions_for(caps);
+        }
+        &self.runtime.heating_capacity_fractions
     }
 
     pub fn new(equipment_type: HvacEquipmentType, zone_id: impl Into<Option<ZoneId>>) -> Self {
@@ -583,6 +618,8 @@ impl HvacEquipment {
                 prev_zone_temp_c: None,
                 dr_setpoint_offset_c: 0.0,
                 non_hvac_input_w: 0.0,
+                heating_capacity_fractions: Vec::new(),
+                cooling_capacity_fractions: Vec::new(),
             },
             control: HvacControlState {
                 max_capacity_fraction: 1.0,

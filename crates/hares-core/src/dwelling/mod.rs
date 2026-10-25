@@ -1663,6 +1663,14 @@ pub struct StepResult {
     pub gas_power_w: f64,
 }
 
+/// One step's queued-request bound: the construction-time capacity the
+/// actor dispatch buffer and each priority tier's queue pre-size for.
+/// An event's requests (the EV driver's arrival, the BMS's
+/// re-evaluation) queue inside the bound, so a steady-state event pays
+/// no first-growth fill; `clear` and `drain` keep the capacity, so the
+/// fills are once per buffer, per process.
+const ACTOR_DISPATCH_BOUND: usize = 16;
+
 /// Internal control queue and routing logic.
 ///
 /// # Tier ordering (across priority levels)
@@ -1766,7 +1774,14 @@ fn named_unit_addressed_by_end_use(
 impl Default for ControlDispatcher {
     fn default() -> Self {
         Self {
-            by_tier: std::array::from_fn(|_| VecDeque::new()),
+            // Each tier's queue pre-sizes at construction for one step's
+            // queued-request bound, the same bound the actor dispatch
+            // buffer's capacity carries: an event's requests (the EV
+            // driver's arrival, the BMS's re-evaluation) queue inside
+            // it, so a steady-state event never pays the queue's first
+            // growth. `drain` keeps the capacity, so the fill is once
+            // per queue, per process.
+            by_tier: std::array::from_fn(|_| VecDeque::with_capacity(ACTOR_DISPATCH_BOUND)),
             seen_targets: Vec::with_capacity(16),
         }
     }
@@ -2621,7 +2636,11 @@ fn validate_equipment_loops(
 /// `state_snapshot_phase` accumulator is bracketed around the whole
 /// profiling phase of the same name instead of one site, and
 /// `state_snapshot_phase_allocation_free_after_first_step` asserts it
-/// the same way against a reused step-result buffer.
+/// the same way against a reused step-result buffer. The
+/// `stage_rank_scratch` accumulator brackets the equipment phase's
+/// stage-rank scratch site, and
+/// `stage_rank_scratch_allocation_free_after_first_step` asserts it the
+/// same way.
 #[cfg(test)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct SnapshotAllocations {
@@ -2635,6 +2654,15 @@ struct SnapshotAllocations {
     fluid_set_from: u64,
     /// Every custom slot's `set_custom`, once per installed solver.
     custom_set_from: u64,
+    /// The equipment phase's stage-rank scratch: the per-step buffer the
+    /// three phase loops push the stepped ranks into for the
+    /// stage-ordering invariant.
+    stage_rank_scratch: u64,
+    /// The humidity alpha telemetry's per-step rebuild: the map the
+    /// humidity update applies to the zones' semi-implicit alphas with,
+    /// removed from and reinserted into `equipment_telemetry` with a
+    /// fresh format-built key per zone per step.
+    humidity_alpha_rebuild: u64,
     /// The whole `state_snapshot` phase, from its clock entry to its
     /// handoff to `output`: the equipment snapshot, the per-zone delivery
     /// vectors and the step result's zone temperatures.
@@ -2644,7 +2672,7 @@ struct SnapshotAllocations {
 #[cfg(test)]
 impl SnapshotAllocations {
     /// The per-site totals as an ordered list a test can diff by name.
-    fn totals(&self) -> [(&'static str, u64); 7] {
+    fn totals(&self) -> [(&'static str, u64); 9] {
         [
             ("snapshot_equipment", self.snapshot_equipment),
             ("update_in_place_slots", self.update_in_place_slots),
@@ -2653,6 +2681,8 @@ impl SnapshotAllocations {
             ("electrical_set_from", self.electrical_set_from),
             ("fluid_set_from", self.fluid_set_from),
             ("custom_set_from", self.custom_set_from),
+            ("stage_rank_scratch", self.stage_rank_scratch),
+            ("humidity_alpha_rebuild", self.humidity_alpha_rebuild),
         ]
     }
 }
@@ -2666,6 +2696,11 @@ enum SnapshotAllocSite {
     HumiditySetFrom,
     ElectricalSetFrom,
     FluidSetFrom,
+    /// The equipment phase's stage-rank scratch, not the snapshot path.
+    StageRankScratch,
+    /// The humidity alpha telemetry's per-step rebuild, in the humidity
+    /// update's zone application.
+    HumidityAlphaRebuild,
     /// The whole `state_snapshot` phase, not one site.
     StateSnapshotPhase,
 }
@@ -2695,6 +2730,12 @@ impl Dwelling {
                 SnapshotAllocSite::HumiditySetFrom => accumulators.humidity_set_from += delta,
                 SnapshotAllocSite::ElectricalSetFrom => accumulators.electrical_set_from += delta,
                 SnapshotAllocSite::FluidSetFrom => accumulators.fluid_set_from += delta,
+                SnapshotAllocSite::StageRankScratch => {
+                    accumulators.stage_rank_scratch += delta;
+                }
+                SnapshotAllocSite::HumidityAlphaRebuild => {
+                    accumulators.humidity_alpha_rebuild += delta;
+                }
                 SnapshotAllocSite::StateSnapshotPhase => {
                     accumulators.state_snapshot_phase += delta;
                 }
@@ -2787,6 +2828,51 @@ pub struct Dwelling {
     /// Reused scratch for the per-step warning drain: a step in which no
     /// equipment warns allocates nothing.
     warning_scratch: Vec<Warning>,
+    /// The step's executed-actor set, the debug-only EveryStep check's
+    /// scratch: cleared per step before the scheduler loop fills it, so
+    /// a debug build's steady state allocates nothing for the set
+    /// either. Debug-only: the check it feeds is a debug assertion.
+    #[cfg(debug_assertions)]
+    executed_actors_scratch: std::collections::HashSet<usize>,
+    /// Reused scratch for the humidity update's per-zone telemetry keys:
+    /// the zone's `humidity_semi_implicit_alpha_zone_N` key builds in the
+    /// scratch (cleared, refilled) instead of a fresh `format!` per zone
+    /// per step, so the step's steady state allocates nothing. The key
+    /// text is a pure function of the zone id; nothing outside the call
+    /// reads the scratch.
+    humidity_alpha_key_scratch: String,
+    /// Reused scratch for the step's runtime stage-rank sequence: the
+    /// ranks the step's three equipment phase loops push, which the
+    /// stage-ordering invariant (`check_equipment_step_order`) reads at
+    /// the end of the equipment phase. The buffer persists across steps
+    /// so the steady state allocates nothing (the follow-up census's
+    /// site); it is cleared at the one place that fills it, before the
+    /// step's first push, so the check reads only this step's ranks.
+    ///
+    /// That clear-at-use is the buffer's whole invalidation story, and it
+    /// is airtight at every equipment-set mutation point because the
+    /// buffer is write-only scratch within a step and fully re-derived
+    /// before every read:
+    /// - Construction holds it empty (`Vec::new()`); the first step's
+    ///   clear is a no-op and the pushes fill it.
+    /// - Every roster change funnels through the roster's single
+    ///   `install_roster_caches` funnel (`add_equipment`,
+    ///   `remove_equipment`, `replace_equipment`, the actor changes):
+    ///   none of them reads or restores this buffer, and the next step's
+    ///   equipment phase clears it before the first push, so a rank
+    ///   recorded under a departed roster cannot reach the check (the
+    ///   proof lives in `install_roster_caches`).
+    /// - A checkpoint restore never rebuilds the roster (`load_checkpoint`
+    ///   validates the checkpoint's equipment against the dwelling's live
+    ///   roster; `restore_building_state` leaves the equipment set to the
+    ///   fresh build), and the buffer is not checkpoint state; the next
+    ///   step re-derives it from scratch before the check reads it (the
+    ///   proof lives in `load_checkpoint`).
+    /// - Mid-step reentrancy does not exist: the phase loops hand each
+    ///   equipment only `&latest_env` and `&mut ports`, never
+    ///   `&mut Dwelling`, so no nested step can observe the buffer
+    ///   half-filled.
+    stepped_stage_ranks: Vec<u8>,
     /// Per-equipment HPXML setpoint reconciliation records, keyed by instance name.
     /// Populated during `from_config()` / `from_preparsed()` from the typed configs
     /// attached to each `EquipmentSpec`.
@@ -4547,6 +4633,10 @@ fn assemble_from_blueprint_with_seed(
         seeded_stream_actors: Vec::new(),
         warnings: std::mem::take(warnings),
         warning_scratch: Vec::new(),
+        humidity_alpha_key_scratch: String::new(),
+        #[cfg(debug_assertions)]
+        executed_actors_scratch: std::collections::HashSet::new(),
+        stepped_stage_ranks: Vec::new(),
         setpoints_reconciled_by_equipment,
         roof_info,
         wall_azimuths,
@@ -4587,7 +4677,7 @@ fn assemble_from_blueprint_with_seed(
         scheduler: StepScheduler::default(),
         auto_registered_actor_names: HashSet::new(),
         next_ev_driver_stream: 0,
-        actor_dispatch_buf: Vec::with_capacity(16),
+        actor_dispatch_buf: Vec::with_capacity(ACTOR_DISPATCH_BOUND),
         solver_feedback_actor,
         prev_zone_temps: HashMap::new(),
         prior_zone_temps: HashMap::new(),
@@ -4980,6 +5070,51 @@ impl Dwelling {
             ));
         }
         self.run_timestep(self.recording_enabled())
+    }
+
+    /// The by-value [`Self::step`]'s body, writing the step result in
+    /// place into `out`: the same checks, the same step, no fresh result
+    /// per call. The internal loops that step every timestep (the Python
+    /// single-step binding and the fleet's per-dwelling step loop) step
+    /// through one reused result this way, so their steady state pays no
+    /// zone-temperature allocation; `step()` keeps its by-value signature
+    /// for every external caller.
+    ///
+    /// The reuse is semantics-neutral on the success path:
+    /// `run_timestep_into` overwrites every field of `out` there, so a
+    /// reused buffer carries nothing from the step before. On a failed
+    /// step the buffer's content depends on where the step failed: an
+    /// early-phase failure (a refused step, a failed solve, anything
+    /// before the state-snapshot phase writes the result) leaves `out`
+    /// holding the previous step's values; a failure at the output
+    /// phase's `record_step` leaves it holding the current step's
+    /// values, the result already written when the recorder raised. The
+    /// bindings discard the buffer whenever the step errors (the caller
+    /// receives the error, never the buffer), so the distinction is
+    /// safe there; a caller that reads `out` after a failed step reads
+    /// it at its own risk, on no contract.
+    ///
+    /// # Errors
+    ///
+    /// The same causes the by-value [`Self::step`] carries.
+    pub fn step_into(&mut self, out: &mut StepResult) -> Result<()> {
+        #[cfg(debug_assertions)]
+        if self.test_panic_on_step {
+            panic!("test-induced panic in Dwelling::step()");
+        }
+        #[cfg(debug_assertions)]
+        assert!(
+            !self.test_assert_panic_on_step,
+            "test-induced assert failure in Dwelling::step()"
+        );
+        if self.run_result.is_some() {
+            return Err(HaresError::Simulation(
+                "the run finished and cannot step further: the finished run's result is \
+                 fixed; read it with finish()"
+                    .to_string(),
+            ));
+        }
+        self.run_timestep_into(self.recording_enabled(), out)
     }
 
     /// Queues a control signal for one equipment instance by name.
@@ -7244,8 +7379,12 @@ impl Dwelling {
         #[cfg(feature = "observe")]
         let mut actor_error_count: usize = 0;
         #[cfg(debug_assertions)]
-        let mut executed_actors: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
+        {
+            // The step's executed-actor set, the dwelling's persistent
+            // debug scratch: cleared per step, so a debug build's
+            // steady state allocates nothing for it either.
+            self.executed_actors_scratch.clear();
+        }
 
         self.actor_dispatch_buf.clear();
         for entry in self.scheduler.build() {
@@ -7322,7 +7461,7 @@ impl Dwelling {
                         scheduled_phases.push(format!("ActorDecide({})", entry.name));
                         #[cfg(debug_assertions)]
                         {
-                            executed_actors.insert(idx);
+                            self.executed_actors_scratch.insert(idx);
                         }
 
                         // The open `Actors` span (this entry's whole
@@ -7386,7 +7525,7 @@ impl Dwelling {
                     .any(|e| e.slot == Some(crate::scheduler::ActorSlot(i)));
                 if registered && is_every_step {
                     debug_assert!(
-                        executed_actors.contains(&i),
+                        self.executed_actors_scratch.contains(&i),
                         "EveryStep actor '{}' (index {}) was not called during ActorDecide phase",
                         actor.name(),
                         i,
@@ -7547,8 +7686,27 @@ impl Dwelling {
         // Runtime stage-rank tracking: records the actual step execution
         // sequence so the invariant checker validates real loop ordering,
         // not just the static sort of equipment_execution_order.
-        let mut stepped_stage_ranks: Vec<u8> =
-            Vec::with_capacity(self.roster.equipment_execution_order.len());
+        //
+        // The scratch persists across steps (the dwelling's
+        // `stepped_stage_ranks` field) and is re-derived from scratch
+        // every step: this clear is the only place that empties it and
+        // the three phase loops below are the only places that fill it,
+        // so the stage-ordering check at the end of the phase reads this
+        // step's ranks and nothing else. That is also why no equipment-
+        // or state-mutation point needs to clear it: a stale rank cannot
+        // cross a step boundary, a roster change (`install_roster_caches`
+        // never reads or restores the buffer; the next step clears it
+        // before the first push), or a checkpoint restore (the restore
+        // never rebuilds the roster and the buffer is not checkpoint
+        // state). The field's doc carries the full invalidation proof.
+        #[cfg(test)]
+        let stage_rank_alloc_before = thread_allocations();
+        self.stepped_stage_ranks.clear();
+        #[cfg(test)]
+        self.record_snapshot_allocations(
+            stage_rank_alloc_before,
+            SnapshotAllocSite::StageRankScratch,
+        );
 
         // Phase 1: Independent-stage equipment (PV, generators).
         for _oi in 0..self.roster.equipment_execution_order.len() {
@@ -7578,7 +7736,7 @@ impl Dwelling {
                     &self.ports.electrical,
                 )?;
                 self.record_equipment_step_success(idx);
-                stepped_stage_ranks.push(stage_rank(stage));
+                self.stepped_stage_ranks.push(stage_rank(stage));
             }
 
             #[cfg(feature = "observe")]
@@ -7655,7 +7813,7 @@ impl Dwelling {
                     &self.ports.electrical,
                 )?;
                 self.record_equipment_step_success(idx);
-                stepped_stage_ranks.push(stage_rank(stage));
+                self.stepped_stage_ranks.push(stage_rank(stage));
             }
 
             #[cfg(feature = "observe")]
@@ -7706,7 +7864,8 @@ impl Dwelling {
                     &self.ports.electrical,
                 )?;
                 self.record_equipment_step_success(idx);
-                stepped_stage_ranks.push(stage_rank(ExecutionStage::Thermal));
+                self.stepped_stage_ranks
+                    .push(stage_rank(ExecutionStage::Thermal));
             }
 
             #[cfg(feature = "observe")]
@@ -7744,9 +7903,11 @@ impl Dwelling {
         }
 
         // Stage-ordering invariant: verify that equipment step execution order
-        // respects stage_rank ordering (non-decreasing ranks).
+        // respects stage_rank ordering (non-decreasing ranks). The slice is
+        // this step's own ranks only: the persistent scratch was cleared
+        // before the phase's first push and nothing else writes it.
         self.invariant_checker
-            .check_equipment_step_order(&stepped_stage_ranks)?;
+            .check_equipment_step_order(&self.stepped_stage_ranks)?;
 
         // Non-finite telemetry enforcement (always on): equipment
         // writes are rejected at the Telemetry boundary in every build, and
@@ -7975,7 +8136,18 @@ impl Dwelling {
             &mut self.fluid_update_buf,
         )?;
 
-        apply_humidity_update_to_zones(&mut self.latest_env, &self.humidity_update_buf);
+        #[cfg(test)]
+        let humidity_alpha_before = thread_allocations();
+        apply_humidity_update_to_zones(
+            &mut self.latest_env,
+            &self.humidity_update_buf,
+            &mut self.humidity_alpha_key_scratch,
+        );
+        #[cfg(test)]
+        self.record_snapshot_allocations(
+            humidity_alpha_before,
+            SnapshotAllocSite::HumidityAlphaRebuild,
+        );
 
         // BMS PV staleness diagnostic: after the electrical solver runs at
         // Step 4 and the timestep is ≥ 5 min, compare the PV generation used
@@ -10005,6 +10177,104 @@ destination = "memory"
         );
     }
 
+    /// The step's stage-rank scratch allocation, the witness for the
+    /// census site the P1 record names (`stepped_stage_ranks`): a fresh
+    /// `Vec::with_capacity` per step for the unconditional stage-ordering
+    /// invariant, one allocation per step in every build. The site's
+    /// accumulator (`stage_rank_scratch`) brackets exactly the buffer's
+    /// acquisition, so the counts attribute to this site alone. RED at
+    /// the parent: the delta is one per step. GREEN with the scratch
+    /// persisted on the dwelling: zero on every step after the first.
+    #[test]
+    fn stage_rank_scratch_allocation_free_after_first_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.run_timestep(false).expect("first step");
+        let baseline = dwelling.snapshot_allocation_totals().stage_rank_scratch;
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("step");
+        }
+        let after = dwelling.snapshot_allocation_totals().stage_rank_scratch;
+        assert_eq!(
+            after,
+            baseline,
+            "the stage-rank scratch allocated {} times over 4 steps after the \
+             first ({} per step): the scratch must persist across steps and \
+             re-derive per step without allocating",
+            after - baseline,
+            (after - baseline) / 4,
+        );
+    }
+
+    /// The humidity alpha telemetry's per-step rebuild, the witness for
+    /// the census's second-heaviest site: the humidity update removed
+    /// the alpha telemetry map from `equipment_telemetry`, rebuilt every
+    /// zone's `humidity_semi_implicit_alpha_zone_N` key through
+    /// `format!`, and reinserted the map under a fresh `String` key,
+    /// every step. RED at the parent: one allocation per zone per step
+    /// plus the map key per step (six zones on the OCHRE sample home:
+    /// seven per step). GREEN when the map's entry updates in place and
+    /// the zone keys build in a reused scratch: zero on every step after
+    /// the first.
+    #[test]
+    fn humidity_alpha_telemetry_rebuild_is_allocation_free_after_first_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.run_timestep(false).expect("first step");
+        let baseline = dwelling.snapshot_allocation_totals().humidity_alpha_rebuild;
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("step");
+        }
+        let after = dwelling.snapshot_allocation_totals().humidity_alpha_rebuild;
+        assert_eq!(
+            after,
+            baseline,
+            "the humidity alpha telemetry rebuild allocated {} times over 4 \
+             steps after the first: the alpha map must update in place",
+            after - baseline,
+        );
+    }
+
     /// A custom solver's slot is resolved once at installation: the
     /// returned handle reads the solver's update after a step, and every
     /// installation that would drift the step path's fixed slot set is
@@ -10490,6 +10760,11 @@ fn cfg_gated_helper() {
         dwelling.ports = PortSlots::from_declarations(&declarations);
         dwelling.rollback_ports = PortSlots::from_declarations(&declarations);
         let equipment = equipment_refs(&dwelling.equipment);
+        // Direct roster mutation, outside the install_roster_caches
+        // funnel: like every equipment-set change it needs no explicit
+        // invalidation of the persistent stage-rank scratch, which the
+        // next step's equipment phase clears before its first push (the
+        // field's doc carries the proof).
         dwelling.roster.equipment_execution_order = compute_equipment_execution_order(&equipment);
         dwelling.roster.equipment_ids = equipment.iter().map(|eq| eq.descriptor().id).collect();
         dwelling.active_equipment_ids = equipment.iter().map(|eq| eq.descriptor().id).collect();
@@ -25043,5 +25318,140 @@ occupancy = 1.0"#,
                 .iter()
                 .any(|f| f.name() == "Total Electric Power (kW)")
         );
+    }
+
+    /// A shared step result written by `run_timestep_into` must hold
+    /// EXACTLY the values the by-value `run_timestep` returns at every
+    /// step: no staleness from the previous step, no partial writes. Two
+    /// identically built dwellings step in lockstep; one reuses one
+    /// buffer, one takes a fresh result per step.
+    #[test]
+    fn rev_p1_into_matches_byvalue_every_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+        let build = || {
+            Dwelling::from_hpxml_with_reports(
+                HpxmlInputs {
+                    hpxml_path: &hpxml,
+                    schedule_path: &schedule,
+                    weather_path: &weather,
+                },
+                start_time,
+                chrono::Duration::minutes(15),
+                chrono::Duration::hours(2),
+                None,
+                Vec::new(),
+                root.join("python/hares/defaults"),
+            )
+            .expect("build the fixture dwelling")
+        };
+        let mut shared_dwelling = build();
+        let mut fresh_dwelling = build();
+
+        let mut shared = StepResult::default();
+        let mut last_fresh_len = 0usize;
+        for step in 0..6 {
+            shared_dwelling
+                .run_timestep_into(false, &mut shared)
+                .expect("shared-buffer step");
+            let fresh = fresh_dwelling.run_timestep(false).expect("fresh step");
+            assert_eq!(
+                shared, fresh,
+                "step {step}: the reused buffer disagrees with the by-value result"
+            );
+            last_fresh_len = fresh.zone_temperatures_c.len();
+        }
+        // The shared buffer's zone-temperature vector holds the LAST
+        // step's values only (no history accumulates inside it).
+        assert_eq!(shared.zone_temperatures_c.len(), last_fresh_len);
+    }
+
+    /// The step path's in-place telemetry snapshot must leave the map
+    /// content-identical to a fresh insert per step, including when a
+    /// foreign stale key and a wrong-shaped, value-corrupted entry are
+    /// injected between steps.
+    #[test]
+    fn rev_p1_telemetry_snapshot_rebuilds_content() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            chrono::Duration::hours(2),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.run_timestep(false).expect("first step");
+        let names: Vec<String> = dwelling.equipment_id_by_name.keys().cloned().collect();
+        assert!(!names.is_empty(), "fixture has equipment");
+
+        // Inject: (a) a foreign stale name; (b) under a live name, a
+        // wrong-shaped telemetry (stale key + corrupted live value).
+        dwelling
+            .latest_env
+            .equipment_telemetry
+            .insert("rev_p1_stale_equipment".to_string(), Telemetry::new());
+        let victim = names[0].clone();
+        {
+            let entry = dwelling
+                .latest_env
+                .equipment_telemetry
+                .get_mut(&victim)
+                .expect("the first step inserted the live equipment's entry");
+            entry.0.insert("rev_p1_stale_key".to_string(), 42.0);
+            entry.0.insert("defrost_cycle_state".to_string(), 999.0);
+        }
+
+        dwelling.run_timestep(false).expect("step after injection");
+
+        // The snapshot must equal a fresh per-equipment snapshot: the
+        // foreign name is gone, every live equipment's map content is
+        // exactly its equipment's live telemetry (keys AND values AND
+        // latches, via the derived Debug).
+        assert!(
+            !dwelling
+                .latest_env
+                .equipment_telemetry
+                .contains_key("rev_p1_stale_equipment"),
+            "a stale foreign entry survived the step"
+        );
+        for name in &names {
+            let entry = dwelling
+                .latest_env
+                .equipment_telemetry
+                .get(name)
+                .unwrap_or_else(|| panic!("entry for {name} missing after the step"));
+            let idx = dwelling
+                .equipment
+                .iter()
+                .position(|eq| eq.as_ref().descriptor().name == *name)
+                .expect("name resolves to equipment");
+            let fresh = dwelling.equipment[idx].as_ref().telemetry();
+            assert_eq!(
+                format!("{entry:?}"),
+                format!("{fresh:?}"),
+                "the snapshot entry for {name} is not content-identical to a fresh snapshot"
+            );
+            assert!(
+                !entry.0.contains_key("rev_p1_stale_key"),
+                "a stale key survived the step in {name}'s entry"
+            );
+        }
     }
 }

@@ -11,6 +11,25 @@ use hares_types::{
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
 
+// The fluid solver's per-step scratch-site allocation accumulator, read
+// by the site's witness test only: `resolve` brackets its whole body
+// (the per-loop maps, the effective-flow clone, the state collect and
+// the payload encode) and adds the delta here. The counting allocator
+// is installed by this crate's test build alone.
+#[cfg(test)]
+thread_local! {
+    static FLUID_RESOLVE_SCRATCH_SITE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The accumulator's read-and-reset, for the witness test. Thread-local:
+/// the coverage build runs the suite in one process on many threads, so a
+/// process-global accumulator would count other threads' resolves inside
+/// this thread's witness window.
+#[cfg(test)]
+pub(crate) fn fluid_resolve_scratch_site() -> u64 {
+    FLUID_RESOLVE_SCRATCH_SITE.take()
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FluidSolverConfig {
     /// Optional per-loop hydraulic topology for mass-conservation verification.
@@ -86,6 +105,25 @@ pub struct FluidSolver {
     /// Present only for loops with a splitter topology; the per-step check
     /// is a lookup plus a sum.
     pump_flow_checks: HashMap<LoopId, PumpFlowCheck>,
+    /// The per-step scratch maps, persistent so the step's steady state
+    /// allocates nothing: `grouped` holds this step's accumulator indices
+    /// per loop (the loop's `Vec` is emptied, never dropped, so its
+    /// capacity survives), `seen_loops` is this step's loop list in
+    /// first-appearance order, and the node-flow, resolved-flow,
+    /// effective-flow, parent/child-count and plumbing-node maps are
+    /// `clear`ed per loop (their values are all `Copy`, so a clear
+    /// reallocates nothing) and refilled from the same inputs the fresh
+    /// maps read. The states scratch holds the sorted loop states the
+    /// payload encodes.
+    grouped: HashMap<LoopId, Vec<usize>>,
+    seen_loops: Vec<LoopId>,
+    node_flows: HashMap<FluidNodeId, f64>,
+    resolved_node_flows: HashMap<FluidNodeId, f64>,
+    effective_flows: HashMap<FluidNodeId, f64>,
+    parent_count: HashMap<FluidNodeId, usize>,
+    child_count: HashMap<FluidNodeId, usize>,
+    plumbing_nodes: std::collections::HashSet<FluidNodeId>,
+    states_scratch: Vec<FluidLoopState>,
 }
 
 /// Precomputed pump-flow wiring for one loop topology.
@@ -167,11 +205,27 @@ impl FluidSolver {
         // Precompute the pump flow check wiring per loop: the pump node
         // (Source role, zero parents) and the splitter branch node ids.
         let pump_flow_checks = pump_flow_checks(&config, &loop_types);
+        let declared_loop_count = loop_types.len();
         Ok(Self {
             config,
             loop_types,
             loop_states: HashMap::new(),
-            last_known_temps: HashMap::new(),
+            // Reserved at construction for the declared loops: each loop's
+            // entry (its last known supply/return pair, recalled on a
+            // zero-flow step) inserts the first time the loop carries
+            // flow (the first morning's draw, not a construction site)
+            // and the map's table is already sized for them, so the
+            // steady state allocates nothing.
+            last_known_temps: HashMap::with_capacity(declared_loop_count),
+            grouped: HashMap::new(),
+            seen_loops: Vec::new(),
+            node_flows: HashMap::new(),
+            resolved_node_flows: HashMap::new(),
+            effective_flows: HashMap::new(),
+            parent_count: HashMap::new(),
+            child_count: HashMap::new(),
+            plumbing_nodes: std::collections::HashSet::new(),
+            states_scratch: Vec::new(),
             #[cfg(feature = "observe")]
             loop_fluid_type_mismatch_count: 0,
             #[cfg(feature = "observe")]
@@ -205,6 +259,12 @@ impl FluidSolver {
     /// fail.
     pub fn install_loop_types(&mut self, loop_types: HashMap<LoopId, FluidType>) {
         self.pump_flow_checks = pump_flow_checks(&self.config, &loop_types);
+        // The last-known map's table is sized for the declared loops at
+        // install: the loop types install after construction (the roster
+        // plan), and each loop's entry inserts the first time the loop
+        // carries flow, so the table must be sized here or the first
+        // flowing step pays the allocation.
+        self.last_known_temps.reserve(loop_types.len());
         self.loop_types = loop_types;
     }
 
@@ -284,6 +344,8 @@ impl DomainSolver for FluidSolver {
         _dt: Duration,
         out: &mut DomainUpdate,
     ) -> Result<(), HaresError> {
+        #[cfg(test)]
+        let site_before = hares_types::alloc_count::thread_allocations();
         self.loop_states.clear();
 
         #[cfg(feature = "observe")]
@@ -307,12 +369,19 @@ impl DomainSolver for FluidSolver {
             self.raw_return_temp_c.clear();
         }
 
-        let mut grouped: HashMap<LoopId, Vec<&hares_types::FluidAccumulator>> = HashMap::new();
-        for acc in &ports.fluid {
-            grouped.entry(acc.loop_id).or_default().push(acc);
+        self.seen_loops.clear();
+        for entries in self.grouped.values_mut() {
+            entries.clear();
+        }
+        for (slot, acc) in ports.fluid.iter().enumerate() {
+            let entries = self.grouped.entry(acc.loop_id).or_default();
+            if entries.is_empty() {
+                self.seen_loops.push(acc.loop_id);
+            }
+            entries.push(slot);
         }
 
-        for (loop_id, entries) in grouped {
+        for &loop_id in &self.seen_loops {
             // The loop-type map is rebuilt from the live equipment's fluid
             // port declarations at assembly and on every equipment-list
             // refresh, so every loop carrying an accumulator is declared.
@@ -331,11 +400,14 @@ impl DomainSolver for FluidSolver {
             // entries on a loop agree on fluid_type; the observe gate counts
             // mismatches per step for diagnostics.
             #[cfg(feature = "observe")]
-            if !entries
-                .windows(2)
-                .all(|w| w[0].fluid_type == w[1].fluid_type)
             {
-                self.loop_fluid_type_mismatch_count += 1;
+                let slots = &self.grouped[&loop_id];
+                let agrees = slots
+                    .windows(2)
+                    .all(|w| ports.fluid[w[0]].fluid_type == ports.fluid[w[1]].fluid_type);
+                if !agrees {
+                    self.loop_fluid_type_mismatch_count += 1;
+                }
             }
 
             let cp = hares_physics::constants::cp_j_kg_k(fluid_type);
@@ -349,9 +421,15 @@ impl DomainSolver for FluidSolver {
             );
 
             // ── Build per-node flow totals from accumulators ─────────────
-            let mut node_flows: HashMap<FluidNodeId, f64> = HashMap::new();
-            for acc in &entries {
-                *node_flows.entry(acc.node_id).or_default() += acc.total_flow_kg_s;
+            // The map is the solver's persistent scratch: cleared (its
+            // values are `Copy`, so a clear reallocates nothing) and
+            // refilled from the same accumulators in the same order, the
+            // same sums in the same addition order.
+            let node_flows = &mut self.node_flows;
+            node_flows.clear();
+            for &slot in &self.grouped[&loop_id] {
+                *node_flows.entry(ports.fluid[slot].node_id).or_default() +=
+                    ports.fluid[slot].total_flow_kg_s;
             }
 
             // ── Flow-splitting resolution (T-0255) ──────────────────────
@@ -375,17 +453,20 @@ impl DomainSolver for FluidSolver {
             // the map when a lookup missed. A sum over a HashMap's values
             // iterates in hash order, and floating-point addition is not
             // associative, so such a fallback is a determinism hazard.
-            let resolved_node_flows: Option<(FluidNodeId, f64, HashMap<FluidNodeId, f64>)> = {
+            // The splitter resolution's carried values (the pump node and
+            // its resolved flow) beside the persistent resolved map: the
+            // `resolved_active` flag stands in for the old Option's Some.
+            let mut pump_node_val = FluidNodeId(0);
+            let mut pump_resolved_val = 0.0_f64;
+            let resolved_active = {
                 let topology_opt = self.config.loop_topologies.get(&loop_id);
                 if let Some(topology) = topology_opt {
                     if !topology.splitters.is_empty() {
-                        let parent_count: HashMap<FluidNodeId, usize> = {
-                            let mut map = HashMap::new();
-                            for (_, to) in &topology.edges {
-                                *map.entry(*to).or_default() += 1;
-                            }
-                            map
-                        };
+                        let parent_count = &mut self.parent_count;
+                        parent_count.clear();
+                        for (_, to) in &topology.edges {
+                            *parent_count.entry(*to).or_default() += 1;
+                        }
 
                         // Identify pump node: Source role, zero parents.
                         let pump_node = topology.nodes.iter().find(|n| {
@@ -411,7 +492,8 @@ impl DomainSolver for FluidSolver {
                                     total_requested;
                             }
 
-                            let mut resolved = HashMap::new();
+                            let resolved = &mut self.resolved_node_flows;
+                            resolved.clear();
 
                             if total_available <= MIN_FLOW_KG_S || total_requested <= MIN_FLOW_KG_S
                             {
@@ -533,24 +615,25 @@ impl DomainSolver for FluidSolver {
                             // Also resolve non-splitter branch nodes:
                             // for mixer arms that are not splitter children,
                             // keep original accumulator flow.
-                            for (nid, flow) in &node_flows {
+                            for (nid, flow) in &*node_flows {
                                 if !resolved.contains_key(nid) && *nid != pump.node_id {
                                     resolved.insert(*nid, *flow);
                                 }
                             }
 
-                            // The pump node, its resolved flow and the
-                            // resolved node flows, carried out of the
-                            // resolution.
-                            Some((pump.node_id, pump_resolved, resolved))
+                            // The pump node and its resolved flow, carried
+                            // out of the resolution beside the map.
+                            pump_node_val = pump.node_id;
+                            pump_resolved_val = pump_resolved;
+                            true
                         } else {
-                            None
+                            false
                         }
                     } else {
-                        None
+                        false
                     }
                 } else {
-                    None
+                    false
                 }
             };
 
@@ -562,23 +645,28 @@ impl DomainSolver for FluidSolver {
                 for splitter in &mut topology.splitters {
                     for branch in &mut splitter.branches {
                         branch.requested_flow_kg_s =
-                            node_flows.get(&branch.node_id).copied().unwrap_or(0.0);
+                            self.node_flows.get(&branch.node_id).copied().unwrap_or(0.0);
                     }
                 }
             }
 
             // Build effective flows: resolved values override raw accumulator
             // flows. Used for both conservation checking and aggregation.
-            let effective_flows: HashMap<FluidNodeId, f64> =
-                if let Some((_, _, resolved)) = &resolved_node_flows {
-                    let mut eff = node_flows.clone();
-                    for (nid, flow) in resolved {
-                        eff.insert(*nid, *flow);
-                    }
-                    eff
-                } else {
-                    node_flows.clone()
-                };
+            // The map is the solver's persistent scratch: cleared and
+            // refilled from the node flows (the clone's same entries), then
+            // the resolved overrides inserted in the same map's iteration
+            // order. No arithmetic iterates either map, so the table's
+            // layout cannot reach a bit.
+            let effective_flows = &mut self.effective_flows;
+            effective_flows.clear();
+            for (nid, flow) in &self.node_flows {
+                effective_flows.insert(*nid, *flow);
+            }
+            if resolved_active {
+                for (nid, flow) in &self.resolved_node_flows {
+                    effective_flows.insert(*nid, *flow);
+                }
+            }
 
             // ── Mass-conservation check (T-0254) ──────────────────────────
             //
@@ -602,23 +690,22 @@ impl DomainSolver for FluidSolver {
                     #[cfg(feature = "observe")]
                     let mut max_imbalance = 0.0_f64;
 
-                    // Precompute child count per node.
-                    let child_count: HashMap<FluidNodeId, usize> = {
-                        let mut map = HashMap::new();
-                        for (from, _) in &topology.edges {
-                            *map.entry(*from).or_default() += 1;
-                        }
-                        map
-                    };
+                    // Precompute child count per node. Both maps are the
+                    // solver's persistent scratch (cleared and refilled;
+                    // their values are `Copy`, so a clear reallocates
+                    // nothing).
+                    let child_count = &mut self.child_count;
+                    child_count.clear();
+                    for (from, _) in &topology.edges {
+                        *child_count.entry(*from).or_default() += 1;
+                    }
 
                     // Precompute parent count per node.
-                    let parent_count: HashMap<FluidNodeId, usize> = {
-                        let mut map = HashMap::new();
-                        for (_, to) in &topology.edges {
-                            *map.entry(*to).or_default() += 1;
-                        }
-                        map
-                    };
+                    let parent_count = &mut self.parent_count;
+                    parent_count.clear();
+                    for (_, to) in &topology.edges {
+                        *parent_count.entry(*to).or_default() += 1;
+                    }
 
                     for i in 0..topology.nodes.len() {
                         let node_id = topology.nodes[i].node_id;
@@ -706,9 +793,11 @@ impl DomainSolver for FluidSolver {
                     }
                 } else {
                     // ── Serial-flow consistency check (no topology) ──
-                    if entries.len() > 1 {
-                        let first_flow = entries[0].total_flow_kg_s;
-                        for acc in &entries[1..] {
+                    let slots = &self.grouped[&loop_id];
+                    if slots.len() > 1 {
+                        let first_flow = ports.fluid[slots[0]].total_flow_kg_s;
+                        for &slot in &slots[1..] {
+                            let acc = &ports.fluid[slot];
                             let diff = (acc.total_flow_kg_s - first_flow).abs();
                             if diff > MASS_FLOW_TOLERANCE {
                                 #[cfg(feature = "observe")]
@@ -722,7 +811,7 @@ impl DomainSolver for FluidSolver {
                                      accumulators report inconsistent flow rates: \
                                      node {:?} flow = {} kg/s, node {:?} flow = {} kg/s, \
                                      diff = {:.6e} kg/s, tolerance = {:.6e} kg/s",
-                                    entries[0].node_id,
+                                    ports.fluid[slots[0]].node_id,
                                     first_flow,
                                     acc.node_id,
                                     acc.total_flow_kg_s,
@@ -747,7 +836,7 @@ impl DomainSolver for FluidSolver {
                 cooling_power_w,
                 mut mean_supply_temp_c,
                 mut mean_return_temp_c,
-            ) = if let Some((pump_node, pump_total, resolved)) = &resolved_node_flows {
+            ) = if resolved_active {
                 // The pump node and the total loop flow come from the
                 // resolution: the pump's resolved flow is carried out of
                 // it as the loop's total, with no second search for the
@@ -761,22 +850,23 @@ impl DomainSolver for FluidSolver {
 
                 // Collect the pump, splitter and mixer node_ids for
                 // exclusion from temperature averaging: these nodes are
-                // plumbing, not thermal components.
-                let plumbing_nodes: std::collections::HashSet<FluidNodeId> = {
-                    let mut set = std::collections::HashSet::new();
-                    set.insert(*pump_node);
-                    if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
-                        for s in &topo.splitters {
-                            set.insert(s.node_id);
-                        }
-                        for m in &topo.mixers {
-                            set.insert(m.node_id);
-                        }
+                // plumbing, not thermal components. The set is the
+                // solver's persistent scratch (its values are `Copy`, so
+                // a clear reallocates nothing).
+                let plumbing_nodes = &mut self.plumbing_nodes;
+                plumbing_nodes.clear();
+                plumbing_nodes.insert(pump_node_val);
+                if let Some(topo) = self.config.loop_topologies.get(&loop_id) {
+                    for s in &topo.splitters {
+                        plumbing_nodes.insert(s.node_id);
                     }
-                    set
-                };
+                    for m in &topo.mixers {
+                        plumbing_nodes.insert(m.node_id);
+                    }
+                }
 
-                for acc in &entries {
+                for &slot in &self.grouped[&loop_id] {
+                    let acc = &ports.fluid[slot];
                     // Skip plumbing nodes (pump, splitter, mixer) in
                     // temperature / power aggregation. These nodes carry
                     // flow but do not represent thermal components —
@@ -785,7 +875,8 @@ impl DomainSolver for FluidSolver {
                     if plumbing_nodes.contains(&acc.node_id) {
                         continue;
                     }
-                    let allocated_flow = resolved
+                    let allocated_flow = self
+                        .resolved_node_flows
                         .get(&acc.node_id)
                         .copied()
                         .unwrap_or(acc.total_flow_kg_s);
@@ -824,13 +915,21 @@ impl DomainSolver for FluidSolver {
                         .unwrap_or((0.0, 0.0))
                 };
 
-                (*pump_total, net_heating, net_cooling, supply_c, return_c)
+                (
+                    pump_resolved_val,
+                    net_heating,
+                    net_cooling,
+                    supply_c,
+                    return_c,
+                )
             } else {
                 // No flow-splitting: use accumulator flows directly.
-                let tf: f64 = entries.iter().map(|e| e.total_flow_kg_s).sum();
-                let (nh, nc): (f64, f64) = entries
+                let slots = &self.grouped[&loop_id];
+                let tf: f64 = slots.iter().map(|&s| ports.fluid[s].total_flow_kg_s).sum();
+                let (nh, nc): (f64, f64) = slots
                     .iter()
-                    .map(|e| {
+                    .map(|&s| {
+                        let e = &ports.fluid[s];
                         let delta_t = e.mean_supply_temp_c - e.mean_return_temp_c;
                         let power = cp * e.total_flow_kg_s * delta_t;
                         match e.direction.unwrap_or(HeatTransferDirection::Source) {
@@ -848,13 +947,17 @@ impl DomainSolver for FluidSolver {
                         .copied()
                         .unwrap_or((0.0, 0.0))
                 } else {
-                    let ss = entries
+                    let ss = slots
                         .iter()
-                        .map(|e| e.total_flow_kg_s * e.mean_supply_temp_c)
+                        .map(|&s| {
+                            ports.fluid[s].total_flow_kg_s * ports.fluid[s].mean_supply_temp_c
+                        })
                         .sum::<f64>();
-                    let sr = entries
+                    let sr = slots
                         .iter()
-                        .map(|e| e.total_flow_kg_s * e.mean_return_temp_c)
+                        .map(|&s| {
+                            ports.fluid[s].total_flow_kg_s * ports.fluid[s].mean_return_temp_c
+                        })
                         .sum::<f64>();
                     let temps = (ss / tf, sr / tf);
                     self.last_known_temps.insert(loop_id, temps);
@@ -934,14 +1037,16 @@ impl DomainSolver for FluidSolver {
             // allocations. The pump node and the splitter branch nodes are
             // precomputed at construction, so the per-step cost is a lookup
             // and a sum, never a topology rescan.
-            if let Some((_, _, resolved)) = &resolved_node_flows
-                && let Some(check) = self.pump_flow_checks.get(&loop_id)
-            {
-                let pump_flow = resolved.get(&check.pump_node).copied().unwrap_or(0.0);
+            if resolved_active && let Some(check) = self.pump_flow_checks.get(&loop_id) {
+                let pump_flow = self
+                    .resolved_node_flows
+                    .get(&check.pump_node)
+                    .copied()
+                    .unwrap_or(0.0);
                 let branch_sum: f64 = check
                     .branch_nodes
                     .iter()
-                    .map(|n| resolved.get(n).copied().unwrap_or(0.0))
+                    .map(|n| self.resolved_node_flows.get(n).copied().unwrap_or(0.0))
                     .sum();
                 let diff = (pump_flow - branch_sum).abs();
                 if diff >= MASS_FLOW_TOLERANCE {
@@ -954,8 +1059,10 @@ impl DomainSolver for FluidSolver {
             }
 
             // ── System-level invariant (T-0084) ──────────────────────────
-            let total_declared_thermal_w: f64 =
-                entries.iter().map(|e| e.total_thermal_power_w).sum();
+            let total_declared_thermal_w: f64 = self.grouped[&loop_id]
+                .iter()
+                .map(|&s| ports.fluid[s].total_thermal_power_w)
+                .sum();
 
             let net_power_w = heating_power_w - cooling_power_w;
 
@@ -1012,11 +1119,32 @@ impl DomainSolver for FluidSolver {
             );
         }
 
-        let mut states: Vec<FluidLoopState> = self.loop_states.values().cloned().collect();
+        // The sorted loop states built in the solver's persistent scratch
+        // (cleared, refilled by clone in the map's iteration order, then
+        // sorted by loop id, the same values the fresh collect held),
+        // and the payload encoded into the update buffer's own vector
+        // (taken out, cleared, refilled, restored), so the steady state
+        // allocates nothing.
+        let states = &mut self.states_scratch;
+        states.clear();
+        states.extend(self.loop_states.values().cloned());
         states.sort_by_key(|s| s.loop_id.0);
         out.domain_id = FLUID;
         out.zone_temperatures_c.clear();
-        out.custom_payload = FluidDomainPayload::encode(&states);
+        if states.is_empty() {
+            out.custom_payload = None;
+        } else {
+            let mut payload = out.custom_payload.take().unwrap_or_default();
+            FluidDomainPayload::encode_into(states, &mut payload);
+            out.custom_payload = Some(payload);
+        }
+        #[cfg(test)]
+        if let (Some(before), Some(after)) =
+            (site_before, hares_types::alloc_count::thread_allocations())
+        {
+            FLUID_RESOLVE_SCRATCH_SITE
+                .with(|site| site.set(site.get().saturating_add(after.saturating_sub(before))));
+        }
         Ok(())
     }
 }
@@ -1036,7 +1164,9 @@ mod tests {
         ZoneState,
     };
 
-    use crate::fluid_solver::{FluidSolver, FluidSolverConfig, plan_loop_types};
+    use crate::fluid_solver::{
+        FluidSolver, FluidSolverConfig, fluid_resolve_scratch_site, plan_loop_types,
+    };
 
     fn env() -> EnvironmentState {
         EnvironmentState {
@@ -1100,6 +1230,63 @@ mod tests {
 
     fn approx_eq(a: f64, b: f64) {
         assert!((a - b).abs() <= 1e-6, "a={a} b={b}");
+    }
+
+    /// The fluid solver's per-step scratch allocation, the witness for the
+    /// census's heaviest site (about 9 allocations per step on the
+    /// consumer-shape fixture): the per-loop grouping map, the per-node
+    /// flow maps, the effective-flow clone, the loop-state collect and
+    /// the payload encode were all built fresh per step. The step loop
+    /// reuses the solver, so the steady state must allocate nothing: the
+    /// same loops, the same accumulators, resolved into the same payload
+    /// with the same bits. The whole `resolve` body is bracketed, so the
+    /// assertion covers every allocation the step path's fluid phase
+    /// makes, first step excluded.
+    #[test]
+    fn fluid_resolve_scratch_is_allocation_free_after_the_first_step() {
+        let mut solver = FluidSolver::new(
+            FluidSolverConfig::default(),
+            &[(LoopId(1), FluidType::Water)],
+        )
+        .unwrap();
+        let mut ports = PortSlots {
+            fluid: vec![hares_types::FluidAccumulator::new(
+                LoopId(1),
+                FluidType::Water,
+            )],
+            ..Default::default()
+        };
+        ports
+            .accumulate(&PortContribution::Fluid {
+                loop_id: LoopId(1),
+                flow_rate_kg_s: 0.5,
+                supply_temp_c: 60.0,
+                return_temp_c: 40.0,
+                fluid_type: FluidType::Water,
+                thermal_power_w: None,
+                node_id: FluidNodeId(0),
+                direction: HeatTransferDirection::Source,
+            })
+            .unwrap();
+        let e = env();
+        let mut out = hares_types::DomainUpdate::empty(hares_types::FLUID);
+
+        // The first step pays the scratch's first fills.
+        solver
+            .resolve(&ports, &e, Duration::from_secs(60), &mut out)
+            .unwrap();
+        let _ = fluid_resolve_scratch_site();
+
+        for _ in 0..4 {
+            solver
+                .resolve(&ports, &e, Duration::from_secs(60), &mut out)
+                .unwrap();
+        }
+        let total = fluid_resolve_scratch_site();
+        assert_eq!(
+            total, 0,
+            "the fluid resolve allocated {total} times over the 4 steps after the first"
+        );
     }
 
     #[test]
