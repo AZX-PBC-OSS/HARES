@@ -11,19 +11,23 @@ use hares_types::{
 
 const MIN_FLOW_KG_S: f64 = 1e-12;
 
-/// The fluid solver's per-step scratch-site allocation accumulator, read
-/// by the site's witness test only: `resolve` brackets its whole body
-/// (the per-loop maps, the effective-flow clone, the state collect and
-/// the payload encode) and adds the delta here. The counting allocator
-/// is installed by this crate's test build alone.
+// The fluid solver's per-step scratch-site allocation accumulator, read
+// by the site's witness test only: `resolve` brackets its whole body
+// (the per-loop maps, the effective-flow clone, the state collect and
+// the payload encode) and adds the delta here. The counting allocator
+// is installed by this crate's test build alone.
 #[cfg(test)]
-static FLUID_RESOLVE_SCRATCH_SITE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static FLUID_RESOLVE_SCRATCH_SITE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// The accumulator's read-and-reset, for the witness test.
+/// The accumulator's read-and-reset, for the witness test. Thread-local:
+/// the coverage build runs the suite in one process on many threads, so a
+/// process-global accumulator would count other threads' resolves inside
+/// this thread's witness window.
 #[cfg(test)]
 pub(crate) fn fluid_resolve_scratch_site() -> u64 {
-    FLUID_RESOLVE_SCRATCH_SITE.swap(0, std::sync::atomic::Ordering::Relaxed)
+    FLUID_RESOLVE_SCRATCH_SITE.take()
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -1138,10 +1142,8 @@ impl DomainSolver for FluidSolver {
         if let (Some(before), Some(after)) =
             (site_before, hares_types::alloc_count::thread_allocations())
         {
-            FLUID_RESOLVE_SCRATCH_SITE.fetch_add(
-                after.saturating_sub(before),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            FLUID_RESOLVE_SCRATCH_SITE
+                .with(|site| site.set(site.get().saturating_add(after.saturating_sub(before))));
         }
         Ok(())
     }

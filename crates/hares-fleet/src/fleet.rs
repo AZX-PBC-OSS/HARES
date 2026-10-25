@@ -2057,6 +2057,15 @@ impl SteppableFleet {
 #[cfg(test)]
 static FLEET_STEP_HANDOFF_SITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The stepping tests' exclusivity lock: the coverage build runs the
+/// suite in one process on many threads, and the handoff site's
+/// accumulator is process-global (the loop's closures run on any rayon
+/// worker, so it cannot be thread-local). Every test that steps a fleet
+/// holds this guard across its body, so the differential witness's
+/// windows count only their own fleet's steps.
+#[cfg(test)]
+static FLEET_STEP_EXCLUSIVITY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Resets the handoff site's accumulator. Test-only.
 #[cfg(test)]
 fn reset_fleet_step_handoff_site() {
@@ -3147,6 +3156,9 @@ mod tests {
 
     #[test]
     fn steppable_fleet_steps_and_finishes() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -3186,6 +3198,9 @@ mod tests {
     /// fail, it finished.
     #[test]
     fn step_after_finish_is_already_finished_error() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -3237,6 +3252,9 @@ mod tests {
     /// the difference is exactly the dwelling-steps' vectors.
     #[test]
     fn fleet_step_handoff_zone_temperature_allocation_free_after_first_step() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -3326,6 +3344,9 @@ mod tests {
     /// content-identical every step.
     #[test]
     fn fleet_reused_results_match_the_by_value_form_step_for_step() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -3376,6 +3397,9 @@ mod tests {
     /// carrying the panic and then the skip instead of any old content.
     #[test]
     fn fleet_reused_results_carry_nothing_across_a_mid_episode_mutation() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(PoisonError::into_inner);

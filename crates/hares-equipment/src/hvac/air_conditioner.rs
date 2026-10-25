@@ -3,21 +3,24 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-/// The cooling core's SHR telemetry-key allocation accumulator, read by
-/// the site's witness test only: the step's SHR write used
-/// `Telemetry::insert` (whose `impl Into<String>` key builds a fresh
-/// `String` every call, even when the map already holds the key), one
-/// allocation per cooling step. The counting allocator is installed by
-/// this crate's test build alone.
+// The cooling core's SHR telemetry-key allocation accumulator, read by
+// the site's witness test only: the step's SHR write used
+// `Telemetry::insert` (whose `impl Into<String>` key builds a fresh
+// `String` every call, even when the map already holds the key), one
+// allocation per cooling step. The counting allocator is installed by
+// this crate's test build alone.
 #[cfg(test)]
-static COOLING_SHR_TELEMETRY_SITE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static COOLING_SHR_TELEMETRY_SITE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// The accumulator's read-and-reset, for the witness test.
+/// The accumulator's read-and-reset, for the witness test. Thread-local:
+/// the coverage build runs the suite in one process on many threads, so a
+/// process-global accumulator would count other threads' SHR writes inside
+/// this thread's witness window.
 #[cfg(test)]
 pub(crate) fn cooling_shr_telemetry_site() -> u64 {
-    use std::sync::atomic::Ordering;
-    COOLING_SHR_TELEMETRY_SITE.swap(0, Ordering::Relaxed)
+    COOLING_SHR_TELEMETRY_SITE.take()
 }
 
 use chrono::{DateTime, FixedOffset};
@@ -1405,10 +1408,8 @@ impl CoolingCore {
             if let (Some(before), Some(after)) =
                 (site_before, hares_types::alloc_count::thread_allocations())
             {
-                COOLING_SHR_TELEMETRY_SITE.fetch_add(
-                    after.saturating_sub(before),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                COOLING_SHR_TELEMETRY_SITE
+                    .with(|site| site.set(site.get().saturating_add(after.saturating_sub(before))));
             }
         }
         let original_mode = self.operating_mode;
@@ -7633,7 +7634,7 @@ mod speed_selection_parity_tests {
     #[test]
     fn init_accepts_full_per_stage_biquadratic_curves_ac() {
         // 4 speed stages, 4 capacity + 4 EIR → interleaved = 8 entries (4 pairs).
-        // n_coeffs=8 == n_speeds*2=8 → accepted.
+        // n_coe*2=8 → accepted.
         let cfg = multi_speed_ac_config(4, vec![3_000.0, 5_000.0, 7_000.0, 10_000.0], 4, 4);
         let mut core = CoolingCore::new(cfg.clone(), false);
         let env = minimal_env();

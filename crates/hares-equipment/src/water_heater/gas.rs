@@ -20,20 +20,23 @@ use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_s
 
 use super::siting::{self, Siting};
 
-/// The gas water heater's per-step heat-injection allocation accumulator,
-/// read by the site's witness test only: the step brackets the
-/// `heat_injections` buffer's construction (a fresh `vec![]` per step,
-/// the census's one-allocation-per-water-heater-step site). The counting
-/// allocator is installed by this crate's test build alone.
+// The gas water heater's per-step heat-injection allocation accumulator,
+// read by the site's witness test only: the step brackets the
+// `heat_injections` buffer's construction (a fresh `vec![]` per step,
+// the census's one-allocation-per-water-heater-step site). The counting
+// allocator is installed by this crate's test build alone.
 #[cfg(test)]
-static GAS_WH_HEAT_INJECTIONS_SITE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static GAS_WH_HEAT_INJECTIONS_SITE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// The accumulator's read-and-reset, for the witness test.
+/// The accumulator's read-and-reset, for the witness test. Thread-local:
+/// the coverage build runs the suite in one process on many threads, so a
+/// process-global accumulator would count other threads' gas water
+/// heaters' fills inside this thread's witness window.
 #[cfg(test)]
 pub(crate) fn gas_wh_heat_injections_site() -> u64 {
-    use std::sync::atomic::Ordering;
-    GAS_WH_HEAT_INJECTIONS_SITE.swap(0, Ordering::Relaxed)
+    GAS_WH_HEAT_INJECTIONS_SITE.take()
 }
 use super::tank::{StratifiedTank, StratifiedTankConfig, TemperedDrawConfig, TemperedDrawInputs};
 use super::{
@@ -676,10 +679,8 @@ impl Equipment for GasWH {
         if let (Some(before), Some(after)) =
             (site_before, hares_types::alloc_count::thread_allocations())
         {
-            GAS_WH_HEAT_INJECTIONS_SITE.fetch_add(
-                after.saturating_sub(before),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            GAS_WH_HEAT_INJECTIONS_SITE
+                .with(|site| site.set(site.get().saturating_add(after.saturating_sub(before))));
         }
         let heat_injections = &self.heat_injections_scratch;
 

@@ -5,18 +5,23 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// The BMS's last-action allocation accumulator, read by the site's
-/// witness test only: the self-consumption re-evaluation reassigned
-/// `last_action` (a fresh `String`) on every charging and every
-/// discharging step, not only at the action's transition. The counting
-/// allocator is installed by this crate's test build alone.
+// The BMS's last-action allocation accumulator, read by the site's
+// witness test only: the self-consumption re-evaluation reassigned
+// `last_action` (a fresh `String`) on every charging and every
+// discharging step, not only at the action's transition. The counting
+// allocator is installed by this crate's test build alone.
 #[cfg(test)]
-static BMS_LAST_ACTION_SITE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    static BMS_LAST_ACTION_SITE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// The accumulator's read-and-reset, for the witness test.
+/// The accumulator's read-and-reset, for the witness test. Thread-local:
+/// the coverage build runs the suite in one process on many threads, so a
+/// process-global accumulator would count other threads' BMS steps inside
+/// this thread's witness window.
 #[cfg(test)]
 pub(crate) fn bms_last_action_site() -> u64 {
-    BMS_LAST_ACTION_SITE.swap(0, std::sync::atomic::Ordering::Relaxed)
+    BMS_LAST_ACTION_SITE.take()
 }
 
 use serde::{Deserialize, Serialize};
@@ -254,7 +259,16 @@ impl BatteryManagementActor {
     /// content differs.
     fn assign_action(&mut self, action: &'static str) -> bool {
         if self.last_action != action {
+            #[cfg(test)]
+            let site_before = hares_types::alloc_count::thread_allocations();
             self.last_action = action.into();
+            #[cfg(test)]
+            if let (Some(before), Some(after)) =
+                (site_before, hares_types::alloc_count::thread_allocations())
+            {
+                BMS_LAST_ACTION_SITE
+                    .with(|site| site.set(site.get().saturating_add(after.saturating_sub(before))));
+            }
             true
         } else {
             false
