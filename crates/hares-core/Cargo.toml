@@ -100,6 +100,10 @@ path = "tests/wiring_properties.rs"
 name = "bench_construction"
 path = "../../tests/bench_construction.rs"
 
+[[test]]
+name = "scenario_streams"
+path = "../../tests/scenario_streams.rs"
+
 [[bench]]
 name = "single_building"
 path = "../../benches/single_building.rs"

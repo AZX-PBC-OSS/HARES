@@ -75,6 +75,47 @@ pub fn dwelling_seed(master_seed: u64, bldg_id: i64) -> [u8; 32] {
     seed
 }
 
+/// The scenario byte `dwelling_seed_scenario` writes into key byte 24
+/// when a scenario is declared, so a declared scenario 0 never derives
+/// the key the absent scenario does.
+pub const SCENARIO_PRESENCE_BYTE: u8 = 1;
+
+/// Generator key of the dwelling with `bldg_id` under `master_seed` with
+/// the scenario mixed in: the [`dwelling_seed`] layout, and, when a
+/// scenario is declared, the scenario id's little-endian bytes at 16..24
+/// and [`SCENARIO_PRESENCE_BYTE`] at byte 24. `None` (the absent
+/// scenario) keeps today's bytes exactly: bytes 16..32 stay zero, so
+/// every scenario-less key, checkpoint and fixture is unmoved.
+///
+/// The map is injective with no hash: two scenarios differ at bytes
+/// 16..24 whatever the master seed and building id are, and a declared
+/// scenario 0 differs from the absent scenario at byte 24 (the presence
+/// byte), so "scenario 0" and "no scenario" never share a stream. The
+/// mix lands where the master seed's reach ends, so every surface inside
+/// the dwelling key (the dwelling's own stream, the EV driver streams,
+/// every event-load interior) inherits scenario disjointness with no
+/// per-site change.
+///
+/// Named scope, not an oversight: the identity-keyed surfaces outside
+/// the derivation (`schedule_source_key`, the EV driver's key material)
+/// do not receive the scenario. Two scenarios whose dwellings carry
+/// identically configured unspecified-seed noisy sources share those
+/// sources' keystreams; the contract docs name the scope and the escape
+/// (an explicit per-source seed).
+#[must_use]
+pub fn dwelling_seed_scenario(
+    master_seed: u64,
+    scenario_seed: Option<u64>,
+    bldg_id: i64,
+) -> [u8; 32] {
+    let mut seed = dwelling_seed(master_seed, bldg_id);
+    if let Some(scenario) = scenario_seed {
+        seed[16..24].copy_from_slice(&scenario.to_le_bytes());
+        seed[24] = SCENARIO_PRESENCE_BYTE;
+    }
+    seed
+}
+
 /// A schedule source's stochastic keystream key: the configured key when
 /// the source carries an explicit seed, otherwise derived from the
 /// source's identity (`<dwelling identity>:<owner name>:<source role>`).
@@ -88,6 +129,14 @@ pub fn dwelling_seed(master_seed: u64, bldg_id: i64) -> [u8; 32] {
 /// share a keystream, the same identity is reproducible run to run, and
 /// the default is never the all-zero key every unspecified-seed source
 /// would otherwise share.
+///
+/// Named scope: the scenario seed does not enter this derivation. The
+/// key depends on the identity alone, so two scenarios' dwellings whose
+/// sources are identically configured and unspecified-seed derive the
+/// same keys and share those keystreams; that share is deliberate (an
+/// identity-keyed key stays stable across scenario relabeling), and a
+/// scenario that needs its own series for a source sets the source's
+/// explicit seed. The scope is stated in the RNG contract docs.
 #[must_use]
 pub fn schedule_source_key(explicit: Option<[u8; 32]>, identity: &str) -> [u8; 32] {
     if let Some(key) = explicit {
@@ -205,6 +254,114 @@ mod tests {
             RngStream::event_load([4_u8; 32], identity).stream,
             super::EVENT_LOAD_STREAM_TAG | (nonce_word >> 1),
             "the event-load nonce stays the plain identity hash"
+        );
+    }
+
+    /// The scenario mix leaves the bytes 0..16 (the master seed and the
+    /// building id) and the absent scenario's bytes exactly as they are,
+    /// and puts distinct scenarios at distinct keys: the layout map is
+    /// injective with no hash involved.
+    #[test]
+    fn scenario_mixes_are_injective_over_the_spare_bytes() {
+        let scenario_less = dwelling_seed(42, 1);
+        let absent = dwelling_seed_scenario(42, None, 1);
+        assert_eq!(absent, scenario_less, "None keeps today's bytes exactly");
+
+        let a = dwelling_seed_scenario(42, Some(1), 1);
+        let b = dwelling_seed_scenario(42, Some(2), 1);
+        assert_ne!(a, b, "two scenarios must not share a dwelling key");
+        assert_eq!(&a[..16], &scenario_less[..16], "bytes 0..16 unmoved");
+        assert_eq!(
+            &a[16..24],
+            &1_u64.to_le_bytes(),
+            "the scenario id rides bytes 16..24, little-endian"
+        );
+        assert_eq!(a[24], super::SCENARIO_PRESENCE_BYTE, "the presence byte");
+        assert_eq!(&a[25..], &[0_u8; 7], "bytes 25..32 stay zero");
+
+        // The master seed and the building id stay in their own bytes
+        // under a declared scenario.
+        assert_eq!(&a[..8], &42_u64.to_le_bytes(), "the master seed unmoved");
+        assert_eq!(&a[8..16], &1_i64.to_le_bytes(), "the building id unmoved");
+    }
+
+    /// A declared scenario 0 must not equal the absent scenario, or
+    /// "scenario 0" and "no scenario" would share every stream; and no
+    /// (master, scenario, building) triple with a declared scenario,
+    /// all zeros included, derives the all-zero key.
+    #[test]
+    fn scenario_zero_is_not_the_absent_scenario_and_never_all_zero() {
+        let declared = dwelling_seed_scenario(42, Some(0), 1);
+        let absent = dwelling_seed_scenario(42, None, 1);
+        assert_ne!(
+            declared, absent,
+            "Some(0) and None must not derive the same key"
+        );
+
+        for (master, scenario, bldg) in [
+            (0, Some(0), 0),
+            (0, Some(0), 1),
+            (0, Some(1), 0),
+            (u64::MAX, Some(0), i64::MIN),
+            (0, Some(u64::MAX), 0),
+        ] {
+            assert_ne!(
+                dwelling_seed_scenario(master, scenario, bldg),
+                [0_u8; 32],
+                "the declared scenario ({master}, {scenario:?}, {bldg}) must \
+                 never derive the all-zero key"
+            );
+        }
+        // The scenario-less corner (master 0, building 0) is today's
+        // all-zero key and stays exactly there: moving it would move
+        // every scenario-less key, checkpoint and fixture. The declared
+        // scenario's presence byte is what keeps the declared case off
+        // it.
+        assert_eq!(dwelling_seed(0, 0), [0_u8; 32]);
+    }
+
+    /// One identity under two scenario ids derives distinct dwelling keys
+    /// and so distinct event-load streams for the same building; the
+    /// same (master, scenario, building, identity) reproduces the same
+    /// key and stream run to run and interleaved with other scenarios'
+    /// derivations; and the scenario mix changes no nonce value: the
+    /// event-load nonce stays the plain identity hash under every
+    /// scenario.
+    #[test]
+    fn scenario_streams_are_disjoint_reproducible_and_nonce_stable() {
+        let identity = "Clothes Washer";
+        let key_a = dwelling_seed_scenario(42, Some(1), 1);
+        let key_b = dwelling_seed_scenario(42, Some(2), 1);
+
+        let stream_a = RngStream::event_load(key_a, identity);
+        let stream_b = RngStream::event_load(key_b, identity);
+        assert_ne!(
+            stream_a.seed, stream_b.seed,
+            "one identity under two scenarios: distinct keys"
+        );
+        assert_ne!(stream_a, stream_b, "distinct keys: distinct streams");
+        assert_eq!(
+            stream_a.stream, stream_b.stream,
+            "the stream nonce itself is unchanged by the scenario mix: the \
+             disjointness rides the key alone"
+        );
+        // The nonce stays the plain identity hash over the identity: the
+        // top-bit tag and the shift are unchanged; the scenario enters
+        // through the key alone.
+        assert_eq!(
+            stream_a.stream,
+            super::EVENT_LOAD_STREAM_TAG | (fnv1a_64(identity.as_bytes()) >> 1),
+            "the event-load nonce is the identity hash under every scenario"
+        );
+
+        // Reproducible run to run and interleaved with other scenarios'
+        // derivations.
+        let again = RngStream::event_load(dwelling_seed_scenario(42, Some(1), 1), identity);
+        let _interleaved = dwelling_seed_scenario(42, Some(2), 1);
+        let _other_building = dwelling_seed_scenario(42, Some(1), 2);
+        assert_eq!(
+            stream_a, again,
+            "the same (master, scenario, bldg, identity) reproduces"
         );
     }
 }

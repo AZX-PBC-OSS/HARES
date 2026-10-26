@@ -57,6 +57,24 @@ pub fn derive_dwelling_rng(master_seed: u64, bldg_id: i64) -> ChaCha8Rng {
     ChaCha8Rng::from_seed(hares_types::rng::dwelling_seed(master_seed, bldg_id))
 }
 
+/// The scenario-aware derivation: the same per-dwelling key with the
+/// declared scenario mixed into the spare bytes (the scenario-mixed
+/// master key). `None` (the absent scenario) derives exactly
+/// [`derive_dwelling_rng`]'s key, so the scenario-less paths are unmoved;
+/// two scenarios under one master seed derive distinct keys at the
+/// scenario bytes, with the stream nonces untouched.
+pub fn derive_dwelling_rng_scenario(
+    master_seed: u64,
+    scenario_seed: Option<u64>,
+    bldg_id: i64,
+) -> ChaCha8Rng {
+    ChaCha8Rng::from_seed(hares_types::rng::dwelling_seed_scenario(
+        master_seed,
+        scenario_seed,
+        bldg_id,
+    ))
+}
+
 /// Derives an independent sub-RNG from a parent RNG by partitioning
 /// ChaCha8's 64-bit stream space.  The returned RNG shares the parent's
 /// seed but operates on a distinct, non-overlapping stream starting at
@@ -123,6 +141,47 @@ mod tests {
 
         assert_eq!(a1.get_seed(), b1.get_seed());
         assert_eq!(a2.get_seed(), b2.get_seed());
+    }
+
+    /// The isolation invariant on the scenario axis: deriving, adding or
+    /// removing a scenario never moves another scenario's stream, and a
+    /// home's streams inside one scenario never move when another home's
+    /// derive beside it. The absent scenario's key is the scenario-less
+    /// derivation's own, byte for byte.
+    #[test]
+    fn isolation_adding_scenarios_does_not_affect_others() {
+        let s1 = derive_dwelling_rng_scenario(7, Some(1), 1);
+        let s2 = derive_dwelling_rng_scenario(7, Some(2), 1);
+
+        let _s3 = derive_dwelling_rng_scenario(7, Some(3), 1);
+        let _s1_other_building = derive_dwelling_rng_scenario(7, Some(1), 2);
+
+        let s1_again = derive_dwelling_rng_scenario(7, Some(1), 1);
+        let s2_again = derive_dwelling_rng_scenario(7, Some(2), 1);
+
+        assert_eq!(s1.get_seed(), s1_again.get_seed());
+        assert_eq!(s2.get_seed(), s2_again.get_seed());
+        assert_ne!(s1.get_seed(), s2.get_seed());
+        assert_eq!(
+            derive_dwelling_rng_scenario(7, None, 1).get_seed(),
+            derive_dwelling_rng(7, 1).get_seed(),
+            "the absent scenario's key is the scenario-less derivation's"
+        );
+        // Every scenario's key differs from every other scenario's at the
+        // scenario bytes alone: the stream nonces stay free for the
+        // existing partition (the dwelling's stream 0, the EV driver
+        // range, the top-bit event-load tag).
+        let mut s1_stream = s1.clone();
+        s1_stream.set_stream(0);
+        s1_stream.set_word_pos(0);
+        let mut s2_stream = s2.clone();
+        s2_stream.set_stream(0);
+        s2_stream.set_word_pos(0);
+        assert_ne!(
+            s1_stream.random::<u64>(),
+            s2_stream.random::<u64>(),
+            "the same nonce under two scenarios' keys draws disjoint streams"
+        );
     }
 
     #[test]

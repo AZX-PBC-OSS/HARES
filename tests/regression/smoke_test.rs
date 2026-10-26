@@ -239,6 +239,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    scenario_seed: None,
                     // Match OCHRE smoke: May 5, 2019, 12:00 PM Denver (UTC-7)
                     start_time: denver_offset()
                         .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
@@ -476,6 +477,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    scenario_seed: None,
                     // Denver local noon (UTC-7) on May 5 2019 -- mild spring noon,
                     // neither heating nor cooling is expected to dominate.
                     start_time: denver_offset()

@@ -96,6 +96,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         .and_then(|v| v.as_integer())
         .expect("time_res seconds");
     SimulationConfig {
+        scenario_seed: None,
         start_time: DateTime::parse_from_rfc3339(start).expect("start_time parses"),
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(time_res_s),
@@ -298,6 +299,7 @@ fn a_microwave_column_on_an_os_hpxml_building_counts_only_the_residual_mels() {
 fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
     let bldg = project_root().join("tests/fixtures/resstock/2025.1/bldg0176775");
     let sim = SimulationConfig {
+        scenario_seed: None,
         start_time: FixedOffset::west_opt(5 * 3600)
             .expect("UTC-5 offset is valid")
             .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)

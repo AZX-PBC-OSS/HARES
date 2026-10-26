@@ -60,6 +60,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    scenario_seed: None,
                     start_time,
                     duration: Duration::hours(24),
                     time_res: Duration::minutes(1),

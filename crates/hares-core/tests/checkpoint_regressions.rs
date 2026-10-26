@@ -521,6 +521,7 @@ fn resumable_dwelling_config(case: &ResumeCase) -> DwellingConfig {
         defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: FixedOffset::west_opt(case.utc_offset_west_h * 3600)
                     .expect("valid offset")
                     .with_ymd_and_hms(2018, case.month, case.day, 0, 0, 0)
@@ -814,6 +815,7 @@ fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
         defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: FixedOffset::west_opt(5 * 3600)
                     .expect("valid offset")
                     .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)

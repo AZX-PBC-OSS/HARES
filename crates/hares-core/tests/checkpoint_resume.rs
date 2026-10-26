@@ -39,6 +39,7 @@ fn start() -> DateTime<FixedOffset> {
 
 fn sim_config() -> SimulationConfig {
     let config = SimulationConfig {
+        scenario_seed: None,
         start_time: start(),
         duration: Duration::days(12),
         time_res: Duration::seconds(900),

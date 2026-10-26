@@ -121,6 +121,7 @@ mod tests {
                 defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
                 settings: DwellingSettings::new(
                     SimulationConfig {
+                        scenario_seed: None,
                         start_time: denver.with_ymd_and_hms(2019, 7, 15, 0, 0, 0).unwrap(),
                         duration: Duration::hours(24),
                         time_res: Duration::minutes(1),

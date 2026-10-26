@@ -55,11 +55,15 @@ allocation; `DailyProfile` and `Constant` compute in O(1).
 
 All randomness flows from a single `master_seed` through
 `derive_dwelling_rng(master_seed, bldg_id)` in `hares-core/src/rng.rs`.
-This guarantees:
+A run that declares a `scenario_seed` mixes it into the same key
+(`derive_dwelling_rng_scenario`, the scenario-mixed master key), so two
+scenarios under one master seed draw disjoint streams; the absent
+scenario keeps the scenario-less key's exact bytes. This guarantees:
 
-- Identical results across runs with the same seed.
+- Identical results across runs with the same seed and scenario.
 - Per-dwelling isolation: adding/removing a building does not change
-  another building's random stream.
+  another building's random stream, and adding/removing a scenario does
+  not change another scenario's.
 - Checkpoint/restore reproduces the stream (`ChaCha8Rng::from_seed`).
 
 When adding stochastic behaviour, draw from the dwelling's `self.rng` --

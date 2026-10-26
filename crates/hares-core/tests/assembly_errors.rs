@@ -23,6 +23,7 @@ fn cz2a_config(defaults: PathBuf) -> DwellingConfig {
         defaults: DefaultsSource::directory(defaults),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: DateTime::<FixedOffset>::parse_from_rfc3339(
                     "2023-01-01T00:00:00-07:00",
                 )

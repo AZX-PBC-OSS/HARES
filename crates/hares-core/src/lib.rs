@@ -78,5 +78,6 @@ pub use result::{
 };
 pub use rng::SeededStream;
 pub use rng::derive_dwelling_rng;
+pub use rng::derive_dwelling_rng_scenario;
 pub use telemetry::DwellingTelemetry;
 pub use telemetry::ObservationWarnOnce;

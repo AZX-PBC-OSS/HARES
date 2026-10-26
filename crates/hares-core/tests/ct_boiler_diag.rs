@@ -75,6 +75,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    scenario_seed: None,
                     start_time: FixedOffset::west_opt(5 * 3600)
                         .unwrap()
                         .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)

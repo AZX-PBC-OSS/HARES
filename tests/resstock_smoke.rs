@@ -185,6 +185,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    scenario_seed: None,
                     start_time: denver_offset()
                         .with_ymd_and_hms(2019, 5, 5, 12, 0, 0)
                         .unwrap(),
@@ -383,6 +384,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    scenario_seed: None,
                     start_time: denver_offset()
                         .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)
                         .unwrap(),
@@ -493,6 +495,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    scenario_seed: None,
                     start_time: denver_offset()
                         .with_ymd_and_hms(2018, month, day, 0, 0, 0)
                         .unwrap(),

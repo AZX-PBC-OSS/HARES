@@ -277,6 +277,7 @@ class TestSimulationConfig:
             output_chunk_size=5000,
             setpoint_deadband_c=1.5,
             master_seed=42,
+            scenario_seed=11,
             civil_timezone="America/Denver",
             site_location=SiteLocationOverride(latitude_deg=40.0),
             max_consecutive_step_failures=3,

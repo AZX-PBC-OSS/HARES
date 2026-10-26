@@ -46,6 +46,7 @@ fn start_at() -> DateTime<FixedOffset> {
 
 fn sim_config(duration_s: i64, step_s: i64) -> SimulationConfig {
     SimulationConfig {
+        scenario_seed: None,
         start_time: start_at(),
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(step_s),

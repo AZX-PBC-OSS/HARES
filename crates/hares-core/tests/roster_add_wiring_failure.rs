@@ -33,6 +33,7 @@ fn config() -> DwellingConfig {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: denver_offset::denver_offset()
                     .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
                     .unwrap(),

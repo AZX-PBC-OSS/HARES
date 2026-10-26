@@ -43,6 +43,7 @@ fn sim_config(
     verbosity: u8,
 ) -> hares_core::SimulationConfig {
     hares_core::SimulationConfig {
+        scenario_seed: None,
         start_time: FixedOffset::west_opt(10 * 3600)
             .expect("UTC-10 offset is valid")
             .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)

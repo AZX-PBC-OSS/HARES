@@ -48,6 +48,7 @@ fn start_at(rfc3339: &str) -> DateTime<chrono::FixedOffset> {
 
 fn sim_config(start_time: DateTime<chrono::FixedOffset>, days: i64) -> SimulationConfig {
     SimulationConfig {
+        scenario_seed: None,
         start_time,
         duration: Duration::days(days),
         time_res: Duration::seconds(900),

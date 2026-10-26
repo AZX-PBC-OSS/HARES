@@ -404,6 +404,7 @@ impl PySimulationConfig {
         output_chunk_size = hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
         setpoint_deadband_c = None,
         master_seed = 0,
+        scenario_seed = None,
         civil_timezone = None,
         site_location = None,
         max_consecutive_step_failures = hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -425,6 +426,7 @@ impl PySimulationConfig {
         output_chunk_size: usize,
         setpoint_deadband_c: Option<f64>,
         master_seed: u64,
+        scenario_seed: Option<u64>,
         civil_timezone: Option<String>,
         site_location: Option<PySiteLocationOverride>,
         max_consecutive_step_failures: u32,
@@ -498,6 +500,7 @@ impl PySimulationConfig {
             output_chunk_size,
             setpoint_deadband_c,
             master_seed,
+            scenario_seed,
             civil_timezone,
             site_location: site_location.map(|s| s.0).unwrap_or_default(),
             max_consecutive_step_failures,
@@ -651,6 +654,19 @@ impl PySimulationConfig {
     #[setter]
     pub fn set_master_seed(&mut self, value: u64) -> PyResult<()> {
         self.assign(|cfg| cfg.master_seed = value)
+    }
+
+    /// The run's scenario seed: mixed into every per-dwelling stream key
+    /// when set, the absent scenario keeping the scenario-less
+    /// derivation's exact bytes.
+    #[getter]
+    pub fn scenario_seed(&self) -> Option<u64> {
+        self.0.scenario_seed
+    }
+
+    #[setter]
+    pub fn set_scenario_seed(&mut self, value: Option<u64>) -> PyResult<()> {
+        self.assign(|cfg| cfg.scenario_seed = value)
     }
 
     #[getter]
@@ -1061,6 +1077,7 @@ mod tests {
             0,
             None,
             None,
+            None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
             crate::py_config::PyWarmupArg::Absent,
@@ -1126,6 +1143,7 @@ mod tests {
                     0,
                     None,
                     None,
+                    None,
                     hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     None,
                     PyWarmupArg::Absent,
@@ -1156,6 +1174,7 @@ mod tests {
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 0,
+                None,
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -1190,6 +1209,7 @@ mod tests {
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 0,
+                None,
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,

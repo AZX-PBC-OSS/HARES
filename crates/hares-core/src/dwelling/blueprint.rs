@@ -11,7 +11,7 @@ use hares_io::{
 use hares_types::{EndUse, HaresError, Warning};
 
 use super::solver_builder::{WeatherAverages, compute_weather_averages};
-use crate::derive_dwelling_rng;
+use crate::derive_dwelling_rng_scenario;
 use crate::dwelling::{DwellingConfig, DwellingSettings, WarningLog};
 use crate::resolved::ResolvedModel;
 
@@ -507,7 +507,11 @@ impl DwellingBlueprintBuilder {
         // single-dwelling parse averaged.
         let weather_avgs = compute_weather_averages(&inputs.weather.series(), &building)?;
         let design_conditions = inputs.weather.series().design_conditions;
-        let rng = derive_dwelling_rng(settings.sim_config.master_seed, settings.bldg_id);
+        let rng = derive_dwelling_rng_scenario(
+            settings.sim_config.master_seed,
+            settings.sim_config.scenario_seed,
+            settings.bldg_id,
+        );
 
         Ok(Arc::new(DwellingBlueprint {
             inputs,

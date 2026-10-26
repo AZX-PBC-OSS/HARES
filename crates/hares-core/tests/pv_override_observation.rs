@@ -28,6 +28,7 @@ fn pv_dwelling() -> Dwelling {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: FixedOffset::east_opt(0)
                     .expect("UTC")
                     .with_ymd_and_hms(2019, 7, 15, 0, 0, 0)

@@ -35,6 +35,7 @@ fn fleet_construction_1000_homes_wall_time() {
         .single()
         .expect("start");
     let sim_config = SimulationConfig {
+        scenario_seed: None,
         start_time,
         duration: chrono::Duration::hours(24),
         time_res: chrono::Duration::seconds(900),

@@ -34,6 +34,7 @@ fn cz4a_config(metrics: bool) -> DwellingConfig {
         defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: start,
                 duration: chrono::Duration::hours(24),
                 time_res: chrono::Duration::minutes(15),

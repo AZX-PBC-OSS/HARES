@@ -22,6 +22,7 @@ fn cz5a_config(master_seed: u64, warmup: bool) -> DwellingConfig {
         defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig {
+                scenario_seed: None,
                 start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
                     .expect("valid start time"),
                 duration: Duration::seconds(2 * 86_400),

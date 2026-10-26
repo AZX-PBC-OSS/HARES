@@ -137,6 +137,7 @@ pub fn build_dwelling_config(
         defaults: DefaultsSource::directory(defaults_path),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: fixture_start::fixture_start(),
                 duration,
                 time_res: Duration::minutes(1),

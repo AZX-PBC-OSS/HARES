@@ -93,7 +93,7 @@ use serde_json::{Map, Value};
 use crate::actors::{
     BatteryManagementActor, BmsParams, EvDriverActor, EvDriverParams, SolverFeedbackActor,
 };
-use crate::derive_dwelling_rng;
+use crate::derive_dwelling_rng_scenario;
 use crate::environment::EnvironmentInitOptions;
 #[cfg(feature = "profiling")]
 use crate::health::{ActorTiming, ActorTimings};
@@ -3225,6 +3225,7 @@ impl Dwelling {
             weather_path,
         } = inputs;
         let sim_config = SimulationConfig {
+            scenario_seed: None,
             start_time,
             duration,
             time_res,
@@ -3838,12 +3839,14 @@ fn assemble_from_blueprint_with_seed(
     let local_start = bp.local_start;
     let defaults = bp.inputs.defaults.store();
     let config = settings;
-    // The rng: the blueprint's own (the master seed the blueprint froze
-    // with), or the seed given (the reset's), derived the same way.
+    // The rng: the blueprint's own (the master seed and scenario the
+    // blueprint froze with), or the seed given (the reset's), derived the
+    // same way: the scenario-mixed derivation with the blueprint's own
+    // scenario, the episode seed in the master-seed position.
     let rng = if master_seed == bp.settings.sim_config.master_seed {
         bp.rng.clone()
     } else {
-        derive_dwelling_rng(master_seed, config.bldg_id)
+        derive_dwelling_rng_scenario(master_seed, config.sim_config.scenario_seed, config.bldg_id)
     };
     // The input records the parse read, carried to the run's provenance:
     // the parse's own records, `None` when the parse read no file.
@@ -6058,9 +6061,16 @@ impl Dwelling {
     /// `HaresError::Dwelling` when a recorded actor is gone, or a seeded
     /// component's `reseed` refuses.
     pub fn reseed(&mut self, master_seed: u64) -> Result<()> {
-        let stream_seed = hares_types::rng::dwelling_seed(master_seed, self.bldg_id);
+        // The scenario-mixed derivation with this dwelling's own declared
+        // scenario, the reseed's seed in the master-seed position: the
+        // gym's per-episode reset enters here, so an episode seed
+        // composes with the scenario seed, and two episodes sharing an
+        // episode seed under different scenarios draw disjoint streams.
+        let scenario_seed = self.blueprint.settings.sim_config.scenario_seed;
+        let stream_seed =
+            hares_types::rng::dwelling_seed_scenario(master_seed, scenario_seed, self.bldg_id);
         // The dwelling's own stream, at its start.
-        self.rng = derive_dwelling_rng(master_seed, self.bldg_id);
+        self.rng = derive_dwelling_rng_scenario(master_seed, scenario_seed, self.bldg_id);
         // Every event-load equipment's stream: the identity nonce
         // construction assigned is kept, the generator starts over.
         for eq in &mut self.equipment {
@@ -22338,6 +22348,7 @@ latent_gain_fraction = 0.08
             ),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    scenario_seed: None,
                     start_time: DateTime::parse_from_rfc3339(start).expect("start time"),
                     duration: chrono::Duration::days(2),
                     time_res: chrono::Duration::seconds(step_s),

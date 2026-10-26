@@ -51,6 +51,7 @@ fn build_dwelling() -> Dwelling {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: chrono::FixedOffset::west_opt(10 * 3600)
                     .expect("UTC-10 offset is valid")
                     .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)

@@ -2470,6 +2470,7 @@ class SimulationConfig:
         output_chunk_size: int = ...,
         setpoint_deadband_c: float | None = ...,
         master_seed: int = ...,
+        scenario_seed: int | None = ...,
         civil_timezone: str | None = ...,
         site_location: SiteLocationOverride | None = ...,
         max_consecutive_step_failures: int = ...,
@@ -2515,6 +2516,10 @@ class SimulationConfig:
     def master_seed(self) -> int: ...
     @master_seed.setter
     def master_seed(self, value: int) -> None: ...
+    @property
+    def scenario_seed(self) -> int | None: ...
+    @scenario_seed.setter
+    def scenario_seed(self, value: int | None) -> None: ...
     @property
     def civil_timezone(self) -> str | None: ...
     @civil_timezone.setter

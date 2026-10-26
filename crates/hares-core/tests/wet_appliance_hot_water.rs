@@ -21,6 +21,7 @@ fn sim_config(
     step_s: i64,
 ) -> SimulationConfig {
     SimulationConfig {
+        scenario_seed: None,
         start_time,
         duration,
         time_res: Duration::seconds(step_s),

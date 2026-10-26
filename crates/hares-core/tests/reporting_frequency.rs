@@ -37,6 +37,7 @@ fn sim_config(
     chunk: usize,
 ) -> SimulationConfig {
     SimulationConfig {
+        scenario_seed: None,
         start_time: start,
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(step_s),
