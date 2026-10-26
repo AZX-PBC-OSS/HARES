@@ -516,10 +516,18 @@ class TestDefaultStrategyEv:
             duration_s=3 * 86400, time_res_s=900, seed=42, verbosity=1
         )
         dw.initialize()
+        # The manual driver's own seed, not the run's master seed: a
+        # driver keyed on the master seed in the dwelling whose building
+        # id it carries keys its day roll on the dwelling key itself
+        # (driver_key_material is byte-identical to dwelling_seed there),
+        # and the built-in driver the add_ev below builds rides the same
+        # reserved stream - the key collision the dwelling's guard
+        # rejects. This test is about one driver per vehicle, so the
+        # manual driver keys on its own seed.
         dw.add_ev_with_driver(
             VehicleId.tesla_model_y_lr(),
             EvArchetypeId.daily_commuter_l2(),
-            seed=42,
+            seed=99,
         )
         dw.add_ev(EV("EV1", capacity_j=270000000, max_charging_power_w=7680))
         dw.set_electric_tariff(tariff)
