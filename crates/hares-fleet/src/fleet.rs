@@ -20,6 +20,7 @@ use hares_io::{
 };
 use hares_types::ControlSignal;
 use hares_types::HaresError;
+use hares_types::PriceSignal;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -208,6 +209,8 @@ pub enum FleetError {
     NoSuchHome { index: usize, len: usize },
     #[error("dwelling at index {index} refused the grid voltage override: {message}")]
     InvalidGridVoltage { index: usize, message: String },
+    #[error("dwelling at index {index} refused the grid frequency override: {message}")]
+    InvalidGridFrequency { index: usize, message: String },
     #[error("dwelling {bldg_id} telemetry snapshot failed: {source}")]
     Telemetry {
         bldg_id: i64,
@@ -1949,6 +1952,55 @@ impl SteppableFleet {
             self.set_grid_voltage(index, voltage_pu)?;
         }
         Ok(())
+    }
+
+    /// Applies a grid-frequency override to one dwelling.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::NoSuchHome`] naming the index and the length when the
+    /// index is out of range; the dwelling's own validation error when the
+    /// override is not a finite value in [40, 80] Hz.
+    pub fn set_frequency(&mut self, dwelling_index: usize, frequency_hz: f64) -> Result<()> {
+        let len = self.dwellings.len();
+        let dwelling = self
+            .dwellings
+            .get_mut(dwelling_index)
+            .ok_or(FleetError::NoSuchHome {
+                index: dwelling_index,
+                len,
+            })?;
+        dwelling
+            .set_frequency(frequency_hz)
+            .map_err(|err| FleetError::InvalidGridFrequency {
+                index: dwelling_index,
+                message: err.to_string(),
+            })
+    }
+
+    /// Applies a shared grid-frequency override to all dwellings.
+    ///
+    /// # Errors
+    ///
+    /// The dwelling validation error of the first home the override fails
+    /// at (every home runs the same validation, so one name is enough).
+    pub fn set_frequency_all(&mut self, frequency_hz: f64) -> Result<()> {
+        for index in 0..self.dwellings.len() {
+            self.set_frequency(index, frequency_hz)?;
+        }
+        Ok(())
+    }
+
+    /// Applies a price signal to every dwelling.
+    ///
+    /// The fleet's price boundary: every home receives the same signal,
+    /// applied through the dwelling's own `set_price_signal`, so the
+    /// fleet's price behavior is the dwelling federate's exactly (one
+    /// boundary behavior; see docs/cosim.md).
+    pub fn set_price_signal_all(&mut self, signal: PriceSignal) {
+        for dwelling in &mut self.dwellings {
+            dwelling.set_price_signal(signal.clone());
+        }
     }
 
     /// Queues a control signal for one dwelling by equipment name.
@@ -8478,5 +8530,63 @@ mod tests {
                 (name.clone(), values)
             })
             .collect()
+    }
+
+    /// The frequency and price overrides reach every dwelling: the
+    /// frequency override composes beside each home's voltage override
+    /// (never overwritten), and the fleet's price signal lands on every
+    /// home exactly as the single dwelling's own `set_price_signal`.
+    #[test]
+    fn frequency_and_price_overrides_apply_to_every_dwelling() {
+        let _step_exclusive = FLEET_STEP_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let dir = tempdir().expect("temp dir");
+        let (mut fleet, build_errors) =
+            SteppableFleet::from_configs(build_valid_configs(dir.path(), 2), 2)
+                .expect("build the fleet");
+        assert!(build_errors.is_empty());
+
+        // The frequency: a per-dwelling override, an all-dwellings
+        // override, and the out-of-band rejection.
+        fleet
+            .set_frequency(1, 59.3)
+            .expect("an in-band frequency for dwelling 1");
+        assert_eq!(fleet.dwellings[1].grid_frequency_override_hz(), Some(59.3));
+        assert_eq!(fleet.dwellings[0].grid_frequency_override_hz(), None);
+        fleet
+            .set_frequency_all(59.8)
+            .expect("an in-band frequency everywhere");
+        for (index, dwelling) in fleet.dwellings.iter().enumerate() {
+            assert_eq!(
+                dwelling.grid_frequency_override_hz(),
+                Some(59.8),
+                "dwelling {index}: the all-dwellings override reaches every home"
+            );
+        }
+        let err = fleet
+            .set_frequency(0, 600.0)
+            .expect_err("an out-of-band frequency must be rejected");
+        assert!(
+            matches!(err, FleetError::InvalidGridFrequency { index: 0, .. }),
+            "the rejection is the fleet's typed error: {err}"
+        );
+
+        // The price: the fleet-wide signal lands on every home.
+        fleet.set_price_signal_all(PriceSignal {
+            electricity_price: Some(0.42),
+            export_price: None,
+            ghg_intensity: None,
+        });
+        for (index, dwelling) in fleet.dwellings.iter().enumerate() {
+            assert_eq!(
+                dwelling.price_signal().electricity_price,
+                Some(0.42),
+                "dwelling {index}: the fleet's price reaches every home"
+            );
+        }
     }
 }

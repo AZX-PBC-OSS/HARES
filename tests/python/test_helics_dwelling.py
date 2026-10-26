@@ -174,6 +174,7 @@ class _FakeDwelling:
         self._telemetry_values = [(3.0, 0.5), (4.0, 0.6)]
         self.grid_voltage_values: list[float] = []
         self.price_signals: list[dict[str, float | None]] = []
+        self.frequency_values: list[float] = []
         self.applied_controls: list[tuple[str, Any]] = []
         self._n_zones = n_zones
         self._n_equipment = n_equipment
@@ -238,6 +239,10 @@ class _FakeDwelling:
     def set_grid_voltage(self, voltage_pu: float) -> None:
         self.grid_voltage_values.append(voltage_pu)
         self._log.append(("set_grid_voltage", voltage_pu))
+
+    def set_frequency(self, frequency_hz: float) -> None:
+        self.frequency_values.append(frequency_hz)
+        self._log.append(("set_frequency", frequency_hz))
 
     def set_price_signal(self, signal: dict[str, float | None]) -> None:
         self.price_signals.append(signal)
@@ -1303,6 +1308,52 @@ def test_helics_price_valid_property_reflects_flag(
     orchestrator._sub_price.push_double(-0.05)
     orchestrator._read_subscriptions()
     assert orchestrator.helics_price_valid is False
+
+
+def test_frequency_subscription_applies_in_band_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The grid/frequency channel end to end: an in-band frequency is
+    applied to the dwelling through set_frequency."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(frequency_topic="grid/frequency")
+
+    assert orchestrator._sub_frequency is not None
+    orchestrator._sub_frequency.push_double(59.8)
+    orchestrator._read_subscriptions()
+    assert dwelling.frequency_values == [59.8]
+    assert orchestrator.helics_frequency_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+
+def test_frequency_subscription_refuses_out_of_band_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The ONE boundary behavior: an out-of-band frequency is flagged,
+    counted, and never applied; the dwelling keeps its last valid
+    frequency."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(frequency_topic="grid/frequency")
+
+    assert orchestrator._sub_frequency is not None
+    orchestrator._sub_frequency.push_double(600.0)
+    orchestrator._read_subscriptions()
+    assert dwelling.frequency_values == [], (
+        "an out-of-band frequency must never be applied"
+    )
+    assert orchestrator.helics_frequency_valid is False
+    assert orchestrator.helics_range_violations_total == 1
+
+    orchestrator._sub_frequency.push_double(59.3)
+    orchestrator._read_subscriptions()
+    assert dwelling.frequency_values == [59.3]
+    assert orchestrator.helics_frequency_valid is True
 
 
 def test_stale_subscription_count_increases_when_no_data(

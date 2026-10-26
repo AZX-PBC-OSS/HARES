@@ -39,6 +39,14 @@ Expected HELICS subscription units
 ``grid/price`` (or caller-provided topic)
     Real-time electricity price in currency/kWh. Must be non-negative;
     a negative value triggers a diagnostic warning.
+
+``grid/frequency`` (or caller-provided topic)
+    Grid frequency in Hz. Expected range: 40-80 Hz (the band the engine's
+    setter admits: both nominal frequencies' governing event ranges with
+    transient headroom). A value out of range triggers a diagnostic
+    warning and is not applied; the dwelling keeps its last valid
+    frequency. Without a frequency subscription the engine runs the
+    60 Hz constant.
 """
 
 from __future__ import annotations
@@ -81,11 +89,19 @@ _LOG = logging.getLogger(__name__)
 VOLTAGE_PU_MIN = 0.5
 VOLTAGE_PU_MAX = 1.5
 
+# Grid-frequency range guard: values outside [40, 80] Hz are not grid
+# frequencies a premise simulation should be fed and indicate a likely unit
+# mismatch or corruption. The band mirrors the engine setter's admitted band
+# (both nominal frequencies' governing event ranges with transient headroom).
+FREQUENCY_HZ_MIN = 40.0
+FREQUENCY_HZ_MAX = 80.0
+
 
 class HELICSDiagnostics(TypedDict):
     """Per-timestep HELICS diagnostic fields returned by ``get_diagnostic_row()``."""
 
     helics_voltage_valid: bool
+    helics_frequency_valid: bool
     helics_price_valid: bool
     helics_control_clamped: int
     helics_range_violations_total: int
@@ -399,6 +415,7 @@ class HELICSDwelling:
         self._sub_voltage: HelicsSubscriptionLike | None = None
         self._sub_control: HelicsSubscriptionLike | None = None
         self._sub_price: HelicsSubscriptionLike | None = None
+        self._sub_frequency: HelicsSubscriptionLike | None = None
 
         self._pub_zone_temp: list[HelicsPublicationLike] = []
         self._pub_equipment_power: list[HelicsPublicationLike] = []
@@ -415,6 +432,7 @@ class HELICSDwelling:
         self._federation_terminated = False
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._range_violations_total = 0
         self._stale_counts: dict[str, int] = {}
@@ -521,14 +539,16 @@ class HELICSDwelling:
         voltage_topic: str | None = None,
         control_topic: str | None = None,
         price_topic: str | None = None,
+        frequency_topic: str | None = None,
         required_keys: set[str] | None = None,
     ) -> list[HELICSSubscriptionConfig]:
-        """Register subscriptions for grid voltage, controls, and price.
+        """Register subscriptions for grid voltage, controls, price, and frequency.
 
         Args:
             voltage_topic: HELICS topic for grid voltage (per-unit).
             control_topic: HELICS topic for JSON control messages.
             price_topic: HELICS topic for real-time electricity price.
+            frequency_topic: HELICS topic for grid frequency (Hz).
             required_keys: Optional set of fully-qualified subscription keys that
                 must be registered. After entering execution mode, any missing
                 required key is logged as an error.
@@ -546,6 +566,10 @@ class HELICSDwelling:
         if price_topic is not None:
             self._sub_price = self._fed.register_subscription(price_topic, "double")
             configs.append(HELICSSubscriptionConfig(key=price_topic, type="double"))
+
+        if frequency_topic is not None:
+            self._sub_frequency = self._fed.register_subscription(frequency_topic, "double")
+            configs.append(HELICSSubscriptionConfig(key=frequency_topic, type="double"))
 
         self._subscription_configs = configs
         if required_keys is not None:
@@ -676,6 +700,7 @@ class HELICSDwelling:
     def _read_subscriptions(self) -> None:
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._update_mask = 0
         self._stale_subscription_count = 0
@@ -691,6 +716,8 @@ class HELICSDwelling:
             _sub_objs.append(self._sub_control)
         if self._sub_price is not None:
             _sub_objs.append(self._sub_price)
+        if self._sub_frequency is not None:
+            _sub_objs.append(self._sub_frequency)
 
         _updates: list[bool] = []
         for sub_obj in _sub_objs:
@@ -757,6 +784,29 @@ class HELICSDwelling:
                 except Exception as exc:
                     _LOG.warning("Failed to apply price signal: %s", exc)
 
+            if self._sub_frequency is not None and _update_by_sub.get(self._sub_frequency, False):
+                try:
+                    frequency_hz = float(self._sub_frequency.double)
+                    if frequency_hz < FREQUENCY_HZ_MIN or frequency_hz > FREQUENCY_HZ_MAX:
+                        # Unit/corruption guard: a value outside [40, 80] Hz
+                        # is not a grid frequency a premise simulation should
+                        # be fed. Flag and warn, but do NOT apply: the
+                        # dwelling keeps its last valid frequency, the same
+                        # refuse-and-count contract the voltage channel
+                        # enforces.
+                        self._last_frequency_out_of_range = True
+                        _LOG.warning(
+                            "Grid frequency %.3f Hz outside expected range [%.1f, %.1f]; "
+                            "value not applied; keeping last valid frequency.",
+                            frequency_hz,
+                            FREQUENCY_HZ_MIN,
+                            FREQUENCY_HZ_MAX,
+                        )
+                    else:
+                        self._dwelling.set_frequency(frequency_hz)
+                except Exception as exc:
+                    _LOG.warning("Failed to apply grid frequency: %s", exc)
+
             if self._sub_control is None:
                 return
             if not _update_by_sub.get(self._sub_control, False):
@@ -794,6 +844,8 @@ class HELICSDwelling:
             if self._last_voltage_out_of_range:
                 self._range_violations_total += 1
             if self._last_price_negative:
+                self._range_violations_total += 1
+            if self._last_frequency_out_of_range:
                 self._range_violations_total += 1
 
     def _verify_registration_completeness(self) -> tuple[set[str], set[str]]:
@@ -936,6 +988,11 @@ class HELICSDwelling:
         return not self._last_voltage_out_of_range
 
     @property
+    def helics_frequency_valid(self) -> bool:
+        """True when the most recent frequency subscription was in [40, 80] Hz."""
+        return not self._last_frequency_out_of_range
+
+    @property
     def helics_price_valid(self) -> bool:
         """True when the most recent price subscription was non-negative."""
         return not self._last_price_negative
@@ -962,6 +1019,7 @@ class HELICSDwelling:
         """
         return {
             "helics_voltage_valid": self.helics_voltage_valid,
+            "helics_frequency_valid": self.helics_frequency_valid,
             "helics_price_valid": self.helics_price_valid,
             "helics_control_clamped": self.helics_control_clamped,
             "helics_range_violations_total": self.helics_range_violations_total,

@@ -48,6 +48,12 @@ Expected HELICS subscription units
 
 Per-dwelling voltage topics (caller-provided)
     Same per-unit voltage range (0.5–1.5 pu).
+
+``grid/price`` (or caller-provided fleet-wide topic)
+    Real-time electricity price in currency/kWh, applied to every
+    dwelling. Must be non-negative; a negative value triggers a
+    diagnostic warning. The boundary behavior is the dwelling federate's
+    exactly (one boundary behavior; see docs/cosim.md).
 """
 
 from __future__ import annotations
@@ -155,6 +161,7 @@ class HELICSFleet:
         self._sub_voltage_all: HelicsSubscriptionLike | None = None
         self._sub_voltage_dwelling: list[HelicsSubscriptionLike] = []
         self._sub_control: HelicsSubscriptionLike | None = None
+        self._sub_price: HelicsSubscriptionLike | None = None
 
         self._publication_configs: list[HELICSPublicationConfig] = []
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
@@ -162,6 +169,7 @@ class HELICSFleet:
         self._federation_terminated = False
         self._last_voltage_all_out_of_range = False
         self._last_per_dwelling_voltage_out_of_range = False
+        self._last_price_negative = False
         self._control_clamped = 0
         self._range_violations_total = 0
         self._stale_counts: dict[str, int] = {}
@@ -297,9 +305,10 @@ class HELICSFleet:
         voltage_topic: str | None = None,
         per_dwelling_voltage_topics: list[str] | None = None,
         control_topic: str | None = None,
+        price_topic: str | None = None,
         required_keys: set[str] | None = None,
     ) -> list[HELICSSubscriptionConfig]:
-        """Register fleet-wide/per-dwelling voltage and control subscriptions.
+        """Register fleet-wide/per-dwelling voltage, control, and price subscriptions.
 
         Args:
             voltage_topic: Fleet-wide voltage topic (applied to all dwellings).
@@ -307,6 +316,7 @@ class HELICSFleet:
                 Length must match the fleet size.  These are only registered when
                 provided -- they are **not** auto-derived from ``voltage_topic``.
             control_topic: JSON control topic for equipment setpoints.
+            price_topic: Fleet-wide price topic (applied to all dwellings).
             required_keys: Optional set of fully-qualified subscription keys that
                 must be registered. After entering execution mode, any missing
                 required key is logged as an error.
@@ -336,6 +346,12 @@ class HELICSFleet:
             configs.append(HELICSSubscriptionConfig(key=control_topic, type="string"))
         else:
             self._sub_control = None
+
+        if price_topic is not None:
+            self._sub_price = self._fed.register_subscription(price_topic, "double")
+            configs.append(HELICSSubscriptionConfig(key=price_topic, type="double"))
+        else:
+            self._sub_price = None
 
         self._subscription_configs = configs
         if required_keys is not None:
@@ -446,13 +462,14 @@ class HELICSFleet:
     def _read_subscriptions(self) -> None:
         self._last_voltage_all_out_of_range = False
         self._last_per_dwelling_voltage_out_of_range = False
+        self._last_price_negative = False
         self._control_clamped = 0
         self._update_mask = 0
         self._stale_subscription_count = 0
 
         # Track stale subscription counts and build update mask.
         # Bits match _subscription_configs order: bit 0 = fleet-wide voltage,
-        # bits 1..N = per-dwelling voltages, last bit = control.
+        # bits 1..N = per-dwelling voltages, then price, then control last.
         # is_updated() is called exactly once per subscription so that stale
         # tracking and business logic share the same result.
         _sub_objs: list[HelicsSubscriptionLike] = []
@@ -461,6 +478,8 @@ class HELICSFleet:
         _sub_objs.extend(self._sub_voltage_dwelling)
         if self._sub_control is not None:
             _sub_objs.append(self._sub_control)
+        if self._sub_price is not None:
+            _sub_objs.append(self._sub_price)
 
         _updates: list[bool] = []
         for sub_obj in _sub_objs:
@@ -492,15 +511,21 @@ class HELICSFleet:
                 try:
                     voltage_pu = float(self._sub_voltage_all.double)
                     if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                        # The ONE boundary behavior (the dwelling federate's
+                        # exactly): out-of-band values are flagged, counted
+                        # and never applied; the dwellings keep their last
+                        # valid voltage.
                         self._last_voltage_all_out_of_range = True
                         _LOG.warning(
                             "Fleet-wide grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
-                            "check that the external federate publishes per-unit (not volts)",
+                            "check that the external federate publishes per-unit (not volts). "
+                            "Value not applied; keeping last valid voltage.",
                             voltage_pu,
                             VOLTAGE_PU_MIN,
                             VOLTAGE_PU_MAX,
                         )
-                    self._fleet.set_grid_voltage_all(voltage_pu)
+                    else:
+                        self._fleet.set_grid_voltage_all(voltage_pu)
                 except Exception as exc:
                     _LOG.warning("Failed to apply fleet-wide grid voltage: %s", exc)
 
@@ -509,17 +534,38 @@ class HELICSFleet:
                     try:
                         voltage_pu = float(subscription.double)
                         if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                            # The ONE boundary behavior: out-of-band values
+                            # are flagged, counted and never applied.
                             self._last_per_dwelling_voltage_out_of_range = True
                             _LOG.warning(
-                                "Grid voltage for dwelling %d %.3f pu outside expected range [%.1f, %.1f]",
+                                "Grid voltage for dwelling %d %.3f pu outside expected range [%.1f, %.1f]; "
+                                "value not applied; keeping last valid voltage.",
                                 dwelling_index,
                                 voltage_pu,
                                 VOLTAGE_PU_MIN,
                                 VOLTAGE_PU_MAX,
                             )
-                        self._fleet.set_grid_voltage(dwelling_index, voltage_pu)
+                        else:
+                            self._fleet.set_grid_voltage(dwelling_index, voltage_pu)
                     except Exception as exc:
                         _LOG.warning("Failed to apply grid voltage for dwelling %d: %s", dwelling_index, exc)
+
+            if self._sub_price is not None and _update_by_sub.get(self._sub_price, False):
+                try:
+                    price = float(self._sub_price.double)
+                    # The dwelling federate's price behavior, applied
+                    # exactly: a negative price warns, counts and is
+                    # still applied (a negative tariff is a real
+                    # scenario; the warning is the diagnostic).
+                    if price < 0.0:
+                        self._last_price_negative = True
+                        _LOG.warning(
+                            "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                            price,
+                        )
+                    self._fleet.set_price_signal_all(price)
+                except Exception as exc:
+                    _LOG.warning("Failed to apply price signal: %s", exc)
 
             if self._sub_control is None or not _update_by_sub.get(self._sub_control, False):
                 return
@@ -559,6 +605,8 @@ class HELICSFleet:
             if self._last_voltage_all_out_of_range:
                 self._range_violations_total += 1
             if self._last_per_dwelling_voltage_out_of_range:
+                self._range_violations_total += 1
+            if self._last_price_negative:
                 self._range_violations_total += 1
 
     def _verify_registration_completeness(self) -> tuple[set[str], set[str]]:
@@ -807,20 +855,26 @@ class HELICSFleet:
         return not self._last_per_dwelling_voltage_out_of_range
 
     @property
+    def helics_price_valid(self) -> bool:
+        """True when the most recent price subscription was non-negative."""
+        return not self._last_price_negative
+
+    @property
     def helics_control_clamped(self) -> int:
         """Count of control signal fields that exceeded validation ranges this timestep."""
         return self._control_clamped
 
     @property
     def helics_range_violations_total(self) -> int:
-        """Cumulative count of all range violations (voltage, control) across the run."""
+        """Cumulative count of all range violations (voltage, price, control) across the run."""
         return self._range_violations_total
 
     def get_diagnostic_row(self) -> dict[str, object]:
         """Return a dict of HELICS diagnostic fields for this timestep.
 
         Keys: ``helics_voltage_all_valid`` (bool), ``per_dwelling_voltage_valid`` (bool),
-        ``helics_control_clamped`` (int), ``helics_range_violations_total`` (int),
+        ``helics_price_valid`` (bool), ``helics_control_clamped`` (int),
+        ``helics_range_violations_total`` (int),
         ``helics_stale_subscription_count`` (int),
         ``helics_update_mask`` (int).
 
@@ -829,6 +883,7 @@ class HELICSFleet:
         return {
             "helics_voltage_all_valid": self.helics_voltage_all_valid,
             "per_dwelling_voltage_valid": self.per_dwelling_voltage_valid,
+            "helics_price_valid": self.helics_price_valid,
             "helics_control_clamped": self.helics_control_clamped,
             "helics_range_violations_total": self.helics_range_violations_total,
             "helics_stale_subscription_count": self._stale_subscription_count,

@@ -1180,6 +1180,19 @@ impl PyDwelling {
         Ok(())
     }
 
+    pub fn set_frequency(&self, frequency_hz: f64) -> PyResult<()> {
+        // Loud on non-finite frequency at the boundary (the shared
+        // validators' section rationale, `utils.rs`). The engine's
+        // setter validates the full contract (a finite value in
+        // [40, 80] Hz); finiteness is re-checked here so the Python
+        // caller sees the boundary's error class for NaN before the
+        // dwelling is acquired.
+        validate_finite(frequency_hz, "frequency_hz")?;
+        let mut dwelling = self.acquire()?;
+        dwelling.set_frequency(frequency_hz).map_err(to_py_err)?;
+        Ok(())
+    }
+
     #[cfg(feature = "observe")]
     pub fn enable_observer(&self, capacity: usize) -> PyResult<()> {
         let mut dwelling = self.acquire()?;

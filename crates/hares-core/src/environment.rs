@@ -1594,6 +1594,14 @@ impl EnvironmentManager {
         self.grid_override = Some(grid);
     }
 
+    /// The active grid override, mutable: a caller composing one
+    /// override channel (frequency) into another's stored state uses
+    /// this instead of rebuilding the whole [`GridState`]. `None` when
+    /// no override is active (the defaults rule).
+    pub fn grid_override_mut(&mut self) -> Option<&mut GridState> {
+        self.grid_override.as_mut()
+    }
+
     /// Clear any active grid override and restore defaults.
     pub fn clear_grid_override(&mut self) {
         self.grid_override = None;

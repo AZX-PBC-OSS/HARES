@@ -143,6 +143,25 @@ use synthetic::{
 
 const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 
+/// The utility voltage the environment's grid state carries when no
+/// voltage override was set (the same constant the environment manager's
+/// no-override path uses).
+const DEFAULT_GRID_VOLTAGE_PU: f64 = 1.0;
+
+/// The admitted grid-frequency override band, in Hz.
+///
+/// The band spans both nominal frequencies' governing event ranges with
+/// transient headroom: a 60 Hz system's under-frequency load-shedding band
+/// (57.0 to 60.5 Hz) and a 50 Hz system's (47.5 to 52.0 Hz) sit well
+/// inside [40, 80] Hz, and the band still rejects the unit-mixup and
+/// corruption classes (zero, negative, a 10x slip, NaN, infinity) the
+/// voltage override's validation rejects. Anything outside is not a grid
+/// frequency a premise simulation should be fed; the setter refuses it
+/// naming the band, and the HELICS boundary counts it and never applies
+/// it.
+const GRID_FREQUENCY_HZ_MIN: f64 = 40.0;
+const GRID_FREQUENCY_HZ_MAX: f64 = 80.0;
+
 /// Bus voltage [pu] formed by an island-capable source during a utility
 /// outage. The minimal islanding model assumes the grid-forming source
 /// regulates the bus at nominal; no island power-flow or droop physics is
@@ -3082,6 +3101,14 @@ pub struct Dwelling {
     /// `reset_with_seed` builds) warns again instead of inheriting the
     /// previous run's consumed gate.
     island_unserved_warned: bool,
+    /// The run's grid-frequency override, the value `set_frequency`
+    /// stored. Composed into the environment's grid state beside the
+    /// voltage override: `set_grid_voltage` must never overwrite a set
+    /// frequency (the 60 Hz constant is the fallback when no override
+    /// was given, never an overwrite). Not checkpointed, matching the
+    /// voltage override's treatment: the overrides are run
+    /// configuration the driving scenario re-applies after a restore.
+    grid_frequency_override_hz: Option<f64>,
     /// The observation dispatch's per-run warn-once gates (the
     /// actor-telemetry fallbacks): the run's own state, fresh with the
     /// dwelling, never a process global shared across runs or threads.
@@ -4714,6 +4741,7 @@ fn assemble_from_blueprint_with_seed(
         island_unserved_w: 0.0,
         island_excess_w: 0.0,
         island_unserved_warned: false,
+        grid_frequency_override_hz: None,
         observation_warn_once: ObservationWarnOnce::default(),
         reports: config.sim_config.reports.clone(),
         diagnostics: config.sim_config.diagnostics,
@@ -5504,11 +5532,66 @@ impl Dwelling {
         }
         self.environment.set_grid_override(GridState {
             voltage_pu,
-            frequency_hz: DEFAULT_GRID_FREQUENCY_HZ,
+            // The stored frequency override survives a voltage call: the
+            // 60 Hz constant is the fallback when no frequency was set,
+            // never an overwrite of a set value.
+            frequency_hz: self
+                .grid_frequency_override_hz
+                .unwrap_or(DEFAULT_GRID_FREQUENCY_HZ),
             island_bus_voltage_pu: None,
         });
         self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
         Ok(())
+    }
+
+    /// Applies a grid-frequency override through the environment manager,
+    /// stored beside the voltage override: the frequency is a first-class
+    /// grid input, and a later `set_grid_voltage` never overwrites it.
+    ///
+    /// The value is validated here: a finite frequency in [40, 80] Hz,
+    /// the band that spans both nominal frequencies' governing event
+    /// ranges (60 Hz UFLS 57.0-60.5, 50 Hz 47.5-52.0) with transient
+    /// headroom while rejecting the unit-mixup and corruption classes.
+    /// The environment's grid state carries the frequency every step
+    /// (60 Hz when no override was given); equipment reading
+    /// `GridState::frequency_hz` sees the set value at the next step.
+    ///
+    /// # Errors
+    ///
+    /// `HaresError::Dwelling` naming the value and the accepted band when
+    /// `frequency_hz` is not a finite value in [40, 80] Hz.
+    pub fn set_frequency(&mut self, frequency_hz: f64) -> Result<()> {
+        let valid = frequency_hz.is_finite()
+            && (GRID_FREQUENCY_HZ_MIN..=GRID_FREQUENCY_HZ_MAX).contains(&frequency_hz);
+        if !valid {
+            return Err(HaresError::Dwelling(format!(
+                "set_frequency: {frequency_hz} Hz is not a valid grid frequency override: \
+                 a finite value in [{GRID_FREQUENCY_HZ_MIN}, {GRID_FREQUENCY_HZ_MAX}] Hz \
+                 is required"
+            )));
+        }
+        self.grid_frequency_override_hz = Some(frequency_hz);
+        match self.environment.grid_override_mut() {
+            // A frequency-only run composes the override with the default
+            // utility voltage: the override replaces the grid state
+            // wholesale, so the voltage it carries must be the same
+            // default the no-override path would have used.
+            Some(grid) => grid.frequency_hz = frequency_hz,
+            None => self.environment.set_grid_override(GridState {
+                voltage_pu: DEFAULT_GRID_VOLTAGE_PU,
+                frequency_hz,
+                island_bus_voltage_pu: None,
+            }),
+        }
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
+        Ok(())
+    }
+
+    /// Returns the active grid-frequency override, `None` when the run
+    /// runs the 60 Hz constant (the fallback).
+    #[must_use]
+    pub fn grid_frequency_override_hz(&self) -> Option<f64> {
+        self.grid_frequency_override_hz
     }
 
     /// Selects the named observation channels into a flat contiguous
