@@ -9710,6 +9710,11 @@ fn zone_display_name(
 /// programming errors that would cause two EV drivers to share identical
 /// stochastic behaviour — silently correlated streams are a latent data-quality
 /// hazard that is nearly impossible to detect from simulation output alone.
+/// The `seen` map opens on the live roster's own reported pairs, so a newly
+/// built driver cannot take a pair a caller-supplied driver (a registry-built
+/// EV driver) already holds; the caller half of the guard, the same rejection
+/// for a supplied actor against the dwelling's assignments, runs in
+/// `Dwelling::ensure_actor_rng_pairs_free` at every add.
 #[cfg(any(debug_assertions, test))]
 fn check_ev_rng_stream_no_collision(
     seen: &mut HashMap<([u8; 32], u64), String>,
@@ -9802,7 +9807,14 @@ pub(crate) fn build_actors_from_seeds(
     let mut built_in_actors: Vec<Box<dyn Actor>> = Vec::new();
 
     #[cfg(any(debug_assertions, test))]
-    let mut seen_rng_pairs: HashMap<([u8; 32], u64), String> = HashMap::new();
+    let mut seen_rng_pairs: HashMap<([u8; 32], u64), String> = existing_actors
+        .iter()
+        .filter_map(|actor| {
+            actor
+                .rng_stream_state()
+                .map(|state| ((state.seed, state.stream), actor.name().to_string()))
+        })
+        .collect();
 
     for (name, seed) in seeds {
         match seed {
@@ -15270,6 +15282,84 @@ occupancy = 1.0
             sub_b.get_stream(),
             "EvDriver:EV_002",
         );
+    }
+
+    /// The collision guard's registry half, at the dwelling level: a
+    /// registry EV driver whose configured seed equals the run's master
+    /// seed and whose dwelling id equals the building id keys its day roll
+    /// on `driver_key_material`, byte-identical to the dwelling key, at
+    /// the reserved stream nonce the first built-in driver already holds.
+    /// The add is rejected with the collision named. Under a declared
+    /// scenario the dwelling key's bytes 16..24 hold the scenario id the
+    /// key material never carries, so the same configuration does not
+    /// collide and the same add succeeds.
+    #[test]
+    fn registry_ev_driver_on_the_master_seed_and_building_id_is_caught() {
+        use crate::actor_registry::{ActorConfig, ActorRegistry};
+        use hares_equipment::config::ConfigValue;
+
+        let (_dir, toml_path) = temp_toml("registry_driver_master_seed_collision");
+        write_minimal_toml(&toml_path);
+
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        add_driven_ev(&mut dwelling, "EV1");
+        // The built-in driver holds the dwelling key at the reserved base
+        // stream: exactly the pair the colliding registry driver derives.
+        assert_eq!(
+            driver_stream(&dwelling, "EV1"),
+            crate::rng::RNG_STREAM_EV_DRIVER_BASE,
+            "the first built-in driver rides the reserved base stream"
+        );
+
+        let registry = ActorRegistry::new();
+        // The configured seed 0 is the TOML's master seed, and the
+        // dwelling id 9001 is the TOML's building id: the key material
+        // equals the dwelling key byte for byte.
+        let mut colliding = ActorConfig::new("Probe", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(0.0));
+        colliding.dwelling_id = 9001;
+        let err = dwelling
+            .add_actor_by_name(&registry, colliding)
+            .expect_err("the registry driver on the master seed and building id is caught");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Probe") && msg.contains("already assigned"),
+            "the rejection names the actor and the assignment it clashes with: {msg}"
+        );
+        // The rejected actor never joined: the roster holds the built-in
+        // driver alone.
+        assert_eq!(dwelling.actors.len(), 1, "the roster is unchanged");
+
+        // A different configured seed derives a different key: the add
+        // succeeds.
+        let distinct = ActorConfig::new("Probe", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(7.0));
+        dwelling
+            .add_actor_by_name(&registry, distinct)
+            .expect("a driver keyed on its own seed does not collide");
+
+        // The scenario path is unaffected: bytes 16..24 hold the scenario
+        // id, the key material never does, and the pairs differ.
+        let (_scenario_dir, scenario_path) = temp_toml("registry_driver_master_seed_scenario");
+        let mut scenario_toml = fs::read_to_string(&toml_path).expect("the minimal TOML reads");
+        scenario_toml = scenario_toml.replacen(
+            "master_seed = 0",
+            "master_seed = 0\nscenario_seed = 5",
+            1,
+        );
+        fs::write(&scenario_path, scenario_toml).expect("the scenario TOML writes");
+        let mut scenario_dwelling =
+            Dwelling::from_toml_config(&scenario_path).expect("the scenario dwelling builds");
+        add_driven_ev(&mut scenario_dwelling, "EV1");
+        let mut same_seed = ActorConfig::new("Probe", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(0.0));
+        same_seed.dwelling_id = 9001;
+        scenario_dwelling
+            .add_actor_by_name(&registry, same_seed)
+            .expect("under a declared scenario the key material does not collide");
     }
 
     #[test]
