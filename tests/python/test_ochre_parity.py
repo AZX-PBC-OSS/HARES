@@ -382,6 +382,11 @@ def test_parity(
 # the events), so the heating draw fell 32.5037 to 28.0696 kWh and the
 # total 55.0445 to 50.6104 kWh. An interim record of 32.7613/55.3021 was
 # measured on a stale extension without the defrost fix and is struck.
+# Verified 2026-10-26 for the defrost discrete cycle's coarse-dt guard (the
+# defrost entry in docs/PHYSICS_DECISIONS.md): the guard selects the
+# continuous model at steps longer than the 210 s defrost event; this
+# parity run is 1-minute steps, inside the discrete regime the guard does
+# not touch, so the HARES records below hold re-verified and unchanged.
 PARITY_24H_HEATING_OCHRE_KWH = 30.9974
 PARITY_24H_HEATING_HARES_KWH = 28.0696
 PARITY_24H_WATER_HEATING_OCHRE_KWH = 1.0083
