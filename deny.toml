@@ -23,4 +23,5 @@ ignore = [
     { id = "RUSTSEC-2026-0391", reason = "zstd 0.14 blocked by pyo3-arrow's arrow-array 59; parquet's local-file write path does not reach the with_context stream-reuse bug; revisit at pyo3-arrow's arrow-60 release" },
     { id = "RUSTSEC-2026-0398", reason = "zstd 0.14 blocked by pyo3-arrow's arrow-array 59; the seekable feature is not enabled in this build; revisit at pyo3-arrow's arrow-60 release" },
     { id = "RUSTSEC-2026-0403", reason = "zstd 0.14 blocked by pyo3-arrow's arrow-array 59; same exposure analysis as RUSTSEC-2026-0391; revisit at pyo3-arrow's arrow-60 release" },
+    { id = "RUSTSEC-2026-0410", reason = "the wasm32 allocator shim's unchecked allocation failure; this project builds only x86_64-unknown-linux-gnu and aarch64-apple-darwin, so the wasm32 target is unreachable; revisit if a wasm32 target is ever added" },
 ]
