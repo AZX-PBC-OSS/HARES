@@ -253,8 +253,8 @@ impl Dwelling {
     ///
     /// `HaresError::Control` when an actor with the same name is already
     /// registered, or when the actor's seeded RNG stream is already
-    /// assigned (see [`Self::ensure_actor_rng_pairs_free`]); the roster
-    /// plan's error otherwise, which includes the
+    /// assigned (the private `ensure_actor_rng_pairs_free` guard); the
+    /// roster plan's error otherwise, which includes the
     /// actor's own when it cannot act on its targets
     /// ([`Actor::validate_equipment`]). On `Err` the actor roster and
     /// schedule are exactly as before the call.
@@ -722,7 +722,8 @@ impl Dwelling {
     /// As [`Self::add_equipment`]; the reason is `HaresError::Control` when
     /// the equipment passes its own validation but a supplied actor's name
     /// is already registered, or when a supplied actor's seeded RNG stream
-    /// is already assigned (see [`Self::ensure_actor_rng_pairs_free`]).
+    /// is already assigned (the private `ensure_actor_rng_pairs_free`
+    /// guard).
     pub fn add_equipment_with_actors(
         &mut self,
         mut eq: Box<dyn Equipment>,
