@@ -61,11 +61,11 @@ impl RngStream {
 ///
 /// Contract: this derivation is where the master seed's reach ends. The
 /// fleet path threads the seed here and nowhere else: the DR compliance
-/// driver's draw, the EV driver's key material and a noisy TimeWindows
-/// source's keystream key key on their own configured seed or identity,
-/// and the fleet path constructs none of them. If the fleet path gains
-/// actor or noisy-source construction, the master seed MUST thread into
-/// their unspecified-seed derivations the same way, or re-seeding a
+/// driver's draw, the registry EV driver's key material and a noisy
+/// TimeWindows source's keystream key key on their own configured seed or
+/// identity, and the fleet path constructs none of them. If the fleet path
+/// gains actor or noisy-source construction, the master seed MUST thread
+/// into their unspecified-seed derivations the same way, or re-seeding a
 /// fleet would silently leave those streams unseeded.
 #[must_use]
 pub fn dwelling_seed(master_seed: u64, bldg_id: i64) -> [u8; 32] {
@@ -92,16 +92,17 @@ pub const SCENARIO_PRESENCE_BYTE: u8 = 1;
 /// scenario 0 differs from the absent scenario at byte 24 (the presence
 /// byte), so "scenario 0" and "no scenario" never share a stream. The
 /// mix lands where the master seed's reach ends, so every surface inside
-/// the dwelling key (the dwelling's own stream, the EV driver streams,
-/// every event-load interior) inherits scenario disjointness with no
-/// per-site change.
+/// the dwelling key (the dwelling's own stream, the built-in EV drivers'
+/// streams, every event-load interior) inherits scenario disjointness
+/// with no per-site change.
 ///
 /// Named scope, not an oversight: the identity-keyed surfaces outside
-/// the derivation (`schedule_source_key`, the EV driver's key material)
-/// do not receive the scenario. Two scenarios whose dwellings carry
-/// identically configured unspecified-seed noisy sources share those
-/// sources' keystreams; the contract docs name the scope and the escape
-/// (an explicit per-source seed).
+/// the derivation (`schedule_source_key`, the registry EV driver's key
+/// material) do not receive the scenario. Two scenarios share an
+/// unspecified-seed noisy source's keystream only when both dwellings
+/// address the same dwelling identity (the same building id); different
+/// building ids derive different keys. The contract docs name the scope
+/// and the escape (an explicit per-source seed).
 #[must_use]
 pub fn dwelling_seed_scenario(
     master_seed: u64,
@@ -131,9 +132,11 @@ pub fn dwelling_seed_scenario(
 /// would otherwise share.
 ///
 /// Named scope: the scenario seed does not enter this derivation. The
-/// key depends on the identity alone, so two scenarios' dwellings whose
-/// sources are identically configured and unspecified-seed derive the
-/// same keys and share those keystreams; that share is deliberate (an
+/// key depends on the identity alone, so two scenarios that address the
+/// same dwelling identity (the same building id) and configure their
+/// sources identically and unspecified-seed derive the same keys and
+/// share those keystreams; dwellings with different building ids derive
+/// different keys. That share is deliberate (an
 /// identity-keyed key stays stable across scenario relabeling), and a
 /// scenario that needs its own series for a source sets the source's
 /// explicit seed. The scope is stated in the RNG contract docs.

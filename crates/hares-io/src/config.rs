@@ -102,11 +102,14 @@ pub struct SimulationConfig {
     /// draw disjoint streams, a declared scenario 0 is not the absent
     /// scenario, and the absent scenario keeps the scenario-less
     /// derivation's exact bytes. The mix reaches every surface inside
-    /// the per-dwelling key (the dwelling's own stream, the EV driver
-    /// streams, every event-load interior); the identity-keyed surfaces
-    /// (an unspecified-seed noisy source's keystream key, the EV driver's
-    /// key material) key on identity alone and are outside the scenario's
-    /// reach, the scope the RNG contract docs name.
+    /// the per-dwelling key (the dwelling's own stream, the built-in EV
+    /// drivers' streams, every event-load interior); the identity-keyed
+    /// surfaces (an unspecified-seed noisy source's keystream key, the
+    /// registry EV driver's key material) key on identity alone and are
+    /// outside the scenario's reach: two scenarios share such a keystream
+    /// only when both dwellings address the same building id, different
+    /// building ids deriving different keys. The scope the RNG contract
+    /// docs name.
     #[serde(default)]
     pub scenario_seed: Option<u64>,
     /// IANA timezone for civil-time schedule indexing (e.g. "America/Denver").
