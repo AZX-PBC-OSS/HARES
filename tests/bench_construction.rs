@@ -209,6 +209,34 @@ fn bench_checkpoint_round_trip_assertions_hold_at_both_roster_sizes() {
     );
 }
 
+/// The rl_episode bench's year episode runs to completion: the 8760-step
+/// bench's dwelling (the shared synthetic fixture, 3600 s steps, the
+/// leap-year start 2024-01-01) steps its full 8,760-step loop without
+/// meeting the run's end. The bench was ungated in CI until the complete
+/// bench gate set ran it, and its first gated run panicked at the
+/// boundary: at a 365-day duration the typical-weather rule's Feb 29
+/// skip leaves 8,736 steps, and the bench's 8,760th step was past the
+/// configured end (RED at the base `de259c8e`'s own probe; the fix, the
+/// 366-day duration, is in the bench). The suite runs the episode's
+/// construction and its full step loop at suite cost (about a second),
+/// so the boundary can never again sit outside every test's reach.
+#[test]
+fn bench_rl_episode_year_episode_steps_to_completion() {
+    let dir = tempdir().expect("bench temp dir");
+    let path = bench_common::numbered_path(dir.path(), "hares-bench-rl-episode-year", "toml");
+    // The fix's exact shape: the bench's make_dwelling call with the
+    // 366-day duration and the 3600 s step.
+    std::fs::write(&path, bench_common::synthetic_toml(31_622_400, 3_600))
+        .expect("write the year episode's TOML");
+    let mut dwelling = Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
+        .expect("the year episode's dwelling must construct");
+    for step in 0..8_760 {
+        dwelling
+            .step()
+            .unwrap_or_else(|err| panic!("the year episode's step {step} fails: {err}"));
+    }
+}
+
 /// The shared fixture's report destinations are relative to the bench
 /// directory the caller passes; a re-run in a test writes its own files,
 /// so the report paths point at the test's own directory.

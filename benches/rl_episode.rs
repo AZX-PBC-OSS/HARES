@@ -166,7 +166,18 @@ fn bench_episode_single(c: &mut Criterion, dir: &Path) {
         let (time_res_s, duration_s, label) = if num_steps == EPISODE_96 {
             (900, 86_400, "96_steps")
         } else {
-            (3600, 31_536_000, "8760_steps")
+            // The episode's 8,760 steps are one year of hourly elements,
+            // and the synthetic fixture's start is 2024-01-01: a leap
+            // year. The typical-weather rule's Feb 29 skip removes the
+            // interval's Feb 29 (86,400 s), so a 365-day duration holds
+            // 8,736 steps and the episode's 8,760th step is past the
+            // configured end (the run steps 8,736 times, then refuses:
+            // "simulation already reached configured end"; the base
+            // commit's own probe, run before this fix). The duration is
+            // 366 days: with the skip, exactly 8,760 steps; without it,
+            // 8,784, and the 8,760-step loop is inside the run either
+            // way.
+            (3600, 31_622_400, "8760_steps")
         };
 
         let sample_size = 10;
@@ -233,9 +244,15 @@ fn bench_episode_vec(c: &mut Criterion, dir: &Path) {
         (16, 900, 86_400, "16d_96s_15min"),
         (64, 900, 86_400, "64d_96s_15min"),
         (256, 900, 86_400, "256d_96s_15min"),
-        (16, 3600, 31_536_000, "16d_8760s_1hr"),
-        (64, 3600, 31_536_000, "64d_8760s_1hr"),
-        (256, 3600, 31_536_000, "256d_8760s_1hr"),
+        // The 8760-step year episodes: the 366-day duration (not 365) is
+        // the boundary fix the single-episode bench's comment carries:
+        // the leap-year start's Feb 29 is skipped under the typical
+        // weather rule, so 365 days holds 8,736 steps and the 8,760th
+        // step is past the configured end; 366 days holds exactly 8,760
+        // with the skip and 8,784 without it.
+        (16, 3600, 31_622_400, "16d_8760s_1hr"),
+        (64, 3600, 31_622_400, "64d_8760s_1hr"),
+        (256, 3600, 31_622_400, "256d_8760s_1hr"),
     ];
 
     for &(num_dwellings, time_res_s, duration_s, label) in configs {
