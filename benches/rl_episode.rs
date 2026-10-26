@@ -176,8 +176,14 @@ fn bench_episode_single(c: &mut Criterion, dir: &Path) {
             // commit's own probe, run before this fix). The duration is
             // 366 days: with the skip, exactly 8,760 steps; without it,
             // 8,784, and the 8,760-step loop is inside the run either
-            // way.
-            (3600, 31_622_400, "8760_steps")
+            // way. The constants are the shared bench constants
+            // (common::YEAR_EPISODE_*), the same shapes the
+            // bench_construction suite's year witnesses run.
+            (
+                common::YEAR_EPISODE_TIME_RES_S,
+                common::YEAR_EPISODE_DURATION_S,
+                "8760_steps",
+            )
         };
 
         let sample_size = 10;
@@ -249,10 +255,26 @@ fn bench_episode_vec(c: &mut Criterion, dir: &Path) {
         // the leap-year start's Feb 29 is skipped under the typical
         // weather rule, so 365 days holds 8,736 steps and the 8,760th
         // step is past the configured end; 366 days holds exactly 8,760
-        // with the skip and 8,784 without it.
-        (16, 3600, 31_622_400, "16d_8760s_1hr"),
-        (64, 3600, 31_622_400, "64d_8760s_1hr"),
-        (256, 3600, 31_622_400, "256d_8760s_1hr"),
+        // with the skip and 8,784 without it. The constants are the
+        // shared bench constants (common::YEAR_EPISODE_*).
+        (
+            16,
+            common::YEAR_EPISODE_TIME_RES_S,
+            common::YEAR_EPISODE_DURATION_S,
+            "16d_8760s_1hr",
+        ),
+        (
+            64,
+            common::YEAR_EPISODE_TIME_RES_S,
+            common::YEAR_EPISODE_DURATION_S,
+            "64d_8760s_1hr",
+        ),
+        (
+            256,
+            common::YEAR_EPISODE_TIME_RES_S,
+            common::YEAR_EPISODE_DURATION_S,
+            "256d_8760s_1hr",
+        ),
     ];
 
     for &(num_dwellings, time_res_s, duration_s, label) in configs {

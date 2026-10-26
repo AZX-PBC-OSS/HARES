@@ -120,36 +120,53 @@ fn bench_checkpoint_bench_is_registered() {
 }
 
 /// The CI bench job's gate set is the complete registered set: every
-/// `[[bench]]` entry across the workspace manifests is named with
-/// `--bench <name>` on both of the bench job's `cargo bench` command
-/// lines (the baseline generation and the PR run). The names are derived
-/// from the manifests, not enumerated here, so an eleventh bench added
-/// without a CI flag fails this test the same way the five ungated
-/// benches this test was written against do.
+/// `[[bench]]` entry across EVERY workspace member's manifest is named
+/// with `--bench <name>` on both of the bench job's `cargo bench`
+/// command lines (the baseline generation and the PR run). The members
+/// are enumerated by `cargo metadata` at test time, the bench names
+/// parsed from each member's manifest, so a bench added to any crate's
+/// manifest (hares-fleet's or hares-io's included) without a CI flag
+/// fails this test the same way the five ungated benches this test was
+/// written against do.
 #[test]
 fn ci_bench_job_gates_every_registered_bench() {
-    let manifests = [
-        include_str!("../crates/hares-core/Cargo.toml"),
-        include_str!("../crates/hares-envelope/Cargo.toml"),
-    ];
-    let mut registered: Vec<&str> = Vec::new();
-    for manifest in &manifests {
-        let mut lines = manifest.lines();
-        while let Some(line) = lines.next() {
-            if line.trim() != "[[bench]]" {
-                continue;
-            }
-            let name = lines
-                .next()
-                .map(str::trim)
-                .and_then(|line| line.strip_prefix("name = \""))
-                .and_then(|line| line.strip_suffix('"'))
-                .unwrap_or_else(|| panic!("a [[bench]] section without a name line"));
-            registered.push(name);
-        }
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let output = std::process::Command::new(cargo)
+        .args(["metadata", "--no-deps", "--offline", "--format-version", "1"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        output.status.success(),
+        "cargo metadata fails: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the workspace metadata parses");
+    let manifest_paths: Vec<String> = metadata["packages"]
+        .as_array()
+        .expect("the metadata carries the workspace member list")
+        .iter()
+        .filter_map(|package| package["manifest_path"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        manifest_paths.len() >= 10,
+        "the workspace members enumerate to fewer than the ten crates the \
+         workspace declares: {manifest_paths:?}"
+    );
+
+    let mut registered: Vec<String> = Vec::new();
+    for path in &manifest_paths {
+        let manifest = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("the member manifest {path} reads: {err}"));
+        registered.extend(
+            registered_benches(&manifest)
+                .into_iter()
+                .map(str::to_string),
+        );
     }
     assert!(
-        registered.contains(&"single_building"),
+        registered.contains(&"single_building".to_string()),
         "the manifest parse found no benches: {registered:?}"
     );
 
@@ -166,7 +183,7 @@ fn ci_bench_job_gates_every_registered_bench() {
     for command in &commands {
         let missing: Vec<&str> = registered
             .iter()
-            .copied()
+            .map(String::as_str)
             .filter(|name| !command.contains(&format!("--bench {name} ")))
             .collect();
         assert!(
@@ -175,6 +192,26 @@ fn ci_bench_job_gates_every_registered_bench() {
              missing {missing:?} on {command:?}"
         );
     }
+}
+
+/// The `[[bench]]` entries' names in one manifest's text, in declaration
+/// order: the `[[bench]]` section header followed by its `name` line.
+fn registered_benches(manifest: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut lines = manifest.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "[[bench]]" {
+            continue;
+        }
+        let name = lines
+            .next()
+            .map(str::trim)
+            .and_then(|line| line.strip_prefix("name = \""))
+            .and_then(|line| line.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("a [[bench]] section without a name line"));
+        names.push(name);
+    }
+    names
 }
 
 /// The checkpoint bench's two rosters and its own setup assertions, at
@@ -210,30 +247,66 @@ fn bench_checkpoint_round_trip_assertions_hold_at_both_roster_sizes() {
 }
 
 /// The rl_episode bench's year episode runs to completion: the 8760-step
-/// bench's dwelling (the shared synthetic fixture, 3600 s steps, the
-/// leap-year start 2024-01-01) steps its full 8,760-step loop without
-/// meeting the run's end. The bench was ungated in CI until the complete
-/// bench gate set ran it, and its first gated run panicked at the
-/// boundary: at a 365-day duration the typical-weather rule's Feb 29
-/// skip leaves 8,736 steps, and the bench's 8,760th step was past the
-/// configured end (RED at the base `de259c8e`'s own probe; the fix, the
-/// 366-day duration, is in the bench). The suite runs the episode's
-/// construction and its full step loop at suite cost (about a second),
-/// so the boundary can never again sit outside every test's reach.
+/// bench's dwelling (the shared synthetic fixture, the shared
+/// YEAR_EPISODE_* shapes, the leap-year start 2024-01-01) steps its full
+/// 8,760-step loop without meeting the run's end. The bench was ungated
+/// in CI until the complete bench gate set ran it, and its first gated
+/// run panicked at the boundary: at a 365-day duration the
+/// typical-weather rule's Feb 29 skip leaves 8,736 steps, and the bench's
+/// 8,760th step was past the configured end (RED at the base `de259c8e`'s
+/// own probe; the fix, the 366-day duration, is in the bench). The
+/// non-leap-start case starts 2023-01-01, where the run year carries no
+/// Feb 29 to skip and the same 366-day duration holds the full 8,784
+/// steps: the witness steps every one of them. The suite runs the
+/// episodes' constructions and full step loops at suite cost (about two
+/// seconds), so the boundary can never again sit outside every test's
+/// reach.
 #[test]
 fn bench_rl_episode_year_episode_steps_to_completion() {
     let dir = tempdir().expect("bench temp dir");
+    // The leap start: with the skip, exactly 8,760 steps, the bench's own
+    // loop length.
     let path = bench_common::numbered_path(dir.path(), "hares-bench-rl-episode-year", "toml");
-    // The fix's exact shape: the bench's make_dwelling call with the
-    // 366-day duration and the 3600 s step.
-    std::fs::write(&path, bench_common::synthetic_toml(31_622_400, 3_600))
-        .expect("write the year episode's TOML");
+    std::fs::write(
+        &path,
+        bench_common::synthetic_toml(
+            bench_common::YEAR_EPISODE_DURATION_S,
+            bench_common::YEAR_EPISODE_TIME_RES_S,
+        ),
+    )
+    .expect("write the year episode's TOML");
     let mut dwelling = Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
         .expect("the year episode's dwelling must construct");
-    for step in 0..8_760 {
+    for step in 0..bench_common::YEAR_EPISODE_STEPS {
         dwelling
             .step()
             .unwrap_or_else(|err| panic!("the year episode's step {step} fails: {err}"));
+    }
+
+    // The non-leap start: no Feb 29 in the run year, no skip, and the
+    // duration's full 8,784 steps exist to run.
+    let path = bench_common::numbered_path(dir.path(), "hares-bench-rl-episode-year", "toml");
+    std::fs::write(
+        &path,
+        bench_common::synthetic_toml_with_start(
+            bench_common::YEAR_EPISODE_DURATION_S,
+            bench_common::YEAR_EPISODE_TIME_RES_S,
+            "2023-01-01T00:00:00Z",
+        ),
+    )
+    .expect("write the non-leap year episode's TOML");
+    let mut dwelling = Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
+        .expect("the non-leap year episode's dwelling must construct");
+    let non_leap_steps: u64 = (bench_common::YEAR_EPISODE_DURATION_S
+        / bench_common::YEAR_EPISODE_TIME_RES_S) as u64;
+    assert_eq!(
+        non_leap_steps, 8_784,
+        "the 366-day duration at 3600 s holds 8,784 steps"
+    );
+    for step in 0..non_leap_steps {
+        dwelling
+            .step()
+            .unwrap_or_else(|err| panic!("the non-leap year episode's step {step} fails: {err}"));
     }
 }
 

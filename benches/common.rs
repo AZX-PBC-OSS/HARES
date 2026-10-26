@@ -171,11 +171,18 @@ pub fn build_dwelling_config(
 }
 
 pub fn synthetic_toml(duration_s: i64, time_res_s: i64) -> String {
+    synthetic_toml_with_start(duration_s, time_res_s, "2024-01-01T00:00:00Z")
+}
+
+/// The same fixture at a caller's start: the year-episode witness's
+/// non-leap case starts 2023-01-01, where the run year carries no Feb 29
+/// for the typical-weather rule to skip.
+pub fn synthetic_toml_with_start(duration_s: i64, time_res_s: i64, start: &str) -> String {
     format!(
         r#"building_id = 1
 
 [simulation]
-start_time = "2024-01-01T00:00:00Z"
+start_time = "{start}"
 time_res = {time_res_s}
 duration = {duration_s}
 output_chunk_size = 1000
@@ -236,6 +243,15 @@ pub const CHECKPOINT_SMALL_CONTINUATION_STEPS: u64 = 60; // 1 h
 /// margin.
 pub const CHECKPOINT_LARGE_PREFIX_STEPS: u64 = 96; // 24 h at 900 s
 pub const CHECKPOINT_LARGE_CONTINUATION_STEPS: u64 = 48; // 12 h
+
+/// The rl_episode bench's year-episode shape, shared with the
+/// bench_construction suite's year witnesses: 366 days at 3600 s steps.
+/// The leap-year start's Feb 29 is skipped under the typical weather
+/// rule, so the duration holds exactly 8,760 steps with the skip and
+/// 8,784 without it (the non-leap start).
+pub const YEAR_EPISODE_DURATION_S: i64 = 31_622_400;
+pub const YEAR_EPISODE_TIME_RES_S: i64 = 3_600;
+pub const YEAR_EPISODE_STEPS: usize = 8_760;
 
 /// The checkpoint bench's small-roster dwelling: the shared synthetic
 /// TOML through `from_toml_config_with_reports`, the bench's own
