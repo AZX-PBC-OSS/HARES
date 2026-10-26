@@ -135,3 +135,8 @@ name = "diagnostics_report"
 path = "../../benches/diagnostics_report.rs"
 harness = false
 
+[[bench]]
+name = "checkpoint"
+path = "../../benches/checkpoint.rs"
+harness = false
+

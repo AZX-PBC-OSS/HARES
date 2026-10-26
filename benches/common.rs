@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Duration;
+use hares_core::Dwelling;
 use hares_core::{DwellingConfig, SimulationConfig};
 
 use hares_core::DwellingSettings;
@@ -215,4 +216,197 @@ occupancy = 1.0
 pub fn synthetic_toml_case(path: &PathBuf, duration_s: i64) {
     let toml = synthetic_toml(duration_s, 60);
     fs::write(path, toml).expect("failed to write synthetic TOML fixture");
+}
+
+/// The checkpoint bench's small roster: the synthetic TOML dwelling (one
+/// zone, one electric furnace, no event loads, no actors), the checkpoint
+/// floor, the same fixture the rl_step bench builds. The run's 26-hour
+/// duration covers the bench's 24-hour prefix and its continuation with
+/// margin, so the assertion's steps never meet the run's end.
+pub const CHECKPOINT_SMALL_PREFIX_STEPS: u64 = 1_440; // 24 h at 60 s
+pub const CHECKPOINT_SMALL_CONTINUATION_STEPS: u64 = 60; // 1 h
+
+/// The checkpoint bench's large roster: the HPXML base.xml fixture at the
+/// fleet shape (900 s steps, no own reports), the eight-equipment roster
+/// the fleet and single_building benches run (heating, cooling, water
+/// heating, clothes washer, clothes dryer, dishwasher, cooking range,
+/// refrigerator; four of them RNG-carrying event appliances). The run's
+/// 48-hour duration covers the 24-hour prefix and the continuation with
+/// margin.
+pub const CHECKPOINT_LARGE_PREFIX_STEPS: u64 = 96; // 24 h at 900 s
+pub const CHECKPOINT_LARGE_CONTINUATION_STEPS: u64 = 48; // 12 h
+
+/// The checkpoint bench's small-roster dwelling: the shared synthetic
+/// TOML through `from_toml_config_with_reports`, the bench's own
+/// construction call, with no reports (the restore refuses non-memory
+/// report destinations, and the bench measures the checkpoint, not the
+/// report row streams).
+pub fn checkpoint_small_dwelling(dir: &Path) -> Dwelling {
+    let path = numbered_path(dir, "hares-bench-checkpoint-small", "toml");
+    synthetic_toml_case(&path, 93_600);
+    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
+        .expect("the checkpoint bench's small dwelling builds")
+}
+
+/// The checkpoint bench's large-roster dwelling config: the shared HPXML
+/// fixture through `build_dwelling_config` at the fleet shape.
+pub fn checkpoint_large_config(
+    dir: &Path,
+    bldg_id: i64,
+    schedule_path: &Path,
+    weather_path: &Path,
+) -> DwellingConfig {
+    let mut config = build_dwelling_config(
+        dir,
+        bldg_id,
+        schedule_path.to_path_buf(),
+        weather_path.to_path_buf(),
+        repo_defaults_path(),
+        Duration::hours(48),
+    );
+    config.settings.sim_config.reports.clear();
+    config.settings.sim_config.time_res = Duration::seconds(900);
+    config
+}
+
+/// The checkpoint bench's large-roster dwelling: the config above through
+/// `Dwelling::from_config`, the construction the restore target repeats.
+pub fn checkpoint_large_dwelling(
+    dir: &Path,
+    bldg_id: i64,
+    schedule_path: &Path,
+    weather_path: &Path,
+) -> Dwelling {
+    let config = checkpoint_large_config(dir, bldg_id, schedule_path, weather_path);
+    Dwelling::from_config(config).expect("the checkpoint bench's large dwelling builds")
+}
+
+/// Steps `n` times, failing with `what` named: the bench's prefix and
+/// continuation loops, and the same loops in the suite's copy.
+pub fn step_n(dwelling: &mut Dwelling, n: u64, what: &str) {
+    for _ in 0..n {
+        dwelling
+            .step()
+            .unwrap_or_else(|err| panic!("{what}: the step fails: {err}"));
+    }
+}
+
+/// The checkpoint's canonical JSON bytes: the `serde_json::Value` form,
+/// whose objects are BTreeMaps (serde_json without `preserve_order`), so
+/// every map's keys render in sorted order whatever iteration order the
+/// snapshot's own HashMap instances happened to hold. The canonical form
+/// is the bench's bitwise witness: equal bytes pin equal structure and
+/// equal float bits (the shortest round-trip form is injective per bit
+/// pattern, -0.0 rendering apart from 0.0).
+pub fn canonical_checkpoint_bytes(checkpoint: &hares_core::DwellingCheckpoint) -> Vec<u8> {
+    let value = serde_json::to_value(checkpoint).expect("the checkpoint converts to a JSON value");
+    serde_json::to_vec(&value).expect("the canonical form serializes")
+}
+
+/// The checkpoint bench's setup assertions, run once per roster size
+/// outside the timed regions (and by the bench_construction suite at
+/// suite cost), failing loudly if either breaks: a bench that cannot
+/// detect a deliberate regression in the path it times is a finding.
+///
+/// 1. State bit-identity after restore: the prefix-stepped state saves,
+///    serializes, parses through the gated reader and restores into a
+///    freshly built dwelling of the same fixture; the restored dwelling
+///    re-saves a checkpoint equal to the saved one field for field (the
+///    type derives `PartialEq`, the maps comparing order-independently)
+///    and equal in canonical bytes (every float bit preserved).
+/// 2. The restored run's continuation equivalence: the restored dwelling
+///    and a fresh continuous dwelling step the same further steps; the
+///    two end states are equal field for field and in canonical bytes,
+///    the two actor-facing environment maps excluded (see the compare's
+///    comment). The full output-surface acceptance stays with the
+///    checkpoint_resume suite; this is the bench's own short witness.
+pub fn assert_checkpoint_round_trip(
+    dir: &Path,
+    build: impl Fn() -> Dwelling,
+    prefix_steps: u64,
+    continuation_steps: u64,
+    label: &str,
+) {
+    let mut source = build();
+    step_n(&mut source, prefix_steps, &format!("{label}: the prefix"));
+    let checkpoint = source
+        .save_checkpoint()
+        .unwrap_or_else(|err| panic!("{label}: the prefix state saves: {err}"));
+    // The pinned file path: the serde_json serialization, the SHA-256
+    // checksum and the atomic rename, then the checksum verify and the
+    // gated parse back.
+    let file = numbered_path(dir, "hares-bench-checkpoint-assert", "json");
+    checkpoint
+        .save(&file)
+        .unwrap_or_else(|err| panic!("{label}: the checkpoint file writes: {err}"));
+    let loaded = hares_core::DwellingCheckpoint::load(&file)
+        .unwrap_or_else(|err| panic!("{label}: the checkpoint file loads: {err}"));
+
+    // Bit-identity: the gated parse restores into a fresh dwelling of the
+    // same fixture, and that dwelling re-saves the same state.
+    let mut restored = build();
+    restored
+        .load_checkpoint(loaded.clone())
+        .unwrap_or_else(|err| panic!("{label}: the checkpoint restores: {err}"));
+    let re_saved = restored
+        .save_checkpoint()
+        .unwrap_or_else(|err| panic!("{label}: the restored state saves: {err}"));
+    assert_eq!(
+        loaded, checkpoint,
+        "{label}: the file round trip changes the checkpoint"
+    );
+    assert_eq!(
+        re_saved, loaded,
+        "{label}: the restored dwelling re-saves a different checkpoint"
+    );
+    assert_eq!(
+        canonical_checkpoint_bytes(&re_saved),
+        canonical_checkpoint_bytes(&checkpoint),
+        "{label}: the re-saved checkpoint's canonical bytes differ from the saved run's"
+    );
+
+    // Continuation equivalence: the restored run and the continuous run
+    // step the same further steps and hold the same committed state. The
+    // two actor-facing environment maps are excluded (cleared on both
+    // side's snapshot before the compare): the restore's own
+    // `snapshot_equipment_state` registers telemetry keys the continuous
+    // run's maps never held (observed: the air conditioner's `shr`, never
+    // cooled, present in the restored run's map only), the divergence
+    // `load_checkpoint`'s own doc acknowledges when it overwrites the maps
+    // with the checkpoint's; the committed state the checkpoint carries
+    // (the equipment blobs, the thermal, humidity and fluid state, the
+    // RNG, the electrical summary, the health and warning records)
+    // compares in full.
+    step_n(
+        &mut restored,
+        continuation_steps,
+        &format!("{label}: the continuation"),
+    );
+    let mut restored_end = restored
+        .save_checkpoint()
+        .unwrap_or_else(|err| panic!("{label}: the continued state saves: {err}"));
+    restored_end.env_equipment_telemetry.clear();
+    restored_end.env_equipment_core.clear();
+    let mut continuous = build();
+    step_n(
+        &mut continuous,
+        prefix_steps + continuation_steps,
+        &format!("{label}: the continuous run"),
+    );
+    let mut continuous_end = continuous
+        .save_checkpoint()
+        .unwrap_or_else(|err| panic!("{label}: the continuous state saves: {err}"));
+    continuous_end.env_equipment_telemetry.clear();
+    continuous_end.env_equipment_core.clear();
+    assert_eq!(
+        restored_end, continuous_end,
+        "{label}: the resumed run's committed state after {continuation_steps} further \
+         steps is not the continuous run's"
+    );
+    assert_eq!(
+        canonical_checkpoint_bytes(&restored_end),
+        canonical_checkpoint_bytes(&continuous_end),
+        "{label}: the resumed run's committed state after {continuation_steps} further \
+         steps is not the continuous run's, byte for byte"
+    );
 }
