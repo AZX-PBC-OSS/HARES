@@ -39,6 +39,9 @@ pub(crate) enum ObservationKind {
     OutdoorHumidityRatio,
     TotalPowerKw,
     ReactivePowerKvar,
+    GridInterchangeKw,
+    Islanded,
+    BusVoltagePu,
     /// The zone at `position` in the sorted-zone-id order; `id` is the
     /// zone's own id, so the dwelling executor finds it without sorting.
     ZoneTemperature {
@@ -214,6 +217,15 @@ fn resolve_field(
     }
     if field == "reactive_power_var" {
         return Ok(ObservationKind::ReactivePowerKvar);
+    }
+    if field == "grid_interchange_w" {
+        return Ok(ObservationKind::GridInterchangeKw);
+    }
+    if field == "islanded" {
+        return Ok(ObservationKind::Islanded);
+    }
+    if field == "bus_voltage_pu" {
+        return Ok(ObservationKind::BusVoltagePu);
     }
 
     let zone_bracket = |prefix: &str| -> Option<Result<(ZoneId, usize), HaresError>> {
@@ -413,6 +425,9 @@ fn telemetry_read(
         ObservationKind::OutdoorHumidityRatio => telemetry.outdoor_humidity_ratio,
         ObservationKind::TotalPowerKw => telemetry.total_power_w,
         ObservationKind::ReactivePowerKvar => telemetry.reactive_power_var,
+        ObservationKind::GridInterchangeKw => telemetry.grid_interchange_w,
+        ObservationKind::Islanded => telemetry.islanded as u8 as f64,
+        ObservationKind::BusVoltagePu => telemetry.bus_voltage_pu,
         ObservationKind::ZoneTemperature { position, .. } => {
             telemetry.zone_temperatures_c[*position]
         }

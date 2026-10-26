@@ -150,6 +150,11 @@ class HELICSFleet:
         self._pub_aggregate_reactive: HelicsPublicationLike | None = None
         self._pub_dwelling_power: list[HelicsPublicationLike] = []
         self._pub_dwelling_reactive: list[HelicsPublicationLike] = []
+        self._pub_dwelling_interchange: list[HelicsPublicationLike] = []
+        self._pub_dwelling_islanded: list[HelicsPublicationLike] = []
+        self._pub_dwelling_bus_voltage: list[HelicsPublicationLike] = []
+        self._pub_dwelling_unserved: list[HelicsPublicationLike] = []
+        self._pub_dwelling_excess: list[HelicsPublicationLike] = []
 
         self._pub_aggregate_zone_temp: HelicsPublicationLike | None = None
         self._pub_aggregate_soc: HelicsPublicationLike | None = None
@@ -215,6 +220,11 @@ class HELICSFleet:
         ]
 
         # Per-dwelling power and reactive (existing)
+        self._pub_dwelling_interchange = []
+        self._pub_dwelling_islanded = []
+        self._pub_dwelling_bus_voltage = []
+        self._pub_dwelling_unserved = []
+        self._pub_dwelling_excess = []
         for dwelling_index in range(self._n_dwellings):
             power_name = f"dwelling_{dwelling_index}/total_power_w"
             reactive_name = f"dwelling_{dwelling_index}/reactive_power_var"
@@ -226,6 +236,44 @@ class HELICSFleet:
             set_publication_info(pub_reactive, "units=VAR")
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"))
             configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"))
+
+            # The grid-facing publications (docs/cosim.md): per dwelling,
+            # mirroring the per-dwelling voltage pattern. The interchange
+            # is exactly 0.0 whenever the utility is out (the breaker is
+            # open), the meter's net flow otherwise.
+            pub_interchange = self._fed.register_publication(
+                f"dwelling_{dwelling_index}/grid_interchange_w", "double"
+            )
+            pub_islanded = self._fed.register_publication(
+                f"dwelling_{dwelling_index}/islanded", "double"
+            )
+            pub_bus_voltage = self._fed.register_publication(
+                f"dwelling_{dwelling_index}/bus_voltage_pu", "double"
+            )
+            pub_unserved = self._fed.register_publication(
+                f"dwelling_{dwelling_index}/island_unserved_w", "double"
+            )
+            pub_excess = self._fed.register_publication(
+                f"dwelling_{dwelling_index}/island_excess_w", "double"
+            )
+            set_publication_info(pub_interchange, "units=W")
+            set_publication_info(pub_islanded, "units=flag")
+            set_publication_info(pub_bus_voltage, "units=pu")
+            set_publication_info(pub_unserved, "units=W")
+            set_publication_info(pub_excess, "units=W")
+            self._pub_dwelling_interchange.append(pub_interchange)
+            self._pub_dwelling_islanded.append(pub_islanded)
+            self._pub_dwelling_bus_voltage.append(pub_bus_voltage)
+            self._pub_dwelling_unserved.append(pub_unserved)
+            self._pub_dwelling_excess.append(pub_excess)
+            for key in (
+                f"dwelling_{dwelling_index}/grid_interchange_w",
+                f"dwelling_{dwelling_index}/islanded",
+                f"dwelling_{dwelling_index}/bus_voltage_pu",
+                f"dwelling_{dwelling_index}/island_unserved_w",
+                f"dwelling_{dwelling_index}/island_excess_w",
+            ):
+                configs.append(HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{key}"))
 
         # Aggregate zone temperature publication (mean across fleet)
         agg_zone_temp_name = "aggregate_zone_temp_c"
@@ -698,6 +746,33 @@ class HELICSFleet:
                 self._pub_dwelling_power[dwelling_index].publish(power_w)
             if dwelling_index < len(self._pub_dwelling_reactive):
                 self._pub_dwelling_reactive[dwelling_index].publish(reactive_var)
+
+            # The grid-facing publications (docs/cosim.md), per dwelling:
+            # the interchange exactly 0.0 whenever the utility is out (the
+            # breaker is open), the meter's net flow otherwise. Direct
+            # attribute access: a telemetry object without the grid-facing
+            # fields must fail loudly here, never silently publish a
+            # stale-quantity substitute.
+            if dwelling_index < len(self._pub_dwelling_interchange):
+                self._pub_dwelling_interchange[dwelling_index].publish(
+                    float(telemetry.grid_interchange_w)
+                )
+            if dwelling_index < len(self._pub_dwelling_islanded):
+                self._pub_dwelling_islanded[dwelling_index].publish(
+                    1.0 if telemetry.islanded else 0.0
+                )
+            if dwelling_index < len(self._pub_dwelling_bus_voltage):
+                self._pub_dwelling_bus_voltage[dwelling_index].publish(
+                    float(telemetry.bus_voltage_pu)
+                )
+            if dwelling_index < len(self._pub_dwelling_unserved):
+                self._pub_dwelling_unserved[dwelling_index].publish(
+                    float(telemetry.island_unserved_w)
+                )
+            if dwelling_index < len(self._pub_dwelling_excess):
+                self._pub_dwelling_excess[dwelling_index].publish(
+                    float(telemetry.island_excess_w)
+                )
 
             # Per-dwelling zone temperatures
             if dwelling_index < len(self._pub_dwelling_zone_temp):

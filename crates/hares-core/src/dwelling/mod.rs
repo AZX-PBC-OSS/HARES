@@ -5848,6 +5848,19 @@ impl Dwelling {
             energy_balance_residuals,
             total_power_w: self.electrical_solver.net_active_w(),
             reactive_power_var: self.electrical_solver.net_reactive_var(),
+            // The grid-facing publications (the co-simulation contract,
+            // docs/cosim.md): the interchange is exactly 0.0 whenever the
+            // utility is out (the breaker is open; the island's internal
+            // imbalance surfaces as `island_unserved_w` / `island_excess_w`
+            // and the premise balance above, never as a phantom grid
+            // load), and the meter's net flow otherwise.
+            grid_interchange_w: if self.latest_env.grid.grid_outage() {
+                0.0
+            } else {
+                self.electrical_solver.net_active_w()
+            },
+            islanded: self.latest_env.grid.islanded(),
+            bus_voltage_pu: self.latest_env.grid.bus_voltage_pu(),
             island_unserved_w: self.island_unserved_w,
             island_excess_w: self.island_excess_w,
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,
@@ -5955,6 +5968,15 @@ impl Dwelling {
             ObservationKind::OutdoorHumidityRatio => self.latest_env.weather.outdoor_humidity_ratio,
             ObservationKind::TotalPowerKw => self.electrical_solver.net_active_w(),
             ObservationKind::ReactivePowerKvar => self.electrical_solver.net_reactive_var(),
+            ObservationKind::GridInterchangeKw => {
+                if self.latest_env.grid.grid_outage() {
+                    0.0
+                } else {
+                    self.electrical_solver.net_active_w()
+                }
+            }
+            ObservationKind::Islanded => self.latest_env.grid.islanded() as u8 as f64,
+            ObservationKind::BusVoltagePu => self.latest_env.grid.bus_voltage_pu(),
             ObservationKind::ZoneTemperature { id, .. } => self.zone_temperature_c(*id)?,
             ObservationKind::SetpointHeat { id, .. } => {
                 self.zone_setpoint_c(*id, SetpointSide::Heat)?

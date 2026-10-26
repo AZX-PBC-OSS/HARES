@@ -231,6 +231,11 @@ class _FakeDwelling:
         return SimpleNamespace(
             total_power_w=p_kw,
             reactive_power_var=q_kvar,
+            grid_interchange_w=p_kw,
+            islanded=False,
+            bus_voltage_pu=1.0,
+            island_unserved_w=0.0,
+            island_excess_w=0.0,
             zone=lambda: zone_dict,
             equipment=lambda: equip_dict,
             timestep_index=self._step_count,
@@ -337,6 +342,11 @@ def test_helics_dwelling_config_and_registration(monkeypatch: pytest.MonkeyPatch
     assert [p.key for p in pubs] == [
         "grid/house_1/total_power_w",
         "grid/house_1/reactive_power_var",
+        "grid/house_1/grid_interchange_w",
+        "grid/house_1/islanded",
+        "grid/house_1/bus_voltage_pu",
+        "grid/house_1/island_unserved_w",
+        "grid/house_1/island_excess_w",
         "grid/house_1/zone_0/temp_air_c",
         "grid/house_1/equipment_0/power_w",
         "grid/house_1/equipment_0/soc_pct",

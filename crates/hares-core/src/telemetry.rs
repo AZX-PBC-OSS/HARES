@@ -25,6 +25,19 @@ pub struct DwellingTelemetry {
     pub energy_balance_residuals: Vec<f64>,
     pub total_power_w: f64,
     pub reactive_power_var: f64,
+    /// The grid interchange (W): the net active power crossing the
+    /// service connection. Exactly 0.0 whenever the utility is out (the
+    /// breaker is open: during an island the imbalance surfaces as the
+    /// island's internal response, `island_unserved_w` / `island_excess_w`,
+    /// never as a phantom grid load); the meter's net flow otherwise.
+    pub grid_interchange_w: f64,
+    /// True when the dwelling is islanded: the utility is out and an
+    /// on-site source holds the bus energized.
+    pub islanded: bool,
+    /// The bus voltage (pu) the dwelling's equipment sees: the utility
+    /// voltage when the utility is up, the island-formed bus voltage
+    /// during an outage with an island source, 0.0 on a de-energized bus.
+    pub bus_voltage_pu: f64,
     /// Load (W) the island sources failed to cover during islanded operation
     /// (would-be phantom grid import). Always 0.0 when not islanded.
     pub island_unserved_w: f64,
@@ -176,6 +189,9 @@ mod tests {
             energy_balance_residuals: vec![0.0],
             total_power_w: 1.2,
             reactive_power_var: 0.0,
+            grid_interchange_w: 1.2,
+            islanded: false,
+            bus_voltage_pu: 1.0,
             island_unserved_w: 0.0,
             island_excess_w: 0.0,
             outdoor_temp_c: 10.0,
@@ -544,6 +560,9 @@ mod tests {
         "outdoor_humidity_ratio",
         "total_power_w",
         "reactive_power_var",
+        "grid_interchange_w",
+        "islanded",
+        "bus_voltage_pu",
     ];
 
     /// Bracket-based keys with a known zone.
