@@ -312,9 +312,12 @@ pub fn step_n(dwelling: &mut Dwelling, n: u64, what: &str) {
 /// whose objects are BTreeMaps (serde_json without `preserve_order`), so
 /// every map's keys render in sorted order whatever iteration order the
 /// snapshot's own HashMap instances happened to hold. The canonical form
-/// is the bench's bitwise witness: equal bytes pin equal structure and
-/// equal float bits (the shortest round-trip form is injective per bit
-/// pattern, -0.0 rendering apart from 0.0).
+/// is the bench's bitwise witness: equal bytes pin equal structure and,
+/// for finite values, equal float bits (the shortest round-trip form is
+/// injective per value, minus-zero rendering apart from zero).
+/// Non-finite values render as serde_json `null` and cannot be
+/// distinguished in the bytes; the `PartialEq` leg catches the NaN cases
+/// anyway (a NaN never compares equal).
 pub fn canonical_checkpoint_bytes(checkpoint: &hares_core::DwellingCheckpoint) -> Vec<u8> {
     let value = serde_json::to_value(checkpoint).expect("the checkpoint converts to a JSON value");
     serde_json::to_vec(&value).expect("the canonical form serializes")
@@ -330,13 +333,15 @@ pub fn canonical_checkpoint_bytes(checkpoint: &hares_core::DwellingCheckpoint) -
 ///    freshly built dwelling of the same fixture; the restored dwelling
 ///    re-saves a checkpoint equal to the saved one field for field (the
 ///    type derives `PartialEq`, the maps comparing order-independently)
-///    and equal in canonical bytes (every float bit preserved).
+///    and equal in canonical bytes (every finite float bit preserved;
+///    the non-finite values render as `null` there, the `PartialEq` leg
+///    catching the NaN cases).
 /// 2. The restored run's continuation equivalence: the restored dwelling
 ///    and a fresh continuous dwelling step the same further steps; the
 ///    two end states are equal field for field and in canonical bytes,
-///    the two actor-facing environment maps excluded (see the compare's
-///    comment). The full output-surface acceptance stays with the
-///    checkpoint_resume suite; this is the bench's own short witness.
+///    the one named actor-facing divergence narrowed to its key (see the
+///    compare's comment). The full output-surface acceptance stays with
+///    the checkpoint_resume suite; this is the bench's own short witness.
 pub fn assert_checkpoint_round_trip(
     dir: &Path,
     build: impl Fn() -> Dwelling,
@@ -384,37 +389,54 @@ pub fn assert_checkpoint_round_trip(
 
     // Continuation equivalence: the restored run and the continuous run
     // step the same further steps and hold the same committed state. The
-    // two actor-facing environment maps are excluded (cleared on both
-    // side's snapshot before the compare): the restore's own
-    // `snapshot_equipment_state` registers telemetry keys the continuous
-    // run's maps never held (observed: the air conditioner's `shr`, never
-    // cooled, present in the restored run's map only), the divergence
-    // `load_checkpoint`'s own doc acknowledges when it overwrites the maps
-    // with the checkpoint's; the committed state the checkpoint carries
-    // (the equipment blobs, the thermal, humidity and fluid state, the
-    // RNG, the electrical summary, the health and warning records)
-    // compares in full.
+    // one named actor-facing divergence is narrowed to its exact key
+    // instead of excluding the maps wholesale: the air conditioner's
+    // `load_state` inserts the `shr` telemetry key at the restore (the
+    // checkpoint's decoded value, air_conditioner.rs's load_state), and
+    // the first post-restore step's snapshot copies it into the
+    // actor-facing map; the continuous run's never-cooled air
+    // conditioner's step never published the key, so the key exists in
+    // the restored run's map only. Exactly that key is removed from the
+    // restored side where the continuous side lacks it (at most one
+    // registration: a second would be some other equipment's shr, not
+    // the named divergence), and the two actor-facing maps otherwise
+    // compare in full — any other key registered, any value differing,
+    // fails, as does an equipment entry present on one side only. The
+    // committed state the checkpoint carries (the equipment blobs, the
+    // thermal, humidity and fluid state, the RNG, the electrical
+    // summary, the health and warning records) compares in full.
     step_n(
         &mut restored,
         continuation_steps,
         &format!("{label}: the continuation"),
     );
-    let mut restored_end = restored
-        .save_checkpoint()
-        .unwrap_or_else(|err| panic!("{label}: the continued state saves: {err}"));
-    restored_end.env_equipment_telemetry.clear();
-    restored_end.env_equipment_core.clear();
     let mut continuous = build();
     step_n(
         &mut continuous,
         prefix_steps + continuation_steps,
         &format!("{label}: the continuous run"),
     );
-    let mut continuous_end = continuous
+    let continuous_end = continuous
         .save_checkpoint()
         .unwrap_or_else(|err| panic!("{label}: the continuous state saves: {err}"));
-    continuous_end.env_equipment_telemetry.clear();
-    continuous_end.env_equipment_core.clear();
+    let mut restored_end = restored
+        .save_checkpoint()
+        .unwrap_or_else(|err| panic!("{label}: the continued state saves: {err}"));
+    let mut narrowed = 0usize;
+    for (name, telemetry) in restored_end.env_equipment_telemetry.iter_mut() {
+        let Some(continuous_telemetry) = continuous_end.env_equipment_telemetry.get(name) else {
+            continue;
+        };
+        if telemetry.0.contains_key("shr") && !continuous_telemetry.0.contains_key("shr") {
+            telemetry.0.remove("shr");
+            narrowed += 1;
+        }
+    }
+    assert!(
+        narrowed <= 1,
+        "{label}: {narrowed} equipments' `shr` keys are restorations' own; \
+         the named divergence is one registration"
+    );
     assert_eq!(
         restored_end, continuous_end,
         "{label}: the resumed run's committed state after {continuation_steps} further \

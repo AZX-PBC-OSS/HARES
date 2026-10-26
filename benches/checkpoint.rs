@@ -17,7 +17,10 @@
 //!
 //! The timed regions keep the dwelling drops out of the measurement (the
 //! row-39 record's drop lesson: a large dwelling's drop is allocator work
-//! the checkpoint's cost must not carry). Save borrows one dwelling and
+//! the checkpoint's cost must not carry), and the save's returned
+//! checkpoint's drop stays out the same way (`iter_with_large_drop`
+//! defers it past the timing; the record's "save times save_checkpoint
+//! plus the file write" stays literal). Save borrows one dwelling and
 //! times `save_checkpoint` plus the file write (the serde_json
 //! serialization, the SHA-256 checksum, the atomic rename) to one path,
 //! rewritten each iteration; restore times the file read, the checksum
@@ -73,7 +76,7 @@ fn bench_checkpoint(c: &mut Criterion) {
         );
         let path = common::numbered_path(dir, "hares-bench-checkpoint-save-small", "json");
         group.bench_function(BenchmarkId::new("save", "small"), |b| {
-            b.iter(|| {
+            b.iter_with_large_drop(|| {
                 let checkpoint = dwelling
                     .save_checkpoint()
                     .expect("save/small: the state saves");
@@ -91,7 +94,7 @@ fn bench_checkpoint(c: &mut Criterion) {
         );
         let path = common::numbered_path(dir, "hares-bench-checkpoint-save-large", "json");
         group.bench_function(BenchmarkId::new("save", "large"), |b| {
-            b.iter(|| {
+            b.iter_with_large_drop(|| {
                 let checkpoint = dwelling
                     .save_checkpoint()
                     .expect("save/large: the state saves");
