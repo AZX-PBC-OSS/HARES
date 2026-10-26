@@ -63,6 +63,7 @@ fn bldg2_january_config() -> DwellingConfig {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: FixedOffset::west_opt(5 * 3600)
                     .unwrap()
                     .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)

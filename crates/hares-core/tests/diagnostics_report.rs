@@ -38,6 +38,7 @@ fn cz4a_sim_config() -> SimulationConfig {
         .single()
         .expect("start");
     SimulationConfig {
+        scenario_seed: None,
         start_time: start,
         duration: Duration::hours(1),
         time_res: Duration::seconds(60),

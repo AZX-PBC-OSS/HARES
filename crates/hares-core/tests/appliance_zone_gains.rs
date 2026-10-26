@@ -86,6 +86,7 @@ fn dwelling_config(run: &Run) -> DwellingConfig {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: DateTime::<FixedOffset>::parse_from_rfc3339(run.start)
                     .expect("start time parses"),
                 duration: Duration::days(run.days),
@@ -643,6 +644,7 @@ fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time,
                 duration: Duration::hours(6),
                 time_res: Duration::seconds(TIME_RES_S),

@@ -37,6 +37,7 @@ fn cz2a_config(
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time: start,
                 duration: chrono::Duration::seconds(duration_s),
                 time_res: chrono::Duration::seconds(step_s),

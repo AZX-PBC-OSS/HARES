@@ -35,6 +35,7 @@ fn sim_config(
     verbosity: u8,
 ) -> SimulationConfig {
     SimulationConfig {
+        scenario_seed: None,
         start_time: start,
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(step_s),

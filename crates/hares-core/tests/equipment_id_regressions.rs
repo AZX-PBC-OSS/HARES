@@ -92,6 +92,7 @@ fn write_fixture_hpxml(dir: &Path) -> PathBuf {
 
 fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> SimulationConfig {
     SimulationConfig {
+        scenario_seed: None,
         start_time: FixedOffset::west_opt(10 * 3600)
             .expect("UTC-10 offset is valid")
             .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)

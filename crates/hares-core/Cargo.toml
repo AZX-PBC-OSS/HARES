@@ -100,6 +100,10 @@ path = "tests/wiring_properties.rs"
 name = "bench_construction"
 path = "../../tests/bench_construction.rs"
 
+[[test]]
+name = "scenario_streams"
+path = "../../tests/scenario_streams.rs"
+
 [[bench]]
 name = "single_building"
 path = "../../benches/single_building.rs"
@@ -133,5 +137,10 @@ harness = false
 [[bench]]
 name = "diagnostics_report"
 path = "../../benches/diagnostics_report.rs"
+harness = false
+
+[[bench]]
+name = "checkpoint"
+path = "../../benches/checkpoint.rs"
 harness = false
 

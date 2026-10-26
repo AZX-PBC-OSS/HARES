@@ -252,12 +252,15 @@ impl Dwelling {
     /// # Errors
     ///
     /// `HaresError::Control` when an actor with the same name is already
-    /// registered; the roster plan's error otherwise, which includes the
+    /// registered, or when the actor's seeded RNG stream is already
+    /// assigned (the private `ensure_actor_rng_pairs_free` guard); the
+    /// roster plan's error otherwise, which includes the
     /// actor's own when it cannot act on its targets
     /// ([`Actor::validate_equipment`]). On `Err` the actor roster and
     /// schedule are exactly as before the call.
     pub fn add_actor(&mut self, actor: Box<dyn Actor>) -> Result<()> {
         self.ensure_actor_names_free(std::slice::from_ref(&actor))?;
+        self.ensure_actor_rng_pairs_free(std::slice::from_ref(&actor), &[])?;
         let mut change = self.actor_change(vec![true; self.actors.len()]);
         change.supplied.push(actor);
         let plan =
@@ -326,6 +329,60 @@ impl Dwelling {
                     "duplicate actor name '{name}' is not allowed"
                 )));
             }
+        }
+        Ok(())
+    }
+
+    /// The EV-driver collision guard's caller half: a supplied actor that
+    /// reports a seeded stream must not hold a `(seed, stream)` pair the
+    /// dwelling has already assigned — its own stream's, a live actor's, or
+    /// one a built-in build in the same change assigns.
+    ///
+    /// The named case: the registry EV driver's day roll keys on
+    /// `driver_key_material(configured seed, dwelling id)` — byte-identical
+    /// to `dwelling_seed(master seed, building id)` when the configured seed
+    /// is the run's master seed and the dwelling id is the building id — and
+    /// rides the reserved EV-driver stream nonce the first built-in driver
+    /// takes, so the two pairs collide deterministically and two actors draw
+    /// one keystream. The guard rejects the driver (the roster is unchanged).
+    /// Under a declared scenario the dwelling key's bytes 16..24 carry the
+    /// scenario id the key material never holds, so the same configuration
+    /// does not collide there.
+    fn ensure_actor_rng_pairs_free(
+        &self,
+        supplied: &[Box<dyn Actor>],
+        built_in: &[Box<dyn Actor>],
+    ) -> Result<()> {
+        let mut assigned: HashMap<([u8; 32], u64), String> = HashMap::new();
+        assigned.insert(
+            (self.rng.get_seed(), self.rng.get_stream()),
+            "the dwelling's own stream".to_string(),
+        );
+        for actor in self.actors.iter().chain(built_in.iter()) {
+            if let Some(state) = actor.rng_stream_state() {
+                assigned.insert((state.seed, state.stream), actor.name().to_string());
+            }
+        }
+        for actor in supplied {
+            let Some(state) = actor.rng_stream_state() else {
+                continue;
+            };
+            if let Some(existing) = assigned.get(&(state.seed, state.stream)) {
+                return Err(HaresError::Control(format!(
+                    "actor '{}' holds the seeded RNG stream (seed 0x{}, stream {}) \
+                     already assigned to {existing}: two consumers of one \
+                     (seed, stream) pair draw identical series",
+                    actor.name(),
+                    state
+                        .seed
+                        .iter()
+                        .take(8)
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>(),
+                    state.stream
+                )));
+            }
+            assigned.insert((state.seed, state.stream), actor.name().to_string());
         }
         Ok(())
     }
@@ -664,7 +721,9 @@ impl Dwelling {
     ///
     /// As [`Self::add_equipment`]; the reason is `HaresError::Control` when
     /// the equipment passes its own validation but a supplied actor's name
-    /// is already registered.
+    /// is already registered, or when a supplied actor's seeded RNG stream
+    /// is already assigned (the private `ensure_actor_rng_pairs_free`
+    /// guard).
     pub fn add_equipment_with_actors(
         &mut self,
         mut eq: Box<dyn Equipment>,
@@ -683,6 +742,7 @@ impl Dwelling {
                     self.tariff_evaluator.as_ref(),
                     &[],
                 )?;
+                self.ensure_actor_rng_pairs_free(&change.supplied, &change.built_in)?;
                 let mut equipment = self.equipment_refs();
                 equipment.push(eq.as_ref());
                 let plan =

@@ -29,6 +29,7 @@ fn sim_config() -> SimulationConfig {
         .single()
         .expect("start");
     SimulationConfig {
+        scenario_seed: None,
         start_time: start,
         duration: chrono::Duration::hours(24),
         time_res: chrono::Duration::seconds(900),

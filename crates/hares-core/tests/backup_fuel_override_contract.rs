@@ -45,6 +45,7 @@ fn sample_config(sample: &str, overrides: Option<serde_json::Value>) -> Dwelling
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig {
+                scenario_seed: None,
                 start_time,
                 duration: Duration::hours(24),
                 time_res: Duration::seconds(900),

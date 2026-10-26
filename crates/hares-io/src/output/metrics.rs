@@ -2173,6 +2173,7 @@ mod tests {
 
     fn test_config(deadband: Option<f64>) -> SimulationConfig {
         SimulationConfig {
+            scenario_seed: None,
             start_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -2205,6 +2206,7 @@ mod tests {
             HOURS_PER_YEAR as i64
         };
         SimulationConfig {
+            scenario_seed: None,
             start_time: FixedOffset::east_opt(0)
                 .unwrap()
                 .with_ymd_and_hms(year, 1, 1, 0, 0, 0)

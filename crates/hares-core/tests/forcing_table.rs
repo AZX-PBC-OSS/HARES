@@ -50,6 +50,7 @@ fn sim_config(
     civil_timezone: Option<&str>,
 ) -> SimulationConfig {
     SimulationConfig {
+        scenario_seed: None,
         start_time,
         duration: Duration::days(days),
         time_res: Duration::seconds(time_res_s),

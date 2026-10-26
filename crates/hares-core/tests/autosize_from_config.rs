@@ -187,6 +187,7 @@ fn build_minimal_dwelling(hpxml_xml: &str) -> Dwelling {
         defaults: DefaultsSource::directory(hares_core::shipped_defaults_dir()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time,
                 duration: Duration::hours(1),
                 time_res: Duration::minutes(1),

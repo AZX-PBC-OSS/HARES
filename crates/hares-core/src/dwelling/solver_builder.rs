@@ -2120,6 +2120,7 @@ mod tests {
         let env = env_with_zone_temps(&[21.0]);
 
         let sim_config = hares_io::SimulationConfig {
+            scenario_seed: None,
             start_time: chrono::FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
@@ -2190,6 +2191,7 @@ mod tests {
         let env = env_with_zone_temps(&[21.0]);
 
         let sim_config = hares_io::SimulationConfig {
+            scenario_seed: None,
             start_time: chrono::FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)

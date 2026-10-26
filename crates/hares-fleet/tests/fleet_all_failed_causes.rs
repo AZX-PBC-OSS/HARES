@@ -49,6 +49,7 @@ fn config_with_schedule_source(bldg_id: i64, schedule_path: Option<PathBuf>) -> 
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                scenario_seed: None,
                 start_time,
                 duration: Duration::hours(24),
                 time_res: Duration::seconds(900),

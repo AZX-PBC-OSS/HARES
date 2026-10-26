@@ -96,6 +96,22 @@ pub struct SimulationConfig {
     /// Master RNG seed for reproducibility (default: 0).
     #[serde(default)]
     pub master_seed: u64,
+    /// The run's scenario seed (default: none). A declared scenario mixes
+    /// its id into every per-dwelling stream key's spare bytes (the
+    /// scenario-mixed master key): two scenarios under one master seed
+    /// draw disjoint streams, a declared scenario 0 is not the absent
+    /// scenario, and the absent scenario keeps the scenario-less
+    /// derivation's exact bytes. The mix reaches every surface inside
+    /// the per-dwelling key (the dwelling's own stream, the built-in EV
+    /// drivers' streams, every event-load interior); the identity-keyed
+    /// surfaces (an unspecified-seed noisy source's keystream key, the
+    /// registry EV driver's key material) key on identity alone and are
+    /// outside the scenario's reach: two scenarios share such a keystream
+    /// only when both dwellings address the same building id, different
+    /// building ids deriving different keys. The scope the RNG contract
+    /// docs name.
+    #[serde(default)]
+    pub scenario_seed: Option<u64>,
     /// IANA timezone for civil-time schedule indexing (e.g. "America/Denver").
     /// When set, occupancy schedules and utility rates are indexed by civil
     /// (wall-clock) time including DST transitions. Weather indexing is unaffected.
@@ -187,6 +203,7 @@ impl hares_types::DescribeFields for SimulationConfig {
             output_chunk_size: default_output_chunk_size(),
             setpoint_deadband_c: Some(1.0),
             master_seed: 0,
+            scenario_seed: None,
             civil_timezone: Some("America/Denver".to_string()),
             site_location: SiteLocationOverride::sample(),
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -260,6 +277,16 @@ impl hares_types::DescribeFields for SimulationConfig {
                     "master_seed",
                     FieldMeta {
                         description: Some("the master RNG seed for reproducibility"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "scenario_seed",
+                    FieldMeta {
+                        description: Some(
+                            "the run's scenario seed, mixed into every per-dwelling stream key; \
+                             absent keeps the scenario-less derivation",
+                        ),
                         ..Default::default()
                     },
                 ),
@@ -1299,6 +1326,7 @@ max_evictions = 0
     #[test]
     fn time_res_beyond_u32_seconds_is_an_error() {
         let cfg = SimulationConfig {
+            scenario_seed: None,
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
                 .expect("start time parses"),
             duration: Duration::seconds(i64::from(u32::MAX) * 2),
@@ -1359,6 +1387,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
         let toml_err = SimulationConfig::from_toml(toml)
             .expect_err("a duplicate report path is a validate error on the TOML path too");
         let built = SimulationConfig {
+            scenario_seed: None,
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
                 .expect("start time parses"),
             duration: Duration::seconds(3600),
@@ -1405,6 +1434,7 @@ latitude_deg = 95.0
         let toml_err = SimulationConfig::from_toml(toml)
             .expect_err("an out-of-range site coordinate is a validate error on the TOML path too");
         let built = SimulationConfig {
+            scenario_seed: None,
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
                 .expect("start time parses"),
             duration: Duration::seconds(3600),
@@ -1840,6 +1870,7 @@ utc_offset_h = -7.0
         };
         fn config_for_warmup(warmup: WarmupConfig) -> SimulationConfig {
             SimulationConfig {
+                scenario_seed: None,
                 start_time: chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
                     .expect("a valid sample start"),
                 duration: Duration::seconds(3600),
