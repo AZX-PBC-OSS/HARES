@@ -55,6 +55,20 @@ pub struct DwellingBlueprint {
     /// dwellings: that path reads the TOML, recorded nowhere in the
     /// records, and the absence discloses that.
     pub(super) input_records: Option<InputRecords>,
+    /// The per-surface irradiance table, built on the blueprint's first
+    /// build from its surfaces and its forcing table and shared by every
+    /// dwelling the blueprint builds (the RT-2 record's per-surface
+    /// table): the per-surface Perez and incidence are functions of the
+    /// step's weather and solar position and of the blueprint's own
+    /// surface geometry, so the table is one computation per blueprint.
+    /// The process's content registry extends the sharing across
+    /// independently constructed blueprints of identical content: the
+    /// same surfaces, weather, forcing and time base resolve to one table
+    /// instance, different content never shares. Empty until the first
+    /// build; never built when the per-step forcing path was forced at
+    /// the first build.
+    pub(super) per_surface_irradiance:
+        std::sync::OnceLock<std::sync::Arc<crate::environment::SurfaceIrradianceTable>>,
 }
 
 impl DwellingBlueprint {
@@ -514,6 +528,7 @@ impl DwellingBlueprintBuilder {
             rng,
             blueprint_edited,
             input_records,
+            per_surface_irradiance: std::sync::OnceLock::new(),
         }))
     }
 }
