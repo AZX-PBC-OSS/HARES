@@ -1,0 +1,27 @@
+# cargo-deny's configuration. The advisories' section carries the
+# documented risk acceptances: each entry states the exposure analysis
+# and the condition under which it must be revisited. An ignore entry
+# without a revisit condition is a broken window.
+
+[advisories]
+version = 2
+ignore = [
+    # RUSTSEC-2026-0391, -0398, -0403: the zstd crate's three advisories
+    # (2026-10-16's batch). The patched zstd is >= 0.14.3, which parquet
+    # 60 carries; the engine's parquet is 59.3 because pyo3-arrow 0.20.0
+    # (the newest, 2026-10-15) still links arrow-array 59.3, and the two
+    # arrow generations cannot coexist in one type graph. The exposure:
+    # zstd reaches the engine only through parquet's column compression
+    # writing LOCAL frame files the user's own pipeline produced; the
+    # abandoned-context stream reuse (0391) is not in parquet's write
+    # path, the seekable feature (0398) is not enabled, and the frames
+    # are not attacker-supplied inputs in the threat model. REVISIT
+    # TRIGGER: pyo3-arrow's release that links arrow-array 60 (or the
+    # parquet 59's line gaining a patched zstd). The moment either
+    # lands, bump the arrow/parquet/pyo3-arrow family to the patched
+    # zstd and delete these entries.
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.14 blocked by pyo3-arrow's arrow-array 59; parquet's local-file write path does not reach the with_context stream-reuse bug; revisit at pyo3-arrow's arrow-60 release" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd 0.14 blocked by pyo3-arrow's arrow-array 59; the seekable feature is not enabled in this build; revisit at pyo3-arrow's arrow-60 release" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd 0.14 blocked by pyo3-arrow's arrow-array 59; same exposure analysis as RUSTSEC-2026-0391; revisit at pyo3-arrow's arrow-60 release" },
+    { id = "RUSTSEC-2026-0410", reason = "the wasm32 allocator shim's unchecked allocation failure; this project builds only x86_64-unknown-linux-gnu and aarch64-apple-darwin, so the wasm32 target is unreachable; revisit if a wasm32 target is ever added" },
+]

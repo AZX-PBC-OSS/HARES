@@ -6171,4 +6171,418 @@ mod tests {
             "beb779009391304122dca1dcb6345acd81c1df506e4db17d845a1eeadf7151c0"
         );
     }
+
+    /// The vendored OCHRE defaults directory the pin tests read: the same
+    /// file the sha256 tripwire above pins, through the submodule checkout.
+    fn vendored_defaults_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendors/OCHRE/ochre/defaults")
+    }
+
+    fn vendored_default_schedules_csv_path() -> std::path::PathBuf {
+        vendored_defaults_dir().join(super::DEFAULT_SCHEDULES_CSV)
+    }
+
+    /// One raw row of the vendored CSV: (schedule name, element, values,
+    /// data source). The profile parser skips the rows whose OCHRE Name is
+    /// "N/A" or empty, so the citation census and the Table C.3(2)
+    /// coefficient pins, which must cover every row including those, read
+    /// the file's raw rows through the engine's own CSV line parser.
+    fn vendored_default_schedules_rows() -> Vec<(String, String, String, String)> {
+        let content = std::fs::read_to_string(vendored_default_schedules_csv_path())
+            .expect("the vendored OCHRE defaults CSV is readable (is the submodule checked out?)");
+        let mut rows = Vec::new();
+        for line in content.lines().skip(1) {
+            let fields = super::parse_csv_line(line);
+            assert!(
+                fields.len() >= 5,
+                "a vendored CSV row has fewer than five fields: {line}"
+            );
+            rows.push((
+                fields[0].trim().to_string(),
+                fields[1].trim().to_string(),
+                fields[4].trim().to_string(),
+                fields
+                    .get(5)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default(),
+            ));
+        }
+        rows
+    }
+
+    fn row_values(raw: &[(String, String, String, String)], name: &str, element: &str) -> Vec<f64> {
+        let (_, _, values, _) = raw
+            .iter()
+            .find(|(s, e, _, _)| s == name && e == element)
+            .unwrap_or_else(|| panic!("the vendored CSV has no row {name}/{element}"));
+        values
+            .split(',')
+            .map(|token| {
+                super::parse_trimmed_f64(token).unwrap_or_else(|| {
+                    panic!("the row {name}/{element} has a value that does not parse: {token}")
+                })
+            })
+            .collect()
+    }
+
+    /// The tier-3 "Occupancy" profile's hourly fractions are the published
+    /// values: Table C.3(5) of ANSI/RESNET/ICC 301-2022 Addendum C. The
+    /// public witness is the OS-HPXML v1.12.0 documentation's Default
+    /// Schedules table
+    /// (https://openstudio-hpxml.readthedocs.io/en/v1.12.0/workflow_inputs.html),
+    /// whose occupants weekday and weekend rows quote these 24 fractions in
+    /// full (verified against the fetched v1.12.0 page). In the vendored
+    /// CSV's Data Source column 12 rows cite Table C.3(5) (the occupancy,
+    /// general water use, ceiling fan, hot-water fixtures and
+    /// demand-controlled recirculation rows; the census test pins the
+    /// count); the profile's monthly multipliers row is an all-1.0 row and
+    /// carries no citation, one of the 19 uncited rows its own test names.
+    /// The pins read the raw rows because the strict profile loader
+    /// rejects the upstream file itself: the vendored ceiling_fan profile
+    /// has no monthly row, which the engine's shipped copy
+    /// (`python/hares/defaults`) completes (and derives its own weekend
+    /// fractions from), so the parsed route is exercised there, not here.
+    /// The Addendum C standard text itself is UNVERIFIABLE-WEB (the
+    /// operator supplies it from library access); the docs page is the
+    /// witness. A changed fraction fails here before it can move a
+    /// generated schedule.
+    #[test]
+    fn occupancy_profile_fractions_pin_the_c35_table_values() {
+        let raw = vendored_default_schedules_rows();
+        let expected = [
+            0.035, 0.035, 0.035, 0.035, 0.035, 0.059, 0.082, 0.055, 0.027, 0.014, 0.014, 0.014,
+            0.014, 0.014, 0.019, 0.027, 0.041, 0.055, 0.068, 0.082, 0.082, 0.070, 0.053, 0.035,
+        ];
+        assert_eq!(
+            row_values(&raw, "occupants", "WeekdayScheduleFractions").as_slice(),
+            &expected[..],
+            "the Occupancy weekday fractions moved off the published Table C.3(5) row"
+        );
+        assert_eq!(
+            row_values(&raw, "occupants", "WeekendScheduleFractions").as_slice(),
+            &expected[..],
+            "the Occupancy weekend fractions moved off the published Table C.3(5) row"
+        );
+        assert_eq!(
+            row_values(&raw, "occupants", "MonthlyScheduleMultipliers").as_slice(),
+            &[1.0; 12][..],
+            "the Occupancy monthly multipliers moved off the all-1.0 row"
+        );
+    }
+
+    /// The lighting profiles' published values: the hourly fractions are
+    /// Table C.3(3) of ANSI/RESNET/ICC 301-2022 Addendum C (6 rows in the
+    /// vendored CSV: the indoor, exterior and garage profiles' weekday and
+    /// weekend rows) and the monthly multipliers are Table C.3(4) (3 rows,
+    /// one per lighting profile, shared values). The OS-HPXML v1.12.0
+    /// documentation's Default Schedules table quotes every one of these
+    /// rows in full (verified against the fetched v1.12.0 page). The pins
+    /// read the raw rows (see the occupancy pin for why). The engine's
+    /// shipped copy of the table (`python/hares/defaults`) derives its own
+    /// weekend fractions from these and cites the derivations there; this
+    /// pin is the vendored upstream file's published rows.
+    #[test]
+    fn lighting_profiles_pin_the_c33_fractions_and_c34_multipliers() {
+        let raw = vendored_default_schedules_rows();
+
+        let indoor_fractions = [
+            0.012, 0.010, 0.010, 0.010, 0.011, 0.018, 0.030, 0.038, 0.041, 0.041, 0.039, 0.037,
+            0.036, 0.035, 0.037, 0.041, 0.050, 0.065, 0.086, 0.106, 0.110, 0.079, 0.040, 0.018,
+        ];
+        let exterior_fractions = [
+            0.040, 0.037, 0.037, 0.035, 0.035, 0.039, 0.044, 0.041, 0.031, 0.025, 0.024, 0.024,
+            0.025, 0.028, 0.030, 0.035, 0.044, 0.056, 0.064, 0.068, 0.070, 0.065, 0.056, 0.047,
+        ];
+        let garage_fractions = [
+            0.023, 0.019, 0.015, 0.017, 0.021, 0.031, 0.042, 0.041, 0.034, 0.029, 0.027, 0.025,
+            0.021, 0.021, 0.021, 0.026, 0.031, 0.044, 0.084, 0.117, 0.113, 0.096, 0.063, 0.039,
+        ];
+        let multipliers = [
+            1.19, 1.11, 1.02, 0.93, 0.84, 0.80, 0.82, 0.88, 0.98, 1.07, 1.16, 1.20,
+        ];
+
+        assert_eq!(
+            row_values(
+                &raw,
+                "lighting_interior",
+                "InteriorWeekdayScheduleFractions"
+            )
+            .as_slice(),
+            &indoor_fractions[..],
+            "the Indoor Lighting weekday fractions moved off the published Table C.3(3) row"
+        );
+        assert_eq!(
+            row_values(
+                &raw,
+                "lighting_interior",
+                "InteriorWeekendScheduleFractions"
+            )
+            .as_slice(),
+            &indoor_fractions[..],
+            "the Indoor Lighting weekend fractions moved off the published Table C.3(3) row"
+        );
+        assert_eq!(
+            row_values(
+                &raw,
+                "lighting_exterior",
+                "ExteriorWeekdayScheduleFractions"
+            )
+            .as_slice(),
+            &exterior_fractions[..],
+            "the Exterior Lighting weekday fractions moved off the published Table C.3(3) row"
+        );
+        assert_eq!(
+            row_values(
+                &raw,
+                "lighting_exterior",
+                "ExteriorWeekendScheduleFractions"
+            )
+            .as_slice(),
+            &exterior_fractions[..],
+            "the Exterior Lighting weekend fractions moved off the published Table C.3(3) row"
+        );
+        assert_eq!(
+            row_values(&raw, "lighting_garage", "GarageWeekdayScheduleFractions").as_slice(),
+            &garage_fractions[..],
+            "the Garage Lighting weekday fractions moved off the published Table C.3(3) row"
+        );
+        assert_eq!(
+            row_values(&raw, "lighting_garage", "GarageWeekendScheduleFractions").as_slice(),
+            &garage_fractions[..],
+            "the Garage Lighting weekend fractions moved off the published Table C.3(3) row"
+        );
+        for (name, element) in [
+            ("lighting_interior", "InteriorMonthlyScheduleMultipliers"),
+            ("lighting_exterior", "ExteriorMonthlyScheduleMultipliers"),
+            ("lighting_garage", "GarageMonthlyScheduleMultipliers"),
+        ] {
+            assert_eq!(
+                row_values(&raw, name, element).as_slice(),
+                &multipliers[..],
+                "the {name} monthly multipliers moved off the published Table C.3(4) row"
+            );
+        }
+    }
+
+    /// The refrigerator coefficient rows are Table C.3(2) of
+    /// ANSI/RESNET/ICC 301-2022 Addendum C (4 rows in the vendored CSV: the
+    /// refrigerator and extra_refrigerator constant and temperature
+    /// coefficients), published on the OS-HPXML v1.12.0 documentation's
+    /// Default Schedules table (verified against the fetched v1.12.0
+    /// page). Their OCHRE Name is "N/A", so the profile parser skips them
+    /// and the pins read the raw rows; the two constant rows differ in
+    /// exactly one sign (hour 19: +0.077 for the refrigerator,
+    /// -0.077 for the extra refrigerator). The standard text itself is
+    /// UNVERIFIABLE-WEB; the docs page is the witness.
+    #[test]
+    fn refrigerator_coefficient_rows_pin_the_c32_values() {
+        let raw = vendored_default_schedules_rows();
+
+        let refrigerator_constant = [
+            -0.487, -0.340, -0.370, -0.361, -0.515, -0.684, -0.471, -0.159, -0.079, -0.417, -0.411,
+            -0.386, -0.240, -0.314, -0.160, -0.121, -0.469, -0.412, -0.091, 0.077, -0.118, -0.247,
+            -0.445, -0.544,
+        ];
+        let extra_refrigerator_constant = [
+            -0.487, -0.340, -0.370, -0.361, -0.515, -0.684, -0.471, -0.159, -0.079, -0.417, -0.411,
+            -0.386, -0.240, -0.314, -0.160, -0.121, -0.469, -0.412, -0.091, -0.077, -0.118, -0.247,
+            -0.445, -0.544,
+        ];
+        let temperature = [
+            0.019, 0.016, 0.017, 0.016, 0.018, 0.021, 0.019, 0.015, 0.015, 0.019, 0.018, 0.018,
+            0.016, 0.017, 0.015, 0.015, 0.020, 0.020, 0.017, 0.014, 0.016, 0.017, 0.019, 0.020,
+        ];
+
+        assert_eq!(
+            row_values(&raw, "refrigerator", "ConstantScheduleCoefficients").as_slice(),
+            &refrigerator_constant[..],
+            "the refrigerator constant coefficients moved off the published Table C.3(2) row"
+        );
+        assert_eq!(
+            row_values(&raw, "extra_refrigerator", "ConstantScheduleCoefficients").as_slice(),
+            &extra_refrigerator_constant[..],
+            "the extra_refrigerator constant coefficients moved off the published Table C.3(2) row"
+        );
+        assert_eq!(
+            row_values(&raw, "refrigerator", "TemperatureScheduleCoefficients").as_slice(),
+            &temperature[..],
+            "the refrigerator temperature coefficients moved off the published Table C.3(2) row"
+        );
+        assert_eq!(
+            row_values(
+                &raw,
+                "extra_refrigerator",
+                "TemperatureScheduleCoefficients"
+            )
+            .as_slice(),
+            &temperature[..],
+            "the extra_refrigerator temperature coefficients moved off the published Table C.3(2) row"
+        );
+    }
+
+    /// The vendored CSV's Data Source census, the red-team-corrected
+    /// counts (the original research entry reversed the C.3(2) and C.3(4)
+    /// counts and omitted the blanks; the corrected census is 12 rows
+    /// Table C.3(5), 12 Table C.3(1), 6 Table C.3(3), 4 Table C.3(2),
+    /// 3 Table C.3(4), 2 Equation 4.2-43a, 29 rows citing Figures 16, 23
+    /// or 24 of the 2010 Building America House Simulation Protocols, and
+    /// 19 with no citation). The file has 88 lines: one header plus the 87
+    /// data rows the census counts over, which reconciles the two
+    /// records' counts (the research file counts lines, row 57's record
+    /// counts rows). A silent re-sourcing of any row, a new citation form
+    /// or a new uncited row fails here. No row cites ATUS: the file
+    /// carries the 301 Addendum C and BAHSP fraction profiles, not the
+    /// Markov chain data.
+    #[test]
+    fn citation_census_pins_the_red_team_corrected_counts() {
+        let rows = vendored_default_schedules_rows();
+        assert_eq!(
+            rows.len(),
+            87,
+            "the vendored CSV's data-row count moved (88 lines: one header plus 87 rows)"
+        );
+
+        let mut counts = [0usize; 8]; // C.3(5), C.3(1), C.3(3), C.3(2), C.3(4), the equation, BAHSP, uncited
+        for (name, element, _, source) in &rows {
+            if source.contains("Table C.3(5)") {
+                counts[0] += 1;
+            } else if source.contains("Table C.3(1)") {
+                counts[1] += 1;
+            } else if source.contains("Table C.3(3)") {
+                counts[2] += 1;
+            } else if source.contains("Table C.3(2)") {
+                counts[3] += 1;
+            } else if source.contains("Table C.3(4)") {
+                counts[4] += 1;
+            } else if source.contains("Equation 4.2-43a") {
+                counts[5] += 1;
+            } else if source.contains("BAHSP") {
+                counts[6] += 1;
+            } else if source.is_empty() {
+                counts[7] += 1;
+            } else {
+                panic!(
+                    "the row {name}/{element} carries a Data Source the census does not know: {source}"
+                );
+            }
+        }
+
+        let [c35, c31, c33, c32, c34, equation, bahsp, uncited] = counts;
+        assert_eq!(c35, 12, "the Table C.3(5) row count moved");
+        assert_eq!(c31, 12, "the Table C.3(1) row count moved");
+        assert_eq!(c33, 6, "the Table C.3(3) row count moved");
+        assert_eq!(c32, 4, "the Table C.3(2) row count moved");
+        assert_eq!(c34, 3, "the Table C.3(4) row count moved");
+        assert_eq!(equation, 2, "the Equation 4.2-43a row count moved");
+        assert_eq!(
+            bahsp, 29,
+            "the 2010 BAHSP figure row count moved (Figures 16, 23 and 24)"
+        );
+        assert_eq!(uncited, 19, "the uncited row count moved");
+        assert_eq!(
+            c35 + c31 + c33 + c32 + c34 + equation + bahsp + uncited,
+            87,
+            "the census must cover every data row"
+        );
+    }
+
+    /// The 19 uncited rows, enumerated by name (row 57's landed wording:
+    /// "19 of 87 rows carry none, counted and named"). They are the
+    /// all-1.0 monthly multiplier rows, the holiday lighting fractions and
+    /// the vehicle schedules among them. A new row without a citation, or
+    /// a re-citation of one of these, fails here.
+    #[test]
+    fn uncited_rows_of_the_vendored_csv_are_enumerated_and_named() {
+        let rows = vendored_default_schedules_rows();
+        let mut uncited: Vec<(String, String)> = rows
+            .iter()
+            .filter(|(_, _, _, source)| source.is_empty())
+            .map(|(name, element, _, _)| (name.clone(), element.clone()))
+            .collect();
+        uncited.sort();
+
+        let expected: Vec<(String, String)> = [
+            ("clothes_dryer", "MonthlyScheduleMultipliers"),
+            ("clothes_washer", "MonthlyScheduleMultipliers"),
+            ("cooking_range", "MonthlyScheduleMultipliers"),
+            ("dishwasher", "MonthlyScheduleMultipliers"),
+            ("fuel_loads_fireplace", "MonthlyScheduleMultipliers"),
+            ("fuel_loads_grill", "MonthlyScheduleMultipliers"),
+            ("fuel_loads_lighting", "MonthlyScheduleMultipliers"),
+            (
+                "general_water_use",
+                "GeneralWaterUseMonthlyScheduleMultipliers",
+            ),
+            (
+                "hot_water_fixtures",
+                "WaterFixturesMonthlyScheduleMultipliers",
+            ),
+            (
+                "hot_water_recirculation_pump",
+                "RecirculationPumpMonthlyScheduleMultipliers",
+            ),
+            ("lighting_exterior_holiday", "WeekdayScheduleFractions"),
+            ("lighting_exterior_holiday", "WeekendScheduleFractions"),
+            ("occupants", "MonthlyScheduleMultipliers"),
+            ("plug_loads_other", "MonthlyScheduleMultipliers"),
+            ("plug_loads_tv", "MonthlyScheduleMultipliers"),
+            ("plug_loads_vehicle", "MonthlyScheduleMultipliers"),
+            ("plug_loads_vehicle", "WeekdayScheduleFractions"),
+            ("plug_loads_vehicle", "WeekendScheduleFractions"),
+            ("plug_loads_well_pump", "MonthlyScheduleMultipliers"),
+        ]
+        .iter()
+        .map(|(name, element)| (name.to_string(), element.to_string()))
+        .collect();
+
+        assert_eq!(
+            uncited, expected,
+            "the uncited rows moved: every row without a citation is named here"
+        );
+    }
+
+    /// The four OS-HPXML v1.12.0 reference sources vendored at the repo
+    /// root are the upstream witness the occupancy provenance contract
+    /// pins (the contract on [`inject_occupancy_schedule`] carries their
+    /// sha256 constants): this test re-hashes the vendored bytes against
+    /// those constants, so a root file that stops byte-matching the
+    /// v1.12.0 tag fails here. The six `BuildResidentialScheduleFile`
+    /// Markov CSVs stay documentation-only pins in the same contract:
+    /// they are not vendored, there are no in-tree bytes to hash, and the
+    /// pin tests do not fetch.
+    #[test]
+    fn vendored_os_hpxml_ruby_sources_match_the_doc_pinned_sha256s() {
+        use sha2::{Digest, Sha256};
+
+        let pinned: [(&str, &str); 4] = [
+            (
+                "hotwater_appliances.rb",
+                "6e1eff6f0e58cd02818e00b29b88dd99a4900ed86bc3933905bd1ca0caa0cfc5",
+            ),
+            (
+                "hvac.rb",
+                "2365b4181cfd88561f4647ee20e18557c7aaf72251ef925b2535123757f93e5b",
+            ),
+            (
+                "misc_loads.rb",
+                "65da7711923555d973248daafa5cadcc37818682d7354452b0419d428184e777",
+            ),
+            (
+                "model.rb",
+                "3f3e46fe81e924969fd4b9a0246b5ef45c630093f42203f8cfd956151f343bd7",
+            ),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (name, expected) in pinned {
+            let bytes = std::fs::read(root.join(name)).unwrap_or_else(|err| {
+                panic!("the vendored OS-HPXML source {name} is unreadable: {err}")
+            });
+            let digest = Sha256::digest(&bytes);
+            let actual: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(
+                actual, expected,
+                "{name} no longer byte-matches the OS-HPXML v1.12.0 tag the contract pins"
+            );
+        }
+    }
 }
