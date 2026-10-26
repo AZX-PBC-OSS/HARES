@@ -8,10 +8,15 @@
 //! the master-seed position).
 //!
 //! Fixture: the synthetic single-zone TOML dwelling the rl_step bench
-//! builds, at 900 s steps, warm-up disabled, every stream construction
-//! derives (the dwelling's own stream 0; the one electric furnace is no
-//! event load). The scenario reaches the build through the `[simulation]`
-//! table's `scenario_seed` key.
+//! builds, at 900 s steps, warm-up disabled, extended with the two
+//! stochastic classes the synthetic fixture alone omits: the `[event_load]`
+//! table's Cooking Range (an event-load stream keyed on the load's
+//! identity) and a built-in EV driver (the EV equipment's actor seed, the
+//! driver keyed on the dwelling's reserved EV-driver stream). Every stream
+//! construction derives: the dwelling's own stream 0, the event load's
+//! tagged stream, the built-in driver's reserved stream. The scenario
+//! reaches the build through the `[simulation]` table's `scenario_seed`
+//! key.
 //!
 //! RED as the unthreaded scenario: before the scenario key exists, the
 //! config boundary rejects the key (`SimulationConfig` carries
@@ -26,8 +31,10 @@ use hares_core::Dwelling;
 mod bench_common;
 
 /// The synthetic dwelling's TOML with the master seed and the optional
-/// scenario key set. Warm-up disabled: the streams a fresh build holds at
-/// construction are the streams the reseed composition compares.
+/// scenario key set, and the `[event_load]` table's Cooking Range: the
+/// event-load stream the per-component claims must cover. Warm-up
+/// disabled: the streams a fresh build holds at construction are the
+/// streams the reseed composition compares.
 fn scenario_toml(scenario: Option<u64>, master_seed: u64) -> String {
     let scenario_line = scenario
         .map(|id| format!("scenario_seed = {id}\n"))
@@ -67,15 +74,45 @@ ach = 3.0
 
 [schedule]
 occupancy = 1.0
+
+[event_load]
+active_power_w = 1500.0
+event_probability = 0.5
 "#
     )
+}
+
+/// The fixture's built-in EV driver: the EV equipment's actor seed builds
+/// `EvDriver:EV1` at the add, keyed on the dwelling's scenario-mixed
+/// stream range exactly as a fresh construction's driver is.
+fn add_fixture_ev(dwelling: &mut Dwelling) {
+    use hares_equipment::{EquipmentConfig, EquipmentRegistry};
+
+    let config: hares_equipment::EvConfig = serde_json::from_value(serde_json::json!({
+        "capacity_j": 216000000.0,
+        "charging_level": "L2",
+        "max_charging_power_w": 7200.0,
+    }))
+    .expect("the fixture's EvConfig parses");
+    let config =
+        EquipmentConfig::from_typed("EV1".to_string(), "EV".to_string(), config).expect("typed");
+    let mut ev = EquipmentRegistry::new()
+        .create("EV", config.clone())
+        .expect("the fixture's EV creates");
+    ev.init(&config, dwelling.latest_env())
+        .expect("the fixture's EV inits");
+    dwelling
+        .add_equipment(ev)
+        .expect("the fixture's EV joins with its built-in driver");
 }
 
 fn scenario_dwelling(dir: &Path, scenario: Option<u64>, master_seed: u64) -> Dwelling {
     let path = bench_common::numbered_path(dir, "hares-scenario-dwelling", "toml");
     std::fs::write(&path, scenario_toml(scenario, master_seed)).expect("the scenario TOML writes");
-    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
-        .expect("the scenario dwelling builds")
+    let mut dwelling = Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
+        .expect("the scenario dwelling builds");
+    add_fixture_ev(&mut dwelling);
+    dwelling
 }
 
 /// Two scenarios under one master seed: every stream the dwellings hold
@@ -218,13 +255,26 @@ fn reseed_composes_the_episode_seed_with_the_scenario() {
     // The composition's exactness: each reseeded dwelling's streams are
     // the streams a fresh construction under (the episode seed, its own
     // scenario) holds at build, every component, key, nonce and word
-    // position.
+    // position. The zips assert equal lengths first: a truncated zip
+    // would pass the composition with a component missing.
     let fresh_a = scenario_dwelling(dir, Some(1), EPISODE_SEED);
     let fresh_b = scenario_dwelling(dir, Some(2), EPISODE_SEED);
+    let fresh_streams_a = fresh_a.seeded_streams();
+    let fresh_streams_b = fresh_b.seeded_streams();
+    assert_eq!(
+        streams_a.len(),
+        fresh_streams_a.len(),
+        "the reseeded scenario a holds the components a fresh build does"
+    );
+    assert_eq!(
+        streams_b.len(),
+        fresh_streams_b.len(),
+        "the reseeded scenario b holds the components a fresh build does"
+    );
     for (reseeded, fresh) in streams_a
         .iter()
-        .zip(&fresh_a.seeded_streams())
-        .chain(streams_b.iter().zip(&fresh_b.seeded_streams()))
+        .zip(&fresh_streams_a)
+        .chain(streams_b.iter().zip(&fresh_streams_b))
     {
         assert_eq!(
             reseeded.state, fresh.state,
@@ -234,4 +284,42 @@ fn reseed_composes_the_episode_seed_with_the_scenario() {
             reseeded.component
         );
     }
+
+    // The class-specific composition: the fixture's two stochastic
+    // classes compose by their own derivations, not as a global
+    // swap-and-drop. The event-load component keys on the scenario-mixed
+    // episode key and rides the tagged event-load nonce partition; the
+    // built-in EV driver keys on the same key and rides the reserved
+    // EV-driver stream the construction assigned it.
+    let episode_key = hares_types::rng::dwelling_seed_scenario(EPISODE_SEED, Some(1), 1);
+    let event_load = streams_a
+        .iter()
+        .find(|stream| stream.state.stream & hares_types::rng::EVENT_LOAD_STREAM_TAG != 0)
+        .expect("the fixture's event-load stream is in the seeded set");
+    assert_eq!(
+        event_load.state.seed, episode_key,
+        "the event load's stream keys on the scenario-mixed episode key"
+    );
+    assert_eq!(
+        event_load.state.word_pos, 0,
+        "the reseeded event load draws from its start"
+    );
+    let driver = streams_a
+        .iter()
+        .find(|stream| stream.component.starts_with("actor 'EvDriver:"))
+        .expect("the fixture's built-in EV driver is in the seeded set");
+    assert_eq!(
+        driver.state.stream,
+        hares_core::rng::RNG_STREAM_EV_DRIVER_BASE,
+        "the built-in driver's stream nonce is the reserved base the \
+         construction assigns the first driver"
+    );
+    assert_eq!(
+        driver.state.seed, episode_key,
+        "the built-in driver's stream keys on the scenario-mixed episode key"
+    );
+    assert_eq!(
+        driver.state.word_pos, 0,
+        "the reseeded driver draws from its start"
+    );
 }
