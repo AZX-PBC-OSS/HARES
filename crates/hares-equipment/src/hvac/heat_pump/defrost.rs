@@ -112,9 +112,12 @@ pub struct DefrostConfig {
     /// Whether the discrete frost cycle resolves the defrost penalty into
     /// explicit events. Enabled (the default): `evaluate_defrost` feeds only
     /// the frost accumulator and the cycle's phases own the per-step
-    /// multipliers, applied exactly once per step. Disabled: the continuous
-    /// model's average multipliers apply on every frost-condition step and
-    /// the cycle tracker stays dormant.
+    /// multipliers, applied exactly once per step, at steps that can resolve
+    /// the event (see `DefrostCycleTracker::resolves_event_at`: a step longer
+    /// than the cycle duration selects the continuous model there). Disabled
+    /// (or above that boundary): the continuous model's average multipliers
+    /// apply on every frost-condition step and the cycle tracker stays
+    /// dormant.
     #[serde(default = "default_true")]
     pub defrost_discrete_cycle: bool,
 }
@@ -267,6 +270,16 @@ impl std::fmt::Display for DefrostCycleState {
 /// Coil - Defrost Operation for the continuous model the duty mirrors; the
 /// explicit ON/OFF cycle and its EWMA-smoothed trigger are HARES-specific
 /// (not from E+ source).
+///
+/// The tracker resolves its event only at steps the event can hold whole.
+/// At a step longer than the event duration the event fills whole steps and
+/// the realized duty quantizes upward (1.33x the documented duty at 300 s
+/// steps, 2.66x at 900 s, 5.32x at 3600 s, at the defrost probe's duty), so
+/// above that boundary the caller selects the continuous model instead:
+/// [`Self::resolves_event_at`] reports the regime, and the continuous
+/// EnergyPlus ERM 26.1 fractional model, which applies its time-averaged
+/// penalty at any timestep, is the coarse-step limit of this extension.
+/// See the defrost entry in docs/PHYSICS_DECISIONS.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefrostCycleTracker {
     /// Current cycle state.
@@ -304,7 +317,30 @@ impl DefrostCycleTracker {
         }
     }
 
+    /// Whether the discrete cycle can resolve its event at this timestep.
+    ///
+    /// The event lasts `cycle_duration_s` (capped by
+    /// `max_defrost_duration_s`, the same duration the Defrosting phase
+    /// exits on); a step longer than the event cannot resolve it: the event
+    /// occupies whole steps and the realized duty quantizes upward without
+    /// bound as the step grows. The boundary is the event duration itself:
+    /// at exactly 210 s the event is one whole step and the documented duty
+    /// holds. The caller selects the continuous model when this returns
+    /// false, so the coarse-step behavior is the continuous model's own:
+    /// the EnergyPlus ERM 26.1 fractional defrost model, which applies its
+    /// time-averaged penalty at any timestep. The defrost entry in
+    /// docs/PHYSICS_DECISIONS.md records the decision and the rejected
+    /// pinned-maximum-step alternative.
+    #[must_use]
+    pub fn resolves_event_at(&self, dt_s: f64) -> bool {
+        dt_s <= self.cycle_duration_s.min(self.max_defrost_duration_s)
+    }
+
     /// Advance the FSM by one timestep.
+    ///
+    /// The caller gates this on [`Self::resolves_event_at`]: at a step
+    /// longer than the event duration the continuous model owns the
+    /// multipliers and the FSM must not advance.
     ///
     /// - `dt_s` -- timestep duration (s)
     /// - `time_fraction` — continuous defrost time fraction from `evaluate_defrost`
@@ -1702,6 +1738,65 @@ mod defrost_tests {
         assert!(
             (duty - tf).abs() < 0.05 * tf,
             "the FSM duty {duty:.5} must match the documented duty {tf} over many cycles"
+        );
+    }
+
+    /// The coarse-dt guard's boundary predicate: the tracker resolves its
+    /// event at steps at or below the event duration (the cycle duration,
+    /// capped by the max duration: the same duration the Defrosting phase
+    /// exits on) and yields to the continuous model above it.
+    #[test]
+    fn tracker_resolves_event_at_the_event_duration_boundary() {
+        let mut tracker = DefrostCycleTracker::new();
+        assert!(tracker.resolves_event_at(209.999));
+        assert!(tracker.resolves_event_at(210.0));
+        assert!(!tracker.resolves_event_at(210.0001));
+        assert!(!tracker.resolves_event_at(900.0));
+
+        // The event duration is the cycle duration capped by the max: a
+        // 600 s cycle with a 210 s cap resolves only at or below 210 s.
+        tracker.cycle_duration_s = 600.0;
+        tracker.max_defrost_duration_s = 210.0;
+        assert!(!tracker.resolves_event_at(210.0001));
+        assert!(tracker.resolves_event_at(210.0));
+
+        tracker.cycle_duration_s = 600.0;
+        tracker.max_defrost_duration_s = 600.0;
+        assert!(tracker.resolves_event_at(600.0));
+        assert!(!tracker.resolves_event_at(600.001));
+    }
+
+    /// At the boundary itself (the step equal to the cycle duration) the
+    /// event is one whole step and the documented duty still holds: one
+    /// Defrosting step per 1/tf steps.
+    #[test]
+    fn tracker_duty_holds_at_the_boundary_step() {
+        let mut tracker = DefrostCycleTracker::new();
+        tracker.cycle_duration_s = 210.0;
+        let tf = 0.2_f64;
+        let dt = 210.0_f64; // the event is exactly one step
+
+        // Pre-warm the EWMA without triggering (huge cycle duration).
+        tracker.cycle_duration_s = 1_000_000.0;
+        for _ in 0..400 {
+            tracker.advance(dt, tf, true, 0.0).unwrap();
+        }
+        tracker.cycle_duration_s = 210.0;
+        tracker.accumulated_frost_s = 0.0;
+
+        let total_steps = 2_000_u32;
+        let mut defrost_steps = 0_u32;
+        for _ in 0..total_steps {
+            tracker.advance(dt, tf, true, 0.0).unwrap();
+            if tracker.is_defrosting() {
+                defrost_steps += 1;
+            }
+        }
+        let duty = f64::from(defrost_steps) / f64::from(total_steps);
+        assert!(
+            (duty - tf).abs() < 0.05 * tf,
+            "the FSM duty {duty:.5} must match the documented duty {tf} even at the \
+             boundary step (the event is one whole step)"
         );
     }
 

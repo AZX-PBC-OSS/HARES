@@ -1382,7 +1382,6 @@ impl HeatPumpHeaterCore {
             return Err(err);
         }
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
-        let dt_min = dt.as_secs_f64() / 60.0;
         let dt_s = dt.as_secs_f64();
 
         // Pre-compute defrost conditions for FSM advance. evaluate_defrost is
@@ -1422,10 +1421,14 @@ impl HeatPumpHeaterCore {
 
         // Advance the discrete defrost FSM BEFORE compute_step so the current
         // state is visible during step computation. The FSM runs only when
-        // the discrete frost cycle is selected; with the continuous model
-        // the tracker stays dormant and evaluate_defrost owns the
-        // multipliers.
-        if self.defrost_config.defrost_discrete_cycle {
+        // the discrete frost cycle is selected and the step can resolve its
+        // event (the coarse-dt guard: see `DefrostCycleTracker::resolves_event_at`;
+        // a step longer than the event cannot, and the continuous model owns
+        // the multipliers there). With the continuous model the tracker stays
+        // dormant and evaluate_defrost owns the multipliers.
+        if self.defrost_config.defrost_discrete_cycle
+            && self.defrost_cycle_tracker.resolves_event_at(dt_s)
+        {
             self.defrost_cycle_tracker.advance(
                 dt_s,
                 defrost_conditions.1,
@@ -1434,7 +1437,7 @@ impl HeatPumpHeaterCore {
             )?;
         }
 
-        let step = self.compute_step(env, dt_min)?;
+        let step = self.compute_step(env, dt_s)?;
 
         if step.thermal_output_w > 0.0 {
             let sensible_gain_w = step.thermal_output_w - step.latent_gain_w;
@@ -1754,7 +1757,8 @@ impl HeatPumpHeaterCore {
         Ok(())
     }
 
-    fn compute_step(&mut self, env: &EnvironmentState, dt_min: f64) -> crate::Result<HeaterStep> {
+    fn compute_step(&mut self, env: &EnvironmentState, dt_s: f64) -> crate::Result<HeaterStep> {
+        let dt_min = dt_s / 60.0;
         let zone = lookup_zone(env, self.hvac.config.served_zone()?)?;
         let pressure_pa = env.weather.pressure_pa();
 
@@ -1987,12 +1991,19 @@ impl HeatPumpHeaterCore {
         // evaluate_defrost feeds only the frost accumulator and the cycle's
         // phases apply the multipliers exactly once per step (full-intensity
         // events, the bare frost derate between them). With it disabled the
-        // continuous model's average applies directly. The FSM keeps
+        // continuous model's average applies directly. The coarse-dt guard:
+        // a step longer than the cycle's event cannot resolve it (the event
+        // occupies whole steps and the realized duty quantizes upward), so
+        // above the boundary the continuous model owns the multipliers and
+        // the tracker stays dormant
+        // (`DefrostCycleTracker::resolves_event_at`; the defrost entry in
+        // docs/PHYSICS_DECISIONS.md records the decision). The FSM keeps
         // advancing (so defrost completes on elapsed time) even when the
         // compressor is off, but the multipliers only apply during actual
         // compressor operation, otherwise the equipment reports phantom
         // draw while commanded off.
-        let discrete_cycle = self.defrost_config.defrost_discrete_cycle;
+        let discrete_cycle = self.defrost_config.defrost_discrete_cycle
+            && self.defrost_cycle_tracker.resolves_event_at(dt_s);
         let is_discrete_defrosting =
             discrete_cycle && self.defrost_cycle_tracker.is_defrosting() && hp_on;
 
