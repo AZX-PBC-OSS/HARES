@@ -132,7 +132,13 @@ fn bench_checkpoint_bench_is_registered() {
 fn ci_bench_job_gates_every_registered_bench() {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = std::process::Command::new(cargo)
-        .args(["metadata", "--no-deps", "--offline", "--format-version", "1"])
+        .args([
+            "metadata",
+            "--no-deps",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("cargo metadata runs");
@@ -297,8 +303,8 @@ fn bench_rl_episode_year_episode_steps_to_completion() {
     .expect("write the non-leap year episode's TOML");
     let mut dwelling = Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
         .expect("the non-leap year episode's dwelling must construct");
-    let non_leap_steps: u64 = (bench_common::YEAR_EPISODE_DURATION_S
-        / bench_common::YEAR_EPISODE_TIME_RES_S) as u64;
+    let non_leap_steps: u64 =
+        (bench_common::YEAR_EPISODE_DURATION_S / bench_common::YEAR_EPISODE_TIME_RES_S) as u64;
     assert_eq!(
         non_leap_steps, 8_784,
         "the 366-day duration at 3600 s holds 8,784 steps"

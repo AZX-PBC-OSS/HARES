@@ -15344,11 +15344,8 @@ occupancy = 1.0
         // id, the key material never does, and the pairs differ.
         let (_scenario_dir, scenario_path) = temp_toml("registry_driver_master_seed_scenario");
         let mut scenario_toml = fs::read_to_string(&toml_path).expect("the minimal TOML reads");
-        scenario_toml = scenario_toml.replacen(
-            "master_seed = 0",
-            "master_seed = 0\nscenario_seed = 5",
-            1,
-        );
+        scenario_toml =
+            scenario_toml.replacen("master_seed = 0", "master_seed = 0\nscenario_seed = 5", 1);
         fs::write(&scenario_path, scenario_toml).expect("the scenario TOML writes");
         let mut scenario_dwelling =
             Dwelling::from_toml_config(&scenario_path).expect("the scenario dwelling builds");
