@@ -7651,8 +7651,13 @@ impl Dwelling {
             }
             match entry.phase {
                 ExecutionPhase::SolverFeedback => {
+                    // The phase label feeds only the observing path's
+                    // debug line (compiled out in release): a step whose
+                    // observer is never enabled pays nothing for it.
                     #[cfg(feature = "observe")]
-                    scheduled_phases.push("SolverFeedback".to_string());
+                    if observing {
+                        scheduled_phases.push("SolverFeedback".to_string());
+                    }
 
                     // Step 1e: collect ideal targets and solve capacities.
                     self.solver_feedback_actor
@@ -7692,8 +7697,14 @@ impl Dwelling {
                     }
 
                     if should_call {
+                        // The actor label feeds only the observing
+                        // path's debug line (compiled out in release):
+                        // a step whose observer is never enabled pays
+                        // nothing for it.
                         #[cfg(feature = "observe")]
-                        scheduled_phases.push(format!("ActorDecide({})", entry.name));
+                        if observing {
+                            scheduled_phases.push(format!("ActorDecide({})", entry.name));
+                        }
                         #[cfg(debug_assertions)]
                         {
                             self.executed_actors_scratch.insert(idx);
@@ -8439,8 +8450,6 @@ impl Dwelling {
         // the updated state. Zone temperatures are already applied above; the
         // slot write copies the full DomainUpdate in place for solvers that
         // read it (humidity).
-        #[cfg(feature = "observe")]
-        let thermal_for_observer = self.thermal_update_buf.clone();
         #[cfg(test)]
         let thermal_alloc_before = thread_allocations();
         self.latest_env
@@ -8534,6 +8543,13 @@ impl Dwelling {
             let port_load_adj_w = port_load_raw_w * zip_scale;
             let port_net_w = port_load_adj_w + self.ports.electrical.generation_power_w;
             let residual = (self.electrical_solver.net_active_w() - port_net_w).abs();
+            // The thermal-update buffer's capture clone, deferred to the
+            // capture site (the census's A2): the buffer's content is
+            // unchanged between the zone apply above and here (the
+            // humidity, electrical and fluid solves write their own
+            // buffers), so the deferred clone carries the same values,
+            // and a step whose observer is never enabled pays nothing.
+            let thermal_for_observer = self.thermal_update_buf.clone();
             obs_phases.post_solvers = Some(observer_capture::capture_solvers(
                 &thermal_for_observer,
                 &self.humidity_update_buf,
