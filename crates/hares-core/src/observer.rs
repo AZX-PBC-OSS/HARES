@@ -14,6 +14,14 @@ use hares_types::{
     LoopId, PortDeclaration, Telemetry, ZoneHeat, ZoneId,
 };
 
+/// One actor's telemetry channel keys: the actor's name and its sorted
+/// key list, shared through the Arc. The key set is frozen at the
+/// telemetry's seal (the unknown-key latch rejects new keys for the
+/// run's life), so the list is a pure function of frozen state: cached
+/// once per actor at the first observed push and cloned as an Arc per
+/// step.
+pub type ActorTelemetryKeys = std::sync::Arc<(String, Vec<String>)>;
+
 /// Complete snapshot of a single simulation timestep, populated incrementally
 /// at phase boundaries within `Dwelling::run_timestep`.
 #[derive(Debug, Clone)]
@@ -37,8 +45,10 @@ pub struct StepSnapshot {
     /// cos(2π · fractional_hour / 24) for verifying time_cos observation field.
     pub time_cos: f64,
     /// Per-actor telemetry channel keys present at this timestep:
-    /// actor_name → list of channel keys.
-    pub actor_telemetry_keys: Vec<(String, Vec<String>)>,
+    /// actor_name → list of channel keys, shared through the Arc (the
+    /// key set is frozen at the telemetry's seal; the list is cached
+    /// once per actor and cloned as an Arc per step).
+    pub actor_telemetry_keys: Vec<ActorTelemetryKeys>,
 }
 
 /// Incrementally populated captures for each phase of `run_timestep`.
@@ -216,7 +226,7 @@ pub struct CustomSolverCapture {
 }
 
 /// Capture of all dispatched control signals and their resolution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DispatchCapture {
     /// All signals dispatched this timestep, in tier order (low → high).
     pub signals: Vec<DispatchedSignal>,

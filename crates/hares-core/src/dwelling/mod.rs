@@ -119,8 +119,8 @@ use crate::diagnostics::DiagnosticAccumulator;
 use crate::observer::MoistureZoneInvariant;
 #[cfg(feature = "observe")]
 use crate::observer::{
-    DispatchCapture, DispatchedSignal, EquipmentObservation, MoistureInvariantCapture,
-    ObserverBuffer, PhaseSnapshots, SameTierConflict, StepSnapshot,
+    DispatchedSignal, EquipmentObservation, MoistureInvariantCapture, ObserverBuffer,
+    PhaseSnapshots, SameTierConflict, StepSnapshot,
 };
 #[cfg(feature = "observe")]
 use crate::observer_capture;
@@ -1833,13 +1833,21 @@ impl ControlDispatcher {
     }
 
     #[cfg(feature = "observe")]
-    fn dispatch_into_observed(
+    fn dispatch_into_observed_into(
         &mut self,
         equipment: &mut [Box<dyn Equipment>],
         warnings: &mut WarningLog,
         rejected_control_signals: &mut RejectionGate,
-    ) -> DispatchCapture {
-        let mut same_tier_conflicts = Vec::new();
+        signals: &mut Vec<DispatchedSignal>,
+        same_tier_conflicts: &mut Vec<SameTierConflict>,
+    ) {
+        // The pass's conflict scan replaces the passed list's content;
+        // the signals append: the step's merge target (the holder's
+        // retained Vec, cleared once per step) concatenates every
+        // observing pass's signals in dispatch order, so the captured
+        // content is the pre-pass's conflicts plus every pass's signals,
+        // exactly what the per-pass-fresh + merge shape produced.
+        same_tier_conflicts.clear();
         for (tier_idx, tier_que) in self.by_tier.iter().enumerate() {
             let (head, tail) = tier_que.as_slices();
             let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
@@ -1872,7 +1880,6 @@ impl ControlDispatcher {
             }
         }
 
-        let mut signals = Vec::new();
         self.drain_tiers(
             equipment,
             warnings,
@@ -1887,10 +1894,6 @@ impl ControlDispatcher {
                 });
             },
         );
-        DispatchCapture {
-            signals,
-            same_tier_conflicts,
-        }
     }
 
     fn drain_tiers(
@@ -2763,6 +2766,54 @@ impl Dwelling {
     }
 }
 
+/// The observe build's per-site allocation accumulators (the row's
+/// witnesses): the sites the observe feature gates, bracketed on the
+/// step path and read by the dwelling's test module. Separate from
+/// [`SnapshotAllocations`]: those sites exist only under the observe
+/// feature, and that record's totals are asserted in the default build.
+#[cfg(all(test, feature = "observe"))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ObserveAllocations {
+    /// The pre-step port snapshot buffer's writes: the step-start fill
+    /// and the per-equipment re-writes after each equipment's step.
+    port_snapshot_buf: u64,
+    /// The observed dispatch passes' captures: the signals Vec and the
+    /// merge target's buffers, cleared and refilled per step.
+    dispatch_capture_buf: u64,
+    /// The actor telemetry keys' per-step collect into the recycled
+    /// snapshot slot.
+    actor_telemetry_keys: u64,
+}
+
+#[cfg(all(test, feature = "observe"))]
+impl ObserveAllocations {
+    /// Adds the allocations the counting allocator saw between `before`
+    /// and now to `site`'s accumulator. Both reads are `None` when no
+    /// binary installed the allocator, and then nothing is recorded.
+    /// The method takes the accumulator alone (not the dwelling) so a
+    /// bracket inside a live borrow of another field stays a disjoint
+    /// field path.
+    fn record(&mut self, before: Option<u64>, site: ObserveAllocSite) {
+        if let (Some(before), Some(after)) = (before, thread_allocations()) {
+            let delta = after.saturating_sub(before);
+            match site {
+                ObserveAllocSite::PortSnapshotBuf => self.port_snapshot_buf += delta,
+                ObserveAllocSite::DispatchCaptureBuf => self.dispatch_capture_buf += delta,
+                ObserveAllocSite::ActorTelemetryKeys => self.actor_telemetry_keys += delta,
+            }
+        }
+    }
+}
+
+/// The observe build's bracketed sites.
+#[cfg(all(test, feature = "observe"))]
+#[derive(Clone, Copy, Debug)]
+enum ObserveAllocSite {
+    PortSnapshotBuf,
+    DispatchCaptureBuf,
+    ActorTelemetryKeys,
+}
+
 /// Top-level single-dwelling simulation orchestrator.
 pub struct Dwelling {
     pub bldg_id: i64,
@@ -2949,6 +3000,12 @@ pub struct Dwelling {
     /// The snapshot path's per-site allocation accumulators; test build only.
     #[cfg(test)]
     snapshot_allocations: SnapshotAllocations,
+    /// The observe build's per-site allocation accumulators (the row's
+    /// witnesses: the port snapshot buffer's writes, the observed
+    /// dispatch captures, the actor telemetry keys' collect); test build
+    /// with the observe feature only.
+    #[cfg(all(test, feature = "observe"))]
+    observe_allocations: ObserveAllocations,
     #[cfg(debug_assertions)]
     test_panic_on_step: bool,
     #[cfg(debug_assertions)]
@@ -3138,6 +3195,22 @@ pub struct Dwelling {
     actor_timings: ActorTimings,
     #[cfg(feature = "observe")]
     observer_buf: Option<ObserverBuffer>,
+    /// The observe build's pre-step port snapshot: one persistent buffer
+    /// the step's per-equipment diffs read and re-write in place. The
+    /// step fills it once at the step start (the first observed step
+    /// allocates its Vecs; every step after reuses them through
+    /// [`PortSlots::copy_into`]) and re-writes it after every
+    /// equipment's step, so the per-equipment port re-clones are gone.
+    #[cfg(feature = "observe")]
+    port_snapshot_buf: PortSlots,
+    /// Per-actor telemetry key lists, cached at the actor's first
+    /// observed push: the key set is frozen at the telemetry's seal, so
+    /// the collected list is a pure function of frozen state and its Arc
+    /// clones per step. An unsealed telemetry never caches (its key set
+    /// could still grow). Parallel to `actors`; rebuilt when the actor
+    /// count changes.
+    #[cfg(feature = "observe")]
+    actor_key_cache: Vec<Option<crate::observer::ActorTelemetryKeys>>,
     /// Accumulates per-step data for post-hoc diagnostic checks (unmet hours,
     /// short-cycling, freezing excursions, simultaneous heating/cooling).
     /// Evaluated at end-of-run by `run_post_hoc_checks()`.
@@ -4697,6 +4770,8 @@ fn assemble_from_blueprint_with_seed(
         custom_update_bufs: Vec::new(),
         #[cfg(test)]
         snapshot_allocations: SnapshotAllocations::default(),
+        #[cfg(all(test, feature = "observe"))]
+        observe_allocations: ObserveAllocations::default(),
         projected_row_buf: Vec::new(),
         projected_valid_buf: Vec::new(),
         occupancy_column_idx,
@@ -4754,6 +4829,10 @@ fn assemble_from_blueprint_with_seed(
         actor_timings: ActorTimings::default(),
         #[cfg(feature = "observe")]
         observer_buf: None,
+        #[cfg(feature = "observe")]
+        port_snapshot_buf: PortSlots::default(),
+        #[cfg(feature = "observe")]
+        actor_key_cache: Vec::new(),
         #[cfg(feature = "observe")]
         diagnostic_accum: None,
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -6416,17 +6495,25 @@ impl Dwelling {
         self.end_dispatch_pass(gate)
     }
 
-    /// One observed dispatch pass under the run's health policy.
+    /// One observed dispatch pass under the run's health policy: the
+    /// dispatched signals append to `signals` (the step's merge target,
+    /// cleared once per step by its holder) and the pass's own same-tier
+    /// conflicts replace `same_tier_conflicts`' content.
     #[cfg(feature = "observe")]
-    fn dispatch_pass_observed(&mut self) -> Result<DispatchCapture> {
+    fn dispatch_pass_observed_into(
+        &mut self,
+        signals: &mut Vec<DispatchedSignal>,
+        same_tier_conflicts: &mut Vec<SameTierConflict>,
+    ) -> Result<()> {
         let mut gate = self.rejection_gate();
-        let capture = self.control_dispatcher.dispatch_into_observed(
+        self.control_dispatcher.dispatch_into_observed_into(
             &mut self.equipment,
             &mut self.warnings,
             &mut gate,
+            signals,
+            same_tier_conflicts,
         );
-        self.end_dispatch_pass(gate)?;
-        Ok(capture)
+        self.end_dispatch_pass(gate)
     }
 
     #[cfg(feature = "profiling")]
@@ -7465,12 +7552,30 @@ impl Dwelling {
         // until the next step. Dispatching first lets setpoint and mode
         // overrides take effect on the same step.
         #[cfg(feature = "observe")]
-        let pre_dispatch_capture = if self.observer_buf.is_some() {
-            Some(self.dispatch_pass_observed()?)
+        // The dispatch capture's buffers, taken from the recycled slot's
+        // post-dispatch capture (its Vecs retained) or fresh: the signals
+        // Vec clears once per step and every observing pass appends into
+        // it, so the capture the snapshot carries holds every pass's
+        // signals in dispatch order over the pre-pass's own conflict
+        // list, exactly the merged content the per-pass-fresh-and-extend
+        // shape produced, without the fresh Vecs per pass.
+        let mut dispatch_capture_buf = obs_phases.post_dispatch.take().unwrap_or_default();
+        #[cfg(feature = "observe")]
+        dispatch_capture_buf.signals.clear();
+        #[cfg(feature = "observe")]
+        if self.observer_buf.is_some() {
+            #[cfg(test)]
+            let dc_before = thread_allocations();
+            self.dispatch_pass_observed_into(
+                &mut dispatch_capture_buf.signals,
+                &mut dispatch_capture_buf.same_tier_conflicts,
+            )?;
+            #[cfg(test)]
+            self.observe_allocations
+                .record(dc_before, ObserveAllocSite::DispatchCaptureBuf);
         } else {
             self.dispatch_pass()?;
-            None
-        };
+        }
         #[cfg(not(feature = "observe"))]
         self.dispatch_pass()?;
         // End of the `environment` phase: entry through Step 1a' (environment
@@ -7696,15 +7801,21 @@ impl Dwelling {
         // external signal already applied.
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
-            let capture = self.dispatch_pass_observed()?;
-            let merged = match pre_dispatch_capture {
-                Some(mut pre) => {
-                    pre.signals.extend(capture.signals);
-                    pre
-                }
-                None => capture,
-            };
-            obs_phases.post_dispatch = Some(merged);
+            // The post-decide pass appends into the same buffers; its
+            // conflicts record into a throwaway (the merged capture keeps
+            // the pre-pass's, exactly as the old merge did), and the
+            // merged capture moves into the phase only after the
+            // derived-signal loop below has appended too.
+            let mut conflicts_scratch = Vec::new();
+            #[cfg(test)]
+            let dc_before = thread_allocations();
+            self.dispatch_pass_observed_into(
+                &mut dispatch_capture_buf.signals,
+                &mut conflicts_scratch,
+            )?;
+            #[cfg(test)]
+            self.observe_allocations
+                .record(dc_before, ObserveAllocSite::DispatchCaptureBuf);
         } else {
             self.dispatch_pass()?;
         }
@@ -7757,15 +7868,23 @@ impl Dwelling {
             }
             #[cfg(feature = "observe")]
             if self.observer_buf.is_some() {
-                let capture = self.dispatch_pass_observed()?;
-                if let Some(ref mut merged) = obs_phases.post_dispatch {
-                    merged.signals.extend(capture.signals);
-                }
+                let mut conflicts_scratch = Vec::new();
+                self.dispatch_pass_observed_into(
+                    &mut dispatch_capture_buf.signals,
+                    &mut conflicts_scratch,
+                )?;
             } else {
                 self.dispatch_pass()?;
             }
             #[cfg(not(feature = "observe"))]
             self.dispatch_pass()?;
+        }
+
+        // The dispatch capture moves into the phase here: every pass this
+        // step took has appended, so the capture is the merged one.
+        #[cfg(feature = "observe")]
+        if self.observer_buf.is_some() {
+            obs_phases.post_dispatch = Some(dispatch_capture_buf);
         }
 
         // End of the `dispatch` phase (Steps 2 and 2b); Step 2a re-runs
@@ -7826,11 +7945,20 @@ impl Dwelling {
         #[cfg(feature = "observe")]
         let mut nonthermal_obs_used: usize = 0;
         #[cfg(feature = "observe")]
-        let mut pre_snapshot = if observing {
-            Some(self.ports.clone())
-        } else {
-            None
-        };
+        // The pre-step port snapshot: the persistent buffer's in-place
+        // fill. The first observed step allocates the buffer's Vecs;
+        // every step after reuses them, and the re-writes after each
+        // equipment's step keep the buffer current for the next
+        // equipment's diff (the fresh `PortSlots` clone per step and the
+        // fresh clone after every equipment are gone).
+        if observing {
+            #[cfg(test)]
+            let ps_before = thread_allocations();
+            self.port_snapshot_buf.copy_into(&self.ports);
+            #[cfg(test)]
+            self.observe_allocations
+                .record(ps_before, ObserveAllocSite::PortSnapshotBuf);
+        }
 
         // Runtime stage-rank tracking: records the actual step execution
         // sequence so the invariant checker validates real loop ordering,
@@ -7865,7 +7993,11 @@ impl Dwelling {
                 continue;
             }
             #[cfg(feature = "observe")]
-            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
+            let pre_ports = if observing {
+                Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+            } else {
+                None
+            };
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             self.rollback_ports.copy_into(&self.ports);
@@ -7895,8 +8027,9 @@ impl Dwelling {
                     equipment = %self.equipment[idx].descriptor().name,
                     "equipment step executed"
                 );
-                if let Some(ref mut snapshot) = pre_snapshot {
-                    let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                if observing {
+                    let contribution =
+                        observer_capture::diff_ports(&self.port_snapshot_buf, &self.ports);
                     let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
                     if nonthermal_obs_used < nonthermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
@@ -7913,7 +8046,12 @@ impl Dwelling {
                         ));
                     }
                     nonthermal_obs_used += 1;
-                    *snapshot = self.ports.clone();
+                    #[cfg(test)]
+                    let ps_before = thread_allocations();
+                    self.port_snapshot_buf.copy_into(&self.ports);
+                    #[cfg(test)]
+                    self.observe_allocations
+                        .record(ps_before, ObserveAllocSite::PortSnapshotBuf);
                 }
             }
         }
@@ -7954,7 +8092,11 @@ impl Dwelling {
                 continue;
             }
             #[cfg(feature = "observe")]
-            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
+            let pre_ports = if observing {
+                Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+            } else {
+                None
+            };
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             self.rollback_ports.copy_into(&self.ports);
@@ -7983,8 +8125,9 @@ impl Dwelling {
                     equipment = %self.equipment[idx].descriptor().name,
                     "equipment step executed"
                 );
-                if let Some(ref mut snapshot) = pre_snapshot {
-                    let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                if observing {
+                    let contribution =
+                        observer_capture::diff_ports(&self.port_snapshot_buf, &self.ports);
                     let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
                     if nonthermal_obs_used < nonthermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
@@ -8001,7 +8144,12 @@ impl Dwelling {
                         ));
                     }
                     nonthermal_obs_used += 1;
-                    *snapshot = self.ports.clone();
+                    #[cfg(test)]
+                    let ps_before = thread_allocations();
+                    self.port_snapshot_buf.copy_into(&self.ports);
+                    #[cfg(test)]
+                    self.observe_allocations
+                        .record(ps_before, ObserveAllocSite::PortSnapshotBuf);
                 }
             }
         }
@@ -8017,7 +8165,11 @@ impl Dwelling {
                 continue;
             }
             #[cfg(feature = "observe")]
-            let pre_ports = pre_snapshot.as_ref().map(observer_capture::capture_ports);
+            let pre_ports = if observing {
+                Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+            } else {
+                None
+            };
 
             self.rollback_ports.copy_into(&self.ports);
             // Snapshot the shared electrical bus so the post-step delta is
@@ -8046,8 +8198,9 @@ impl Dwelling {
                     equipment = %self.equipment[idx].descriptor().name,
                     "equipment step executed"
                 );
-                if let Some(ref mut snapshot) = pre_snapshot {
-                    let contribution = observer_capture::diff_ports(snapshot, &self.ports);
+                if observing {
+                    let contribution =
+                        observer_capture::diff_ports(&self.port_snapshot_buf, &self.ports);
                     let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
                     if thermal_obs_used < thermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
@@ -8064,7 +8217,12 @@ impl Dwelling {
                         ));
                     }
                     thermal_obs_used += 1;
-                    *snapshot = self.ports.clone();
+                    #[cfg(test)]
+                    let ps_before = thread_allocations();
+                    self.port_snapshot_buf.copy_into(&self.ports);
+                    #[cfg(test)]
+                    self.observe_allocations
+                        .record(ps_before, ObserveAllocSite::PortSnapshotBuf);
                 }
             }
         }
@@ -8624,17 +8782,38 @@ impl Dwelling {
                     + self.latest_env.current_time.second() as f64 / 3600.0;
                 libm::cos(2.0 * std::f64::consts::PI * fhour / 24.0)
             };
-            slot.actor_telemetry_keys = self
-                .actors
-                .iter()
-                .filter_map(|actor| {
-                    actor.telemetry().map(|tel| {
-                        let mut keys: Vec<String> = tel.0.keys().cloned().collect();
-                        keys.sort();
-                        (actor.name().to_string(), keys)
-                    })
-                })
-                .collect();
+            // The actor telemetry keys: each actor's frozen key list is
+            // cached as an Arc at the actor's first observed push (the
+            // key set is sealed at the telemetry's construction; an
+            // unsealed telemetry never caches) and cloned as an Arc per
+            // step, collected into the recycled slot's own Vec (cleared:
+            // the capacity stays).
+            #[cfg(test)]
+            let atk_before = thread_allocations();
+            slot.actor_telemetry_keys.clear();
+            if self.actor_key_cache.len() != self.actors.len() {
+                self.actor_key_cache.clear();
+                self.actor_key_cache.resize(self.actors.len(), None);
+            }
+            for (i, actor) in self.actors.iter().enumerate() {
+                let Some(tel) = actor.telemetry() else {
+                    continue;
+                };
+                if let Some(cached) = &self.actor_key_cache[i] {
+                    slot.actor_telemetry_keys.push(Arc::clone(cached));
+                    continue;
+                }
+                let mut keys: Vec<String> = tel.0.keys().cloned().collect();
+                keys.sort();
+                let entry = Arc::new((actor.name().to_string(), keys));
+                if tel.is_sealed() {
+                    self.actor_key_cache[i] = Some(Arc::clone(&entry));
+                }
+                slot.actor_telemetry_keys.push(entry);
+            }
+            #[cfg(test)]
+            self.observe_allocations
+                .record(atk_before, ObserveAllocSite::ActorTelemetryKeys);
             buf.push(slot);
         }
 
@@ -10154,6 +10333,8 @@ mod tests {
     use super::*;
     use crate::checkpoint::DwellingCheckpoint;
     use crate::derive_dwelling_rng;
+    #[cfg(feature = "observe")]
+    use crate::observer::DispatchCapture;
     use crate::rng::RNG_STREAM_EV_DRIVER_BASE;
     use conversions::{
         build_output_column_index, equipment_config_from_spec, json_value_to_config_value,
@@ -10537,6 +10718,235 @@ destination = "memory"
              its own clone_from",
             delta,
         );
+    }
+
+    /// The pre-step port snapshot buffer's writes, the observe build's
+    /// allocation census's B1 fill and B4 re-clone: the step cloned a
+    /// fresh `PortSlots` per step (the thermal, fluid and humidity Vecs)
+    /// and re-cloned a fresh one after every equipment's step for the
+    /// next equipment's diff (3 per equipment per step). The single
+    /// persistent buffer's `copy_into` reuses the Vec capacities, so
+    /// after the first observed step the site allocates nothing. RED at
+    /// the parent (the fill plus the re-clones, per step); GREEN at the
+    /// commit: zero on every step after the buffer's first fill.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn port_snapshot_buffer_is_allocation_free_after_the_first_step() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            // Four hours: the test steps ten of the fifteen-minute
+            // steps (one fill, five warm-in, four measured).
+            chrono::Duration::hours(4),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.enable_observer(4);
+        dwelling.run_timestep(false).expect("first step");
+        for _ in 0..5 {
+            dwelling.run_timestep(false).expect("warm-in step");
+        }
+        // The warm-in's fills read and discarded: the sites' brackets
+        // restart at zero for the measured window.
+        dwelling.observe_allocations = ObserveAllocations::default();
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("measured step");
+        }
+        let delta = dwelling.observe_allocations.port_snapshot_buf;
+        assert_eq!(
+            delta, 0,
+            "the port snapshot buffer's writes allocated {delta} times over \
+             4 observed steps after the buffer's first fill: the step-start \
+             fill and the per-equipment re-writes must reuse the buffer's \
+             Vec capacities",
+        );
+    }
+
+    /// A der-shaped dwelling (the cz6b parity fixture, the battery's BMS
+    /// in `SelfConsumption`: the two registered actors, the census's
+    /// actor-bearing secondary's own roster) at 900 s steps, no reports,
+    /// warm-up disabled: the test steps its own warm-in.
+    #[cfg(feature = "observe")]
+    fn actor_bearing_dwelling(steps: usize) -> Dwelling {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/parity/cz6b_pv_battery_ev");
+        Dwelling::from_config(DwellingConfig {
+            hpxml: InputSource::Path(fixture.join("building.xml")),
+            schedule: Some(InputSource::Path(fixture.join("schedule.csv"))),
+            weather: WeatherInput::Path(fixture.join("weather.epw")),
+            defaults: DefaultsSource::directory(shipped_defaults_dir()),
+            settings: DwellingSettings::new(
+                SimulationConfig {
+                    scenario_seed: None,
+                    start_time: DateTime::parse_from_rfc3339("2023-06-01T00:00:00-07:00")
+                        .expect("valid start time"),
+                    duration: chrono::Duration::seconds(900 * steps as i64),
+                    time_res: chrono::Duration::seconds(900),
+                    reports: Vec::new(),
+                    diagnostics: false,
+                    metrics: false,
+                    output_chunk_size: 1024,
+                    setpoint_deadband_c: None,
+                    master_seed: 0,
+                    civil_timezone: None,
+                    site_location: hares_io::SiteLocationOverride::default(),
+                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_io::HealthPolicy::default(),
+                    first_hour_interpolation: Default::default(),
+                    weather_year: hares_io::WeatherYear::default(),
+                    warmup: hares_io::Warmup::Disabled,
+                },
+                Some(serde_json::json!({
+                    "Battery": {"bms_mode": "{\"SelfConsumption\": {\"min_soc\": 0.1, \
+                     \"max_soc\": 0.95, \"solar_only_charging\": false}}"}
+                })),
+                1,
+                None,
+            ),
+        })
+        .expect("the actor-bearing fixture dwelling builds")
+    }
+
+    /// The observed dispatch passes' captures, the observe build's
+    /// allocation census's B6: the observing drain built a fresh signals
+    /// Vec per pass and the merge extended a fresh target's Vec, so the
+    /// solver-feedback actor's same-step queue paid the Vec growths
+    /// every step. The buffers are the recycled slot's own post-dispatch
+    /// capture now: the signals Vec clears once per step and every pass
+    /// appends; the merge is the concatenation itself. RED at the
+    /// parent: the capture's per-step growths. GREEN: the signals Vec
+    /// and the merge target allocate nothing; the site's residual is
+    /// the conflict scan's own transients (the census's remaining
+    /// dispatch-capture site), named in the pin below.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn dispatch_capture_buffers_reuse_their_allocations() {
+        let mut dwelling = actor_bearing_dwelling(16);
+        dwelling.enable_observer(4);
+        for step in 0..8 {
+            dwelling
+                .run_timestep(false)
+                .unwrap_or_else(|err| panic!("warm-in step {step} must succeed: {err:?}"));
+        }
+        dwelling.observe_allocations = ObserveAllocations::default();
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("measured step");
+        }
+        let delta = dwelling.observe_allocations.dispatch_capture_buf;
+        assert_eq!(
+            delta, 16,
+            "the observed dispatch captures allocated {} times over 4 \
+             observed steps: the retained signals Vec and merge target \
+             must allocate nothing, leaving 4 per step: the per-tier \
+             requests collect and the same-tier conflict scan's own \
+             transients (this fixture's steady step records one real \
+             same-tier conflict, the two ASHP-heater requests: the \
+             conflict's inner signals Vec, the scan's fresh recorded-from \
+             ledger and the conflicts throwaway's first push)",
+            delta,
+        );
+
+        // The captured content is unchanged: every pass's signals in
+        // dispatch order over the pre-pass's conflict list.
+        let snapshots = dwelling.drain_observations();
+        let last = snapshots
+            .last()
+            .expect("the ring holds the step's snapshot");
+        let post = last
+            .phases
+            .post_dispatch
+            .as_ref()
+            .expect("the dispatch capture");
+        assert_eq!(post.signals.len(), 5, "the step's five dispatched signals");
+        assert!(
+            post.same_tier_conflicts.is_empty(),
+            "the merged capture keeps the pre-pass's conflict list (empty here), \
+             the post-decide pass's conflicts recording to the scan's own throwaway"
+        );
+    }
+
+    /// The actor telemetry keys' per-step collect, the observe build's
+    /// allocation census's B12: per actor per step, the exact-capacity
+    /// keys Vec, one String clone per key, the actor's name, and the
+    /// outer collect (22 per step on this fixture: 10 + 11 + 1). The key
+    /// set is frozen at the telemetry's seal, so the list is cached as
+    /// one Arc per actor at the first observed push, cloned as an Arc
+    /// per step into the recycled slot's own Vec: zero per step in the
+    /// steady state. The content is pinned against the actors' live
+    /// telemetry maps: the same names, the same sorted key lists, the
+    /// same order.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn actor_telemetry_keys_are_the_frozen_arcs_and_allocate_nothing() {
+        let mut dwelling = actor_bearing_dwelling(16);
+        dwelling.enable_observer(4);
+        for step in 0..8 {
+            dwelling
+                .run_timestep(false)
+                .unwrap_or_else(|err| panic!("warm-in step {step} must succeed: {err:?}"));
+        }
+        dwelling.observe_allocations = ObserveAllocations::default();
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("measured step");
+        }
+        let delta = dwelling.observe_allocations.actor_telemetry_keys;
+        assert_eq!(
+            delta, 0,
+            "the actor telemetry keys' collect allocated {} times over 4 \
+             observed steps: the frozen key lists must cache as one Arc \
+             per actor and clone the Arc per step",
+            delta,
+        );
+
+        // The content: the ring's latest snapshot's entries are the
+        // actors' own names and sorted telemetry key lists, in actor
+        // order, whatever the element's shared form.
+        let snapshots = dwelling.drain_observations();
+        let last = snapshots
+            .last()
+            .expect("the ring holds the step's snapshot");
+        let expected: Vec<(String, Vec<String>)> = snapshot_actor_keys_for_check(&dwelling);
+        assert_eq!(last.actor_telemetry_keys.len(), expected.len());
+        for (entry, (name, keys)) in last.actor_telemetry_keys.iter().zip(&expected) {
+            assert_eq!(&entry.0, name, "the actor's name is the cached one");
+            assert_eq!(
+                &entry.1, keys,
+                "the actor's key list is the sorted frozen set"
+            );
+        }
+    }
+
+    /// The actor telemetry keys' expected content, read from the actors'
+    /// live telemetry maps: per actor with telemetry, its name and its
+    /// sorted key list, in actor order.
+    #[cfg(feature = "observe")]
+    fn snapshot_actor_keys_for_check(dwelling: &Dwelling) -> Vec<(String, Vec<String>)> {
+        dwelling
+            .actors
+            .iter()
+            .filter_map(|actor| {
+                actor.telemetry().map(|tel| {
+                    let mut keys: Vec<String> = tel.0.keys().cloned().collect();
+                    keys.sort();
+                    (actor.name().to_string(), keys)
+                })
+            })
+            .collect()
     }
 
     /// A custom solver's slot is resolved once at installation: the
@@ -13941,10 +14351,13 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let capture = dispatcher.dispatch_into_observed(
+        let mut capture = DispatchCapture::default();
+        dispatcher.dispatch_into_observed_into(
             &mut equipment,
             &mut warnings,
             &mut RejectionGate::new(0, None),
+            &mut capture.signals,
+            &mut capture.same_tier_conflicts,
         );
 
         assert!(warnings.is_empty());
@@ -13993,10 +14406,13 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
-        let capture = dispatcher.dispatch_into_observed(
+        let mut capture = DispatchCapture::default();
+        dispatcher.dispatch_into_observed_into(
             &mut equipment,
             &mut warnings,
             &mut RejectionGate::new(0, None),
+            &mut capture.signals,
+            &mut capture.same_tier_conflicts,
         );
 
         assert!(warnings.is_empty());
@@ -14038,10 +14454,13 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let capture = dispatcher.dispatch_into_observed(
+        let mut capture = DispatchCapture::default();
+        dispatcher.dispatch_into_observed_into(
             &mut equipment,
             &mut warnings,
             &mut RejectionGate::new(0, None),
+            &mut capture.signals,
+            &mut capture.same_tier_conflicts,
         );
 
         assert!(warnings.is_empty());
@@ -14174,10 +14593,13 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery)];
-        let capture = dispatcher.dispatch_into_observed(
+        let mut capture = DispatchCapture::default();
+        dispatcher.dispatch_into_observed_into(
             &mut equipment,
             &mut warnings,
             &mut RejectionGate::new(0, None),
+            &mut capture.signals,
+            &mut capture.same_tier_conflicts,
         );
 
         assert!(warnings.is_empty());
@@ -14223,10 +14645,13 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let capture = dispatcher.dispatch_into_observed(
+        let mut capture = DispatchCapture::default();
+        dispatcher.dispatch_into_observed_into(
             &mut equipment,
             &mut warnings,
             &mut RejectionGate::new(0, None),
+            &mut capture.signals,
+            &mut capture.same_tier_conflicts,
         );
 
         assert!(warnings.is_empty());
@@ -14279,10 +14704,13 @@ occupancy = 1.0
 
         let mut warnings = WarningLog::new();
         let mut equipment: Vec<Box<dyn Equipment>> = vec![Box::new(battery), Box::new(heater)];
-        let capture = dispatcher.dispatch_into_observed(
+        let mut capture = DispatchCapture::default();
+        dispatcher.dispatch_into_observed_into(
             &mut equipment,
             &mut warnings,
             &mut RejectionGate::new(0, None),
+            &mut capture.signals,
+            &mut capture.same_tier_conflicts,
         );
 
         assert!(warnings.is_empty());
