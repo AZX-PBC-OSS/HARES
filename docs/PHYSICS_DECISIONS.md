@@ -1206,3 +1206,63 @@ against a superseded edition that the engine's own measured drift
 baseline fails while the current band passes); pinning the normative
 Annex A3 acceptance ranges (UNVERIFIABLE-WEB until the standard's pages
 are supplied; the row's record says so and the upgrade path stays open).
+
+## The ZIP load model evaluates at the actual voltage across the full admitted band
+
+The grid-signal channel admits a per-unit service voltage of exactly 0.0
+(the utility-outage signal) or a finite value in [0.5, 1.5] pu
+(`Dwelling::set_grid_voltage`, the HELICS voltage contract). The
+electrical solver's aggregate load scale
+(`crates/hares-envelope/src/electrical_solver.rs` `zip_load_scale`)
+formerly clamped the voltage into [0.9, 1.1] pu before evaluating the ZIP
+polynomial, with a per-step warning when the raw value lay outside: a 0.7
+pu sag read as 0.9 pu every step forever. The clamp is removed. The
+polynomial terms are evaluated at the ACTUAL per-unit voltage, over the
+channel's whole admitted band, and at any finite value a caller can
+construct: the static ZIP model's voltage dependence is the physics the
+model name carries, and substituting a band edge for the given voltage is
+the input-substitution class the engine's own rules forbid.
+
+Architecture note (why the default dwelling still reads near-constant
+power at the aggregate): the voltage response of a real dwelling lives
+per equipment. Every ZIP-governed load (scheduled and event loads) scales
+its own draw through its resolved `ZipLoad` row
+(`hares-types::zip::ZipLoad::apply`) at the bus voltage, which has never
+clamped, and the per-equipment rows are the literature's measured
+compositions (Bokhari 2014, Hajagos & Danai 1998, Arif 2013 via the OCHRE
+ZIP Parameters table). The aggregate solver scale exists for the
+like-for-like electrical-balance comparison and would double-scale the
+ports if a non-default composition were set on top of the
+per-equipment application, so the assembled dwelling builds it pure
+constant-power: the aggregate's pure-P default is the no-double-count
+choice, not a claim that the premise has zero voltage sensitivity (the
+premise's true aggregate composition is reported by
+`Dwelling::premise_zip`). Removing the clamp makes the aggregate helper
+agree with the per-equipment physics wherever it is actually evaluated.
+
+Motor-driven families at the deep-sag bands: HARES models their
+deep-sag response with their static ZIP rows and adds no dynamic
+stall/lockout model. The decision follows the reference tool: EnergyPlus
+(the vendored sources) carries no voltage-dependent motor-stall physics
+for zone-level residential equipment; its only stall curves
+(`Fans.cc` `plTotalEffStallCurveNum`, the variable-flow fan's part-load
+efficiency stall) are fan aerodynamics, not motor response to service
+voltage, because envelope equipment in EnergyPlus responds to control
+signals, not to a bus voltage. The residential motor classes' literature
+ZIP rows the engine already runs (pumps and compressor motors: Hajagos &
+Danai 1998, fitted across the sag band) encode the measured static draw
+of those families at deep sag, elevated where the measured composition
+says so; a dynamic stall model (a stalling threshold, locked-rotor draw,
+thermal consequence) would be new behavior with no reference in the
+toolchain, so it is recorded here as a non-model rather than silently
+absent. The per-step clamp warning is gone with the clamp: in-band
+evaluations are legitimate physics, never a warning; the boundary
+setters and the HELICS diagnostics count out-of-band values at the
+boundary where they are rejected, and no census site exists because no
+clamp remains.
+
+Direction of the delta: none. The assembled dwelling's aggregate scale
+is the pure-P identity before and after, so no committed golden moves;
+the deep-sag response this change makes available is the aggregate
+helper's agreement with the per-equipment physics (witnessed by the
+solver's brownout vectors at 0.5/0.7/0.88 pu).

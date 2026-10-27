@@ -24,6 +24,8 @@ use crate::py_enums::PyResStockVersion;
 use crate::py_report::{PyFrequency, PySelection};
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::check_unexpected_kwargs;
+use crate::utils::validate_finite;
+use hares_types::PriceSignal;
 
 fn parse_resstock_version(s: &str) -> PyResult<IoResStockVersion> {
     let normalized: String = s
@@ -801,6 +803,46 @@ impl PySteppableFleet {
     pub fn set_grid_voltage_all(&self, voltage_pu: f64) -> PyResult<()> {
         let mut fleet = self.acquire()?;
         fleet.set_grid_voltage_all(voltage_pu).map_err(to_py_err)?;
+        Ok(())
+    }
+
+    pub fn set_frequency(&self, dwelling_index: usize, frequency_hz: f64) -> PyResult<()> {
+        let mut fleet = self.acquire()?;
+        fleet
+            .set_frequency(dwelling_index, frequency_hz)
+            .map_err(steppable_error_to_py_err)
+    }
+
+    pub fn set_frequency_all(&self, frequency_hz: f64) -> PyResult<()> {
+        let mut fleet = self.acquire()?;
+        fleet.set_frequency_all(frequency_hz).map_err(to_py_err)?;
+        Ok(())
+    }
+
+    #[pyo3(signature = (electricity_price, export_price=None, ghg_intensity=None))]
+    pub fn set_price_signal_all(
+        &self,
+        electricity_price: f64,
+        export_price: Option<f64>,
+        ghg_intensity: Option<f64>,
+    ) -> PyResult<()> {
+        // Loud on non-finite prices at the boundary (the same validators
+        // the single dwelling's set_price_signal runs, `py_dwelling.rs`):
+        // the fleet's price application is the dwelling federate's
+        // exactly, so the same finiteness rejection lands here.
+        validate_finite(electricity_price, "electricity_price")?;
+        if let Some(v) = export_price {
+            validate_finite(v, "export_price")?;
+        }
+        if let Some(v) = ghg_intensity {
+            validate_finite(v, "ghg_intensity")?;
+        }
+        let mut fleet = self.acquire()?;
+        fleet.set_price_signal_all(PriceSignal {
+            electricity_price: Some(electricity_price),
+            export_price,
+            ghg_intensity,
+        });
         Ok(())
     }
 

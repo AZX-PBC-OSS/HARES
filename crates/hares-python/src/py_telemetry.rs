@@ -108,6 +108,27 @@ impl PyTelemetry {
         self.inner.island_unserved_w
     }
 
+    /// The grid interchange [W]: the net active power crossing the
+    /// service connection. Exactly 0.0 whenever the utility is out (the
+    /// breaker is open); the meter's net flow otherwise.
+    #[getter]
+    pub fn grid_interchange_w(&self) -> f64 {
+        self.inner.grid_interchange_w
+    }
+
+    /// True when the dwelling is islanded: the utility is out and an
+    /// on-site source holds the bus energized.
+    #[getter]
+    pub fn islanded(&self) -> bool {
+        self.inner.islanded
+    }
+
+    /// The bus voltage [pu] the dwelling's equipment sees.
+    #[getter]
+    pub fn bus_voltage_pu(&self) -> f64 {
+        self.inner.bus_voltage_pu
+    }
+
     /// Surplus on-site generation [W] the island could not absorb during
     /// islanded operation (would-be phantom grid export). 0.0 when not
     /// islanded.

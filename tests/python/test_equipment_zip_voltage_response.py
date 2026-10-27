@@ -28,6 +28,13 @@ import pytest
 from conftest import HARES_DEFAULTS, HPXML, SCHEDULE, WEATHER, make_dwelling
 from hares import SimulationConfig
 
+
+def _f64_bits(x: float) -> int:
+    """The float's IEEE-754 bits (Python floats carry no to_bits)."""
+    import struct
+
+    return struct.unpack("<Q", struct.pack("<d", x))[0]
+
 # Physics-modeled (Rule R1) equipment on the base.xml fixture.
 PHYSICS_EQUIPMENT = [
     "Gas Furnace",
@@ -322,3 +329,57 @@ class TestZipDataIntegrity:
         assert "v0" in message, (
             f"the rejection must name the offending field, got: {excinfo.value}"
         )
+
+
+class TestDeepSagSteppedResponse:
+    def test_scheduled_load_steps_at_the_true_deep_sag_pu(self):
+        """A dwelling stepped through a 0.7 pu sag answers with the ZIP
+        polynomial evaluated at 0.7 pu, end to end through a real step.
+
+        The per-equipment ZIP path has never clamped (the aggregate
+        solver scale was the clamp site; its pure-P default never fired
+        it in the assembled dwelling), so this witness is green across
+        the clamp's removal: it pins that the deep-sag response is real
+        at the dwelling surface, not only in the solver unit. Two
+        identically-seeded dwellings, one at 0.7 pu and one at 1.0 pu:
+        the raw scheduled draw is identical (voltage feeds no RNG), so
+        the governing load's power is the raw draw times the ZIP terms
+        at the actual voltage, bitwise.
+        """
+        dw_nominal = make_dwelling(duration_s=600, time_res_s=60)
+        dw_sag = make_dwelling(duration_s=600, time_res_s=60)
+        dw_nominal.set_grid_voltage(1.0)
+        dw_sag.set_grid_voltage(0.7)
+
+        v = 0.7
+        # The Indoor Lighting row (Bokhari et al. 2014): the same
+        # coefficients equipment_zip() publishes.
+        zip_dict = dw_nominal.equipment_zip("Indoor Lighting")
+        assert zip_dict is not None and zip_dict["real_power_zip_applies"]
+        zp, ip, pp = zip_dict["zp"], zip_dict["ip"], zip_dict["pp"]
+        mult_nominal = zp * 1.0 * 1.0 + ip * 1.0 + pp
+        mult_sag = zp * v * v + ip * v + pp
+
+        witness_steps = 0
+        for _ in range(10):
+            r_nominal = dw_nominal.step()
+            dw_sag.step()
+            tel_nominal = dw_nominal.telemetry()
+            tel_sag = dw_sag.telemetry()
+            names = list(tel_nominal.equipment()["names"])
+            powers_nominal = list(tel_nominal.equipment()["power_w"])
+            powers_sag = list(tel_sag.equipment()["power_w"])
+            for name, p_nominal, p_sag in zip(names, powers_nominal, powers_sag):
+                if name != "Indoor Lighting" or p_nominal == 0.0:
+                    continue
+                # The same raw draw (bit-identical across the two runs),
+                # scaled by the same polynomial at the two voltages.
+                raw = p_nominal / mult_nominal
+                expected_sag = raw * mult_sag
+                assert _f64_bits(p_sag) == _f64_bits(expected_sag), (
+                    f"step {r_nominal['timestep_index']}: Indoor Lighting at "
+                    f"{v} pu must be the raw draw {raw} W times the ZIP terms "
+                    f"at {v} pu ({expected_sag} W), got {p_sag} W"
+                )
+                witness_steps += 1
+        assert witness_steps > 0, "the fixture must draw lighting power inside the window"

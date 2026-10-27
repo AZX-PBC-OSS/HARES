@@ -11,6 +11,25 @@ All publication keys and their expected physical units:
 ``{prefix}{fed_name}/reactive_power_var``
     Reactive power in kilovolt-amperes reactive (kvar).
 
+``{prefix}{fed_name}/grid_interchange_w``
+    The grid interchange in watts (W): exactly 0.0 whenever the utility is
+    out (the breaker is open), the meter's net flow otherwise. The feeder
+    federate's demand channel reads THIS topic, never ``total_power_w``
+    (the premise balance), whose islanded value is the island's internal
+    imbalance.
+
+``{prefix}{fed_name}/islanded``
+    1.0 when the dwelling is islanded (the utility out, an on-site source
+    holding the bus), 0.0 otherwise.
+
+``{prefix}{fed_name}/bus_voltage_pu``
+    The bus voltage in per-unit (pu) the dwelling's equipment sees.
+
+``{prefix}{fed_name}/island_unserved_w`` and ``island_excess_w``
+    The island's internal imbalance in watts (W): the load the island
+    sources failed to cover / the surplus they cannot absorb. Both 0.0
+    when not islanded.
+
 ``{prefix}{fed_name}/zone_{index}/temp_air_c``
     Zone indoor air temperature in degrees Celsius (degC).
 
@@ -39,6 +58,14 @@ Expected HELICS subscription units
 ``grid/price`` (or caller-provided topic)
     Real-time electricity price in currency/kWh. Must be non-negative;
     a negative value triggers a diagnostic warning.
+
+``grid/frequency`` (or caller-provided topic)
+    Grid frequency in Hz. Expected range: 40-80 Hz (the band the engine's
+    setter admits: both nominal frequencies' governing event ranges with
+    transient headroom). A value out of range triggers a diagnostic
+    warning and is not applied; the dwelling keeps its last valid
+    frequency. Without a frequency subscription the engine runs the
+    60 Hz constant.
 """
 
 from __future__ import annotations
@@ -81,11 +108,19 @@ _LOG = logging.getLogger(__name__)
 VOLTAGE_PU_MIN = 0.5
 VOLTAGE_PU_MAX = 1.5
 
+# Grid-frequency range guard: values outside [40, 80] Hz are not grid
+# frequencies a premise simulation should be fed and indicate a likely unit
+# mismatch or corruption. The band mirrors the engine setter's admitted band
+# (both nominal frequencies' governing event ranges with transient headroom).
+FREQUENCY_HZ_MIN = 40.0
+FREQUENCY_HZ_MAX = 80.0
+
 
 class HELICSDiagnostics(TypedDict):
     """Per-timestep HELICS diagnostic fields returned by ``get_diagnostic_row()``."""
 
     helics_voltage_valid: bool
+    helics_frequency_valid: bool
     helics_price_valid: bool
     helics_control_clamped: int
     helics_range_violations_total: int
@@ -396,9 +431,15 @@ class HELICSDwelling:
 
         self._pub_power: HelicsPublicationLike | None = None
         self._pub_reactive: HelicsPublicationLike | None = None
+        self._pub_interchange: HelicsPublicationLike | None = None
+        self._pub_islanded: HelicsPublicationLike | None = None
+        self._pub_bus_voltage: HelicsPublicationLike | None = None
+        self._pub_unserved: HelicsPublicationLike | None = None
+        self._pub_excess: HelicsPublicationLike | None = None
         self._sub_voltage: HelicsSubscriptionLike | None = None
         self._sub_control: HelicsSubscriptionLike | None = None
         self._sub_price: HelicsSubscriptionLike | None = None
+        self._sub_frequency: HelicsSubscriptionLike | None = None
 
         self._pub_zone_temp: list[HelicsPublicationLike] = []
         self._pub_equipment_power: list[HelicsPublicationLike] = []
@@ -415,6 +456,7 @@ class HELICSDwelling:
         self._federation_terminated = False
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._range_violations_total = 0
         self._stale_counts: dict[str, int] = {}
@@ -450,16 +492,36 @@ class HELICSDwelling:
         """
         power_name = "total_power_w"
         reactive_name = "reactive_power_var"
+        interchange_name = "grid_interchange_w"
+        islanded_name = "islanded"
+        bus_voltage_name = "bus_voltage_pu"
+        unserved_name = "island_unserved_w"
+        excess_name = "island_excess_w"
 
         self._pub_power = self._fed.register_publication(power_name, "double")
         self._pub_reactive = self._fed.register_publication(reactive_name, "double")
+        self._pub_interchange = self._fed.register_publication(interchange_name, "double")
+        self._pub_islanded = self._fed.register_publication(islanded_name, "double")
+        self._pub_bus_voltage = self._fed.register_publication(bus_voltage_name, "double")
+        self._pub_unserved = self._fed.register_publication(unserved_name, "double")
+        self._pub_excess = self._fed.register_publication(excess_name, "double")
 
         set_publication_info(self._pub_power, "units=W")
         set_publication_info(self._pub_reactive, "units=VAR")
+        set_publication_info(self._pub_interchange, "units=W")
+        set_publication_info(self._pub_islanded, "units=flag")
+        set_publication_info(self._pub_bus_voltage, "units=pu")
+        set_publication_info(self._pub_unserved, "units=W")
+        set_publication_info(self._pub_excess, "units=W")
 
         configs: list[HELICSPublicationConfig] = [
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{power_name}"),
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{reactive_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{interchange_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{islanded_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{bus_voltage_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{unserved_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{excess_name}"),
         ]
 
         # Zone temperature publications
@@ -521,14 +583,16 @@ class HELICSDwelling:
         voltage_topic: str | None = None,
         control_topic: str | None = None,
         price_topic: str | None = None,
+        frequency_topic: str | None = None,
         required_keys: set[str] | None = None,
     ) -> list[HELICSSubscriptionConfig]:
-        """Register subscriptions for grid voltage, controls, and price.
+        """Register subscriptions for grid voltage, controls, price, and frequency.
 
         Args:
             voltage_topic: HELICS topic for grid voltage (per-unit).
             control_topic: HELICS topic for JSON control messages.
             price_topic: HELICS topic for real-time electricity price.
+            frequency_topic: HELICS topic for grid frequency (Hz).
             required_keys: Optional set of fully-qualified subscription keys that
                 must be registered. After entering execution mode, any missing
                 required key is logged as an error.
@@ -546,6 +610,10 @@ class HELICSDwelling:
         if price_topic is not None:
             self._sub_price = self._fed.register_subscription(price_topic, "double")
             configs.append(HELICSSubscriptionConfig(key=price_topic, type="double"))
+
+        if frequency_topic is not None:
+            self._sub_frequency = self._fed.register_subscription(frequency_topic, "double")
+            configs.append(HELICSSubscriptionConfig(key=frequency_topic, type="double"))
 
         self._subscription_configs = configs
         if required_keys is not None:
@@ -676,6 +744,7 @@ class HELICSDwelling:
     def _read_subscriptions(self) -> None:
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._update_mask = 0
         self._stale_subscription_count = 0
@@ -691,6 +760,8 @@ class HELICSDwelling:
             _sub_objs.append(self._sub_control)
         if self._sub_price is not None:
             _sub_objs.append(self._sub_price)
+        if self._sub_frequency is not None:
+            _sub_objs.append(self._sub_frequency)
 
         _updates: list[bool] = []
         for sub_obj in _sub_objs:
@@ -757,6 +828,29 @@ class HELICSDwelling:
                 except Exception as exc:
                     _LOG.warning("Failed to apply price signal: %s", exc)
 
+            if self._sub_frequency is not None and _update_by_sub.get(self._sub_frequency, False):
+                try:
+                    frequency_hz = float(self._sub_frequency.double)
+                    if frequency_hz < FREQUENCY_HZ_MIN or frequency_hz > FREQUENCY_HZ_MAX:
+                        # Unit/corruption guard: a value outside [40, 80] Hz
+                        # is not a grid frequency a premise simulation should
+                        # be fed. Flag and warn, but do NOT apply: the
+                        # dwelling keeps its last valid frequency, the same
+                        # refuse-and-count contract the voltage channel
+                        # enforces.
+                        self._last_frequency_out_of_range = True
+                        _LOG.warning(
+                            "Grid frequency %.3f Hz outside expected range [%.1f, %.1f]; "
+                            "value not applied; keeping last valid frequency.",
+                            frequency_hz,
+                            FREQUENCY_HZ_MIN,
+                            FREQUENCY_HZ_MAX,
+                        )
+                    else:
+                        self._dwelling.set_frequency(frequency_hz)
+                except Exception as exc:
+                    _LOG.warning("Failed to apply grid frequency: %s", exc)
+
             if self._sub_control is None:
                 return
             if not _update_by_sub.get(self._sub_control, False):
@@ -794,6 +888,8 @@ class HELICSDwelling:
             if self._last_voltage_out_of_range:
                 self._range_violations_total += 1
             if self._last_price_negative:
+                self._range_violations_total += 1
+            if self._last_frequency_out_of_range:
                 self._range_violations_total += 1
 
     def _verify_registration_completeness(self) -> tuple[set[str], set[str]]:
@@ -866,13 +962,31 @@ class HELICSDwelling:
             )
 
     def _publish_results(self) -> None:
-        if self._pub_power is None or self._pub_reactive is None:
+        if (
+            self._pub_power is None
+            or self._pub_reactive is None
+            or self._pub_interchange is None
+            or self._pub_islanded is None
+            or self._pub_bus_voltage is None
+            or self._pub_unserved is None
+            or self._pub_excess is None
+        ):
             raise RuntimeError("Publications are not registered; call register_publications() first")
         telemetry = self._dwelling.telemetry()
         self._pub_power.publish(float(telemetry.total_power_w))
         self._pub_reactive.publish(float(telemetry.reactive_power_var))
+        # The grid-facing publications (docs/cosim.md): the interchange is
+        # exactly 0.0 whenever the utility is out (the breaker is open; the
+        # island's internal imbalance surfaces through the island channels
+        # below, never as a phantom grid load the feeder federate would read
+        # as demand), and the meter's net flow otherwise.
+        self._pub_interchange.publish(float(telemetry.grid_interchange_w))
+        self._pub_islanded.publish(1.0 if telemetry.islanded else 0.0)
+        self._pub_bus_voltage.publish(float(telemetry.bus_voltage_pu))
+        self._pub_unserved.publish(float(telemetry.island_unserved_w))
+        self._pub_excess.publish(float(telemetry.island_excess_w))
 
-        _published_count = 2
+        _published_count = 7
 
         # Zone temperatures
         if self._pub_zone_temp:
@@ -936,6 +1050,11 @@ class HELICSDwelling:
         return not self._last_voltage_out_of_range
 
     @property
+    def helics_frequency_valid(self) -> bool:
+        """True when the most recent frequency subscription was in [40, 80] Hz."""
+        return not self._last_frequency_out_of_range
+
+    @property
     def helics_price_valid(self) -> bool:
         """True when the most recent price subscription was non-negative."""
         return not self._last_price_negative
@@ -962,6 +1081,7 @@ class HELICSDwelling:
         """
         return {
             "helics_voltage_valid": self.helics_voltage_valid,
+            "helics_frequency_valid": self.helics_frequency_valid,
             "helics_price_valid": self.helics_price_valid,
             "helics_control_clamped": self.helics_control_clamped,
             "helics_range_violations_total": self.helics_range_violations_total,

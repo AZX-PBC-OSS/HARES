@@ -1,4 +1,24 @@
 //! Electrical domain solver for power flow aggregation.
+//!
+//! The voltage channel's admitted modeling band, per unit: the outage
+//! setter (`Dwelling::set_grid_voltage`) and the HELICS voltage contract
+//! admit exactly `0.0` (a utility outage) or a finite per-unit voltage in
+//! [0.5, 1.5] pu. The ZIP load model's voltage sensitivity operates over
+//! that full admitted band: the polynomial terms are evaluated at the
+//! ACTUAL per-unit voltage with no clamp. Clamping the evaluation to a
+//! narrower band (the [0.9, 1.1] modeling range this solver once used)
+//! substituted the band edge for the sag: a 0.7 pu sag read as 0.9 pu
+//! every step forever, which is the substitution class the input-honesty
+//! rules forbid (the value given was replaced by a policy). The static
+//! ZIP polynomial evaluated across the admitted band is the
+//! voltage-dependence physics the model name carries; the per-equipment
+//! ZIP (`hares-types::zip::ZipLoad::apply`) has never clamped. A value
+//! outside the admitted band cannot reach this solver through the setters
+//! (they reject it naming the band); the dead-bus branch of
+//! [`ElectricalSolver::effective_load_scale`] holds the scale at 1.0 for
+//! the de-energized case, and a non-finite utility voltage de-energizes
+//! the bus by that branch's NaN-robust comparison, so the polynomial is
+//! evaluated only at finite per-unit voltages in practice.
 
 use std::time::Duration;
 
@@ -8,27 +28,6 @@ use hares_types::{
 use thiserror::Error;
 
 const ZIP_SUM_TOLERANCE: f64 = 1e-6;
-
-/// Lower bound for voltage clamping in per-unit.
-///
-/// The [0.9, 1.1] pu modeling range is wider than the ANSI C84.1-2020
-/// Range A [0.95, 1.05] pu service-voltage band and the Range B
-/// [0.917, 1.058] pu utilization-voltage band (ANSI C84.1-2020 §4.1).
-/// The wider modeling range is chosen because:
-/// — HARES simulation scenarios can include fault transients, motor starts,
-///   and islanding events that drive voltage outside normal steady-state
-///   limits, and clamping at tighter bounds would mask the physics of those
-///   events.
-/// — The ±10% envelope is the standard steady-state voltage tolerance for
-///   electrical equipment nameplate ratings (ANSI C84.1-2020 §4.2.2,
-///   "Range A — Service Voltage"). Within this band, the static ZIP
-///   polynomial remains a physically meaningful load model.
-/// — Below 0.9 pu, load compositions change qualitatively (motors stall,
-///   electronics shut down) making the static ZIP model invalid; above
-///   1.1 pu, equipment damage is likely and the ZIP model over-predicts
-///   load.
-const VOLTAGE_PU_MIN: f64 = 0.9;
-const VOLTAGE_PU_MAX: f64 = 1.1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolverZipCoefficients {
@@ -122,41 +121,20 @@ impl ElectricalSolver {
 
     /// Returns the ZIP load scale factor for the given per-unit voltage.
     ///
-    /// Clamps `voltage_pu` to the modeling range [0.9, 1.1] pu (see
-    /// `VOLTAGE_PU_MIN` / `VOLTAGE_PU_MAX` constants for rationale) before
-    /// computing `Z·V² + I·V + P` where `V = voltage_pu / nominal_voltage_pu`.
-    /// A `tracing::warn!` fires when the raw value is outside the modeling range.
+    /// Evaluates `Z·V² + I·V + P` where `V = voltage_pu / nominal_voltage_pu`
+    /// at the ACTUAL per-unit voltage: no clamp. The load model's voltage
+    /// sensitivity operates over the voltage channel's full admitted band
+    /// ([0.5, 1.5] pu; see the module's band note above); the polynomial is
+    /// defined and evaluated at any finite voltage, so a value that
+    /// bypassed the boundary validation still evaluates rather than being
+    /// substituted.
     ///
     /// Used internally by `resolve()` and exposed so callers (e.g. the electrical
     /// balance invariant check) can apply the same scaling to port-side load
     /// accumulation for a like-for-like comparison with `net_active_w()`.
     #[must_use]
     pub fn zip_load_scale(&self, voltage_pu: f64) -> f64 {
-        let raw_voltage_pu = voltage_pu;
-        let voltage_pu = raw_voltage_pu.clamp(VOLTAGE_PU_MIN, VOLTAGE_PU_MAX);
-        if raw_voltage_pu != voltage_pu {
-            tracing::warn!(
-                raw_voltage_pu = raw_voltage_pu,
-                clamped_voltage_pu = voltage_pu,
-                "grid voltage_pu outside modeling range [{}, {}]; clamped",
-                VOLTAGE_PU_MIN,
-                VOLTAGE_PU_MAX,
-            );
-        }
         let v = voltage_pu / self.config.nominal_voltage_pu;
-        #[cfg(debug_assertions)]
-        {
-            let nominal = self.config.nominal_voltage_pu;
-            let v_lower = VOLTAGE_PU_MIN / nominal;
-            let v_upper = VOLTAGE_PU_MAX / nominal;
-            assert!(
-                v >= v_lower - 2.0 * f64::EPSILON && v <= v_upper + 2.0 * f64::EPSILON,
-                "clamped v = voltage_pu / nominal must be in [{}, {}], got {}",
-                v_lower,
-                v_upper,
-                v,
-            );
-        }
         self.config.zip.z * v * v + self.config.zip.i * v + self.config.zip.p
     }
 
@@ -591,20 +569,22 @@ mod tests {
 
     #[test]
     fn test_voltage_clamping() {
-        // ZIP: Z=0.5, I=0.3, P=0.2 — voltage-sensitive so clamping is visible.
+        // Renamed contract (axis A5): no clamping. The ZIP scale
+        // evaluates at the ACTUAL pu voltage across the whole admitted
+        // band and beyond it; these vectors pin the deep-sag and
+        // overvoltage values the old clamp substituted away.
+        // ZIP: Z=0.5, I=0.3, P=0.2, voltage-sensitive.
         let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let load_w = 10000.0;
 
-        // V=0.5 (below range) → clamped to 0.9.
-        // load_scale at V=0.9: 0.5*0.81 + 0.3*0.9 + 0.2 = 0.875
+        // V=0.5: no clamp; scale = 0.5*0.25 + 0.3*0.5 + 0.2 = 0.575.
         let result_low = run_with_voltage(zip, 0.5, load_w);
-        let expected_low = load_w * 0.875;
+        let expected_low = load_w * (0.5 * 0.25 + 0.3 * 0.5 + 0.2);
         assert!((result_low - expected_low).abs() <= 1e-10);
 
-        // V=1.3 (above range) → clamped to 1.1.
-        // load_scale at V=1.1: 0.5*1.21 + 0.3*1.1 + 0.2 = 1.135
+        // V=1.3: no clamp; scale = 0.5*1.69 + 0.3*1.3 + 0.2 = 1.535.
         let result_high = run_with_voltage(zip, 1.3, load_w);
-        let expected_high = load_w * 1.135;
+        let expected_high = load_w * (0.5 * 1.69 + 0.3 * 1.3 + 0.2);
         assert!((result_high - expected_high).abs() <= 1e-10);
 
         // V=1.0 (in range) → passes through unchanged, scale = 1.0.
@@ -619,7 +599,7 @@ mod tests {
         // force-gated off at the control level in that state, so the port
         // load is expected to be zero; the solver deliberately holds the
         // ZIP scale at 1.0 so any un-gated (leaked) load stays fully
-        // visible at the meter instead of being attenuated by the clamped
+        // visible at the meter instead of being attenuated by the
         // ZIP polynomial (see `effective_load_scale`).
         let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let load_w = 10000.0;
@@ -630,20 +610,66 @@ mod tests {
             "dead-bus scale must be 1.0 (leak-visible), got {result_zero} W"
         );
 
-        // A merely sagged (nonzero) voltage still goes through the clamped
-        // ZIP polynomial: V=0.5 clamps to the 0.9 pu modeling bound.
+        // A merely sagged (nonzero) voltage evaluates the ZIP polynomial
+        // at the actual pu: V=0.5 and V=0.9 now answer DIFFERENTLY (the
+        // deep-sag band carries information), and both stay positive.
         let result_sag = run_with_voltage(zip, 0.5, load_w);
         let result_bound = run_with_voltage(zip, 0.9, load_w);
-        assert!((result_sag - result_bound).abs() <= 1e-10);
+        assert!((result_sag - result_bound).abs() > 1e-6);
         assert!(result_sag > 0.0);
     }
 
+    // The brownout witness (axis A5): a loaded dwelling's electrical
+    // domain stepped through a sag must answer with the ZIP polynomial
+    // evaluated at the ACTUAL per-unit voltage, not the clamped modeling
+    // band's flat line. The voltage channel admits [0.5, 1.5] pu (the
+    // outage setter's band); the deep-sag band is exactly where the
+    // study's information lives, so the load model's response must cover
+    // it.
     #[test]
-    fn zip_load_scale_clamps_out_of_range_voltage() {
-        // Verify that zip_load_scale clamps its input to [0.9, 1.1] pu.
-        // Ensures the invariant checker and observer (which call
-        // zip_load_scale directly) get the same scale as resolve()
-        // when facing out-of-range voltages.
+    fn sag_step_responds_at_the_true_pu_across_the_admitted_band() {
+        // IEEE Task Force residential ZIP: Z=0.2, I=0.2, P=0.6.
+        let zip = SolverZipCoefficients::new(0.2, 0.2, 0.6).unwrap();
+        let load_w = 10_000.0;
+        for (voltage_pu, expected_scale) in [
+            (0.5, 0.2 * 0.25 + 0.2 * 0.5 + 0.6),
+            (0.7, 0.2 * 0.49 + 0.2 * 0.7 + 0.6),
+            (0.88, 0.2 * 0.88_f64.powi(2) + 0.2 * 0.88 + 0.6),
+            (1.3, 0.2 * 1.69 + 0.2 * 1.3 + 0.6),
+            (1.5, 0.2 * 2.25 + 0.2 * 1.5 + 0.6),
+        ] {
+            let net = run_with_voltage(zip, voltage_pu, load_w);
+            let expected = load_w * expected_scale;
+            assert!(
+                (net - expected).abs() <= 1e-10,
+                "a {voltage_pu} pu sag must scale the load by the ZIP terms \
+                 evaluated at {voltage_pu} pu ({expected} W), got {net} W \
+                 (the clamped flat line)"
+            );
+        }
+    }
+
+    // The attack plan's composition vectors at 0.7 pu: a pure-Z load
+    // draws V-squared scaled, a pure-I load V scaled (the corner no
+    // other test exercises), a pure-P load holds.
+    #[test]
+    fn brownout_vectors_scale_by_composition_at_the_true_pu() {
+        let load_w = 10_000.0;
+        let v = 0.7;
+        let pure_z = SolverZipCoefficients::new(1.0, 0.0, 0.0).unwrap();
+        assert!((run_with_voltage(pure_z, v, load_w) - load_w * v * v).abs() <= 1e-10);
+        let pure_i = SolverZipCoefficients::new(0.0, 1.0, 0.0).unwrap();
+        assert!((run_with_voltage(pure_i, v, load_w) - load_w * v).abs() <= 1e-10);
+        let pure_p = SolverZipCoefficients::new(0.0, 0.0, 1.0).unwrap();
+        assert!((run_with_voltage(pure_p, v, load_w) - load_w).abs() <= 1e-10);
+    }
+
+    #[test]
+    fn zip_load_scale_evaluates_the_true_pu_across_the_admitted_band() {
+        // The scale at the admitted band's edges is the polynomial
+        // evaluated at that voltage: no clamp. Ensures the invariant
+        // checker and observer (which call zip_load_scale directly) get
+        // the same scale as resolve() across the full admitted band.
         let zip = SolverZipCoefficients::new(0.5, 0.3, 0.2).unwrap();
         let solver = ElectricalSolver::new(ElectricalSolverConfig {
             zip,
@@ -651,16 +677,14 @@ mod tests {
         })
         .unwrap();
 
-        // V=0.5 (below range) → clamped to 0.9.
-        // ZIP at V=0.9: 0.5*0.81 + 0.3*0.9 + 0.2 = 0.875
+        // V=0.5 (the admitted band's floor): scale = 0.5*0.5² + 0.3*0.5 + 0.2.
         let scale_low = solver.zip_load_scale(0.5);
-        let expected_low = 0.5 * 0.9_f64.powi(2) + 0.3 * 0.9 + 0.2;
+        let expected_low = 0.5 * 0.5_f64.powi(2) + 0.3 * 0.5 + 0.2;
         assert!((scale_low - expected_low).abs() <= 1e-10);
 
-        // V=1.3 (above range) → clamped to 1.1.
-        // ZIP at V=1.1: 0.5*1.21 + 0.3*1.1 + 0.2 = 1.135
-        let scale_high = solver.zip_load_scale(1.3);
-        let expected_high = 0.5 * 1.1_f64.powi(2) + 0.3 * 1.1 + 0.2;
+        // V=1.5 (the admitted band's ceiling): scale = 0.5*2.25 + 0.3*1.5 + 0.2.
+        let scale_high = solver.zip_load_scale(1.5);
+        let expected_high = 0.5 * 1.5_f64.powi(2) + 0.3 * 1.5 + 0.2;
         assert!((scale_high - expected_high).abs() <= 1e-10);
     }
 

@@ -195,6 +195,7 @@ class _FakeFleet:
         self.grid_voltage_all_values: list[float] = []
         self.grid_voltage_values: list[tuple[int, float]] = []
         self.applied_controls: list[tuple[int, str, Any]] = []
+        self.price_signals: list[float] = []
 
     def __len__(self) -> int:
         return len(self._zone_counts) if self._zone_counts is not None else 3
@@ -254,6 +255,11 @@ class _FakeFleet:
         return SimpleNamespace(
             total_power_w=p_kw,
             reactive_power_var=q_kvar,
+            grid_interchange_w=p_kw,
+            islanded=False,
+            bus_voltage_pu=1.0,
+            island_unserved_w=0.0,
+            island_excess_w=0.0,
             zone=lambda: zone_dict,
             equipment=lambda: equip_dict,
             timestep_index=self._step_count,
@@ -266,6 +272,10 @@ class _FakeFleet:
     def set_grid_voltage(self, dwelling_index: int, voltage_pu: float) -> None:
         self.grid_voltage_values.append((dwelling_index, voltage_pu))
         self._log.append(("set_grid_voltage", dwelling_index, voltage_pu))
+
+    def set_price_signal_all(self, electricity_price: float) -> None:
+        self.price_signals.append(electricity_price)
+        self._log.append(("set_price_signal_all", electricity_price))
 
     def apply_control(self, dwelling_index: int, name: str, signal: Any) -> None:
         if name == "Unknown":
@@ -340,10 +350,25 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
         "grid/fleet_1/aggregate_reactive_var",
         "grid/fleet_1/dwelling_0/total_power_w",
         "grid/fleet_1/dwelling_0/reactive_power_var",
+        "grid/fleet_1/dwelling_0/grid_interchange_w",
+        "grid/fleet_1/dwelling_0/islanded",
+        "grid/fleet_1/dwelling_0/bus_voltage_pu",
+        "grid/fleet_1/dwelling_0/island_unserved_w",
+        "grid/fleet_1/dwelling_0/island_excess_w",
         "grid/fleet_1/dwelling_1/total_power_w",
         "grid/fleet_1/dwelling_1/reactive_power_var",
+        "grid/fleet_1/dwelling_1/grid_interchange_w",
+        "grid/fleet_1/dwelling_1/islanded",
+        "grid/fleet_1/dwelling_1/bus_voltage_pu",
+        "grid/fleet_1/dwelling_1/island_unserved_w",
+        "grid/fleet_1/dwelling_1/island_excess_w",
         "grid/fleet_1/dwelling_2/total_power_w",
         "grid/fleet_1/dwelling_2/reactive_power_var",
+        "grid/fleet_1/dwelling_2/grid_interchange_w",
+        "grid/fleet_1/dwelling_2/islanded",
+        "grid/fleet_1/dwelling_2/bus_voltage_pu",
+        "grid/fleet_1/dwelling_2/island_unserved_w",
+        "grid/fleet_1/dwelling_2/island_excess_w",
         "grid/fleet_1/aggregate_zone_temp_c",
         "grid/fleet_1/aggregate_soc_pct",
         "grid/fleet_1/dwelling_0/zone_0/temp_air_c",
@@ -757,9 +782,11 @@ def test_fleet_constructor_tracks_timing_from_fleet_object(
     assert orchestrator._n_dwellings == 3
 
 
-def test_fleet_wide_voltage_out_of_range_flagged_and_forwarded(
+def test_fleet_wide_voltage_out_of_range_flagged_and_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The ONE boundary behavior (the dwelling federate's exactly): an
+    out-of-band voltage is flagged and counted, and never applied."""
     module, fake_helics = _import_fleet_module(monkeypatch)
     fleet = _FakeFleet(fake_helics.log)
     orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
@@ -771,16 +798,21 @@ def test_fleet_wide_voltage_out_of_range_flagged_and_forwarded(
     orchestrator._sub_voltage_all.push_double(0.1)
     orchestrator._read_subscriptions()
     assert orchestrator._last_voltage_all_out_of_range is True
-    assert fleet.grid_voltage_all_values == [0.1]
+    assert orchestrator.helics_range_violations_total == 1
+    assert fleet.grid_voltage_all_values == [], (
+        "an out-of-band fleet-wide voltage must never be applied"
+    )
 
     orchestrator._sub_voltage_all.push_double(1.0)
     orchestrator._read_subscriptions()
-    assert fleet.grid_voltage_all_values == [0.1, 1.0]
+    assert fleet.grid_voltage_all_values == [1.0]
 
 
-def test_per_dwelling_voltage_out_of_range_flagged_and_forwarded(
+def test_per_dwelling_voltage_out_of_range_flagged_and_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The ONE boundary behavior: an out-of-band per-dwelling voltage is
+    flagged and counted, and never applied to its dwelling."""
     module, fake_helics = _import_fleet_module(monkeypatch)
     fleet = _FakeFleet(fake_helics.log)
     orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
@@ -798,11 +830,45 @@ def test_per_dwelling_voltage_out_of_range_flagged_and_forwarded(
     orchestrator._sub_voltage_dwelling[0].push_double(10.0)
     orchestrator._read_subscriptions()
     assert orchestrator._last_per_dwelling_voltage_out_of_range is True
-    assert fleet.grid_voltage_values == [(0, 10.0)]
+    assert orchestrator.helics_range_violations_total == 1
+    assert fleet.grid_voltage_values == [], (
+        "an out-of-band per-dwelling voltage must never be applied"
+    )
 
     orchestrator._sub_voltage_dwelling[0].push_double(0.97)
     orchestrator._read_subscriptions()
-    assert fleet.grid_voltage_values == [(0, 10.0), (0, 0.97)]
+    assert fleet.grid_voltage_values == [(0, 0.97)]
+
+
+def test_fleet_price_subscription_applies_to_every_dwelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The price channel's fleet subscription applies the signal exactly
+    as the dwelling federate's: a valid price lands on every dwelling; a
+    negative price warns, counts, and is still applied (a negative
+    tariff is a real scenario; the warning is the diagnostic)."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+
+    orchestrator._sub_price.push_double(0.42)
+    orchestrator._read_subscriptions()
+    assert fleet.price_signals == [0.42]
+    assert orchestrator.helics_price_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+    orchestrator._sub_price.push_double(-0.05)
+    orchestrator._read_subscriptions()
+    assert fleet.price_signals == [0.42, -0.05], (
+        "a negative price is applied after its warning, the dwelling "
+        "federate's exact price behavior"
+    )
+    assert orchestrator.helics_price_valid is False
+    assert orchestrator.helics_range_violations_total == 1
 
 
 def test_set_publication_info_attaches_unit_metadata(
