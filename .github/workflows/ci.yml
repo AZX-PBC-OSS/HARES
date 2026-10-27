@@ -390,27 +390,28 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
-      - name: Cache benchmark baseline
-        id: cache
-        if: env.BASE_SHA != ''
-        uses: actions/cache@v4
-        with:
-          path: baseline.json
-          key: bench-baseline-${{ env.BASE_SHA }}-${{ hashFiles('.github/workflows/ci.yml', 'benches/**', 'crates/*/benches/**') }}
       - name: Generate baseline
-        if: steps.cache.outputs.cache-hit != 'true' && env.BASE_SHA != ''
-        # A baseline from a base whose benches cannot run (a construction
-        # guard the base's own fixtures predate) is unproducible: the step
-        # is tolerated, the comparison below notices the missing file and
-        # skips, and the PR's own benchmark run above still gates the job.
-        # The gate self-heals when a tree with runnable benches merges.
+        if: env.BASE_SHA != ''
+        # The baseline is generated IN THIS JOB, on THIS runner, in THIS
+        # sitting - every time. The earlier actions/cache step defeated
+        # the pairing: a cached baseline came from a different runner's
+        # sitting, and the cross-sitting variance (measured at up to 25
+        # percent) blew through the 20 percent gate as false positives.
+        # Same runner, same sitting: the comparison carries no machine
+        # variance, so the 20 percent threshold measures the change, not
+        # the runner. A baseline from a base whose benches cannot run (a
+        # construction guard the base's own fixtures predate) is
+        # unproducible: the step is tolerated, the comparison below
+        # notices the missing file and skips, and the PR's own benchmark
+        # run above still gates the job. The gate self-heals when a tree
+        # with runnable benches merges.
         continue-on-error: true
         run: |
           git checkout "$BASE_SHA"
           cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver --bench metrics_request --bench rl_episode --bench output_row_plan --bench diagnostics_report --bench thermal_step --bench checkpoint -- --save-baseline baseline
           critcmp --export baseline > baseline.json
       - name: Restore PR branch
-        if: steps.cache.outputs.cache-hit != 'true' && env.BASE_SHA != ''
+        if: env.BASE_SHA != ''
         run: git checkout ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Run PR benchmarks
         run: cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver --bench metrics_request --bench rl_episode --bench output_row_plan --bench diagnostics_report --bench thermal_step --bench checkpoint -- --save-baseline pr
