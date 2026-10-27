@@ -111,7 +111,7 @@ pub struct EquipmentPhaseCapture {
 }
 
 /// Per-equipment observation: identity, telemetry, port declarations, and contributions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EquipmentObservation {
     pub name: String,
     pub equipment_type: String,
@@ -126,7 +126,7 @@ pub struct EquipmentObservation {
 }
 
 /// Per-equipment port contribution: the delta this equipment added to `PortSlots` during one step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EquipmentContribution {
     /// The heat this equipment added to each zone, every path included.
     pub thermal: Vec<(ZoneId, ZoneHeat)>,
@@ -149,7 +149,7 @@ pub struct FluidContributionCapture {
 }
 
 /// Snapshot of all port accumulators at a phase boundary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PortsCapture {
     /// Each zone's accumulated heat, every path included.
     pub thermal: Vec<(ZoneId, ZoneHeat)>,
@@ -278,6 +278,38 @@ impl ObserverBuffer {
             self.snapshots.pop_front();
         }
         self.snapshots.push_back(snapshot);
+    }
+
+    /// Takes the slot a push would evict (a fresh slot while the ring is
+    /// still filling). The step's capture writes reuse the taken slot's
+    /// buffers in place, and the snapshot built on them goes back through
+    /// [`ObserverBuffer::push`], which then finds the ring below capacity
+    /// and pushes without evicting. The pair keeps the ring's exact
+    /// contents: the take evicts the oldest snapshot exactly when the
+    /// push would have, one step earlier. A step that errors between the
+    /// take and the push drops the slot's allocations, leaving the ring
+    /// one slot short until the next successful push refills it: the
+    /// failed run is over, and the ring's oldest snapshot is the only
+    /// thing lost.
+    pub(crate) fn take_slot(&mut self) -> StepSnapshot {
+        if self.snapshots.len() == self.capacity {
+            self.snapshots
+                .pop_front()
+                .expect("the ring is at its capacity")
+        } else {
+            StepSnapshot {
+                step_index: 0,
+                timestamp: DateTime::<FixedOffset>::default(),
+                phases: PhaseSnapshots::default(),
+                actor_skips: 0,
+                actor_calls: 0,
+                actor_error_count: 0,
+                moisture_invariant: None,
+                time_sin: 0.0,
+                time_cos: 0.0,
+                actor_telemetry_keys: Vec::new(),
+            }
+        }
     }
 
     /// Drains all snapshots out of the buffer.

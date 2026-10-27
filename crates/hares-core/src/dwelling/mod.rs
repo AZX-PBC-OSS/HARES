@@ -7356,7 +7356,21 @@ impl Dwelling {
         let alloc_before = thread_allocations();
 
         #[cfg(feature = "observe")]
-        let mut obs_phases = PhaseSnapshots::default();
+        // The recycled slot: when the observer's ring is full, the push
+        // at the end of the step would evict its oldest snapshot; the
+        // take does that eviction now and hands the slot over, so the
+        // step's capture writes reuse the slot's buffers in place (the
+        // telemetry maps' reuse is the row's own). The taken slot's
+        // scalars are rewritten at the push; a step that errors before
+        // it drops the slot and leaves the ring one slot short until the
+        // next push (the failed run is over; nothing reads it).
+        let mut obs_slot: Option<StepSnapshot> =
+            self.observer_buf.as_mut().map(|buf| buf.take_slot());
+        #[cfg(feature = "observe")]
+        let mut obs_phases: PhaseSnapshots = obs_slot
+            .as_mut()
+            .map(|slot| std::mem::take(&mut slot.phases))
+            .unwrap_or_default();
 
         // Step 1: update environment at current clock state.
         // Feed zone temperatures back first so the borrow on self.latest_env.zones
@@ -7789,9 +7803,28 @@ impl Dwelling {
         // (default: ≥ 5 minutes) because 1-minute timesteps have <1%/s PV
         // ramp rates where the one-step PV lag has negligible impact.
         #[cfg(feature = "observe")]
-        let mut thermal_obs: Vec<EquipmentObservation> = Vec::new();
+        // The per-equipment observation lists, seeded from the recycled
+        // slot's own phase captures: each element's telemetry map and
+        // buffers are reused in place (the row's clone_from site) while
+        // the equipment count matches, and a roster change falls back to
+        // fresh captures beyond the recycled elements. The used counters
+        // track this step's processed equipment per list; the stale tail
+        // (a roster shrink) truncates before the phase capture.
+        let mut thermal_obs: Vec<EquipmentObservation> =
+            match obs_phases.post_thermal_equipment.take() {
+                Some(capture) => capture.equipment,
+                None => Vec::new(),
+            };
         #[cfg(feature = "observe")]
-        let mut nonthermal_obs: Vec<EquipmentObservation> = Vec::new();
+        let mut nonthermal_obs: Vec<EquipmentObservation> =
+            match obs_phases.post_nonthermal_equipment.take() {
+                Some(capture) => capture.equipment,
+                None => Vec::new(),
+            };
+        #[cfg(feature = "observe")]
+        let mut thermal_obs_used: usize = 0;
+        #[cfg(feature = "observe")]
+        let mut nonthermal_obs_used: usize = 0;
         #[cfg(feature = "observe")]
         let mut pre_snapshot = if observing {
             Some(self.ports.clone())
@@ -7864,11 +7897,22 @@ impl Dwelling {
                 );
                 if let Some(ref mut snapshot) = pre_snapshot {
                     let contribution = observer_capture::diff_ports(snapshot, &self.ports);
-                    nonthermal_obs.push(observer_capture::capture_single_equipment(
-                        self.equipment[idx].as_ref(),
-                        contribution,
-                        pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
-                    ));
+                    let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
+                    if nonthermal_obs_used < nonthermal_obs.len() {
+                        observer_capture::capture_single_equipment_into(
+                            &mut nonthermal_obs[nonthermal_obs_used],
+                            self.equipment[idx].as_ref(),
+                            contribution,
+                            pre_ports,
+                        );
+                    } else {
+                        nonthermal_obs.push(observer_capture::capture_single_equipment(
+                            self.equipment[idx].as_ref(),
+                            contribution,
+                            pre_ports,
+                        ));
+                    }
+                    nonthermal_obs_used += 1;
                     *snapshot = self.ports.clone();
                 }
             }
@@ -7941,11 +7985,22 @@ impl Dwelling {
                 );
                 if let Some(ref mut snapshot) = pre_snapshot {
                     let contribution = observer_capture::diff_ports(snapshot, &self.ports);
-                    nonthermal_obs.push(observer_capture::capture_single_equipment(
-                        self.equipment[idx].as_ref(),
-                        contribution,
-                        pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
-                    ));
+                    let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
+                    if nonthermal_obs_used < nonthermal_obs.len() {
+                        observer_capture::capture_single_equipment_into(
+                            &mut nonthermal_obs[nonthermal_obs_used],
+                            self.equipment[idx].as_ref(),
+                            contribution,
+                            pre_ports,
+                        );
+                    } else {
+                        nonthermal_obs.push(observer_capture::capture_single_equipment(
+                            self.equipment[idx].as_ref(),
+                            contribution,
+                            pre_ports,
+                        ));
+                    }
+                    nonthermal_obs_used += 1;
                     *snapshot = self.ports.clone();
                 }
             }
@@ -7993,11 +8048,22 @@ impl Dwelling {
                 );
                 if let Some(ref mut snapshot) = pre_snapshot {
                     let contribution = observer_capture::diff_ports(snapshot, &self.ports);
-                    thermal_obs.push(observer_capture::capture_single_equipment(
-                        self.equipment[idx].as_ref(),
-                        contribution,
-                        pre_ports.expect("pre_ports is Some when pre_snapshot is Some"),
-                    ));
+                    let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
+                    if thermal_obs_used < thermal_obs.len() {
+                        observer_capture::capture_single_equipment_into(
+                            &mut thermal_obs[thermal_obs_used],
+                            self.equipment[idx].as_ref(),
+                            contribution,
+                            pre_ports,
+                        );
+                    } else {
+                        thermal_obs.push(observer_capture::capture_single_equipment(
+                            self.equipment[idx].as_ref(),
+                            contribution,
+                            pre_ports,
+                        ));
+                    }
+                    thermal_obs_used += 1;
                     *snapshot = self.ports.clone();
                 }
             }
@@ -8005,9 +8071,13 @@ impl Dwelling {
 
         // Observer captures: nonthermal first (Independent + Electrical ran
         // first), then thermal (Thermal ran last). This reverses the prior
-        // capture order to match the new execution order.
+        // capture order to match the new execution order. The recycled
+        // elements the step did not reach (a roster shrink) truncate away;
+        // the reached ones moved through their in-place updates.
         #[cfg(feature = "observe")]
         if observing {
+            nonthermal_obs.truncate(nonthermal_obs_used);
+            thermal_obs.truncate(thermal_obs_used);
             obs_phases.post_nonthermal_equipment = Some(observer_capture::capture_equipment_phase(
                 nonthermal_obs,
                 &self.ports,
@@ -8528,38 +8598,44 @@ impl Dwelling {
             };
             #[cfg(not(all(feature = "observe", debug_assertions)))]
             let moisture_invariant: Option<MoistureInvariantCapture> = None;
-            buf.push(StepSnapshot {
-                step_index: self.clock.current_step(),
-                timestamp: self.latest_env.current_time,
-                phases: obs_phases,
-                actor_skips,
-                actor_calls,
-                actor_error_count,
-                moisture_invariant,
-                time_sin: {
-                    let fhour = self.latest_env.current_time.hour() as f64
-                        + self.latest_env.current_time.minute() as f64 / 60.0
-                        + self.latest_env.current_time.second() as f64 / 3600.0;
-                    libm::sin(2.0 * std::f64::consts::PI * fhour / 24.0)
-                },
-                time_cos: {
-                    let fhour = self.latest_env.current_time.hour() as f64
-                        + self.latest_env.current_time.minute() as f64 / 60.0
-                        + self.latest_env.current_time.second() as f64 / 3600.0;
-                    libm::cos(2.0 * std::f64::consts::PI * fhour / 24.0)
-                },
-                actor_telemetry_keys: self
-                    .actors
-                    .iter()
-                    .filter_map(|actor| {
-                        actor.telemetry().map(|tel| {
-                            let mut keys: Vec<String> = tel.0.keys().cloned().collect();
-                            keys.sort();
-                            (actor.name().to_string(), keys)
-                        })
+            // The recycled slot's scalars are rewritten here; its phase
+            // captures were taken at the step start and (for the
+            // equipment phases) written in place, so the slot carries
+            // this step's data with its old buffers.
+            let mut slot = obs_slot
+                .take()
+                .expect("the step's slot was taken at the step start");
+            slot.step_index = self.clock.current_step();
+            slot.timestamp = self.latest_env.current_time;
+            slot.phases = obs_phases;
+            slot.actor_skips = actor_skips;
+            slot.actor_calls = actor_calls;
+            slot.actor_error_count = actor_error_count;
+            slot.moisture_invariant = moisture_invariant;
+            slot.time_sin = {
+                let fhour = self.latest_env.current_time.hour() as f64
+                    + self.latest_env.current_time.minute() as f64 / 60.0
+                    + self.latest_env.current_time.second() as f64 / 3600.0;
+                libm::sin(2.0 * std::f64::consts::PI * fhour / 24.0)
+            };
+            slot.time_cos = {
+                let fhour = self.latest_env.current_time.hour() as f64
+                    + self.latest_env.current_time.minute() as f64 / 60.0
+                    + self.latest_env.current_time.second() as f64 / 3600.0;
+                libm::cos(2.0 * std::f64::consts::PI * fhour / 24.0)
+            };
+            slot.actor_telemetry_keys = self
+                .actors
+                .iter()
+                .filter_map(|actor| {
+                    actor.telemetry().map(|tel| {
+                        let mut keys: Vec<String> = tel.0.keys().cloned().collect();
+                        keys.sort();
+                        (actor.name().to_string(), keys)
                     })
-                    .collect(),
-            });
+                })
+                .collect();
+            buf.push(slot);
         }
 
         // Record per-step diagnostic data for post-hoc checks (unmet hours,
@@ -10400,6 +10476,66 @@ destination = "memory"
             "the humidity alpha telemetry rebuild allocated {} times over 4 \
              steps after the first: the alpha map must update in place",
             after - baseline,
+        );
+    }
+
+    /// The observation path's telemetry map clone, the observe build's
+    /// allocation census's B3 site's biggest half: the per-equipment
+    /// capture cloned the equipment's telemetry map fresh every step (a
+    /// fresh table plus one String per registered key: 177 keys + 15
+    /// tables per step on the census's consumer fixture). The bracket is
+    /// the site's own (`take_telemetry_site_allocations`), and this
+    /// binary installs the counting allocator, so the counts are real.
+    /// RED at the row's base: the per-step keys' count. GREEN once the
+    /// observation path's clone goes through `Telemetry`'s hand-written
+    /// `clone_from` (the steady state's in-place overwrite): zero on
+    /// every step after the ring's first fills.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn observation_telemetry_clone_is_allocation_free_after_the_first_steps() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let hpxml = root.join("tests/fixtures/hpxml/ochre_samples/base.xml");
+        let schedule = root.join("data/examples/BEopt_example_schedule.csv");
+        let weather = root.join("data/examples/USA_CO_Denver.epw");
+        let start_time = chrono::DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
+            .expect("valid start time");
+
+        let mut dwelling = Dwelling::from_hpxml_with_reports(
+            HpxmlInputs {
+                hpxml_path: &hpxml,
+                schedule_path: &schedule,
+                weather_path: &weather,
+            },
+            start_time,
+            chrono::Duration::minutes(15),
+            // Four hours: the test steps ten of the fifteen-minute
+            // steps (one fill, five warm-in, four measured).
+            chrono::Duration::hours(4),
+            None,
+            Vec::new(),
+            root.join("python/hares/defaults"),
+        )
+        .expect("build the fixture dwelling");
+
+        dwelling.enable_observer(4);
+        dwelling.run_timestep(false).expect("first step");
+        for _ in 0..5 {
+            dwelling.run_timestep(false).expect("warm-in step");
+        }
+        // The warm-in's fills read and discarded: the site's bracket
+        // restarts at zero for the measured window.
+        let _ = crate::observer_capture::take_telemetry_site_allocations();
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("measured step");
+        }
+        let delta = crate::observer_capture::take_telemetry_site_allocations();
+        assert_eq!(
+            delta, 0,
+            "the observation path's telemetry clone allocated {} times over \
+             4 observed steps after the ring's first fills: the \
+             per-equipment capture must clone the telemetry map through \
+             its own clone_from",
+            delta,
         );
     }
 
