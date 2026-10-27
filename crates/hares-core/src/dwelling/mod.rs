@@ -22668,10 +22668,14 @@ latent_gain_fraction = 0.08
         );
     }
 
-    /// The minimum-day-count test's candidate is the leap fixture (it
-    /// converges on day 4 under the defaults: the corrected defrost duty's
-    /// zero-capacity events lengthen the ASHP's warm-up transient):
-    /// min_days = 5 runs exactly five days.
+    /// The minimum-day-count test's candidate is the leap fixture: it
+    /// converged on day 4 under the defrost consolidation's defaults (the
+    /// corrected duty's zero-capacity events lengthened the ASHP's warm-up
+    /// transient) and converges on day 2 since the coarse-dt guard (the
+    /// defrost entry in docs/PHYSICS_DECISIONS.md: at 900 s steps the
+    /// continuous model owns the multipliers, so the quantized duty's
+    /// zero-capacity frost hours no longer stall the transient); min_days
+    /// = 5 still runs exactly five days.
     #[test]
     fn warmup_min_days_is_honoured() {
         let default_days = {
@@ -22689,13 +22693,13 @@ latent_gain_fraction = 0.08
                     ..
                 } => {
                     assert!(converged);
-                    assert_eq!(*days_run, 4, "the leap candidate converges on day 4");
+                    assert_eq!(*days_run, 2, "the leap candidate converges on day 2");
                     *days_run
                 }
                 other => panic!("expected Ran, got {other:?}"),
             }
         };
-        assert_eq!(default_days, 4);
+        assert_eq!(default_days, 2);
 
         let config = parity_candidate(
             "cz4a_ashp_hpwh",

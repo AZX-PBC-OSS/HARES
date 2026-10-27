@@ -358,6 +358,13 @@ TRACE_HEATING_OCHRE_KWH = 47.052
 # with it: the 48 h heating 28.9580 to 29.1539 kWh, the worst-6 h
 # divergence 2.0090 to 2.0590 C, the 48 h mean 0.3940 to 0.3971 C
 # (OCHRE's own 47.052 kWh unchanged).
+# Verified 2026-10-26 for the defrost discrete cycle's coarse-dt guard (the
+# defrost entry in docs/PHYSICS_DECISIONS.md): the guard selects the
+# continuous model at steps longer than the 210 s defrost event; this trace
+# runs 1-minute steps, inside the discrete regime the guard does not touch,
+# so the defrost-window records above hold re-verified and unchanged at
+# their 2026-10-19 values (the cause of this row's own movements lives at
+# 900 s and 3600 s steps: the ASHP-bearing goldens, not this trace).
 TRACE_HEATING_HARES_KWH = 29.1539
 OVERNIGHT_WORST_C = 0.7800
 OVERNIGHT_MEAN_C = 0.3680

@@ -2133,12 +2133,23 @@ impl DefrostProbeRun {
 /// percent of the duty; coarser steps quantize the event upward and wobble
 /// the realized duty by O(period/window).
 fn defrost_probe_run(defrost: DefrostConfig) -> DefrostProbeRun {
+    defrost_probe_run_at_dt(defrost, 10, 17_280, 600)
+}
+
+/// The defrost probe at an arbitrary timestep: `n_steps` steps of `dt_secs`
+/// seconds, the first `n_warmup` of them discarded as warm-up. The static
+/// operating point and the telemetry accumulation are the 10 s probe's.
+fn defrost_probe_run_at_dt(
+    defrost: DefrostConfig,
+    dt_secs: i64,
+    n_steps: usize,
+    n_warmup: usize,
+) -> DefrostProbeRun {
     use hares_types::telemetry_keys as tk;
 
-    let env = defrost_probe_env();
-    let dt = Duration::from_secs(10);
-    let n_steps = 17_280_usize;
-    let n_warmup = 600_usize;
+    let mut env = defrost_probe_env();
+    env.time_res = chrono::Duration::seconds(dt_secs);
+    let dt = Duration::from_secs(dt_secs as u64);
 
     let registry = EquipmentRegistry::new();
     let cfg = defrost_probe_config(defrost);
@@ -2285,5 +2296,151 @@ fn defrost_discrete_defrost_electric_matches_continuous_integral() {
          (discrete {:.1} W vs continuous {:.1} W)",
         discrete.total_extra_w,
         continuous.total_extra_w
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The coarse-dt guard
+//
+// The defrost consolidation's own measurement (the measurement ledger's
+// coarse-dt duty table) exposed the coarse-timestep regression it carried:
+// at steps coarse against the 210 s event the event occupies whole steps and
+// the realized duty quantizes upward, 1.00x the documented time fraction at
+// 10 s, 1.12x at 60 s, 1.33x at 300 s, 2.66x at 900 s and 5.32x at 3600 s
+// (at 3600 s the ASHP delivered zero heat every other frost hour). The
+// coarse-dt guard (the defrost entry in docs/PHYSICS_DECISIONS.md) selects
+// the continuous model when the step exceeds the cycle duration, and these
+// tests pin the duty bound and the boundary.
+// ---------------------------------------------------------------------------
+
+/// The duty bound's named tolerance: the realized duty's multiple of the
+/// documented time fraction must sit within 1.0 plus or minus this at every
+/// grid step. The discrete regime's own quantization at the 60 s grid point
+/// (the 210 s event spans four whole 60 s steps, 240 s over 210 s: 1.14 at
+/// worst) passes with margin; the coarse-step regime's readings (1.33 at
+/// 300 s, 2.66 at 900 s, 5.32 at 3600 s) fail it. The defrost entry in
+/// docs/PHYSICS_DECISIONS.md documents the bound.
+const DUTY_BOUND_TOLERANCE: f64 = 0.25;
+
+/// The suite's timestep grid (s): the defrost duty's convergence is asserted
+/// at every one.
+const DEFROST_GRID_S: [i64; 5] = [10, 60, 300, 900, 3600];
+
+/// One grid probe pair at `dt_secs`: the discrete default and the continuous
+/// model alone, over a 48 h measured window after a 6,000 s warm-up (the
+/// EWMA's tau is 600 s, so even the 3,600 s step's two warm-up steps
+/// converge it).
+fn defrost_grid_probe_pair(dt_secs: i64) -> (DefrostProbeRun, DefrostProbeRun) {
+    let n_warmup = ((6_000 + dt_secs - 1) / dt_secs) as usize;
+    let n_measured = (172_800 / dt_secs) as usize;
+    let n_steps = n_warmup + n_measured;
+    let continuous = defrost_probe_run_at_dt(
+        DefrostConfig {
+            defrost_discrete_cycle: false,
+            ..DefrostConfig::default()
+        },
+        dt_secs,
+        n_steps,
+        n_warmup,
+    );
+    let discrete = defrost_probe_run_at_dt(DefrostConfig::default(), dt_secs, n_steps, n_warmup);
+    (continuous, discrete)
+}
+
+/// The defrost duty's over-application bound: the realized duty, as a
+/// multiple of the documented time fraction, must sit within
+/// [`DUTY_BOUND_TOLERANCE`] of 1.0 at every timestep in the suite's grid.
+/// The multiple is read off the defrost-electric integral (the discrete run
+/// over the continuous model's own at the same step): in the quantized
+/// regime the event draw is the continuous average divided by the duty, so
+/// the integral ratio equals the Defrosting-step fraction's multiple of the
+/// documented fraction, and above the coarse-dt guard's boundary the
+/// discrete run IS the continuous run. RED at the defrost consolidation's
+/// parent with that record's coarse-dt readings (1.33 at 300 s, 2.66 at
+/// 900 s, 5.32 at 3600 s).
+#[test]
+fn defrost_duty_stays_within_the_documented_fraction_at_every_grid_step() {
+    let mut table = Vec::new();
+    let mut violations = Vec::new();
+    for &dt_secs in &DEFROST_GRID_S {
+        let (continuous, discrete) = defrost_grid_probe_pair(dt_secs);
+        assert!(
+            continuous.total_extra_w > 0.0,
+            "the continuous model must meter defrost power at {dt_secs} s steps \
+             for the bound to be meaningful"
+        );
+        assert!(
+            discrete.n_defrosting > 0 || dt_secs > 210,
+            "the discrete cycle must fire at {dt_secs} s steps (inside the discrete \
+             regime) for the bound to be meaningful"
+        );
+        let multiple = discrete.total_extra_w / continuous.total_extra_w;
+        let duty_fraction = discrete.n_defrosting as f64 / discrete.measured_steps() as f64;
+        table.push(format!(
+            "dt {dt_secs:>4} s: the Defrosting-step fraction {duty_fraction:.5}, the \
+             duty's multiple of the documented fraction {multiple:.4}"
+        ));
+        if (multiple - 1.0).abs() > DUTY_BOUND_TOLERANCE {
+            violations.push(format!(
+                "at {dt_secs} s steps the multiple is {multiple:.4} (the Defrosting-step \
+                 fraction {duty_fraction:.5})"
+            ));
+        }
+    }
+    println!(
+        "the defrost duty table (the realized duty's multiple of the documented time fraction):"
+    );
+    for line in &table {
+        println!("{line}");
+    }
+    assert!(
+        violations.is_empty(),
+        "the defrost duty's over-application bound fails: {}. The bound is 1.0 plus or \
+         minus {DUTY_BOUND_TOLERANCE} at every grid step; the full table: {}. Steps longer \
+         than the 210 s event must select the continuous model, whose own duty is the \
+         documented fraction.",
+        violations.join("; "),
+        table.join("; ")
+    );
+}
+
+/// The coarse-dt guard's boundary at one step each side: the discrete cycle
+/// still owns the multipliers at and below the 210 s event duration (at
+/// exactly the boundary the event is one whole step and the documented duty
+/// holds) and the continuous model owns them above it (its metering then
+/// matches the continuous-alone run bit for bit). This boundary is the
+/// guard's new behavior surface; the defrost entry in
+/// docs/PHYSICS_DECISIONS.md names it and its quantization edges.
+#[test]
+fn defrost_discrete_cycle_resolves_at_its_own_duration_and_yields_above_it() {
+    // At and one step below the boundary: the discrete cycle fires.
+    for dt_secs in [209_i64, 210] {
+        let n_warmup = ((6_000 + dt_secs - 1) / dt_secs) as usize;
+        let n_steps = n_warmup + (172_800 / dt_secs) as usize;
+        let run = defrost_probe_run_at_dt(DefrostConfig::default(), dt_secs, n_steps, n_warmup);
+        assert!(
+            run.n_defrosting > 0,
+            "the discrete cycle must still fire at {dt_secs} s steps: at or below the \
+             210 s event duration the discrete model owns the multipliers"
+        );
+    }
+
+    // One step above the boundary: the tracker stays dormant and the
+    // discrete run's metering is the continuous model's own, bit for bit.
+    let (continuous, discrete) = defrost_grid_probe_pair(211);
+    assert_eq!(
+        discrete.n_defrosting, 0,
+        "the tracker must stay dormant above the 210 s event duration: the coarse-dt \
+         guard selects the continuous model there"
+    );
+    assert_eq!(
+        discrete.total_extra_w, continuous.total_extra_w,
+        "above the boundary the discrete run's defrost-electric metering must be \
+         bit-identical to the continuous model's own"
+    );
+    assert_eq!(
+        discrete.total_thermal_w, continuous.total_thermal_w,
+        "above the boundary the discrete run's delivered heat must be bit-identical \
+         to the continuous model's own"
     );
 }
