@@ -69,21 +69,70 @@ pub(crate) fn capture_equipment_phase(
 }
 
 /// Captures a single equipment's observation with contribution and pre-step port state.
+///
+/// The fresh form: an empty observation written through
+/// [`capture_single_equipment_into`], so the two forms' field set is
+/// mirrored in one place.
 pub(crate) fn capture_single_equipment(
     eq: &dyn Equipment,
     contribution: EquipmentContribution,
     pre_step_ports: PortsCapture,
 ) -> EquipmentObservation {
+    let mut obs = EquipmentObservation::default();
+    capture_single_equipment_into(&mut obs, eq, contribution, pre_step_ports);
+    obs
+}
+
+/// The same capture, written into a recycled observation: the telemetry
+/// map's copy goes through `Telemetry`'s hand-written `clone_from`, so
+/// the steady state (every key registered at init, the same key set on
+/// both sides) overwrites the values in place and allocates nothing.
+/// The identity fields still build fresh Strings: their
+/// borrowed-or-shared descriptor form is the equipment capture's own
+/// remaining site, not this one.
+pub(crate) fn capture_single_equipment_into(
+    obs: &mut EquipmentObservation,
+    eq: &dyn Equipment,
+    contribution: EquipmentContribution,
+    pre_step_ports: PortsCapture,
+) {
     let desc = eq.descriptor();
-    EquipmentObservation {
-        name: desc.name.clone(),
-        equipment_type: desc.equipment_type.to_string(),
-        end_use: desc.end_use.clone(),
-        telemetry: eq.telemetry().clone(),
-        port_declarations: eq.ports().to_vec(),
-        contribution,
-        pre_step_ports,
+    obs.name = desc.name.clone();
+    obs.equipment_type = desc.equipment_type.to_string();
+    obs.end_use = desc.end_use.clone();
+    #[cfg(test)]
+    let before = hares_types::alloc_count::thread_allocations();
+    obs.telemetry.clone_from(eq.telemetry());
+    #[cfg(test)]
+    record_telemetry_site_allocations(before);
+    obs.port_declarations = eq.ports().to_vec();
+    obs.contribution = contribution;
+    obs.pre_step_ports = pre_step_ports;
+}
+
+// The observation path's telemetry-write site's allocation bracket: the
+// count the counting allocator saw around the site's map copy, read and
+// reset by the dwelling's witness tests. This file is the only place the
+// site itself sits.
+#[cfg(test)]
+thread_local! {
+    static TELEMETRY_SITE_ALLOCATIONS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_telemetry_site_allocations(before: Option<u64>) {
+    if let (Some(before), Some(after)) = (before, hares_types::alloc_count::thread_allocations()) {
+        TELEMETRY_SITE_ALLOCATIONS.with(|cell| {
+            cell.set(cell.get() + after.saturating_sub(before));
+        });
     }
+}
+
+/// Reads and resets the telemetry-write site's allocation bracket.
+#[cfg(test)]
+pub(crate) fn take_telemetry_site_allocations() -> u64 {
+    TELEMETRY_SITE_ALLOCATIONS.with(std::cell::Cell::take)
 }
 
 /// Computes the per-equipment contribution by diffing port accumulators before and after a step.

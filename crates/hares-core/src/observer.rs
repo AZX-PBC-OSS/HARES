@@ -14,6 +14,14 @@ use hares_types::{
     LoopId, PortDeclaration, Telemetry, ZoneHeat, ZoneId,
 };
 
+/// One actor's telemetry channel keys: the actor's name and its sorted
+/// key list, shared through the Arc. The key set is frozen at the
+/// telemetry's seal (the unknown-key latch rejects new keys for the
+/// run's life), so the list is a pure function of frozen state: cached
+/// once per actor at the first observed push and cloned as an Arc per
+/// step.
+pub type ActorTelemetryKeys = std::sync::Arc<(String, Vec<String>)>;
+
 /// Complete snapshot of a single simulation timestep, populated incrementally
 /// at phase boundaries within `Dwelling::run_timestep`.
 #[derive(Debug, Clone)]
@@ -37,8 +45,10 @@ pub struct StepSnapshot {
     /// cos(2π · fractional_hour / 24) for verifying time_cos observation field.
     pub time_cos: f64,
     /// Per-actor telemetry channel keys present at this timestep:
-    /// actor_name → list of channel keys.
-    pub actor_telemetry_keys: Vec<(String, Vec<String>)>,
+    /// actor_name → list of channel keys, shared through the Arc (the
+    /// key set is frozen at the telemetry's seal; the list is cached
+    /// once per actor and cloned as an Arc per step).
+    pub actor_telemetry_keys: Vec<ActorTelemetryKeys>,
 }
 
 /// Incrementally populated captures for each phase of `run_timestep`.
@@ -111,7 +121,7 @@ pub struct EquipmentPhaseCapture {
 }
 
 /// Per-equipment observation: identity, telemetry, port declarations, and contributions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EquipmentObservation {
     pub name: String,
     pub equipment_type: String,
@@ -126,7 +136,7 @@ pub struct EquipmentObservation {
 }
 
 /// Per-equipment port contribution: the delta this equipment added to `PortSlots` during one step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EquipmentContribution {
     /// The heat this equipment added to each zone, every path included.
     pub thermal: Vec<(ZoneId, ZoneHeat)>,
@@ -149,7 +159,7 @@ pub struct FluidContributionCapture {
 }
 
 /// Snapshot of all port accumulators at a phase boundary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PortsCapture {
     /// Each zone's accumulated heat, every path included.
     pub thermal: Vec<(ZoneId, ZoneHeat)>,
@@ -216,7 +226,7 @@ pub struct CustomSolverCapture {
 }
 
 /// Capture of all dispatched control signals and their resolution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DispatchCapture {
     /// All signals dispatched this timestep, in tier order (low → high).
     pub signals: Vec<DispatchedSignal>,
@@ -278,6 +288,38 @@ impl ObserverBuffer {
             self.snapshots.pop_front();
         }
         self.snapshots.push_back(snapshot);
+    }
+
+    /// Takes the slot a push would evict (a fresh slot while the ring is
+    /// still filling). The step's capture writes reuse the taken slot's
+    /// buffers in place, and the snapshot built on them goes back through
+    /// [`ObserverBuffer::push`], which then finds the ring below capacity
+    /// and pushes without evicting. The pair keeps the ring's exact
+    /// contents: the take evicts the oldest snapshot exactly when the
+    /// push would have, one step earlier. A step that errors between the
+    /// take and the push drops the slot's allocations, leaving the ring
+    /// one slot short until the next successful push refills it: the
+    /// failed run is over, and the ring's oldest snapshot is the only
+    /// thing lost.
+    pub(crate) fn take_slot(&mut self) -> StepSnapshot {
+        if self.snapshots.len() == self.capacity {
+            self.snapshots
+                .pop_front()
+                .expect("the ring is at its capacity")
+        } else {
+            StepSnapshot {
+                step_index: 0,
+                timestamp: DateTime::<FixedOffset>::default(),
+                phases: PhaseSnapshots::default(),
+                actor_skips: 0,
+                actor_calls: 0,
+                actor_error_count: 0,
+                moisture_invariant: None,
+                time_sin: 0.0,
+                time_cos: 0.0,
+                actor_telemetry_keys: Vec::new(),
+            }
+        }
     }
 
     /// Drains all snapshots out of the buffer.
