@@ -789,6 +789,54 @@ the defrost electric integral fell to the continuous model's own, and the
 48 h OCHRE thermal trace's heating fell 31.37 to 28.96 kWh with the
 overnight divergence against OCHRE tightening 1.23 to 0.78 C.
 
+The coarse-dt guard (2026-10-26): the consolidation's own measurement
+exposed the coarse-timestep regression it carried while it fixed the
+fine-dt duty. At steps coarse against the 210 s event the event occupies
+whole steps and the realized duty quantizes upward: 1.00x the documented
+time fraction at 10 s, 1.12x at 60 s, 1.33x at 300 s, 2.66x at 900 s and
+5.32x at 3600 s (at 3600 s the ASHP delivered zero heat every other frost
+hour). This row repays that regression, and its record says so plainly:
+the first fix's coarse-dt over-application is what moved the ASHP-bearing
+goldens a second time. The repair: the discrete cycle resolves its event
+only at steps the event can hold whole; when the step exceeds
+`cycle_duration_s` (the event's own length, the cycle duration capped by
+the max defrost duration) the engine auto-selects the continuous model
+and the tracker stays dormant
+(`DefrostCycleTracker::resolves_event_at`). The choice is against the
+EnergyPlus defrost models (the external verification's items 1a through
+2, all EXACT or DIVERGENT-DOCUMENTED): EnergyPlus has no discrete defrost
+event at all; its ERM 26.1 fractional model applies the time-averaged
+penalty at any timestep, so the continuous model is the E+-faithful
+behavior at steps that cannot resolve the event. The rejected
+alternative: pin a documented maximum step in the model's contract. A cap
+that errors cannot stand, because the discrete cycle is the default and
+the suite's own ASHP fixtures run at 900 s and 3600 s; a cap below the
+event duration (60 s) would erase the event's temporal resolution across
+the grid for at most a 14 percent duty gain and has no EnergyPlus
+lineage; a cap at the event duration IS the auto-select with a second
+number to drift. The duty table after the repair: 0.996 at 10 s, 1.12 at
+60 s (the discrete regime's own quantization: the 210 s event spans four
+whole 60 s steps, 240 s over 210 s), 1.00 at 300 s, 900 s and 3600 s
+(the continuous model's own duty, the documented fraction exactly; the
+Defrosting-step fraction is 0 there because the tracker is dormant). The
+documented tolerance: the realized duty's multiple of the documented
+fraction sits within 1.0 plus or minus 0.25 at every grid step (the
+defrost probe's duty-bound test, RED at the 1.33x/2.66x/5.32x readings,
+GREEN after). The boundary is a behavior surface, tested one step each
+side: at exactly 210 s the event is one whole step and the duty holds;
+one step below it the event spans two whole steps and the quantization
+approaches 2x (the discrete regime's own documented edge, the red team's
+attack surface); one step above it the continuous model owns the
+multipliers and its metering is bit-identical to the continuous model
+alone. Direction of the delta: the ASHP-bearing goldens re-captured
+again (`fleet_mixed_offset`, `leap_year_february_900s`,
+`weather_wrap_900s`, `full_year_900s_dst`); every movement is the
+coarse-dt over-application's removal (the 3600 s fixture's alternating
+zero-heat frost hours end). The 48 h OCHRE thermal trace's records do
+not move: the trace runs 60 s steps, inside the discrete regime the
+guard does not touch, and its defrost-window pins stand re-verified with
+this cause.
+
 ## A gas boiler's flue loss leaves outdoors, the jacket share heats the zone
 
 The boiler's combustion residual (fuel input minus useful output) is
