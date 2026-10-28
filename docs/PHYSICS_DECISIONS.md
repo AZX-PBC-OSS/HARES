@@ -1332,3 +1332,37 @@ held form answers 0.875924 at every voltage below the turn: monotone,
 below nominal, and free of the extrapolated stall class. No load class
 outside the recorded families keeps a turn: a deeper sag can never
 draw more.
+
+## The frequency channel is read by nothing (the named gap)
+
+The grid-signal channel's frequency input is accepted, validated and
+stored: `set_frequency` admits a finite value in [40, 80] Hz, rejects
+and counts out-of-band values at the boundary, and stores it in
+`GridState::frequency_hz` for the step. No production code reads it.
+The brownout round's B4d probe held a 59 Hz excursion beside a 0.7 pu
+sag and a pure 58 Hz excursion: every state channel (per-equipment
+power, zone temperatures, SOC, modes, the meter total, the reactive
+flows) was bitwise identical to the sag-only run. The channel composes
+with nothing.
+
+The absence is deliberate and recorded: nothing in the recorded
+decisions or the reference stack supports a frequency response
+coefficient for any residential load class in this engine. The load
+model of record is the OCHRE ZIP parameter table, whose columns are
+voltage-only (Zp/Ip/Pp/Zq/Iq/Pq/pf: no frequency term); the IEEE Task
+Force load-model form the engine's rows follow is the voltage polynomial
+the rows carry; and EnergyPlus (the vendored sources, the reference tool
+the stall decision examined) supplies no supply-frequency physics for
+zone or plant equipment to port: its Fans, Pumps and DX coils carry no
+line-frequency input, and the V/Hz relationship (a motor's air-gap flux
+proportional to volts per hertz, torque capability with it) is a drive
+control model, not a measured static response of residential equipment
+to a grid-frequency excursion, for which no coefficient source exists in
+the toolchain. A frequency-dependent motor response (flux, slip,
+speed-cubed fan affinity) would be new behavior with no reference in
+the toolchain, exactly the class the stall decision records as a
+non-model rather than silently absent: it is recorded here the same
+way. The named gap: a frequency-excursion study reads zero response by
+construction, and the channel's only consumers are the setters, the
+validators and the test constructors; a study needing one must land the
+coefficient source and the record first, and retire this entry.
