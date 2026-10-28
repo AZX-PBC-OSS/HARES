@@ -109,8 +109,11 @@ pub struct ResistanceWH {
     mains_temp_c_source: Option<ScheduleSource>,
     /// The wet appliances' untempered draw [kg/s], from its schedule column.
     appliance_draw_source: Option<ScheduleSource>,
-    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// real power stays bit-identical; Q comes from `ZipLoad::reactive_var`.
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`):
+    /// the element's draw evaluates the row's real polynomial at the bus
+    /// voltage through the recorded deep-sag form (the impedance share,
+    /// P = V²/R), and the delivered heat follows the draw; Q comes from
+    /// `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
     // --- Setpoint ramp rate ---
     target_setpoint_c: f64,
@@ -670,6 +673,20 @@ impl Equipment for ResistanceWH {
             }
         }
 
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the element is a resistor and its class row is
+        // pure impedance, so the draw evaluates the row's real polynomial
+        // at the ACTUAL bus voltage (P = V²/R through the Z share, the
+        // row's declared shares honored), and the delivered heat is the
+        // scaled draw: the element converts electric to heat at unity, so
+        // the tank receives exactly the watts a reduced-voltage element can
+        // deliver. The control composition above (duty, DR, the combined
+        // clamp) acts on the rated draw; the voltage response multiplies
+        // the result (the two multiplications commute).
+        let voltage_multiplier = self.zip.deep_sag_real_multiplier(env.grid.bus_voltage_pu());
+        let upper_power_w = upper_power_w * voltage_multiplier;
+        let lower_power_w = lower_power_w * voltage_multiplier;
+
         let mut heat_buf = [(0usize, 0.0f64); 2];
         let mut n = 0;
         if upper_power_w > 0.0 {
@@ -743,9 +760,9 @@ impl Equipment for ResistanceWH {
         // forced off when the bus is de-energized), so delivered tank heat and metered draw
         // are always consistent here.
         let electric_power_w = upper_power_w + lower_power_w;
-        // Rule R1: Q from the already-computed real power (never through the
-        // real-power ZIP polynomial). pf = 1.0 (resistive element) yields
-        // exactly 0.0 kVAR.
+        // Q from the already-computed (voltage-scaled) real power, per the
+        // component doctrine (see `hvac::reactive`). pf = 1.0 (resistive
+        // element) yields exactly 0.0 kVAR.
         let reactive_power_var = self
             .zip
             .reactive_var(electric_power_w, env.grid.bus_voltage_pu());
@@ -1444,6 +1461,62 @@ mod tests {
             custom: vec![],
             humidity: vec![],
         }
+    }
+
+    /// F1's witness: the element's draw evaluates its class row (pure
+    /// impedance, P = V²/R) at the ACTUAL bus voltage, and the tank's heat
+    /// follows the scaled draw. At the parent the element drew its rated
+    /// watts bitwise at 1.0 and 0.5 pu (110.348223229 W on the brownout
+    /// round's midnight probe) while the ZIP table scored the row pure
+    /// impedance: the pin is the defect. The corrected element draws a
+    /// quarter of its rated watts at half voltage, and the tank's stored
+    /// energy rises by less (the heat follows the draw).
+    #[test]
+    fn element_draw_evaluates_its_impedance_row_at_the_actual_voltage() {
+        let typed = typed_config();
+        let mut cfg = config_from_typed(typed);
+        cfg.ochre_class = "Electric Resistance Water Heater".to_string();
+
+        let step_once = |voltage_pu: f64| -> (f64, f64) {
+            let mut wh = ResistanceWH::new(cfg.clone());
+            wh.init(&cfg, &env(21.0)).unwrap();
+            let stored_before = wh.stored_energy_j().expect("tank stored energy");
+            let mut env_sag = env(21.0);
+            env_sag.grid.voltage_pu = voltage_pu;
+            let mut p = ports();
+            wh.step(&env_sag, Duration::from_secs(60), &mut p).unwrap();
+            let draw = p.electrical.load_power_w;
+            let stored_after = wh.stored_energy_j().expect("tank stored energy");
+            (draw, stored_after - stored_before)
+        };
+
+        let (draw_nominal, stored_rise_nominal) = step_once(1.0);
+        let (draw_half, stored_rise_half) = step_once(0.5);
+        assert!(
+            draw_nominal > 0.0,
+            "fixture: the cold tank must fire the element"
+        );
+        // P = V²/R through the pure-impedance row: exactly a quarter of
+        // the watts at half voltage.
+        let expected_half = draw_nominal * 0.25;
+        assert_eq!(
+            draw_half.to_bits(),
+            expected_half.to_bits(),
+            "the element at 0.5 pu must draw rated × 0.25 ({expected_half} W), \
+             got {draw_half} W (the pinned constant-power draw)"
+        );
+        // The tank's heat follows the scaled draw: a strictly smaller
+        // stored-energy rise, bounded by the quarter-power physics plus the
+        // (voltage-invariant) jacket loss.
+        assert!(
+            stored_rise_half < stored_rise_nominal,
+            "the tank must heat less at 0.5 pu: {stored_rise_half} J vs \
+             {stored_rise_nominal} J"
+        );
+        assert!(
+            stored_rise_half > 0.0,
+            "a quarter-voltage element still heats the tank: {stored_rise_half} J"
+        );
     }
 
     /// Grid outage: elements have no supply power, so no electrical heat may

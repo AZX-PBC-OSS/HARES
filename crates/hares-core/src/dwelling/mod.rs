@@ -5365,14 +5365,15 @@ impl Dwelling {
     /// is knowable only by simulation, so a whole-premise %P/%V combines
     /// this aggregate with those shares.
     ///
-    /// `None` when no ZIP-governed equipment has a computable positive
-    /// expected draw — never a silent constant-power answer.
+    /// `None` when no ZIP-governing equipment has a computable positive
+    /// weight; never a silent constant-power answer.
     #[must_use]
     pub fn premise_zip(&self) -> Option<PremiseZip> {
         premise_zip::aggregate_premise_zip(
             self.equipment(),
             self.environment.schedule(),
             self.environment.schedule_upsample_factor(),
+            self.latest_env.grid.bus_voltage_pu(),
         )
     }
 

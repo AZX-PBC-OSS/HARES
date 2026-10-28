@@ -144,9 +144,11 @@ pub(super) struct CoolingCore {
     dr_duty_cycle: f64,
     dr_duration_remaining_s: Option<f64>,
     dr_level: DRLevel,
-    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// applies to the compressor component only (class default pf 0.96, or a
-    /// user `"zip"` override). Real power stays bit-identical; Q comes from
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`):
+    /// applies to the compressor component (class default pf 0.96, or a
+    /// user `"zip"` override), whose real polynomial scales the
+    /// compressor's draw at the bus voltage through the recorded deep-sag
+    /// form (as fitted: the recorded Hajagos & Danai row); Q comes from
     /// `ZipLoad::reactive_var` per component (see `hvac::reactive`).
     zip: hares_types::zip::ResolvedZip,
     /// Indoor blower / condenser fan motor component ZIP (pf 0.87), derived
@@ -1343,17 +1345,33 @@ impl CoolingCore {
 
         self.last_compressor_w = compressor_w;
         let sf = self.hvac.config.space_fraction;
-        let electric_w = (compressor_w + fan_w + self.crankcase_heater_w) * sf;
-        // Rule R1: Q from the already-computed real power, per component
-        // (see `hvac::reactive`): compressor at the unit ZIP (pf 0.96),
-        // blower/condenser fans at pf 0.87. The crankcase heater is
-        // resistive (pf 1.0) and contributes Q ≡ 0.
-        let reactive_power_var = self
-            .zip
-            .reactive_var(compressor_w * sf, env.grid.bus_voltage_pu())
-            + self
-                .fan_zip
-                .reactive_var(fan_w * sf, env.grid.bus_voltage_pu());
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the compressor motor's draw evaluates the unit
+        // row (the recorded Hajagos & Danai compressor row, as fitted) at
+        // the ACTUAL bus voltage: its deep-sag elevation is the measured
+        // static draw of the family; the blower/condenser fan motors
+        // evaluate their own fan-motor row; the crankcase heater is a
+        // resistive element and evaluates the impedance share, P = V²/R.
+        // The thermal delivery is the equipment's own physics (the COP
+        // and capacity curves, voltage-invariant); the control composition
+        // acts on the rated draw, and the voltage response multiplies the
+        // result (the two multiplications commute).
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
+        let motor_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
+        let fan_multiplier =
+            super::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
+        let v_norm = bus_voltage_pu / self.zip.v0;
+        let resistive_multiplier = v_norm * v_norm;
+        let compressor_w = compressor_w * motor_multiplier;
+        let fan_w = fan_w * fan_multiplier;
+        let crankcase_w = self.crankcase_heater_w * resistive_multiplier;
+        let electric_w = (compressor_w + fan_w + crankcase_w) * sf;
+        // Q from the already-computed (voltage-scaled) real power, per
+        // component (see `hvac::reactive`): compressor at the unit ZIP
+        // (pf 0.96), blower/condenser fans at pf 0.87. The crankcase
+        // heater is resistive (pf 1.0) and contributes Q ≡ 0.
+        let reactive_power_var = self.zip.reactive_var(compressor_w * sf, bus_voltage_pu)
+            + self.fan_zip.reactive_var(fan_w * sf, bus_voltage_pu);
         if electric_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: (electric_w),
@@ -1469,8 +1487,7 @@ impl CoolingCore {
         // and MAIN_POWER_KW, so per-component telemetry sums to the unit total.
         self.telemetry.set(tk::COMPRESSOR_KW, compressor_w * sf);
         self.telemetry.set(tk::FAN_KW, fan_w * sf);
-        self.telemetry
-            .set(tk::CRANKCASE_KW, self.crankcase_heater_w * sf);
+        self.telemetry.set(tk::CRANKCASE_KW, crankcase_w * sf);
         self.telemetry
             .set(tk::SUPPLY_TEMP_C, self.hvac.config.supply_air_temp_c);
         self.telemetry
@@ -3476,6 +3493,58 @@ mod tests {
         );
     }
 
+    /// F2's witness: the compressor's draw evaluates the unit row (the
+    /// recorded Hajagos & Danai cooling row, as fitted) at the ACTUAL bus
+    /// voltage. At the parent the compressor drew 600.074966 W at 0.7 pu
+    /// and 599.910799 W at 0.5 pu (a 0.164 W change across a 0.2 pu
+    /// sag) while the row predicts 0.991 and 1.145 (a +15.5 percent
+    /// rise, 93 W on this class). The recorded deep-sag decision governs:
+    /// the elevation is the measured static draw of the family.
+    #[test]
+    fn compressor_draw_follows_the_recorded_row_at_deep_sag() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let environment = env_at_second(27.0, 35.0, 0);
+
+        let step_once = |voltage_pu: f64| -> f64 {
+            let mut env_run = env_at_second(27.0, 35.0, 0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(0.0)
+        };
+
+        let p_nominal = step_once(1.0);
+        let p_half = step_once(0.5);
+        assert!(p_nominal > 0.0, "fixture: the compressor must run");
+        let row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("class row");
+        let raw_multiplier = row.zp * 0.5 * 0.5 + row.ip * 0.5 + row.pp;
+        assert!(
+            raw_multiplier > 1.1,
+            "fixture: the recorded row must elevate at 0.5 pu, got {raw_multiplier}"
+        );
+        let expected = p_nominal * raw_multiplier;
+        assert!(
+            (p_half - expected).abs() < 1e-9,
+            "the compressor at 0.5 pu must draw the row's evaluated response \
+             ({expected}), got {p_half} (the pinned constant-power draw)"
+        );
+        assert!(
+            (p_half - p_nominal).abs() > 0.05 * p_nominal,
+            "the pinned flat line must be gone: {p_half} vs {p_nominal}"
+        );
+    }
+
     #[test]
     fn central_four_speed_variable_speed_interpolates_stage_ladder() {
         let cfg = ac_config_with(|typed| {
@@ -3953,8 +4022,14 @@ mod tests {
     /// (pf 0 sentinel) — must produce bit-identical real power at every step
     /// and voltage.
     #[test]
-    fn cooling_real_power_bit_identical_with_and_without_reactive_zip() {
-        let config_pf = ac_config_with(|typed| typed.startup_cd = Some(0.0));
+    fn cooling_real_power_follows_the_row_and_reactive_follows_pf() {
+        let config_pf = ac_config_with(|typed| {
+            typed.startup_cd = Some(0.0);
+            // The compressor-only unit: the fan would carry its own row's
+            // multiplier (a different response), and this witness pins the
+            // compressor's row.
+            typed.fan_power_w = Some(0.0);
+        });
         let mut config_nopf = config_pf.clone();
         config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
 
@@ -3985,24 +4060,31 @@ mod tests {
             eq_nopf
                 .step(&environment, Duration::from_secs(60), &mut ports_nopf)
                 .unwrap();
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged between pf and no-pf twins"
-            );
-            assert_eq!(
-                eq_pf
-                    .telemetry()
-                    .get(tk::ELECTRIC_KW)
-                    .expect("kW")
-                    .to_bits(),
-                eq_nopf
-                    .telemetry()
-                    .get(tk::ELECTRIC_KW)
-                    .expect("kW")
-                    .to_bits(),
-                "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
-            );
+            // At the reference voltage the row's multiplier is exactly 1.0
+            // and the twins' real powers agree bitwise; off nominal the
+            // pf twin's real power follows its row's deep-sag form while
+            // the constant-power twin stays flat (the recorded deep-sag
+            // decision: the row governs the draw at the actual voltage).
+            if *v == 1.0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): at the reference voltage the twins' \
+                     real powers must agree bitwise"
+                );
+            } else {
+                let multiplier = hares_types::zip::zip_defaults_for_class("Air Conditioner")
+                    .expect("class row")
+                    .deep_sag_real_multiplier(*v, true);
+                let expected = ports_nopf.electrical.load_power_w * multiplier;
+                assert!(
+                    (ports_pf.electrical.load_power_w - expected).abs() < 1e-9,
+                    "step {i} (v={v}): the row's twin must draw {expected} W \
+                     (the row's deep-sag form), got \
+                     {} W",
+                    ports_pf.electrical.load_power_w
+                );
+            }
             assert_eq!(
                 ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"

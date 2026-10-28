@@ -833,11 +833,10 @@ pub fn normalize_enum_text(raw: &str) -> Option<serde_json::Value> {
 ///
 /// The returned [`hares_types::zip::ResolvedZip`] is governing -- the equipment (a scheduled or
 /// event load) scales its real power through the real-power polynomial at
-/// the bus voltage each step. Rule R1 callers use
-/// `resolve_reactive_zip` instead.
+/// the bus voltage each step.
 #[must_use]
 pub fn resolve_zip(config: &EquipmentConfig) -> hares_types::zip::ResolvedZip {
-    hares_types::zip::ResolvedZip::governing(resolve_zip_load(config))
+    resolve_governing_with_recorded_shape(config)
 }
 
 /// The coefficient-resolution chain shared by [`resolve_zip`] and
@@ -857,28 +856,44 @@ pub(crate) const ZIP_SUM_TARGET: f64 = 1.0;
 /// literature coefficient sets).
 pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
 
-/// Resolve the Rule R1 reactive-only ZIP model for typed equipment.
+/// Resolve the Rule R1 reactive ZIP model for typed equipment.
 ///
 /// The effective ZIP is resolved through the same chain as
 /// [`resolve_zip`] (instance sidecar → class-table defaults → constant
-/// power), then returned as a non-governing [`ResolvedZip`]: the real-power
-/// side is forced to constant power `(0, 0, 1)` and flagged as
-/// structurally inapplicable, because typed equipment computes its real
-/// electric power through its own physics and must keep it bit-identical
-/// at all voltages; only the reactive side of the ZIP model is used, via
-/// [`hares_types::zip::ZipLoad::reactive_var`] on the already-computed
-/// power (`Q = P · tan(acos(pf)) · (zq·V² + iq·V + pq)`).
+/// power). The real-power side is NOT pinned: the row's declared
+/// real-power coefficients govern the equipment's voltage response: the
+/// physics-computed draw is scaled by the row's deep-sag form at the bus
+/// voltage each step (the resistive elements by their impedance share,
+/// P = V²/R, per the row's declared shares; the motor and compressor
+/// families by their recorded static-row response), and the returned
+/// [`ResolvedZip`] declares this with `real_power_zip_applies = true`.
+/// Only the DER controllers resolve reactive-only.
+///
+/// The reactive side is unchanged: `Q = P · tan(acos(pf)) ·
+/// (zq·V² + iq·V + pq)` on the already-computed, voltage-scaled power,
+/// per component (`hvac::reactive`).
 ///
 /// Errors when a coefficient-sum invariant is violated (e.g. a bad `"zip"`
 /// config override), so misconfiguration fails at init instead of silently
-/// skewing power. This is the canonical Rule R1 helper for all typed
-/// equipment (HVAC, water heaters, fans, pumps).
+/// skewing power. This is the canonical typed-equipment helper for all
+/// typed equipment (HVAC, water heaters, fans, pumps).
 pub(crate) fn resolve_reactive_zip(
     config: &EquipmentConfig,
 ) -> crate::Result<hares_types::zip::ResolvedZip> {
-    let resolved = hares_types::zip::ResolvedZip::reactive_only(resolve_zip_load(config));
+    let resolved = resolve_governing_with_recorded_shape(config);
     validate_zip_sums(&resolved.zip, &config.name)?;
     Ok(resolved)
+}
+
+/// The shared resolution tail: the class row plus the recorded deep-sag
+/// shape policy for the class.
+fn resolve_governing_with_recorded_shape(
+    config: &EquipmentConfig,
+) -> hares_types::zip::ResolvedZip {
+    let mut resolved = hares_types::zip::ResolvedZip::governing(resolve_zip_load(config));
+    resolved.real_shape_as_fitted =
+        hares_types::zip::deep_sag_row_evaluates_as_fitted(&config.ochre_class);
+    resolved
 }
 
 /// Validate the coefficient-sum invariants of a resolved [`ZipLoad`].

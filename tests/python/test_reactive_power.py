@@ -708,8 +708,21 @@ class TestResolvedZipInspection:
         assert zip_dict is not None
         # Primary component = compressor: ASHP Heater class default pf 0.84.
         assert zip_dict["pf"] == 0.84
-        # Rule R1: real side forced to constant power.
-        assert (zip_dict["zp"], zip_dict["ip"], zip_dict["pp"]) == (0.0, 0.0, 1.0)
+        # The published coefficients are the ASHP Heater class row's own:
+        # the row's real polynomial scales the compressor's draw at the bus
+        # voltage through the recorded deep-sag form, so the real side is
+        # governing, not the old (0, 0, 1) structural pin.
+        class_row = {
+            "zp": 0.72,
+            "ip": -0.98,
+            "pp": 1.26,
+        }
+        assert (
+            zip_dict["zp"],
+            zip_dict["ip"],
+            zip_dict["pp"],
+        ) == (class_row["zp"], class_row["ip"], class_row["pp"])
+        assert zip_dict["real_power_zip_applies"] is True
         assert _equipment_resolved_zip(dw, "ASHP") == zip_dict
 
     def test_user_zip_override_pf_09_visible(self):

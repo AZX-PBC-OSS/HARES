@@ -462,14 +462,14 @@ pub trait Equipment: Send + Sync {
     ///   indirect tank with no electric draw).
     ///
     /// `real_power_zip_applies` distinguishes the two regimes a bare
-    /// coefficient set cannot: `true` (scheduled and event loads) means the
-    /// real-power polynomial genuinely governs real power at the bus
-    /// voltage; `false` (Rule R1 physics equipment and DER) means the
-    /// published `(zp, ip, pp) = (0, 0, 1)` is a structural pin — real power
-    /// comes from the equipment's own physics or controller and only the
-    /// reactive side of the ZIP applies. Anything computing voltage
-    /// sensitivity from the published real coefficients must consult the
-    /// flag first.
+    /// coefficient set cannot: `true` (scheduled and event loads, and the
+    /// typed physics equipment) means the real-power polynomial genuinely
+    /// governs real power at the bus voltage: for a typed physics
+    /// equipment it scales the physics-computed draw through the recorded
+    /// deep-sag form; `false` (DER) means the real draw is
+    /// controller-driven and never ZIP-scaled, and only the reactive side
+    /// of the ZIP applies. Anything computing voltage sensitivity from the
+    /// published real coefficients must consult the flag first.
     ///
     /// `pf = 0.0` in the returned ZIP is the "reactive disabled" sentinel
     /// (see [`hares_types::zip::ZipLoad`]). This is a pure inspection

@@ -136,10 +136,11 @@ pub struct IdealHvac {
     /// Biquadratic temperature-correction curves for the non-ideal fallback path.
     /// Default identity coefficients produce no correction (cap_ratio = eir_ratio = 1.0).
     curves: BiquadraticCurveSet,
-    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly zero, real power
-    /// stays bit-identical. Wired uniformly with the rest of the fleet so the
-    /// §4 cross-equipment consistency check stays uniform.
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`):
+    /// Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly zero, and the
+    /// row is constant power by declaration (the draw's deep-sag multiplier
+    /// is exactly 1 at every voltage). Wired uniformly with the rest of the
+    /// fleet so the cross-equipment consistency check stays uniform.
     zip: hares_types::zip::ResolvedZip,
 }
 
@@ -825,11 +826,15 @@ impl Equipment for IdealHvac {
         }
 
         // Emit electrical port contribution for fan power (W, SI).
-        let fan_w = fan_power_w;
-        // Rule R1: Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly
+        // The declared deep-sag response: the fan draw evaluates the unit
+        // row at the ACTUAL bus voltage (the ideal class's row is constant
+        // power by declaration, so the multiplier is exactly 1 at every
+        // voltage). Ideal HVAC is unity pf (OCHRE Ideal = 1.0) → Q exactly
         // zero. Wired uniformly so the cross-equipment consistency check
         // (port/CoreOutput/telemetry) stays uniform across the fleet.
-        let reactive_power_var = self.zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
+        let fan_w = fan_power_w * self.zip.deep_sag_real_multiplier(bus_voltage_pu);
+        let reactive_power_var = self.zip.reactive_var(fan_w, bus_voltage_pu);
         if fan_power_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: (fan_w),

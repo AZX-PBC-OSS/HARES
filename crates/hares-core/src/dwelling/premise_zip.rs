@@ -1,22 +1,28 @@
 //! Premise-level aggregate ZIP: the dwelling's real voltage response.
 //!
 //! Per-equipment `Equipment::resolved_zip()` answers "how does *this*
-//! equipment respond to voltage" — but for an entire category of equipment
-//! (Rule R1 physics models: HVAC, water heaters, ventilation; and DER) the
-//! published real coefficients are a structural `(0, 0, 1)` pin, because
-//! real power comes from the equipment's own physics or controller and is
-//! deliberately voltage-invariant. Summing the published coefficients over
-//! such equipment predicts zero premise sensitivity, while the dwelling's
-//! ZIP-governed load (scheduled and event loads) measurably does respond.
+//! equipment respond to voltage": every ZIP-bearing equipment class
+//! carries its class row, and the row's real coefficients scale that
+//! equipment's draw at the bus voltage (the scheduled loads scale their
+//! scheduled draw; the typed physics equipment scales its
+//! physics-computed draw through the recorded deep-sag form; the DER
+//! controllers are reactive-only and never scale).
 //!
-//! The aggregate here answers the premise question without simulation: the
-//! power-weighted mean ZIP over the equipment whose real-power coefficients
-//! genuinely govern their real power, plus an explicit roster of what is and
-//! is not covered. It cannot know the *share* of total draw that
-//! physics-driven equipment takes (that depends on weather, occupancy and
-//! control, knowable only by simulation), so the aggregate describes the
-//! ZIP-governed mix, and the caller combines it with physics-equipment
-//! energy shares when they need whole-premise %P/%V.
+//! The aggregate here answers the premise question: the power-weighted
+//! mean over the equipment whose real-power coefficients genuinely
+//! govern their real power, plus an explicit roster of what is and is not
+//! covered. The weights are the moment's raw draws when the dwelling has
+//! stepped (each equipment's last core-output electric draw, un-scaled
+//! through its own row at the bus voltage (the moment's composition),
+//! falling back to the expected mean draw over the loaded schedule for a
+//! dwelling that has not stepped (the static route). The aggregate
+//! cannot know the *share* of total draw that physics-driven equipment
+//! takes without simulation, so before the first step the weights are the
+//! schedule's expected means; after it, the aggregate is the moment's
+//! composition and `deep_sag_scale` is the number the stepping engine
+//! answers at the current bus voltage, with each row's deep-sag form
+//! applied (a held refrigerator row included), which no single published
+//! coefficient row can reproduce when evaluated raw.
 
 use hares_equipment::{Equipment, ExpectedMeanPower};
 use hares_io::schedule::ScheduleTimeSeries;
@@ -26,24 +32,37 @@ use hares_types::zip::ZipLoad;
 /// from. See [`crate::dwelling::Dwelling::premise_zip`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct PremiseZip {
-    /// Power-weighted aggregate ZIP over the ZIP-governed equipment with a
-    /// computable expected draw (positive `governing` weights). The
-    /// real-power coefficients sum to 1 by construction (each included
-    /// equipment's row is init-validated to sum to 1). The reactive side
+    /// Power-weighted aggregate ZIP over the ZIP-governing equipment with a
+    /// computable weight (a positive moment draw, or a positive expected
+    /// mean when the dwelling has not stepped). The real-power coefficients
+    /// sum to 1 by construction (each included equipment's row is
+    /// init-validated to sum to 1). The reactive side
     /// (`zq`/`iq`/`pq`, `pf` via the mean of `tan(acos(pf))`) is a
     /// first-order aggregate, not an exact reduction.
     pub zip: ZipLoad,
-    /// `(equipment name, expected mean power [kW])` for every ZIP-governed
-    /// equipment. `None` when the expected draw cannot be determined
-    /// without simulation (stochastic event scheduling without a kW
-    /// series, or a schedule column absent from the loaded data); such
-    /// equipment is listed but contributes no weight to [`PremiseZip::zip`].
+    /// `(equipment name, weighting draw [W])` for every ZIP-governing
+    /// equipment. The weight is the moment's raw draw (the last step's
+    /// core-output electric draw, un-scaled through the equipment's own row
+    /// at the bus voltage) when the dwelling has stepped, else the expected
+    /// mean draw over the loaded schedule; `None` when neither is
+    /// computable (stochastic event scheduling without a kW series, or a
+    /// schedule column absent from the loaded data); such equipment is
+    /// listed but contributes no weight to [`PremiseZip::zip`].
     pub governing: Vec<(String, Option<f64>)>,
-    /// Equipment whose real power is physics- or DER-driven
+    /// Equipment whose real power is DER-controller-driven
     /// (`real_power_zip_applies == false`): voltage-invariant by
     /// construction, so it contributes no voltage sensitivity and is
     /// excluded from the aggregate.
     pub constant_power: Vec<String>,
+    /// The assembled governed response at the bus voltage the aggregation
+    /// ran at: the weighting-draw-weighted mean of the governing rows'
+    /// deep-sag multipliers, each row evaluated through its recorded
+    /// deep-sag form. This is the number the stepping engine answers for
+    /// the moment's composition; no single published coefficient row can
+    /// reproduce it when evaluated raw, because a held deep-sag row is not
+    /// a quadratic. `None` when no governing equipment carries a positive
+    /// weight.
+    pub deep_sag_scale: Option<f64>,
 }
 
 /// Mean of a schedule column over the loaded schedule data [kW], matching
@@ -76,7 +95,7 @@ fn schedule_column_mean_w(
 }
 
 /// Aggregate the premise-level ZIP over a dwelling's equipment. `None` when
-/// no ZIP-governed equipment has a computable, positive expected draw — an
+/// no ZIP-governing equipment has a computable, positive weight: an
 /// aggregate formed from no information would be indistinguishable from
 /// "the premise is constant power", the exact conflation the
 /// `real_power_zip_applies` flag exists to prevent.
@@ -84,12 +103,13 @@ pub(crate) fn aggregate_premise_zip(
     equipment: &[Box<dyn Equipment>],
     schedule: &ScheduleTimeSeries,
     upsample_factor: u32,
+    bus_voltage_pu: f64,
 ) -> Option<PremiseZip> {
     let mut governing: Vec<(String, Option<f64>)> = Vec::new();
     let mut constant_power: Vec<String> = Vec::new();
 
     // Weighted sums over the governing equipment with a known positive
-    // expected draw: real/reactive coefficients, tan(acos(pf)) and v0.
+    // weight: real/reactive coefficients, tan(acos(pf)) and v0.
     let mut total_weight = 0.0;
     let mut zp = 0.0;
     let mut ip = 0.0;
@@ -99,6 +119,7 @@ pub(crate) fn aggregate_premise_zip(
     let mut pq = 0.0;
     let mut tan_phi_sum = 0.0;
     let mut v0 = 0.0;
+    let mut deep_sag_weighted = 0.0;
 
     for eq in equipment {
         let Some(resolved) = eq.resolved_zip() else {
@@ -110,12 +131,32 @@ pub(crate) fn aggregate_premise_zip(
             constant_power.push(name);
             continue;
         }
-        let mean_power_w = match eq.expected_mean_power_w() {
-            Some(ExpectedMeanPower::W(w)) => Some(w),
-            Some(ExpectedMeanPower::ScheduleColumn(col_idx)) => {
-                schedule_column_mean_w(schedule, col_idx, upsample_factor)
+        // The moment's raw draw: the last step's core-output electric draw
+        // (watts, scaled at the bus voltage), un-scaled through the
+        // equipment's own row. A stepped dwelling aggregates the moment's
+        // composition: a load that stepped and drew zero is off at the
+        // moment and carries a zero weight, and an unstepped one falls
+        // back to the expected mean over the loaded schedule.
+        let moment_raw_draw_w = match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) if bus_voltage_pu > 0.0 => {
+                if w > 0.0 {
+                    let multiplier = resolved.deep_sag_real_multiplier(bus_voltage_pu);
+                    (multiplier > 0.0).then(|| w / multiplier)
+                } else {
+                    Some(0.0)
+                }
             }
-            None => None,
+            _ => None,
+        };
+        let mean_power_w = match moment_raw_draw_w {
+            Some(w) => Some(w),
+            None => match eq.expected_mean_power_w() {
+                Some(ExpectedMeanPower::W(w)) => Some(w),
+                Some(ExpectedMeanPower::ScheduleColumn(col_idx)) => {
+                    schedule_column_mean_w(schedule, col_idx, upsample_factor)
+                }
+                None => None,
+            },
         };
         // The roster must publish only weights the aggregate actually
         // used: a load whose ZIP coefficients are non-finite (bypassing
@@ -148,6 +189,7 @@ pub(crate) fn aggregate_premise_zip(
             pq += w * zip.pq;
             tan_phi_sum += w * zip.tan_phi();
             v0 += w * zip.v0;
+            deep_sag_weighted += w * resolved.deep_sag_real_multiplier(bus_voltage_pu);
         }
     }
 
@@ -180,6 +222,7 @@ pub(crate) fn aggregate_premise_zip(
         },
         governing,
         constant_power,
+        deep_sag_scale: Some(deep_sag_weighted / total_weight),
     })
 }
 
@@ -197,6 +240,7 @@ mod tests {
         descriptor: hares_types::EquipmentDescriptor,
         resolved: Option<hares_types::zip::ResolvedZip>,
         mean: Option<ExpectedMeanPower>,
+        core: hares_types::CoreOutput,
     }
 
     impl StubLoad {
@@ -221,7 +265,13 @@ mod tests {
                 },
                 resolved,
                 mean,
+                core: hares_types::CoreOutput::default(),
             }
+        }
+
+        fn with_last_draw(mut self, w: f64) -> Self {
+            self.core.flows.electric_w = Some(hares_types::ElectricPower::Consumption(w));
+            self
         }
     }
 
@@ -258,7 +308,7 @@ mod tests {
             unimplemented!()
         }
         fn core_output(&self) -> &CoreOutput {
-            unimplemented!()
+            &self.core
         }
         fn save_state(&self) -> hares_equipment::Result<Vec<u8>> {
             unimplemented!()
@@ -289,7 +339,11 @@ mod tests {
         }
     }
 
-    fn governing_load(name: &str, zip: ZipLoad, mean: Option<ExpectedMeanPower>) -> Box<StubLoad> {
+    fn governing_load(
+        name: &str,
+        zip: ZipLoad,
+        mean: Option<ExpectedMeanPower>,
+    ) -> Box<dyn Equipment> {
         Box::new(StubLoad::new(
             name,
             Some(hares_types::zip::ResolvedZip::governing(zip)),
@@ -297,7 +351,23 @@ mod tests {
         ))
     }
 
-    fn pinned_load(name: &str) -> Box<StubLoad> {
+    fn governing_stepped_load(
+        name: &str,
+        zip: ZipLoad,
+        mean: Option<ExpectedMeanPower>,
+        last_raw_draw_w: f64,
+    ) -> Box<dyn Equipment> {
+        Box::new(
+            StubLoad::new(
+                name,
+                Some(hares_types::zip::ResolvedZip::governing(zip)),
+                mean,
+            )
+            .with_last_draw(last_raw_draw_w),
+        )
+    }
+
+    fn pinned_load(name: &str) -> Box<dyn Equipment> {
         Box::new(StubLoad::new(
             name,
             Some(hares_types::zip::ResolvedZip::reactive_only(
@@ -319,6 +389,71 @@ mod tests {
     }
 
     #[test]
+    fn stepped_dwelling_weights_are_the_moment_composition() {
+        // F10's fix: a dwelling that has stepped aggregates the moment's
+        // composition: each equipment's weight is its last raw draw (the
+        // scaled core draw un-scaled through its own row at the bus
+        // voltage), and `deep_sag_scale` is the assembled response the
+        // stepping engine answers, with each row's deep-sag form applied.
+        // At the parent the weights were the expected mean draws of loads
+        // that were off at the moment (the dryer, the range), and the
+        // reported aggregate understated the assembled deep-sag response
+        // by up to 24.8 percent.
+        let refrigerator = hares_types::zip::zip_defaults_for_class("Refrigerator").expect("row");
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        // Two governing loads at the noon moment: the refrigerator drawing
+        // raw 100 W and the lighting raw 200 W, both stepped at 0.7 pu.
+        // The refrigerator's row is held at its stationary point below
+        // 0.843 pu, so its 0.7 pu evaluation is the held value, not the
+        // raw polynomial's 0.9787.
+        let bus_voltage = 0.7;
+        let m_fridge = refrigerator.deep_sag_real_multiplier(bus_voltage, false);
+        let m_lighting = lighting.deep_sag_real_multiplier(bus_voltage, false);
+        let equipment: Vec<Box<dyn Equipment>> = vec![
+            governing_stepped_load(
+                "Refrigerator",
+                refrigerator,
+                Some(ExpectedMeanPower::W(10.0)),
+                100.0 * m_fridge,
+            ),
+            governing_stepped_load(
+                "Indoor Lighting",
+                lighting,
+                Some(ExpectedMeanPower::W(500.0)),
+                200.0 * m_lighting,
+            ),
+        ];
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, bus_voltage)
+            .expect("both loads carry positive moment weights");
+        // The weights are the RAW draws (the expected means, 10 W and 500
+        // W, must be ignored when the moment's draws exist).
+        assert_eq!(
+            premise.governing[0],
+            ("Refrigerator".to_string(), Some(100.0))
+        );
+        assert_eq!(
+            premise.governing[1],
+            ("Indoor Lighting".to_string(), Some(200.0))
+        );
+        // The assembled response: the raw-draw-weighted mean of the rows'
+        // deep-sag evaluations: the engine's answer for this composition,
+        // NOT the raw evaluation of the aggregate coefficient row (the
+        // refrigerator's hold is unreachable from a single quadratic).
+        let expected_scale = (100.0 * m_fridge + 200.0 * m_lighting) / 300.0;
+        let scale = premise.deep_sag_scale.expect("stepped weights");
+        assert!(
+            (scale - expected_scale).abs() < 1e-12,
+            "deep_sag_scale must be the assembled response {expected_scale}, got {scale}"
+        );
+        // The raw evaluation of the published coefficient row differs (the
+        // hold's effect): the field is the deep-sag consumer's answer.
+        let raw_row_evaluation = premise.zip.zp * bus_voltage * bus_voltage
+            + premise.zip.ip * bus_voltage
+            + premise.zip.pp;
+        assert!(raw_row_evaluation != scale);
+    }
+
+    #[test]
     fn aggregate_weights_by_expected_mean_and_rosters_regimes() {
         // Two governing loads: lighting (1 kW, zp=1 → constant impedance) and
         // a 3 kW constant-power scheduled load, plus a Rule R1 HVAC unit.
@@ -337,7 +472,7 @@ mod tests {
             pinned_load("Gas Furnace"),
         ];
         // Column mean = (1 + 3)/2 = 2 kW vs 3 kW for the constant load.
-        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1)
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0)
             .expect("positive governing weights aggregate");
         let total = 5.0;
         assert_eq!(premise.zip.zp, (2.0 * lighting.zp + 3.0 * 0.0) / total);
@@ -364,7 +499,8 @@ mod tests {
                 Some(ExpectedMeanPower::W(2.0)),
             ),
         ];
-        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1).expect("aggregates");
+        let premise =
+            aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0).expect("aggregates");
         // Only the known-weight load shapes the aggregate: pure constant power.
         assert_eq!(
             (premise.zip.zp, premise.zip.ip, premise.zip.pp),
@@ -383,7 +519,7 @@ mod tests {
             governing_load("MELs", lighting, None),
             pinned_load("Air Conditioner"),
         ];
-        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1).is_none());
+        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0).is_none());
     }
 
     #[test]
@@ -394,14 +530,14 @@ mod tests {
             lighting,
             Some(ExpectedMeanPower::W(0.0)),
         )];
-        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1).is_none());
+        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0).is_none());
     }
 
     #[test]
     fn equipment_without_zip_concept_is_silent() {
         let equipment: Vec<Box<dyn Equipment>> =
             vec![Box::new(StubLoad::new("Generator", None, None))];
-        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1).is_none());
+        assert!(aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0).is_none());
     }
 
     #[test]
@@ -489,7 +625,7 @@ mod tests {
                 Some(ExpectedMeanPower::W(2.0)),
             ),
         ];
-        let premise = aggregate_premise_zip(&equipment, &nan_schedule, 1).expect("aggregates");
+        let premise = aggregate_premise_zip(&equipment, &nan_schedule, 1, 1.0).expect("aggregates");
         assert_eq!(
             premise.governing[0],
             ("Indoor Lighting".to_string(), None),
@@ -533,7 +669,7 @@ mod tests {
                 Some(ExpectedMeanPower::W(1.0)),
             ),
         ];
-        match aggregate_premise_zip(&equipment, &empty_schedule(), 1) {
+        match aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0) {
             None => {}
             Some(premise) => {
                 for (label, value) in [
@@ -588,7 +724,7 @@ mod tests {
             ),
             governing_load("Honest Load", honest, Some(ExpectedMeanPower::W(1.0))),
         ];
-        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1)
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0)
             .expect("the honest load has a positive computable draw");
 
         // Caller-side audit: weighted mean over the rostered positive

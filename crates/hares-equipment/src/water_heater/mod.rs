@@ -731,9 +731,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_reactive_zip_forces_constant_real_power() {
-        // Rule R1: whatever the source ZIP says about the real side, water
-        // heaters must never scale their real power through the polynomial.
+    fn resolve_reactive_zip_governs_the_real_side_through_the_class_row() {
+        // The declared deep-sag response: whatever the source ZIP says
+        // about the real side, the resolver now returns it verbatim as the
+        // governing row: the water heater's draw evaluates the row's real
+        // polynomial at the actual bus voltage (the brownout round's F1:
+        // the resistance WH's element drew its rated watts bitwise at 1.0
+        // and 0.5 pu while the table scored the row pure impedance).
         let mut cfg = base_config();
         cfg.zip = Some(hares_types::zip::ZipLoad {
             zp: 0.825,
@@ -745,12 +749,17 @@ mod tests {
             pf: 0.97,
             v0: 1.0,
         });
-        let zip = resolve_reactive_zip(&cfg).expect("valid reactive side");
-        assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
+        let zip = resolve_reactive_zip(&cfg).expect("valid zip");
+        assert_eq!((zip.zp, zip.ip, zip.pp), (0.825, -0.44, 0.615));
         assert_eq!(zip.pf, 0.97);
+        assert!(zip.real_power_zip_applies);
+        // The real side scales at the bus voltage through the deep-sag
+        // form; at nominal it is the exact identity.
         for v in [0.9, 1.0, 1.1] {
             let p_w = 2.4;
-            assert_eq!(zip.apply(p_w, v).0.to_bits(), p_w.to_bits());
+            let expected = p_w * zip.deep_sag_real_multiplier(v);
+            let (real, _) = zip.apply(p_w, v);
+            assert_eq!(real.to_bits(), expected.to_bits(), "v={v}");
         }
     }
 
@@ -762,15 +771,17 @@ mod tests {
         let cfg = base_config();
         let zip = resolve_reactive_zip(&cfg).expect("constant power fallback");
         assert_eq!(zip.zip, hares_types::zip::ZipLoad::constant_power());
-        assert!(!zip.real_power_zip_applies);
+        assert!(zip.real_power_zip_applies);
 
-        // A production class name resolves the literature row.
+        // A production class name resolves the literature row whole: the
+        // real coefficients are the row's own (they govern the voltage
+        // response) and the reactive coefficients are unchanged.
         let mut cfg = base_config();
         cfg.ochre_class = "Heat Pump Water Heater".to_string();
         let zip = resolve_reactive_zip(&cfg).expect("HPWH class row");
         assert_eq!(zip.pf, 0.97);
-        assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
-        assert!(!zip.real_power_zip_applies);
+        assert_eq!((zip.zp, zip.ip, zip.pp), (0.825, -0.44, 0.615));
+        assert!(zip.real_power_zip_applies);
         let class_row =
             hares_types::zip::zip_defaults_for_class("Heat Pump Water Heater").expect("row");
         assert_eq!(

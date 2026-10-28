@@ -50,9 +50,10 @@ pub struct ElectricFurnace {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
-    /// Rule R1 reactive-only ZIP for the resistance element (class default
-    /// pf 1.0 → Q exactly zero, or a user `"zip"` override). Real power
-    /// stays bit-identical.
+    /// The class ZIP row for the resistance element (class default
+    /// pf 1.0 → Q exactly zero, or a user `"zip"` override): its real
+    /// polynomial scales the element's draw and delivered heat at the bus
+    /// voltage through the recorded deep-sag form.
     zip: hares_types::zip::ResolvedZip,
     /// Blower fan motor component ZIP (pf 0.87), derived at init via
     /// `hvac::reactive::secondary_motor_zip`.
@@ -78,8 +79,9 @@ pub struct GasFurnace {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
-    /// Rule R1 reactive-only ZIP: blower fan motor pf 0.87;
-    /// Q comes from ZipLoad::reactive_var.
+    /// The class ZIP row: blower fan motor pf 0.87; the blower's draw
+    /// evaluates the row's real polynomial at the bus voltage through the
+    /// recorded deep-sag form; Q comes from ZipLoad::reactive_var.
     zip: hares_types::zip::ResolvedZip,
 }
 
@@ -263,8 +265,20 @@ impl Equipment for ElectricFurnace {
         }
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
-        let gross_capacity_w = self.rated_capacity_w * duty * sf;
-        let fan_w = (self.fan_power_w * duty) * sf;
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the resistive element's draw and its delivered
+        // heat evaluate the unit row's real polynomial at the ACTUAL bus
+        // voltage (the impedance share, P = V²/R, the row's declared
+        // shares honored); the blower motor evaluates its own fan-motor
+        // row, and its waste heat follows its scaled draw. The control
+        // composition (duty) acts on the rated draw; the voltage response
+        // multiplies the result (the two multiplications commute).
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
+        let element_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
+        let fan_multiplier =
+            super::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
+        let gross_capacity_w = self.rated_capacity_w * duty * sf * element_multiplier;
+        let fan_w = (self.fan_power_w * duty) * sf * fan_multiplier;
         // Heating element power + fan power
         let element_w = gross_capacity_w * self.eir;
         let electric_w = element_w + fan_w;
@@ -272,8 +286,8 @@ impl Equipment for ElectricFurnace {
         // Per-component reactive (see `hvac::reactive`): the resistance
         // element at the unit ZIP (pf 1.0 → Q ≡ 0), the blower fan motor at
         // pf 0.87.
-        let reactive_power_var = self.zip.reactive_var(element_w, env.grid.bus_voltage_pu())
-            + self.fan_zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
+        let reactive_power_var = self.zip.reactive_var(element_w, bus_voltage_pu)
+            + self.fan_zip.reactive_var(fan_w, bus_voltage_pu);
         // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
         let fan_heat_w = fan_w;
         let total_sensible_w = gross_capacity_w + fan_heat_w;
@@ -740,13 +754,21 @@ impl Equipment for GasFurnace {
         // Fuel is computed from gross capacity: the furnace burns fuel regardless
         // of duct losses. zone_heat_fractions distributes gross output by DSE.
         let gross_capacity_w = self.rated_capacity_w * duty * sf;
-        let fan_w = (self.fan_power_w * duty) * sf;
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the blower motor's draw evaluates the unit row
+        // (the fan-motor row) at the ACTUAL bus voltage, and its waste
+        // heat follows the scaled draw. The fuel-side heat is voltage
+        // invariant. The control composition (duty) acts on the rated
+        // draw; the voltage response multiplies the result.
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
+        let fan_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
+        let fan_w = (self.fan_power_w * duty) * sf * fan_multiplier;
         let fuel_input_w = if gross_capacity_w > 0.0 {
             gross_capacity_w / self.fuel_efficiency
         } else {
             0.0
         };
-        let reactive_power_var = self.zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
+        let reactive_power_var = self.zip.reactive_var(fan_w, bus_voltage_pu);
         // Fan waste heat contributes to zone sensible gain (OCHRE HVAC.py line 543).
         let fan_heat_w = fan_w;
         let total_sensible_w = gross_capacity_w + fan_heat_w;
@@ -2541,7 +2563,7 @@ mod tests {
     }
 
     #[test]
-    fn electric_furnace_real_power_bit_identical_with_and_without_reactive_zip() {
+    fn electric_furnace_real_power_follows_the_row() {
         let cfg_pf = ef_config(8_000.0, 1.05);
         let mut cfg_nopf = ef_config(8_000.0, 1.05);
         cfg_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
@@ -2578,11 +2600,27 @@ mod tests {
             eq_nopf
                 .step(&env_v, Duration::from_secs(60), &mut ports_nopf)
                 .unwrap();
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged"
-            );
+            // The element's draw and delivered heat evaluate the unit row
+            // (the resistance row) and the blower its own fan row, each at
+            // the ACTUAL bus voltage: the bitwise identity at the reference
+            // voltage, a measurably different draw off it (the two
+            // components' rows differ, so the composite expectation is the
+            // union of the per-row witnesses this file and baseboard.rs
+            // pin precisely).
+            if *v == 1.0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): at the reference voltage the twins must agree bitwise"
+                );
+            } else {
+                assert_ne!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): the row-governed draw must leave the \
+                     constant-power twin's flat line"
+                );
+            }
             assert_eq!(ports_nopf.electrical.reactive_power_var, 0.0);
         }
     }
@@ -2680,7 +2718,7 @@ mod tests {
     }
 
     #[test]
-    fn gas_furnace_real_power_bit_identical_with_and_without_reactive_zip() {
+    fn gas_furnace_blower_follows_the_fan_row_and_reactive_follows_pf() {
         let base_cfg = GasFurnaceConfig {
             afue: 0.8,
             capacity_w: 10_000.0,
@@ -2732,11 +2770,26 @@ mod tests {
             eq_nopf
                 .step(&env_v, Duration::from_secs(60), &mut ports_nopf)
                 .unwrap();
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged"
-            );
+            // The blower's draw evaluates the unit row (the fan-motor row)
+            // at the ACTUAL bus voltage: the bitwise identity at the
+            // reference voltage, the row's multiplier off it.
+            if *v == 1.0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): at the reference voltage the twins must agree bitwise"
+                );
+            } else {
+                let multiplier = hares_types::zip::zip_defaults_for_class("Gas Furnace")
+                    .expect("row")
+                    .deep_sag_real_multiplier(*v, true);
+                let expected = ports_nopf.electrical.load_power_w * multiplier;
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    expected.to_bits(),
+                    "step {i} (v={v}): the blower must draw {expected} W (the row's deep-sag form)"
+                );
+            }
             if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }

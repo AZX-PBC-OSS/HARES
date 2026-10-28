@@ -1266,3 +1266,69 @@ is the pure-P identity before and after, so no committed golden moves;
 the deep-sag response this change makes available is the aggregate
 helper's agreement with the per-equipment physics (witnessed by the
 solver's brownout vectors at 0.5/0.7/0.88 pu).
+
+## The typed equipment's draw evaluates its declared row at the actual voltage (the deep-sag entry's completion)
+
+The brownout round's attack (the F1/F2/F3 findings) caught the two
+halves of the load model disagreeing: the ZIP table scores each class a
+voltage response, while every typed equipment's real draw was pinned to
+constant power: the reactive-only projection forced the real side to
+`(0, 0, 1)` and only the reactive side of the row was used, so the
+resistance water heater's element drew its rated 110.348223229 W bitwise
+at 1.0 and 0.5 pu (its own row is pure impedance: the physics is a
+quarter of the watts and a quarter of the heat), the ASHP's compressor
+answered 599.910799 W at 0.5 pu where its recorded Hajagos & Danai row
+predicts 1.145 (a +15.5 percent rise), and the ventilation fan sat at
+19.950000 W across the whole band against a fan row predicting 0.355 at
+0.5 pu. The pin is removed. Every typed equipment's real draw now
+evaluates its resolved row's real polynomial at the ACTUAL bus voltage:
+the physics-computed draw is the row's nominal draw and the row scales
+it: the scheduled loads' existing behavior, extended to the typed
+fleet. The thermal sides follow the drawn watts where the conversion is
+the element itself (the resistance water heater, the electric
+baseboard, furnace and boiler elements, the ER backup strips, the pan
+and crankcase and defrost heaters: a resistor delivers exactly its
+drawn watts as heat, so the delivered heat scales with the draw and the
+energy balance holds), and stay with the equipment's own physics where
+the equipment's performance model owns the delivery (the compressors'
+capacity curves and COPs, the fans' airflows, the pumps' hydraulics):
+the static row's response is the draw's, and the row's elevation at
+deep sag degrades the effective COP exactly as the measured families'
+elevation implies. The control composition (duty, load fraction, power
+limit) acts on the rated draw and the voltage response multiplies the
+result: the multiplications commute with the shed (the round's B4c
+finding), and the power limit's threshold sees the true, voltage-scaled
+draw. At the reference voltage the multiplier is exactly 1.0 (the
+model's declared pure redistribution, the coefficient sums validated to
+1), so every row whose coefficient sum is exactly 1.0 in
+floating point evaluates unchanged; the fan family's sum carries a
+last-ulp residue (0.26 + 0.9 - 0.16 = 1.0000000000000002), and the
+residue the old polynomial evaluation baked into the fan draws and the
+recorded goldens is the identity's correction: the fleet_mixed_offset
+golden's ceiling-fan column and the cascade's metrics moved by one ulp
+and were re-captured (twice-identical), every other fixture bitwise
+unchanged. The recorded direction of the delta above still holds.
+
+Shape constraint (the round's F3 finding, now stated and enforced): the
+evaluated response is monotone non-decreasing in voltage across the
+admitted [0.5, 1.5] pu band for every load class whose physics is
+monotone. The resistive classes are monotone increasing through their
+impedance share (P = V²/R); the constant-power share is flat by
+declaration; the recorded motor families (the Hajagos & Danai 1998
+pumps and compressor rows and the fan family) evaluate as fitted,
+because the paragraph above licenses their deep-sag elevation as the
+measured static draw of families fitted across the sag band; and every
+other class evaluates through the monotone form: a row whose stationary
+point falls inside the admitted band below nominal is held at the
+stationary value on the deeper-sag side, so the evaluated response
+never rises as the voltage falls. The concrete witness is the
+refrigerator class: its Bokhari 2014 row (5.03, -8.48, 4.45) is a
+second-order fit around nominal voltage whose quadratic extrapolation
+turns at 8.48/(2·5.03) = 0.842942 pu inside the admitted band: the
+round measured the refrigerator drawing 80.170430 W at 0.5 pu against
+53.466985 W at 0.7 pu (1.4675x nominal at half voltage), the
+stalled-draw class, while this record says no stall model exists. The
+held form answers 0.875924 at every voltage below the turn: monotone,
+below nominal, and free of the extrapolated stall class. No load class
+outside the recorded families keeps a turn: a deeper sag can never
+draw more.

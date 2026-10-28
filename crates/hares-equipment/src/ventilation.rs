@@ -316,8 +316,10 @@ pub struct Ventilation {
     ports: Vec<PortDeclaration>,
     telemetry: Telemetry,
     core_output: CoreOutput,
-    /// Rule R1 reactive-only ZIP: real power stays bit-identical;
-    /// Q comes from ZipLoad::reactive_var. Ventilation fan pf 0.87.
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`):
+    /// the fan motor's draw evaluates the row's real polynomial at the bus
+    /// voltage through the recorded deep-sag form; Q comes from
+    /// `ZipLoad::reactive_var`. Ventilation fan pf 0.87.
     zip: ResolvedZip,
 
     ventilation_type: VentilationType,
@@ -833,12 +835,17 @@ impl Equipment for Ventilation {
             m_dot_kg_s * LATENT_HEAT_VAPORISATION_0C_J_KG * eff_l * (w_indoor - w_outdoor);
 
         // Fan electrical power [kW]
-        let fan_w = effective_fan_power_w;
-        let reactive_power_var = self.zip.reactive_var(fan_w, env.grid.bus_voltage_pu());
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the fan motor's draw evaluates the unit row at
+        // the ACTUAL bus voltage. The airflow is the fan model's own
+        // physics (the envelope solver's ventilation exchange is unchanged).
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
+        let fan_w = effective_fan_power_w * self.zip.deep_sag_real_multiplier(bus_voltage_pu);
+        let reactive_power_var = self.zip.reactive_var(fan_w, bus_voltage_pu);
 
         // Write ports
         ports.accumulate(&PortContribution::Electrical {
-            active_power_w: effective_fan_power_w,
+            active_power_w: fan_w,
             reactive_power_var,
         })?;
 
@@ -1411,6 +1418,43 @@ mod tests {
         assert!(
             (t_supply - 14.0).abs() < 0.5,
             "HRV supply at 0°C outdoor / 20°C indoor / 70% eff should be ~14°C, got {t_supply}"
+        );
+    }
+
+    /// F2's second witness: the ventilation fan's draw evaluates its unit
+    /// row (the OCHRE fans row) at the ACTUAL bus voltage. At the parent
+    /// the fan drew 19.950000 W, bitwise, at both 1.0 and 0.5 pu, against
+    /// a row predicting 0.355 at 0.5 pu (7.08 W on this fan).
+    #[test]
+    fn ventilation_fan_draw_follows_its_row_at_deep_sag() {
+        let cfg = hrv_config();
+        let e = env(0.0, 20.0);
+
+        let step_once = |voltage_pu: f64| -> f64 {
+            let mut hrv = Ventilation::new(cfg.clone());
+            hrv.init(&cfg, &e).expect("init");
+            let mut env_run = env(0.0, 20.0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            hrv.step(&env_run, Duration::from_secs(300), &mut ports)
+                .expect("step");
+            ports.electrical.load_power_w
+        };
+
+        let p_nominal = step_once(1.0);
+        let p_half = step_once(0.5);
+        assert!(p_nominal > 0.0, "fixture: the fan must draw power");
+        let row = hares_types::zip::zip_defaults_for_class("Ventilation Fan").expect("class row");
+        let raw_multiplier = row.zp * 0.5 * 0.5 + row.ip * 0.5 + row.pp;
+        let expected = p_nominal * raw_multiplier;
+        assert_eq!(
+            p_half.to_bits(),
+            expected.to_bits(),
+            "the fan at 0.5 pu must draw the row's evaluated response \
+             ({expected} W), got {p_half} W (the pinned constant-power draw)"
         );
     }
 
@@ -2539,7 +2583,7 @@ mod tests {
     }
 
     #[test]
-    fn real_power_bit_identical_with_and_without_reactive_zip() {
+    fn real_power_follows_the_fan_row_and_reactive_follows_pf() {
         let cfg_pf = hrv_config();
         let mut cfg_nopf = hrv_config();
         cfg_nopf.zip = Some(ZipLoad::constant_power());
@@ -2569,11 +2613,27 @@ mod tests {
             eq_nopf
                 .step(&env_v, Duration::from_secs(300), &mut ports_nopf)
                 .expect("step no-pf");
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged between pf and no-pf twins"
-            );
+            // The fan's draw evaluates its row's real polynomial at the
+            // ACTUAL bus voltage (the recorded deep-sag decision): the
+            // bitwise identity at the reference voltage, the row's
+            // multiplier off it.
+            if *v == 1.0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): at the reference voltage the twins must agree bitwise"
+                );
+            } else {
+                let multiplier = hares_types::zip::zip_defaults_for_class("Ventilation Fan")
+                    .expect("row")
+                    .deep_sag_real_multiplier(*v, true);
+                let expected = ports_nopf.electrical.load_power_w * multiplier;
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    expected.to_bits(),
+                    "step {i} (v={v}): the fan must draw {expected} W (the row's deep-sag form)"
+                );
+            }
             if ports_pf.electrical.reactive_power_var != 0.0 {
                 any_reactive = true;
             }

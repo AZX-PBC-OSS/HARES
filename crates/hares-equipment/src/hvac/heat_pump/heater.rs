@@ -206,9 +206,11 @@ struct HeatPumpHeaterCore {
     dr_duration_remaining_s: Option<f64>,
     /// Current DR level (for telemetry).
     dr_level: DRLevel,
-    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// applies to the compressor component only (class default pf 0.84, or a
-    /// user `"zip"` override). Real power stays bit-identical; Q comes from
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`):
+    /// applies to the compressor component (class default pf 0.84, or a
+    /// user `"zip"` override), whose real polynomial scales the
+    /// compressor's draw at the bus voltage through the recorded deep-sag
+    /// form (as fitted: the recorded Hajagos & Danai row); Q comes from
     /// `ZipLoad::reactive_var` per component (see `hvac::reactive`). ER
     /// backup, pan heater, and resistive defrost elements are resistive
     /// (pf 1.0) and contribute Q ≡ 0.
@@ -2229,7 +2231,7 @@ impl HeatPumpHeaterCore {
         // (pure electric resistance), and its thermal output was added to
         // er_capacity_w above. The backup ER's electric draw uses backup_eir,
         // so we must subtract the defrost portion before computing er_power_w.
-        let defrost_resistive_electric_w = if is_discrete_defrosting
+        let mut defrost_resistive_electric_w = if is_discrete_defrosting
             && self.defrost_config.strategy == DefrostStrategy::Resistive
         {
             self.defrost_config.resistive_defrost_capacity_w + self.defrost_config.defrost_power_w
@@ -2242,7 +2244,7 @@ impl HeatPumpHeaterCore {
             && env.weather.outdoor_temp_c < self.pan_heater_temp_c
             && self.pan_heater_w > 0.0
             && hp_on;
-        let pan_heater_w = if self.pan_heater_on {
+        let mut pan_heater_w = if self.pan_heater_on {
             self.pan_heater_w
         } else {
             0.0
@@ -2259,8 +2261,33 @@ impl HeatPumpHeaterCore {
                     | FuelType::WoodPellet
             )
         );
-        let er_electric_w = if backup_is_fuel { 0.0 } else { er_power_w };
+        let mut er_electric_w = if backup_is_fuel { 0.0 } else { er_power_w };
         let mut fuel_w = if backup_is_fuel { er_power_w } else { 0.0 };
+
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the compressor motor evaluates the unit row at
+        // the ACTUAL bus voltage: the recorded Hajagos & Danai row, as
+        // fitted: its deep-sag elevation is the measured static draw of
+        // the family; the blower/outdoor fan and loop pump motors evaluate
+        // their own component rows; the resistive sub-components (the ER
+        // backup element, the pan heater, the resistive defrost element)
+        // evaluate the impedance share, P = V²/R, and the ER's delivered
+        // heat follows its scaled draw. The compressor's thermal delivery
+        // is the equipment's own physics. The control composition below
+        // (duty, load fraction, power limit) acts on the values it sees;
+        // the multiplicative parts commute with this response.
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
+        let motor_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
+        let fan_multiplier =
+            crate::hvac::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
+        let v_norm = bus_voltage_pu / self.zip.v0;
+        let resistive_multiplier = v_norm * v_norm;
+        hp_electric_w *= motor_multiplier;
+        fan_power_w *= fan_multiplier;
+        er_capacity_w *= resistive_multiplier;
+        er_electric_w *= resistive_multiplier;
+        pan_heater_w *= resistive_multiplier;
+        defrost_resistive_electric_w *= resistive_multiplier;
 
         // Gross output including fan waste heat (OCHRE HVAC.py line 543).
         // zone_heat_fractions (set from duct_dse during init) distributes
@@ -2382,6 +2409,9 @@ impl HeatPumpHeaterCore {
                 self.pump_efficiency,
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
+            ) * crate::hvac::reactive::secondary_motor_real_multiplier(
+                &self.pump_zip,
+                bus_voltage_pu,
             )
         } else {
             0.0
@@ -3543,9 +3573,15 @@ mod tests {
 
         let zip = eq.resolved_zip().expect("ASHP heater exposes a ZIP");
         assert_eq!(zip.pf, 0.84);
-        assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
-        // Reactive coefficients come from the ASHP Heater class row.
+        assert!(zip.real_power_zip_applies);
+        // The published coefficients are the ASHP Heater class row's own
+        // (the row's real polynomial scales the compressor's draw at the
+        // bus voltage through the recorded deep-sag form).
         let class_row = hares_types::zip::zip_defaults_for_class("ASHP Heater").expect("row");
+        assert_eq!(
+            (zip.zp, zip.ip, zip.pp),
+            (class_row.zp, class_row.ip, class_row.pp)
+        );
         assert_eq!(
             (zip.zq, zip.iq, zip.pq),
             (class_row.zq, class_row.iq, class_row.pq)
@@ -4055,7 +4091,7 @@ mod tests {
     /// (pf 0 sentinel) — must produce bit-identical real power at every step
     /// and voltage.
     #[test]
-    fn heating_real_power_bit_identical_with_and_without_reactive_zip() {
+    fn heating_real_power_follows_the_row_and_reactive_follows_pf() {
         let config_pf = heater_config();
         let mut config_nopf = config_pf.clone();
         config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
@@ -4085,24 +4121,25 @@ mod tests {
             eq_nopf
                 .step(&environment, Duration::from_secs(60), &mut ports_nopf)
                 .unwrap();
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged between pf and no-pf twins"
-            );
-            assert_eq!(
-                eq_pf
-                    .telemetry()
-                    .get(tk::ELECTRIC_KW)
-                    .expect("kW")
-                    .to_bits(),
-                eq_nopf
-                    .telemetry()
-                    .get(tk::ELECTRIC_KW)
-                    .expect("kW")
-                    .to_bits(),
-                "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
-            );
+            // The recorded deep-sag decision: the pf twin's draw evaluates
+            // its row's real polynomial at the ACTUAL bus voltage, so the
+            // twins agree bitwise at the reference voltage (the exact
+            // identity) and the row's response leaves the constant-power
+            // twin's flat line off it.
+            if *v == 1.0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): at the reference voltage the twins must agree bitwise"
+                );
+            } else {
+                assert_ne!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): the row-governed draw must leave the \
+                     constant-power twin's flat line"
+                );
+            }
             assert_eq!(
                 ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"

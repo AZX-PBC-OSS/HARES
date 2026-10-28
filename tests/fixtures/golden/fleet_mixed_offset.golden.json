@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "3305095b112247fe571bf3770747f7bea496d852",
+  "git_head": "6f17fecc3faae0f9018aee857669f7e031e544a4",
   "git_dirty": true,
   "metrics": [
     {
@@ -58,8 +58,8 @@
           "value": 139.2268662177952
         },
         "opaque_conduction_kwh": {
-          "bits": "0xc0806f732975ea1f",
-          "value": -525.9312314235757
+          "bits": "0xc0806f732975ea20",
+          "value": -525.9312314235758
         },
         "ventilation_kwh": {
           "bits": "0x0000000000000000",
@@ -86,8 +86,8 @@
       "nan_step_count": 0,
       "peak_power_kw.per_end_use": {
         "ceiling_fan": {
-          "bits": "0x4035283dd29ec57c",
-          "value": 21.157193340075068
+          "bits": "0x4035283dd29ec57b",
+          "value": 21.157193340075064
         },
         "hvac_cooling": {
           "bits": "0x0000000000000000",
@@ -160,8 +160,8 @@
       },
       "total_energy_kwh.per_end_use": {
         "ceiling_fan": {
-          "bits": "0x40042784f5416a86",
-          "value": 2.519296566065637
+          "bits": "0x40042784f5416a85",
+          "value": 2.5192965660656363
         },
         "hvac_cooling": {
           "bits": "0x0000000000000000",
@@ -277,8 +277,8 @@
       "nan_step_count": 0,
       "peak_power_kw.per_end_use": {
         "ceiling_fan": {
-          "bits": "0x4034d487394c493b",
-          "value": 20.83018835174992
+          "bits": "0x4034d487394c493a",
+          "value": 20.830188351749918
         },
         "hvac_cooling": {
           "bits": "0x4049000000000000",
@@ -821,26 +821,26 @@
         },
         {
           "name": "Total Electric Power (kW)",
-          "digest": "226e36aadf3a37e3b51dd93a90c45d32f2de25334d2812916a841c47a9a5da09",
+          "digest": "2f3e2db552876b02ead124f0a212fa5d405f4ebebbb07ed78e77068c98d835a4",
           "blocks": [
-            "2b70130c8e54d9d1fecfd94a27603dcdb0f34907e1492a6a2d0ec634a659077d",
-            "53dcc31345ca255cb9ca38d36fd8483a17c37c5afcf402faf1f22613b18a02f8"
+            "ffb2595e65a650c90a681ac37cd23e2d91502e7c614979d13adb49eb390f6095",
+            "acd53d5c6bf9ff3422d84fd1319cbe075ef07195b2086d288459ba5f087b3f0a"
           ]
         },
         {
           "name": "Total Gas Power (therms/hour)",
-          "digest": "8a34de2ba219d2b4c864e4c04cca9f5d6bdc829184ed22b7b28b1a1a7622f2bf",
+          "digest": "348b6288e64d84050eaf2c94a2a16633c22450d32266b2b6cedfaac91c748d44",
           "blocks": [
-            "f79e4ac0da83b98c8218c830a8011985d8a4d4fe563daa5a84c36374b2c1a45d",
+            "c9d11e759bbc2725cc9455a96fb34a7f2500cdab0aab0b22df79c87d7598ad25",
             "db0e95e9ee948bb9024a7ac1a4764ffde6b7ba081a82a2addb82ae032c3a0bcb"
           ]
         },
         {
           "name": "Total Reactive Power (kVAR)",
-          "digest": "ba741ba724e444ce2f1a3226562349402b510a306ce6a622e4325b8eb1fac95b",
+          "digest": "88f1c4f2697386f1add5c2f7b65f4cb1807e36c7b9674e122cd06984697705e5",
           "blocks": [
-            "d35251239887652d7d68c37b6cdb37749b13ad1553fb61d6215aec6bdf9897e6",
-            "3abe8176de7f681d41a4db358a16229db29801e01f2d927da715d76149497306"
+            "05dbb689b78b58c6295dce7cf02d1b5b165e28b834687afb53465a05968b00c8",
+            "be73de93ce0d193b195425643454ff42b266a5ef3ed20e8175840ff32a0ab123"
           ]
         },
         {
@@ -869,9 +869,9 @@
         },
         {
           "name": "Gas Boiler Gas Power (therms/hour)",
-          "digest": "6c1b521221323bf7847edb8be5bc3722764ca4a3b9efe8052de4e3c05243de26",
+          "digest": "4a4e281d42a666888a9001bb7af240325811796648f27b532fd690348f03d910",
           "blocks": [
-            "69d0affd6cc3115f3b7134562fe373289e41a89cacdfa68529b9b1dc51563369",
+            "84cb1faf76f19f6f1c9241b27a11729b24d6c94f9e98ae9c58dad84c6c9d0a74",
             "0d90b94d91e03fb5f1fbb71243c8f3e43002942ed8bef3490515abb21d94f015"
           ]
         },
@@ -949,10 +949,10 @@
         },
         {
           "name": "Ceiling Fan Electric Power (kW)",
-          "digest": "6c635972973a833f999b861653a15eedbc02f3298c87ff4c7f1fe00ab49ba5a3",
+          "digest": "ff2d7c9ee4217eeb6cccab2492ef7a1b3cd30a7c48eaf0bce70e759deb8769bf",
           "blocks": [
-            "1e7013ac762a282bc8b84e93fdf3e12b17052be1a230c354c48179902f96e926",
-            "4367fa75d87c579923d5040360b8b4146370ad5bff19e6cc546d1f9a8ae39b14"
+            "25c89b13d7eb0b534c08128914e5b40906a1ecfff2e8296a35cb2d78bbd8cbcd",
+            "c55fe68598a1c94d31d7ff9a4989b02dc79e55e846d2fbc615bdb30bd160166b"
           ]
         },
         {
@@ -973,10 +973,10 @@
         },
         {
           "name": "HVAC Heating End Use Electric Power (kW)",
-          "digest": "f443d0fa735af710929b707831b3e19a00ec0a20ba1e9fbd3e2251fcad04db83",
+          "digest": "fdf581330fd0a5509376a0a73b18587db3ea58621ec2846cae17473dfdc36e7f",
           "blocks": [
             "f816b5eeb2ba3097f182143e7159d814e3d7aaad5e7dce72df7885f9e99885d3",
-            "1598e08f9e4391eaa94a476e669e649187953a88f8a02de13c0ff9d52de02d9d"
+            "4775ec8c421a55cf3de818fe33c36c99a6f7c1456990a0e76172275a0486c1b2"
           ]
         },
         {
@@ -1021,10 +1021,10 @@
         },
         {
           "name": "Ceiling Fan End Use Electric Power (kW)",
-          "digest": "6c635972973a833f999b861653a15eedbc02f3298c87ff4c7f1fe00ab49ba5a3",
+          "digest": "ff2d7c9ee4217eeb6cccab2492ef7a1b3cd30a7c48eaf0bce70e759deb8769bf",
           "blocks": [
-            "1e7013ac762a282bc8b84e93fdf3e12b17052be1a230c354c48179902f96e926",
-            "4367fa75d87c579923d5040360b8b4146370ad5bff19e6cc546d1f9a8ae39b14"
+            "25c89b13d7eb0b534c08128914e5b40906a1ecfff2e8296a35cb2d78bbd8cbcd",
+            "c55fe68598a1c94d31d7ff9a4989b02dc79e55e846d2fbc615bdb30bd160166b"
           ]
         },
         {
@@ -1053,10 +1053,10 @@
         },
         {
           "name": "ASHP Heater Electric Power (kW)",
-          "digest": "171058d986d7592b2dd2aff5fa0434103ae241a71ee6c38f371441875945aea5",
+          "digest": "a5f723bf157fc4f3565fabc7ac6c086f0b5e8ae4a887449c75702fb91045b4f3",
           "blocks": [
             "e26bb03a517c9bdf14d3b6f69de4c7ebb6aac13d1a8ed6e72b00c36f63757317",
-            "52ac6e2ffe8a01015d2aa5a219d88bd5b2e27b19d49a8d2c5cef61802b502eb8"
+            "79871b772889b37383db898237f4a411dc01ef9ad2128a07f4938d3cc3962b30"
           ]
         },
         {

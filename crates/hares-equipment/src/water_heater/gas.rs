@@ -173,8 +173,9 @@ pub struct GasWH {
     // Transient load fraction from LoadFraction control signal; reset each step.
     ctrl_load_fraction: f64,
     // --- ZIP voltage model ---
-    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`)
-    /// for the draft-inducer fan motor: real power stays bit-identical; Q
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`)
+    /// for the draft-inducer fan motor: its real polynomial scales the
+    /// fan's draw at the bus voltage through the recorded deep-sag form; Q
     /// comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
     // --- TMV tempered draw ---
@@ -779,16 +780,19 @@ impl Equipment for GasWH {
         // without draft-fan proving; HARES keeps the burner firing so gas
         // water heating remains available in islanded scenarios (matches
         // OCHRE, which treats EF < 0.7 gas WHs as grid-independent).
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the draft-inducer fan motor's draw evaluates
+        // the unit row (the fan-motor row) at the ACTUAL bus voltage. The
+        // gas-side heat is voltage invariant.
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
         let fan_electric_w = if !env.grid.bus_energized() {
             0.0
         } else {
-            rated_fan_electric_w
+            rated_fan_electric_w * self.zip.deep_sag_real_multiplier(bus_voltage_pu)
         };
-        // Rule R1: Q from the already-computed fan power (never through the
-        // real-power ZIP polynomial); fan motor pf 0.87 by class default.
-        let fan_reactive_var = self
-            .zip
-            .reactive_var(fan_electric_w, env.grid.bus_voltage_pu());
+        // Q from the already-computed (voltage-scaled) fan power; fan
+        // motor pf 0.87 by class default.
+        let fan_reactive_var = self.zip.reactive_var(fan_electric_w, bus_voltage_pu);
         if fan_electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: fan_electric_w,
@@ -1492,10 +1496,14 @@ mod tests {
         );
         // Class "Gas Water Heater" → draft-inducer fan motor row.
         assert_eq!(eq.zip.pf, 0.87);
+        assert!(eq.zip.real_power_zip_applies);
+        // The published coefficients are the fan-motor row's own (the row's
+        // real polynomial scales the fan's draw at the bus voltage through
+        // the recorded deep-sag form).
+        let fan_row = hares_types::zip::zip_defaults_for_class("Gas Water Heater").expect("row");
         assert_eq!(
             (eq.zip.zp, eq.zip.ip, eq.zip.pp),
-            (0.0, 0.0, 1.0),
-            "Rule R1: real side must be constant power"
+            (fan_row.zp, fan_row.ip, fan_row.pp)
         );
         // Q/P = tan(acos(0.87)) at nominal voltage (reactive base sums to 1).
         let p_w = 0.05;
