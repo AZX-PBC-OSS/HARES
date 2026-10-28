@@ -121,7 +121,7 @@ graph LR
 
 ### Reactive Power
 
-All heat pump types (ASHP, MSHP, GSHP, WSHP) carry `CoreCapabilities::REACTIVE` and report signed reactive power on port, CoreOutput, and telemetry. Reactive power follows Rule R1 (`Q` computed from the already-computed real power — real power remains bit-identical at all voltages) and is computed **per component** (`crates/hares-equipment/src/hvac/reactive.rs`):
+All heat pump types (ASHP, MSHP, GSHP, WSHP) carry `CoreCapabilities::REACTIVE` and report signed reactive power on port, CoreOutput, and telemetry. Reactive power is derived from the already-computed real power (the components' real draws evaluate their class rows' real polynomials at the actual bus voltage through the recorded deep-sag form, so the compressor and fan draws follow their rows at sag) and is computed **per component** (`crates/hares-equipment/src/hvac/reactive.rs`):
 
 ```
 Q_total = Σ_c  P_c · tan(acos(pf_c)) · reactive_base_c(V)

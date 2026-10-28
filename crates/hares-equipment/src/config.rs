@@ -856,7 +856,7 @@ pub(crate) const ZIP_SUM_TARGET: f64 = 1.0;
 /// literature coefficient sets).
 pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
 
-/// Resolve the Rule R1 reactive ZIP model for typed equipment.
+/// Resolve the governing ZIP model for typed equipment.
 ///
 /// The effective ZIP is resolved through the same chain as
 /// [`resolve_zip`] (instance sidecar → class-table defaults → constant
