@@ -246,6 +246,26 @@ impl DwellingBlueprintBuilder {
     /// [`HaresError`] when the site cannot be resolved or the equipment
     /// resolution fails.
     pub fn new(inputs: ParsedInputs, settings: DwellingSettings) -> Result<Self, HaresError> {
+        // The generated-schedule family's behavioral diversity: a no-CSV
+        // dwelling's generated schedule is diversified under the
+        // dwelling's scenario-mixed key before anything reads it. A CSV
+        // schedule's or a code-built series' inputs pass through
+        // untouched, and the config's knob turns the layer off.
+        let generation = hares_io::ScheduleGeneration {
+            start: settings.sim_config.start_time,
+            duration: settings.sim_config.duration,
+            interval: super::conversions::chrono_to_std_duration(settings.sim_config.time_res)?,
+        };
+        let dwelling_key = hares_types::rng::dwelling_seed_scenario(
+            settings.sim_config.master_seed,
+            settings.sim_config.scenario_seed,
+            settings.bldg_id,
+        );
+        let inputs = inputs.diversify_generated_schedule(
+            generation,
+            dwelling_key,
+            settings.sim_config.schedule_diversity.is_on(),
+        )?;
         let building = inputs.hpxml.building();
         let site_location = resolve_site_location(
             &building.site,

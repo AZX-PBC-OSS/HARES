@@ -1166,6 +1166,7 @@ mod tests {
                     None,
                     0,
                     None,
+                    "on",
                     None,
                     None,
                     hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,

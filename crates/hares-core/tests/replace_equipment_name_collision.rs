@@ -37,6 +37,7 @@ fn fixture_dir() -> PathBuf {
 fn sim_config() -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: chrono::FixedOffset::west_opt(10 * 3600)
             .expect("UTC-10 offset is valid")
             .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)

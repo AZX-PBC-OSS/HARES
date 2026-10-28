@@ -39,6 +39,7 @@ fn cz4a_sim_config() -> SimulationConfig {
         .expect("start");
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: start,
         duration: Duration::hours(1),
         time_res: Duration::seconds(60),

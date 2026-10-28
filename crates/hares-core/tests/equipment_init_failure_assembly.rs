@@ -44,6 +44,7 @@ fn config(hpxml: &Path) -> DwellingConfig {
         settings: DwellingSettings::new(
             hares_io::SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time,
                 duration: Duration::hours(24),
                 time_res: Duration::seconds(3600),

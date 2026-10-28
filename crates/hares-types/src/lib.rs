@@ -15,6 +15,7 @@ pub mod alloc_count;
 #[cfg(feature = "observe")]
 pub mod clamp_census;
 pub mod control_signal;
+pub mod diversity;
 pub mod domain_solver;
 pub mod environment;
 pub mod equipment;

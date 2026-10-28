@@ -78,6 +78,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time,
                     duration,
                     time_res: Duration::minutes(1),

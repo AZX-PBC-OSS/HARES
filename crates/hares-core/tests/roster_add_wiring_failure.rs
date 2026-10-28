@@ -34,6 +34,7 @@ fn config() -> DwellingConfig {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: denver_offset::denver_offset()
                     .with_ymd_and_hms(2023, 1, 1, 0, 0, 0)
                     .unwrap(),

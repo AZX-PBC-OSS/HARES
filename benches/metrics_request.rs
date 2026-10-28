@@ -35,6 +35,7 @@ fn cz4a_config(metrics: bool) -> DwellingConfig {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: start,
                 duration: chrono::Duration::hours(24),
                 time_res: chrono::Duration::minutes(15),

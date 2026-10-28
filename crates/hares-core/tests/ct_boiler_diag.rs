@@ -76,6 +76,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: FixedOffset::west_opt(5 * 3600)
                         .unwrap()
                         .with_ymd_and_hms(2018, 1, 15, 0, 0, 0)

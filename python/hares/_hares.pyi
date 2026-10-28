@@ -2477,6 +2477,7 @@ class SimulationConfig:
         setpoint_deadband_c: float | None = ...,
         master_seed: int = ...,
         scenario_seed: int | None = ...,
+        schedule_diversity: str = ...,
         civil_timezone: str | None = ...,
         site_location: SiteLocationOverride | None = ...,
         max_consecutive_step_failures: int = ...,
@@ -2526,6 +2527,10 @@ class SimulationConfig:
     def scenario_seed(self) -> int | None: ...
     @scenario_seed.setter
     def scenario_seed(self, value: int | None) -> None: ...
+    @property
+    def schedule_diversity(self) -> str: ...
+    @schedule_diversity.setter
+    def schedule_diversity(self, value: str) -> None: ...
     @property
     def civil_timezone(self) -> str | None: ...
     @civil_timezone.setter

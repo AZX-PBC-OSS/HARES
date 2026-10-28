@@ -428,6 +428,16 @@ impl DefaultProfiles {
         self.profiles.get(name)
     }
 
+    /// Replace the profile named `name` with `profile` when one is
+    /// present: the diversity transform's write, keeping the loaded
+    /// file's path for the error messages. A name the loaded file does
+    /// not carry is left alone (the generation errors on it, naming it).
+    pub(crate) fn replace(&mut self, name: &str, profile: DefaultScheduleProfile) {
+        if let Some(slot) = self.profiles.get_mut(name) {
+            *slot = profile;
+        }
+    }
+
     /// Why no profile named `name` is available, for error messages: the
     /// file it is missing from, or the unset defaults directory.
     pub(crate) fn missing_profile(&self, name: &str) -> String {
@@ -438,6 +448,13 @@ impl DefaultProfiles {
                  load '{DEFAULT_SCHEDULES_CSV}' from; set defaults_path"
             ),
         }
+    }
+
+    /// Insert (or replace) a profile by name: the tests' builder for a
+    /// transform probe that does not want the shipped CSV.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&mut self, name: &str, profile: DefaultScheduleProfile) {
+        self.profiles.insert(name.to_string(), profile);
     }
 }
 

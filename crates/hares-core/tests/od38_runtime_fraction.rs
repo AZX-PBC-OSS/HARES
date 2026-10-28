@@ -43,6 +43,7 @@ fn base_xml_config(month: u32, time_res_s: i64) -> DwellingConfig {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(offset_hours * 3600)
                     .unwrap()
                     .with_ymd_and_hms(2018, start_month_day.0, start_month_day.1, 0, 0, 0)

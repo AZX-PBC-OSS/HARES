@@ -27,6 +27,7 @@ fn project_root() -> PathBuf {
 fn sim_config(duration: Duration) -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: FixedOffset::west_opt(10 * 3600)
             .expect("UTC-10 offset is valid")
             .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)

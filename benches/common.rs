@@ -138,6 +138,7 @@ pub fn build_dwelling_config(
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: fixture_start::fixture_start(),
                 duration,
                 time_res: Duration::minutes(1),

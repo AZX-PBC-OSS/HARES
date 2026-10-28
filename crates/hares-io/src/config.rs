@@ -46,6 +46,34 @@ pub enum ConfigError {
     Validation(String),
 }
 
+/// The generated-schedule family's per-dwelling behavioral diversity: on
+/// (the default), every no-CSV dwelling's generated schedule is
+/// diversified under its own scenario-mixed per-dwelling key (the
+/// presence timing, the occupancy level, the appliance diversity factors
+/// and the water-draw timing and level; the parameter table and its
+/// provenance live on `hares_types::diversity`); off restores the shared
+/// default-profile columns every no-CSV home used to copy. A schedule
+/// CSV is never diversified whatever the setting: the layer is the
+/// generated family's alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScheduleDiversity {
+    /// The diversified generated schedule (the default).
+    #[default]
+    On,
+    /// The pre-diversity behavior: every no-CSV home runs the same
+    /// default-profile columns.
+    Off,
+}
+
+impl ScheduleDiversity {
+    /// Whether the diversity layer applies.
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        self == Self::On
+    }
+}
+
 /// Simulation configuration controlling temporal loop, output, and RNG.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +140,19 @@ pub struct SimulationConfig {
     /// docs name.
     #[serde(default)]
     pub scenario_seed: Option<u64>,
+    /// The generated-schedule family's behavioral diversity (default:
+    /// on). On, every no-CSV dwelling's generated schedule carries its
+    /// own behavioral draws under the dwelling's scenario-mixed key: the
+    /// presence timing's shift, the occupancy level's scale, the
+    /// appliance end uses' diversity factors and the water-draw timing
+    /// and level. Off, every no-CSV home runs the same default-profile
+    /// columns. A schedule CSV is never diversified whatever the
+    /// setting; the draws' parameter table and its provenance record
+    /// (the 301 Addendum C central profiles, the EULP report the
+    /// fleet-aggregate acceptance is stated against) live on
+    /// `hares_types::diversity` and the schedule-sources doc.
+    #[serde(default)]
+    pub schedule_diversity: ScheduleDiversity,
     /// IANA timezone for civil-time schedule indexing (e.g. "America/Denver").
     /// When set, occupancy schedules and utility rates are indexed by civil
     /// (wall-clock) time including DST transitions. Weather indexing is unaffected.
@@ -204,6 +245,7 @@ impl hares_types::DescribeFields for SimulationConfig {
             setpoint_deadband_c: Some(1.0),
             master_seed: 0,
             scenario_seed: None,
+            schedule_diversity: ScheduleDiversity::default(),
             civil_timezone: Some("America/Denver".to_string()),
             site_location: SiteLocationOverride::sample(),
             max_consecutive_step_failures: DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -286,6 +328,19 @@ impl hares_types::DescribeFields for SimulationConfig {
                         description: Some(
                             "the run's scenario seed, mixed into every per-dwelling stream key; \
                              absent keeps the scenario-less derivation",
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "schedule_diversity",
+                    FieldMeta {
+                        description: Some(
+                            "the generated-schedule family's behavioral diversity: \"on\" (the \
+                             default) draws every no-CSV home's own presence timing, occupancy \
+                             level, appliance factors and water timing under its scenario-mixed \
+                             key; \"off\" runs every no-CSV home on the same default-profile \
+                             columns; a schedule CSV is never diversified",
                         ),
                         ..Default::default()
                     },
@@ -1327,6 +1382,7 @@ max_evictions = 0
     fn time_res_beyond_u32_seconds_is_an_error() {
         let cfg = SimulationConfig {
             scenario_seed: None,
+            schedule_diversity: Default::default(),
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
                 .expect("start time parses"),
             duration: Duration::seconds(i64::from(u32::MAX) * 2),
@@ -1388,6 +1444,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
             .expect_err("a duplicate report path is a validate error on the TOML path too");
         let built = SimulationConfig {
             scenario_seed: None,
+            schedule_diversity: Default::default(),
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
                 .expect("start time parses"),
             duration: Duration::seconds(3600),
@@ -1435,6 +1492,7 @@ latitude_deg = 95.0
             .expect_err("an out-of-range site coordinate is a validate error on the TOML path too");
         let built = SimulationConfig {
             scenario_seed: None,
+            schedule_diversity: Default::default(),
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
                 .expect("start time parses"),
             duration: Duration::seconds(3600),
@@ -1871,6 +1929,7 @@ utc_offset_h = -7.0
         fn config_for_warmup(warmup: WarmupConfig) -> SimulationConfig {
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
                     .expect("a valid sample start"),
                 duration: Duration::seconds(3600),

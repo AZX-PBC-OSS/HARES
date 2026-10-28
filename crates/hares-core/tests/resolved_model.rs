@@ -43,6 +43,7 @@ fn config(hpxml: &Path) -> DwellingConfig {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time,
                 duration: Duration::hours(2),
                 time_res: Duration::seconds(900),

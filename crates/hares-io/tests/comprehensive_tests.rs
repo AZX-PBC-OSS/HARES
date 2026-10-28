@@ -40,6 +40,7 @@ mod fixture_start;
 fn test_config(deadband: Option<f64>) -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: fixture_start::fixture_start(),
         duration: Duration::hours(1),
         time_res: Duration::hours(1),

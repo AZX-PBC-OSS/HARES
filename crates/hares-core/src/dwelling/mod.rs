@@ -3333,6 +3333,7 @@ impl Dwelling {
         } = inputs;
         let sim_config = SimulationConfig {
             scenario_seed: None,
+            schedule_diversity: Default::default(),
             start_time,
             duration,
             time_res,
@@ -10853,6 +10854,7 @@ destination = "memory"
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: DateTime::parse_from_rfc3339("2023-06-01T00:00:00-07:00")
                         .expect("valid start time"),
                     duration: chrono::Duration::seconds(900 * steps as i64),
@@ -23245,6 +23247,7 @@ latent_gain_fraction = 0.08
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: DateTime::parse_from_rfc3339(start).expect("start time"),
                     duration: chrono::Duration::days(2),
                     time_res: chrono::Duration::seconds(step_s),

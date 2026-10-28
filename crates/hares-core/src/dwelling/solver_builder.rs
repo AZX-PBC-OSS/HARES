@@ -2121,6 +2121,7 @@ mod tests {
 
         let sim_config = hares_io::SimulationConfig {
             scenario_seed: None,
+            schedule_diversity: Default::default(),
             start_time: chrono::FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)
@@ -2192,6 +2193,7 @@ mod tests {
 
         let sim_config = hares_io::SimulationConfig {
             scenario_seed: None,
+            schedule_diversity: Default::default(),
             start_time: chrono::FixedOffset::east_opt(0)
                 .expect("UTC offset")
                 .with_ymd_and_hms(2026, 1, 1, 12, 0, 0)

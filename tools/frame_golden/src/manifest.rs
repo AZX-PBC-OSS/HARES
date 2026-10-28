@@ -285,6 +285,7 @@ const SIMULATION_KEYS: &[&str] = &[
     "setpoint_deadband_c",
     "master_seed",
     "scenario_seed",
+    "schedule_diversity",
     "civil_timezone",
     "site_location",
     "max_consecutive_step_failures",
@@ -638,6 +639,7 @@ mod tests {
             setpoint_deadband_c: Some(1.0),
             master_seed: 0,
             scenario_seed: Some(3),
+            schedule_diversity: Default::default(),
             civil_timezone: Some("UTC".into()),
             site_location: hares_io::SiteLocationOverride {
                 latitude_deg: Some(40.0),

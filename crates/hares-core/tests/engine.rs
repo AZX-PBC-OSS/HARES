@@ -141,6 +141,7 @@ fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> Simulati
     reports.push(csv_report("file", &csv_path, 0));
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: FixedOffset::east_opt(0)
             .expect("UTC offset")
             .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
@@ -441,6 +442,7 @@ fn run_without_metrics_request_returns_none_metrics() {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 reports: Vec::new(),
                 metrics: false,
                 ..simulation_config(scratch.path("output.csv"))

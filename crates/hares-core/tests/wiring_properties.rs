@@ -125,6 +125,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)
                     .expect("UTC offset")
                     .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
@@ -166,6 +167,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)
                     .expect("UTC offset")
                     .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
@@ -305,6 +307,7 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)
                     .expect("UTC offset")
                     .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)
@@ -440,6 +443,7 @@ fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)
                     .expect("UTC offset")
                     .with_ymd_and_hms(2026, 3, 21, 12, 0, 0)

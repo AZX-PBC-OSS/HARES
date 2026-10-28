@@ -41,6 +41,7 @@ fn base_xml_config() -> DwellingConfig {
         settings: DwellingSettings::new(
             hares_io::SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: DateTime::parse_from_rfc3339("2019-01-01T00:00:00-07:00")
                     .expect("valid start time"),
                 duration: Duration::hours(1),
