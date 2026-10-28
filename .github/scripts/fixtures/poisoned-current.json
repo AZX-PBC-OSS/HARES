@@ -1,0 +1,62 @@
+{
+  "name": "pr",
+  "benchmarks": {
+    "rl_episode/batch_step/step_and_observe/16": {
+      "baseline": "pr",
+      "fullname": "pr/rl_episode/batch_step/step_and_observe/16",
+      "criterion_benchmark_v1": {
+        "group_id": "rl_episode",
+        "function_id": "batch_step",
+        "value_str": "16",
+        "throughput": { "elements": 16 },
+        "full_id": "rl_episode/batch_step/step_and_observe/16",
+        "directory_name": "rl_episode_batch_step_step_and_observe_16"
+      },
+      "criterion_estimates_v1": {
+        "mean": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 620000.0, "upper_bound": 1202600.0 }, "point_estimate": 911268.0, "standard_error": 956470.0 },
+        "median": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 701000.0, "upper_bound": 708600.0 }, "point_estimate": 704800.0, "standard_error": 1900.0 },
+        "median_abs_dev": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 1950.0, "upper_bound": 2800.0 }, "point_estimate": 2600.0, "standard_error": 220.0 },
+        "slope": null,
+        "std_dev": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 956470.0, "upper_bound": 956470.0 }, "point_estimate": 956470.0, "standard_error": 48000.0 }
+      }
+    },
+    "rl_episode/batch_step/step_and_observe/64": {
+      "baseline": "pr",
+      "fullname": "pr/rl_episode/batch_step/step_and_observe/64",
+      "criterion_benchmark_v1": {
+        "group_id": "rl_episode",
+        "function_id": "batch_step",
+        "value_str": "64",
+        "throughput": { "elements": 64 },
+        "full_id": "rl_episode/batch_step/step_and_observe/64",
+        "directory_name": "rl_episode_batch_step_step_and_observe_64"
+      },
+      "criterion_estimates_v1": {
+        "mean": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 173200.0, "upper_bound": 174900.0 }, "point_estimate": 174050.0, "standard_error": 430.0 },
+        "median": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 173000.0, "upper_bound": 174800.0 }, "point_estimate": 173980.0, "standard_error": 450.0 },
+        "median_abs_dev": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 900.0, "upper_bound": 1500.0 }, "point_estimate": 1150.0, "standard_error": 150.0 },
+        "slope": null,
+        "std_dev": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 2600.0, "upper_bound": 3800.0 }, "point_estimate": 3100.0, "standard_error": 300.0 }
+      }
+    },
+    "rl_episode/batch_step/step_and_observe/256": {
+      "baseline": "pr",
+      "fullname": "pr/rl_episode/batch_step/step_and_observe/256",
+      "criterion_benchmark_v1": {
+        "group_id": "rl_episode",
+        "function_id": "batch_step",
+        "value_str": "256",
+        "throughput": { "elements": 256 },
+        "full_id": "rl_episode/batch_step/step_and_observe/256",
+        "directory_name": "rl_episode_batch_step_step_and_observe_256"
+      },
+      "criterion_estimates_v1": {
+        "mean": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 701300.0, "upper_bound": 700700.0 }, "point_estimate": 701000.0, "standard_error": 1500.0 },
+        "median": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 700800.0, "upper_bound": 701400.0 }, "point_estimate": 701100.0, "standard_error": 150.0 },
+        "median_abs_dev": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 850.0, "upper_bound": 1250.0 }, "point_estimate": 1050.0, "standard_error": 100.0 },
+        "slope": null,
+        "std_dev": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 2200.0, "upper_bound": 3300.0 }, "point_estimate": 2700.0, "standard_error": 280.0 }
+      }
+    }
+  }
+}
