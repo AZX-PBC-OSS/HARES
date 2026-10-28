@@ -3382,23 +3382,29 @@ class Dwelling:
 # Gym / RL
 # ---------------------------------------------------------------------------
 
-# action_bounds: one finite (low, high), low <= high, per action_layout
-# column, shared by every dwelling of the call. A bad pair, a dwelling
-# whose deadband target holds a narrower band, or a dwelling whose
+# batch_step: the actions are a C-contiguous (n_dwellings, action_layout
+# length) float64 buffer protocol view (a numpy array among them), read in
+# place, one row per dwelling, or None to step every dwelling with no
+# actions. action_bounds: one finite (low, high), low <= high, per
+# action_layout column, shared by every dwelling of the call. A bad pair, a
+# dwelling whose deadband target holds a narrower band, or a dwelling whose
 # equipment is missing or would reject its signal raises ValueError before
-# any signal reaches any dwelling.
+# any signal reaches any dwelling. include_step_dict (default False) builds
+# each row's "step" dict, the same dict Dwelling.step() returns; the
+# default builds none: the observation buffer is the fast channel.
 #
 # A step whose observation read fails ends that environment with its
 # error: terminated=True, info["error_msg"] holding the error, and its
 # row of the buffer set to NaN; no substitute vector is produced.
 def batch_step(
     dwellings: list[Dwelling],
-    actions: list[list[float]],
+    actions: Any | None,
     plans: list[ObservationPlan],
     action_layout: list[tuple[str, str]],
     signal_type_by_equipment: dict[str, str],
     action_bounds: list[tuple[float, float]],
     obs_out: Any,
+    include_step_dict: bool = False,
 ) -> list[dict[str, Any]]: ...
 
 def clip_action(

@@ -70,6 +70,9 @@ struct StepResult {
     /// no key strings; the dict is built only for the keys set in that
     /// step.
     info: Vec<(&'static str, f64)>,
+    /// The step's warning count, its own dict entry (an int in Python,
+    /// the flags beside it being floats).
+    warning_count: usize,
     /// The step's failure, `None` when the step stepped: the message and
     /// the fatality flag cross as data.
     failure: Option<StepFailure>,
@@ -100,6 +103,22 @@ fn observe_environment_into(
     let _ = env_index;
     let guard = dwelling.acquire_string().map_err(|failure| failure.msg)?;
     guard.observe_into(plan, out).map_err(|err| err.to_string())
+}
+
+/// A readable `f64` view of `obj`'s buffer. The batch's action buffer is
+/// the vector environment's own `(n_envs, n_actions)` array, read in
+/// place, one row per dwelling: the observation path's zero-copy channel
+/// in reverse. A read-only view is accepted (the batch only reads).
+fn readable_f64_buffer(obj: &Bound<'_, PyAny>) -> PyResult<PyBuffer<f64>> {
+    let buffer = PyBuffer::<f64>::get(obj).map_err(|_| {
+        PyValueError::new_err("the action buffer must expose a float64 buffer protocol view")
+    })?;
+    if !buffer.is_c_contiguous() {
+        return Err(PyValueError::new_err(
+            "the action buffer must be C-contiguous",
+        ));
+    }
+    Ok(buffer)
 }
 
 /// A writable `f64` view of `obj`'s buffer. The batch's observation
@@ -605,22 +624,30 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// releases the GIL so Rayon threads can step dwellings in true parallel.
 /// The GIL is only re-acquired afterwards for Python dict construction.
 ///
+/// `actions` is a C-contiguous `(n_envs, n_actions)` float64 buffer
+/// protocol view (a numpy array among them), read in place, one row per
+/// dwelling: the observation path's zero-copy channel in reverse. `None`
+/// steps every dwelling with no actions.
+///
 /// Each environment's observation is read through the environment's own
 /// frozen plan (`plans`, built at the environment's `reset`) into `obs_out`,
 /// the vector environment's `(n_envs, n_fields)` float64 buffer, filled in
 /// place through its buffer protocol: no per-row lists and no Python object
 /// per field. The buffer's row width is the plan's field count.
 ///
-/// Each result dict carries `"step"`, the same dict `Dwelling.step()`
-/// returns (both go through one conversion), so the caller's `reward_fn`
-/// sees the same context on the batch path as on a single dwelling's step.
-/// A failed step carries `"step": None` and keeps the batch rectangular:
+/// When `include_step_dict` is true, each result dict carries `"step"`, the
+/// same dict `Dwelling.step()` returns (both go through one conversion), so
+/// the caller's `reward_fn` sees the same context on the batch path as on a
+/// single dwelling's step. The default false builds no step dicts: the
+/// observation buffer is the fast channel the RL consumers read, and the
+/// batch pays for no dicts it does not need. With the dict asked for, a
+/// failed step carries `"step": None` and keeps the batch rectangular:
 /// its row of the buffer holds the dwelling's last observation (the failed
 /// step changed nothing, so the telemetry on hand is that state). A step
 /// whose observation read fails ends that environment with its error:
 /// `terminated=True`, `info["error_msg"]` holding the error, and its row of
 /// the buffer set to NaN; no substitute vector is produced. Its `info`
-/// dict always carries `"warning_count"` (float), the
+/// dict always carries `"warning_count"` (int), the
 /// number of warnings the dwelling accumulated during the step (e.g. control
 /// signals rejected at dispatch time). When non-zero, `"warnings"`
 /// (list of str) holds the drained messages; they are consumed here, so a
@@ -635,24 +662,35 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// or would reject its signal) is a `ValueError` raised before a signal
 /// reaches any dwelling.
 #[pyfunction(name = "batch_step")]
-#[pyo3(signature = (dwellings, actions, plans, action_layout, signal_type_by_equipment, action_bounds, obs_out))]
+#[pyo3(signature = (dwellings, actions, plans, action_layout, signal_type_by_equipment, action_bounds, obs_out, include_step_dict = false))]
 #[allow(clippy::too_many_arguments)]
 pub fn batch_step_py(
     py: Python<'_>,
     dwellings: Vec<Py<PyDwelling>>,
-    actions: Vec<Vec<f64>>,
+    actions: Option<&Bound<'_, PyAny>>,
     plans: Vec<Py<PyObservationPlan>>,
     action_layout: Vec<(String, String)>,
     signal_type_by_equipment: HashMap<String, String>,
     action_bounds: Vec<(f64, f64)>,
     obs_out: &Bound<'_, PyAny>,
+    include_step_dict: bool,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    // Dimension check first (useful error regardless of mapping status).
-    if !actions.is_empty() && actions.len() != dwellings.len() {
+    // The action buffer's shape check first (a useful error regardless of
+    // mapping status): one row of `action_layout.len()` floats per
+    // dwelling, read in place.
+    let action_buffer = match actions {
+        None => None,
+        Some(obj) => Some(readable_f64_buffer(obj)?),
+    };
+    let action_width = action_layout.len();
+    if let Some(buffer) = &action_buffer
+        && buffer.item_count() != dwellings.len() * action_width
+    {
         return Err(PyValueError::new_err(format!(
-            "actions length ({}) must match dwellings length ({})",
-            actions.len(),
+            "the action buffer holds {} floats for {} environments of {} action dimensions",
+            buffer.item_count(),
             dwellings.len(),
+            action_width,
         )));
     }
     if plans.len() != dwellings.len() {
@@ -708,6 +746,15 @@ pub fn batch_step_py(
     let borrows: Vec<PyRef<'_, PyDwelling>> =
         dwellings.iter().map(|d| d.bind(py).borrow()).collect();
 
+    // The action buffer is read in place through its own pointer: the
+    // typed get above guarantees float64, the contiguity check guarantees
+    // the row layout, and the PyBuffer keeps the export alive for the
+    // read, which runs on the calling thread with the GIL held, so no
+    // writer can touch the floats while they are read.
+    let actions_view: Option<&[f64]> = action_buffer.as_ref().map(|buffer| unsafe {
+        slice::from_raw_parts(buffer.buf_ptr().cast::<f64>(), buffer.item_count())
+    });
+
     // Map every dwelling's actions to ControlSignals before applying any, so
     // a refused action leaves every dwelling untouched; then apply them
     // before entering the GIL-free section.
@@ -716,7 +763,13 @@ pub fn batch_step_py(
     // NaN/inf guarding is enforced unconditionally in map_action_to_signals
     // and as a defense-in-depth invariant check in build_control_signal.
     let mut mapped = Vec::with_capacity(borrows.len());
-    for (dwelling_ref, action) in borrows.iter().zip(&actions) {
+    for (env_index, dwelling_ref) in borrows.iter().enumerate() {
+        // No action buffer steps every dwelling with no signals; a zero
+        // width row is the same no-op for its dwelling.
+        let action = match actions_view {
+            Some(view) => &view[env_index * action_width..(env_index + 1) * action_width],
+            None => continue,
+        };
         if action.is_empty() {
             continue;
         }
@@ -807,7 +860,7 @@ pub fn batch_step_py(
                             .collect::<Vec<String>>()
                     })
                     .unwrap_or_default();
-                info.push(("warning_count", warnings.len() as f64));
+                let warning_count = warnings.len();
                 match step_result {
                     Ok(step) => {
                         let plan = &plan_handles[idx];
@@ -824,6 +877,7 @@ pub fn batch_step_py(
                                 terminated: true,
                                 truncated: false,
                                 info,
+                                warning_count,
                                 failure: Some(StepFailure {
                                     msg: e,
                                     fatal: false,
@@ -836,6 +890,7 @@ pub fn batch_step_py(
                                 terminated: false,
                                 truncated: false,
                                 info,
+                                warning_count,
                                 failure: None,
                                 warnings,
                             }
@@ -869,6 +924,7 @@ pub fn batch_step_py(
                             terminated: true,
                             truncated: false,
                             info,
+                            warning_count,
                             failure: Some(step_failure),
                             warnings,
                         }
@@ -881,18 +937,28 @@ pub fn batch_step_py(
 
     // GIL re-acquired here -- convert results to Python dicts.
     let mut out = Vec::with_capacity(results.len());
-    for item in results {
+    for (env_index, item) in results.into_iter().enumerate() {
         let d = PyDict::new(py);
-        match item.step {
-            Some(step) => {
-                let zone_keys = zone_keys_for_step(&step);
-                d.set_item("step", step_result_to_py_dict(py, &step, &zone_keys)?)?;
+        if include_step_dict {
+            match item.step {
+                Some(step) => {
+                    // The row's zone keys come from the dwelling's cache:
+                    // derived at the first dict build, reused for every
+                    // later step, so a step allocates no key strings.
+                    let mut cache = borrows[env_index]
+                        .zone_keys
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let zone_keys = cache.get_or_insert_with(|| zone_keys_for_step(&step));
+                    d.set_item("step", step_result_to_py_dict(py, &step, zone_keys)?)?;
+                }
+                None => d.set_item("step", py.None())?,
             }
-            None => d.set_item("step", py.None())?,
         }
         d.set_item("terminated", item.terminated)?;
         d.set_item("truncated", item.truncated)?;
         let info_dict = PyDict::new(py);
+        info_dict.set_item("warning_count", item.warning_count)?;
         for (k, v) in &item.info {
             info_dict.set_item(k, v)?;
         }
@@ -973,6 +1039,91 @@ mod tests {
     /// the test's alone.
     static OBSERVATION_FAULT_EXCLUSIVITY: Mutex<()> = Mutex::new(());
 
+    /// The content pin: when the batch builds a row's step dict, it is the
+    /// single-step path's own dict. Both dwellings take the same action and
+    /// step once from the same fixture state; the pin holds the keys, the
+    /// values and the key order identical, which the one shared conversion
+    /// (`step_result_to_py_dict`) gives both paths.
+    #[test]
+    fn batch_step_dict_content_matches_the_single_step_dict() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let single = base_dwelling(py);
+            let batched = base_dwelling(py);
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+            let plan = batched
+                .bind(py)
+                .borrow()
+                .observation_plan(vec!["total_power_w".to_string()])
+                .expect("the plan builds");
+            let plan = Py::new(py, plan).expect("the plan wraps");
+            let buffer = numpy::PyArray2::<f64>::zeros(py, (1, 1), false);
+
+            // The same action both paths step under: the single path clips
+            // and queues it itself (the batch path does the same inside).
+            let values = clip_action_py(&single.bind(py).borrow(), vec![21.0], layout.clone())
+                .expect("the clip runs");
+            let mut field_values = HashMap::new();
+            for ((_, field), value) in layout.iter().zip(values) {
+                field_values.insert(field.clone(), value);
+            }
+            let signal =
+                build_control_signal("ThermalSetpoint", &field_values).expect("the signal builds");
+            single
+                .bind(py)
+                .borrow()
+                .apply_control("Gas Furnace".to_string(), &PyControlSignal { signal }, None)
+                .expect("the control applies");
+            let single_dict = single
+                .bind(py)
+                .borrow_mut()
+                .step(py)
+                .expect("the single step runs");
+
+            let rows = batch_step_py(
+                py,
+                vec![batched.clone_ref(py)],
+                Some(actions_array(py, &[&[21.0]]).bind(py)),
+                vec![plan],
+                layout,
+                signal_types,
+                vec![(-50.0, 80.0)],
+                buffer.as_any(),
+                true,
+            )
+            .expect("the batch step runs");
+            let batch_dict = rows[0]
+                .bind(py)
+                .get_item("step")
+                .expect("the row carries a step dict")
+                .cast_into::<PyDict>()
+                .expect("the step is a dict");
+
+            let single_dict = single_dict
+                .into_bound(py)
+                .cast_into::<PyDict>()
+                .expect("the step is a dict");
+            let single_keys: Vec<String> = single_dict
+                .iter()
+                .map(|(k, _)| k.extract::<String>().expect("the keys are strings"))
+                .collect();
+            let batch_keys: Vec<String> = batch_dict
+                .iter()
+                .map(|(k, _)| k.extract::<String>().expect("the keys are strings"))
+                .collect();
+            assert_eq!(single_keys, batch_keys, "the same keys in the same order");
+            assert_eq!(
+                single_dict.repr().expect("repr").to_string_lossy(),
+                batch_dict.repr().expect("repr").to_string_lossy(),
+                "the step dicts are byte-identical: keys, values and order"
+            );
+        });
+    }
+
     /// Set the test-only step-failure injection (`None` clears it): the
     /// message the next `step_core_string` call returns as a non-fatal
     /// failure.
@@ -980,6 +1131,17 @@ mod tests {
         *crate::py_dwelling::TEST_STEP_FAILURE
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = msg;
+    }
+
+    /// The batch's action buffer: one C-contiguous row per environment,
+    /// the `(n_envs, width)` float64 array the extension reads in place.
+    fn actions_array(py: Python<'_>, rows: &[&[f64]]) -> Py<PyAny> {
+        let width = rows.first().map_or(0, |row| row.len());
+        let flat: Vec<f64> = rows.iter().flat_map(|row| row.iter().copied()).collect();
+        let array = numpy::PyArray1::<f64>::from_slice(py, &flat)
+            .reshape([rows.len(), width])
+            .expect("the rows are rectangular");
+        array.into_any().unbind()
     }
 
     /// A stepable base.xml dwelling for the batch health tests.
@@ -1079,15 +1241,17 @@ mod tests {
                 .collect();
             let buffer = numpy::PyArray2::<f64>::zeros(py, (2, 1), false);
 
+            let actions = actions_array(py, &[&[100.0], &[20.0]]);
             batch_step_py(
                 py,
                 vec![first.clone_ref(py), second.clone_ref(py)],
-                vec![vec![100.0], vec![20.0]],
+                Some(actions.bind(py)),
                 plans,
                 layout,
                 signal_types,
                 vec![(-50.0, 80.0)],
                 buffer.as_any(),
+                false,
             )
             .expect("the batch step must run");
 
@@ -1143,15 +1307,17 @@ mod tests {
             let buffer = numpy::PyArray2::<f64>::zeros(py, (2, 1), false);
 
             TEST_OBSERVATION_FAULT.store(0, Ordering::Relaxed);
+            let actions = actions_array(py, &[&[20.0], &[20.0]]);
             let result = batch_step_py(
                 py,
                 vec![first.clone_ref(py), second.clone_ref(py)],
-                vec![vec![20.0], vec![20.0]],
+                Some(actions.bind(py)),
                 plans,
                 layout,
                 signal_types,
                 vec![(-50.0, 80.0)],
                 buffer.as_any(),
+                false,
             );
             TEST_OBSERVATION_FAULT.store(usize::MAX, Ordering::Relaxed);
             let rows = result.expect("the batch step itself runs");
@@ -1225,15 +1391,17 @@ mod tests {
                             refused the signal"
                 .to_string();
             inject_step_failure(Some(injected.clone()));
+            let actions = actions_array(py, &[&[21.0]]);
             let result = batch_step_py(
                 py,
                 vec![dwelling.clone_ref(py)],
-                vec![vec![21.0]],
+                Some(actions.bind(py)),
                 vec![plan],
                 layout,
                 signal_types,
                 vec![(-50.0, 80.0)],
                 buffer.as_any(),
+                false,
             );
             inject_step_failure(None);
             let rows = result.expect("the batch step itself runs");
@@ -2032,11 +2200,14 @@ mod tests {
         );
     }
 
-    /// Hand-run measurement (ignored; `cargo test -p hares-python --all-features
-    /// --release --lib batch_step_allocation_counts -- --ignored --nocapture`):
+    /// Hand-run measurement (ignored; `cargo test -p hares-python --release
+    /// --lib batch_step_allocation_counts -- --ignored --nocapture`; the
+    /// counting allocator is this crate's test-build global allocator, which
+    /// the profiling feature's dev-dependency allocator displaces):
     /// the counting allocator's per-call allocation delta for whole
     /// `batch_step` calls at 1 and 8 environments, 20 calls each after 10
-    /// warm ones. The count is the calling thread's own: the parallel
+    /// warm ones, with the step dict asked for and with it not. The count is
+    /// the calling thread's own: the parallel
     /// section's worker-thread allocations are not in it, so the 8-environment
     /// figure covers the GIL-held conversion section, and the per-environment
     /// observation read's own count is pinned exactly by hares-core's
@@ -2070,38 +2241,43 @@ mod tests {
                     })
                     .collect();
                 let buffer = numpy::PyArray2::<f64>::zeros(py, (n_envs, 1), false);
+                let actions = actions_array(py, &vec![&[21.0][..]; n_envs]);
 
-                let mut deltas: Vec<u64> = Vec::new();
-                for call in 0..30 {
-                    let before = thread_allocations().expect("the counting allocator");
-                    batch_step_py(
-                        py,
-                        dwellings
-                            .iter()
-                            .map(|dwelling| dwelling.clone_ref(py))
-                            .collect(),
-                        vec![vec![21.0]; n_envs],
-                        plans.iter().map(|plan| plan.clone_ref(py)).collect(),
-                        layout.clone(),
-                        signal_types.clone(),
-                        bounds_pair.clone(),
-                        buffer.as_any(),
-                    )
-                    .expect("the batch step runs");
-                    let after = thread_allocations().expect("the counting allocator");
-                    if call >= 10 {
-                        deltas.push(after - before);
+                for include_step_dict in [false, true] {
+                    let mut deltas: Vec<u64> = Vec::new();
+                    for call in 0..30 {
+                        let before = thread_allocations().expect("the counting allocator");
+                        batch_step_py(
+                            py,
+                            dwellings
+                                .iter()
+                                .map(|dwelling| dwelling.clone_ref(py))
+                                .collect(),
+                            Some(actions.bind(py)),
+                            plans.iter().map(|plan| plan.clone_ref(py)).collect(),
+                            layout.clone(),
+                            signal_types.clone(),
+                            bounds_pair.clone(),
+                            buffer.as_any(),
+                            include_step_dict,
+                        )
+                        .expect("the batch step runs");
+                        let after = thread_allocations().expect("the counting allocator");
+                        if call >= 10 {
+                            deltas.push(after - before);
+                        }
                     }
+                    deltas.sort_unstable();
+                    let median = deltas[deltas.len() / 2];
+                    println!(
+                        "batch_step n_envs={n_envs} include_step_dict={include_step_dict}: \
+                         per-call calling-thread allocations \
+                         median {median}, min {}, max {} over {} calls",
+                        deltas[0],
+                        deltas[deltas.len() - 1],
+                        deltas.len()
+                    );
                 }
-                deltas.sort_unstable();
-                let median = deltas[deltas.len() / 2];
-                println!(
-                    "batch_step n_envs={n_envs}: per-call calling-thread allocations \
-                     median {median}, min {}, max {} over {} calls",
-                    deltas[0],
-                    deltas[deltas.len() - 1],
-                    deltas.len()
-                );
             }
         });
     }

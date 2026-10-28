@@ -275,7 +275,7 @@ def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
     assert env._action_bounds[column] == (MIN_THERMOSTAT_BAND_C, MAX_HVAC_THERMOSTAT_BAND_C)
     assert [field for _, field in env._action_layout] == ["deadband_c", "heat_c"]
     _, _, _, _, infos = env.step(np.asarray([[30.0, 21.0], [30.0, 21.0]]))
-    assert [info["warning_count"] for info in infos] == [0.0, 0.0], "the band is clipped"
+    assert [info["warning_count"] for info in infos] == [0, 0], "the band is clipped"
 
 
 class _DwellingWithBand:

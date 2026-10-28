@@ -24,6 +24,17 @@ replacement.
   `max_export_w`, keyword-only. A removed keyword names its replacement;
   the parent's positional forms raise `TypeError`.
 
+- Changed: `batch_step` takes the actions as a C-contiguous
+  `(n_envs, n_actions)` float64 buffer protocol view (a numpy array among
+  them), read in place, one row per dwelling, or `None` for no actions
+  (the old `list[list[float]]` form is gone), and gains the
+  `include_step_dict=False` keyword: the row's `"step"` dict, the same
+  dict `Dwelling.step()` returns, is built only when asked, and the row's
+  zone keys are cached per dwelling instead of rebuilt per step.
+  `info["warning_count"]` is an int (was a float), and the single-dwelling
+  gym's step info omits `"seed"` when no seed is set (was `0`) and builds
+  no telemetry dicts under the default reward.
+
 - Changed: `batch_step` classes a step failure's fatality from the
   dwelling's own state (the flag crossing the batch boundary as data), not
   from the error message's text: a transient failure whose message merely

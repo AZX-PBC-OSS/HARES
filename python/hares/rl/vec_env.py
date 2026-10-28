@@ -313,9 +313,13 @@ class VecDwellingGymEnv:
     def step(self, actions: np.ndarray):
         """Advance every dwelling one timestep.
 
+        ``actions`` is the ``(n_envs, n_actions)`` float64 array, passed to
+        the extension as its own C-contiguous buffer: read in place, one
+        row per dwelling, like the observation write.
+
         Each entry of ``infos`` carries the same shape on both step paths:
         ``"step"`` (the step dict the reward reads, ``None`` when that
-        dwelling's step failed), ``"warning_count"`` (float, always
+        dwelling's step failed), ``"warning_count"`` (int, always
         present) and ``"warnings"`` (list[str], present only when the count
         is non-zero, the warnings drained from that dwelling during the
         step, e.g. control signals rejected at dispatch time). Both step
@@ -335,15 +339,18 @@ class VecDwellingGymEnv:
         infos: list[dict[str, Any]] = []
         plans = self._env_plans()
         if rust_batch_step is not None:
-            actions_list = arr.tolist()
+            # include_step_dict=True: the reward reads each environment's
+            # step dict, so this caller asks for it; the default spares
+            # consumers that read the buffer alone.
             raw = rust_batch_step(
                 self._dwellings,
-                actions_list,
+                arr,
                 plans,
                 self._action_layout,
                 self._signal_type_by_equipment,
                 self._action_bounds,
                 self._obs_buffer,
+                True,
             )
             for dwelling, row in zip(self._dwellings, raw, strict=True):
                 step_data = row["step"]

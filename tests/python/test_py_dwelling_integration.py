@@ -507,7 +507,7 @@ class TestBatchStep:
         dw = _init_dwelling(duration_s=600, time_res_s=60)
         plan = dw.observation_plan(["total_power_w"])
         buf = array("d", bytes(8))
-        results = batch_step([dw], [[]], [plan], [], {}, [], buf)
+        results = batch_step([dw], None, [plan], [], {}, [], buf, True)
         assert isinstance(results, list)
         assert len(results) == 1
         r = results[0]
@@ -535,7 +535,7 @@ class TestBatchStep:
                 for _ in range(5):
                     results = batch_step(
                         dw_list,
-                        [[]] * len(dw_list),
+                        None,
                         plans,
                         [],
                         {},
@@ -564,7 +564,7 @@ class TestBatchStep:
         """batch_step with empty dwellings list returns empty results."""
         from hares import batch_step
 
-        results = batch_step([], [], [], [], {}, [], array("d"))
+        results = batch_step([], None, [], [], {}, [], array("d"))
         assert isinstance(results, list)
         assert len(results) == 0
 
@@ -586,7 +586,7 @@ class TestBatchStep:
                 for _ in range(3):
                     results = batch_step(
                         dw_list,
-                        [[]] * len(dw_list),
+                        None,
                         plans,
                         [],
                         {},

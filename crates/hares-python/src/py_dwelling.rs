@@ -756,7 +756,13 @@ pub struct PyDwelling {
     initialized: bool,
     registry: ActorRegistry,
     equipment_registry: EquipmentRegistry,
-    zone_keys: Option<Vec<String>>,
+    /// The per-zone temperature keys a step dict carries, cached at the
+    /// first dict build (the zone structure never changes under a built
+    /// dwelling): the single-step path and the batch path's dict builds
+    /// share the cache, so a step allocates no key strings after the
+    /// first. The mutex is the batch path's handle: it builds dicts from
+    /// a shared borrow of the dwelling on the parent thread.
+    pub(crate) zone_keys: Mutex<Option<Vec<String>>>,
     /// The single-step loop's reused result: the step writes it in place
     /// (the `step_into` form), so a Python loop calling `step()` per
     /// timestep pays the zone-temperature allocation once, at the first
@@ -830,7 +836,7 @@ impl PyDwelling {
             initialized: false,
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
-            zone_keys: None,
+            zone_keys: Mutex::new(None),
             step_scratch: hares_core::StepResult::default(),
             gas_tariff: None,
             callback_cause: Arc::new(std::sync::Mutex::new(None)),
@@ -1106,14 +1112,11 @@ impl PyDwelling {
             );
         }
 
-        if self.zone_keys.is_none() {
-            self.zone_keys = Some(zone_keys_for_step(&self.step_scratch));
-        }
-
-        let zone_keys = self
+        let mut cache = self
             .zone_keys
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("zone keys not initialized"))?;
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let zone_keys = cache.get_or_insert_with(|| zone_keys_for_step(&self.step_scratch));
         step_result_to_py_dict(py, &self.step_scratch, zone_keys)
     }
 
@@ -1990,7 +1993,10 @@ impl PyDwelling {
         self.mutex_poison_events.store(0, Ordering::SeqCst);
         self.config = config;
         self.initialized = false;
-        self.zone_keys = None;
+        *self
+            .zone_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.step_scratch = hares_core::StepResult::default();
         *self.callback_cause.lock().expect("cause slot mutex") = None;
 
@@ -2488,7 +2494,7 @@ impl PyDwelling {
             initialized: false,
             registry: ActorRegistry::new(),
             equipment_registry: EquipmentRegistry::new(),
-            zone_keys: None,
+            zone_keys: Mutex::new(None),
             step_scratch: hares_core::StepResult::default(),
             gas_tariff: None,
             callback_cause: Arc::new(std::sync::Mutex::new(None)),

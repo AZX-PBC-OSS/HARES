@@ -430,18 +430,18 @@ def build_control_signal(signal_type: str, values: Mapping[str, float]) -> Any:
     raise ValueError(f"unsupported signal type: {signal_type!r}")
 
 
-def drain_step_warnings(dwelling: Any) -> tuple[float, list[str]]:
+def drain_step_warnings(dwelling: Any) -> tuple[int, list[str]]:
     """Drain warnings accumulated on ``dwelling`` during the step just taken.
 
     Returns ``(warning_count, messages)`` matching the Rust ``batch_step``
-    info contract: the count is a float published under
+    info contract: the count is an int published under
     ``info["warning_count"]`` on every step, while the messages go under
     ``info["warnings"]`` only when the count is non-zero.
     ``Dwelling.take_warnings()`` drains, so each warning is surfaced exactly
     once.
     """
     messages = [str(message) for message in dwelling.take_warnings()]
-    return float(len(messages)), messages
+    return len(messages), messages
 
 
 # ---------------------------------------------------------------------------
@@ -649,10 +649,12 @@ class DwellingGymEnv(_GYM_BASE):
 
         ``info`` carries the same contract as the Rust ``batch_step`` fast
         path: ``"step"`` is the dwelling's ``StepResult`` for the step,
-        ``"warning_count"`` (float) is always present and counts the warnings
+        ``"warning_count"`` (int) is always present and counts the warnings
         drained from the dwelling during the step (e.g. control signals
         rejected at dispatch time); ``"warnings"`` (list[str]) is present only
-        when the count is non-zero and holds the drained messages. Warnings
+        when the count is non-zero and holds the drained messages. ``"seed"``
+        is the episode's applied seed when one was set (``reset(seed=...)``);
+        it is omitted when no seed is set. Warnings
         are drained exactly once per step, so a subsequent
         ``Dwelling.take_warnings()`` will not return them again.
         """
@@ -665,7 +667,13 @@ class DwellingGymEnv(_GYM_BASE):
 
         self._apply_action(arr)
         step_data: StepResult = self._dwelling.step()
-        telemetry = self._dwelling.telemetry()
+        # The telemetry trees are built only for a reward function that
+        # reads them: the default reward reads the step dict alone, and no
+        # step under it pays for the dicts. The handle is captured here,
+        # the same point the always-built capture used.
+        telemetry: Any = (
+            self._dwelling.telemetry() if self._reward_fn is not None else None
+        )
         obs = self._observation()
         self._steps_elapsed += 1
         truncated = self._steps_elapsed >= self._max_steps
@@ -692,12 +700,13 @@ class DwellingGymEnv(_GYM_BASE):
         warning_count, warning_messages = drain_step_warnings(self._dwelling)
         info: dict[str, Any] = {
             "step": step_data,
-            "seed": self._active_seed if self._active_seed is not None else 0,
             "timestep_index": self._steps_elapsed,
             "observation_bounds": self._observation_bounds,
             "initial_observation_mask": None,
             "warning_count": warning_count,
         }
+        if self._active_seed is not None:
+            info["seed"] = self._active_seed
         if warning_messages:
             info["warnings"] = warning_messages
         return obs, reward, False, truncated, info
