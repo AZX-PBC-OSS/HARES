@@ -37,6 +37,32 @@ def _f64_bits(x: float) -> int:
 
     return struct.unpack("<Q", struct.pack("<d", x))[0]
 
+
+def _deep_sag_real_multiplier(zip_dict, voltage_pu: float, as_fitted: bool) -> float:
+    """Evaluate a published row's real coefficients at a pu voltage through
+    the recorded deep-sag form.
+
+    The form is the record's (``docs/PHYSICS_DECISIONS.md``, the deep-sag
+    entry; ``ZipLoad::deep_sag_real_multiplier``): the row's real
+    polynomial at ``voltage_pu / v0``, with every class outside the
+    recorded motor families held at the row's in-band stationary point on
+    the deeper-sag side (the evaluated response never rises as the
+    voltage falls) and the recorded motor families evaluating the raw
+    polynomial as fitted. The model's own evaluation is witnessed end to
+    end by the dwelling witnesses below and the hares-types row tests;
+    this evaluation pins the published coefficients to the same physics.
+    """
+    zp, ip, pp = zip_dict["zp"], zip_dict["ip"], zip_dict["pp"]
+    v_norm = voltage_pu / zip_dict["v0"]
+    if v_norm == 1.0:
+        return 1.0
+    if not as_fitted and v_norm < 1.0 and zp > 0.0:
+        v_turn = -ip / (2.0 * zp)
+        if 0.5 / zip_dict["v0"] <= v_turn < 1.0:
+            held = v_turn if v_norm < v_turn else v_norm
+            return zp * held * held + ip * held + pp
+    return zp * v_norm * v_norm + ip * v_norm + pp
+
 # Physics-modeled (typed) equipment on the base.xml fixture: their class
 # rows govern the voltage response of their physics-computed draws.
 PHYSICS_EQUIPMENT = [
@@ -65,17 +91,39 @@ class TestRealPowerZipApplicability:
         assert seen > 0, "fixture must enumerate at least one ZIP-bearing equipment"
 
     def test_physics_equipment_declares_its_class_row_as_governing(self):
-        """The typed equipment's published coefficients are its class row's.
+        """The typed equipment's published coefficients are its class row's
+        own, and their evaluations at exact pu voltages are the physics the
+        table declares.
 
         The row's real coefficients scale the equipment's physics-computed
         draw at the bus voltage (the recorded deep-sag decision), so the
         published ``(zp, ip, pp)`` are the class row's own and the flag
         declares them governing: the brownout round's F1/F2 defect was a
         structural ``(0,0,1)`` pin that reported constant power while the
-        table scored the row an impedance or a motor response.
+        table scored the row an impedance or a motor response. That defect
+        class is a real side re-pinned to ``(0, 0, 1)`` behind a ``True``
+        flag, and a re-pin evaluates flat 1.0 at every voltage (the Ideal
+        class's own constant-power row), so the pins below hold the class
+        rows exactly and their hand-derived deep-sag evaluations, which a
+        re-pin cannot satisfy.
         """
         dw = make_dwelling(duration_s=600, time_res_s=60)
-        for name in PHYSICS_EQUIPMENT:
+
+        # The class rows, hand-pinned from the recorded literature table
+        # (`zip_defaults_for_class` in crates/hares-types/src/zip.rs): the
+        # gas furnace's electric draw is its blower fan motor (the OCHRE
+        # fans row), the air conditioner's compressor the Hajagos & Danai
+        # 1998 cooling row, the resistance water heater's element pure
+        # impedance (the OCHRE CSV row 17). The boolean is the recorded
+        # deep-sag shape policy: the compressor and fan families evaluate
+        # as fitted, the resistance row through the monotone form.
+        class_rows = {
+            "Gas Furnace": ((0.26, 0.9, -0.16), True),
+            "Air Conditioner": ((1.6, -2.69, 2.09), True),
+            "Electric Resistance Water Heater": ((1.0, 0.0, 0.0), False),
+        }
+        zip_dicts: dict[str, dict] = {}
+        for name, (row, as_fitted) in class_rows.items():
             zip_dict = dw.equipment_zip(name)
             assert zip_dict is not None, f"{name} must expose a ZIP dict"
             assert zip_dict["real_power_zip_applies"] is True, (
@@ -83,13 +131,71 @@ class TestRealPowerZipApplicability:
                 f"the bus voltage; the published coefficients are real and "
                 f"governing"
             )
-            # The published real coefficients sum to 1 (the model's pure
-            # redistribution at the reference voltage) and are not the
-            # structural pin of a load the table scores differently.
-            assert (
-                zip_dict["zp"] + zip_dict["ip"] + zip_dict["pp"] != 0.0
-                or name in ("Tankless Water Heater", "Ideal HVAC")
+            assert (zip_dict["zp"], zip_dict["ip"], zip_dict["pp"]) == row, (
+                f"{name}: the published real coefficients must be its class "
+                f"row {row}, not a structural (0, 0, 1) pin behind a "
+                f"governing flag"
             )
+            zip_dicts[name] = zip_dict
+
+        # The shares' evaluations at exact pu voltages, hand-derived from
+        # the pinned rows through the recorded deep-sag form.
+        water_heater = zip_dicts["Electric Resistance Water Heater"]
+        # The pure-impedance row (1, 0, 0) evaluates V^2: the element draws
+        # 0.49 of rated at 0.7 pu (0.7 squared) and exactly a quarter at
+        # 0.5 pu (P = V^2/R: the element is a resistor, so the heat
+        # follows the draw).
+        assert _deep_sag_real_multiplier(water_heater, 0.7, as_fitted=False) == 0.7 * 0.7
+        assert _deep_sag_real_multiplier(water_heater, 0.5, as_fitted=False) == 0.25
+
+        # The compressor row (1.6, -2.69, 2.09) evaluates as fitted:
+        # 1.6 x 0.25 - 2.69 x 0.5 + 2.09 = 0.4 - 1.345 + 2.09 = 1.145 at
+        # 0.5 pu, the measured static draw of the family: the draw rises
+        # as the voltage falls.
+        conditioner = zip_dicts["Air Conditioner"]
+        assert _deep_sag_real_multiplier(conditioner, 0.5, as_fitted=True) == 1.145
+
+        # The blower fan row (0.26, 0.9, -0.16) evaluates as fitted:
+        # 0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.065 + 0.45 - 0.16 = 0.355 at
+        # 0.5 pu.
+        furnace = zip_dicts["Gas Furnace"]
+        assert _deep_sag_real_multiplier(furnace, 0.5, as_fitted=True) == 0.355
+
+        # The constant-power row (0, 0, 1), the Ideal class's own, is the
+        # one row whose evaluation is flat 1.0: exactly the signature a
+        # re-pinned real side reads at every voltage, and exactly what the
+        # governing rows above must not read at a sag.
+        ideal = {"zp": 0.0, "ip": 0.0, "pp": 1.0, "v0": 1.0}
+        for v in (0.5, 0.7, 1.0):
+            assert _deep_sag_real_multiplier(ideal, v, as_fitted=False) == 1.0
+
+        # The refrigerator's row (5.03, -8.48, 4.45) turns at
+        # 8.48 / (2 x 5.03) = 0.8429423459 pu, inside the admitted band,
+        # so the monotone form holds the evaluation at the quadratic's
+        # stationary value 4.45 - 8.48 squared / (4 x 5.03)
+        # = 0.8759244532803181 for every voltage below the turn: 0.5 pu
+        # and 0.7 pu agree bitwise, where the raw polynomial answers
+        # 1.4675000000000002 and 0.9786999999999999 (the stalled-draw
+        # class the record does not model).
+        refrigerator = dw.equipment_zip("Refrigerator")
+        assert refrigerator is not None, "the refrigerator must expose a ZIP dict"
+        assert (refrigerator["zp"], refrigerator["ip"], refrigerator["pp"]) == (
+            5.03, -8.48, 4.45
+        ), (
+            "the refrigerator's published coefficients must be the Bokhari "
+            "et al. 2014 row (5.03, -8.48, 4.45)"
+        )
+        held_05 = _deep_sag_real_multiplier(refrigerator, 0.5, as_fitted=False)
+        held_07 = _deep_sag_real_multiplier(refrigerator, 0.7, as_fitted=False)
+        assert (
+            _f64_bits(held_05)
+            == _f64_bits(held_07)
+            == _f64_bits(0.8759244532803181)
+        ), (
+            "the refrigerator's held evaluation must be the stationary "
+            "value 0.8759244532803181 bitwise at 0.5 and 0.7 pu, got "
+            f"{held_05} and {held_07}"
+        )
 
     def test_scheduled_loads_declared_real_power_zip_applies(self):
         dw = make_dwelling(duration_s=600, time_res_s=60)
