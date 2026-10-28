@@ -24,6 +24,13 @@ replacement.
   `max_export_w`, keyword-only. A removed keyword names its replacement;
   the parent's positional forms raise `TypeError`.
 
+- Changed: `batch_step` classes a step failure's fatality from the
+  dwelling's own state (the flag crossing the batch boundary as data), not
+  from the error message's text: a transient failure whose message merely
+  carries the fatal sentinel's wording is no longer reported under
+  `info["dwelling_fatal"]`, and a panic that poisons the dwelling's lock
+  now is. The messages themselves are unchanged.
+
 - Added: `defaults_dir()`: the packaged defaults directory, the
   `defaults` tree the installed package carries, resolved from the
   installed package's own location. `defaults=None` (the constructors'

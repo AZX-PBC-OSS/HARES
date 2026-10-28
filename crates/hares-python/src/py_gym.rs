@@ -18,9 +18,7 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 
 use crate::py_control::PyControlSignal;
-use crate::py_dwelling::{
-    FATAL_DWELLING_PREFIX, PyDwelling, step_result_to_py_dict, zone_keys_for_step,
-};
+use crate::py_dwelling::{PyDwelling, StepFailure, step_result_to_py_dict, zone_keys_for_step};
 
 /// The frozen observation plan, built once per episode against a built
 /// dwelling and read every step: the Python handle over
@@ -72,7 +70,9 @@ struct StepResult {
     /// no key strings; the dict is built only for the keys set in that
     /// step.
     info: Vec<(&'static str, f64)>,
-    error_msg: Option<String>,
+    /// The step's failure, `None` when the step stepped: the message and
+    /// the fatality flag cross as data.
+    failure: Option<StepFailure>,
     /// Warnings drained from the dwelling after this step (e.g.
     /// control-dispatch rejections). Surfaced under `info["warnings"]` so RL
     /// loops see rejected control signals without polling `take_warnings()`.
@@ -98,7 +98,7 @@ fn observe_environment_into(
         }
     }
     let _ = env_index;
-    let guard = dwelling.acquire_string()?;
+    let guard = dwelling.acquire_string().map_err(|failure| failure.msg)?;
     guard.observe_into(plan, out).map_err(|err| err.to_string())
 }
 
@@ -432,7 +432,7 @@ fn check_signals_accepted(
     dwelling: &PyDwelling,
     signals: &[(String, ControlSignal)],
 ) -> Result<(), String> {
-    let dwelling = dwelling.acquire_string()?;
+    let dwelling = dwelling.acquire_string().map_err(|failure| failure.msg)?;
     for (equipment, signal) in signals {
         debug_assert!(!signal.is_immediate_state_update());
         dwelling
@@ -779,13 +779,17 @@ pub fn batch_step_py(
                 let step_result = match step_result {
                     Ok(inner) => inner,
                     Err(payload) => {
-                        if dwelling.dwelling.is_poisoned() {
+                        let poisoned = dwelling.dwelling.is_poisoned();
+                        if poisoned {
                             dwelling.mark_poisoned();
                         }
-                        Err(format!(
-                            "HARES internal panic: {}",
-                            panic_hook::panic_payload_to_string(payload)
-                        ))
+                        Err(StepFailure {
+                            msg: format!(
+                                "HARES internal panic: {}",
+                                panic_hook::panic_payload_to_string(payload)
+                            ),
+                            fatal: poisoned,
+                        })
                     }
                 };
                 // Drain warnings accumulated during this step (e.g. control
@@ -811,7 +815,8 @@ pub fn batch_step_py(
                         if let Err(e) = observe_environment_into(dwelling, plan, row, idx) {
                             // A step whose observation fails ends that
                             // environment with its error: no substitute
-                            // vector, the row NaN, the environment done.
+                            // vector, the row NaN, the environment done. The
+                            // dwelling itself is fine: a non-fatal failure.
                             info.push(("observation_error", 1.0));
                             row.fill(f64::NAN);
                             StepResult {
@@ -819,7 +824,10 @@ pub fn batch_step_py(
                                 terminated: true,
                                 truncated: false,
                                 info,
-                                error_msg: Some(e),
+                                failure: Some(StepFailure {
+                                    msg: e,
+                                    fatal: false,
+                                }),
                                 warnings,
                             }
                         } else {
@@ -828,15 +836,17 @@ pub fn batch_step_py(
                                 terminated: false,
                                 truncated: false,
                                 info,
-                                error_msg: None,
+                                failure: None,
                                 warnings,
                             }
                         }
                     }
-                    Err(e) => {
-                        let is_fatal = e.starts_with(FATAL_DWELLING_PREFIX);
+                    Err(step_failure) => {
+                        // The fatality flag crossed as data: a permanent
+                        // failure is the dwelling's own state, never its
+                        // message's wording.
                         info.push(("error", 1.0));
-                        if is_fatal {
+                        if step_failure.fatal {
                             info.push(("dwelling_fatal", 1.0));
                         }
                         // A failed row carries the dwelling's last
@@ -859,7 +869,7 @@ pub fn batch_step_py(
                             terminated: true,
                             truncated: false,
                             info,
-                            error_msg: Some(e),
+                            failure: Some(step_failure),
                             warnings,
                         }
                     }
@@ -886,8 +896,8 @@ pub fn batch_step_py(
         for (k, v) in &item.info {
             info_dict.set_item(k, v)?;
         }
-        if let Some(ref msg) = item.error_msg {
-            info_dict.set_item("error_msg", msg)?;
+        if let Some(ref failure) = item.failure {
+            info_dict.set_item("error_msg", &failure.msg)?;
         }
         if !item.warnings.is_empty() {
             info_dict.set_item("warnings", &item.warnings)?;
@@ -962,6 +972,15 @@ mod tests {
     /// here holds the lock for its whole body and the flag's window is
     /// the test's alone.
     static OBSERVATION_FAULT_EXCLUSIVITY: Mutex<()> = Mutex::new(());
+
+    /// Set the test-only step-failure injection (`None` clears it): the
+    /// message the next `step_core_string` call returns as a non-fatal
+    /// failure.
+    fn inject_step_failure(msg: Option<String>) {
+        *crate::py_dwelling::TEST_STEP_FAILURE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = msg;
+    }
 
     /// A stepable base.xml dwelling for the batch health tests.
     fn base_dwelling(py: Python<'_>) -> Py<PyDwelling> {
@@ -1171,6 +1190,85 @@ mod tests {
                 view[[1, 0]].is_finite(),
                 "the stepping environment's row is a real observation"
             );
+        });
+    }
+
+    /// The prefix-collision witness: a step failure is classified by its
+    /// typed flag, never by its message's text. The injected failure is a
+    /// transient step failure whose message carries the fatal sentinel's own
+    /// text; the batch must end the environment for the failure while
+    /// reporting it non-fatal, because the dwelling is not poisoned. A
+    /// classification that reads the message flags it fatal.
+    #[test]
+    fn a_transient_failure_whose_message_carries_the_fatal_sentinel_is_not_flagged_fatal() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let dwelling = base_dwelling(py);
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+            let plan = dwelling
+                .bind(py)
+                .borrow()
+                .observation_plan(vec!["total_power_w".to_string()])
+                .expect("the plan builds");
+            let plan = Py::new(py, plan).expect("the plan wraps");
+            let buffer = numpy::PyArray2::<f64>::zeros(py, (1, 1), false);
+
+            // The message below is the fatal messages' own leading text
+            // (py_dwelling's FATAL_DWELLING_PREFIX) followed by ordinary
+            // transient-failure wording: the collision the string-sniffing
+            // classification misread as a poisoned dwelling.
+            let injected = "[FATAL_DWELLING] transient failure: the furnace \
+                            refused the signal"
+                .to_string();
+            inject_step_failure(Some(injected.clone()));
+            let result = batch_step_py(
+                py,
+                vec![dwelling.clone_ref(py)],
+                vec![vec![21.0]],
+                vec![plan],
+                layout,
+                signal_types,
+                vec![(-50.0, 80.0)],
+                buffer.as_any(),
+            );
+            inject_step_failure(None);
+            let rows = result.expect("the batch step itself runs");
+
+            let info = rows[0]
+                .bind(py)
+                .get_item("info")
+                .expect("the row carries info")
+                .cast_into::<PyDict>()
+                .expect("info is a dict");
+            assert!(
+                info.get_item("dwelling_fatal")
+                    .expect("info reads")
+                    .is_none(),
+                "a transient failure whose message carries the fatal sentinel's \
+                 text must not be flagged dwelling_fatal: the classification \
+                 reads the failure's typed flag, never its message"
+            );
+            assert!(
+                info.get_item("error").expect("info reads").is_some(),
+                "the failure is still surfaced as a step error"
+            );
+            let error_msg: String = info
+                .get_item("error_msg")
+                .expect("info reads")
+                .expect("the failed step's info carries error_msg")
+                .extract()
+                .expect("the error message is a string");
+            assert_eq!(error_msg, injected);
+            let terminated: bool = rows[0]
+                .bind(py)
+                .get_item("terminated")
+                .and_then(|v| v.extract())
+                .expect("terminated is a bool");
+            assert!(terminated, "the failed step ends the environment");
         });
     }
 

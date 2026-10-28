@@ -73,6 +73,14 @@ pub(crate) static TEST_BUILD_COUNT: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 pub(crate) static TEST_COUNT_EXCLUSIVITY: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Test-only fault switch for the batch step-failure classification: the
+/// message returned as a NON-fatal step failure by every
+/// [`PyDwelling::step_core_string`] call while set. `None` faults nothing.
+/// Lives in `hares-python` (the crate under test), never in `hares-core`'s
+/// `step`: `cfg(test)` is set only for the crate under test.
+#[cfg(test)]
+pub(crate) static TEST_STEP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 use crate::conversions::naive_chrono_to_py_datetime;
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
@@ -650,10 +658,25 @@ fn protocol_bridge_config_from_py(
 // Lock helpers are now methods on PyDwelling (acquire, acquire_string,
 // acquire_hares) that check the `poisoned` AtomicBool before locking.
 
-/// Sentinels that identify a fatal dwelling error in GIL-free `String` error
-/// contexts (e.g. [`batch_step_py`]) where a typed error cannot cross thread
-/// boundaries.
-pub(crate) const FATAL_DWELLING_PREFIX: &str = "[FATAL_DWELLING] ";
+/// The fatal failure messages' leading text. It is part of the message's
+/// own wording, for the human or log reader of the message, and no
+/// classification reads it: fatality crosses the GIL-free boundary as
+/// [`StepFailure`]'s `fatal` field, set by the paths that know the
+/// dwelling's state.
+const FATAL_DWELLING_PREFIX: &str = "[FATAL_DWELLING] ";
+
+/// A step failure crossing the GIL-free batch boundary: the message and
+/// whether the dwelling is permanently failed. `fatal` is carried as
+/// data, set only by the paths that know the dwelling's state (the
+/// poisoned flag, a poisoned lock, a panic that poisoned the lock), so
+/// the receiving thread classifies the failure without reading message
+/// content: a transient error's message is the error's own text, never
+/// a classification.
+#[derive(Debug, Clone)]
+pub(crate) struct StepFailure {
+    pub(crate) msg: String,
+    pub(crate) fatal: bool,
+}
 
 /// The per-zone temperature keys a step dict carries, in the step's zone
 /// order: "Temperature - Indoor (C)" for zone 0, "Temperature - Zone_N (C)"
@@ -2493,24 +2516,31 @@ impl PyDwelling {
 
     /// GIL-free variant of [`acquire`] required by `Send` contexts (e.g. Rayon threads).
     ///
-    /// Returns `Err(String)` instead of `PyErr` so it can be used without holding the GIL.
-    /// Fatal errors are prefixed with [`FATAL_DWELLING_PREFIX`] so callers can
-    /// distinguish permanent from transient failures.
-    pub(crate) fn acquire_string(&self) -> Result<MutexGuard<'_, Dwelling>, String> {
+    /// Returns `Err(StepFailure)` instead of `PyErr` so it can be used without holding the GIL:
+    /// fatal errors carry `fatal: true` as data, so callers distinguish permanent from
+    /// transient failures without reading message content.
+    pub(crate) fn acquire_string(&self) -> Result<MutexGuard<'_, Dwelling>, StepFailure> {
         if crate::py_callback::delivery_in_progress() {
-            return Err(crate::py_callback::REENTRY_MESSAGE.to_string());
+            return Err(StepFailure {
+                msg: crate::py_callback::REENTRY_MESSAGE.to_string(),
+                fatal: false,
+            });
         }
         if self.poisoned.load(Ordering::Acquire) {
-            return Err(format!(
-                "{}dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
-                FATAL_DWELLING_PREFIX
-            ));
+            return Err(StepFailure {
+                msg: format!(
+                    "{}dwelling is in a fatal error state (internal state corruption); create a new Dwelling instance",
+                    FATAL_DWELLING_PREFIX
+                ),
+                fatal: true,
+            });
         }
         self.dwelling.lock().map_err(|e| {
-            format!(
+            let msg = format!(
                 "{}dwelling state is corrupted (internal panic: {}); create a new Dwelling instance",
                 FATAL_DWELLING_PREFIX, e
-            )
+            );
+            StepFailure { msg, fatal: true }
         })
     }
 
@@ -2551,24 +2581,39 @@ impl PyDwelling {
     /// (e.g. [`batch_step_py`]) where `HaresError` cannot cross thread boundaries
     /// as a `PyErr`.
     ///
-    /// Routes through [`acquire_string`] so fatal (poisoned) errors are prefixed
-    /// with [`FATAL_DWELLING_PREFIX`], allowing [`batch_step_py`] to distinguish
-    /// permanent from transient failures. Transient [`step`] errors carry no prefix.
-    pub(crate) fn step_core_string(&self) -> Result<hares_core::StepResult, String> {
+    /// Routes through [`acquire_string`], so a fatal (poisoned) failure carries
+    /// `fatal: true` as data, and [`batch_step_py`] distinguishes permanent from
+    /// transient failures by that field. A [`step`] error is transient: the
+    /// single-step path maps it through `map_run_error`, never
+    /// `FatalDwellingError`, while the dwelling's poisoned flag is unset.
+    pub(crate) fn step_core_string(&self) -> Result<hares_core::StepResult, StepFailure> {
+        #[cfg(test)]
+        if let Some(msg) = TEST_STEP_FAILURE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Err(StepFailure { msg, fatal: false });
+        }
         if !self.initialized {
-            return Err(
-                "PyDwelling.step() called before initialize(). Call dwelling.initialize() first."
+            return Err(StepFailure {
+                msg: "PyDwelling.step() called before initialize(). Call dwelling.initialize() \
+                      first."
                     .to_string(),
-            );
+                fatal: false,
+            });
         }
         let mut dwelling = self.acquire_string()?;
-        dwelling.step().map_err(|e| e.to_string())
+        dwelling.step().map_err(|e| StepFailure {
+            msg: e.to_string(),
+            fatal: false,
+        })
     }
 
     /// The deadband range of the named equipment's thermostat class, or
     /// `None` when it takes no band.
     pub(crate) fn band_range_of(&self, name: &str) -> Result<Option<(f64, f64)>, String> {
-        let dwelling = self.acquire_string()?;
+        let dwelling = self.acquire_string().map_err(|failure| failure.msg)?;
         let eq = dwelling
             .equipment()
             .iter()
@@ -3634,6 +3679,7 @@ mod tests {
     // --------------------------------------------------------------------
 
     use super::FATAL_DWELLING_PREFIX;
+    use super::StepFailure;
 
     /// Minimal struct mirroring `PyDwelling`'s poison-guard pattern.
     struct PoisonGuard {
@@ -3649,13 +3695,17 @@ mod tests {
             }
         }
 
-        fn acquire(&self) -> Result<MutexGuard<'_, i32>, String> {
+        fn acquire(&self) -> Result<MutexGuard<'_, i32>, StepFailure> {
             if self.poisoned.load(Ordering::Acquire) {
-                return Err(format!("{}fatal: state corruption", FATAL_DWELLING_PREFIX));
+                return Err(StepFailure {
+                    msg: format!("{}fatal: state corruption", FATAL_DWELLING_PREFIX),
+                    fatal: true,
+                });
             }
-            self.lock
-                .lock()
-                .map_err(|_| "acquire failed: poison".to_string())
+            self.lock.lock().map_err(|_| StepFailure {
+                msg: "acquire failed: poison".to_string(),
+                fatal: true,
+            })
         }
 
         fn mark_poisoned(&self) {
@@ -3691,9 +3741,15 @@ mod tests {
         assert!(guard.poisoned.load(Ordering::Acquire));
         let result = guard.acquire();
         assert!(result.is_err(), "acquire should fail when flag is set");
+        let failure = result.unwrap_err();
         assert!(
-            result.unwrap_err().starts_with(FATAL_DWELLING_PREFIX),
-            "error should carry fatal prefix"
+            failure.fatal,
+            "the poisoned flag's failure is fatal, carried as data"
+        );
+        assert!(
+            failure.msg.contains("fatal: state corruption"),
+            "the message states the corruption: {}",
+            failure.msg
         );
     }
 
@@ -3754,7 +3810,7 @@ mod tests {
     }
 
     #[test]
-    fn fatal_dwelling_prefix_detectable_by_callers() {
+    fn a_fatal_failure_carries_its_classification_as_data() {
         let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3762,8 +3818,13 @@ mod tests {
         guard.mark_poisoned();
         let err = guard.acquire().unwrap_err();
         assert!(
-            err.starts_with(FATAL_DWELLING_PREFIX),
-            "fatal errors must be detectable by prefix in GIL-free String contexts"
+            err.fatal,
+            "the fatal failure is flagged by its field, readable without \
+             the message"
+        );
+        assert!(
+            err.msg.starts_with(FATAL_DWELLING_PREFIX),
+            "the sentinel text stays in the fatal message for its readers"
         );
     }
 
@@ -3781,11 +3842,17 @@ mod tests {
             }
         }
 
-        fn acquire_string(&self) -> Result<MutexGuard<'_, i32>, String> {
+        fn acquire_string(&self) -> Result<MutexGuard<'_, i32>, StepFailure> {
             if self.poisoned.load(Ordering::Acquire) {
-                return Err(format!("{}fatal: state corruption", FATAL_DWELLING_PREFIX));
+                return Err(StepFailure {
+                    msg: format!("{}fatal: state corruption", FATAL_DWELLING_PREFIX),
+                    fatal: true,
+                });
             }
-            self.lock.lock().map_err(|_| "acquire failed".to_string())
+            self.lock.lock().map_err(|_| StepFailure {
+                msg: "acquire failed".to_string(),
+                fatal: true,
+            })
         }
 
         fn mark_poisoned(&self) {
@@ -3793,15 +3860,15 @@ mod tests {
         }
 
         /// Mirrors `PyDwelling::step_core_string`: locks via `acquire_string`,
-        /// then performs a step. Fatal errors carry `FATAL_DWELLING_PREFIX`.
-        fn step_core_string(&self) -> Result<i32, String> {
+        /// then performs a step. Fatal errors carry `fatal: true` as data.
+        fn step_core_string(&self) -> Result<i32, StepFailure> {
             let _guard = self.acquire_string()?;
             Ok(42)
         }
     }
 
     #[test]
-    fn step_core_string_returns_fatal_prefix_when_poisoned() {
+    fn step_core_string_propagates_the_fatal_flag_when_poisoned() {
         let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3809,9 +3876,9 @@ mod tests {
         guard.mark_poisoned();
         let err = guard.step_core_string().unwrap_err();
         assert!(
-            err.starts_with(FATAL_DWELLING_PREFIX),
-            "step_core_string must propagate the fatal prefix from acquire_string so \
-             batch_step_py can distinguish permanent from transient failures"
+            err.fatal,
+            "step_core_string must propagate the fatal flag from acquire_string \
+             so batch_step_py can distinguish permanent from transient failures"
         );
     }
 
