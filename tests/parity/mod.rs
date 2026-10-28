@@ -47,7 +47,7 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
     match (fixture_id, metric) {
         // cz5a_minisplit_gas_wh: the peak's residual is the pinned-start
         // recovery minute's maximum electric draw at the -19 C design
-        // temperature: HARES draws 17.89 kW there and OCHRE's 14.81 kW,
+        // temperature: HARES draws 18.04 kW there and OCHRE's 14.81 kW,
         // while the window's HVAC energies agree to 1.2 % (the fixture's
         // orphan air distribution system is gone from both sides' inputs,
         // so the old 33.6 % / 32.3 % residuals are closed at 1.2 % and
@@ -58,12 +58,17 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // full 17.58 kW rating for the minute plus ~0.3 kW fan; OCHRE's
         // ER fills the ideal load 14.41 kW plus its 0.25 kW fan and the
         // 0.15 kW pan heater (HVAC.py:1396-1407, 1427-1436, 1482-1497).
+        // The pan heater draws on both sides now (OCHRE conditions it on
+        // ambient temperature alone, HVAC.py:1495, so it runs in this
+        // ER-only minute; HARES's 0.15 kW adds to the larger HARES peak,
+        // moving the residual 20.8 to 21.8 %): the residual is the ER
+        // dispatch divergence measured at the peak.
         // EnergyPlus's unitary heat pump fires the full supplementary
         // element as HARES does; OCHRE's ideal ER fill is its own
         // continuous dispatch. The default stage table (D-020)'s only
         // vote in this window is the fan's capacity-proportional flow
         // (staging.rs:466): the window never operates the compressor.
-        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(21.5),
+        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(22.5),
         // cz6b_resistance_res_wh: both models cycle the resistance element
         // at its rating from the same pinned start, but the two envelope
         // models put the same total capacitance in different places, the

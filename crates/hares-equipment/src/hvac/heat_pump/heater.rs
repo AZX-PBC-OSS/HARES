@@ -42,6 +42,7 @@ use super::defrost::{
 use super::heater_config::{default_heater_telemetry, heater_telemetry_fields};
 use crate::config::constructor_equipment_id;
 use hares_physics::biquadratic::biquadratic;
+use hares_physics::constants::KW_TO_W;
 use hares_physics::ground::SourceTemperature;
 
 fn eir_from_backup_fuel(fuel: Option<FuelType>) -> f64 {
@@ -961,7 +962,10 @@ impl HeatPumpHeaterCore {
                 );
             }
             self.hvac.config.duct_dse = 1.0;
-            self.pan_heater_w = MSHP_PAN_HEATER_DEFAULT_KW;
+            // The pan heater's rated draw is an OCHRE class attribute in kW
+            // (HVAC.py:1482); this field joins the watt-valued electric sum,
+            // so the conversion lands once, where the unit changes.
+            self.pan_heater_w = MSHP_PAN_HEATER_DEFAULT_KW * KW_TO_W;
         } else {
             self.hvac.config.speed_control_mode = match cfg.common.number_of_speeds {
                 0 | 1 => SpeedControlMode::SingleSpeed,
@@ -2240,10 +2244,21 @@ impl HeatPumpHeaterCore {
         };
         let er_power_w = (er_capacity_w - defrost_resistive_thermal_w).max(0.0) * self.backup_eir;
 
+        // OCHRE MinisplitAHSPHeater.calculate_power_and_heat
+        // (HVAC.py:1489-1497) conditions the pan heater on ambient
+        // temperature and the rated draw alone -- never on compressor
+        // operation -- so the draw persists through compressor-off steps
+        // (winter standby) and ER-only operation. It joins the electric
+        // sum only ("no impact on sensible heat", HVAC.py:1493). The
+        // de-energized bus removes the supply the same way it does in the
+        // reference: the base equipment's run_zip zeroes the whole electric
+        // draw at zero volts (Equipment.py:201-202), so an islanded
+        // (energized) bus keeps the draw and a dead one drops it, as with
+        // the AC crankcase heater.
         self.pan_heater_on = matches!(self.variant, HeaterVariant::Minisplit)
+            && env.grid.bus_energized()
             && env.weather.outdoor_temp_c < self.pan_heater_temp_c
-            && self.pan_heater_w > 0.0
-            && hp_on;
+            && self.pan_heater_w > 0.0;
         let mut pan_heater_w = if self.pan_heater_on {
             self.pan_heater_w
         } else {
@@ -4256,6 +4271,124 @@ mod tests {
         assert_eq!(
             eq.core.hvac.runtime.last_speed_index, 1,
             "after the 300s dwell expires and zone temperature keeps falling, two-speed ASHP must escalate to high stage"
+        );
+    }
+
+    /// The pan heater runs on ambient temperature alone: OCHRE
+    /// MinisplitAHSPHeater.calculate_power_and_heat (HVAC.py:1489-1497)
+    /// sets `pan_heater_on = pan_heater_kw > 0 and t_ext < pan_heater_temp`
+    /// after the base class power computation, so the 0.150 kW condensate-pan
+    /// draw (class attribute, HVAC.py:1482) appears on every step below 0 C
+    /// including standby, where the compressor never runs. HARES gated the
+    /// same draw on compressor operation and read zero energy across every
+    /// standby step of the heating season.
+    #[test]
+    fn mshp_pan_heater_draws_on_winter_standby() {
+        let cfg = mshp_config_with(|_| {});
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        // Zone above the 21 C heating setpoint plus the 1 C hysteresis and
+        // below the 26 C cooling setpoint: the thermostat holds every mode
+        // off. Ambient -5 C is below the 0 C pan-heater threshold.
+        let e = env(23.0, -5.0, 0.003);
+        eq.init(&cfg, &e).unwrap();
+        let mode = eq.update_control(&e);
+        assert_eq!(
+            mode,
+            OperatingMode::Off,
+            "zone above the heating setpoint must hold the compressor off"
+        );
+
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            eq.core.pan_heater_on,
+            "the pan heater must run on winter standby: OCHRE gates it on \
+             ambient temperature alone (HVAC.py:1495)"
+        );
+        // OCHRE form (HVAC.py:1497): electric_kw += pan_heater_kw *
+        // space_fraction = 0.150 kW * 1.0 = 150 W on the meter, and no
+        // thermal output ("no impact on sensible heat", HVAC.py:1493). The
+        // port carries watts, the ductless minisplit's space_fraction is 1.0,
+        // and every other component is zero in this mode, so the port total
+        // is the pan heater's draw alone: 0.150 * KW_TO_W rounds to exactly
+        // 150.0 (the product's representation error, 5.6e-15, is below half
+        // an ulp at 150, 1.4e-14), and the zero additions that follow are
+        // exact.
+        let draw_w = ports.electrical.net_active_w();
+        assert_eq!(
+            draw_w, 150.0,
+            "standby draw must be pan_heater_kw * space_fraction = 150 W, got {draw_w} W"
+        );
+    }
+
+    /// ER-only operation leaves the compressor off, and the pan heater's
+    /// gate does not consult it (OCHRE HVAC.py:1495 conditions on ambient
+    /// temperature and the rated draw only): at -5 C the pan heater draws
+    /// alongside the backup elements.
+    #[test]
+    fn pan_heater_draws_in_er_only_mode() {
+        let cfg = mshp_config_with(|typed| {
+            typed.common.backup_capacity_w = Some(3_000.0);
+            typed.er_lockout_temp_c = Some(10.0);
+            // Force HP lockout so only ER runs.
+            typed.hp_lockout_temp_c = Some(50.0);
+            typed.er_setpoint_offset_c = Some(0.0);
+        });
+
+        // OAT cold enough to trigger the pan heater and below HP lockout.
+        let e = env(18.0, -5.0, 0.003);
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.init(&cfg, &e).unwrap();
+
+        let mode = eq.update_control(&e);
+        assert_eq!(mode, OperatingMode::HeatingER, "must be ER-only mode");
+
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+        assert!(
+            eq.core.pan_heater_on,
+            "the pan heater must draw in ER-only mode: OCHRE's gate reads \
+             ambient temperature alone (HVAC.py:1495)"
+        );
+    }
+
+    /// The de-energized bus removes the pan heater's supply: the reference
+    /// zeroes the whole electric draw at zero volts (OCHRE Equipment.py
+    /// run_zip:201-202, which runs after the pan heater joins electric_kw),
+    /// so a dead bus drops the draw an otherwise-identical cold step
+    /// carries, while an islanded (energized) bus keeps it.
+    #[test]
+    fn mshp_pan_heater_drops_on_a_de_energized_bus() {
+        let cfg = mshp_config_with(|_| {});
+        let mut eq = MinisplitHeater::new(cfg.clone());
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        let mut e = env(23.0, -5.0, 0.003);
+        e.grid.voltage_pu = 0.0;
+        e.grid.island_bus_voltage_pu = None;
+        eq.init(&cfg, &e).unwrap();
+        let mode = eq.update_control(&e);
+        assert_eq!(mode, OperatingMode::Off, "the outage forces every mode off");
+
+        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            !eq.core.pan_heater_on,
+            "the pan heater must not draw from a de-energized bus"
+        );
+        let draw_w = ports.electrical.net_active_w();
+        assert_eq!(
+            draw_w, 0.0,
+            "a de-energized bus must carry no electric draw, got {draw_w} W"
         );
     }
 
@@ -6795,40 +6928,6 @@ mod tests {
             "HP must lock out when OAT ({oat_below:.2}°C) is below \
              lockout - hysteresis ({:.2}°C)",
             lockout_c - DEFAULT_HP_LOCKOUT_HYSTERESIS_C
-        );
-    }
-
-    // Bug 2: Pan heater must only run when compressor (HP) is active.
-    // In ER-only mode the compressor is off; pan heater must be off.
-    #[test]
-    fn pan_heater_off_in_er_only_mode() {
-        let cfg = mshp_config_with(|typed| {
-            typed.common.backup_capacity_w = Some(3_000.0);
-            typed.er_lockout_temp_c = Some(10.0);
-            // Force HP lockout so only ER runs.
-            typed.hp_lockout_temp_c = Some(50.0);
-            typed.er_setpoint_offset_c = Some(0.0);
-        });
-
-        // OAT cold enough to trigger pan heater but below HP lockout → ER-only.
-        let e = env(18.0, -5.0, 0.003);
-        let mut eq = MinisplitHeater::new(cfg.clone());
-        let mut ports = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
-        eq.init(&cfg, &e).unwrap();
-        // Give the MSHP a non-zero pan heater so it would fire if the bug were present.
-        eq.core.pan_heater_w = 0.1;
-        eq.core.pan_heater_temp_c = 5.0; // OAT -5°C is below this
-
-        let mode = eq.update_control(&e);
-        assert_eq!(mode, OperatingMode::HeatingER, "must be ER-only mode");
-
-        eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
-        assert!(
-            !eq.core.pan_heater_on,
-            "pan heater must be off when compressor is not running (ER-only mode)"
         );
     }
 
