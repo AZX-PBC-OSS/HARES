@@ -95,7 +95,9 @@ pub struct GasFurnace {
 }
 
 /// Version 2: the thermostat hysteresis is persisted.
-const FURNACE_CHECKPOINT_VERSION: u32 = 2;
+/// Version 3: the electric furnace's assembled base is persisted with the
+/// moment draw it un-scales (the gas furnace stores `None`).
+const FURNACE_CHECKPOINT_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FurnaceState {
@@ -108,6 +110,9 @@ struct FurnaceState {
     operating_mode: OperatingMode,
     run_time_s: f64,
     electric_w: f64,
+    /// The moment's assembled base (the element's and blower's pre-scaling
+    /// draw), the pair to `electric_w`.
+    last_nominal_draw_w: Option<f64>,
     thermal_output_w: f64,
     fuel_input_w: f64,
     speed_index: f64,
@@ -299,7 +304,7 @@ impl Equipment for ElectricFurnace {
         // by it and answers the assembled response, the scaled sum over it.
         let nominal_component_w =
             self.rated_capacity_w * duty * sf * self.eir + self.fan_power_w * duty * sf;
-        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
+        let last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let gross_capacity_w = self.rated_capacity_w * duty * sf * element_multiplier;
         let fan_w = (self.fan_power_w * duty) * sf * fan_multiplier;
         // Heating element power + fan power
@@ -412,6 +417,9 @@ impl Equipment for ElectricFurnace {
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
         write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = last_nominal_draw_w;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_w: Some(ElectricPower::Consumption(electric_w.max(0.0))),
@@ -484,6 +492,7 @@ impl Equipment for ElectricFurnace {
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                last_nominal_draw_w: self.last_nominal_draw_w,
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 fuel_input_w: 0.0,
                 speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
@@ -516,6 +525,11 @@ impl Equipment for ElectricFurnace {
         self.run_time_s = decoded.run_time_s;
         self.mode_override = decoded.mode_override;
         self.dr_level = decoded.dr_level;
+        // The moment's assembled base restores with the draw it un-scales;
+        // a non-finite or non-positive report is no base.
+        self.last_nominal_draw_w = decoded
+            .last_nominal_draw_w
+            .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0);
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
             .insert(tk::THERMAL_OUTPUT_W, decoded.thermal_output_w);
@@ -975,6 +989,9 @@ impl Equipment for GasFurnace {
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                // The gas furnace's electric draw is its blower alone (a
+                // single row): no assembled base is needed.
+                last_nominal_draw_w: None,
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),

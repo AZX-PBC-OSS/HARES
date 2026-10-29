@@ -774,6 +774,11 @@ impl Equipment for GshpCooler {
         // construction default (all fields `None`) — a presence-rule
         // violation for every declared capability.
         self.core_output = self.inner.core_output().clone();
+        // The restored output omits the pump, so the assembled base that
+        // un-scales it is the inner's restored base: one moment, one pair
+        // of faces (the pre-restore base included the pump and is not the
+        // restored moment's).
+        self.last_nominal_draw_w = self.inner.nominal_electric_draw_w();
         Ok(())
     }
 
@@ -1167,6 +1172,9 @@ impl Equipment for WshpCooler {
         // `None`) — a presence-rule violation for every declared
         // capability.
         self.core_output = self.inner.core_output().clone();
+        // The restored output omits the pump, so the assembled base that
+        // un-scales it is the inner's restored base.
+        self.last_nominal_draw_w = self.inner.nominal_electric_draw_w();
         Ok(())
     }
 

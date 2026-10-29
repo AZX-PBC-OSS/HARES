@@ -199,6 +199,10 @@ struct AirConditionerState {
     last_speed_index: usize,
     last_speed_frac: f64,
     electric_w: f64,
+    /// The moment's assembled base (the components' pre-scaling draw), the
+    /// pair to `electric_w`: the premise aggregate un-scales the
+    /// checkpointed draw through it, so the two faces travel together.
+    last_nominal_draw_w: Option<f64>,
     sensible_cooling_w: f64,
     latent_cooling_w: f64,
     /// The last cooling step's SHR, `None` while the unit has never cooled:
@@ -234,7 +238,9 @@ struct AirConditionerState {
 // Version 5: `shr` became `Option<f64>`: `None` until the unit's first
 // cooling step, so the restore writes the telemetry key only when a cooled
 // step produced a value and a restored never-cooled unit's map matches a
-// continuously-run one's instead of gaining a 1.0 sentinel key.
+// continuously-run one's instead of gaining a 1.0 sentinel key. Also added
+// `last_nominal_draw_w`, the assembled base that un-scales the checkpointed
+// moment draw for the premise aggregate.
 const AC_CHECKPOINT_VERSION: u32 = 5;
 
 #[derive(Clone, Copy)]
@@ -1428,7 +1434,7 @@ impl CoolingCore {
         // under a limit the base is the capped reference draw, not the
         // nameplate rating: the step's own reference-voltage draw.
         let nominal_component_w = (compressor_w + fan_w + self.crankcase_heater_w) * sf;
-        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
+        let last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let compressor_w = compressor_w * motor_multiplier;
         let fan_w = fan_w * fan_multiplier;
         let crankcase_w = self.crankcase_heater_w * resistive_multiplier;
@@ -1622,6 +1628,9 @@ impl CoolingCore {
             post_dse_sensible_w + post_dse_latent_w,
             &mut self.telemetry,
         )?;
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = last_nominal_draw_w;
         let active_setpoint_c = match original_mode {
             OperatingMode::Cooling => sp.cooling_c,
             OperatingMode::Heating => sp.heating_c,
@@ -2083,6 +2092,7 @@ impl CoolingCore {
                 last_speed_index: self.hvac.runtime.last_speed_index,
                 last_speed_frac: self.hvac.runtime.last_speed_frac,
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                last_nominal_draw_w: self.last_nominal_draw_w,
                 sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
                 latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
                 // The key's presence is the cooled marker: an absent key
@@ -2136,6 +2146,14 @@ impl CoolingCore {
         self.hvac.runtime.plf_state = decoded.plf_state;
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
+        // The moment's assembled base restores with the draw it un-scales:
+        // the checkpoint publishes that draw, so a restored read divides by
+        // the same composition the checkpoint ran. A non-finite or
+        // non-positive report is no base (the aggregate's own acceptance
+        // rule), never a division by a broken checkpoint value.
+        self.last_nominal_draw_w = decoded
+            .last_nominal_draw_w
+            .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0);
         // The restored state's SHR is `None` until the unit's first cooling
         // step, as the continuous path's is: the last computed value rides
         // only when a cooled step produced one, and a never-cooled unit
@@ -4010,6 +4028,88 @@ mod tests {
             "the assembled response must be the hand computation \
              {expected_response}, got {reported_response} (the compressor \
              row alone evaluates {m_compressor})"
+        );
+    }
+
+    /// The assembled base is part of the moment a checkpoint restores: the
+    /// checkpointed step publishes its electric draw, so the base that
+    /// un-scales it must travel in the same blob. Without the base a
+    /// restored unit's premise read un-scales the checkpointed composition
+    /// through the compressor row (the parent's dishonest answer for a
+    /// multi-component moment) or, restored into a used instance, divides
+    /// the checkpointed draw by the pre-restore step's base: the published
+    /// response is then a function of the restore path, not of the state.
+    #[test]
+    fn checkpoint_restores_the_assembled_base_of_the_moment() {
+        let cfg = ac_config_with(|typed| {
+            typed.startup_cd = None;
+        });
+        let environment = env_at_second(27.0, 35.0, 0);
+
+        let run = |voltage_pu: f64, load_fraction: Option<f64>| -> AirConditioner {
+            let mut env_run = env_at_second(27.0, 35.0, 0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            if let Some(fraction) = load_fraction {
+                // A one-step control multiplier: the step composes it into
+                // the base and consumes it.
+                eq.apply_control(&ControlSignal::LoadFraction { fraction })
+                    .unwrap();
+            }
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &AirConditioner| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the unit must report its draw, got {other:?}"),
+        };
+
+        let half = run(0.5, Some(0.5));
+        let half_base = half
+            .nominal_electric_draw_w()
+            .expect("the composed step reports its base");
+        let half_draw = draw(&half);
+        let blob = half.save_state().expect("checkpoint");
+
+        // A fresh instance restores the base with the draw the blob
+        // carries: one moment, one pair of faces.
+        let mut fresh = AirConditioner::new(cfg.clone());
+        fresh.init(&cfg, &environment).unwrap();
+        fresh.load_state(&blob).unwrap();
+        assert_eq!(
+            fresh.nominal_electric_draw_w(),
+            Some(half_base),
+            "the checkpoint publishes the moment's draw, so it must restore \
+             the base that un-scales it"
+        );
+        assert_eq!(
+            draw(&fresh).to_bits(),
+            half_draw.to_bits(),
+            "fixture: the restored draw is the checkpointed draw"
+        );
+
+        // A used instance's pre-restore base is not the checkpoint's: the
+        // restore must replace it, never keep it.
+        let mut used = run(0.5, None);
+        assert_ne!(
+            used.nominal_electric_draw_w(),
+            Some(half_base),
+            "fixture: the full-composition base differs from the half"
+        );
+        used.load_state(&blob).unwrap();
+        assert_eq!(
+            used.nominal_electric_draw_w(),
+            Some(half_base),
+            "a restore replaces the base: the pre-restore step's base must \
+             not survive"
         );
     }
 
@@ -6970,14 +7070,14 @@ mod dr_tests {
         eq_full.init(&cfg, &environment).unwrap();
         let full_w = step_once(&mut eq_full, &environment);
 
-        let run = |voltage_pu: f64| -> AirConditioner {
+        let run = |voltage_pu: f64, fraction: f64| -> AirConditioner {
             let mut env_run = hot_env(30.0);
             env_run.grid.voltage_pu = voltage_pu;
             let mut eq = AirConditioner::new(cfg.clone());
             eq.init(&cfg, &environment).unwrap();
             // The load fraction is a one-step multiplier: applied before
             // each run's step, consumed by it.
-            eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.5 })
+            eq.apply_control(&ControlSignal::LoadFraction { fraction })
                 .unwrap();
             let mut ports = make_ports();
             eq.update_control(&env_run);
@@ -6990,8 +7090,8 @@ mod dr_tests {
             other => panic!("fixture: the unit must report its draw, got {other:?}"),
         };
 
-        let nominal_unit = run(1.0);
-        let sag_unit = run(0.5);
+        let nominal_unit = run(1.0, 0.5);
+        let sag_unit = run(0.5, 0.5);
         let nominal_w = draw(&nominal_unit);
         // The fixture discriminates: the crankcase heater is off at 30 C, so
         // the half-fractioned state's reference draw is exactly half the
@@ -7041,6 +7141,23 @@ mod dr_tests {
             "the response must not carry the duty factor ({response} is a \
              nameplate base's duty-carrying answer; the base already holds \
              the composition)"
+        );
+
+        // The composition's other edge: a fully-cycled-off fraction draws
+        // nothing, so the step reports no base at all. The aggregate then
+        // rosters the moment's zero weight (the P2 class), never a stale or
+        // nameplate base for a load the control turned off.
+        let off = run(0.5, 0.0);
+        assert_eq!(
+            draw(&off),
+            0.0,
+            "fixture: a zero load fraction draws nothing (the crankcase \
+             heater is off at 30 C)"
+        );
+        assert_eq!(
+            off.nominal_electric_draw_w(),
+            None,
+            "a step that drew nothing reports no assembled base"
         );
     }
 }

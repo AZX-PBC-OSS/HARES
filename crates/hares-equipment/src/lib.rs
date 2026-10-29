@@ -556,8 +556,12 @@ pub trait Equipment: Send + Sync {
     /// un-scale route).
     ///
     /// A report must be finite and positive: the aggregate accepts no other
-    /// value as a base. Pure inspection surface for the premise aggregate
-    /// ([`crate::ExpectedMeanPower`]'s sibling); never influences stepping.
+    /// value as a base. The base is checkpoint state wherever the checkpoint
+    /// publishes the moment's draw, so a restored read divides the restored
+    /// draw by the same composition; a unit whose restore publishes no draw
+    /// (a zero-flow restore instant) carries no base either. Pure inspection
+    /// surface for the premise aggregate ([`crate::ExpectedMeanPower`]'s
+    /// sibling); never influences stepping.
     fn nominal_electric_draw_w(&self) -> Option<f64> {
         None
     }

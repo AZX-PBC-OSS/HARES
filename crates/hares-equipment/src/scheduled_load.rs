@@ -101,6 +101,10 @@ fn slice_to_12(src: &[f64]) -> [f64; 12] {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct ScheduledLoadState {
     last_non_zero_power_w: f64,
+    /// The base that divides the checkpointed moment draw: the commanded
+    /// draw of a `PowerSetpoint` step, `None` for a schedule-driven step
+    /// (the resolved row's un-scale is the reference draw).
+    last_nominal_draw_w: Option<f64>,
     last_non_zero_gas_w: f64,
     last_reactive_power_var: f64,
     load_fraction: f64,
@@ -301,6 +305,12 @@ impl Equipment for ScheduledLoad {
         )]
     }
 
+    /// Version 2: the checkpoint carries the moment's assembled base, the
+    /// commanded draw of a `PowerSetpoint` step.
+    fn checkpoint_version() -> u32 {
+        2
+    }
+
     fn descriptor(&self) -> &EquipmentDescriptor {
         &self.descriptor
     }
@@ -337,8 +347,8 @@ impl Equipment for ScheduledLoad {
     ) -> std::result::Result<(), HaresError> {
         // The step's assembled base: only a PowerSetpoint-driven step has one
         // (set below); every other step's reference draw is the resolved
-        // row's un-scale.
-        self.last_nominal_draw_w = None;
+        // row's un-scale. It commits at the end, so a failed step leaves the
+        // checkpointed state unchanged.
         // Grid outage (de-energized bus): all outputs are zero. Gas scheduled
         // loads are also zeroed — modern gas appliances (ranges, dryers,
         // fireplaces with electronic ignition) need electricity to operate.
@@ -362,6 +372,7 @@ impl Equipment for ScheduledLoad {
         if !env.grid.bus_energized() || period_zeroed {
             self.last_non_zero_power_w = 0.0;
             self.last_non_zero_gas_w = 0.0;
+            self.last_nominal_draw_w = None;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::TOTAL_SENSIBLE_GAIN_W, 0.0);
@@ -402,6 +413,7 @@ impl Equipment for ScheduledLoad {
         if self.mode_override == Some(OperatingMode::Off) {
             self.last_non_zero_power_w = 0.0;
             self.last_non_zero_gas_w = 0.0;
+            self.last_nominal_draw_w = None;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::TOTAL_SENSIBLE_GAIN_W, 0.0);
@@ -440,7 +452,7 @@ impl Equipment for ScheduledLoad {
 
         // PowerSetpoint overrides the schedule entirely for this step. The override
         // is cleared at the end of this step (per-step, not persistent).
-        let (electric_power_w, reactive_power_var, gas_consumption_w) =
+        let (electric_power_w, reactive_power_var, gas_consumption_w, last_nominal_draw_w) =
             if let Some(override_w) = self.power_setpoint_override.take() {
                 // The override commands real power; the reactive side stays
                 // the ZIP model's at that power (Rule R1: Q-only, the real
@@ -450,9 +462,8 @@ impl Equipment for ScheduledLoad {
                 // is the override itself: the aggregate divides the step's
                 // draw by it and answers the flat response of 1.0 the engine
                 // takes, not the resolved row's evaluation.
-                self.last_nominal_draw_w = (override_w > 0.0).then_some(override_w);
                 let q = self.zip.reactive_var(override_w, env.grid.bus_voltage_pu());
-                (override_w, q, 0.0)
+                (override_w, q, 0.0, (override_w > 0.0).then_some(override_w))
             } else {
                 // Apply the month multiplier (D-013). Negative schedule
                 // values are silently clamped to zero -- OCHRE treats them as "no load" rather
@@ -494,7 +505,7 @@ impl Equipment for ScheduledLoad {
                 } else {
                     (0.0, 0.0)
                 };
-                (real_w, reactive_var, gas_w)
+                (real_w, reactive_var, gas_w, None)
             };
 
         #[cfg(feature = "observe")]
@@ -534,6 +545,9 @@ impl Equipment for ScheduledLoad {
         let total_sensible_w = total_gain_source_w * self.gains.sensible;
         let latent_gain_w = gain.latent_w;
         accumulate_zone_gain(ports, self.descriptor.zone, gain)?;
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = last_nominal_draw_w;
 
         self.telemetry.set(tk::ELECTRIC_KW, electric_power_w);
         self.telemetry
@@ -674,6 +688,7 @@ impl Equipment for ScheduledLoad {
         try_save_versioned(
             &ScheduledLoadState {
                 last_non_zero_power_w: self.last_non_zero_power_w,
+                last_nominal_draw_w: self.last_nominal_draw_w,
                 last_non_zero_gas_w: self.last_non_zero_gas_w,
                 last_reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 load_fraction: self.load_fraction,
@@ -694,6 +709,9 @@ impl Equipment for ScheduledLoad {
             self.descriptor().id,
         )?;
         self.last_non_zero_power_w = decoded.last_non_zero_power_w;
+        self.last_nominal_draw_w = decoded
+            .last_nominal_draw_w
+            .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0);
         self.last_non_zero_gas_w = decoded.last_non_zero_gas_w;
         self.load_fraction = decoded.load_fraction;
         self.mode_override = decoded.mode_override;
@@ -1463,6 +1481,76 @@ mod tests {
             (response - 1.0).abs() < 1e-15,
             "the assembled response of a flat override is exactly 1.0, got \
              {response} (the row's un-scale would answer 0.345)"
+        );
+    }
+
+    /// The flat overridden moment's base is checkpoint state: the checkpoint
+    /// publishes the commanded draw, so the base that divides it must
+    /// travel in the same blob. Without it the restored read un-scales a
+    /// flat draw through the Lighting row (0.345 at 0.5 pu, a response the
+    /// store never takes).
+    #[test]
+    fn checkpoint_restores_a_flat_overrides_base_with_its_draw() {
+        let run = |override_w: Option<f64>| -> ScheduledLoad {
+            let config = config_with_schedule("s", "Lighting", &[3.0]);
+            let mut env = base_env();
+            env.grid.voltage_pu = 0.5;
+            let mut eq =
+                ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+            eq.init(&config, &env).unwrap();
+            if let Some(active_power_w) = override_w {
+                eq.apply_control(&ControlSignal::PowerSetpoint {
+                    active_power_w,
+                    reactive_power_var: None,
+                    min_soc: None,
+                    max_soc: None,
+                })
+                .unwrap();
+            }
+            let mut ports = PortSlots {
+                thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+            eq
+        };
+
+        let overridden = run(Some(400.0));
+        let base = overridden
+            .nominal_electric_draw_w()
+            .expect("an overridden step knows its reference draw");
+        let blob = overridden.save_state().expect("checkpoint");
+
+        // A fresh instance restores the base with the draw the blob
+        // carries.
+        let mut fresh = run(None);
+        assert_eq!(
+            fresh.nominal_electric_draw_w(),
+            None,
+            "fixture: a schedule-only step has no assembled base"
+        );
+        fresh.load_state(&blob).unwrap();
+        assert_eq!(
+            fresh.nominal_electric_draw_w(),
+            Some(base),
+            "the checkpoint publishes the moment's draw, so it must restore \
+             the base that divides it"
+        );
+
+        // A used instance's pre-restore base is not the checkpoint's: the
+        // restore replaces it, never keeps it.
+        let mut used = run(Some(300.0));
+        assert_eq!(
+            used.nominal_electric_draw_w(),
+            Some(300.0),
+            "fixture: the pre-restore override is a different base"
+        );
+        used.load_state(&blob).unwrap();
+        assert_eq!(
+            used.nominal_electric_draw_w(),
+            Some(base),
+            "a restore replaces the base: the checkpoint's flat draw divides \
+             by the commanded draw, never by the pre-restore override"
         );
     }
 

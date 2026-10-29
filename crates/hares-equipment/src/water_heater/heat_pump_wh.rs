@@ -47,7 +47,9 @@ use super::{
 
 /// v3: the state no longer carries a ramp target setpoint (this type has
 /// no setpoint ramp).
-const HPWH_CHECKPOINT_VERSION: u32 = 4;
+/// v5: added `last_nominal_draw_w`, the assembled base that un-scales the
+/// checkpointed moment draw for the premise aggregate.
+const HPWH_CHECKPOINT_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HpwhState {
@@ -65,6 +67,9 @@ struct HpwhState {
     cop: f64,
     cap_mult: f64,
     electric_w: f64,
+    /// The moment's assembled base (the compressor's, backup element's and
+    /// fan/parasitic's pre-scaling draw), the pair to `electric_w`.
+    last_nominal_draw_w: Option<f64>,
     reactive_power_var: f64,
     compressor_power_w: f64,
     backup_element_power_w: f64,
@@ -1120,7 +1125,7 @@ impl Equipment for HeatPumpWH {
         // storing it here lets the premise aggregate answer the assembled
         // response, the scaled sum over it.
         let nominal_component_w = compressor_nominal_w + backup_nominal_w + fan_parasitic_w;
-        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
+        let last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let electric_power_w =
             compressor_power_w + backup_power_w + fan_parasitic_w * motor_multiplier;
         // Q from the already-computed (voltage-scaled) real power.
@@ -1283,6 +1288,9 @@ impl Equipment for HeatPumpWH {
         // Reset transient ctrl_load_fraction after this step so it does not
         // carry over to the next step unless reapplied by the controller.
         self.ctrl_load_fraction = 1.0;
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = last_nominal_draw_w;
         self.core_output = core_output;
 
         // Advance the DR duration once per step, at the step's end: the
@@ -1346,6 +1354,7 @@ impl Equipment for HeatPumpWH {
                 cop: self.telemetry.get(tk::COP).unwrap_or(0.0),
                 cap_mult: self.telemetry.get(tk::CAP_MULT).unwrap_or(1.0),
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                last_nominal_draw_w: self.last_nominal_draw_w,
                 reactive_power_var: self.telemetry.get(tk::REACTIVE_POWER_KVAR).unwrap_or(0.0),
                 compressor_power_w: self.telemetry.get(tk::COMPRESSOR_POWER_W).unwrap_or(0.0),
                 backup_element_power_w: self
@@ -1401,6 +1410,11 @@ impl Equipment for HeatPumpWH {
         self.dr_setpoint_offset_c = decoded.dr_setpoint_offset_c;
         self.dr_load_fraction = decoded.dr_load_fraction;
         self.dr_duration_remaining_s = decoded.dr_duration_remaining_s;
+        // The moment's assembled base restores with the draw it un-scales;
+        // a non-finite or non-positive report is no base.
+        self.last_nominal_draw_w = decoded
+            .last_nominal_draw_w
+            .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0);
         restore_optional_source(
             &mut self.appliance_draw_source,
             decoded.appliance_draw_source_state,

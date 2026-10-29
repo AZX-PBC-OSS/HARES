@@ -258,6 +258,9 @@ struct HeaterState {
     last_speed_index: usize,
     last_speed_frac: f64,
     electric_w: f64,
+    /// The moment's assembled base (the final components' pre-scaling sum,
+    /// the served space fraction included), the pair to `electric_w`.
+    last_nominal_draw_w: Option<f64>,
     thermal_output_w: f64,
     speed_index: f64,
     prev_base_setpoint: f64,
@@ -294,7 +297,9 @@ struct HeaterState {
 // Version 3: added `min_on_time_s`/`min_off_time_s` for short-cycle protection persistence.
 // Version 4: added `startup_c_d`, `startup_time_since_start_min`, `startup_was_on`
 // for startup ramp persistence across checkpoint restart.
-const HEATER_CHECKPOINT_VERSION: u32 = 4;
+// Version 5: added `last_nominal_draw_w`, the assembled base that un-scales the
+// checkpointed moment draw for the premise aggregate.
+const HEATER_CHECKPOINT_VERSION: u32 = 5;
 
 #[derive(Clone, Copy)]
 struct HeaterControl {
@@ -351,6 +356,10 @@ struct HeaterStep {
     /// Ground-loop circulation pump electrical power [kW]. GSHP only; zero
     /// for air-source equipment.
     pump_w: f64,
+    /// The moment's assembled base (the final components' pre-scaling sum,
+    /// the served space fraction included), committed by the outer step
+    /// once all its fallible work has succeeded.
+    nominal_draw_w: Option<f64>,
 }
 
 impl ASHPHeater {
@@ -1726,6 +1735,9 @@ impl HeatPumpHeaterCore {
             _ => sp.heating_c + self.dr_setpoint_offset_c,
         };
         write_ebm_telemetry(ebm_window, delivered_thermal_w, &mut self.telemetry)?;
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = step.nominal_draw_w;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_w: Some(ElectricPower::Consumption(scaled_electric_w.max(0.0))),
@@ -2516,7 +2528,7 @@ impl HeatPumpHeaterCore {
         };
         let nominal_component_w =
             (reference_electric_w + pump_w / pump_multiplier) * self.hvac.config.space_fraction;
-        self.last_nominal_draw_w = if nominal_component_w.is_finite() && nominal_component_w > 0.0 {
+        let nominal_draw_w = if nominal_component_w.is_finite() && nominal_component_w > 0.0 {
             Some(nominal_component_w)
         } else {
             None
@@ -2543,6 +2555,7 @@ impl HeatPumpHeaterCore {
             eir_ratio,
             latent_gain_w,
             pump_w: pump_w.max(0.0),
+            nominal_draw_w,
         })
     }
 
@@ -2869,6 +2882,7 @@ impl HeatPumpHeaterCore {
                 last_speed_index: self.hvac.runtime.last_speed_index,
                 last_speed_frac: self.hvac.runtime.last_speed_frac,
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                last_nominal_draw_w: self.last_nominal_draw_w,
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
                 prev_base_setpoint: self.prev_base_setpoint,
@@ -2935,6 +2949,11 @@ impl HeatPumpHeaterCore {
         self.hvac.runtime.startup.was_on = decoded.startup_was_on;
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
+        // The moment's assembled base restores with the draw it un-scales;
+        // a non-finite or non-positive report is no base.
+        self.last_nominal_draw_w = decoded
+            .last_nominal_draw_w
+            .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0);
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
         self.ctrl_power_limit_w = decoded.ctrl_power_limit_w.unwrap_or(f64::INFINITY);
         self.ctrl_mode_override = decoded.ctrl_mode_override;

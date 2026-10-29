@@ -755,7 +755,7 @@ impl Equipment for Dehumidifier {
         // components' pre-scaling sum. A zero draw reports no base, the same
         // "no positive weight" answer the aggregate gives every switched-off
         // load.
-        self.last_nominal_draw_w =
+        let last_nominal_draw_w =
             (snapshot.nominal_electric_w > 0.0).then_some(snapshot.nominal_electric_w);
         self.check_part_load_bounds(snapshot.plf, snapshot.rtf)?;
         #[cfg(feature = "observe")]
@@ -854,6 +854,9 @@ impl Equipment for Dehumidifier {
             },
             performance: CorePerformance::default(),
         };
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = last_nominal_draw_w;
         Ok(())
     }
 
@@ -915,6 +918,11 @@ impl Equipment for Dehumidifier {
         // published output on the same restore-instant state. The next
         // step re-derives the mode from the restored `is_on` dispatch.
         self.operating_mode = self.operating_mode.resolve_idle(false, None);
+        // The checkpoint carries no committed power, so the restore instant
+        // has no assembled base either: a non-positive draw reports none,
+        // and a pre-restore base must not survive into the zero-flow
+        // instant.
+        self.last_nominal_draw_w = None;
         self.write_step_telemetry(PerformanceSnapshot {
             water_removal_l_day: self.telemetry.get(tk::WATER_REMOVAL_L_DAY).unwrap_or(0.0),
             electric_power_w: self.telemetry.get(tk::ELECTRIC_POWER_W).unwrap_or(0.0),
@@ -1427,7 +1435,7 @@ mod tests {
             .unwrap();
         let state = eq.save_state().unwrap();
 
-        let mut restored = Dehumidifier::new(cfg);
+        let mut restored = Dehumidifier::new(cfg.clone());
         restored.init(&config(), &env(0.62)).unwrap();
         restored.load_state(&state).unwrap();
 
@@ -1437,6 +1445,28 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("a dehumidifier checkpoint must restore a contract-valid output");
+
+        // The restore instant publishes no draw, so it carries no assembled
+        // base: a used instance's pre-restore base must not survive into
+        // it (`nominal_electric_draw_w` is `None` when the moment drew
+        // nothing).
+        let mut used = Dehumidifier::new(cfg);
+        used.init(&config(), &env(0.62)).unwrap();
+        used.update_control(&env(0.62));
+        let mut slots = ports();
+        used.step(&env(0.62), Duration::from_secs(60), &mut slots)
+            .unwrap();
+        assert!(
+            used.nominal_electric_draw_w().is_some(),
+            "fixture: the running step reports its assembled base"
+        );
+        used.load_state(&state).unwrap();
+        assert_eq!(
+            used.nominal_electric_draw_w(),
+            None,
+            "the zero-flow restore instant carries no base: the pre-restore \
+             step's base must not survive"
+        );
     }
 
     #[test]

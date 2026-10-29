@@ -193,7 +193,9 @@ pub struct GasBoiler {
 
 /// Version 3: the fluid domain's first-publish marker is persisted (the
 /// absent-payload escape's bound survives a checkpoint resume).
-const BOILER_CHECKPOINT_VERSION: u32 = 3;
+/// Version 4: the electric boiler's assembled base is persisted with the
+/// moment draw it un-scales (the gas boiler stores `None`).
+const BOILER_CHECKPOINT_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BoilerState {
@@ -206,6 +208,10 @@ struct BoilerState {
     operating_mode: OperatingMode,
     run_time_s: f64,
     electric_w: f64,
+    /// The moment's assembled base (the element's and pump's pre-scaling
+    /// draw), the pair to `electric_w`: the premise aggregate un-scales the
+    /// checkpointed draw through it.
+    last_nominal_draw_w: Option<f64>,
     fuel_input_w: f64,
     thermal_output_w: f64,
     eir: f64,
@@ -431,7 +437,7 @@ impl Equipment for ElectricBoiler {
             0.0
         };
         let nominal_component_w = element_nominal_w + pump_nominal_w;
-        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
+        let last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let thermal_output_w = self.rated_capacity_w * duty * sf * element_multiplier;
         let element_w = thermal_output_w * self.eir;
         // Circulation pump runs whenever the boiler delivers heat (same
@@ -555,6 +561,9 @@ impl Equipment for ElectricBoiler {
         // validate_core_contract requirement that HAS_SETPOINT => setpoint_c is Some).
         let active_setpoint_c = sp.heating_c;
         write_ebm_telemetry(ebm_window, thermal_output_w, &mut self.telemetry)?;
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = last_nominal_draw_w;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_w: Some(ElectricPower::Consumption(electric_w.max(0.0))),
@@ -629,6 +638,7 @@ impl Equipment for ElectricBoiler {
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                last_nominal_draw_w: self.last_nominal_draw_w,
                 fuel_input_w: 0.0,
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 eir: self.eir,
@@ -662,6 +672,11 @@ impl Equipment for ElectricBoiler {
         self.mode_override = decoded.mode_override;
         self.dr_level = decoded.dr_level;
         self.fluid_payload_seen = decoded.fluid_payload_seen;
+        // The moment's assembled base restores with the draw it un-scales;
+        // a non-finite or non-positive report is no base.
+        self.last_nominal_draw_w = decoded
+            .last_nominal_draw_w
+            .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0);
 
         self.telemetry.insert(tk::ELECTRIC_KW, decoded.electric_w);
         self.telemetry
@@ -1211,6 +1226,10 @@ impl Equipment for GasBoiler {
                 operating_mode: self.operating_mode,
                 run_time_s: self.run_time_s,
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                // The gas boiler's electric draw is its pump alone (a single
+                // row): the premise aggregate's un-scale needs no assembled
+                // base, so the checkpoint stores none.
+                last_nominal_draw_w: None,
                 fuel_input_w: self.telemetry.get(tk::FUEL_INPUT_W).unwrap_or(0.0),
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 eir: self.telemetry.get(tk::EIR).unwrap_or(self.eir_max),
