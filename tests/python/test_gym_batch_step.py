@@ -15,7 +15,7 @@ from __future__ import annotations
 from array import array
 
 import pytest
-from conftest import make_dwelling
+from conftest import HARES_DEFAULTS, ROOT, SCHEDULE, WEATHER, make_dwelling
 
 _OBS_FIELDS = ["total_power_w", "outdoor_temp"]
 _SETPOINT_BOUNDS = [(-50.0, 80.0)]
@@ -375,3 +375,78 @@ def test_batch_step_surfaces_rejected_control_signal_in_info():
     assert any("Gas Furnace" in w for w in info["warnings"])
     # The messages were drained into info -- a subsequent poll is empty.
     assert dwelling.take_warnings() == []
+
+
+# The multi-zone fixture: the PV+battery example's home resolves to zones
+# 1 and 2 and no zone 0, so a step dict's zone keys are the two Zone_N
+# keys in zone order and no "Temperature - Indoor (C)" at all: the list a
+# single-zone dwelling's cache build would produce is absent, so a cache
+# built from the wrong dwelling's shape fails the pin. The battery's
+# bms_mode is the declaration its HPXML omits (a construction error
+# without it).
+_PV_BATTERY_HPXML = ROOT / "data" / "examples" / "pv_battery_example.xml"
+_BATTERY_BMS_MODE = (
+    '{"SelfConsumption": {"min_soc": 0.1, "max_soc": 1.0, '
+    '"solar_only_charging": false, "surplus_deadband_w": 0}}'
+)
+_ZONE_KEYS = [
+    "Temperature - Zone_1 (C)",
+    "Temperature - Zone_2 (C)",
+]
+
+
+def _multi_zone_dwelling():
+    from hares import Dwelling, SimulationConfig
+
+    dwelling = Dwelling.from_hpxml(
+        str(_PV_BATTERY_HPXML),
+        str(SCHEDULE),
+        str(WEATHER),
+        config=SimulationConfig(
+            start_time="2019-07-01T12:00:00",
+            duration=1800,
+            time_res=900,
+            master_seed=42,
+        ),
+        defaults=str(HARES_DEFAULTS),
+        bldg_id=1,
+        overrides={"Battery": {"bms_mode": _BATTERY_BMS_MODE}},
+    )
+    dwelling.initialize()
+    return dwelling
+
+
+def test_batch_step_zone_keys_cache_on_a_two_zone_batch():
+    """The per-dwelling zone-key cache is shared by the batch and the
+    single-step dict builds: a two-dwelling multi-zone batch carries the
+    full zone key list in zone order, the same dwelling's single step()
+    taken after the batch filled its cache carries the same keys, and the
+    batch row's zone values are the step's own (a fresh copy's first
+    single step, taken through its own cache, is byte-identical to the
+    batch's row). A cache indexed by anything other than the dwelling, a
+    single-zone key build, or a rebuild that reorders the keys fails this
+    pin."""
+    from hares._hares import batch_step
+
+    first, second, fresh = (
+        _multi_zone_dwelling() for _ in range(3)
+    )
+    buffer = _zero_buffer(2, 1)
+    plans = [_plan(first, ["total_power_w"]), _plan(second, ["total_power_w"])]
+    rows = batch_step([first, second], None, plans, [], {}, [], buffer, True)
+    for row in rows:
+        assert row["step"] is not None
+        assert list(row["step"].keys())[-len(_ZONE_KEYS):] == _ZONE_KEYS
+
+    # The shared-cache sequence the single-zone pins never run: the batch
+    # built this dwelling's cache, the single step() reuses it.
+    after = first.step()
+    assert list(after.keys())[-len(_ZONE_KEYS):] == _ZONE_KEYS
+
+    # The values are the step's own: the fresh copy's first step is the
+    # same state the batch's first row stepped, so a mis-indexed cache
+    # (zone temperatures under the wrong keys) moves the repr.
+    assert repr(fresh.step()) == repr(rows[0]["step"]), (
+        "the batch row's step dict is the single-step dict's own bytes, "
+        "zone keys and values included"
+    )

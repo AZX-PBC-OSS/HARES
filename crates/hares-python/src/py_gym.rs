@@ -85,7 +85,9 @@ struct StepResult {
 /// The batch path reads each environment's observation through this one
 /// wrapper around `Dwelling::observe_into`: the plan fills the
 /// environment's row of the caller's buffer in place, no per-row lists
-/// and no Python object per field.
+/// and no Python object per field. A failed acquire or read crosses as
+/// the message alone: the row ends that environment with `error_msg` and
+/// no `dwelling_fatal`, whatever poisoned the acquire.
 fn observe_environment_into(
     dwelling: &PyDwelling,
     plan: &hares_core::ObservationPlan,
@@ -894,8 +896,13 @@ pub fn batch_step_py(
                         if let Err(e) = observe_environment_into(dwelling, plan, row, idx) {
                             // A step whose observation fails ends that
                             // environment with its error: no substitute
-                            // vector, the row NaN, the environment done. The
-                            // dwelling itself is fine: a non-fatal failure.
+                            // vector, the row NaN, the environment done.
+                            // The failure is not classified here: the row
+                            // reports the message under `error_msg` and
+                            // no `dwelling_fatal`, whatever poisoned the
+                            // observation's acquire (a poisoned lock's
+                            // message still carries the fatal sentinel's
+                            // text, which no field reads).
                             info.push(("observation_error", 1.0));
                             row.fill(f64::NAN);
                             StepResult {

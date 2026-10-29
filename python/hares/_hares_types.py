@@ -96,20 +96,23 @@ class StepInfo(TypedDict):
     """Per-step ``info`` payload for :class:`hares.rl.DwellingGymEnv`.
 
     ``warning_count`` and ``warnings`` follow the same contract as the Rust
-    ``batch_step`` fast path: ``warning_count`` (float) is always present and
+    ``batch_step`` fast path: ``warning_count`` (int) is always present and
     counts the warnings drained from the dwelling during the step (e.g.
     control signals rejected at dispatch time); ``warnings`` (list[str]) is
     present only when the count is non-zero and holds the drained messages.
-    Warnings are drained exactly once per step, so a subsequent
+    ``seed`` is the episode's applied seed, present after any ``reset``
+    call (``reset(seed=...)`` stores the given seed, ``reset(seed=None)``
+    draws a random one) and omitted on a step taken before the first
+    ``reset``. Warnings are drained exactly once per step, so a subsequent
     ``Dwelling.take_warnings()`` will not return them again.
     """
 
-    seed: int
+    seed: NotRequired[int]
     timestep_index: int
     step: dict[str, Any]
     observation_bounds: dict[str, tuple[float, float]]
     initial_observation_mask: np.ndarray | None
-    warning_count: float
+    warning_count: int
     warnings: NotRequired[list[str]]
 
 class ArrowStreamExportable(Protocol):

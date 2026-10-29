@@ -653,8 +653,10 @@ class DwellingGymEnv(_GYM_BASE):
         drained from the dwelling during the step (e.g. control signals
         rejected at dispatch time); ``"warnings"`` (list[str]) is present only
         when the count is non-zero and holds the drained messages. ``"seed"``
-        is the episode's applied seed when one was set (``reset(seed=...)``);
-        it is omitted when no seed is set. Warnings
+        is the episode's applied seed, present after any ``reset`` call
+        (``reset(seed=...)`` stores the given seed, ``reset(seed=None)``
+        draws a random one) and omitted on a step taken before the first
+        ``reset``. Warnings
         are drained exactly once per step, so a subsequent
         ``Dwelling.take_warnings()`` will not return them again.
         """
