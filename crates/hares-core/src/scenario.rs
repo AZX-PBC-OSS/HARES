@@ -504,4 +504,111 @@ mod tests {
             "the sampled bedroom count must reach the patches the build consumed"
         );
     }
+
+    /// The wildcard override's round-trip: a sampled value whose target
+    /// is the wildcard (`all` or `*`, the overrides map's
+    /// pattern-matching keys) lands in every equipment that reads the
+    /// field, read back from the built dwelling's resolved model bit
+    /// for bit, the same pin the direct path's witness holds. The
+    /// mutation proof rides with it: a second draw's different value
+    /// flips the resolved multiplier, so the pin is coupled to the
+    /// sample and a wiring that dropped the application would fail the
+    /// bitwise comparison.
+    #[test]
+    fn a_wildcard_override_sample_reaches_the_equipment_that_reads_it() {
+        let spec_for = |wildcard: &str| {
+            ScenarioSpec {
+                name: "wildcard".to_string(),
+                parameters: vec![hares_types::ScenarioParameter {
+                    name: "load_multiplier".to_string(),
+                    unit: "fraction".to_string(),
+                    target: hares_types::ScenarioTarget::Override {
+                        equipment: wildcard.to_string(),
+                        field: "usage_multiplier".to_string(),
+                    },
+                    distribution: hares_types::ScenarioDistribution::Uniform {
+                        low: 0.7,
+                        high: 1.3,
+                    },
+                    correlation: None,
+                }],
+            }
+        };
+        let config_for = |settings: DwellingSettings| DwellingConfig {
+            hpxml: hares_io::InputSource::Path(
+                project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+            ),
+            schedule: Some(hares_io::InputSource::Path(
+                project_root().join("data/examples/BEopt_example_schedule.csv"),
+            )),
+            weather: hares_io::WeatherInput::Path(
+                project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: hares_io::DefaultsSource::directory(
+                project_root().join("python/hares/defaults"),
+            ),
+            settings,
+        };
+        // The multiplier the built load resolves: base.xml's two plug
+        // loads ("MELs" and "TV") are raw-parameter loads that read the
+        // wildcard's field, so the wildcard's reach is two equipment.
+        let resolved_multiplier = |dwelling: &Dwelling, load: &str| {
+            let resolved = dwelling.resolved_model();
+            let eq = resolved
+                .equipment
+                .iter()
+                .find(|eq| eq.name == load)
+                .unwrap_or_else(|| panic!("the dwelling resolves its {load} load"));
+            eq.parameters
+                .iter()
+                .find(|p| p.name == "usage_multiplier")
+                .unwrap_or_else(|| panic!("the {load} load resolves its usage_multiplier"))
+                .value
+        };
+        for wildcard in ["all", "*"] {
+            let spec = spec_for(wildcard);
+            let sample = spec.sample(42, 3, 7).expect("the sample draws");
+            let sampled = sample.values[0].value;
+            let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+            apply_sample(&sample, &mut settings).expect("the sample applies");
+            let dwelling =
+                Dwelling::from_config(config_for(settings)).expect("the scenario dwelling builds");
+            for load in ["MELs", "TV"] {
+                assert_eq!(
+                    resolved_multiplier(&dwelling, load),
+                    sampled,
+                    "the sampled multiplier must reach the {load} load bit for \
+                     bit through the '{wildcard}' override"
+                );
+            }
+        }
+        // The mutation proof, on the 'all' spelling: scenario 4's draw
+        // differs from scenario 3's, and the resolved multiplier flips
+        // with it.
+        let spec = spec_for("all");
+        let sampled = spec.sample(42, 3, 7).expect("the sample draws").values[0].value;
+        let perturbed = spec
+            .sample(42, 4, 7)
+            .expect("the perturbed sample draws")
+            .values[0]
+            .value;
+        assert!(
+            perturbed != sampled,
+            "the perturbed draw must differ from the base draw for the flip \
+             to be observable"
+        );
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        apply_sample(
+            &spec.sample(42, 4, 7).expect("the perturbed sample draws"),
+            &mut settings,
+        )
+        .expect("the perturbed sample applies");
+        let dwelling =
+            Dwelling::from_config(config_for(settings)).expect("the perturbed dwelling builds");
+        assert_eq!(
+            resolved_multiplier(&dwelling, "MELs"),
+            perturbed,
+            "the perturbed sample's resolved multiplier must flip with it"
+        );
+    }
 }
