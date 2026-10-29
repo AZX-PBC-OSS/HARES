@@ -2123,6 +2123,25 @@ mod tests {
         }
     }
 
+    /// A pre-1547 PV checkpoint (format v4, before the layer's state
+    /// existed) is refused with the typed version-mismatch error naming
+    /// both versions: the layer's state is checkpointed, never re-derived
+    /// from a save that predates it.
+    #[test]
+    fn a_pre_der1547_checkpoint_is_refused_not_migrated() {
+        let config = config_single_with_der1547(cat2_settings());
+        let mut pv = PV::new(config.clone());
+        let mut blob = pv.save_state().expect("the state saves");
+        blob[..4].copy_from_slice(&4u32.to_le_bytes());
+        let err = pv.load_state(&blob).expect_err("a v4 blob is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("blob=4"), "{msg}");
+        assert!(
+            msg.contains(&format!("expected={}", PV::checkpoint_version())),
+            "{msg}"
+        );
+    }
+
     /// The brownout round's F8 defect witness: a sustained 0.6 pu sag sits
     /// inside UV1's band (0.45 <= V < 0.70); the Category II default
     /// clearing time is 10 s (IEEE 1547-2018 voltage shall-trip defaults,
@@ -2178,7 +2197,6 @@ mod tests {
             pv.telemetry().get(tk::DER1547_UNCONFIGURED_EXCURSIONS),
             Some(0.0)
         );
-        let _ = baseline_w;
     }
 
     /// The ride-through window honored at a timestep finer than the
@@ -2222,7 +2240,6 @@ mod tests {
             "the accumulated 10 s reaches the window: tripped"
         );
         assert_eq!(pv.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
-        let _ = riding_w;
     }
 
     /// The frequency-droop shape at an over-frequency excursion: 60.536 Hz

@@ -1632,10 +1632,14 @@ ramp from the pre-disturbance output latched on engagement, at
 (zero for a generation-only inverter, the negative charge limit for the
 battery), under-frequency up toward the available injection, the same
 reference equations OpenDER uses (Eq. 3.7.1-12/13/14). With the default
-tables the ramp cannot cross zero inside the frequency trip bands (its
-reach at OF1's edge is 0.388 pu), so the floor binds only on the
-operator-settable surface; that identity is why a deep over-frequency
-excursion trips rather than ramping to zero output.
+tables a full-output inverter's ramp cannot reach the floor inside the
+frequency trip bands (at OF1's edge the reach is 0.388 pu, leaving a
+1.0 pu output at 0.612 pu), so a full-output inverter's deep
+over-frequency excursion trips rather than ramping to zero output. The
+floor is the standard's zero, not a surface-specific clamp: a partly
+loaded inverter (an output below the 0.388 pu reach) is curtailed to
+zero inside the trip band while its ride-through timer runs, and the
+trip still fires at the window's end.
 
 The discrete-time statement is the model's own: the engine steps at 900 s
 (typically), so a trip-band excursion reached in one step trips on that
@@ -1651,6 +1655,40 @@ without disconnecting) is not modeled: the shall-trip settings govern
 the whole ride-through window instead, which is the default settings'
 own semantics.
 
+The per-disturbance accounting, stated: each trip point's accumulator
+resets on the first step its condition does not hold, so two 6 s sags
+separated by a recovery are two rides (neither borrows the other's
+time), and the clearing time is a maximum: a step whose in-band time
+reaches it exactly is a tripped step (a disturbance held for exactly the
+window trips; it does not ride). The enter-service window's bounds are
+inside the window: a bus at 0.917 or 1.05 pu, at 59.5 or 60.1 Hz,
+accumulates the delay. The trip ends the ride-through measurement: the
+firing step reports the window it reached, and the latched inverter's
+per-disturbance timers are spent (the ride-through channel resets when
+the point trips), so a save taken while the latch holds carries no
+partial window.
+
+The frequency-droop pre-disturbance anchor is the inverter's undrooped
+output at the step the deadband is crossed, held while the excursion
+holds: the model's own output for that step is the operating point the
+disturbance found, and a controller with no earlier step is not anchored
+at zero. An inverter whose export function is off (the EV's export leg
+between dispatch steps) clears the anchor, so an excursion that ended
+while the inverter was idle cannot anchor the next ramp; a stale anchor
+would let an over-frequency droop command more than the pre-disturbance
+output. The island model reads the latch: a battery whose trip latch is
+set has ceased to energize and is not an island source (an island
+founded on it would run the loads on phantom power), while an island
+bus another source holds up counts toward the latched inverter's
+enter-service delay as any in-window bus does.
+
+The checkpoint answer: the PV, Battery and EV formats move to v5, v4 and
+v10 with the layer's state added, so a pre-1547 save (v4, v3, v9) is
+refused with the typed version-mismatch error rather than migrated or
+re-derived; a save taken mid-disturbance restores the exact 1547 state,
+the accumulator's window position included, into the controller the
+configuration built before the load.
+
 The layer's scope per DER class: the PV's inverter is governed at every
 step (a de-energized bus is the extreme under-voltage: the trip it
 produces is latched, and the return to service follows the enter-service
@@ -1659,7 +1697,7 @@ battery's and the EV export's layers govern **grid-connected operation
 only** - on a utility-outage step the outage model's contract governs
 instead (its timers reset and a latched trip waits on the enter-service
 windows), because those inverters can be their island's grid-forming
-source and a 1547 trip must never collapse the island it is holding up
+source and the layer must never trip one off the island it is holding up
 (the brownout round's F7 lesson). The EV's charge leg is the vehicle's
 load-side behavior and is not the DER function; the layer gates the
 export leg alone, while the battery's layer gates its inverter's both

@@ -47,7 +47,7 @@ class TestDer1547Surface:
     def test_unconfigured_pv_rides_the_sag_with_the_trip_state_offline(self):
         """Without a ``der_1547`` block the layer is unconfigured: the
         pre-1547 contract (the inverter rides the excursion as a pinned
-        source) with the trip state 0 — the explicit-configuration
+        source) with the trip state 0: the explicit-configuration
         surface, never a silent default."""
         dw = make_dwelling(duration_s=300, time_res_s=60)
         dw.add_pv(PV("TestPV", capacity_w=5000, tilt=30.0, azimuth=180.0))

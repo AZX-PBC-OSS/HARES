@@ -6433,6 +6433,25 @@ fn command_v2g_discharge(ev: &mut Ev, w: f64) {
     .expect("setpoint");
 }
 
+/// A pre-1547 EV checkpoint (format v9, before the layer's state existed)
+/// is refused with the typed version-mismatch error naming both versions:
+/// the layer's state is checkpointed, never re-derived from a save that
+/// predates it.
+#[test]
+fn a_pre_der1547_checkpoint_is_refused_not_migrated() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    let mut blob = ev.save_state().expect("the state saves");
+    blob[..4].copy_from_slice(&9u32.to_le_bytes());
+    let err = ev.load_state(&blob).expect_err("a v9 blob is refused");
+    let msg = err.to_string();
+    assert!(msg.contains("blob=9"), "{msg}");
+    assert!(
+        msg.contains(&format!("expected={}", Ev::checkpoint_version())),
+        "{msg}"
+    );
+}
+
 /// The F8-class defect's EV face: a sustained 0.6 pu sag sits inside
 /// UV1's band (0.45 <= V < 0.70); the Category II default clearing time
 /// is 10 s, so a 900 s timestep reaches it and the export inverter is

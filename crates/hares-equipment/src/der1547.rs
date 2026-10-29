@@ -347,7 +347,8 @@ pub struct Der1547State {
 impl Der1547State {
     /// The largest accumulated in-band time across the eight trip points,
     /// in seconds: how far into the closest clearing-time window the
-    /// disturbance is. The `der1547_ride_through_s` telemetry's source.
+    /// disturbance is. The state-based `der1547_ride_through_s` read's
+    /// source (the PV and the battery publish the step's outcome).
     pub fn max_accumulator_s(&self) -> f64 {
         self.uv1_s
             .max(self.uv2_s)
@@ -443,8 +444,7 @@ impl Der1547Controller {
     /// trip tables govern under any category's defaults: the widest
     /// watch band across the categories (under Cat III's UV1 0.88 pu and
     /// over the shared OV1 1.10 pu; below UF1's 58.5 Hz or above OF1's
-    /// 61.2 Hz). The unconfigured layer's excursion detector and the
-    /// configured layer's shared telemetry use it.
+    /// 61.2 Hz). The unconfigured layer's excursion detector uses it.
     pub fn excursion_present(v_pu: f64, f_hz: f64) -> bool {
         v_pu < IEEE1547_CAT3_UV1_TRIP_V_PU
             || v_pu > IEEE1547_OV1_TRIP_V_PU
@@ -997,6 +997,34 @@ mod tests {
         assert_eq!(sag.trip_reason, trip_reason::UV1);
     }
 
+    /// The enter-service window's bounds are inside the window (IEEE
+    /// 1547-2018 clauses 4.10.2/4.10.3 defaults: V in [0.917, 1.05] pu, f
+    /// in [59.5, 60.1] Hz): a restored bus at a bound accumulates the
+    /// delay; a step just outside it resets the accumulation.
+    #[test]
+    fn enter_service_windows_include_their_bounds() {
+        for (v, f, inside) in [
+            (1.05, 60.1, true),
+            (0.917, 59.5, true),
+            (1.0001, 60.1, true),
+            (1.0501, 60.0, false),
+            (0.9169, 60.0, false),
+            (1.0, 60.1001, false),
+            (1.0, 59.4999, false),
+        ] {
+            let mut ctrl = controller(&cat2(), 5000.0);
+            let trip = one_step(&mut ctrl, 0.6, 60.0, 60.0, 2700.0);
+            assert!(trip.tripped, "the 60 s sag trips UV1");
+            let out = one_step(&mut ctrl, v, f, 60.0, 2700.0);
+            assert!(out.tripped, "({v} pu, {f} Hz): the latch still holds");
+            let expected = if inside { 60.0 } else { 0.0 };
+            assert_eq!(
+                out.enter_service_s, expected,
+                "({v} pu, {f} Hz): the accumulation must be {expected} s"
+            );
+        }
+    }
+
     /// A disturbance that ends inside the ride-through window resets the
     /// accumulator: the window is per-disturbance, not cumulative.
     #[test]
@@ -1092,6 +1120,58 @@ mod tests {
         assert!((out.fw_adj_pu + 1.0 / 6.0).abs() < 1e-12);
     }
 
+    /// The droop's shape over the governed frequency range: constant at
+    /// the pre-disturbance output inside the deadband, linearly decreasing
+    /// beyond each edge at 1/(60 x 0.05) pu per Hz, capped at the
+    /// available injection on the under-frequency side, and monotone
+    /// non-increasing in frequency throughout (an over-frequency rise
+    /// would inject harder the worse the over-frequency gets).
+    #[test]
+    fn droop_shape_is_monotone_over_the_full_frequency_range() {
+        // 59.0 Hz to 61.0 Hz sits inside every default trip band's
+        // ride-through side (UF1's 58.5 and OF1's 61.2 never see it), so
+        // the sweep measures the droop shape alone.
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let mut prev = f64::INFINITY;
+        for i in 0..=2000 {
+            let f = 59.0 + 0.001 * i as f64;
+            let out = ctrl
+                .step(1.0, f, 900.0, true, 4500.0, 5000.0, 0.0)
+                .expect("valid step");
+            assert!(!out.tripped, "the sweep stays out of every trip band");
+            // The tolerance is far below one sweep step's 1.67 W, so it
+            // admits the pu-ratio rounding only, not a rise.
+            assert!(
+                out.p_ref_w <= prev + 1e-9,
+                "the reference rose with frequency at {f} Hz: {prev} -> {}",
+                out.p_ref_w
+            );
+            if (59.964..=60.036).contains(&f) {
+                assert!(
+                    (out.p_ref_w - 4500.0).abs() < 1e-9,
+                    "inside the deadband the reference is the 4500 W anchor, \
+                     got {} W at {f} Hz",
+                    out.p_ref_w
+                );
+            }
+            if i == 0 {
+                assert!(
+                    (out.p_ref_w - 5000.0).abs() < 1e-9,
+                    "the under-frequency ramp caps at the available 5000 W, \
+                     got {} W",
+                    out.p_ref_w
+                );
+            }
+            prev = out.p_ref_w;
+        }
+        let expected_w = (0.9 - (61.0 - 60.036) / 3.0) * 5000.0;
+        assert!(
+            (prev - expected_w).abs() < 1e-6,
+            "at 61.0 Hz the ramp is 0.9 - 0.32133 pu = {expected_w} W, \
+             got {prev} W"
+        );
+    }
+
     /// The droop's pre-disturbance latch holds while the excursion holds
     /// and re-latches from the output on recovery: two identical
     /// excursions ramp from the same base, not a ratcheted one.
@@ -1117,20 +1197,22 @@ mod tests {
     /// charge limit); a generation-only inverter's floor is zero.
     #[test]
     fn over_frequency_floor_stops_the_ramp() {
-        // Generation-only: the ramp cannot go below zero. The first step
-        // is itself the excursion (no pre-disturbance output to ramp
-        // from), so the reference floors at zero immediately.
+        // Generation-only: the ramp cannot go below zero. A 63.5 Hz step
+        // is 3.464 Hz beyond the deadband edge, 1.155 pu of ramp, beyond
+        // the 0.9 pu the inverter delivers: the reference floors at zero
+        // injection.
         let mut ctrl = controller(&cat2(), 5000.0);
         let out = ctrl
             .step(1.0, 63.5, 900.0, true, 4500.0, 4500.0, 0.0)
             .expect("valid step");
         assert_eq!(out.p_ref_w, 0.0, "the ramp floors at zero injection");
 
-        // The default trip tables bound the droop's reach: the ramp's
-        // reach at OF1's 61.2 Hz edge is (61.2 - 60.036)/3 = 0.388 pu, so
-        // from any p_pre <= 1.0 the reference cannot cross zero before a
-        // trip fires. The floor therefore binds only on the
-        // operator-settable surface: with the frequency trip points
+        // The default trip tables bound a full-output inverter's reach:
+        // at OF1's 61.2 Hz edge the ramp is (61.2 - 60.036)/3 = 0.388 pu,
+        // so a 1.0 pu output's reference cannot reach the floor before a
+        // trip fires. The floor is not reserved for the override surface
+        // though: a partly loaded inverter's ramp can reach it inside a
+        // trip band (pinned below). With the frequency trip points
         // widened, a 64 Hz excursion ramps a discharging inverter down
         // through zero into import, and the floor (the -2000 W charge
         // limit) stops the ramp at -0.4 pu of the 5000 W rating.
@@ -1153,6 +1235,34 @@ mod tests {
             .expect("valid step");
         assert!((out.p_ref_w + 2000.0).abs() < 1e-9);
         assert!(!out.tripped, "no trip point fires inside the widened band");
+    }
+
+    /// The droop's floor may bind inside a trip band while the ride-through
+    /// timer runs: a partly loaded inverter's 0.388 pu reach at OF1's edge
+    /// is more than its output, so the frequency-Watt function curtails it
+    /// to zero injection and it still rides the window (the trip, not the
+    /// floor, is the disconnection).
+    #[test]
+    fn the_droop_floor_binds_inside_a_trip_band_for_a_partly_loaded_inverter() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let mut out = ctrl
+            .step(1.0, 61.5, 60.0, true, 1500.0, 1500.0, 0.0)
+            .expect("valid step");
+        assert!(!out.tripped, "60 s is inside OF1's 300 s window");
+        assert_eq!(
+            out.p_ref_w, 0.0,
+            "0.3 pu of output less the 0.488 pu ramp floors at zero injection"
+        );
+        assert!((out.fw_adj_pu + 0.3).abs() < 1e-12);
+        assert_eq!(out.ride_through_s, 60.0);
+
+        for _ in 0..4 {
+            out = ctrl
+                .step(1.0, 61.5, 60.0, true, 1500.0, 1500.0, 0.0)
+                .expect("valid step");
+        }
+        assert!(out.tripped, "the 300 s window completes on the fifth step");
+        assert_eq!(out.trip_reason, trip_reason::OF1);
     }
 
     // -- Return to service (the reconnection delay). --
@@ -1339,8 +1449,7 @@ mod tests {
         let err = serde_json::from_str::<Der1547Settings>(r#"{"category":"II","uv1_s":5.0}"#)
             .expect_err("a top-level unknown key is an error");
         assert!(err.to_string().contains("unknown"), "{err}");
-        let err = serde_json::from_str::<Der1547Settings>(r#"{"category":"IV"}"#)
+        serde_json::from_str::<Der1547Settings>(r#"{"category":"IV"}"#)
             .expect_err("an unknown category is an error");
-        let _ = err;
     }
 }
