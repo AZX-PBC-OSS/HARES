@@ -32,6 +32,15 @@ fn python_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
         return Ok(serde_json::json!(u));
     }
     if let Ok(f) = obj.extract::<f64>() {
+        // serde_json maps a non-finite f64 to null, so a declared number
+        // that is not finite would reach the parser as a null and be
+        // rejected without naming the value: name it here instead.
+        if !f.is_finite() {
+            return Err(PyValueError::new_err(format!(
+                "the scenario spec carries the non-finite number {f}: every declared \
+                 parameter is finite"
+            )));
+        }
         return Ok(serde_json::json!(f));
     }
     if let Ok(s) = obj.extract::<String>() {

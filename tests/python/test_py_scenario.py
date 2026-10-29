@@ -295,10 +295,13 @@ class TestOverridesRoundTrip:
 
 
 class TestSpecValidation:
-    """The declared spec's loud errors."""
+    """The declared spec's loud errors: a typed ``ValueError`` from the
+    binding, never a Rust panic crossing (a panic surfaces as pyo3's
+    ``PanicException``, a ``BaseException``) and never a silently repaired
+    spec."""
 
     def test_unknown_distribution_is_an_error(self):
-        with pytest.raises(Exception, match="unknown variant"):
+        with pytest.raises(ValueError, match="unknown variant"):
             ScenarioSpec(
                 {
                     "name": "bad",
@@ -314,7 +317,7 @@ class TestSpecValidation:
             )
 
     def test_duplicate_names_are_an_error(self):
-        with pytest.raises(Exception, match="name"):
+        with pytest.raises(ValueError, match="name"):
             ScenarioSpec(
                 {
                     "name": "dup",
@@ -336,7 +339,7 @@ class TestSpecValidation:
             )
 
     def test_unknown_patch_field_is_an_error(self):
-        with pytest.raises(Exception, match="patch"):
+        with pytest.raises(ValueError, match="patch"):
             ScenarioSpec(
                 {
                     "name": "bad-patch",
@@ -346,6 +349,26 @@ class TestSpecValidation:
                             "unit": "count",
                             "target": {"patch": {"field": "not_a_patch_field"}},
                             "distribution": {"uniform": {"low": 0.0, "high": 1.0}},
+                        }
+                    ],
+                }
+            )
+
+    def test_a_spec_that_is_not_a_mapping_is_an_error(self):
+        with pytest.raises(ValueError, match="does not parse"):
+            ScenarioSpec("not a spec")  # type: ignore[arg-type]
+
+    def test_a_non_finite_parameter_is_an_error(self):
+        with pytest.raises(ValueError, match="non-finite"):
+            ScenarioSpec(
+                {
+                    "name": "nan",
+                    "parameters": [
+                        {
+                            "name": "p",
+                            "unit": "W",
+                            "target": {"override": {"equipment": "x", "field": "y"}},
+                            "distribution": {"uniform": {"low": float("nan"), "high": 1.0}},
                         }
                     ],
                 }
