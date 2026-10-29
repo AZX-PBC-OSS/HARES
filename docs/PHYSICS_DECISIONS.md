@@ -1340,11 +1340,15 @@ engine answers for the moment's composition: the weighting-draw-weighted
 mean of each governing equipment's own deep-sag response. For an
 equipment whose draw is scaled through a single resolved row, that
 response is the row's evaluation and un-scaling the stepped draw through
-the same row is exact. For a multi-component unit (an air conditioner's
+the same row recovers the reference draw to within the rounding of one
+division (the double round-trip is exact for many pairs but not for every
+one, so the aggregate's single-row weight carries a one-ulp bound, not a
+bit-for-bit identity). For a multi-component unit (an air conditioner's
 compressor, blower and crankcase heater; a heat-pump water heater's
-compressor, backup element and fan/parasitic; the electric furnace and
+compressor, backup element and fan/parasitic; a dehumidifier's on-cycle
+draw and off-cycle parasitic; the electric furnace and
 boiler's element and blower/pump; the heat pump's compressor, fan, pump
-and resistive elements) each component evaluates its OWN row, so no
+and resistive elements) each component evaluates its OWN row or response, so no
 single published row un-scales the blend: the unit's weight is the
 components' nominal draw (each final scaled component un-scaled through
 the row that scaled it) and its response is the components' actual
@@ -1363,6 +1367,24 @@ overstatement); a feeder study reading the aggregate at a deep sag
 would state a response the engine does not answer. At the reference
 voltage every multiplier is exactly 1.0, so the assembled response is
 exactly 1.0 and no committed golden moves.
+
+The base the aggregate divides by is the reference-voltage draw of the
+operating state the step ran, so it carries the control composition the
+step applied: duty cycle, load fraction, the served space fraction, and
+an active power limit (the capped reference draw, not the nameplate
+rating), because those act on the rated draw before the voltage response
+multiplies it. The aggregate accepts a base only when it is finite and
+positive; any other report falls back to the row's single-row evaluation.
+
+On an energized bus a row evaluation that is not finite and positive is
+also a draw the bus cannot supply: the classes that publish an
+expectation (the scheduled and event loads) scale their reference draw by
+the row and report the draw clamped at zero, so the expectation carries
+no weight and the aggregate weights only loads whose response is a
+positive multiplier. A published `deep_sag_scale` is therefore always a
+positive, finite multiplier, and the near-dead bus (the 0.01 pu edge of
+the de-energized boundary) degrades to `None` exactly as the 0.0 pu
+outage does when no load keeps a positive response.
 
 ## The pf = 0.0 sentinel is a reactive-only switch (the secondary real response keeps its row)
 

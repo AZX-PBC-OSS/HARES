@@ -527,18 +527,30 @@ pub trait Equipment: Send + Sync {
     /// that step ran at. `None` when the equipment has not stepped a
     /// positive draw or reports no assembled composition.
     ///
+    /// The state includes the control composition: duty cycle, load
+    /// fraction and an active power limit act on the rated draw before the
+    /// voltage response multiplies it, so under a limit the reported base is
+    /// the capped reference draw (what the equipment would draw at the
+    /// reference voltage with the same limit applied), not the nameplate
+    /// rating. Likewise a unit's space fraction is part of the base, because
+    /// the metered draw it must divide carries it.
+    ///
     /// For an equipment whose draw is scaled through a single resolved row
     /// the premise aggregate needs no answer here: un-scaling the stepped
-    /// draw through that row is exact. A multi-component unit (a compressor
-    /// with its own blower and crankcase elements, a heat-pump water
-    /// heater's compressor and backup element) evaluates each component
-    /// through its own row, so no single published row un-scales the blend;
-    /// this surface reports the components' nominal draws and the
-    /// aggregate's `deep_sag_scale` becomes the assembled response: the
-    /// components' actual evaluated draws over the components' nominal
-    /// draws. The default returns `None` (the single-row un-scale route).
+    /// draw through that row recovers the reference draw to within the
+    /// rounding of one division (it is not bit-exact for every pair). A
+    /// multi-component unit (a compressor with its own blower and crankcase
+    /// elements, a heat-pump water heater's compressor and backup element, a
+    /// dehumidifier's on-cycle draw and off-cycle parasitic) evaluates each
+    /// component through its own response, so no single published row
+    /// un-scales the blend; this surface reports the components' nominal
+    /// draws and the aggregate's `deep_sag_scale` becomes the assembled
+    /// response: the components' actual evaluated draws over the
+    /// components' nominal draws. The default returns `None` (the single-row
+    /// un-scale route).
     ///
-    /// Pure inspection surface for the premise aggregate
+    /// A report must be finite and positive: the aggregate accepts no other
+    /// value as a base. Pure inspection surface for the premise aggregate
     /// ([`crate::ExpectedMeanPower`]'s sibling); never influences stepping.
     fn nominal_electric_draw_w(&self) -> Option<f64> {
         None

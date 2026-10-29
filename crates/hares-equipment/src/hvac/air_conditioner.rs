@@ -1421,7 +1421,12 @@ impl CoolingCore {
         // own rows (the compressor and fan motors through their recorded
         // rows, the crankcase heater through the impedance share). The
         // premise aggregate weights this unit by it and answers the
-        // assembled response, the scaled sum over it.
+        // assembled response, the scaled sum over it. The state whose
+        // reference draw this is carries the control composition the step
+        // applied: duty cycle and load fraction, and an active power limit
+        // (the compressor and fan were scaled by `thermal_ratio` above), so
+        // under a limit the base is the capped reference draw, not the
+        // nameplate rating: the step's own reference-voltage draw.
         let nominal_component_w = (compressor_w + fan_w + self.crankcase_heater_w) * sf;
         self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let compressor_w = compressor_w * motor_multiplier;
@@ -6856,6 +6861,93 @@ mod dr_tests {
         assert!(
             kw_limited > 0.0,
             "PowerLimit must not zero out the equipment"
+        );
+    }
+
+    /// The assembled base under an active power limit: the limit acts on the
+    /// rated composition before the voltage response multiplies it, so the
+    /// reference-voltage draw for that state is the capped draw, not the
+    /// nameplate rating. The aggregate's weight must be that capped base (the
+    /// draw the same limited unit takes at 1.0 pu) and its response the capped
+    /// composition's blend: a base of the uncapped rating would divide the
+    /// capped draw by a reference the limit never let the unit reach.
+    #[test]
+    fn power_limited_moment_reports_the_capped_reference_draw() {
+        let cfg = base_config();
+        let environment = hot_env(30.0);
+
+        let mut eq_unlimited = AirConditioner::new(cfg.clone());
+        eq_unlimited.init(&cfg, &environment).unwrap();
+        let unlimited_w = step_once(&mut eq_unlimited, &environment);
+        // Half the unlimited draw, in watts (the signal and the stored field
+        // are watts: `apply_signal` assigns `max_power_w` to
+        // `ctrl_power_limit_w`, which the step compares against the electric
+        // draw).
+        let limit_w = 0.5 * unlimited_w;
+
+        let run = |voltage_pu: f64| -> AirConditioner {
+            let mut env_run = hot_env(30.0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.apply_control(&ControlSignal::PowerLimit {
+                max_power_w: limit_w,
+                ramp_rate_w_per_s: None,
+            })
+            .unwrap();
+            let mut ports = make_ports();
+            eq.update_control(&env_run);
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &AirConditioner| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the unit must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let nominal_w = draw(&nominal_unit);
+        assert!(
+            unlimited_w > limit_w,
+            "fixture: the limit must bind ({unlimited_w} W unlimited)"
+        );
+        assert!(
+            (nominal_w - limit_w).abs() < 1e-9,
+            "fixture: at the reference voltage the capped draw is the limit \
+             ({limit_w} W), got {nominal_w}"
+        );
+
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_w).abs() < 1e-6 * nominal_w,
+            "the base must be the capped reference draw {nominal_w}, got \
+             {reported_nominal} (the uncapped rating is {unlimited_w})"
+        );
+
+        // The response: the capped composition's components evaluate their own
+        // rows (compressor 1.6 x 0.25 - 2.69 x 0.5 + 2.09 = 1.145, blower
+        // 0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.355).
+        let component_w = |eq: &AirConditioner, key: &str| {
+            let w = eq.telemetry().get(key).unwrap_or(f64::NAN);
+            assert!(w.is_finite(), "fixture: {key} must be finite");
+            w
+        };
+        let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
+        let fan_n = component_w(&nominal_unit, tk::FAN_KW);
+        assert!(compressor_n > 0.0 && fan_n > 0.0, "fixture: both run");
+        let m_compressor: f64 = 1.6 * 0.25 - 2.69 * 0.5 + 2.09;
+        let m_fan: f64 = 0.26 * 0.25 + 0.9 * 0.5 - 0.16;
+        let expected_response =
+            (compressor_n * m_compressor + fan_n * m_fan) / (compressor_n + fan_n);
+        let response = draw(&sag_unit) / reported_nominal;
+        assert!(
+            (response - expected_response).abs() < 1e-9,
+            "the response must be the capped composition's blend \
+             {expected_response}, got {response}"
         );
     }
 }
