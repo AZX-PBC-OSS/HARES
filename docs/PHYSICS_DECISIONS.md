@@ -1403,4 +1403,7 @@ comparison's peak-minute tolerance for `cz5a_minisplit_gas_wh` re-pins
 OCHRE's 14.81 kW in the ER-only design-temperature minute, where both
 sides now carry the 0.15 kW pan draw on top of the documented ER
 dispatch divergence).
+<<<<<<< HEAD
 
+=======
+>>>>>>> d0f17396 (fix: the physics decision record is text to its last byte)
