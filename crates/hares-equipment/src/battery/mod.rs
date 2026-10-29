@@ -1326,7 +1326,13 @@ impl Equipment for Battery {
                 )?;
                 if outcome.tripped {
                     target_power_w = 0.0;
-                } else if outcome.fw_adj_pu != 0.0 {
+                } else if outcome.p_ref_w != -target_power_w {
+                    // The reference governs whenever it differs from the
+                    // model's own output, even when the droop's net
+                    // adjustment is zero (a zero pre-disturbance anchor
+                    // holds injection at zero). When the droop is inactive
+                    // the layer returns the model's output bitwise, so this
+                    // comparison leaves the grid-connected path untouched.
                     target_power_w = -outcome.p_ref_w;
                 }
                 der1547_tripped = outcome.tripped;

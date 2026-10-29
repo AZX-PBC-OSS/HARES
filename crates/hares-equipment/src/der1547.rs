@@ -368,8 +368,10 @@ pub struct Der1547Outcome {
     pub tripped: bool,
     pub trip_reason: u8,
     /// The active-power reference, in W in injection space (positive =
-    /// export): the droop-adjusted normal output when online, 0 when
-    /// tripped.
+    /// export): the injection the droop allows when online, 0 when
+    /// tripped. Bitwise the model's own output when the droop's reference
+    /// coincides with it in per unit, so a caller applies the reference on
+    /// an exact comparison without disturbing the undrooped path.
     pub p_ref_w: f64,
     /// The frequency-droop adjustment applied this step [pu of rating]
     /// (reference minus pre-disturbance output; 0.0 when inactive).
@@ -705,10 +707,21 @@ impl Der1547Controller {
                     (p_ref, p_ref - p_pre)
                 };
                 self.state.last_fw_adj_pu = fw_adj_pu;
+                // When the reference coincides with the model's own output
+                // in per unit (the droop is inactive, or its cap binds at
+                // the model's output), the outcome carries the model's
+                // value bitwise rather than its pu round-trip: the callers
+                // apply the reference on an exact comparison, so the
+                // nominal-frequency path stays bit-identical.
+                let p_ref_w = if p_ref_pu == p_normal_pu {
+                    p_normal_w
+                } else {
+                    p_ref_pu * p_max
+                };
                 Ok(Der1547Outcome {
                     tripped: false,
                     trip_reason: trip_reason::NONE,
-                    p_ref_w: p_ref_pu * p_max,
+                    p_ref_w,
                     fw_adj_pu,
                     ride_through_s: max_acc,
                     enter_service_s: 0.0,

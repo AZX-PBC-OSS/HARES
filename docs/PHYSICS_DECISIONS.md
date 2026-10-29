@@ -1672,7 +1672,12 @@ The frequency-droop pre-disturbance anchor is the inverter's undrooped
 output at the step the deadband is crossed, held while the excursion
 holds: the model's own output for that step is the operating point the
 disturbance found, and a controller with no earlier step is not anchored
-at zero. An inverter whose export function is off (the EV's export leg
+at zero. The reference governs whenever it differs from the model's own
+output: a zero anchor holds the inverter at the floor (zero injection)
+for the rest of an over-frequency excursion even as its irradiance or
+dispatch would otherwise raise it, and the layer returns the model's own
+output bitwise when the two coincide, so the undrooped path stays
+unchanged. An inverter whose export function is off (the EV's export leg
 between dispatch steps) clears the anchor, so an excursion that ended
 while the inverter was idle cannot anchor the next ramp; a stale anchor
 would let an over-frequency droop command more than the pre-disturbance

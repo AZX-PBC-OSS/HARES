@@ -1192,7 +1192,13 @@ impl Equipment for PV {
                     total_ac_power_w = 0.0;
                     total_dc_power_w = 0.0;
                     inverter_online = false;
-                } else if outcome.fw_adj_pu != 0.0 {
+                } else if outcome.p_ref_w != total_ac_power_w {
+                    // The reference governs whenever it differs from the
+                    // model's own output, even when the droop's net
+                    // adjustment is zero (a zero pre-disturbance anchor
+                    // holds injection at zero). When the droop is inactive
+                    // the layer returns the model's output bitwise, so this
+                    // comparison leaves the nominal path untouched.
                     total_ac_power_w = outcome.p_ref_w;
                     total_dc_power_w = total_ac_power_w / self.inverter_efficiency;
                 }
@@ -2140,6 +2146,61 @@ mod tests {
             msg.contains(&format!("expected={}", PV::checkpoint_version())),
             "{msg}"
         );
+    }
+
+    /// The droop reference governs whenever it differs from the model's own
+    /// output, even when the pre-disturbance anchor is zero: a PV whose
+    /// output was zero on the step the deadband was crossed (heavy cloud)
+    /// and rises while the excursion holds stays at the reference the zero
+    /// anchor floored at zero injection, rather than exporting the new
+    /// irradiance's output into an over-frequency grid.
+    #[test]
+    fn a_zero_anchor_excursion_holds_the_reference_as_the_output_rises() {
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let dark = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 0.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        pv.init(
+            &config_single_with_der1547(cat2_settings()),
+            &env_with_surfaces(dark.clone(), 25.0),
+        )
+        .unwrap();
+
+        // The deadband crossing finds a zero-output array: the anchor is
+        // 0 pu and the 0.5 Hz ramp floors at zero injection.
+        let mut hi_f_dark = env_with_surfaces(dark, 25.0);
+        hi_f_dark.grid.frequency_hz = 60.536;
+        let mut ports = PortSlots::default();
+        pv.step(&hi_f_dark, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(ports.electrical.generation_power_w, 0.0);
+        assert_eq!(pv.telemetry().get(tk::DER1547_FW_ADJ_PU), Some(0.0));
+
+        // The irradiance returns while the excursion holds: the latched
+        // zero anchor's reference is still zero injection.
+        let mut hi_f_sunny = env_with_surfaces(sunny, 25.0);
+        hi_f_sunny.grid.frequency_hz = 60.536;
+        ports.zero();
+        pv.step(&hi_f_sunny, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            ports.electrical.generation_power_w, 0.0,
+            "the held zero anchor's reference is zero injection"
+        );
+        assert_eq!(pv.telemetry().get(tk::AC_POWER_KW), Some(0.0));
+        assert_eq!(pv.telemetry().get(tk::DER1547_FW_ADJ_PU), Some(0.0));
     }
 
     /// The brownout round's F8 defect witness: a sustained 0.6 pu sag sits
