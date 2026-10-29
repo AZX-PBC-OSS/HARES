@@ -18,6 +18,8 @@
 //! whose accumulated time reaches it is a tripped step: with the common
 //! 900 s timestep every trip-band excursion is a same-step trip, and at
 //! fine timesteps the ride-through window is honored step by step. The
+//! accumulation is per disturbance: a step the point's condition does not
+//! hold resets its timer, and the trip spends it. The
 //! return-to-service delay integrates the same way off the bus voltage and
 //! frequency inside the enter-service windows.
 
@@ -372,7 +374,9 @@ pub struct Der1547Outcome {
     /// The frequency-droop adjustment applied this step [pu of rating]
     /// (reference minus pre-disturbance output; 0.0 when inactive).
     pub fw_adj_pu: f64,
-    /// The governing band's accumulated time this disturbance, in seconds.
+    /// The governing band's accumulated time this disturbance, in
+    /// seconds: the window the firing step reached on a trip, and zero
+    /// while the latch holds.
     pub ride_through_s: f64,
     /// The enter-service accumulation, in seconds while tripped.
     pub enter_service_s: f64,
@@ -636,6 +640,14 @@ impl Der1547Controller {
                 self.state.tripped = true;
                 self.state.trip_reason = reason;
                 self.state.es_s = 0.0;
+                self.state.uv1_s = 0.0;
+                self.state.uv2_s = 0.0;
+                self.state.ov1_s = 0.0;
+                self.state.ov2_s = 0.0;
+                self.state.uf1_s = 0.0;
+                self.state.uf2_s = 0.0;
+                self.state.of1_s = 0.0;
+                self.state.of2_s = 0.0;
                 self.state.fw_p_pre_pu = None;
                 self.state.last_fw_adj_pu = 0.0;
                 Ok(Der1547Outcome {
@@ -1194,6 +1206,39 @@ mod tests {
             .expect("valid step");
         assert!(!islanded.tripped, "900 s inside the windows reconnects");
         assert_eq!(islanded.p_ref_w, 2700.0, "the reconnected step produces");
+    }
+
+    /// The trip latch carries no running ride-through window: the firing
+    /// step reports the window it reached (the clearing time is a
+    /// maximum), and the latched inverter's per-disturbance timers are
+    /// spent. The ride-through measurement is per excursion
+    /// (`der1547_ride_through_s` "resets when the condition clears or the
+    /// point trips"), so a mid-trip checkpoint carries no stale window
+    /// either.
+    #[test]
+    fn the_trip_latch_carries_no_running_ride_through_window() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let ride = one_step(&mut ctrl, 0.6, 60.0, 5.0, 2700.0);
+        assert_eq!(ride.ride_through_s, 5.0);
+        let trip = one_step(&mut ctrl, 0.6, 60.0, 5.0, 2700.0);
+        assert!(trip.tripped);
+        assert_eq!(
+            trip.ride_through_s, 10.0,
+            "the firing step reports the window it reached"
+        );
+        assert_eq!(
+            ctrl.state().max_accumulator_s(),
+            0.0,
+            "the latched inverter's ride-through timers are spent"
+        );
+        assert_eq!(ctrl.state().uv1_s, 0.0);
+
+        // The next step (still tripped) keeps the latch and reports no
+        // window; the accumulation toward return-to-service is its own.
+        let latched = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2700.0);
+        assert!(latched.tripped);
+        assert_eq!(latched.ride_through_s, 0.0);
+        assert_eq!(latched.enter_service_s, 60.0);
     }
 
     // -- The state's checkpoint round trip. --
