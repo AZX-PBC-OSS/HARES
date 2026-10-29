@@ -4497,11 +4497,12 @@ fn assemble_from_blueprint_with_seed(
             {
                 return Err(HaresError::Dwelling(format!(
                     "event load '{}' (identity '{rng_identity}') carries a reserved \
-                     stream identity: the 'hares/schedule-diversity/' prefixed and \
-                     the 'hares/scenario-sampler/v1' identities are the schedule \
-                     diversity's and the scenario sampler's alone; give the \
+                     stream identity: the '{}'-prefixed and the '{}' identities are the \
+                     schedule diversity's and the scenario sampler's alone; give the \
                      equipment a different HPXML SystemIdentifier id or instance name",
-                    merged_cfg.name
+                    merged_cfg.name,
+                    hares_types::rng::SCHEDULE_DIVERSITY_IDENTITY_PREFIX,
+                    hares_types::rng::SCENARIO_SAMPLER_IDENTITY,
                 )));
             }
             let rng_stream = RngStream::event_load(rng.get_seed(), rng_identity);
