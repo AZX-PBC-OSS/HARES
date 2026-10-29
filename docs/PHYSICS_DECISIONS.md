@@ -1663,10 +1663,25 @@ reaches it exactly is a tripped step (a disturbance held for exactly the
 window trips; it does not ride). The enter-service window's bounds are
 inside the window: a bus at 0.917 or 1.05 pu, at 59.5 or 60.1 Hz,
 accumulates the delay. The trip ends the ride-through measurement: the
-firing step reports the window it reached, and the latched inverter's
-per-disturbance timers are spent (the ride-through channel resets when
-the point trips), so a save taken while the latch holds carries no
-partial window.
+firing step reports the window it reached, the firing point's own window
+and never another band's timer that ran on the same step (a 0.4 pu sag
+fills both UV1's and UV2's timers and reports UV2's 0.16 s, not UV1's
+10 s), and the latched inverter's per-disturbance timers are spent (the
+ride-through channel resets when the point trips), so a save taken while
+the latch holds carries no partial window.
+
+A simultaneous voltage and frequency excursion runs both trip paths: the
+eight points are independent on-delay timers, a step in two bands
+accumulates both, and the point that reaches its window trips the
+inverter. The standard sets each point against its own disturbance and
+does not rank them; the reason the model publishes is the first fired in
+the tables' fixed order (the deeper point before the shallower within a
+class, the voltage points before the frequency points), while the trip
+itself is the same whichever point names it. Every equipment publishes
+its own trip state on the step it fires, and the dwelling's dense
+per-DER channel is aligned with the equipment roster, so a step that
+trips several DERs publishes each at its own index in the roster's
+order.
 
 The frequency-droop pre-disturbance anchor is the inverter's undrooped
 output at the step the deadband is crossed, held while the excursion

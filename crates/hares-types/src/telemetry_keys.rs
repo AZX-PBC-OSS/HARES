@@ -576,8 +576,10 @@ pub const DER1547_TRIP_REASON: &str = "der1547_trip_reason";
 
 /// Seconds accumulated in the governing abnormal band this disturbance:
 /// how far into the active trip point's clearing-time (ride-through)
-/// window the inverter is. Resets when the condition clears or the point
-/// trips.
+/// window the inverter is. The trip ends the measurement: the firing step
+/// reports the window it reached (its firing point's own), and the
+/// latched steps report zero because the per-disturbance timers are
+/// spent. A recovery inside the window resets it to zero.
 ///
 /// scope: internal
 pub const DER1547_RIDE_THROUGH_S: &str = "der1547_ride_through_s";

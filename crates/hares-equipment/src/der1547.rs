@@ -22,6 +22,15 @@
 //! hold resets its timer, and the trip spends it. The
 //! return-to-service delay integrates the same way off the bus voltage and
 //! frequency inside the enter-service windows.
+//!
+//! Each point's timer is its own: a step in two bands accumulates both, and
+//! only the point that reaches its window trips the inverter, which spends
+//! every timer. When several points reach their windows on the same step,
+//! the trip reason is the first in the tables' fixed order (the deeper
+//! point before the shallower within a class, the voltage points before the
+//! frequency points), and the reported ride-through window is that point's
+//! own: the standard sets each point against its own disturbance and does
+//! not rank them.
 
 use serde::{Deserialize, Serialize};
 
@@ -347,8 +356,9 @@ pub struct Der1547State {
 impl Der1547State {
     /// The largest accumulated in-band time across the eight trip points,
     /// in seconds: how far into the closest clearing-time window the
-    /// disturbance is. The state-based `der1547_ride_through_s` read's
-    /// source (the PV and the battery publish the step's outcome).
+    /// disturbance is. The state-based read for the steps the layer does
+    /// not step (an idle export leg); a stepped step publishes its
+    /// outcome, whose trip carries the firing point's own window.
     pub fn max_accumulator_s(&self) -> f64 {
         self.uv1_s
             .max(self.uv2_s)
@@ -376,9 +386,12 @@ pub struct Der1547Outcome {
     /// The frequency-droop adjustment applied this step [pu of rating]
     /// (reference minus pre-disturbance output; 0.0 when inactive).
     pub fw_adj_pu: f64,
-    /// The governing band's accumulated time this disturbance, in
-    /// seconds: the window the firing step reached on a trip, and zero
-    /// while the latch holds.
+    /// The accumulated time of the point the step's excursion is timed
+    /// against, in seconds: on a trip, the firing point's own window (its
+    /// clearing time, the maximum the standard grants) even when other
+    /// bands ran on the step; while the inverter rides, the largest
+    /// accumulated time across the eight points; zero while the latch
+    /// holds.
     pub ride_through_s: f64,
     /// The enter-service accumulation, in seconds while tripped.
     pub enter_service_s: f64,
@@ -574,10 +587,18 @@ impl Der1547Controller {
         } else {
             // Grid-connected online: integrate every trip point's on-delay.
             // The points are visited deepest-first; the first firing point
-            // in that order names the reason.
+            // in that order names the reason. A voltage point precedes a
+            // frequency point when a simultaneous excursion completes both
+            // bands on one step: every point integrates independently, and
+            // the reason is the first fired in this fixed order rather than
+            // a resolution between classes (the standard defines each point
+            // against its own disturbance; it does not rank them).
             let dt = dt_s;
             let mut max_acc = 0.0_f64;
-            let mut fired: Option<u8> = None;
+            // The reason and the window its own timer reached. Both ride
+            // the trip: another holding band's accumulator is not evidence
+            // about the point that fired.
+            let mut fired: Option<(u8, f64)> = None;
             macro_rules! accumulate {
                 ($field:ident, $cond:expr, $point:expr, $reason:expr) => {{
                     let point: &TripPoint = &$point;
@@ -593,7 +614,7 @@ impl Der1547Controller {
                     // and a zero clearing time must not turn that zero
                     // into a trip.
                     if holds && self.state.$field >= point.clearing_s && fired.is_none() {
-                        fired = Some($reason);
+                        fired = Some(($reason, self.state.$field));
                     }
                 }};
             }
@@ -646,7 +667,7 @@ impl Der1547Controller {
                 trip_reason::OF1
             );
 
-            if let Some(reason) = fired {
+            if let Some((reason, window_reached_s)) = fired {
                 self.state.tripped = true;
                 self.state.trip_reason = reason;
                 self.state.es_s = 0.0;
@@ -665,7 +686,7 @@ impl Der1547Controller {
                     trip_reason: reason,
                     p_ref_w: 0.0,
                     fw_adj_pu: 0.0,
-                    ride_through_s: max_acc,
+                    ride_through_s: window_reached_s,
                     enter_service_s: 0.0,
                 })
             } else {
@@ -1096,6 +1117,73 @@ mod tests {
         let neither = one_step(&mut ctrl, 1.0, 60.0, 5.0, 2700.0);
         assert!(!neither.tripped);
         assert_eq!(ctrl.state().max_accumulator_s(), 0.0);
+    }
+
+    /// The trip's published window is the firing point's own. A 0.4 pu sag
+    /// sits below both UV2's 0.45 pu and UV1's 0.70 pu, so both on-delay
+    /// timers integrate; the deep point fires first (its 0.16 s window)
+    /// and the ride-through channel reports that window, not UV1's 10 s
+    /// timer that ran on the same excursion. The clearing time is each
+    /// point's own maximum; a trip is not evidence another band's window
+    /// elapsed.
+    #[test]
+    fn a_trip_publishes_the_firing_points_own_window() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let deep = one_step(&mut ctrl, 0.4, 60.0, 900.0, 2700.0);
+        assert!(deep.tripped);
+        assert_eq!(
+            deep.trip_reason,
+            trip_reason::UV2,
+            "the deep point is the governing one"
+        );
+        assert_eq!(
+            deep.ride_through_s, 0.16,
+            "UV2's window is the one the firing step reached"
+        );
+        assert_eq!(
+            ctrl.state().max_accumulator_s(),
+            0.0,
+            "the trip spends every point's timer"
+        );
+    }
+
+    /// A simultaneous voltage and frequency excursion runs both trip paths
+    /// at once. Every point integrates independently, so a step that
+    /// completes both windows trips on the step: the reason is the firing
+    /// point in the tables' fixed order (the voltage points are visited
+    /// before the frequency points, and the deeper point before the
+    /// shallower within a class), and the ride-through channel reports
+    /// that point's window rather than the longer frequency window the
+    /// same excursion also completed. The trip spends all of them.
+    #[test]
+    fn a_simultaneous_voltage_and_frequency_excursion_names_the_voltage_point() {
+        // 0.6 pu completes UV1's 10 s window; 61.5 Hz completes OF1's
+        // 300 s window on the same 300 s step.
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let out = one_step(&mut ctrl, 0.6, 61.5, 300.0, 2700.0);
+        assert!(out.tripped, "a step that completes either window trips");
+        assert_eq!(
+            out.trip_reason,
+            trip_reason::UV1,
+            "the voltage point is visited first: a step that completes both \
+             windows names it"
+        );
+        assert_eq!(
+            out.ride_through_s, 10.0,
+            "the published window is UV1's 10 s, not OF1's 300 s"
+        );
+        assert_eq!(
+            ctrl.state().max_accumulator_s(),
+            0.0,
+            "the trip spends both excursions' timers"
+        );
+
+        // The deeper point wins within a class: 1.25 pu completes OV2's
+        // 0.16 s window before OV1's 2.0 s one.
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let out = one_step(&mut ctrl, 1.25, 60.0, 900.0, 0.0);
+        assert_eq!(out.trip_reason, trip_reason::OV2);
+        assert_eq!(out.ride_through_s, 0.16);
     }
 
     // -- The frequency-droop shape. --
