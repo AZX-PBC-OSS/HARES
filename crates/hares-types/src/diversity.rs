@@ -29,9 +29,9 @@
 //! 0.25) and 0.999254 (water, sigma 0.30): a low bias of at most 0.075
 //! percent, not a drift that compounds with the spread. The clamp folds
 //! the variance too: the clamped lognormal's variance is 0.022687,
-//! 0.063662 and 0.089734 at the three spreads, 0.30, 1.29 and 4.71
-//! percent below the unclamped exp(sigma^2) - 1, so a home's per-home
-//! spread is the clamped draw's, narrower than the log-space sigma's.
+//! 0.063662 and 0.089734, which is 0.30, 1.29 and 4.71 percent below the
+//! unclamped exp(sigma^2) - 1. The fleet's per-home spread is therefore
+//! the clamped draw's, narrower than the log-space sigma's.
 //! The closed forms are held to an independent quadrature and to the
 //! drawn fleet's moments by
 //! `the_fleet_scale_moments_are_the_clamped_lognormals`. The timing
@@ -388,7 +388,7 @@ mod tests {
     /// 0.15, [0.6, 1.6]), 0.999854 (appliance, sigma 0.25, [0.5, 2.0]) and
     /// 0.999254 (water, sigma 0.30, [0.5, 2.0]), a stated low bias of at
     /// most 0.075 percent; the variance is 0.022687, 0.063662 and
-    /// 0.089734, 0.30, 1.29 and 4.71 percent below the unclamped
+    /// 0.089734, which is 0.30, 1.29 and 4.71 percent below the unclamped
     /// exp(sigma^2) - 1. The closed form is held to an independent Simpson
     /// quadrature of the normal density at 1e-6 relative, and 50,000 drawn
     /// homes hold it at four standard errors of the mean and of the
