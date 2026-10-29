@@ -1710,6 +1710,49 @@ mod tests {
             spec.sample(1, 1, 1).is_err(),
             "the sampler must refuse the spec it cannot apply"
         );
+
+        // The check is joint over the spec's parameters, correlated or
+        // not: two members of one correlation group share the group's
+        // factor and keep one target each, so two correlated parameters
+        // written to one target hit the same refusal. (One parameter
+        // carrying two targets is not a shape the spec can author: the
+        // type holds exactly one target per parameter.)
+        let correlated = ScenarioSpec {
+            name: "correlated-same-target".to_string(),
+            parameters: vec![
+                ScenarioParameter {
+                    name: "a".to_string(),
+                    unit: "fraction".to_string(),
+                    target: target(),
+                    distribution: uniform(0.7, 1.0),
+                    correlation: Some(ScenarioCorrelation {
+                        group: "load".to_string(),
+                        rho: 0.9,
+                    }),
+                },
+                ScenarioParameter {
+                    name: "b".to_string(),
+                    unit: "fraction".to_string(),
+                    target: target(),
+                    distribution: uniform(1.0, 1.3),
+                    correlation: Some(ScenarioCorrelation {
+                        group: "load".to_string(),
+                        rho: 0.9,
+                    }),
+                },
+            ],
+        };
+        let err = correlated
+            .validate()
+            .expect_err("two correlated parameters at one target must fail validation");
+        assert!(
+            err.to_string().contains("'a'") && err.to_string().contains("'b'"),
+            "the error must name both correlated parameters: {err}"
+        );
+        assert!(
+            correlated.sample(1, 1, 1).is_err(),
+            "the sampler must refuse the correlated spec it cannot apply"
+        );
     }
 
     /// A malformed distribution is an error naming it, never a panic or a
