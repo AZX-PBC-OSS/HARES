@@ -66,6 +66,20 @@ pub const WATER_TIMING_DIMENSION: &str = "water-timing";
 /// The water-level dimension: the water-heating magnitude scale.
 pub const WATER_LEVEL_DIMENSION: &str = "water-level";
 
+/// The dimensions' registry: every behavioral dimension of the family,
+/// in draw order. `ScheduleDiversityDraws::draw` consumes exactly one
+/// stream per entry and the keystream-disjointness pin walks this
+/// array with its per-home stream count derived from it, so a
+/// dimension joins the family by joining here, which joins the pin.
+/// There is no other list.
+pub const DIMENSIONS: [&str; 5] = [
+    PRESENCE_TIMING_DIMENSION,
+    OCCUPANCY_LEVEL_DIMENSION,
+    APPLIANCE_FACTORS_DIMENSION,
+    WATER_TIMING_DIMENSION,
+    WATER_LEVEL_DIMENSION,
+];
+
 /// The presence shift's band in hours: a discrete uniform over
 /// -3..=3. The band is the record's choice: wide enough that a fleet's
 /// morning peaks spread across the ramp hours, narrow enough that the
@@ -174,7 +188,8 @@ pub struct ScheduleDiversityDraws {
 
 impl ScheduleDiversityDraws {
     /// The home's draws under the per-dwelling key `dwelling_key`: one
-    /// stream per dimension, each dimension's draws in a fixed order.
+    /// stream per [`DIMENSIONS`] entry (the registry is the dimension
+    /// list), each dimension's draws in a fixed order.
     ///
     /// Contract: the key is the caller's scenario-mixed per-dwelling key
     /// (`hares_types::rng::dwelling_seed_scenario`), so two scenarios'
@@ -422,24 +437,22 @@ mod tests {
     }
 
     /// The draws never share a keystream: over a bounded fleet, each
-    /// home's five dimension streams, the scenario sampler's stream and
-    /// the dwelling's own stream 0 yield distinct first words. The
-    /// derivation's injectivity rides the key's bytes and the reserved
-    /// identities; a shared keystream is the collision it forbids, and
-    /// this is the constructive check over the fleet's actual draws.
+    /// home's dimension streams (walked from [`DIMENSIONS`], the code's
+    /// own registry), the scenario sampler's stream and the dwelling's
+    /// own stream 0 yield distinct first words, and the per-home stream
+    /// count is derived from the registry, so a dimension that joins it
+    /// joins this walk and its count with it. The derivation's
+    /// injectivity rides the key's bytes and the reserved identities; a
+    /// shared keystream is the collision it forbids, and this is the
+    /// constructive check over the fleet's actual draws.
     #[test]
     fn dimension_keystreams_are_disjoint_across_homes_and_dimensions() {
         use std::collections::BTreeMap;
 
-        let dimensions = [
-            PRESENCE_TIMING_DIMENSION,
-            OCCUPANCY_LEVEL_DIMENSION,
-            APPLIANCE_FACTORS_DIMENSION,
-            WATER_TIMING_DIMENSION,
-            WATER_LEVEL_DIMENSION,
-        ];
+        // + the sampler's stream and the dwelling's own stream 0.
+        let streams_per_home = DIMENSIONS.len() + 2;
         let mut seen: BTreeMap<u64, String> = BTreeMap::new();
-        let mut homes = 0_u32;
+        let mut homes = 0_usize;
         for bldg in 0..64_i64 {
             let key = dwelling_seed_scenario(42, Some(1), bldg);
             let own = crate::rng::RngStream {
@@ -451,7 +464,7 @@ mod tests {
             if let Some(other) = seen.insert(own, format!("dwelling stream 0 of bldg {bldg}")) {
                 panic!("bldg {bldg}'s dwelling stream shares a word with {other}");
             }
-            for dimension in dimensions {
+            for dimension in DIMENSIONS {
                 let word = RngStream::schedule_diversity(key, dimension)
                     .rng_at(0)
                     .random::<u64>();
@@ -467,8 +480,38 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            (homes * 7) as usize,
-            "every home contributes seven distinct keystreams"
+            homes * streams_per_home,
+            "every home contributes {streams_per_home} distinct keystreams"
         );
+    }
+
+    /// The registry's guard against the pin's count: the shipped family
+    /// holds five dimensions, and this file's disjointness walk and the
+    /// draw's five streams are written against that count. A registry
+    /// that outgrows the pin fails here with the work named: extend
+    /// `ScheduleDiversityDraws` and the disjointness walk with the new
+    /// dimension, then move the count.
+    #[test]
+    fn the_dimension_registry_cannot_outgrow_the_disjointness_pin() {
+        assert_eq!(
+            DIMENSIONS.len(),
+            5,
+            "the family gained a dimension: the draw's streams and the \
+             keystream-disjointness walk must name it, and this pin's count \
+             moves with them"
+        );
+        for dimension in [
+            PRESENCE_TIMING_DIMENSION,
+            OCCUPANCY_LEVEL_DIMENSION,
+            APPLIANCE_FACTORS_DIMENSION,
+            WATER_TIMING_DIMENSION,
+            WATER_LEVEL_DIMENSION,
+        ] {
+            assert!(
+                DIMENSIONS.contains(&dimension),
+                "the {dimension} dimension left the registry the disjointness \
+                 pin walks"
+            );
+        }
     }
 }
