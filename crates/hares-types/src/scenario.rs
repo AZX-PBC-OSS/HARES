@@ -751,6 +751,57 @@ mod tests {
         }
     }
 
+    /// The declaration-order contract: appending a parameter moves no
+    /// earlier parameter's draw. The parameters draw in declaration
+    /// order from the one sampler stream (a correlation group's shared
+    /// factors first), so a study extending its spec never rewrites the
+    /// recorded values of the parameters it already had, correlated
+    /// members included.
+    #[test]
+    fn appending_a_parameter_moves_no_earlier_draw() {
+        let correlated = |name: &str| ScenarioParameter {
+            name: name.to_string(),
+            unit: "W".to_string(),
+            target: override_target("all", "heating_capacity_w"),
+            distribution: uniform(0.0, 1.0),
+            correlation: Some(ScenarioCorrelation {
+                group: "load".to_string(),
+                rho: 0.9,
+            }),
+        };
+        let pair = spec(vec![correlated("a"), correlated("b")]);
+        let mut extended_parameters = pair.parameters.clone();
+        extended_parameters.push(ScenarioParameter {
+            name: "c".to_string(),
+            unit: "W".to_string(),
+            target: override_target("all", "tank_volume_m3"),
+            distribution: uniform(0.0, 1.0),
+            correlation: None,
+        });
+        let extended = spec(extended_parameters);
+
+        let base = pair.sample(42, 1, 7).expect("the pair samples");
+        let extended = extended
+            .sample(42, 1, 7)
+            .expect("the extended spec samples");
+        assert_eq!(
+            extended.values.len(),
+            base.values.len() + 1,
+            "the appended parameter joins the record's tail"
+        );
+        for (i, base_value) in base.values.iter().enumerate() {
+            assert_eq!(
+                extended.values[i], *base_value,
+                "appending parameter '{}' moved parameter '{}'s draw",
+                extended.values[2].name, base_value.name
+            );
+        }
+        assert_ne!(
+            extended.values[0].value, extended.values[1].value,
+            "the two correlated members' draws are distinct values"
+        );
+    }
+
     /// The KS witness: the empirical CDF of the sampled fleet conforms
     /// to the declared CDF (the max deviation within the N=4,000
     /// Kolmogorov band, the 1 percent critical value about 0.026, with
