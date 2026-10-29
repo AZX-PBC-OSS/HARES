@@ -115,6 +115,7 @@ fn build_islanded_dwelling(tag: &str) -> Dwelling {
         inverter_capacity_va: None,
         grid_forming: None,
         min_dwell_steps: 0,
+        der_1547: None,
     };
     let battery_config =
         EquipmentConfig::from_typed("Battery".to_string(), "Battery".to_string(), cfg).unwrap();

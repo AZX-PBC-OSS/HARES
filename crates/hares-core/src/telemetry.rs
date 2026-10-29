@@ -18,6 +18,12 @@ pub struct DwellingTelemetry {
     pub equipment_modes: Vec<f64>,
     pub equipment_soc: Vec<f64>,
     pub equipment_power_w: Vec<f64>,
+    /// Per-equipment IEEE 1547 trip state (0.0 online, 1.0 tripped), one
+    /// entry per equipment in the same order as `equipment_names`. 0.0
+    /// for equipment without a `der_1547` block (the layer's unconfigured
+    /// contract: the pre-1547 behavior, the excursion counted in the
+    /// equipment's own telemetry).
+    pub equipment_der1547_tripped: Vec<f64>,
     pub setpoint_heat_c: Vec<f64>,
     pub setpoint_cool_c: Vec<f64>,
     /// Per-zone energy balance residual (W) from the zone-air first-law check.
@@ -184,6 +190,7 @@ mod tests {
             equipment_modes: vec![1.0],
             equipment_soc: vec![0.5],
             equipment_power_w: vec![1.2],
+            equipment_der1547_tripped: vec![0.0],
             setpoint_heat_c: vec![20.0],
             setpoint_cool_c: vec![24.0],
             energy_balance_residuals: vec![0.0],
@@ -588,6 +595,7 @@ mod tests {
         t.equipment_soc = vec![0.5, 0.8];
         t.equipment_modes = vec![1.0, 0.0];
         t.equipment_power_w = vec![1.2, 0.0];
+        t.equipment_der1547_tripped = vec![0.0, 0.0];
         t
     }
 

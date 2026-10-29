@@ -57,6 +57,10 @@ impl PyTelemetry {
         out.set_item("modes", &self.inner.equipment_modes)?;
         out.set_item("soc", &self.inner.equipment_soc)?;
         out.set_item("power_w", &self.inner.equipment_power_w)?;
+        // The IEEE 1547 per-DER trip state (0.0 online, 1.0 tripped),
+        // aligned with `names`: the row-15 observability surface's first
+        // channel.
+        out.set_item("der1547_tripped", &self.inner.equipment_der1547_tripped)?;
         Ok(out)
     }
 

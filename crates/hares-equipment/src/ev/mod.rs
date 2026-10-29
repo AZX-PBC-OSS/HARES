@@ -98,6 +98,15 @@ pub struct Ev {
     v2g_soc_reserve: f64,
     v2g_max_discharge_w: f64,
     discharge_respects_deadline: bool,
+    /// The export inverter's IEEE 1547 controller, `Some` when the config
+    /// carries a `der_1547` block. Its state rides the checkpoint. The
+    /// layer governs the grid-connected export function only.
+    der1547: Option<crate::der1547::Der1547Controller>,
+    /// Grid excursions seen while the layer is unconfigured (the counted
+    /// event behind the run's first warning). Always 0 when configured.
+    der1547_unconfigured_excursions: u32,
+    der1547_unconfigured_warned: bool,
+    der1547_unconfigured_in_excursion: bool,
     /// The pack's live AC discharge ceiling [W] published for the driver
     /// actor's dispatch votes: the tighter of each enabled leg's rating
     /// and that leg's energy above its effective discharge floor over the
@@ -333,6 +342,10 @@ impl Ev {
             v2g_soc_reserve: DEFAULT_V2G_SOC_RESERVE,
             v2g_max_discharge_w: DEFAULT_V2G_MAX_DISCHARGE_W,
             discharge_respects_deadline: true,
+            der1547: None,
+            der1547_unconfigured_excursions: 0,
+            der1547_unconfigured_warned: false,
+            der1547_unconfigured_in_excursion: false,
             discharge_ceiling_w: 0.0,
             capacity_derate_model: crate::battery::CapacityDerateModel::default(),
             soc: DEFAULT_SOC.clamp(0.0, 1.0),
@@ -474,6 +487,32 @@ impl Ev {
         self.v2g_max_discharge_w = c.v2g_max_discharge_w.unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_W);
 
         self.discharge_respects_deadline = c.discharge_respects_deadline;
+        // The export inverter's IEEE 1547 layer: built from the config's
+        // `der_1547` block. The droop's per-unit base is the export
+        // rating: the larger of the two legs' discharge ceilings. An EV
+        // with no enabled export leg has no DER function for the layer to
+        // govern, so a `der_1547` block there is a configuration error.
+        self.der1547 = match &c.der_1547 {
+            Some(settings) => {
+                let p_max_w = self.v2g_max_discharge_w.max(self.v2l_max_discharge_w);
+                if !self.v2g_enabled && !self.v2l_enabled {
+                    return Err(HaresError::Equipment(format!(
+                        "{}: der_1547 is configured but the EV has no export \
+                         function (v2g_enabled and v2l_enabled are both false)",
+                        self.descriptor.name
+                    )));
+                }
+                Some(crate::der1547::Der1547Controller::new(
+                    settings,
+                    p_max_w,
+                    &self.descriptor.name,
+                )?)
+            }
+            None => None,
+        };
+        self.der1547_unconfigured_excursions = 0;
+        self.der1547_unconfigured_warned = false;
+        self.der1547_unconfigured_in_excursion = false;
         self.capacity_derate_model = crate::battery::CapacityDerateModel::default();
 
         self.chemistry = match c.chemistry.as_deref() {
@@ -1218,6 +1257,34 @@ impl Ev {
     fn write_telemetry(&mut self) {
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry.set(tk::ACTIVE_POWER_KW, self.active_power_w);
+        // The IEEE 1547 layer's state, published from the controller's
+        // own state so a non-discharging step reports the latch it holds.
+        match &self.der1547 {
+            Some(controller) => {
+                let state = controller.state();
+                self.telemetry
+                    .set(tk::DER1547_TRIPPED, f64::from(state.tripped));
+                self.telemetry
+                    .set(tk::DER1547_TRIP_REASON, f64::from(state.trip_reason));
+                self.telemetry
+                    .set(tk::DER1547_RIDE_THROUGH_S, state.max_accumulator_s());
+                self.telemetry.set(tk::DER1547_ENTER_SERVICE_S, state.es_s);
+                self.telemetry
+                    .set(tk::DER1547_FW_ADJ_PU, state.last_fw_adj_pu);
+                self.telemetry.set(tk::DER1547_UNCONFIGURED_EXCURSIONS, 0.0);
+            }
+            None => {
+                self.telemetry.set(tk::DER1547_TRIPPED, 0.0);
+                self.telemetry.set(tk::DER1547_TRIP_REASON, 0.0);
+                self.telemetry.set(tk::DER1547_RIDE_THROUGH_S, 0.0);
+                self.telemetry.set(tk::DER1547_ENTER_SERVICE_S, 0.0);
+                self.telemetry.set(tk::DER1547_FW_ADJ_PU, 0.0);
+                self.telemetry.set(
+                    tk::DER1547_UNCONFIGURED_EXCURSIONS,
+                    f64::from(self.der1547_unconfigured_excursions),
+                );
+            }
+        }
         self.telemetry.set(
             tk::CONNECTION_STATE,
             match self.connection_state {
@@ -1484,7 +1551,66 @@ impl Ev {
         let heater_ac_eq_w = heater_desired_dc_w / self.charging_efficiency.max(0.01);
 
         if let Some(leg) = discharge_leg {
-            let (export_ac_w, heater_dc_w) = self.compute_discharge(leg, dt, heater_desired_dc_w);
+            let (mut export_ac_w, heater_dc_w) =
+                self.compute_discharge(leg, dt, heater_desired_dc_w);
+
+            // The configured IEEE 1547 layer (grid-connected export
+            // surface): the abnormal-condition trip tables, the
+            // frequency-droop (frequency-Watt) function and the
+            // return-to-service delay apply to the export leg's
+            // grid-connected interchange. On a utility-outage step the
+            // outage model's contract governs instead: the layer is
+            // bypassed (its timers reset, a latched trip waits on the
+            // enter-service windows): the export leg can be the island's
+            // source and is never tripped off its own island. The charge
+            // leg is the vehicle's load-side behavior and is never the
+            // DER function. An unconfigured layer warns once on the first
+            // excursion it declines to govern.
+            match &mut self.der1547 {
+                Some(controller) => {
+                    // `compute_discharge` returns the port's sign
+                    // (negative = export); the controller's contract is
+                    // injection space (positive = export), negated here.
+                    let outcome = controller.step(
+                        env.grid.bus_voltage_pu(),
+                        env.grid.frequency_hz,
+                        dt.as_secs_f64(),
+                        !env.grid.grid_outage(),
+                        -export_ac_w,
+                        self.discharge_ceiling_w,
+                        0.0,
+                    )?;
+                    if outcome.tripped {
+                        export_ac_w = 0.0;
+                    } else if outcome.fw_adj_pu != 0.0 {
+                        export_ac_w = -outcome.p_ref_w;
+                    }
+                }
+                None => {
+                    let v = env.grid.bus_voltage_pu();
+                    let f = env.grid.frequency_hz;
+                    let excursion = env.grid.bus_energized()
+                        && crate::der1547::Der1547Controller::excursion_present(v, f);
+                    if excursion && !self.der1547_unconfigured_in_excursion {
+                        self.der1547_unconfigured_excursions += 1;
+                        if !self.der1547_unconfigured_warned {
+                            self.der1547_unconfigured_warned = true;
+                            tracing::warn!(
+                                ev = %self.descriptor.name,
+                                bus_voltage_pu = v,
+                                grid_frequency_hz = f,
+                                "EV export inverter has no der_1547 trip \
+                                 tables configured: the IEEE 1547 voltage and \
+                                 frequency response layer is inactive and the \
+                                 export rides the excursion as a pinned source; \
+                                 configure `der_1547` to enable it"
+                            );
+                        }
+                    }
+                    self.der1547_unconfigured_in_excursion = excursion;
+                }
+            }
+
             return Ok(ChargeStepPower {
                 charge_leg_ac_w: 0.0,
                 heater_draw_w: (heater_dc_w),
@@ -2058,6 +2184,14 @@ impl Equipment for Ev {
                 v2l_power_w: self.v2l_power_w,
                 away_charge_actual_w: self.away_charge_actual_w,
                 last_mode: self.last_mode,
+                der1547_state: self
+                    .der1547
+                    .as_ref()
+                    .map(|c| c.state().clone())
+                    .unwrap_or_default(),
+                der1547_unconfigured_excursions: self.der1547_unconfigured_excursions,
+                der1547_unconfigured_warned: self.der1547_unconfigured_warned,
+                der1547_unconfigured_in_excursion: self.der1547_unconfigured_in_excursion,
             },
             Self::checkpoint_version(),
             "Ev",
@@ -2115,6 +2249,15 @@ impl Equipment for Ev {
         self.drive_shortfall_j = cp.drive_shortfall_j;
         self.pending_drive_j = cp.pending_drive_j;
         self.last_mode = cp.last_mode;
+        // The IEEE 1547 layer's run state: restored into the live
+        // controller when the layer is configured (init_typed built it
+        // from the config before load_state ran).
+        self.der1547_unconfigured_excursions = cp.der1547_unconfigured_excursions;
+        self.der1547_unconfigured_warned = cp.der1547_unconfigured_warned;
+        self.der1547_unconfigured_in_excursion = cp.der1547_unconfigured_in_excursion;
+        if let Some(controller) = &mut self.der1547 {
+            controller.restore_state(cp.der1547_state);
+        }
 
         // `battery_capacity_j` is static config set by `init`, not
         // stored in the checkpoint (the caller must call `init` before
@@ -2226,7 +2369,11 @@ impl Equipment for Ev {
         //     charge leg, is not derivable at restore because the away
         //     state publishes zero port power; the charge-side
         //     counterpart of `v2l_power_w`, completing the family).
-        9
+        // v10: gained the IEEE 1547 layer's run state (der_1547 trip
+        //     timers, trip latch, enter-service accumulation,
+        //     frequency-droop latch) and the unconfigured layer's
+        //     excursion counter and warn latch.
+        10
     }
 
     /// The pack's stored charge (J), on the Battery reporter's exact

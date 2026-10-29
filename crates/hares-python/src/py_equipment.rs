@@ -247,6 +247,11 @@ pub struct PyBattery {
     pub charging_curve_lut: Option<RegularGridInterpolator>,
     pub ocv_table: Option<OcvTable>,
     pub u_neg_table: Option<UNegTable>,
+    /// The inverter's IEEE 1547-2018 response surface (`der_1547`): a
+    /// dict with `category` ("I", "II" or "III") and optional
+    /// `overrides`, deserialized into the typed settings at the
+    /// Python→JSON boundary. `None` leaves the layer unconfigured.
+    pub der_1547: Option<hares_equipment::Der1547Settings>,
 }
 
 impl PyBattery {
@@ -282,6 +287,7 @@ impl PyBattery {
             charging_curve_lut: None,
             ocv_table: None,
             u_neg_table: None,
+            der_1547: None,
         }
     }
 }
@@ -320,6 +326,7 @@ impl PyBattery {
         charging_curve_lut=None,
         ocv_table=None,
         uneg_table=None,
+        der_1547=None,
         **unexpected,
     ))]
     // PyO3 #[new] constructor must match the Python API parameter list.
@@ -355,9 +362,20 @@ impl PyBattery {
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
         ocv_table: Option<&Bound<'_, PyAny>>,
         uneg_table: Option<&Bound<'_, PyAny>>,
+        der_1547: Option<&Bound<'_, PyAny>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         crate::utils::check_equipment_unexpected_kwargs("Battery", "BatteryConfig", unexpected)?;
+        let der_1547 = match der_1547 {
+            Some(obj) => {
+                let value = crate::utils::python_to_json_value(obj)?;
+                Some(
+                    serde_json::from_value::<hares_equipment::Der1547Settings>(value)
+                        .map_err(crate::py_dwelling::to_py_err_display)?,
+                )
+            }
+            None => None,
+        };
         let lut = match charging_curve_lut {
             Some(obj) => Some(extract_charging_lut(py, obj)?),
             None => None,
@@ -371,6 +389,7 @@ impl PyBattery {
             None => None,
         };
         Ok(Self {
+            der_1547,
             name,
             capacity_j,
             max_charge_w,
@@ -624,12 +643,18 @@ pub struct PyPv {
     pub sam_lut_path: Option<String>,
     #[pyo3(get)]
     pub soiling: Option<PyPvSoilingConfig>,
+    /// The inverter's IEEE 1547-2018 response surface (`der_1547`): a
+    /// dict with `category` ("I", "II" or "III") and optional
+    /// `overrides`, deserialized into the typed settings at the
+    /// Python→JSON boundary. `None` leaves the layer unconfigured.
+    pub der_1547: Option<hares_equipment::Der1547Settings>,
 }
 
 #[pymethods]
 impl PyPv {
     #[new]
-    #[pyo3(signature = (name, *, capacity_w, tilt, azimuth, sam_lut_path=None, soiling=None, **unexpected))]
+    #[pyo3(signature = (name, *, capacity_w, tilt, azimuth, sam_lut_path=None, soiling=None, der_1547=None, **unexpected))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         capacity_w: f64,
@@ -637,9 +662,20 @@ impl PyPv {
         azimuth: f64,
         sam_lut_path: Option<String>,
         soiling: Option<PyPvSoilingConfig>,
+        der_1547: Option<&Bound<'_, PyAny>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         crate::utils::check_equipment_unexpected_kwargs("PV", "PvConfig", unexpected)?;
+        let der_1547 = match der_1547 {
+            Some(obj) => {
+                let value = crate::utils::python_to_json_value(obj)?;
+                Some(
+                    serde_json::from_value::<hares_equipment::Der1547Settings>(value)
+                        .map_err(crate::py_dwelling::to_py_err_display)?,
+                )
+            }
+            None => None,
+        };
         Ok(Self {
             name,
             capacity_w,
@@ -647,6 +683,7 @@ impl PyPv {
             azimuth,
             sam_lut_path,
             soiling,
+            der_1547,
         })
     }
 
@@ -710,12 +747,17 @@ pub struct PyEv {
     pub cell_resistance_ohm: Option<f64>,
     /// Optional 4D charging curve LUT (soc × temp × c_rate × soh → power_fraction).
     pub charging_curve_lut: Option<RegularGridInterpolator>,
+    /// The export inverter's IEEE 1547-2018 response surface (`der_1547`):
+    /// a dict with `category` ("I", "II" or "III") and optional
+    /// `overrides`, deserialized into the typed settings at the
+    /// Python→JSON boundary. `None` leaves the layer unconfigured.
+    pub der_1547: Option<hares_equipment::Der1547Settings>,
 }
 
 #[pymethods]
 impl PyEv {
     #[new]
-    #[pyo3(signature = (name, *, capacity_j=None, max_charging_power_w=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_va=None, battery_temp_c=None, min_charge_temp_c=None, full_power_temp_c=None, heater_power_w=None, heater_threshold_c=None, thermal_mass_j_per_k=None, ua_w_per_k=None, n_series=None, n_parallel=None, cell_resistance_ohm=None, charging_curve_lut=None, **unexpected))]
+    #[pyo3(signature = (name, *, capacity_j=None, max_charging_power_w=None, initial_soc=None, initial_connection_state=None, power_factor=None, charger_capacity_va=None, battery_temp_c=None, min_charge_temp_c=None, full_power_temp_c=None, heater_power_w=None, heater_threshold_c=None, thermal_mass_j_per_k=None, ua_w_per_k=None, n_series=None, n_parallel=None, cell_resistance_ohm=None, charging_curve_lut=None, der_1547=None, **unexpected))]
     // PyO3 #[new] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -738,11 +780,22 @@ impl PyEv {
         n_parallel: Option<u32>,
         cell_resistance_ohm: Option<f64>,
         charging_curve_lut: Option<&Bound<'_, PyAny>>,
+        der_1547: Option<&Bound<'_, PyAny>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         crate::utils::check_equipment_unexpected_kwargs("EV", "EvConfig", unexpected)?;
         let lut = match charging_curve_lut {
             Some(obj) => Some(extract_charging_lut(py, obj)?),
+            None => None,
+        };
+        let der_1547 = match der_1547 {
+            Some(obj) => {
+                let value = crate::utils::python_to_json_value(obj)?;
+                Some(
+                    serde_json::from_value::<hares_equipment::Der1547Settings>(value)
+                        .map_err(crate::py_dwelling::to_py_err_display)?,
+                )
+            }
             None => None,
         };
         Ok(Self {
@@ -764,6 +817,7 @@ impl PyEv {
             n_parallel,
             cell_resistance_ohm,
             charging_curve_lut: lut,
+            der_1547,
         })
     }
 
@@ -804,6 +858,7 @@ impl PyEv {
             n_parallel: None,
             cell_resistance_ohm: None,
             charging_curve_lut: None,
+            der_1547: None,
         }
     }
 
@@ -910,6 +965,7 @@ impl PyEv {
             n_parallel: None,
             cell_resistance_ohm: None,
             charging_curve_lut: None,
+            der_1547: None,
         }
     }
 }

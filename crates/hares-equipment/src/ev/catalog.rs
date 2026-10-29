@@ -206,6 +206,7 @@ impl VehicleSpec {
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
+                der_1547: None,
             },
         )
     }

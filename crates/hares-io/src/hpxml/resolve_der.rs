@@ -151,6 +151,7 @@ pub(super) fn resolve_pv(
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         };
 
         let mut spec = build_typed_spec("PV".to_string(), FuelType::Electric, cfg, defaults)?;
@@ -233,6 +234,7 @@ pub(super) fn resolve_batteries(
             inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
+            der_1547: None,
         };
         let mut spec = build_typed_spec("Battery".to_string(), FuelType::Electric, cfg, defaults)?;
         spec.system_id = battery_id_opt;
@@ -326,6 +328,7 @@ pub(super) fn resolve_ev(
             cc_cv_transition_soc: None,
             charging_priority: None,
             discharge_respects_deadline: true,
+            der_1547: None,
         };
         let mut spec = build_typed_spec("EV".to_string(), FuelType::Electric, cfg, defaults)?;
         spec.system_id = ev_id_opt;

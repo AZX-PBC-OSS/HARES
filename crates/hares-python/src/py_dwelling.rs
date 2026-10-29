@@ -547,6 +547,7 @@ fn battery_config_from_py(battery: &PyBattery) -> Result<EquipmentConfig, HaresE
         grid_export_rule: None,
         grid_forming: None,
         min_dwell_steps: 0,
+        der_1547: battery.der_1547.clone(),
     };
     EquipmentConfig::from_typed(battery.name.clone(), "Battery".to_string(), cfg)
 }
@@ -581,6 +582,7 @@ fn pv_config_from_py(pv: &PyPv) -> Result<EquipmentConfig, HaresError> {
         sam_lut_path: pv.sam_lut_path.clone(),
         soiling,
         arrays: None,
+        der_1547: pv.der_1547.clone(),
     };
     EquipmentConfig::from_typed(pv.name.clone(), "PV".to_string(), cfg)
 }
@@ -640,6 +642,7 @@ fn ev_config_from_py(ev: &PyEv) -> Result<EquipmentConfig, HaresError> {
         cc_cv_transition_soc: None,
         charging_priority: None,
         discharge_respects_deadline: true,
+        der_1547: ev.der_1547.clone(),
     };
     EquipmentConfig::from_typed(ev.name.clone(), "EV".to_string(), cfg)
 }
@@ -1661,6 +1664,7 @@ impl PyDwelling {
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
+                der_1547: None,
             },
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -2983,7 +2987,7 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
     }
 }
 
-fn to_py_err_display<E: std::fmt::Display>(err: E) -> PyErr {
+pub(crate) fn to_py_err_display<E: std::fmt::Display>(err: E) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
@@ -3638,6 +3642,7 @@ mod tests {
             azimuth: 180.0,
             sam_lut_path: Some("/tmp/example.parquet".to_string()),
             soiling: None,
+            der_1547: None,
         };
         let config = pv_config_from_py(&pv).expect("PV config");
         let typed: PvConfig = config.typed().expect("typed PvConfig");
@@ -3656,6 +3661,7 @@ mod tests {
             azimuth: 180.0,
             sam_lut_path: None,
             soiling: None,
+            der_1547: None,
         };
         let config = pv_config_from_py(&pv).expect("PV config");
         let env = pv_env(30.0, 180.0);
@@ -3684,6 +3690,7 @@ mod tests {
                 azimuth: 180.0,
                 sam_lut_path: Some(bad_lut_path.display().to_string()),
                 soiling: None,
+                der_1547: None,
             };
             let config = pv_config_from_py(&pv).expect("PV config");
             let env = pv_env(30.0, 180.0);

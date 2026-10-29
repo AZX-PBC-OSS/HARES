@@ -1366,6 +1366,17 @@ way. The named gap: a frequency-excursion study reads zero response by
 construction, and the channel's only consumers are the setters, the
 validators and the test constructors; a study needing one must land the
 coefficient source and the record first, and retire this entry.
+
+Scope update, the DER response layer's landing: the gap's load-side
+statement stands (no residential load class reads the channel), but the
+channel is no longer read by nothing - the inverter-based DER equipment
+(the PV, the battery's inverter, the EV's export leg) reads
+`GridState::frequency_hz` for its IEEE 1547 frequency trip tables and
+frequency-droop function when a `der_1547` block configures them, per
+the entry "The DER inverters answer the grid signals per IEEE 1547 when
+configured" (the coefficient source the gap demanded, landed and cited
+there). The unconfigured DER classes still read nothing, exactly as
+this entry records.
 ## The MSHP pan heater runs on ambient temperature alone
 
 The minisplit heat pump's condensate pan heater draws its rated 0.150 kW
@@ -1553,3 +1564,115 @@ per home is the smaller claim. A schedule CSV is never diversified:
 measured, upstream and hand-built schedules pass through untouched whatever
 the knob says. The parameter table, the provenance tiers and the
 `SimulationConfig.schedule_diversity` knob are docs/schedule-sources.md.
+## The DER inverters answer the grid signals per IEEE 1547 when configured
+
+The brownout round's F8 finding: the PV at a sustained 0.5 pu sag held
+2569.856304378 W bitwise, the same output as the 1.0 pu run, because the
+only voltage dependence a DER inverter had was the de-energized bus
+(`inverter_online = bus_energized()`), and at restoration from an island
+the PV was immediately back at full output with no reconnection timer.
+The frequency channel's own gap entry (above) records the channel being
+read by nothing. This entry records the DER response layer that closes
+both, for the inverter-based DER classes (the PV, the stationary
+battery's inverter, the EV's V2L/V2G export inverter).
+
+The form: an explicit per-equipment configuration surface, `der_1547`,
+on the PV, Battery and EV configs. **Unconfigured (the default): the
+pre-1547 behavior is kept** - the inverter rides any energized-bus
+excursion as a pinned source and only a de-energized bus stops it - and
+the layer is not silent about it: the first grid excursion the layer
+declines to govern is warned once per equipment (naming the equipment,
+the excursion and the `der_1547` key) and every excursion event is
+counted in `der1547_unconfigured_excursions` telemetry. **Configured:**
+the block states the DER's assigned abnormal-performance category (I, II
+or III) and optionally overrides any parameter. The category selects the
+standard's default settings; the overrides are the operator-settable
+surface (each parameter maps to one of the standard's setting names, and
+an out-of-range or non-finite override is a configuration error naming
+the parameter).
+
+The category this model's defaults follow is **Category II** (the
+residential DER class the engine models). The default values, and the
+public reproductions they are pinned against (the standard's tables are
+IEEE-copyrighted; these reproduce them verbatim):
+
+- Voltage shall-trip defaults, Category II (IEEE 1547-2018 voltage
+  shall-trip tables; NERC, "Bulk Power System Reliability Perspectives
+  on the Adoption of IEEE 1547-2018", March 2023, Table 1.2; MISO,
+  "Guideline for IEEE Std 1547 Implementation", Table 3): OV2 1.20 pu /
+  0.16 s, OV1 1.10 pu / 2.0 s, UV1 0.70 pu / 10 s, UV2 0.45 pu / 0.16 s.
+  (Category I differs in UV1's clearing time, 2.0 s; Category III in
+  OV1 13 s, UV1 0.88 pu / 21 s, UV2 0.50 pu / 2 s; both pinned from the
+  same sources.)
+- Frequency shall-trip defaults (identical across categories; MISO
+  Table 6): OF2 62.0 Hz / 0.16 s, OF1 61.2 Hz / 300 s, UF1 58.5 Hz /
+  300 s, UF2 56.5 Hz / 0.16 s.
+- Frequency-droop (frequency-Watt) parameters (identical across
+  categories; IEEE 1547-2018 clause 6.5.2.7.2 defaults, MISO Table 8):
+  dbOF = dbUF = 0.036 Hz, kOF = kUF = 0.05 pu power per pu frequency.
+- Enter-service criteria (identical across categories; IEEE 1547-2018
+  clauses 4.10.2/4.10.3 defaults, MISO Table 9): voltage within
+  [0.917, 1.05] pu, frequency within [59.5, 60.1] Hz, held for a
+  minimum 300 s delay before the DER re-energizes.
+
+The dynamic forms follow EPRI's OpenDER reference implementation
+(`epri-dev/OpenDER`, the IEEE 1547-2018 model of record; EPRI Report
+3002030962): each shall-trip point is an on-delay timer
+(`ConditionalDelay`, Eq. 3.12.4-2..4) whose accumulated in-band time
+integrates the timestep and caps at the clearing time; the point trips
+when the accumulator reaches the window, and the clearing time is a
+maximum, so a step whose accumulated time reaches it is a tripped step.
+The trip latches: a tripped inverter ceases to energize (no active
+power, no vars, and for the bidirectional battery inverter neither leg
+conducts) until the enter-service delay completes inside the
+enter-service windows. The frequency-droop function adjusts active power
+in injection space: inside the deadband, nothing; beyond it, a linear
+ramp from the pre-disturbance output latched on engagement, at
+1/(60 x k) pu per Hz - over-frequency down toward the injection floor
+(zero for a generation-only inverter, the negative charge limit for the
+battery), under-frequency up toward the available injection, the same
+reference equations OpenDER uses (Eq. 3.7.1-12/13/14). With the default
+tables the ramp cannot cross zero inside the frequency trip bands (its
+reach at OF1's edge is 0.388 pu), so the floor binds only on the
+operator-settable surface; that identity is why a deep over-frequency
+excursion trips rather than ramping to zero output.
+
+The discrete-time statement is the model's own: the engine steps at 900 s
+(typically), so a trip-band excursion reached in one step trips on that
+step and the 300 s reconnection delay completes within one step at
+nominal conditions - the pre-1547 restoration behavior is preserved at
+the 900 s timestep and the delay's pin lives at fine timesteps, where
+the ride-through windows hold step by step. OpenDER's open-loop response
+time (5 s) and reaction time for the droop are below any timestep the
+engine runs and are not modeled; the shape the row pins is the
+steady-state reference, not the filtered response. Momentary cessation
+(the ride-through operating mode where the inverter ceases to energize
+without disconnecting) is not modeled: the shall-trip settings govern
+the whole ride-through window instead, which is the default settings'
+own semantics.
+
+The layer's scope per DER class: the PV's inverter is governed at every
+step (a de-energized bus is the extreme under-voltage: the trip it
+produces is latched, and the return to service follows the enter-service
+delay, which closes F8's "immediately back at full output" half); the
+battery's and the EV export's layers govern **grid-connected operation
+only** - on a utility-outage step the outage model's contract governs
+instead (its timers reset and a latched trip waits on the enter-service
+windows), because those inverters can be their island's grid-forming
+source and a 1547 trip must never collapse the island it is holding up
+(the brownout round's F7 lesson). The EV's charge leg is the vehicle's
+load-side behavior and is not the DER function; the layer gates the
+export leg alone, while the battery's layer gates its inverter's both
+legs (one bidirectional DER inverter).
+
+Alternative rejected: defaults always on. The engine's existing
+scenarios (and their goldens and parity fixtures) were built against the
+pre-1547 inverter behavior, and turning the trip tables on without a
+configuration act would silently change every fleet run's DER response -
+the exact "silent default" class the quality bar bans. The explicit
+surface, the warn-once and the counted excursion keep the unconfigured
+runs honest and byte-compatible. A second alternative, porting OpenDER's
+full dynamic chain (the low-pass filter, the reaction time, momentary
+cessation, the enter-service soft-start ramp), is deferred: none of it
+is observable at the engine's timestep resolution, and each piece would
+be untestable behavior at this resolution rather than pinned physics.

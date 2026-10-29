@@ -216,6 +216,7 @@ fn ev_config(raw: HashMap<String, crate::config::ConfigValue>) -> EquipmentConfi
                 _ => ChargingPriority::DeadlineGuarantee,
             }),
             discharge_respects_deadline: true,
+            der_1547: None,
         },
     )
     .unwrap()
@@ -6386,6 +6387,7 @@ fn minimal_ev_config() -> EvConfig {
         cc_cv_transition_soc: None,
         charging_priority: None,
         discharge_respects_deadline: true,
+        der_1547: None,
     }
 }
 
@@ -6398,6 +6400,197 @@ fn ev_config_round_trips_via_equipment_config() {
     assert!(ec.is_typed());
     let recovered: EvConfig = ec.typed().unwrap();
     assert_eq!(recovered.capacity_j, cfg.capacity_j);
+}
+
+// -- The IEEE 1547 response layer (der_1547) on the export function. --
+
+fn v2g_config_with_der1547(settings: Option<crate::der1547::Der1547Settings>) -> EquipmentConfig {
+    let cfg = EvConfig {
+        der_1547: settings,
+        v2g_enabled: Some(true),
+        v2g_soc_reserve: Some(0.2),
+        v2g_max_discharge_w: Some(5000.0),
+        initial_soc: Some(0.8),
+        ..minimal_ev_config()
+    };
+    EquipmentConfig::from_typed("EV #1".to_string(), "EV".to_string(), cfg).unwrap()
+}
+
+fn cat2_settings() -> crate::der1547::Der1547Settings {
+    crate::der1547::Der1547Settings {
+        category: crate::der1547::Der1547Category::CatII,
+        overrides: None,
+    }
+}
+
+fn command_v2g_discharge(ev: &mut Ev, w: f64) {
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_w: -w,
+        reactive_power_var: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .expect("setpoint");
+}
+
+/// The F8-class defect's EV face: a sustained 0.6 pu sag sits inside
+/// UV1's band (0.45 <= V < 0.70); the Category II default clearing time
+/// is 10 s, so a 900 s timestep reaches it and the export inverter is
+/// tripped for the step. The charge leg is the vehicle's load-side
+/// behavior and is not the DER function: it is untouched by the layer.
+/// The pre-1547 model exported through the sag unchanged.
+#[test]
+fn witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_side() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    let mut sag = sample_env();
+    sag.grid.voltage_pu = 0.6;
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert_eq!(
+        ev.telemetry().get(tk::ACTIVE_POWER_KW),
+        Some(0.0),
+        "the 0.6 pu sag trips the configured export inverter (UV1: 10 s window)"
+    );
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_TRIP_REASON),
+        Some(2.0),
+        "uv1"
+    );
+
+    // The charge leg is load-side: a charging EV keeps charging through
+    // the sag (the DER layer governs the export function only).
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_w: 7200.0,
+        reactive_power_var: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .expect("setpoint");
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert!(
+        ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) > 1.0,
+        "the charge leg is the vehicle's load-side behavior, not the DER \
+         function: it continues through the sag"
+    );
+
+    // The unconfigured layer's EV face: the pre-1547 behavior, warned and
+    // counted.
+    let config = v2g_config_with_der1547(None);
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert!(
+        ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) < -0.1,
+        "unconfigured: the pre-1547 pinned-source behavior"
+    );
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_UNCONFIGURED_EXCURSIONS),
+        Some(1.0)
+    );
+}
+
+/// The F7 guard on the EV's face: on a utility-outage step the export leg
+/// can be the island's source, so the layer is bypassed and the export
+/// flows; the layer is never tripped off its own island.
+#[test]
+fn witness_der1547_ev_island_source_is_never_tripped_off_its_island() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    let mut islanded = sample_env();
+    islanded.grid.voltage_pu = 0.0;
+    islanded.grid.island_bus_voltage_pu = Some(1.0);
+    let mut ports = PortSlots::default();
+    ev.step(&islanded, Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert!(
+        ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) < -0.1,
+        "the island source exports through the outage step"
+    );
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+}
+
+/// The frequency-droop shape on the export leg: 60.536 Hz is 0.5 Hz
+/// beyond the 60.036 Hz deadband edge; the 5 percent droop slope is
+/// 1/(60 x 0.05) = 1/3 pu of the 5000 W export rating per Hz, so a
+/// 3000 W (0.6 pu) export ramps down 1/6 pu = 833.333 W to 2166.667 W.
+#[test]
+fn witness_der1547_ev_export_over_frequency_droop_reduces_export() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    // A normal step first: the droop's pre-disturbance latch takes the
+    // running export.
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .expect("step");
+
+    let mut hi_f = sample_env();
+    hi_f.grid.frequency_hz = 60.536;
+    let mut ports = PortSlots::default();
+    ev.step(&hi_f, Duration::minutes(15), &mut ports)
+        .expect("step");
+    let p_w = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+    let expected_w = -(3000.0 - 833.3333333333334);
+    assert!(
+        (p_w - expected_w).abs() < 1e-6,
+        "the droop sheds 1/6 pu of the 5000 W rating: expected \
+         {expected_w} W, got {p_w} W"
+    );
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+}
+
+/// The 1547 run state survives a checkpoint round trip: a trip latched
+/// before the save still holds after the restore.
+#[test]
+fn witness_der1547_ev_trip_latch_survives_checkpoint_round_trip() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    let mut sag = sample_env();
+    sag.grid.voltage_pu = 0.6;
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+
+    let state = ev.save_state().unwrap();
+    let mut restored = Ev::new(config.clone());
+    restored.init(&config, &sample_env()).expect("init");
+    restored.load_state(&state).expect("load");
+
+    command_v2g_discharge(&mut restored, 3000.0);
+    let mut ports = PortSlots::default();
+    restored
+        .step(&sag, Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert_eq!(
+        restored.telemetry().get(tk::DER1547_TRIPPED),
+        Some(1.0),
+        "the latch rode the checkpoint"
+    );
+    assert_eq!(restored.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
 }
 
 #[test]

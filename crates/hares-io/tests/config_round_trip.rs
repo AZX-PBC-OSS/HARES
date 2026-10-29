@@ -485,6 +485,7 @@ fn sample_battery_config() -> BatteryConfig {
         inverter_capacity_va: None,
         grid_forming: Some(true),
         min_dwell_steps: 0,
+        der_1547: None,
     }
 }
 
@@ -527,6 +528,7 @@ fn sample_ev_config() -> EvConfig {
         cc_cv_transition_soc: None,
         charging_priority: None,
         discharge_respects_deadline: true,
+        der_1547: None,
     }
 }
 
@@ -549,6 +551,7 @@ fn sample_pv_config() -> PvConfig {
         sam_lut_path: None,
         soiling: None,
         arrays: None,
+        der_1547: None,
     }
 }
 

@@ -342,6 +342,7 @@ fn oracle_pv_24h_constant_irradiance() {
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         },
     )
     .unwrap();
@@ -511,6 +512,7 @@ fn oracle_pv_24h_lut_parity() {
             sam_lut_path: Some(lut_path.to_string_lossy().into_owned()),
             soiling: None,
             arrays: None,
+            der_1547: None,
         },
     )
     .unwrap();
@@ -581,6 +583,7 @@ fn oracle_battery_self_discharge_24h() {
             inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
+            der_1547: None,
         },
     )
     .unwrap();

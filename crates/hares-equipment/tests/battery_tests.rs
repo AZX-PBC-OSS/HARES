@@ -103,6 +103,7 @@ fn base_battery_config() -> BatteryConfig {
         inverter_capacity_va: None,
         grid_forming: None,
         min_dwell_steps: 0,
+        der_1547: None,
     }
 }
 
