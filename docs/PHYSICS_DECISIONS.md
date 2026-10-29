@@ -1348,11 +1348,11 @@ compressor, blower and crankcase heater; a heat-pump water heater's
 compressor, backup element and fan/parasitic; a dehumidifier's on-cycle
 draw and off-cycle parasitic; the electric furnace and
 boiler's element and blower/pump; the heat pump's compressor, fan, pump
-and resistive elements) each component evaluates its OWN row or response, so no
-single published row un-scales the blend: the unit's weight is the
-components' nominal draw (each final scaled component un-scaled through
-the row that scaled it) and its response is the components' actual
-evaluated draws over the components' nominal draws. The premise
+and resistive elements) each component evaluates its OWN row or its own
+flat response, so no single published row un-scales the blend: the unit's
+weight is the components' nominal draw (each final scaled component
+un-scaled through the row that scaled it) and its response is the
+components' actual evaluated draws over the components' nominal draws. The premise
 aggregate reads the unit's reported nominal draw
 (`Equipment::nominal_electric_draw_w`) and answers the assembled ratio.
 The form, the source: the units' own scaling sites (the deep-sag entry's
@@ -1373,8 +1373,11 @@ operating state the step ran, so it carries the control composition the
 step applied: duty cycle, load fraction, the served space fraction, and
 an active power limit (the capped reference draw, not the nameplate
 rating), because those act on the rated draw before the voltage response
-multiplies it. The aggregate accepts a base only when it is finite and
-positive; any other report falls back to the row's single-row evaluation.
+multiplies it. A scheduled load's `PowerSetpoint` override commands real
+power and is not row-scaled, so its base is the commanded draw and its
+response is exactly 1.0. The aggregate accepts a base only when it is
+finite and positive; any other report falls back to the row's single-row
+evaluation.
 
 On an energized bus a row evaluation that is not finite and positive is
 also a draw the bus cannot supply: the classes that publish an
