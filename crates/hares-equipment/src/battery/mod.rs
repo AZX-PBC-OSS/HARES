@@ -1219,6 +1219,9 @@ impl Equipment for Battery {
         // temperature above the discharge cutoff, and DR not commanding a
         // full shed. `grid_forming` (default true) gates grid-following-only
         // inverters that cannot form an island bus even when dischargeable.
+        // A latched IEEE 1547 trip means the inverter has ceased to
+        // energize: it cannot hold the bus up, so an island founded on it
+        // would run every load on phantom power.
         let soc_floor = self
             .soc_target_min
             .map(|v| v.max(self.min_soc))
@@ -1229,6 +1232,10 @@ impl Equipment for Battery {
             && self.soc > soc_floor
             && self.discharge_derate_factor() > 0.0
             && self.dr_power_fraction() > 0.0
+            && !self
+                .der1547
+                .as_ref()
+                .is_some_and(|controller| controller.state().tripped)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -2792,6 +2799,62 @@ mod tests {
             "the droop's published adjustment is -1/6 pu"
         );
         assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+    }
+
+    /// A battery whose 1547 trip latch is set has ceased to energize: it
+    /// cannot be the home's island source. Counting it would declare an
+    /// energized island bus that nothing sources (the loads would run on
+    /// phantom power until the enter-service delay completed), so the
+    /// island resolution must read the latch beside the SOC and the
+    /// grid-forming gate.
+    #[test]
+    fn a_tripped_battery_is_not_an_island_source() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            bat.island_source_available(),
+            "a dischargeable grid-forming pack is an island source"
+        );
+
+        // The 10 s UV1 window is reached inside the 60 s sag step.
+        let mut sag = base_env();
+        sag.grid.voltage_pu = 0.6;
+        bat.step(&sag, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        assert!(
+            !bat.island_source_available(),
+            "a ceased-to-energize inverter must not be counted as the island's source"
+        );
+
+        // Once the bus has held the enter-service windows for the 300 s
+        // delay the latch clears and the pack can island the home again.
+        for step in 1..=5 {
+            bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+                .unwrap();
+            let tripped = bat.telemetry().get(tk::DER1547_TRIPPED);
+            assert_eq!(
+                tripped,
+                Some(if step < 5 { 1.0 } else { 0.0 }),
+                "step {step}: the latch clears when the delay completes"
+            );
+            assert_eq!(
+                bat.island_source_available(),
+                step == 5,
+                "step {step}: the island source follows the latch"
+            );
+        }
     }
 
     /// The 1547 run state survives a checkpoint round trip: a trip
