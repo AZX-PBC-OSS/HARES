@@ -102,12 +102,13 @@ pub struct Ev {
     /// carries a `der_1547` block. Its state rides the checkpoint. The
     /// layer governs the grid-connected export function only.
     der1547: Option<crate::der1547::Der1547Controller>,
-    /// The layer's step-reported ride-through time for the step in
-    /// flight, `Some` on the steps the layer stepped: the firing step's
-    /// window is spent in the run state (the trip spends it), so the
-    /// publication reads the step's outcome there and the run state on
-    /// the steps the layer does not step.
-    der1547_step_ride_through_s: Option<f64>,
+    /// The layer's outcome for the step in flight, `Some` on the steps
+    /// the layer stepped: the step's outcome is authoritative for the
+    /// channels it sets (a fail-safe trip never reaches the latch, and
+    /// the firing step's window is spent in the run state), so the
+    /// publication reads it there and the run state on the steps the
+    /// layer does not step.
+    der1547_step_outcome: Option<crate::der1547::Der1547Outcome>,
     /// Grid excursions seen while the layer is unconfigured (the counted
     /// event behind the run's first warning). Always 0 when configured.
     der1547_unconfigured_excursions: u32,
@@ -349,7 +350,7 @@ impl Ev {
             v2g_max_discharge_w: DEFAULT_V2G_MAX_DISCHARGE_W,
             discharge_respects_deadline: true,
             der1547: None,
-            der1547_step_ride_through_s: None,
+            der1547_step_outcome: None,
             der1547_unconfigured_excursions: 0,
             der1547_unconfigured_warned: false,
             der1547_unconfigured_in_excursion: false,
@@ -1264,27 +1265,42 @@ impl Ev {
     fn write_telemetry(&mut self) {
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry.set(tk::ACTIVE_POWER_KW, self.active_power_w);
-        // The IEEE 1547 layer's state, published from the controller's
-        // own state so a non-discharging step reports the latch it holds.
-        // The ride-through channel reads the step outcome when the layer
-        // stepped: the firing step's window is spent in the run state,
-        // and the channel reports the window that step reached, as the
-        // PV's and the battery's channels do.
+        // The IEEE 1547 layer's channels. The step the layer stepped
+        // publishes its outcome, the same source the PV's and the
+        // battery's channels read: a fail-safe trip on a poisoned grid
+        // reading is the step's outcome and never reaches the latch, and
+        // the firing step's window is spent in the run state. The steps
+        // the layer does not step (an idle export leg) publish the run
+        // state, so a latched trip stays reported while the export leg is
+        // off.
         match &self.der1547 {
             Some(controller) => {
                 let state = controller.state();
+                let (tripped, trip_reason, ride_through_s, enter_service_s, fw_adj_pu) =
+                    match self.der1547_step_outcome {
+                        Some(outcome) => (
+                            outcome.tripped,
+                            outcome.trip_reason,
+                            outcome.ride_through_s,
+                            outcome.enter_service_s,
+                            outcome.fw_adj_pu,
+                        ),
+                        None => (
+                            state.tripped,
+                            state.trip_reason,
+                            state.max_accumulator_s(),
+                            state.es_s,
+                            state.last_fw_adj_pu,
+                        ),
+                    };
+                self.telemetry.set(tk::DER1547_TRIPPED, f64::from(tripped));
                 self.telemetry
-                    .set(tk::DER1547_TRIPPED, f64::from(state.tripped));
-                self.telemetry
-                    .set(tk::DER1547_TRIP_REASON, f64::from(state.trip_reason));
-                let ride_through_s = self
-                    .der1547_step_ride_through_s
-                    .unwrap_or_else(|| state.max_accumulator_s());
+                    .set(tk::DER1547_TRIP_REASON, f64::from(trip_reason));
                 self.telemetry
                     .set(tk::DER1547_RIDE_THROUGH_S, ride_through_s);
-                self.telemetry.set(tk::DER1547_ENTER_SERVICE_S, state.es_s);
                 self.telemetry
-                    .set(tk::DER1547_FW_ADJ_PU, state.last_fw_adj_pu);
+                    .set(tk::DER1547_ENTER_SERVICE_S, enter_service_s);
+                self.telemetry.set(tk::DER1547_FW_ADJ_PU, fw_adj_pu);
                 self.telemetry.set(tk::DER1547_UNCONFIGURED_EXCURSIONS, 0.0);
             }
             None => {
@@ -1516,8 +1532,8 @@ impl Ev {
         // resolves.
         self.discharge_ceiling_w = self.live_discharge_ceiling_w(dt);
         // The step-outcome capture is per step: the steps that do not
-        // step the layer publish the run state's ride-through time.
-        self.der1547_step_ride_through_s = None;
+        // step the layer publish the run state instead.
+        self.der1547_step_outcome = None;
 
         // An unavailable period zeroing the EV's rows (`Vacancy` or
         // `Power Outage`, the `electric_vehicle_charging` and
@@ -1611,7 +1627,7 @@ impl Ev {
                         // bitwise, so the nominal path is untouched.
                         export_ac_w = -outcome.p_ref_w;
                     }
-                    self.der1547_step_ride_through_s = Some(outcome.ride_through_s);
+                    self.der1547_step_outcome = Some(outcome);
                 }
                 None => {
                     let v = env.grid.bus_voltage_pu();

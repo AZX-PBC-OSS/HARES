@@ -6712,6 +6712,56 @@ fn witness_der1547_ev_publishes_the_window_the_firing_step_reached() {
     assert_eq!(ev.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(60.0));
 }
 
+/// The shared trip channels report the step the inverter actually took.
+/// The layer's fail-safe (a non-finite bus voltage or grid frequency
+/// trips the inverter for the step) is that step's outcome and never
+/// reaches the latch, so a state-based read publishes "online" for a step
+/// the inverter ceased to energize on while the PV and the battery
+/// publish the outcome. The EV's channels carry the outcome the step
+/// took; the latch, its reason and the enter-service clock remain the
+/// run state's on the steps the layer does not step.
+#[test]
+fn witness_der1547_ev_publishes_the_failsafe_trip_the_step_took() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    // A poisoned grid reading: the layer's documented fail-safe is a trip
+    // for the step (the inverter must not ride a meaningless reading).
+    let mut poisoned = sample_env();
+    poisoned.grid.frequency_hz = f64::NAN;
+    let mut ports = PortSlots::default();
+    ev.step(&poisoned, Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(
+        ev.telemetry().get(tk::ACTIVE_POWER_KW),
+        Some(0.0),
+        "the fail-safe trip zeroes the export"
+    );
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_TRIPPED),
+        Some(1.0),
+        "the step tripped the inverter: the channel reports the step it took"
+    );
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+        Some(0.0),
+        "a fail-safe trip reaches no window"
+    );
+
+    // The fail-safe is per step: the latch was never set, so the next
+    // sound step exports again.
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+    assert!(
+        ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) < -2900.0,
+        "the export resumes on the next sound step"
+    );
+}
+
 #[test]
 fn ev_config_rejects_unknown_fields() {
     use crate::config::ConfigPayload;
