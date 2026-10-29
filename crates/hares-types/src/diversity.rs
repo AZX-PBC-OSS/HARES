@@ -391,6 +391,40 @@ mod tests {
             1.0 - upper - lower
         }
 
+        /// The clamped lognormal's moments by direct Simpson quadrature of
+        /// the standard normal density, an independent reference for the
+        /// closed form: with z the standard normal and
+        /// x = exp(mu + sigma*z),
+        ///   E[g(clamp(x))] = integral g(clamp(exp(mu + sigma z))) phi(z) dz.
+        /// The grid is z in [-12, 12] (the truncated mass is exp(-72)) with
+        /// 100,000 intervals, so the rule's error on this integrand is
+        /// about 1e-11 absolute: far below the 1e-6 relative band the
+        /// closed form must hold.
+        fn quadrature_moments(sigma: f64, lo: f64, hi: f64) -> [f64; 3] {
+            const INTERVALS: usize = 100_000;
+            let mu = -sigma * sigma / 2.0;
+            let (a, b) = (-12.0_f64, 12.0_f64);
+            let step = (b - a) / INTERVALS as f64;
+            let density_scale = 1.0 / libm::sqrt(2.0 * std::f64::consts::PI);
+            let mut sums = [0.0_f64; 3];
+            for i in 0..=INTERVALS {
+                let z = a + step * i as f64;
+                let weight = if i == 0 || i == INTERVALS {
+                    1.0
+                } else if i % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                let x = libm::exp(mu + sigma * z).clamp(lo, hi);
+                let w = weight * density_scale * libm::exp(-0.5 * z * z) * step / 3.0;
+                sums[0] += w * x;
+                sums[1] += w * x * x;
+                sums[2] += w * x * x * x * x;
+            }
+            [sums[0], sums[1], sums[2]]
+        }
+
         let n = 50_000_u64;
         let mut sums = [0.0_f64; 3];
         let mut sq_sums = [0.0_f64; 3];
@@ -416,6 +450,16 @@ mod tests {
             let variance = (sq_sums[c] / n as f64 - mean * mean).max(0.0);
             let sd = libm::sqrt(variance);
             let analytic = clamped_mean(*sigma, *lo, *hi);
+            // The closed form against the quadrature: an identity whose
+            // folded-tail sign is wrong cannot hold this band.
+            let quadrature = quadrature_moments(*sigma, *lo, *hi);
+            assert!(
+                (analytic - quadrature[0]).abs() < 1e-6 * quadrature[0],
+                "the {name} closed-form mean {analytic} left the quadrature \
+                 reference {} by {:.3e} relative",
+                quadrature[0],
+                (analytic - quadrature[0]).abs() / quadrature[0]
+            );
             let se = sigma / libm::sqrt(n as f64);
             assert!(
                 (mean - analytic).abs() < 4.0 * se,
