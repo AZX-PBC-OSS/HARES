@@ -559,75 +559,78 @@ impl Der1547Controller {
             })
         } else {
             // Grid-connected online: integrate every trip point's on-delay.
+            // The points are visited deepest-first; the first firing point
+            // in that order names the reason.
             let dt = dt_s;
             let mut max_acc = 0.0_f64;
+            let mut fired: Option<u8> = None;
             macro_rules! accumulate {
-                ($field:ident, $cond:expr, $point:expr) => {{
+                ($field:ident, $cond:expr, $point:expr, $reason:expr) => {{
                     let point: &TripPoint = &$point;
-                    if $cond {
+                    let holds = $cond;
+                    if holds {
                         self.state.$field = point.clearing_s.min(self.state.$field + dt);
                     } else {
                         self.state.$field = 0.0;
                     }
                     max_acc = max_acc.max(self.state.$field);
+                    // A point fires only on a step its condition holds:
+                    // the accumulator of a band the bus is not in is zero,
+                    // and a zero clearing time must not turn that zero
+                    // into a trip.
+                    if holds && self.state.$field >= point.clearing_s && fired.is_none() {
+                        fired = Some($reason);
+                    }
                 }};
             }
-            accumulate!(uv2_s, v_pu < self.tables.uv2.threshold, self.tables.uv2);
-            accumulate!(uv1_s, v_pu < self.tables.uv1.threshold, self.tables.uv1);
-            accumulate!(ov1_s, v_pu > self.tables.ov1.threshold, self.tables.ov1);
-            accumulate!(ov2_s, v_pu > self.tables.ov2.threshold, self.tables.ov2);
-            accumulate!(uf2_s, f_hz < self.tables.uf2.threshold, self.tables.uf2);
-            accumulate!(uf1_s, f_hz < self.tables.uf1.threshold, self.tables.uf1);
-            accumulate!(of1_s, f_hz > self.tables.of1.threshold, self.tables.of1);
-            accumulate!(of2_s, f_hz > self.tables.of2.threshold, self.tables.of2);
-
-            // The first firing point in the deepest-first order names the
-            // reason; any firing point trips.
-            let fired = [
-                (
-                    self.state.uv2_s,
-                    self.tables.uv2.clearing_s,
-                    trip_reason::UV2,
-                ),
-                (
-                    self.state.uv1_s,
-                    self.tables.uv1.clearing_s,
-                    trip_reason::UV1,
-                ),
-                (
-                    self.state.ov2_s,
-                    self.tables.ov2.clearing_s,
-                    trip_reason::OV2,
-                ),
-                (
-                    self.state.ov1_s,
-                    self.tables.ov1.clearing_s,
-                    trip_reason::OV1,
-                ),
-                (
-                    self.state.uf2_s,
-                    self.tables.uf2.clearing_s,
-                    trip_reason::UF2,
-                ),
-                (
-                    self.state.uf1_s,
-                    self.tables.uf1.clearing_s,
-                    trip_reason::UF1,
-                ),
-                (
-                    self.state.of2_s,
-                    self.tables.of2.clearing_s,
-                    trip_reason::OF2,
-                ),
-                (
-                    self.state.of1_s,
-                    self.tables.of1.clearing_s,
-                    trip_reason::OF1,
-                ),
-            ]
-            .into_iter()
-            .find(|(acc, clearing, _)| acc >= clearing)
-            .map(|(_, _, reason)| reason);
+            accumulate!(
+                uv2_s,
+                v_pu < self.tables.uv2.threshold,
+                self.tables.uv2,
+                trip_reason::UV2
+            );
+            accumulate!(
+                uv1_s,
+                v_pu < self.tables.uv1.threshold,
+                self.tables.uv1,
+                trip_reason::UV1
+            );
+            accumulate!(
+                ov2_s,
+                v_pu > self.tables.ov2.threshold,
+                self.tables.ov2,
+                trip_reason::OV2
+            );
+            accumulate!(
+                ov1_s,
+                v_pu > self.tables.ov1.threshold,
+                self.tables.ov1,
+                trip_reason::OV1
+            );
+            accumulate!(
+                uf2_s,
+                f_hz < self.tables.uf2.threshold,
+                self.tables.uf2,
+                trip_reason::UF2
+            );
+            accumulate!(
+                uf1_s,
+                f_hz < self.tables.uf1.threshold,
+                self.tables.uf1,
+                trip_reason::UF1
+            );
+            accumulate!(
+                of2_s,
+                f_hz > self.tables.of2.threshold,
+                self.tables.of2,
+                trip_reason::OF2
+            );
+            accumulate!(
+                of1_s,
+                f_hz > self.tables.of1.threshold,
+                self.tables.of1,
+                trip_reason::OF1
+            );
 
             if let Some(reason) = fired {
                 self.state.tripped = true;
@@ -940,6 +943,36 @@ mod tests {
         let out = one_step(&mut ctrl, 1.0, 61.5, 60.0, 2700.0);
         assert!(out.tripped, "300 s accumulated at the fifth 60 s step");
         assert_eq!(out.trip_reason, trip_reason::OF1);
+    }
+
+    /// A zero clearing time is "trip on the step the condition holds". The
+    /// accumulator of a point whose condition is false is zero, and a
+    /// zero-length window is not itself a trip: a point must never fire on
+    /// a condition it does not see, whatever its clearing time (the
+    /// operator's surface admits 0.0 as a clearing time).
+    #[test]
+    fn zero_clearing_time_trips_only_while_its_condition_holds() {
+        let settings = Der1547Settings {
+            category: Der1547Category::CatII,
+            overrides: Some(Der1547Overrides {
+                uv1_s: Some(0.0),
+                ..Default::default()
+            }),
+        };
+        let mut ctrl = controller(&settings, 5000.0);
+        let nominal = one_step(&mut ctrl, 1.0, 60.0, 900.0, 4500.0);
+        assert!(
+            !nominal.tripped,
+            "1.0 pu is inside no under-voltage band: the zero window never starts"
+        );
+        assert_eq!(nominal.p_ref_w, 4500.0, "the inverter rides at full output");
+
+        let sag = one_step(&mut ctrl, 0.6, 60.0, 900.0, 4500.0);
+        assert!(
+            sag.tripped,
+            "0.6 pu starts the zero-length window: the same step trips"
+        );
+        assert_eq!(sag.trip_reason, trip_reason::UV1);
     }
 
     /// A disturbance that ends inside the ride-through window resets the
