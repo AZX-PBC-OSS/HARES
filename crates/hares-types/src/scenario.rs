@@ -563,29 +563,32 @@ impl ScenarioSample {
     /// The sample is applicable: every value carries the target recorded
     /// with it, every patch target names a field the settings'
     /// patches carry, every value's name is unique (the names are the
-    /// record's application keys; a repeat would apply last wins), and
-    /// every target's name carries a value (an orphan target would be
-    /// silently ignored). The sampler produces none of the faults; a
-    /// hand-written record (the shape a hand-edited manifest
-    /// deserializes to) can carry each of them. A record written before
-    /// the target map existed carries values with no target and fails
-    /// naming the value; a hand-edited record naming an unknown patch
-    /// field fails naming the field. The application calls this before
-    /// touching the settings, so nothing is applied and then dropped.
-    /// When a record carries more than one fault, the FIRST fault is the
-    /// one named: the values' walk in declaration order (a repeated name
-    /// at its second occurrence, then a value with no target, then an
-    /// unknown patch field), then the orphan targets in the target map's
-    /// order. The check refuses the whole record on the first fault it
-    /// reaches, so the caller fixes that fault and the next attempt names
-    /// the next.
+    /// record's application keys; a repeat would apply last wins), every
+    /// value's target is unique (a target is the application's map key
+    /// too, so two values at one target would apply last wins and the
+    /// earlier value would be dropped), and every target's name carries a
+    /// value (an orphan target would be silently ignored). The sampler
+    /// produces none of the faults; a hand-written record (the shape a
+    /// hand-edited manifest deserializes to) can carry each of them. A
+    /// record written before the target map existed carries values with no
+    /// target and fails naming the value; a hand-edited record naming an
+    /// unknown patch field fails naming the field. The application calls
+    /// this before touching the settings, so nothing is applied and then
+    /// dropped. When a record carries more than one fault, the FIRST fault
+    /// is the one named: the values' walk in declaration order (a repeated
+    /// name at its second occurrence, then a value with no target, then a
+    /// repeated target at its second value, then an unknown patch field),
+    /// then the orphan targets in the target map's order. The check
+    /// refuses the whole record on the first fault it reaches, so the
+    /// caller fixes that fault and the next attempt names the next.
     ///
     /// # Errors
     ///
-    /// [`HaresError`] naming the value, name or field the record cannot
-    /// apply.
+    /// [`HaresError`] naming the value, name, target or field the record
+    /// cannot apply.
     pub fn validate_application(&self) -> Result<(), HaresError> {
         let mut seen = std::collections::BTreeSet::new();
+        let mut seen_targets: Vec<(&str, &ScenarioTarget)> = Vec::with_capacity(self.values.len());
         for value in &self.values {
             if !seen.insert(value.name.as_str()) {
                 return Err(HaresError::Equipment(format!(
@@ -601,6 +604,18 @@ impl ScenarioSample {
                     value.name
                 )));
             };
+            if let Some((earlier, _)) = seen_targets
+                .iter()
+                .find(|(_, earlier_target)| *earlier_target == target)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "the scenario sample's values '{earlier}' and '{}' target the same \
+                     field {target:?}: the application keeps one value per target, so \
+                     the earlier value would be dropped silently",
+                    value.name
+                )));
+            }
+            seen_targets.push((value.name.as_str(), target));
             if let ScenarioTarget::Patch { field } = target
                 && !PATCH_FIELDS.contains(&field.as_str())
             {
@@ -642,9 +657,15 @@ impl ScenarioSample {
 impl ScenarioSpec {
     /// The spec validates: every distribution's parameters are
     /// well-formed, the names are unique, the correlations' rhos are in
-    /// [0, 1), and every patch target names a field the patches carry.
+    /// [0, 1), every patch target names a field the patches carry, and
+    /// every application target carries one parameter. Two parameters
+    /// writing one field would sample two values for one map key and the
+    /// application would keep the later, dropping the earlier silently;
+    /// targets are compared as recorded (the assembly's own wildcard
+    /// refusal covers the two spellings it treats as one equipment).
     pub fn validate(&self) -> Result<(), HaresError> {
         let mut seen = std::collections::BTreeSet::new();
+        let mut targets: Vec<(&str, &ScenarioTarget)> = Vec::with_capacity(self.parameters.len());
         for parameter in &self.parameters {
             parameter.distribution.validate()?;
             if !seen.insert(parameter.name.as_str()) {
@@ -672,6 +693,18 @@ impl ScenarioSpec {
                     parameter.name, field
                 )));
             }
+            if let Some((earlier, _)) = targets
+                .iter()
+                .find(|(_, target)| *target == &parameter.target)
+            {
+                return Err(HaresError::Equipment(format!(
+                    "the parameters '{earlier}' and '{}' target the same field {:?}: \
+                     the application keeps one value per target, so the earlier \
+                     sample would be dropped silently",
+                    parameter.name, parameter.target
+                )));
+            }
+            targets.push((parameter.name.as_str(), &parameter.target));
         }
         Ok(())
     }
@@ -779,11 +812,17 @@ mod tests {
         }
     }
 
+    /// A parameter's application target, unique per name: a spec declares
+    /// one value per target, so multi-parameter fixtures must not collide.
+    fn unique_target(name: &str) -> ScenarioTarget {
+        override_target("all", &format!("field_{name}"))
+    }
+
     fn parameter(name: &str, distribution: ScenarioDistribution) -> ScenarioParameter {
         ScenarioParameter {
             name: name.to_string(),
             unit: "W".to_string(),
-            target: override_target("all", "heating_capacity_w"),
+            target: unique_target(name),
             distribution,
             correlation: None,
         }
@@ -991,7 +1030,7 @@ mod tests {
         let correlated = |name: &str| ScenarioParameter {
             name: name.to_string(),
             unit: "W".to_string(),
-            target: override_target("all", "heating_capacity_w"),
+            target: unique_target(name),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
                 group: "load".to_string(),
@@ -1042,7 +1081,7 @@ mod tests {
         let member = |name: &str, group: &str| ScenarioParameter {
             name: name.to_string(),
             unit: "W".to_string(),
-            target: override_target("all", "heating_capacity_w"),
+            target: unique_target(name),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
                 group: group.to_string(),
@@ -1087,7 +1126,7 @@ mod tests {
         let member = |name: &str, group: &str| ScenarioParameter {
             name: name.to_string(),
             unit: "W".to_string(),
-            target: override_target("all", "heating_capacity_w"),
+            target: unique_target(name),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
                 group: group.to_string(),
@@ -1150,7 +1189,7 @@ mod tests {
         let member = |name: &str, group: &str| ScenarioParameter {
             name: name.to_string(),
             unit: "W".to_string(),
-            target: override_target("all", "heating_capacity_w"),
+            target: unique_target(name),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
                 group: group.to_string(),
@@ -1416,7 +1455,7 @@ mod tests {
         let member = |name: &str, distribution: ScenarioDistribution| ScenarioParameter {
             name: name.to_string(),
             unit: "W".to_string(),
-            target: override_target("all", "heating_capacity_w"),
+            target: unique_target(name),
             distribution,
             correlation: Some(ScenarioCorrelation {
                 group: "load".to_string(),
@@ -1580,6 +1619,70 @@ mod tests {
         assert!(
             err.to_string().contains("ghost"),
             "the error must name the orphan target: {err}"
+        );
+    }
+
+    /// Two values at one application target would apply last wins, the
+    /// earlier value dropped silently: a target is the application's map
+    /// key exactly as a name is, so the record refuses the shape naming
+    /// both values, and the spec refuses the authoring shape at validation
+    /// naming both parameters (the sampler therefore cannot produce it).
+    #[test]
+    fn two_values_at_one_target_are_refused_naming_both() {
+        let record: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [
+                {"name": "a", "value": 0.8, "unit": "fraction"},
+                {"name": "b", "value": 1.2, "unit": "fraction"}
+            ],
+            "targets": {
+                "a": {"override": {"equipment": "MELs", "field": "usage_multiplier"}},
+                "b": {"override": {"equipment": "MELs", "field": "usage_multiplier"}}
+            }
+        }))
+        .expect("the record parses");
+        let err = record
+            .validate_application()
+            .expect_err("two values at one target must be refused");
+        assert!(
+            err.to_string().contains("'a'") && err.to_string().contains("'b'"),
+            "the error must name both values: {err}"
+        );
+
+        let target = || ScenarioTarget::Override {
+            equipment: "MELs".to_string(),
+            field: "usage_multiplier".to_string(),
+        };
+        let spec = ScenarioSpec {
+            name: "same-target".to_string(),
+            parameters: vec![
+                ScenarioParameter {
+                    name: "a".to_string(),
+                    unit: "fraction".to_string(),
+                    target: target(),
+                    distribution: uniform(0.7, 1.0),
+                    correlation: None,
+                },
+                ScenarioParameter {
+                    name: "b".to_string(),
+                    unit: "fraction".to_string(),
+                    target: target(),
+                    distribution: uniform(1.0, 1.3),
+                    correlation: None,
+                },
+            ],
+        };
+        let err = spec
+            .validate()
+            .expect_err("two parameters at one target must fail validation");
+        assert!(
+            err.to_string().contains("'a'") && err.to_string().contains("'b'"),
+            "the error must name both parameters: {err}"
+        );
+        assert!(
+            spec.sample(1, 1, 1).is_err(),
+            "the sampler must refuse the spec it cannot apply"
         );
     }
 

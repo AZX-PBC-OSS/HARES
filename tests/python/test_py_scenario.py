@@ -436,6 +436,32 @@ class TestSpecValidation:
                 }
             )
 
+    def test_two_parameters_at_one_target_are_an_error(self):
+        """A target is the application's map key: two parameters writing one
+        field would keep the later value and drop the earlier silently, so
+        the spec refuses the authoring shape naming both parameters."""
+        target = {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}}
+        with pytest.raises(ValueError, match="'a'.*'b'"):
+            ScenarioSpec(
+                {
+                    "name": "same-target",
+                    "parameters": [
+                        {
+                            "name": "a",
+                            "unit": "count",
+                            "target": target,
+                            "distribution": {"uniform": {"low": 1.0, "high": 2.0}},
+                        },
+                        {
+                            "name": "b",
+                            "unit": "count",
+                            "target": target,
+                            "distribution": {"uniform": {"low": 2.0, "high": 3.0}},
+                        },
+                    ],
+                }
+            )
+
     def test_an_overflowing_closed_form_is_a_value_error_naming_the_parameter(self):
         """A distribution whose parameters validate but whose closed form
         leaves the finite f64 range refuses at the draw, and the binding

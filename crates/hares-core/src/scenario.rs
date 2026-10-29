@@ -89,17 +89,20 @@ fn patches_applied_to(
 /// Apply the sample to the settings: the Override targets merge into the
 /// settings' overrides map (created when the settings carried none), the
 /// Patch targets set the settings' patches (created when the settings
-/// carried none). The sampled values land in declaration order, a later
-/// sample of the same parameter clobbering an earlier one's field.
+/// carried none). The record carries one value per target, so the values
+/// land in declaration order with no field written twice; applying a
+/// second record over the first lets the later record's value win at a
+/// field both name.
 ///
 /// The record is checked before anything is applied: a value with no
-/// recorded target, a repeated value name, an orphan target (a target
-/// whose name carries no value), a patch target naming an unknown field,
-/// or a settings override map (or one of its equipment entries) of
-/// another shape is refused naming the object it cannot apply. A record
-/// with several faults names the FIRST the application reaches: the
-/// record's own value checks in declaration order (a repeated name at
-/// its second occurrence, then a value with no target, then an unknown
+/// recorded target, a repeated value name, two values at one target, an
+/// orphan target (a target whose name carries no value), a patch target
+/// naming an unknown field, or a settings override map (or one of its
+/// equipment entries) of another shape is refused naming the object it
+/// cannot apply. A record with several faults names the FIRST the
+/// application reaches: the record's own value checks in declaration
+/// order (a repeated name at its second occurrence, then a value with no
+/// target, then a repeated target at its second value, then an unknown
 /// patch field), then the record's orphan targets in the target map's
 /// order, then the overrides merge's
 /// entries in the map's order. Both new values are
@@ -109,8 +112,8 @@ fn patches_applied_to(
 ///
 /// # Errors
 ///
-/// [`HaresError`] naming the value, field or override map the record
-/// cannot apply.
+/// [`HaresError`] naming the value, name, target, field or override map
+/// the record cannot apply.
 pub fn apply_sample(
     sample: &ScenarioSample,
     settings: &mut DwellingSettings,
@@ -476,6 +479,40 @@ mod tests {
         );
         assert!(
             settings.patches.is_none() && settings.overrides.is_none(),
+            "the refused record must not touch the settings"
+        );
+    }
+
+    /// Two values at one application target would apply last wins, the
+    /// earlier value dropped silently (the target is the overrides map's
+    /// key): the application refuses the record naming both values and
+    /// leaves the settings exactly as they were. The sampler cannot
+    /// produce the shape (the spec's validation refuses two parameters at
+    /// one target); a hand-written record can.
+    #[test]
+    fn two_values_at_one_target_are_refused_at_the_application() {
+        let sample: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [
+                {"name": "a", "value": 0.8, "unit": "fraction"},
+                {"name": "b", "value": 1.2, "unit": "fraction"}
+            ],
+            "targets": {
+                "a": {"override": {"equipment": "MELs", "field": "usage_multiplier"}},
+                "b": {"override": {"equipment": "MELs", "field": "usage_multiplier"}}
+            }
+        }))
+        .expect("the record parses");
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        let err = apply_sample(&sample, &mut settings)
+            .expect_err("two values at one target must be refused");
+        assert!(
+            err.to_string().contains("'a'") && err.to_string().contains("'b'"),
+            "the error must name both values: {err}"
+        );
+        assert!(
+            settings.overrides.is_none() && settings.patches.is_none(),
             "the refused record must not touch the settings"
         );
     }
