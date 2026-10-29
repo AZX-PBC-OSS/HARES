@@ -393,11 +393,17 @@ mod tests {
     /// quadrature of the normal density at 1e-6 relative, and 50,000 drawn
     /// homes hold it at four standard errors of the mean and of the
     /// variance estimator (the fourth moment gives the latter's spread).
+    /// The standardized fourth central moment is at least 1 for every
+    /// distribution (Jensen: E[(X-m)^4] >= E[(X-m)^2]^2); the closed
+    /// form's kurtosis is pinned on that side of 1, the direction the
+    /// variance estimator's spread (fourth - variance^2 below) needs to
+    /// be real.
     #[test]
     fn the_fleet_scale_moments_are_the_clamped_lognormals() {
         /// The closed-form first, second and fourth moments of the clamped
-        /// lognormal, from the folded-tail identity above.
-        fn clamped_moments(sigma: f64, lo: f64, hi: f64) -> [f64; 3] {
+        /// lognormal, from the folded-tail identity above, with the
+        /// standardized fourth central moment (the kurtosis) beside them.
+        fn clamped_moments(sigma: f64, lo: f64, hi: f64) -> [f64; 4] {
             let mu = -sigma * sigma / 2.0;
             let phi = crate::scenario::normal_cdf;
             let moment = |k: u32| -> f64 {
@@ -406,6 +412,7 @@ mod tests {
                 let (hi_k, lo_k) = match k {
                     1 => (hi, lo),
                     2 => (hi * hi, lo * lo),
+                    3 => (hi * hi * hi, lo * lo * lo),
                     _ => (hi * hi * hi * hi, lo * lo * lo * lo),
                 };
                 let log_hi = libm::log(hi);
@@ -418,7 +425,13 @@ mod tests {
             };
             let mean = moment(1);
             let second = moment(2);
-            [mean, second - mean * mean, moment(4)]
+            let variance = second - mean * mean;
+            // The standardized fourth central moment, by the expansion
+            // E[(X-m)^4] = E[X^4] - 4 m E[X^3] + 6 m^2 E[X^2] - 3 m^4.
+            let central_fourth = moment(4) - 4.0 * mean * moment(3) + 6.0 * mean * mean * second
+                - 3.0 * mean * mean * mean * mean;
+            let kurtosis = central_fourth / (variance * variance);
+            [mean, variance, moment(4), kurtosis]
         }
 
         /// The same moments by direct Simpson quadrature of the standard
@@ -497,7 +510,7 @@ mod tests {
         for (c, (name, sigma, (lo, hi), documented_mean, documented_fold)) in
             cases.iter().enumerate()
         {
-            let [analytic, analytic_variance, fourth] = clamped_moments(*sigma, *lo, *hi);
+            let [analytic, analytic_variance, fourth, kurtosis] = clamped_moments(*sigma, *lo, *hi);
             let [q_mean, q_variance, _] = quadrature_moments(*sigma, *lo, *hi);
             // The closed form against the quadrature: an identity whose
             // folded-tail sign is wrong cannot hold this band.
@@ -532,6 +545,16 @@ mod tests {
                 "the {name} scale's clamp folds {:.4} percent of the mean: the \
                  record states at most 0.075 percent",
                 (1.0 - analytic).abs() * 100.0
+            );
+            // Jensen's bound: the standardized fourth central moment is at
+            // least 1 for every distribution. The variance estimator's
+            // spread below (fourth - variance^2) is real only on that
+            // side of 1, and a sign error in a folded tail would show
+            // here as an imaginary spread before any mean moved.
+            assert!(
+                kurtosis >= 1.0,
+                "the {name} clamped scale's standardized fourth moment \
+                 {kurtosis} is below 1: no distribution's is"
             );
 
             // The drawn homes at the estimators' resolution: the mean's
