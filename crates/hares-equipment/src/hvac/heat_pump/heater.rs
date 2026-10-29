@@ -1287,18 +1287,6 @@ impl HeatPumpHeaterCore {
         self.ctrl_load_fraction = 1.0;
         self.use_ideal = self.hvac.use_ideal_capacity(env);
 
-        // Decrement DR duration and auto-revert to Normal when expired.
-        let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
-        if let Some(remaining) = self.dr_duration_remaining_s {
-            let next = remaining - dt_s;
-            if next <= 0.0 {
-                self.dr_duration_remaining_s = None;
-                self.apply_dr_level(DRLevel::Normal);
-            } else {
-                self.dr_duration_remaining_s = Some(next);
-            }
-        }
-
         // Grid outage: a de-energized bus removes supply power for the
         // compressor, ER backup elements, and blower — force off before any
         // override handling (WH precedent). The ER off-timer bookkeeping
@@ -1386,6 +1374,21 @@ impl HeatPumpHeaterCore {
     ) -> std::result::Result<(), HaresError> {
         if let Some(err) = self.hvac.take_control_error() {
             return Err(err);
+        }
+        // Advance the DR duration once per step. The thermal pipeline runs
+        // `update_control` twice per step, so the countdown lived there it
+        // burned twice the event's wall time and the post-event release
+        // landed after the solver-feedback phase. Advancing here puts the
+        // release on the next step's first control pass, ahead of the
+        // solve. (Mirrors the cooling core's step.)
+        if let Some(remaining) = self.dr_duration_remaining_s {
+            let next = remaining - dt.as_secs_f64();
+            if next <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.apply_dr_level(DRLevel::Normal);
+            } else {
+                self.dr_duration_remaining_s = Some(next);
+            }
         }
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         let dt_s = dt.as_secs_f64();

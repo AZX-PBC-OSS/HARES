@@ -129,6 +129,15 @@ pub(super) struct CoolingCore {
     use_ideal: bool,
     /// Solver-provided ideal capacity [W]; set via IdealCapacity signal.
     ideal_capacity_w: f64,
+    /// Whether an IdealCapacity signal arrived this step. The capacity's
+    /// own field clears at each step's end (a stale capacity must never
+    /// deliver), so a zero reading cannot distinguish "the solve said
+    /// nothing needed" from "the pipeline starved the solve"; this flag
+    /// carries the distinction, and a starved step counts in the
+    /// equipment's health (`ideal_capacity_unsolved_steps`).
+    ideal_capacity_signal_arrived: bool,
+    /// The run-total starvation count (drained via `take_health_counts`).
+    ideal_capacity_unsolved_steps: u64,
 
     // --- External control signals (sticky) ---
     ctrl_duty_cycle: f64,
@@ -392,9 +401,12 @@ impl Equipment for AirConditioner {
     }
 
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        let ideal_capacity_unsolved_steps =
+            std::mem::take(&mut self.core.ideal_capacity_unsolved_steps);
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
             cross_tier_deadband_events: self.core.hvac.take_cross_tier_deadband_count(),
+            ideal_capacity_unsolved_steps,
             ..Default::default()
         }
     }
@@ -494,9 +506,12 @@ impl Equipment for RoomAC {
     }
 
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        let ideal_capacity_unsolved_steps =
+            std::mem::take(&mut self.core.ideal_capacity_unsolved_steps);
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
             cross_tier_deadband_events: self.core.hvac.take_cross_tier_deadband_count(),
+            ideal_capacity_unsolved_steps,
             ..Default::default()
         }
     }
@@ -680,6 +695,8 @@ impl CoolingCore {
             cooling_oat_locked_out: false,
             use_ideal: false,
             ideal_capacity_w: 0.0,
+            ideal_capacity_signal_arrived: false,
+            ideal_capacity_unsolved_steps: 0,
             ctrl_duty_cycle: 1.0,
             ctrl_power_limit_w: f64::INFINITY,
             ctrl_mode_override: None,
@@ -1090,19 +1107,6 @@ impl CoolingCore {
         self.cooling_oat_locked_out = false;
         self.use_ideal = self.hvac.use_ideal_capacity(env);
 
-        // Advance DR duration; auto-revert to Normal when expired.
-        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
-            let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
-            *remaining -= dt_s;
-            if *remaining <= 0.0 {
-                self.dr_duration_remaining_s = None;
-                self.dr_level = DRLevel::Normal;
-                self.dr_setpoint_offset_c = 0.0;
-                self.dr_load_fraction = 1.0;
-                self.dr_duty_cycle = 1.0;
-            }
-        }
-
         // Grid outage: a de-energized bus removes supply power for the
         // compressor and blower — force off before any override handling
         // (WH precedent). Islanded (battery/generator-backed) homes keep an
@@ -1246,6 +1250,25 @@ impl CoolingCore {
         if let Some(err) = self.hvac.take_control_error() {
             return Err(err);
         }
+        // Advance the DR duration once per step. The thermal pipeline runs
+        // `update_control` twice per step (before the solver-feedback phase
+        // and again after the control dispatch), so the countdown lived
+        // there it burned twice the event's wall time and the post-event
+        // release landed after the solve, which read the still-forced-off
+        // mode and solved nothing; the release step then ran the unit's
+        // raw full duty, unmetered. Advancing here puts the release on the
+        // next step's first control pass, ahead of the solve, so the
+        // release step delivers the solved capacity.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= dt.as_secs_f64();
+            if *remaining <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.dr_level = DRLevel::Normal;
+                self.dr_setpoint_offset_c = 0.0;
+                self.dr_load_fraction = 1.0;
+                self.dr_duty_cycle = 1.0;
+            }
+        }
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         self.crankcase_heater_on = false;
         self.crankcase_heater_w = 0.0;
@@ -1257,6 +1280,15 @@ impl CoolingCore {
 
         let dt_min = dt.as_secs_f64() / 60.0;
         if self.operating_mode == OperatingMode::Cooling {
+            // The ideal path's starvation census: an ideal step with no
+            // capacity signal this step delivered nothing (the PLR arms
+            // below read zero). Counted, never silent: the starvation's
+            // cause is a mode flip downstream of the solver-feedback
+            // phase, and a rising count is the trace a dispatch-order
+            // regression leaves.
+            if self.use_ideal && !self.ideal_capacity_signal_arrived {
+                self.ideal_capacity_unsolved_steps += 1;
+            }
             let perf = self.calculate_performance(env, dt_min)?;
             compressor_w = perf.compressor_w;
             fan_w = perf.fan_w;
@@ -1590,8 +1622,11 @@ impl CoolingCore {
             },
         };
 
-        // Clear solver-provided capacity so next step starts fresh.
+        // Clear solver-provided capacity so next step starts fresh. The
+        // arrival flag clears with it: both carry this step's solve, and
+        // a stale one must neither deliver nor mask a starvation.
         self.ideal_capacity_w = 0.0;
+        self.ideal_capacity_signal_arrived = false;
         // LoadFraction is a one-step post-thermostat multiplier.
         self.ctrl_load_fraction = 1.0;
 
@@ -2168,6 +2203,7 @@ impl CoolingCore {
             ControlSignal::IdealCapacity { capacity_w, .. } => {
                 // Solver-provided load: negative = cooling needed.
                 self.ideal_capacity_w = *capacity_w;
+                self.ideal_capacity_signal_arrived = true;
             }
             ControlSignal::MaxCapacityFraction { fraction } => {
                 self.hvac.control.max_capacity_fraction = *fraction;
@@ -2189,8 +2225,18 @@ impl CoolingCore {
         if !self.use_ideal {
             return None;
         }
-        // Only report when thermostat says we need cooling.
-        if self.operating_mode != OperatingMode::Cooling {
+        // The solver's gate reads the thermostat's latched call, never the
+        // published operating mode. The published mode is the idle
+        // resolution's (an off step with no flow publishes Standby), so a
+        // cooling call that delivered nothing last step - a setpoint
+        // override landing after the solver-feedback phase, a DR shed's
+        // forced-off - would otherwise starve every later solve: the
+        // solver never sees the call, the step never delivers, the mode
+        // publishes Standby again. The FSM's latch is the thermostat's own
+        // state: it holds Cooling through the call, so the solve runs
+        // every step the zone is past the cooling setpoint, and the
+        // delivery stays metered to the solved capacity.
+        if self.hvac.thermostat_fsm.mode != ThermostatMode::Cooling {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
@@ -3843,12 +3889,24 @@ mod tests {
             typed.startup_cd = None;
         });
         // The load fraction 0.5 exactly: (24.23 - 23.98)/0.5, an exact match
-        // for the ladder's second stage (half of the 8 000 W max).
+        // for the ladder's second stage (half of the 8 000 W max). The
+        // capacity arrives as the solver's IdealCapacity signal: the ideal
+        // path's delivery is this step's solved capacity, never the raw
+        // thermostat duty (OCHRE HVAC.py:424, h_desired should be equal to
+        // self.delivered_heat).
         let environment = env(24.23, 0.010, 18.0, 35.0);
 
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();
+        // The neutral biquadratic: the capacity ratio is 1.0 at every
+        // condition, so the driven capacity's load fraction is exact.
+        eq.core.hvac.config.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 4];
         eq.update_control(&environment);
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -4000.0,
+            degraded: false,
+        })
+        .unwrap();
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             humidity: vec![HumidityAccumulator::new(ZoneId(1))],
@@ -6101,23 +6159,34 @@ mod dr_tests {
         eq.init(&cfg, &env_t0).unwrap();
 
         // GridEmergency for 120 s (two 60-s steps); time_res = 1 min = 60 s.
-        // First update_control at t=0 decrements by 60 s → remaining = 60 s > 0 → still active.
-        // Second update_control at t=60 decrements by 60 s → remaining = 0 s → reverts to Normal.
+        // The countdown advances once per step, in step(): the event sheds
+        // exactly its two named steps and the unit recovers on the third.
         eq.apply_control(&ControlSignal::DemandResponse {
             level: DRLevel::GridEmergency,
             duration_s: Some(120.0),
         })
         .unwrap();
 
-        // Step at t=0: remaining decrements 60→60 s (still active) → must be off.
+        // Step at t=0: the countdown advances 120→60 s (still active) → off.
         let kw_during = step_once(&mut eq, &env_t0);
         assert_eq!(
             kw_during, 0.0,
             "GridEmergency must shed load while duration active"
         );
 
-        // Step at t=60: remaining decrements 60→0 s → auto-reverts → AC can cool.
-        let kw_after = step_once(&mut eq, &env_t60);
+        // Step at t=60: the countdown advances 60→0 s and reverts, but the
+        // step's control already ran with the event active → off. The shed
+        // covers the event's second named step.
+        let kw_during_second = step_once(&mut eq, &env_t60);
+        assert_eq!(
+            kw_during_second, 0.0,
+            "the event's second named step stays shed: the duration is the \
+             duration the signal named"
+        );
+
+        // Step at t=120: the event is over → AC can cool.
+        let env_t120 = hot_env_at_time(28.0, 120);
+        let kw_after = step_once(&mut eq, &env_t120);
         assert!(
             kw_after > 0.0,
             "After DR duration expires, AC must recover; kw_after={kw_after}"

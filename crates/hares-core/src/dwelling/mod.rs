@@ -8401,6 +8401,7 @@ impl Dwelling {
         // reset per take), and their step already failed the port contract.
         let mut step_fluid_payload_absences: u64 = 0;
         let mut step_cross_tier_deadband_events: u64 = 0;
+        let mut step_ideal_capacity_unsolved_steps: u64 = 0;
         // The equipment whose curve-index clamps drained this step, with
         // each one's count: the policy is evaluated per source, so a limit
         // set on the counter fails the run naming the equipment.
@@ -8414,6 +8415,7 @@ impl Dwelling {
                 }
                 step_fluid_payload_absences += counts.fluid_payload_absences;
                 step_cross_tier_deadband_events += counts.cross_tier_deadband_events;
+                step_ideal_capacity_unsolved_steps += counts.ideal_capacity_unsolved_steps;
             }
             // Warnings raised this step drain beside the health counts,
             // from failed-and-rolled-back equipment too (warnings only, no
@@ -8443,6 +8445,7 @@ impl Dwelling {
         // collision the run hit, with no policy limit (the event escalates
         // nothing: the warning is the signal).
         self.health.cross_tier_deadband_events += step_cross_tier_deadband_events;
+        self.health.ideal_capacity_unsolved_steps += step_ideal_capacity_unsolved_steps;
 
         // The clamp census: once per timestep, after the physics and
         // equipment steps complete, drain the recording thread's per-step

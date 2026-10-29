@@ -577,6 +577,7 @@ impl Equipment for ElectricBoiler {
             curve_index_clamps: 0,
             fluid_payload_absences: std::mem::take(&mut self.fluid_payload_absences),
             cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
+            ideal_capacity_unsolved_steps: 0,
         }
     }
 
@@ -1158,6 +1159,7 @@ impl Equipment for GasBoiler {
             curve_index_clamps: 0,
             fluid_payload_absences: std::mem::take(&mut self.fluid_payload_absences),
             cross_tier_deadband_events: self.hvac.take_cross_tier_deadband_count(),
+            ideal_capacity_unsolved_steps: 0,
         }
     }
 

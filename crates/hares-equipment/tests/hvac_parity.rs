@@ -807,6 +807,14 @@ fn minisplit_cooling_has_no_first_step_startup_penalty() {
 
     let mut ports_first = make_ports();
     eq.update_control(&env);
+    // The ideal path's delivery is this step's solved capacity (OCHRE
+    // HVAC.py:424): drive the same capacity both steps so the run is the
+    // capacity's, not the fallback's.
+    eq.apply_control(&ControlSignal::IdealCapacity {
+        capacity_w: -3_200.0,
+        degraded: false,
+    })
+    .unwrap();
     eq.step(&env, Duration::from_secs(60), &mut ports_first)
         .unwrap();
     let kw_first = eq.telemetry().get("electric_kw").expect("electric_w");
@@ -817,6 +825,11 @@ fn minisplit_cooling_has_no_first_step_startup_penalty() {
 
     let mut ports_second = make_ports();
     eq.update_control(&env);
+    eq.apply_control(&ControlSignal::IdealCapacity {
+        capacity_w: -3_200.0,
+        degraded: false,
+    })
+    .unwrap();
     eq.step(&env, Duration::from_secs(60), &mut ports_second)
         .unwrap();
     let kw_second = eq.telemetry().get("electric_kw").expect("electric_w");
@@ -849,6 +862,14 @@ fn minisplit_cooling_stage_match_runs_continuously() {
     let env = make_env(24.5, 35.0, 18.0);
     eq.init(&cfg, &env).unwrap();
     eq.update_control(&env);
+    // The ideal path's delivery is this step's solved capacity (OCHRE
+    // HVAC.py:424, h_desired should be equal to self.delivered_heat): the
+    // full-capacity drive is the exact stage match the selection walks.
+    eq.apply_control(&ControlSignal::IdealCapacity {
+        capacity_w: -8_000.0,
+        degraded: false,
+    })
+    .unwrap();
 
     let mut ports = make_ports();
     eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
