@@ -1005,31 +1005,31 @@ mod tests {
     /// append-stability alone: a parameter INSERTED at position k leaves
     /// exactly the first k values bitwise unchanged and moves the tail
     /// (the inserted parameter's draws sit in the stream there, so every
-    /// later draw shifts). A study reordering or splicing its spec
-    /// re-draws from the first changed position on.
+    /// later draw shifts). The inserted parameter opens a new correlation
+    /// group, so the pin trips on the group-phase layout too: a sampler
+    /// that drew the groups' factors ahead of the values (the shape the
+    /// fix replaced) would move the head's draws the moment a splice
+    /// opened a group. A study reordering or splicing its spec re-draws
+    /// from the first changed position on.
     #[test]
     fn inserting_a_parameter_moves_only_its_tail() {
-        let base = spec(vec![
-            parameter("a", uniform(0.0, 1.0)),
-            parameter("b", uniform(0.0, 1.0)),
-            parameter("d", uniform(0.0, 1.0)),
-        ]);
+        let member = |name: &str, group: &str| ScenarioParameter {
+            name: name.to_string(),
+            unit: "W".to_string(),
+            target: override_target("all", "heating_capacity_w"),
+            distribution: uniform(0.0, 1.0),
+            correlation: Some(ScenarioCorrelation {
+                group: group.to_string(),
+                rho: 0.9,
+            }),
+        };
+        let base = spec(vec![member("a", "load"), member("b", "load")]);
         let mut spliced = base.parameters.clone();
-        spliced.insert(
-            1,
-            ScenarioParameter {
-                name: "c".to_string(),
-                unit: "W".to_string(),
-                target: override_target("all", "heating_capacity_w"),
-                distribution: uniform(0.0, 1.0),
-                correlation: None,
-            },
-        );
+        spliced.insert(1, member("c", "weather"));
         let inserted = spec(spliced);
 
         let base = base.sample(42, 1, 7).expect("the base spec samples");
         let inserted = inserted.sample(42, 1, 7).expect("the spliced spec samples");
-        assert_eq!(inserted.values[0].name, "a");
         assert_eq!(
             inserted.values[0], base.values[0],
             "the draw before the insertion position is bitwise unchanged"
@@ -1039,14 +1039,13 @@ mod tests {
             "the inserted parameter sits at its position"
         );
         assert_ne!(
-            inserted.values[2].value, base.values[1].value,
-            "the draw after the insertion moved (one inserted uniform draw \
-             sits in the stream before it; two independent uniform draws on \
-             one double is the sampler stream's own collision surface)"
+            inserted.values[1].value, inserted.values[0].value,
+            "the inserted member's draw is its own group's copula transform"
         );
         assert_ne!(
-            inserted.values[3].value, base.values[2].value,
-            "every draw after the insertion moved with the stream"
+            inserted.values[2].value, base.values[1].value,
+            "the draw after the insertion moved (the inserted parameter's \
+             draws sit in the stream before it)"
         );
     }
 
