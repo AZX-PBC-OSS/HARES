@@ -211,7 +211,7 @@ impl ActorTimings {
     }
 }
 
-/// One zone's run-total share of the energy-closure report [kWh].
+/// One zone's run-total share of the energy-closure report, in kWh.
 ///
 /// The terms a zone's own wiring addresses: the end-use energy the
 /// equipment ports delivered into the zone (sensible, radiant and
@@ -224,14 +224,14 @@ impl ActorTimings {
 pub struct ZoneClosureRow {
     /// The zone the row accounts.
     pub zone: ZoneId,
-    /// Equipment-port delivery into the zone over the run [Wh].
+    /// Equipment-port delivery into the zone over the run, in Wh.
     pub delivered_end_use_wh: f64,
-    /// The zone air node's stored-energy change over the run [Wh],
+    /// The zone air node's stored-energy change over the run, in Wh,
     /// positive when the air stored heat. Excludes wall and mass nodes.
     pub zone_air_stored_wh: f64,
 }
 
-/// One closure row's integrated terms [Wh]: the run's physical stored
+/// One closure row's integrated terms, in Wh: the run's physical stored
 /// change, the meters' delivered attribution, the per-step tolerance's
 /// gross flux, and the integrated per-step residual. The report's
 /// statement in kilowatt-hours is these Wh totals divided by 1000; the
@@ -249,17 +249,17 @@ pub struct ZoneClosureRow {
 /// reconciliation's deferred surface (the record names it).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct ClosureRow {
-    /// Stored-energy change integrated over the run [Wh]:
+    /// Stored-energy change integrated over the run, in Wh:
     /// `Σ C_i·(T_next_i − T_prev_i)/dt` over every thermal node. A
     /// difference, so it carries no boundary reference.
     pub stored_delta_wh: f64,
-    /// Equipment-port delivery integrated over the run [Wh] (sensible,
+    /// Equipment-port delivery integrated over the run, in Wh (sensible,
     /// radiant and short-wave; latent is the humidity domain's). An
     /// attribution, not a fourth balance term: the ports' delivery arrives
     /// in the network through the same `B_d·u` columns the invariant's
     /// gains term integrates.
     pub delivered_end_use_wh: f64,
-    /// The per-step tolerance's gross flux integrated over the run [Wh]:
+    /// The per-step tolerance's gross flux integrated over the run, in Wh:
     /// `Σ|q_gains|` per step, the quantity the per-step relative tolerance
     /// `max(1 W, 1e-6·gross)` scales with and the residual's ppm
     /// denominator. The invariant's own account, not a physical energy: the
@@ -267,7 +267,7 @@ pub struct ClosureRow {
     /// dwelling's loads, which is why it is named for the tolerance and
     /// never for the house.
     pub tolerance_gross_wh: f64,
-    /// The integrated per-step residual [Wh]: `Σ (Σq_gains − ΔE_stored −
+    /// The integrated per-step residual, in Wh: `Σ (Σq_gains − ΔE_stored −
     /// q_loss)·dt`, the affine decomposition's own closure. Each step's
     /// residual is bounded by the per-step tolerance `max(1 W, 1e-6·gross)`,
     /// which a step can carry silently; integrated over a year the
@@ -280,11 +280,11 @@ pub struct ClosureRow {
 impl ClosureRow {
     /// Integrates one step's balance into the row.
     ///
-    /// `q_gains` is the thermal solver's external-gain terms [W] (the
+    /// `q_gains` is the thermal solver's external-gain terms, in W (the
     /// affine decomposition's input side: the `B_d·u` term, then the affine
     /// coupling term when the step is coupled),
-    /// `delta_e_storage_w` the stored rate over all nodes [W], and
-    /// `q_loss_w` the conduction term [W] (positive when heat leaves).
+    /// `delta_e_storage_w` the stored rate over all nodes, in W, and
+    /// `q_loss_w` the conduction term, in W (positive when heat leaves).
     /// `dt_s` is the step's length. The row integrates the stored change,
     /// the tolerance's gross and the residual; the gains and conduction
     /// terms themselves are the affine decomposition's, not physical
@@ -346,7 +346,7 @@ impl EnergyClosureReport {
     ///
     /// `thermal_ports` is the step's thermal-port accumulators (the
     /// delivery the ports metered, per zone), `zone_air_stored_w` the
-    /// solver's per-zone air-node stored rates [W], and the remaining
+    /// solver's per-zone air-node stored rates, in W, and the remaining
     /// scalars the full-system terms the thermal solver's
     /// `thermal_balance_terms` exposed. Allocates nothing in steady state:
     /// the zone rows' storage is sized once at the first step each zone

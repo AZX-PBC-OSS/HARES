@@ -525,7 +525,7 @@ impl PyEnergyClosureReport {
     }
 }
 
-/// One closure row's integrated terms [Wh].
+/// One closure row's integrated terms, in Wh.
 #[pyclass(frozen, name = "ClosureRow")]
 pub struct PyClosureRow {
     inner: RustClosureRow,
@@ -563,7 +563,7 @@ impl PyClosureRow {
     }
 }
 
-/// One zone's run-total share of the energy-closure report [Wh].
+/// One zone's run-total share of the energy-closure report, in Wh.
 #[pyclass(frozen, name = "ZoneClosureRow")]
 pub struct PyZoneClosureRow {
     inner: RustZoneClosureRow,

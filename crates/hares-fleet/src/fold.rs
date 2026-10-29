@@ -132,9 +132,9 @@ pub struct HomeResult {
 /// warm-up days the run replayed before its horizon.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HomeClosureTelemetry {
-    /// The run's integrated thermal-balance residual [Wh] (signed).
+    /// The run's integrated thermal-balance residual, in Wh (signed).
     pub residual_wh: f64,
-    /// The run's integrated gross flux [Wh]: the residual's ppm
+    /// The run's integrated gross flux, in Wh: the residual's ppm
     /// denominator.
     pub gross_wh: f64,
     /// Warm-up days the run replayed to convergence (or gave up at);
@@ -166,10 +166,10 @@ impl HomeClosureTelemetry {
 pub struct FleetClosureTelemetry {
     /// Homes whose runs reported a closure account.
     pub homes_reported: usize,
-    /// Mean of the homes' signed residuals [Wh]: the fleet's average bias
+    /// Mean of the homes' signed residuals, in Wh: the fleet's average bias
     /// direction.
     pub residual_wh_mean: f64,
-    /// The signed residuals' 99th percentile [Wh], nearest-rank: the tail
+    /// The signed residuals' 99th percentile, in Wh, nearest-rank: the tail
     /// the fleet's worst homes carry.
     pub residual_wh_p99: f64,
     /// Mean of the homes' residuals in ppm of their own gross flux.
