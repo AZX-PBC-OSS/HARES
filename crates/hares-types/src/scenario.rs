@@ -134,8 +134,15 @@ impl ScenarioDistribution {
     }
 
     /// Draw one value directly from the distribution: the uncorrelated
-    /// parameter's path.
+    /// parameter's path. The distribution validates before it draws, so a
+    /// malformed one is an error naming it, never a panic or a
+    /// substitute value.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the distribution's parameters are malformed.
     pub fn sample(&self, rng: &mut ChaCha8Rng) -> Result<f64, HaresError> {
+        self.validate()?;
         match self {
             Self::Uniform { low, high } => Ok(*low + rng.random::<f64>() * (high - low)),
             Self::Normal { mean, std_dev } => {
@@ -160,38 +167,49 @@ impl ScenarioDistribution {
                         return Ok(*v);
                     }
                 }
-                Ok(values[values.len() - 1])
+                values.last().copied().ok_or_else(|| {
+                    HaresError::Equipment(
+                        "the discrete distribution carries no values to draw".to_string(),
+                    )
+                })
             }
         }
     }
 
     /// The distribution's quantile function at probability `p` in (0, 1):
     /// the correlated parameter's path (the one-factor Gaussian copula's
-    /// transform, which preserves this marginal exactly).
-    #[must_use]
-    pub fn quantile(&self, p: f64) -> f64 {
+    /// transform, which preserves this marginal exactly). The distribution
+    /// validates before it maps, so a malformed one is an error naming it,
+    /// never a panic.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the distribution's parameters are malformed.
+    pub fn quantile(&self, p: f64) -> Result<f64, HaresError> {
+        self.validate()?;
         let p = p.clamp(f64::EPSILON, 1.0 - f64::EPSILON);
-        match self {
+        Ok(match self {
             Self::Uniform { low, high } => low + p * (high - low),
             Self::Normal { mean, std_dev } => mean + std_dev * normal_inverse_cdf(p),
             Self::LogNormal { mu, sigma } => libm::exp(mu + sigma * normal_inverse_cdf(p)),
             Self::Triangular { min, mode, max } => triangular_quantile(*min, *mode, *max, p),
             Self::Discrete { values, weights } => {
                 let total: f64 = weights.iter().sum();
-                if total == 0.0 {
-                    return values[0];
-                }
                 let u = p * total;
                 let mut cumulative = 0.0;
                 for (v, w) in values.iter().zip(weights.iter()) {
                     cumulative += w;
                     if u < cumulative {
-                        return *v;
+                        return Ok(*v);
                     }
                 }
-                values[values.len() - 1]
+                values.last().copied().ok_or_else(|| {
+                    HaresError::Equipment(
+                        "the discrete distribution carries no values to quantile".to_string(),
+                    )
+                })?
             }
-        }
+        })
     }
 }
 
@@ -569,7 +587,7 @@ impl ScenarioSpec {
                     let z_own = normal_standard(&mut rng);
                     let loading = libm::sqrt(correlation.rho);
                     let z = loading * z_group + libm::sqrt(1.0 - correlation.rho) * z_own;
-                    parameter.distribution.quantile(normal_cdf(z))
+                    parameter.distribution.quantile(normal_cdf(z))?
                 }
             };
             // A draw the declared support does not bound cannot be
@@ -1074,6 +1092,32 @@ mod tests {
         let json = serde_json::to_string(&sample).expect("serializes");
         let back: ScenarioSample = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, sample);
+    }
+
+    /// A malformed distribution is an error naming it, never a panic or a
+    /// substitute value: an empty discrete has no value to draw or to
+    /// quantile, and both public paths validate before they index.
+    #[test]
+    fn a_malformed_discrete_is_an_error_not_a_panic() {
+        let dist = ScenarioDistribution::Discrete {
+            values: Vec::new(),
+            weights: Vec::new(),
+        };
+        let mut rng = RngStream::scenario_sampler([0_u8; 32]).rng_at(0);
+        let err = dist
+            .sample(&mut rng)
+            .expect_err("an empty discrete has no value to draw");
+        assert!(
+            err.to_string().contains("discrete"),
+            "the error must name the distribution: {err}"
+        );
+        let err = dist
+            .quantile(0.5)
+            .expect_err("an empty discrete has no value to quantile");
+        assert!(
+            err.to_string().contains("discrete"),
+            "the error must name the distribution: {err}"
+        );
     }
 
     /// The spec's loud errors: a repeated name, a rho outside [0, 1), a
