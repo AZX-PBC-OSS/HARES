@@ -25,12 +25,19 @@ mod harness {
         // SimulationConfig carries serde defaults for every field we do not name
         // here. With no reports the run records nothing: the step loop is the
         // whole cost.
+        //
+        // The run's default warm-up converges over days of its own stepping
+        // before the window starts, and those steps land in the phase means.
+        // The example reports the window's cost, so it opts out: without the
+        // warm-up the step count is the window's own and the printed day count
+        // is the window profiled.
         let sim_toml = format!(
             r#"
 start_time = "2018-01-01T00:00:00-07:00"
 duration = {}
 time_res = 900
 master_seed = 0
+warmup = "disabled"
 "#,
             days * 24 * 3600
         );
@@ -88,7 +95,7 @@ master_seed = 0
         }
         let wall = t0.elapsed();
         eprintln!(
-            "wall {wall:.2?} for {reps} x {days}-day runs (plus one warm-up); \
+            "wall {wall:.2?} for {reps} x {days}-day runs (plus one unmeasured run); \
              per-phase means per run:"
         );
         for (name, d) in [
