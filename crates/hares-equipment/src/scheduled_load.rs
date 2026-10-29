@@ -136,6 +136,13 @@ pub struct ScheduledLoad {
     mode_override: Option<OperatingMode>,
     /// Per-step absolute power override set by `PowerSetpoint`. Cleared after each step.
     power_setpoint_override: Option<f64>,
+    /// The step's nominal electric draw [W] when a `PowerSetpoint` override
+    /// drove it: the override commands real power and the scheduled path does
+    /// not scale it by the row (Rule R1 for the override: Q-only, the real
+    /// side untouched), so the moment's reference draw is the override
+    /// itself. `None` on a schedule-driven step (the resolved row's un-scale
+    /// is the reference draw).
+    last_nominal_draw_w: Option<f64>,
     power_source: ScheduleSource,
 }
 
@@ -182,6 +189,7 @@ impl ScheduledLoad {
             load_fraction: 1.0,
             mode_override: None,
             power_setpoint_override: None,
+            last_nominal_draw_w: None,
             power_source: ScheduleSource::Constant(0.0),
         }
     }
@@ -327,6 +335,10 @@ impl Equipment for ScheduledLoad {
         _dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
+        // The step's assembled base: only a PowerSetpoint-driven step has one
+        // (set below); every other step's reference draw is the resolved
+        // row's un-scale.
+        self.last_nominal_draw_w = None;
         // Grid outage (de-energized bus): all outputs are zero. Gas scheduled
         // loads are also zeroed — modern gas appliances (ranges, dryers,
         // fireplaces with electronic ignition) need electricity to operate.
@@ -433,7 +445,12 @@ impl Equipment for ScheduledLoad {
                 // The override commands real power; the reactive side stays
                 // the ZIP model's at that power (Rule R1: Q-only, the real
                 // side untouched) - an overridden nonzero-pf load keeps its
-                // vars, exactly as the scheduled path's Q does.
+                // vars, exactly as the scheduled path's Q does. The commanded
+                // draw is voltage-invariant, so the moment's reference draw
+                // is the override itself: the aggregate divides the step's
+                // draw by it and answers the flat response of 1.0 the engine
+                // takes, not the resolved row's evaluation.
+                self.last_nominal_draw_w = (override_w > 0.0).then_some(override_w);
                 let q = self.zip.reactive_var(override_w, env.grid.bus_voltage_pu());
                 (override_w, q, 0.0)
             } else {
@@ -566,6 +583,10 @@ impl Equipment for ScheduledLoad {
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.last_nominal_draw_w
     }
 
     fn expected_mean_power_w(&self) -> Option<crate::ExpectedMeanPower> {
@@ -1379,6 +1400,69 @@ mod tests {
         assert!(
             (ports.electrical.net_active_w() - 3000.0).abs() < 10.0,
             "step 2 should revert to schedule 3.0"
+        );
+    }
+
+    /// A `PowerSetpoint` moment is voltage-invariant: the override commands
+    /// real power and the scheduled path does not scale it by the row (Rule
+    /// R1 for the override: Q-only, the real side untouched), so the engine
+    /// answers a response of exactly 1.0 at every voltage. The assembled
+    /// normalization must divide the draw by itself; with no base, the
+    /// aggregate un-scales through the Lighting row and publishes 0.345 at
+    /// 0.5 pu for a draw the row never scaled.
+    #[test]
+    fn a_power_setpoint_moment_reports_its_flat_response_as_the_base() {
+        let run = |voltage_pu: f64| -> ScheduledLoad {
+            let config = config_with_schedule("s", "Lighting", &[3.0]);
+            let mut env = base_env();
+            env.grid.voltage_pu = voltage_pu;
+            let mut eq =
+                ScheduledLoad::new(config.clone(), hares_types::EndUse::LIGHTING, "Lighting");
+            eq.init(&config, &env).unwrap();
+            eq.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_w: 400.0,
+                reactive_power_var: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+            let mut ports = PortSlots {
+                thermal: vec![hares_types::ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
+            eq
+        };
+        let draw = |eq: &ScheduledLoad| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the load must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        // The commanded draw is the same at both voltages (the override is
+        // not row-scaled), and the fixture discriminates: the row's own
+        // evaluation at 0.5 pu is 0.345.
+        assert_eq!(draw(&nominal_unit), 400.0, "fixture: the override draws");
+        assert_eq!(draw(&sag_unit), 400.0, "fixture: the override is flat");
+        let row = sag_unit.resolved_zip().expect("governing row");
+        assert!(
+            (row.deep_sag_real_multiplier(0.5) - 0.345).abs() < 1e-12,
+            "fixture: the Lighting row must evaluate 0.345 at 0.5 pu"
+        );
+
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("an overridden step knows its reference draw");
+        assert_eq!(
+            reported_nominal, 400.0,
+            "the base of a flat override moment is the commanded draw"
+        );
+        let response = draw(&sag_unit) / reported_nominal;
+        assert!(
+            (response - 1.0).abs() < 1e-15,
+            "the assembled response of a flat override is exactly 1.0, got \
+             {response} (the row's un-scale would answer 0.345)"
         );
     }
 
