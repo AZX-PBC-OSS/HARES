@@ -111,28 +111,34 @@ impl ScenarioDistribution {
         }
     }
 
-    /// The analytical mean the moment witnesses compare against.
-    #[must_use]
-    pub fn mean(&self) -> f64 {
-        match self {
+    /// The analytical mean the moment witnesses compare against. The
+    /// distribution validates before it computes, so a malformed one is
+    /// an error naming it, never a substitute value: a discrete with no
+    /// positive weight has no mean to stand in for one.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the distribution's parameters are malformed.
+    pub fn mean(&self) -> Result<f64, HaresError> {
+        self.validate()?;
+        Ok(match self {
             Self::Uniform { low, high } => (low + high) / 2.0,
             Self::Normal { mean, .. } => *mean,
             // The triangular mean is the average of its three corners; the
             // mode is the mean only when the triangle is symmetric.
             Self::Triangular { min, mode, max } => (min + mode + max) / 3.0,
             Self::LogNormal { mu, sigma } => libm::exp(mu + sigma * sigma / 2.0),
+            // Validation holds at least one positive finite weight, so
+            // the total is strictly positive here.
             Self::Discrete { values, weights } => {
                 let total: f64 = weights.iter().sum();
-                if total == 0.0 {
-                    return 0.0;
-                }
                 values
                     .iter()
                     .zip(weights.iter())
                     .map(|(v, w)| v * w / total)
                     .sum()
             }
-        }
+        })
     }
 
     /// Draw one value directly from the distribution: the uncorrelated
@@ -818,7 +824,9 @@ mod tests {
                 .map(|i| s.sample(9, i, 0).expect("samples").values[0].value)
                 .collect();
             let mean = values.iter().sum::<f64>() / n as f64;
-            let expected = distribution.mean();
+            let expected = distribution
+                .mean()
+                .expect("the moment witness's distribution validates");
             // The mean's standard error shrinks with N; the band is
             // generous to the tails' skew (the lognormal's).
             let tolerance = (expected.abs() * 0.06).max(0.08);
@@ -1225,6 +1233,38 @@ mod tests {
         );
     }
 
+    /// The mean has the same arm the draw and the quantile have: a
+    /// discrete with no positive weight (an empty value list, or
+    /// weights that all vanish) has no mean to substitute for, so the
+    /// analytical mean refuses it naming the distribution. A number
+    /// returned from that arm would be a silent substitute value on a
+    /// public path.
+    #[test]
+    fn the_mean_refuses_a_distribution_with_no_mass() {
+        let empty = ScenarioDistribution::Discrete {
+            values: Vec::new(),
+            weights: Vec::new(),
+        };
+        let err = empty
+            .mean()
+            .expect_err("an empty discrete has no mean to return");
+        assert!(
+            err.to_string().contains("discrete"),
+            "the error must name the distribution: {err}"
+        );
+        let zero_total = ScenarioDistribution::Discrete {
+            values: vec![1.0, 2.0],
+            weights: vec![0.0, 0.0],
+        };
+        let err = zero_total
+            .mean()
+            .expect_err("a zero-total discrete has no mean to return");
+        assert!(
+            err.to_string().contains("discrete"),
+            "the error must name the distribution: {err}"
+        );
+    }
+
     /// The spec's loud errors: a repeated name, a rho outside [0, 1), a
     /// malformed distribution, and an unknown patch field all fail
     /// validation naming the parameter.
@@ -1343,10 +1383,12 @@ mod tests {
             mode: 1.2,
             max: 5.0,
         };
+        let mean = asymmetric
+            .mean()
+            .expect("the triangular witness's distribution validates");
         assert!(
-            (asymmetric.mean() - 2.4).abs() < 1e-12,
-            "the triangular mean is (min + mode + max) / 3 = 2.4, got {}",
-            asymmetric.mean()
+            (mean - 2.4).abs() < 1e-12,
+            "the triangular mean is (min + mode + max) / 3 = 2.4, got {mean}"
         );
         // The triangular variance is
         // (a^2 + b^2 + c^2 - ab - bc - ca) / 18 for (a, b, c) =
