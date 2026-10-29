@@ -743,27 +743,60 @@ mod tests {
         );
 
         // The bound over the family's parameter range, not just the two
-        // witness points: every governing row shape (the monotone default
-        // and the as-fitted form the typed equipment resolves) at sag,
-        // reference and elevated voltages, over the realistic draw
-        // magnitudes (sub-watt standby electronics up to a 100 kW
-        // whole-premise peak). The raw draw is the row-scaled reference (one
-        // rounding) and the un-scale divides the same multiplier out (one
-        // rounding), so the recovered weight must land on the reference draw
-        // or an immediate neighbour -- never two steps away, whatever the
-        // mantissa the magnitude puts the pair in.
+        // witness points: the two real shapes the typed equipment resolves
+        // (the monotone hold and the as-fitted polynomial) and the real
+        // coefficient patterns a row override can carry (pure impedance,
+        // pure current, pure constant power, and a mixed row evaluating below
+        // the class rows' floor), at sag (0.5 and 0.75 pu), reference and
+        // elevated voltages, over the realistic draw magnitudes (sub-watt
+        // standby electronics up to a 100 kW whole-premise peak). The raw
+        // draw is the row-scaled reference (one rounding) and the un-scale
+        // divides the same multiplier out (one rounding), so the recovered
+        // weight must land on the reference draw or an immediate neighbour,
+        // whatever the mantissa the magnitude puts the pair in. (A product
+        // that underflows to the subnormal range loses the bound; the
+        // admitted voltage band and these draws keep every product normal.)
         let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
         let fitted_ac = hares_types::zip::ResolvedZip {
             real_shape_as_fitted: true,
             ..hares_types::zip::ResolvedZip::governing(ac_row)
         };
+        // A row override may carry any real coefficient pattern summing to
+        // one: the pure forms and a mixed row evaluating to 0.3 at 0.5 pu,
+        // between the passive impedance floor and the fitted motor rows'
+        // elevations.
+        let pure = |zp: f64, ip: f64, pp: f64| {
+            hares_types::zip::ResolvedZip::governing(ZipLoad {
+                zp,
+                ip,
+                pp,
+                zq: 0.0,
+                iq: 0.0,
+                pq: 1.0,
+                pf: 0.0,
+                v0: 1.0,
+            })
+        };
+        let z_pure = pure(1.0, 0.0, 0.0); // P = V²/R: 0.25 at 0.5 pu
+        let i_pure = pure(0.0, 1.0, 0.0); // P = V: 0.5 at 0.5 pu, 1.1 at 1.1 pu
+        let p_pure = pure(0.0, 0.0, 1.0); // P = const: 1.0 at every voltage
+        let mixed_low = pure(0.8, 0.2, 0.0); // 0.3 at 0.5 pu
         for (resolved, voltage_pu) in [
             (hares_types::zip::ResolvedZip::governing(lighting), 0.5),
             (hares_types::zip::ResolvedZip::governing(lighting), 0.75),
             (hares_types::zip::ResolvedZip::governing(lighting), 1.0),
             (hares_types::zip::ResolvedZip::governing(lighting), 1.1),
             (fitted_ac, 0.5),
+            (fitted_ac, 0.75),
             (fitted_ac, 1.0),
+            (fitted_ac, 1.1),
+            (z_pure, 0.5),
+            (i_pure, 0.5),
+            (i_pure, 1.1),
+            (p_pure, 0.5),
+            (p_pure, 1.1),
+            (mixed_low, 0.5),
+            (mixed_low, 0.75),
         ] {
             let multiplier = resolved.deep_sag_real_multiplier(voltage_pu);
             assert!(
