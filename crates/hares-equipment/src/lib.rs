@@ -521,18 +521,20 @@ pub trait Equipment: Send + Sync {
         None
     }
 
-    /// The moment's nominal electric draw (W): the draw the equipment's
-    /// components take at the reference voltage for the operating state the
-    /// last step stepped, before the deep-sag scaling, at the bus voltage
-    /// that step ran at. `None` when the equipment has not stepped a
-    /// positive draw or reports no assembled composition.
+    /// The moment's nominal electric draw (W): the component draw the
+    /// equipment would take at the reference voltage in the operating state
+    /// the last step stepped, with that step's control composition applied
+    /// and before the deep-sag scaling. `None` when the equipment has not
+    /// stepped a positive draw or reports no assembled composition.
     ///
     /// The state includes the control composition: duty cycle, load
-    /// fraction and an active power limit act on the rated draw before the
-    /// voltage response multiplies it, so under a limit the reported base is
-    /// the capped reference draw (what the equipment would draw at the
-    /// reference voltage with the same limit applied), not the nameplate
-    /// rating. Likewise a unit's space fraction is part of the base, because
+    /// fraction, a commanded flat power and an active power limit. The base
+    /// is what the same controls draw at the reference voltage, whichever
+    /// side of the voltage multiplier an implementation applies them: a
+    /// limit belongs to the base, not to the voltage response, and a unit
+    /// that caps its scaled draw reports the same limited state's reference
+    /// draw (a cap that binds at every voltage reports the identity
+    /// response). A unit's space fraction is part of the base too, because
     /// the metered draw it must divide carries it.
     ///
     /// For an equipment whose draw is scaled through a single resolved row

@@ -1366,17 +1366,23 @@ backup element's impedance share 0.25 (P = V²/R, a 2.4 times
 overstatement); a feeder study reading the aggregate at a deep sag
 would state a response the engine does not answer. At the reference
 voltage every multiplier is exactly 1.0, so the assembled response is
-exactly 1.0 and no committed golden moves.
+the identity and no committed golden moves.
 
 The base the aggregate divides by is the reference-voltage draw of the
 operating state the step ran, so it carries the control composition the
-step applied: duty cycle, load fraction, the served space fraction, and
-an active power limit (the capped reference draw, not the nameplate
-rating), because those act on the rated draw before the voltage response
-multiplies it. A scheduled load's `PowerSetpoint` override commands real
-power and is not row-scaled, so its base is the commanded draw and its
-response is exactly 1.0. The aggregate accepts a base only when it is
-finite and positive; any other report falls back to the row's single-row
+step applied: duty cycle, load fraction, the served space fraction, a
+commanded flat power, and an active power limit (the capped reference
+draw, not the nameplate rating). The base is what the same controls draw
+at the reference voltage whichever side of the voltage multiplier an
+implementation applies them: the air conditioner caps its rated draw
+before the voltage response, while the heat pump heater clamps its
+already-scaled draw (the cap holds the final watts), so its base replays
+the shed-then-cap composition on the nominal components and a cap that
+binds at every voltage reports the identity response, not the uncapped
+blend. A scheduled load's `PowerSetpoint` override commands real power
+and is not row-scaled, so its base is the commanded draw and its response
+is exactly 1.0. The aggregate accepts a base only when it is finite and
+positive; any other report falls back to the row's single-row
 evaluation.
 
 On an energized bus a row evaluation that is not finite and positive is

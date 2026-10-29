@@ -2379,6 +2379,20 @@ impl HeatPumpHeaterCore {
             // defrost_resistive_electric_w are not scaled (on/off elements)
         }
 
+        // The moment's reference components: the same state's component
+        // draws at the reference voltage, captured before the power limit
+        // rewrites the scaled composition. This engine applies the limit to
+        // the SCALED draw (the cap clamps the final watts), so the cap's
+        // ratio is not a voltage response: the base must replay the limit's
+        // composition on these nominal components rather than divide the
+        // capped values back through their rows.
+        let compressor_nominal_w = compressor_w / motor_multiplier;
+        let fan_nominal_w = fan_w / fan_multiplier;
+        let pan_nominal_w = step_pan_heater_w / resistive_multiplier;
+        let backup_nominal_w = backup_er_w / resistive_multiplier;
+        let defrost_nominal_w = defrost_resistive_electric_w / resistive_multiplier;
+        let fuel_nominal_w = fuel_w;
+
         // Apply PowerLimit (sticky): shed ER first (it is on/off, not modulatable),
         // then scale HP+fan proportionally only if still over limit after shedding ER.
         // For fuel backup, electric_w excludes ER (fuel_w carries it); the limit
@@ -2467,26 +2481,41 @@ impl HeatPumpHeaterCore {
         };
         electric_w += pump_w;
 
-        // The moment's nominal component draw: the final scaled components
-        // (post duty/load-fraction/power-limit composition) un-scaled each
-        // through its own row, the counterfactual the premise aggregate
-        // weights this unit by; the response it answers is the scaled draw
-        // over it. The control composition acts on the scaled values it
-        // sees, so the un-scale happens on the final components, each
-        // against the row that scaled it. `space_fraction` multiplies the
-        // combined draw in `step()`, so it belongs to the base as well: the
-        // reported draw and the metered draw must share one unit.
+        // The moment's assembled base: the reference-voltage draw of the
+        // step's control composition. The limit's composition (shed the
+        // on/off backup first, then cap the modulated side) is replayed on
+        // the nominal components because this engine applies the limit to
+        // the scaled draw; the pump is outside the limit and always
+        // nominal. `space_fraction` multiplies the published draw in
+        // `step()`, so it belongs to the base as well. The uncapped replay
+        // is the components' pre-scaling sum.
         let pump_multiplier = crate::hvac::reactive::secondary_motor_real_multiplier(
             &crate::hvac::reactive::LOOP_PUMP_ZIP,
             bus_voltage_pu,
         );
-        let nominal_component_w = (compressor_w / motor_multiplier
-            + fan_w / fan_multiplier
-            + backup_er_w / resistive_multiplier
-            + step_pan_heater_w / resistive_multiplier
-            + defrost_resistive_electric_w / resistive_multiplier
-            + pump_w / pump_multiplier)
-            * self.hvac.config.space_fraction;
+        let hp_only_nominal_w =
+            compressor_nominal_w + fan_nominal_w + pan_nominal_w + defrost_nominal_w;
+        let total_nominal_w = hp_only_nominal_w + backup_nominal_w;
+        let reference_electric_w = if self.ctrl_power_limit_w.is_finite()
+            && total_nominal_w + fuel_nominal_w > self.ctrl_power_limit_w
+        {
+            if hp_only_nominal_w <= self.ctrl_power_limit_w {
+                hp_only_nominal_w
+            } else {
+                self.ctrl_power_limit_w
+            }
+        } else {
+            // The uncapped reference in the draw's own summation order, so
+            // at the reference voltage it is the step's published draw
+            // bitwise and the response is exactly 1.0.
+            compressor_nominal_w
+                + backup_nominal_w
+                + fan_nominal_w
+                + pan_nominal_w
+                + defrost_nominal_w
+        };
+        let nominal_component_w =
+            (reference_electric_w + pump_w / pump_multiplier) * self.hvac.config.space_fraction;
         self.last_nominal_draw_w = if nominal_component_w.is_finite() && nominal_component_w > 0.0 {
             Some(nominal_component_w)
         } else {
@@ -4327,6 +4356,85 @@ mod tests {
             (response - expected_response).abs() < 1e-9,
             "the assembled response must be the components' own evaluations \
              over their nominal draws ({expected_response}), got {response}"
+        );
+    }
+
+    /// A binding power limit is part of the control composition the base
+    /// carries: the base is what the same limited state draws at the
+    /// reference voltage. The heater applies its limit to the voltage-scaled
+    /// draw (the cap clamps the final watts), so at a sag the capped draw is
+    /// flat at the limit and the response is the identity; a base built by
+    /// un-scaling the capped components through their rows answers the
+    /// uncapped blend instead (the limit's ratio divided back out), a
+    /// response the engine never takes.
+    #[test]
+    fn power_limited_moment_reports_the_capped_reference_draw() {
+        let cfg = heater_config_with(|typed| {
+            // The HP side alone, so the cap composition is the compressor
+            // and blower: no on/off backup to shed.
+            typed.common.backup_capacity_w = Some(0.0);
+            typed.common.fan_power_w = Some(300.0);
+        });
+        let environment = env(18.0, 10.0, 0.005);
+
+        let run = |voltage_pu: f64, limit_w: Option<f64>| -> ASHPHeater {
+            let mut env_run = env(18.0, 10.0, 0.005);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = ASHPHeater::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            if let Some(max_power_w) = limit_w {
+                eq.apply_control(&ControlSignal::PowerLimit {
+                    max_power_w,
+                    ramp_rate_w_per_s: None,
+                })
+                .unwrap();
+            }
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &ASHPHeater| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the heater must report its draw, got {other:?}"),
+        };
+
+        let full_w = draw(&run(1.0, None));
+        assert!(full_w > 0.0, "fixture: the heater must run");
+        let limit_w = 0.5 * full_w;
+        let capped_reference_w = draw(&run(1.0, Some(limit_w)));
+        assert!(
+            (capped_reference_w - limit_w).abs() < 1e-9,
+            "fixture: the cap must bind at the reference voltage \
+             ({limit_w} W of {full_w} W), got {capped_reference_w}"
+        );
+
+        let sag = run(0.5, Some(limit_w));
+        let sag_draw = draw(&sag);
+        assert!(
+            (sag_draw - limit_w).abs() < 1e-9,
+            "fixture: the cap clamps the scaled draw, so the limited draw is \
+             the same at 0.5 pu ({limit_w} W), got {sag_draw}"
+        );
+
+        let base = sag
+            .nominal_electric_draw_w()
+            .expect("the limited step reports its base");
+        assert!(
+            (base - capped_reference_w).abs() < 1e-6 * capped_reference_w,
+            "the base must be the same limited state's reference draw \
+             {capped_reference_w}, got {base} (the uncapped composition's \
+             un-scaled blend)"
+        );
+        let response = sag_draw / base;
+        assert!(
+            (response - 1.0).abs() < 1e-9,
+            "a draw the cap holds flat at the limit has the identity \
+             response, got {response}"
         );
     }
 
