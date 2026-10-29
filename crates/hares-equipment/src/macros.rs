@@ -121,6 +121,10 @@ macro_rules! delegate_equipment {
             fn thermostat_axes(&self) -> Option<hares_types::ThermostatAxes> {
                 self.$inner.thermostat_axes()
             }
+
+            fn nominal_electric_draw_w(&self) -> Option<f64> {
+                self.$inner.nominal_electric_draw_w()
+            }
         }
     };
 }

@@ -282,6 +282,12 @@ impl Equipment for HpCooler {
         self.inner.resolved_zip()
     }
 
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        // No electric component beyond the inner unit's: its assembled
+        // nominal draw is this cooler's.
+        self.inner.nominal_electric_draw_w()
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.inner.save_state()
     }
@@ -329,6 +335,12 @@ pub struct GshpCooler {
     /// drives Q. The compressor/fan/crankcase
     /// response comes from the inner [`AirConditioner`].
     pump_zip: hares_types::zip::ZipLoad,
+    /// The moment's nominal component draw of the most recent step (the
+    /// inner unit's assembled nominal plus the pump's pre-scaling draw):
+    /// the premise aggregate's weight for this unit, which un-scales the
+    /// stepped draw through the assembled response it reports. `None` when
+    /// the step drew nothing.
+    last_nominal_draw_w: Option<f64>,
 }
 
 impl GshpCooler {
@@ -385,6 +397,7 @@ impl GshpCooler {
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
             pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            last_nominal_draw_w: None,
         }
     }
 
@@ -638,7 +651,7 @@ impl Equipment for GshpCooler {
         // space_fraction to its combined electric_w, pump included).
         let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
         let sf = self.inner.core.hvac.config.space_fraction;
-        let pump_w = if compressor_ran {
+        let pump_nominal_w = if compressor_ran {
             hares_physics::pump::compute_ground_loop_pump_power_w(
                 self.pump_loop_depth_m,
                 self.pump_pipe_diameter_m,
@@ -647,6 +660,11 @@ impl Equipment for GshpCooler {
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
             ) * sf
+        } else {
+            0.0
+        };
+        let pump_w = if compressor_ran {
+            pump_nominal_w
             // The declared deep-sag response (docs/PHYSICS_DECISIONS.md,
             // the deep-sag entry): the pump motor's draw evaluates its
             // pump-motor row at the ACTUAL bus voltage. The inner
@@ -658,6 +676,14 @@ impl Equipment for GshpCooler {
         } else {
             0.0
         };
+        // The moment's nominal component draw: the inner unit's assembled
+        // nominal (its components' pre-scaling sum) plus the pump's
+        // pre-scaling draw. The premise aggregate weights this unit by it
+        // and answers the assembled response, the combined scaled draw
+        // over it.
+        let nominal_component_w =
+            self.inner.nominal_electric_draw_w().unwrap_or(0.0) + pump_nominal_w;
+        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
 
         // Per-component reactive (see `hvac::reactive`): the ground-loop pump
         // is a circulation pump motor (pf 0.84), not a cooling compressor.
@@ -725,6 +751,10 @@ impl Equipment for GshpCooler {
         self.inner.resolved_zip()
     }
 
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.last_nominal_draw_w
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.inner.save_state()
     }
@@ -781,6 +811,12 @@ pub struct WshpCooler {
     /// honouring the unit-level pf=0 sentinel. The compressor/fan/crankcase
     /// reactive comes from the inner [`AirConditioner`].
     pump_zip: hares_types::zip::ZipLoad,
+    /// The moment's nominal component draw of the most recent step (the
+    /// inner unit's assembled nominal plus the pump's pre-scaling draw):
+    /// the premise aggregate's weight for this unit, which un-scales the
+    /// stepped draw through the assembled response it reports. `None` when
+    /// the step drew nothing.
+    last_nominal_draw_w: Option<f64>,
 }
 
 impl WshpCooler {
@@ -832,6 +868,7 @@ impl WshpCooler {
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
             pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            last_nominal_draw_w: None,
         }
     }
 
@@ -1015,7 +1052,7 @@ impl Equipment for WshpCooler {
         // voltage.
         let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
         let sf = self.inner.core.hvac.config.space_fraction;
-        let pump_w = if compressor_ran {
+        let pump_nominal_w = if compressor_ran {
             hares_physics::pump::compute_ground_loop_pump_power_w(
                 self.pump_loop_depth_m,
                 self.pump_pipe_diameter_m,
@@ -1024,6 +1061,11 @@ impl Equipment for WshpCooler {
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
             ) * sf
+        } else {
+            0.0
+        };
+        let pump_w = if compressor_ran {
+            pump_nominal_w
                 * crate::hvac::reactive::secondary_motor_real_multiplier(
                     &self.pump_zip,
                     env.grid.bus_voltage_pu(),
@@ -1031,6 +1073,14 @@ impl Equipment for WshpCooler {
         } else {
             0.0
         };
+        // The moment's nominal component draw: the inner unit's assembled
+        // nominal (its components' pre-scaling sum) plus the pump's
+        // pre-scaling draw. The premise aggregate weights this unit by it
+        // and answers the assembled response, the combined scaled draw
+        // over it.
+        let nominal_component_w =
+            self.inner.nominal_electric_draw_w().unwrap_or(0.0) + pump_nominal_w;
+        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
 
         // Per-component reactive (see `hvac::reactive`): the water-loop pump
         // is a circulation pump motor (pf 0.84), not a cooling compressor.
@@ -1090,6 +1140,10 @@ impl Equipment for WshpCooler {
         // AirConditioner (the user "zip" sidecar is propagated to it); the
         // loop-pump component ZIP is secondary.
         self.inner.resolved_zip()
+    }
+
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.last_nominal_draw_w
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {

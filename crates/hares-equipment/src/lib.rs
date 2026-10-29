@@ -521,6 +521,29 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// The moment's nominal electric draw (W): the draw the equipment's
+    /// components take at the reference voltage for the operating state the
+    /// last step stepped, before the deep-sag scaling, at the bus voltage
+    /// that step ran at. `None` when the equipment has not stepped a
+    /// positive draw or reports no assembled composition.
+    ///
+    /// For an equipment whose draw is scaled through a single resolved row
+    /// the premise aggregate needs no answer here: un-scaling the stepped
+    /// draw through that row is exact. A multi-component unit (a compressor
+    /// with its own blower and crankcase elements, a heat-pump water
+    /// heater's compressor and backup element) evaluates each component
+    /// through its own row, so no single published row un-scales the blend;
+    /// this surface reports the components' nominal draws and the
+    /// aggregate's `deep_sag_scale` becomes the assembled response: the
+    /// components' actual evaluated draws over the components' nominal
+    /// draws. The default returns `None` (the single-row un-scale route).
+    ///
+    /// Pure inspection surface for the premise aggregate
+    /// ([`crate::ExpectedMeanPower`]'s sibling); never influences stepping.
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        None
+    }
+
     // -----------------------------------------------------------------
     // Initialization lifecycle guard
     // -----------------------------------------------------------------

@@ -105,6 +105,12 @@ pub(super) struct CoolingCore {
     /// for the borehole heat-rejection balance, which pairs it with the gross
     /// (unscaled) coil sensible/latent values.
     pub(super) last_compressor_w: f64,
+    /// The moment's nominal component draw of the most recent step (W, the
+    /// components' pre-scaling sum at the reference voltage, space fraction
+    /// included): the premise aggregate's weight for this unit, which
+    /// un-scales the stepped draw through the assembled response it
+    /// reports. `None` when the step drew nothing.
+    pub(super) last_nominal_draw_w: Option<f64>,
     flow_fraction_correction: f64,
     coil_ao_by_stage: Vec<f64>,
     is_room_ac: bool,
@@ -386,6 +392,10 @@ impl Equipment for AirConditioner {
         Some(self.core.zip)
     }
 
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.core.last_nominal_draw_w
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.core.save_state()
     }
@@ -489,6 +499,10 @@ impl Equipment for RoomAC {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
         Some(self.core.zip)
+    }
+
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.core.last_nominal_draw_w
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -689,6 +703,7 @@ impl CoolingCore {
             crankcase_capacity_curve: None,
             last_cooling_rtf: 0.0,
             last_compressor_w: 0.0,
+            last_nominal_draw_w: None,
             flow_fraction_correction: 1.0,
             coil_ao_by_stage: vec![10.0],
             is_room_ac,
@@ -1392,6 +1407,14 @@ impl CoolingCore {
             super::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
         let v_norm = bus_voltage_pu / self.zip.v0;
         let resistive_multiplier = v_norm * v_norm;
+        // The moment's nominal component draw: the components' pre-scaling
+        // sum, the composition the scaled sum below evaluates through their
+        // own rows (the compressor and fan motors through their recorded
+        // rows, the crankcase heater through the impedance share). The
+        // premise aggregate weights this unit by it and answers the
+        // assembled response, the scaled sum over it.
+        let nominal_component_w = (compressor_w + fan_w + self.crankcase_heater_w) * sf;
+        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let compressor_w = compressor_w * motor_multiplier;
         let fan_w = fan_w * fan_multiplier;
         let crankcase_w = self.crankcase_heater_w * resistive_multiplier;
@@ -3888,6 +3911,91 @@ mod tests {
         assert!(
             (p_half - p_nominal).abs() > 0.05 * p_nominal,
             "the pinned flat line must be gone: {p_half} vs {p_nominal}"
+        );
+    }
+
+    /// Z2's witness: the unit's reported nominal draw is its components'
+    /// pre-scaling sum, so a multi-component moment's premise weight and
+    /// `deep_sag_scale` are the assembled ones. The nominal run's total
+    /// draw *is* the nominal (every multiplier is exactly 1.0 at the
+    /// reference voltage) and its telemetry components are the nominal
+    /// component draws; each component evaluates its own row at 0.5 pu
+    /// (the compressor row as fitted: 1.6 x 0.25 - 2.69 x 0.5 + 2.09 =
+    /// 1.145; the fan row: 0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.355; the
+    /// crankcase heater the impedance share, 0.25). The premise aggregate
+    /// that un-scales the unit's total through the compressor row alone
+    /// (the parent's normalization) would weight this composition
+    /// 1062 W against the true 1200 W-class nominal and publish 1.145
+    /// against the assembled response.
+    #[test]
+    fn reported_nominal_draw_is_the_components_pre_scaling_sum() {
+        let cfg = ac_config_with(|typed| {
+            typed.startup_cd = None;
+        });
+        let environment = env_at_second(27.0, 35.0, 0);
+
+        let run = |voltage_pu: f64| -> AirConditioner {
+            let mut env_run = env_at_second(27.0, 35.0, 0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let component_w = |eq: &AirConditioner, key: &str| {
+            let w = eq.telemetry().get(key).unwrap_or(f64::NAN);
+            assert!(w.is_finite(), "fixture: {key} must be finite");
+            w
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let nominal_total = component_w(&nominal_unit, tk::ELECTRIC_KW);
+        assert!(nominal_total > 0.0, "fixture: the unit must run");
+
+        // The reported nominal draw: the components' pre-scaling sum, the
+        // nominal run's own total draw.
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_total).abs() < 1e-6 * nominal_total,
+            "the reported nominal draw must be the components' pre-scaling \
+             sum ({nominal_total}), got {reported_nominal}"
+        );
+
+        // The assembled response: the hand computation over the components'
+        // own rows, and the stepped run's total must evaluate it.
+        let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
+        let fan_n = component_w(&nominal_unit, tk::FAN_KW);
+        let crank_n = component_w(&nominal_unit, tk::CRANKCASE_KW);
+        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let fan_row = hares_types::zip::zip_defaults_for_class("Ventilation Fan").expect("row");
+        let m_compressor = ac_row.zp * 0.25 + ac_row.ip * 0.5 + ac_row.pp;
+        let m_fan = fan_row.zp * 0.25 + fan_row.ip * 0.5 + fan_row.pp;
+        let m_resistive = 0.25; // the crankcase heater: P = V²/R
+        let nominal_component_w = compressor_n + fan_n + crank_n;
+        let expected_scaled = compressor_n * m_compressor + fan_n * m_fan + crank_n * m_resistive;
+        let expected_response = expected_scaled / nominal_component_w;
+        let sag_total = component_w(&sag_unit, tk::ELECTRIC_KW);
+        assert!(
+            (sag_total - expected_scaled).abs() < 1e-6 * expected_scaled,
+            "the 0.5 pu draw must be the components' own row evaluations \
+             ({expected_scaled}), got {sag_total}"
+        );
+        let reported_response = sag_total / reported_nominal;
+        assert!(
+            (reported_response - expected_response).abs() < 1e-9,
+            "the assembled response must be the hand computation \
+             {expected_response}, got {reported_response} (the compressor \
+             row alone evaluates {m_compressor})"
         );
     }
 

@@ -223,6 +223,13 @@ struct HeatPumpHeaterCore {
     /// derived at init via `hvac::reactive::secondary_motor_zip`. Only GSHP
     /// and WSHP variants draw pump power.
     pump_zip: hares_types::zip::ZipLoad,
+    /// The moment's nominal component draw of the most recent step (the
+    /// final scaled components un-scaled each through its own row, at the
+    /// reference voltage): the premise aggregate's weight for this unit,
+    /// which un-scales the stepped draw through the assembled response it
+    /// reports. `None` when the step drew nothing (or no finite positive
+    /// nominal exists, e.g. a de-energized bus).
+    last_nominal_draw_w: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -452,6 +459,10 @@ impl Equipment for HeatPumpHeaterCore {
         // or a user "zip" override). Fan/loop-pump component ZIPs are
         // secondary; ER backup/defrost elements are resistive (Q ≡ 0).
         Some(self.zip)
+    }
+
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.last_nominal_draw_w
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -725,6 +736,7 @@ impl HeatPumpHeaterCore {
             ),
             fan_zip: hares_types::zip::ZipLoad::constant_power(),
             pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            last_nominal_draw_w: None,
         }
     }
 
@@ -2438,6 +2450,27 @@ impl HeatPumpHeaterCore {
             0.0
         };
         electric_w += pump_w;
+
+        // The moment's nominal component draw: the final scaled components
+        // (post duty/load-fraction/power-limit composition) un-scaled each
+        // through its own row, the counterfactual the premise aggregate
+        // weights this unit by; the response it answers is the scaled draw
+        // over it. The control composition acts on the scaled values it
+        // sees, so the un-scale happens on the final components, each
+        // against the row that scaled it.
+        let pump_multiplier =
+            crate::hvac::reactive::secondary_motor_real_multiplier(&self.pump_zip, bus_voltage_pu);
+        let nominal_component_w = compressor_w / motor_multiplier
+            + fan_w / fan_multiplier
+            + backup_er_w / resistive_multiplier
+            + step_pan_heater_w / resistive_multiplier
+            + defrost_resistive_electric_w / resistive_multiplier
+            + pump_w / pump_multiplier;
+        self.last_nominal_draw_w = if nominal_component_w.is_finite() && nominal_component_w > 0.0 {
+            Some(nominal_component_w)
+        } else {
+            None
+        };
 
         Ok(HeaterStep {
             thermal_output_w,

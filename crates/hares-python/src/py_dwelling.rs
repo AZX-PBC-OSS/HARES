@@ -1418,8 +1418,10 @@ impl PyDwelling {
     /// loads, and the typed physics equipment whose rows scale their
     /// physics-computed draws). The weights are the moment's raw draws when
     /// the dwelling has stepped (each equipment's last electric draw,
-    /// un-scaled through its own row at the bus voltage (the moment's
-    /// composition), else the expected mean draw over the loaded schedule
+    /// un-scaled through its assembled deep-sag response at the bus voltage
+    /// (the equipment's own nominal draw for a multi-component unit, the
+    /// resolved row's un-scale for a single-row one, the moment's
+    /// composition)), else the expected mean draw over the loaded schedule
     /// data.
     ///
     /// Returns a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/
@@ -1427,11 +1429,13 @@ impl PyDwelling {
     /// the reactive side is a first-order aggregate),
     /// ``real_power_zip_applies`` (always ``True`` — the aggregate describes
     /// the governing mix), ``deep_sag_scale`` (the assembled governed
-    /// response at the current bus voltage: the weighting-draw-weighted
-    /// mean of the governing rows' deep-sag multipliers, each row evaluated
-    /// through its recorded deep-sag form: the number the stepping engine
-    /// answers for the moment's composition; ``None`` when no governing
-    /// equipment carried a positive weight),
+    /// response at the current bus voltage: the weighting-draw-weighted mean
+    /// of each governing equipment's own deep-sag response: the
+    /// components' actual evaluated draws over the components' nominal
+    /// draws for a stepped multi-component unit, the resolved row's
+    /// recorded deep-sag form for a single-row one: the number the stepping
+    /// engine answers for the moment's composition; ``None`` when no
+    /// governing equipment carried a positive weight),
     /// ``governing_equipment`` (list of
     /// ``{"name": str, "mean_power_w": float | None}`` -- equipment
     /// included in the aggregate with its weighting draw in watts;
@@ -1439,6 +1443,12 @@ impl PyDwelling {
     /// contributes no weight), and ``constant_power_equipment`` (list of
     /// names whose real power is DER-controller-driven and therefore
     /// voltage-invariant by construction (battery, EV, PV).
+    ///
+    /// At the de-energized boundary (the admitted 0.0 pu outage value) the
+    /// aggregate reports the de-energized state: a load that stepped and
+    /// drew zero carries that zero weight, no expected mean stands in for
+    /// any load, and the aggregate is ``None``: the engine draws zero from
+    /// every load on a de-energized bus.
     ///
     /// ``None`` when no ZIP-governing equipment has a computable positive
     /// weight; never a silent constant-power answer. Pure

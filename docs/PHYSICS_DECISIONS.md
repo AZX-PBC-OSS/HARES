@@ -1333,6 +1333,37 @@ below nominal, and free of the extrapolated stall class. No load class
 outside the recorded families keeps a turn: a deeper sag can never
 draw more.
 
+## The premise aggregate's weights are the components' nominal draws (the assembled normalization)
+
+The premise aggregate's `deep_sag_scale` is the number the stepping
+engine answers for the moment's composition: the weighting-draw-weighted
+mean of each governing equipment's own deep-sag response. For an
+equipment whose draw is scaled through a single resolved row, that
+response is the row's evaluation and un-scaling the stepped draw through
+the same row is exact. For a multi-component unit (an air conditioner's
+compressor, blower and crankcase heater; a heat-pump water heater's
+compressor, backup element and fan/parasitic; the electric furnace and
+boiler's element and blower/pump; the heat pump's compressor, fan, pump
+and resistive elements) each component evaluates its OWN row, so no
+single published row un-scales the blend: the unit's weight is the
+components' nominal draw (each final scaled component un-scaled through
+the row that scaled it) and its response is the components' actual
+evaluated draws over the components' nominal draws. The premise
+aggregate reads the unit's reported nominal draw
+(`Equipment::nominal_electric_draw_w`) and answers the assembled ratio.
+The form, the source: the units' own scaling sites (the deep-sag entry's
+completion, above); the alternative rejected: normalizing the blended
+draw by the primary row's polynomial, which published the compressor
+row's 1.145 for an air-conditioner moment whose assembled response is
+1.01333 (1000 W compressor at 1.145 plus 200 W blower at 0.355 over
+1200 W nominal, a 13 percent overstatement) and the heat-pump water
+heater row's 0.60125 for a backup-only moment whose response is the
+backup element's impedance share 0.25 (P = V²/R, a 2.4 times
+overstatement); a feeder study reading the aggregate at a deep sag
+would state a response the engine does not answer. At the reference
+voltage every multiplier is exactly 1.0, so the assembled response is
+exactly 1.0 and no committed golden moves.
+
 ## The frequency channel is read by nothing (the named gap)
 
 The grid-signal channel's frequency input is accepted, validated and

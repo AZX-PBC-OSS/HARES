@@ -169,6 +169,12 @@ pub struct HeatPumpWH {
     fan_power_w: f64,
     /// Standby parasitic power (W); drawn when compressor is off.
     parasitic_power_w: f64,
+    /// The moment's nominal component draw of the most recent step (W, the
+    /// compressor's, backup element's and fan/parasitic's pre-scaling sum
+    /// at the reference voltage): the premise aggregate's weight for this
+    /// unit, which un-scales the stepped draw through the assembled
+    /// response it reports. `None` when the step drew nothing.
+    last_nominal_draw_w: Option<f64>,
     /// Elapsed time since compressor last turned on (s); `None` when compressor is off.
     compressor_on_since_s: Option<f64>,
     /// Elapsed time since compressor last turned off (s); `None` when compressor is on.
@@ -338,6 +344,7 @@ impl HeatPumpWH {
             lost_heat_fraction: DEFAULT_LOST_HEAT_FRACTION,
             fan_power_w: DEFAULT_FAN_POWER_W,
             parasitic_power_w: DEFAULT_PARASITIC_POWER_W,
+            last_nominal_draw_w: None,
             compressor_on_since_s: None,
             compressor_off_since_s: None,
             min_on_time_s: DEFAULT_MIN_ON_TIME_S,
@@ -1014,6 +1021,22 @@ impl Equipment for HeatPumpWH {
         let motor_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
         let v_norm = bus_voltage_pu / self.zip.v0;
         let resistive_multiplier = v_norm * v_norm;
+        // The moment's nominal component draws: the pre-scaling values the
+        // scaled draws below evaluate through their own rows (the
+        // compressor and fan/parasitic through the unit row, the backup
+        // element through the impedance share). The premise aggregate
+        // weights this unit by their sum and answers the assembled
+        // response, the scaled sum over it.
+        let compressor_nominal_w = if self.compressor_on {
+            (capacity_actual_w / cop_for_physics) * hp_duty
+        } else {
+            0.0
+        };
+        let backup_nominal_w = if self.backup_on {
+            self.backup_element_power_w * er_duty
+        } else {
+            0.0
+        };
         let compressor_power_w = if self.compressor_on {
             (capacity_actual_w / cop_for_physics) * hp_duty * motor_multiplier
         } else {
@@ -1093,7 +1116,11 @@ impl Equipment for HeatPumpWH {
         // OCHRE WaterHeater.py:671: total electric = compressor + ER + fan/parasitic.
         // The fan/parasitic draw evaluates the unit row at the ACTUAL bus
         // voltage (the whole-unit row; the draws above carry the same
-        // response).
+        // response). The nominal component draw is the pre-scaling sum;
+        // storing it here lets the premise aggregate answer the assembled
+        // response, the scaled sum over it.
+        let nominal_component_w = compressor_nominal_w + backup_nominal_w + fan_parasitic_w;
+        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let electric_power_w =
             compressor_power_w + backup_power_w + fan_parasitic_w * motor_multiplier;
         // Q from the already-computed (voltage-scaled) real power.
@@ -1292,6 +1319,10 @@ impl Equipment for HeatPumpWH {
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.last_nominal_draw_w
     }
 
     fn stored_energy_j(&self) -> Option<f64> {
@@ -3495,6 +3526,84 @@ mod tests {
         assert!(
             (elec_100 - elec_80).abs() < 0.01,
             "electrical consumption should be the same: {elec_100:.4} vs {elec_80:.4}"
+        );
+    }
+
+    /// Z2's witness: a backup-only moment's assembled response is the
+    /// backup element's impedance share, P = V²/R: 0.25 at 0.5 pu, not
+    /// the unit row's own multiplier (0.825 x 0.25 - 0.44 x 0.5 + 0.615 =
+    /// 0.60125), which the parent's premise normalization published as the
+    /// scale while weighting the composition 415.8 W against the true
+    /// 1000 W. The compressor is locked out at the fixture's ambient and
+    /// the fan/parasitic draws are zero, so the moment's composition is
+    /// the backup element alone.
+    #[test]
+    fn backup_only_moment_reports_the_impedance_response_as_assembled() {
+        let make_cfg = || {
+            let mut typed = base_typed_config();
+            typed.initial_tank_temp_c = Some(20.0);
+            typed.backup_enable_offset_c = Some(8.0);
+            typed.fan_power_w = Some(0.0);
+            typed.parasitic_power_w = Some(0.0);
+            // Above every ambient the fixture can present: the compressor
+            // cannot run, so the step is backup-only.
+            typed.min_ambient_temp_c = Some(40.0);
+            equipment_config(typed)
+        };
+        let run = |voltage_pu: f64| -> HeatPumpWH {
+            let cfg = make_cfg();
+            let mut env_run = env(24.0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = HeatPumpWH::new(cfg.clone());
+            eq.init(&cfg, &env_run).unwrap();
+            let mut p = ports();
+            eq.step(&env_run, Duration::from_secs(60), &mut p).unwrap();
+            eq
+        };
+        let draw = |eq: &HeatPumpWH| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the unit must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0);
+        let nominal_w = draw(&nominal_unit);
+        assert!(nominal_w > 0.0, "fixture: the backup element must fire");
+        let compressor_ran = nominal_unit
+            .telemetry()
+            .get(tk::COMPRESSOR_POWER_W)
+            .unwrap_or(0.0);
+        assert!(
+            compressor_ran == 0.0,
+            "fixture: the moment must be backup-only, compressor drew {compressor_ran}"
+        );
+
+        let sag_unit = run(0.5);
+        let sag_w = draw(&sag_unit);
+        // P = V²/R: exactly a quarter of the nominal draw (x 0.25 is exact
+        // in f64, and the pre-scaling draw is voltage-invariant).
+        assert!(
+            (sag_w - nominal_w * 0.25).abs() < 1e-9,
+            "the backup element at 0.5 pu must draw exactly a quarter of \
+             the nominal ({}, got {sag_w})",
+            nominal_w * 0.25
+        );
+
+        // The reported nominal draw is the components' pre-scaling sum, so
+        // the assembled response the premise aggregate answers is 0.25,
+        // not the unit row's 0.60125.
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_w).abs() < 1e-6 * nominal_w,
+            "the reported nominal draw must be the components' pre-scaling \
+             sum ({nominal_w}), got {reported_nominal}"
+        );
+        let response = sag_w / reported_nominal;
+        assert!(
+            (response - 0.25).abs() < 1e-9,
+            "the assembled response must be the impedance share 0.25, got \
+             {response}"
         );
     }
 

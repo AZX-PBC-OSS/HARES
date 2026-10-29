@@ -131,6 +131,12 @@ pub struct ElectricBoiler {
     /// Hydronic circulation-pump motor component ZIP (pf 0.84), derived at
     /// init via `hvac::reactive::secondary_motor_zip`.
     pump_zip: hares_types::zip::ZipLoad,
+    /// The moment's nominal component draw of the most recent step (W, the
+    /// element's and pump's pre-scaling sum at the reference voltage):
+    /// the premise aggregate's weight for this unit, which un-scales the
+    /// stepped draw through the assembled response it reports. `None` when
+    /// the step drew nothing.
+    last_nominal_draw_w: Option<f64>,
 }
 
 pub struct GasBoiler {
@@ -263,6 +269,7 @@ impl ElectricBoiler {
                 hares_types::zip::ZipLoad::constant_power(),
             ),
             pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            last_nominal_draw_w: None,
         }
     }
 }
@@ -404,6 +411,18 @@ impl Equipment for ElectricBoiler {
         let element_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
         let pump_multiplier =
             super::reactive::secondary_motor_real_multiplier(&self.pump_zip, bus_voltage_pu);
+        // The moment's nominal component draw: the element's and pump's
+        // pre-scaling sum, the composition the scaled draws below evaluate
+        // through their own rows. The premise aggregate weights this unit
+        // by it and answers the assembled response, the scaled sum over it.
+        let element_nominal_w = self.rated_capacity_w * duty * sf * self.eir;
+        let pump_nominal_w = if self.rated_capacity_w * duty * sf > 0.0 {
+            self.pump_w * sf
+        } else {
+            0.0
+        };
+        let nominal_component_w = element_nominal_w + pump_nominal_w;
+        self.last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let thermal_output_w = self.rated_capacity_w * duty * sf * element_multiplier;
         let element_w = thermal_output_w * self.eir;
         // Circulation pump runs whenever the boiler delivers heat (same
@@ -570,6 +589,10 @@ impl Equipment for ElectricBoiler {
 
     fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
         Some(self.zip)
+    }
+
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.last_nominal_draw_w
     }
 
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {

@@ -13,16 +13,18 @@
 //! govern their real power, plus an explicit roster of what is and is not
 //! covered. The weights are the moment's raw draws when the dwelling has
 //! stepped (each equipment's last core-output electric draw, un-scaled
-//! through its own row at the bus voltage (the moment's composition),
+//! through its assembled deep-sag response at the bus voltage (the
+//! equipment's own nominal draw for a multi-component unit, the resolved
+//! row's un-scale for a single-row one, the moment's composition)),
 //! falling back to the expected mean draw over the loaded schedule for a
 //! dwelling that has not stepped (the static route). The aggregate
 //! cannot know the *share* of total draw that physics-driven equipment
 //! takes without simulation, so before the first step the weights are the
 //! schedule's expected means; after it, the aggregate is the moment's
 //! composition and `deep_sag_scale` is the number the stepping engine
-//! answers at the current bus voltage, with each row's deep-sag form
-//! applied (a held refrigerator row included), which no single published
-//! coefficient row can reproduce when evaluated raw.
+//! answers at the current bus voltage, with each component's deep-sag
+//! form applied (a held refrigerator row included), which no single
+//! published coefficient row can reproduce when evaluated raw.
 //!
 //! At the de-energized boundary (the channel's admitted 0.0 pu outage
 //! value) the aggregate reports the de-energized state: a load that
@@ -49,8 +51,10 @@ pub struct PremiseZip {
     pub zip: ZipLoad,
     /// `(equipment name, weighting draw [W])` for every ZIP-governing
     /// equipment. The weight is the moment's raw draw (the last step's
-    /// core-output electric draw, un-scaled through the equipment's own row
-    /// at the bus voltage) when the dwelling has stepped (a stepped zero
+    /// core-output electric draw, un-scaled through the equipment's
+    /// assembled deep-sag response at the bus voltage: the equipment's own
+    /// nominal draw for a multi-component unit, the resolved row's un-scale
+    /// for a single-row one) when the dwelling has stepped (a stepped zero
     /// draw is a zero weight, the 0.0 pu outage boundary included), else,
     /// on an energized bus only, the expected mean draw over the loaded
     /// schedule; `None` when neither is computable (stochastic event
@@ -65,13 +69,16 @@ pub struct PremiseZip {
     /// excluded from the aggregate.
     pub constant_power: Vec<String>,
     /// The assembled governed response at the bus voltage the aggregation
-    /// ran at: the weighting-draw-weighted mean of the governing rows'
-    /// deep-sag multipliers, each row evaluated through its recorded
-    /// deep-sag form. This is the number the stepping engine answers for
-    /// the moment's composition; no single published coefficient row can
-    /// reproduce it when evaluated raw, because a held deep-sag row is not
-    /// a quadratic. `None` when no governing equipment carries a positive
-    /// weight.
+    /// ran at: the weighting-draw-weighted mean of each governing
+    /// equipment's own deep-sag response: the components' actual evaluated
+    /// draws over the components' nominal draws for a stepped
+    /// multi-component unit, the resolved row's recorded deep-sag form for
+    /// a single-row one and on the static route. This is the number the
+    /// stepping engine answers for the moment's composition; no single
+    /// published coefficient row can reproduce it when evaluated raw,
+    /// because a held deep-sag row is not a quadratic and a multi-component
+    /// unit's blend is not any one of its rows. `None` when no governing
+    /// equipment carries a positive weight.
     pub deep_sag_scale: Option<f64>,
 }
 
@@ -141,26 +148,40 @@ pub(crate) fn aggregate_premise_zip(
             constant_power.push(name);
             continue;
         }
-        // The moment's raw draw: the last step's core-output electric draw
-        // (watts, scaled at the bus voltage), un-scaled through the
-        // equipment's own row. A stepped dwelling aggregates the moment's
-        // composition: a load that stepped and drew zero is off at the
-        // moment and carries a zero weight (at any bus voltage, the 0.0 pu
-        // outage boundary included, where the stepped state is zero draw),
-        // and an unstepped one falls back to the expected mean over the
-        // loaded schedule, on an energized bus only: at the boundary the
-        // engine draws zero from every load, and an expected mean published
-        // as the weight would report a draw the bus cannot supply.
-        let moment_raw_draw_w = match eq.core_output().flows.electric_w {
-            Some(hares_types::ElectricPower::Consumption(w)) => {
-                if w > 0.0 {
-                    let multiplier = resolved.deep_sag_real_multiplier(bus_voltage_pu);
-                    (bus_voltage_pu > 0.0 && multiplier > 0.0).then(|| w / multiplier)
-                } else {
-                    Some(0.0)
+        // The moment's raw draw (the weight) and the deep-sag response it
+        // weights with. A stepped dwelling aggregates the moment's
+        // composition: the weight is the stepped draw un-scaled through its
+        // ASSEMBLED deep-sag response: the equipment's own nominal draw
+        // when it reports one, else the resolved row's un-scale, exact for
+        // a single-row equipment (a multi-component unit evaluates each
+        // component through its own row, so the unit row's multiplier alone
+        // does not un-scale the blend). The response weighted with it is
+        // the assembled ratio or the row's evaluation. A stepped zero
+        // draw is a real zero weight at any bus voltage, the 0.0 pu outage
+        // boundary included, where the stepped state is zero draw; a
+        // positive draw cannot be un-scaled there (a de-energized bus
+        // evaluates no draw response), and an unstepped load falls back to
+        // the expected mean over the loaded schedule, on an energized bus
+        // only: at the
+        // boundary the engine draws zero from every load, and an expected
+        // mean published as the weight would report a draw the bus cannot
+        // supply.
+        let (moment_raw_draw_w, moment_response) = match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) if bus_voltage_pu > 0.0 && w > 0.0 => {
+                match eq.nominal_electric_draw_w() {
+                    Some(nominal_w) => (Some(nominal_w), Some(w / nominal_w)),
+                    None => {
+                        let multiplier = resolved.deep_sag_real_multiplier(bus_voltage_pu);
+                        if multiplier > 0.0 {
+                            (Some(w / multiplier), Some(multiplier))
+                        } else {
+                            (None, None)
+                        }
+                    }
                 }
             }
-            _ => None,
+            Some(hares_types::ElectricPower::Consumption(_)) => (Some(0.0), None),
+            _ => (None, None),
         };
         let mean_power_w = match moment_raw_draw_w {
             Some(w) => Some(w),
@@ -195,6 +216,13 @@ pub(crate) fn aggregate_premise_zip(
             && w.is_finite()
             && zip_is_finite
         {
+            // The response the weight weights with: the moment's assembled
+            // ratio (the stepped draw over the moment's nominal draw) for a
+            // stepped load, the resolved row's evaluation on the static
+            // route: the only response an unstepped equipment's expectation
+            // can carry.
+            let deep_sag_response = moment_response
+                .unwrap_or_else(|| resolved.deep_sag_real_multiplier(bus_voltage_pu));
             total_weight += w;
             zp += w * zip.zp;
             ip += w * zip.ip;
@@ -204,7 +232,7 @@ pub(crate) fn aggregate_premise_zip(
             pq += w * zip.pq;
             tan_phi_sum += w * zip.tan_phi();
             v0 += w * zip.v0;
-            deep_sag_weighted += w * resolved.deep_sag_real_multiplier(bus_voltage_pu);
+            deep_sag_weighted += w * deep_sag_response;
         }
     }
 
@@ -256,6 +284,7 @@ mod tests {
         resolved: Option<hares_types::zip::ResolvedZip>,
         mean: Option<ExpectedMeanPower>,
         core: hares_types::CoreOutput,
+        nominal: Option<f64>,
     }
 
     impl StubLoad {
@@ -281,6 +310,7 @@ mod tests {
                 resolved,
                 mean,
                 core: hares_types::CoreOutput::default(),
+                nominal: None,
             }
         }
 
@@ -288,11 +318,20 @@ mod tests {
             self.core.flows.electric_w = Some(hares_types::ElectricPower::Consumption(w));
             self
         }
+
+        fn with_nominal_draw(mut self, w: f64) -> Self {
+            self.nominal = Some(w);
+            self
+        }
     }
 
     impl Equipment for StubLoad {
         fn descriptor(&self) -> &hares_types::EquipmentDescriptor {
             &self.descriptor
+        }
+
+        fn nominal_electric_draw_w(&self) -> Option<f64> {
+            self.nominal
         }
 
         fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
@@ -517,6 +556,92 @@ mod tests {
              de-energized boundary: the parent published the Lighting \
              row's 0.0 evaluation, -0.04, as the scale of a 500 W \
              expectation on a dead bus"
+        );
+    }
+
+    #[test]
+    fn multi_component_moment_weights_are_the_assembled_nominal_draw() {
+        // Z2's witness (the attack's air-conditioner number): a unit whose
+        // draw is the sum of components with different rows must be
+        // weighted by the components' nominal draw and report the assembled
+        // response, not the primary row's polynomial. The probe's
+        // composition: 1000 W of compressor and 200 W of blower at 0.5 pu
+        // draw 1000 x 1.145 + 200 x 0.355 = 1216 W against 1200 W nominal:
+        // an assembled response of 1216/1200. The primary row's own
+        // multiplier at 0.5 pu is 1.145 (the compressor row, as fitted:
+        // 1.6 x 0.25 - 2.69 x 0.5 + 2.09), a 13 percent overstatement of
+        // the response, and the parent weighted the composition 1062 W
+        // against the true 1200 W.
+        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
+            StubLoad::new(
+                "Air Conditioner",
+                Some(hares_types::zip::ResolvedZip {
+                    real_shape_as_fitted: true,
+                    ..hares_types::zip::ResolvedZip::governing(ac_row)
+                }),
+                None,
+            )
+            .with_last_draw(1216.0)
+            .with_nominal_draw(1200.0),
+        )];
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.5)
+            .expect("the stepped composition carries a positive weight");
+        assert_eq!(
+            premise.governing[0],
+            ("Air Conditioner".to_string(), Some(1200.0)),
+            "the weight must be the components' nominal draw, not the \
+             stepped draw un-scaled through the primary row's multiplier \
+             (1062.004...)"
+        );
+        let scale = premise.deep_sag_scale.expect("stepped weight");
+        let expected_scale = 1216.0 / 1200.0;
+        assert!(
+            (scale - expected_scale).abs() < 1e-12,
+            "deep_sag_scale must be the assembled response {expected_scale} \
+             (the components' actual evaluated draws over the components' \
+             nominal draws), got {scale} (the primary row's 1.145)"
+        );
+        assert!(
+            (scale - ac_row.deep_sag_real_multiplier(0.5, true)).abs() > 1e-3,
+            "the assembled response must not be the primary row's polynomial"
+        );
+    }
+
+    #[test]
+    fn backup_only_heat_pump_water_heater_reports_the_impedance_response() {
+        // Z2's witness (the attack's heat-pump water heater number): a
+        // backup-only unit's draw is the backup element's impedance share,
+        // P = V²/R: 1000 W nominal at 0.5 pu draws 250 W. The HPWH row's
+        // own multiplier at 0.5 pu is 0.825 x 0.25 - 0.44 x 0.5 + 0.615 =
+        // 0.60125; the parent published it as the scale, a 2.4 times
+        // overstatement of the moment's response, weighting the
+        // composition 415.8 W against the true 1000 W.
+        let hpwh_row =
+            hares_types::zip::zip_defaults_for_class("Heat Pump Water Heater").expect("row");
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
+            StubLoad::new(
+                "Heat Pump Water Heater",
+                Some(hares_types::zip::ResolvedZip::governing(hpwh_row)),
+                None,
+            )
+            .with_last_draw(250.0)
+            .with_nominal_draw(1000.0),
+        )];
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.5)
+            .expect("the stepped composition carries a positive weight");
+        assert_eq!(
+            premise.governing[0],
+            ("Heat Pump Water Heater".to_string(), Some(1000.0)),
+            "the weight must be the components' nominal draw, not the \
+             stepped draw un-scaled through the unit row's 0.60125 \
+             (415.801...)"
+        );
+        let scale = premise.deep_sag_scale.expect("stepped weight");
+        assert!(
+            (scale - 0.25).abs() < 1e-12,
+            "deep_sag_scale must be the backup element's impedance response \
+             0.25 (P = V²/R at 0.5 pu), got {scale}"
         );
     }
 
