@@ -1400,10 +1400,8 @@ heater exists only on the `Minisplit` variant and no committed golden
 home declares a mini-split heat pump). The reference-corpus parity
 comparison's peak-minute tolerance for `cz5a_minisplit_gas_wh` re-pins
 21.5 to 22.5 percent with the measured pair (HARES 18.04 kW against
-OCHRE's 14.81 kW in the ER-only design-temperature minute, where both
-sides now carry the 0.15 kW pan draw on top of the documented ER
-dispatch divergence).
-<<<<<<< HEAD
-
-=======
->>>>>>> d0f17396 (fix: the physics decision record is text to its last byte)
+OCHRE's 14.8094 kW in the ER-only design-temperature minute: OCHRE's
+reference peak already carried its 0.15 kW pan draw, 14.41 ER plus
+0.25 fan plus 0.15 pan (HVAC.py:1482-1497), and only HARES moved,
+17.89 to 18.04 kW, so the residual is the documented ER dispatch
+divergence measured at the peak).
