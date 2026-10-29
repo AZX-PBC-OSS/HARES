@@ -13,6 +13,18 @@ Every callable, class and keyword added to, changed in or removed from
 `hares._hares` since `ebdb1a17`, each removed or renamed one with its
 replacement.
 
+- Added: `EnergyClosureReport` (with `system`, `zones`,
+  `residual_ppm_of_gross`), `ClosureRow` (with `external_gains_wh`,
+  `stored_delta_wh`, `envelope_conduction_wh`, `delivered_end_use_wh`,
+  `gross_wh`, `residual_wh`, `residual_ppm_of_gross`) and
+  `ZoneClosureRow` (with `zone`, `delivered_end_use_wh`,
+  `zone_air_stored_wh`): the run's energy-closure report, exposed at
+  `RunResult.health.energy_closure`. The report integrates the per-step
+  thermal balance the `thermal_balance` invariant enforces over the run's
+  production steps (warm-up excluded), so the residual the per-step
+  tolerance `max(1 W, 1e-6·gross)` admits silently becomes a visible run
+  total.
+
 - Changed: the `Battery`, `PV` and `EV` constructors take the SI names,
   keyword-only: `Battery(name, *, capacity_j, max_charge_w=None,
   max_discharge_w=None, ..., inverter_capacity_va=None, ...)`,

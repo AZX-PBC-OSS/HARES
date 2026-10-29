@@ -120,6 +120,68 @@ pub struct HomeResult {
     pub periods_folded: usize,
     /// The run's metrics, when the home's config requested them.
     pub metrics: Option<hares_core::RunMetrics>,
+    /// The run's energy-closure telemetry: the closure residual and gross
+    /// flux the run reported and the warm-up days it ran. `None` for a home
+    /// that failed to build or run (no run, no account).
+    pub closure: Option<HomeClosureTelemetry>,
+}
+
+/// One home's energy-closure telemetry, carried on its [`HomeResult`] row:
+/// the two quantities the fleet's residual distribution reads (the run's
+/// integrated residual and the gross flux it denominates against) and the
+/// warm-up days the run replayed before its horizon.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HomeClosureTelemetry {
+    /// The run's integrated thermal-balance residual [Wh] (signed).
+    pub residual_wh: f64,
+    /// The run's integrated gross flux [Wh]: the residual's ppm
+    /// denominator.
+    pub gross_wh: f64,
+    /// Warm-up days the run replayed to convergence (or gave up at);
+    /// `None` when the run's warm-up was disabled.
+    pub warmup_days_run: Option<u32>,
+}
+
+impl HomeClosureTelemetry {
+    /// The home's residual in parts per million of its own gross flux; 0.0
+    /// when the run carried no gross flux (a ppm of nothing is defined as
+    /// nothing).
+    #[must_use]
+    pub fn residual_ppm_of_gross(&self) -> f64 {
+        if self.gross_wh == 0.0 {
+            0.0
+        } else {
+            self.residual_wh / self.gross_wh * 1e6
+        }
+    }
+}
+
+/// The fleet's energy-closure telemetry: the per-home residuals'
+/// distribution (mean and p99, nearest-rank, over the signed values, in
+/// Wh and in ppm of each home's own gross flux) and the warm-up days-run
+/// per dwelling (the histogram over the homes that ran a warm-up, plus the
+/// count of homes whose warm-up was disabled). Built by
+/// [`FleetResult::energy_closure_telemetry`] from the per-home rows.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FleetClosureTelemetry {
+    /// Homes whose runs reported a closure account.
+    pub homes_reported: usize,
+    /// Mean of the homes' signed residuals [Wh]: the fleet's average bias
+    /// direction.
+    pub residual_wh_mean: f64,
+    /// The signed residuals' 99th percentile [Wh], nearest-rank: the tail
+    /// the fleet's worst homes carry.
+    pub residual_wh_p99: f64,
+    /// Mean of the homes' residuals in ppm of their own gross flux.
+    pub residual_ppm_mean: f64,
+    /// The residuals' 99th percentile in ppm of each home's own gross
+    /// flux, nearest-rank.
+    pub residual_ppm_p99: f64,
+    /// Warm-up days-run histogram over the homes that ran a warm-up:
+    /// days-run → homes.
+    pub warmup_days_run: BTreeMap<u32, usize>,
+    /// Homes whose warm-up was disabled (no days-run to report).
+    pub warmup_disabled_homes: usize,
 }
 
 /// The fleet's result: the aggregate, the covered weight behind it, the
@@ -151,6 +213,52 @@ impl FleetResult {
     #[must_use]
     pub fn homes_table(&self) -> RecordBatch {
         homes_batch(&self.homes)
+    }
+
+    /// The fleet's energy-closure telemetry: the residual distribution
+    /// (mean, p99) and the warm-up days-run per dwelling, folded from the
+    /// per-home rows. `None` when no home's run reported a closure account
+    /// (every home failed to build or run).
+    ///
+    /// The percentile is nearest-rank over the sorted signed values: the
+    /// `ceil(0.99·n)`-th smallest home residual. The fold allocates one
+    /// transient `Vec` per statistic, bounded by the homes row count that
+    /// is already resident; nothing per-home is held beyond it.
+    #[must_use]
+    pub fn energy_closure_telemetry(&self) -> Option<FleetClosureTelemetry> {
+        let reported: Vec<&HomeClosureTelemetry> = self
+            .homes
+            .iter()
+            .filter_map(|home| home.closure.as_ref())
+            .collect();
+        // No home reported an account: the fleet has none.
+        reported.first()?;
+        let mut residual_wh: Vec<f64> = reported.iter().map(|c| c.residual_wh).collect();
+        let mut residual_ppm: Vec<f64> =
+            reported.iter().map(|c| c.residual_ppm_of_gross()).collect();
+        residual_wh.sort_by(|a, b| a.total_cmp(b));
+        residual_ppm.sort_by(|a, b| a.total_cmp(b));
+        let n = reported.len();
+        // Nearest-rank p99: the ceil(0.99·n)-th smallest, 1-indexed.
+        let p99_index = ((0.99_f64 * n as f64).ceil() as usize).saturating_sub(1);
+        let sum = |values: &[f64]| values.iter().sum::<f64>();
+        let mut warmup_days_run = BTreeMap::new();
+        let mut warmup_disabled_homes = 0usize;
+        for closure in &reported {
+            match closure.warmup_days_run {
+                Some(days) => *warmup_days_run.entry(days).or_insert(0) += 1,
+                None => warmup_disabled_homes += 1,
+            }
+        }
+        Some(FleetClosureTelemetry {
+            homes_reported: n,
+            residual_wh_mean: sum(&residual_wh) / n as f64,
+            residual_wh_p99: residual_wh[p99_index],
+            residual_ppm_mean: sum(&residual_ppm) / n as f64,
+            residual_ppm_p99: residual_ppm[p99_index],
+            warmup_days_run,
+            warmup_disabled_homes,
+        })
     }
 }
 
@@ -875,6 +983,103 @@ mod tests {
             .downcast_ref::<TimestampMillisecondArray>()
             .expect("a Timestamp Time column");
         (0..values.len()).map(|row| values.value(row)).collect()
+    }
+
+    /// A homes list whose closure telemetry is fed: one failed home (no
+    /// account), two warm-up-ran homes and one warm-up-disabled home. The
+    /// residuals are hand-derived for the distribution's assertions.
+    fn homes_with_closure() -> Vec<HomeResult> {
+        let home = |bldg_id: i64, closure: Option<HomeClosureTelemetry>| HomeResult {
+            bldg_id,
+            weight: 1.0,
+            status: if closure.is_none() {
+                HomeStatus::Failed("no run".to_string())
+            } else {
+                HomeStatus::Ok
+            },
+            reason: None,
+            steps: 1,
+            periods_folded: 0,
+            metrics: None,
+            closure,
+        };
+        vec![
+            home(1, None),
+            home(
+                2,
+                Some(HomeClosureTelemetry {
+                    residual_wh: 30.0,
+                    gross_wh: 30_000.0,
+                    warmup_days_run: Some(2),
+                }),
+            ),
+            home(
+                3,
+                Some(HomeClosureTelemetry {
+                    residual_wh: -10.0,
+                    gross_wh: 10_000.0,
+                    warmup_days_run: Some(5),
+                }),
+            ),
+            home(
+                4,
+                Some(HomeClosureTelemetry {
+                    residual_wh: 0.0,
+                    gross_wh: 0.0,
+                    warmup_days_run: None,
+                }),
+            ),
+        ]
+    }
+
+    /// The fleet's closure telemetry folds the per-home residuals' mean and
+    /// nearest-rank p99 in Wh and ppm of each home's own gross flux, and
+    /// the warm-up days-run histogram with the disabled count. Hand-derived
+    /// on the four-home fixture: residuals {30, -10, 0} Wh, mean 20/3 Wh;
+    /// sorted ppm: home 2 is +1000 ppm (30/30000), home 3 is -1000 ppm
+    /// (10/10000 x 1e6 = 1000 in magnitude, signed negative), home 4 is
+    /// 0.0 (a ppm of nothing); p99 nearest-rank over 3 values is the
+    /// ceil(2.97)=3rd smallest, the largest.
+    #[test]
+    fn fleet_closure_telemetry_folds_mean_p99_and_warmup_days() {
+        let result = FleetResult {
+            aggregate: RecordBatch::new_empty(Arc::new(Schema::empty())),
+            covered_weight: RecordBatch::new_empty(Arc::new(Schema::empty())),
+            homes: homes_with_closure(),
+            coverage: Coverage::default(),
+            n_succeeded: 3,
+            peak_live_home_results: 1,
+        };
+        let telemetry = result
+            .energy_closure_telemetry()
+            .expect("one home reported an account");
+        assert_eq!(telemetry.homes_reported, 3);
+        assert!((telemetry.residual_wh_mean - 20.0 / 3.0).abs() < 1e-12);
+        // p99 nearest-rank over 3 values: the 3rd smallest = +30 Wh.
+        assert!((telemetry.residual_wh_p99 - 30.0).abs() < 1e-12);
+        assert!((telemetry.residual_ppm_mean - 0.0).abs() < 1e-9);
+        // The largest signed ppm is home 2's +1000.
+        assert!((telemetry.residual_ppm_p99 - 1000.0).abs() < 1e-9);
+        assert_eq!(telemetry.warmup_days_run, BTreeMap::from([(2, 1), (5, 1)]));
+        assert_eq!(telemetry.warmup_disabled_homes, 1);
+    }
+
+    /// A fleet with no reported account carries no telemetry.
+    #[test]
+    fn fleet_closure_telemetry_is_none_without_any_account() {
+        let mut homes = homes_with_closure();
+        for home in &mut homes {
+            home.closure = None;
+        }
+        let result = FleetResult {
+            aggregate: RecordBatch::new_empty(Arc::new(Schema::empty())),
+            covered_weight: RecordBatch::new_empty(Arc::new(Schema::empty())),
+            homes,
+            coverage: Coverage::default(),
+            n_succeeded: 0,
+            peak_live_home_results: 1,
+        };
+        assert!(result.energy_closure_telemetry().is_none());
     }
 
     fn default_fold() -> FleetFold {

@@ -27,8 +27,8 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::fold::{
-    Alignment, Coverage, FleetFold, FleetReport, FleetResult, FoldRows, HomeFoldAlignment,
-    HomeFoldState, HomeResult, ReducerFeed, homes_batch,
+    Alignment, Coverage, FleetFold, FleetReport, FleetResult, FoldRows, HomeClosureTelemetry,
+    HomeFoldAlignment, HomeFoldState, HomeResult, ReducerFeed, homes_batch,
 };
 
 const DEFAULT_RESSTOCK_VERSION: ResStockVersion = ResStockVersion::V2025_1;
@@ -881,6 +881,7 @@ impl Fleet {
                     steps: outcome.steps,
                     periods_folded: 0,
                     metrics: outcome.metrics,
+                    closure: outcome.closure,
                 });
                 folded_flags.push(folds);
             }
@@ -1444,6 +1445,8 @@ struct HomeRun {
     status: HomeStatus,
     steps: u64,
     metrics: Option<hares_core::RunMetrics>,
+    /// The run's energy-closure telemetry, from the run result's health.
+    closure: Option<HomeClosureTelemetry>,
     /// The home's reduced period table, keyed by the period start's
     /// instant (the epoch key), the `Time` column excluded.
     table: BTreeMap<i64, Vec<Option<f64>>>,
@@ -1515,6 +1518,7 @@ fn run_home(
                 )),
                 steps: 0,
                 metrics: None,
+                closure: None,
                 table: BTreeMap::new(),
                 fields: Vec::new(),
             }));
@@ -1535,6 +1539,7 @@ fn run_home(
                         ),
                         steps: 0,
                         metrics: None,
+                        closure: None,
                         table: BTreeMap::new(),
                         fields: Vec::new(),
                     }
@@ -1600,6 +1605,7 @@ fn run_home_body(
         status: HomeStatus::Failed(message),
         steps: 0,
         metrics: None,
+        closure: None,
         table: BTreeMap::new(),
         fields: Vec::new(),
     };
@@ -1652,6 +1658,14 @@ fn run_home_body(
         status,
         steps,
         metrics: result.metrics,
+        closure: Some(HomeClosureTelemetry {
+            residual_wh: result.health.energy_closure.system.residual_wh,
+            gross_wh: result.health.energy_closure.system.gross_wh,
+            warmup_days_run: match &result.health.warmup {
+                WarmupOutcome::Disabled => None,
+                WarmupOutcome::Ran { days_run, .. } => Some(*days_run),
+            },
+        }),
         table,
         fields,
     }

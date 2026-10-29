@@ -63,7 +63,9 @@ pub use hares_io::SimulationConfig;
 pub use hares_io::{InputRecord, InputRecordSource, InputRecords};
 #[cfg(feature = "profiling")]
 pub use health::{ActorTiming, ActorTimings};
-pub use health::{RunHealth, WarmupOutcome, WarmupResiduals};
+pub use health::{
+    ClosureRow, EnergyClosureReport, RunHealth, WarmupOutcome, WarmupResiduals, ZoneClosureRow,
+};
 pub use input_schema::input_schema;
 pub use observation::ObservationPlan;
 pub use rand_chacha::ChaCha8Rng;

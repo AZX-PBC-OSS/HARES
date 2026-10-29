@@ -3,8 +3,8 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "3305095b112247fe571bf3770747f7bea496d852",
-  "git_dirty": true,
+  "git_head": "641858e0f81a596123bbbcb8fe7aa6a031c1f40a",
+  "git_dirty": false,
   "metrics": [
     {
       "comfort_hours": {
@@ -856,6 +856,28 @@
     "cross_tier_deadband_events": 0,
     "curve_index_clamps": 0,
     "discarded_state_energy_wh": 0.0,
+    "energy_closure": {
+      "system": {
+        "delivered_end_use_wh": 344568.83655120747,
+        "envelope_conduction_wh": -249527.8714552009,
+        "external_gains_wh": -237104.3364394483,
+        "gross_wh": 1152014.804667353,
+        "residual_wh": 3.3946179200938786e-12,
+        "stored_delta_wh": 12423.535015753105
+      },
+      "zones": [
+        {
+          "delivered_end_use_wh": 344568.83655120747,
+          "zone": 1,
+          "zone_air_stored_wh": 227.9498820542319
+        },
+        {
+          "delivered_end_use_wh": 0.0,
+          "zone": 2,
+          "zone_air_stored_wh": 1188.0965365287798
+        }
+      ]
+    },
     "evicted_actors": 0,
     "fluid_payload_absences": 0,
     "port_rollbacks": 0,

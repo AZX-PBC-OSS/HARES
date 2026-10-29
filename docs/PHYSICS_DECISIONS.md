@@ -1405,3 +1405,75 @@ reference peak already carried its 0.15 kW pan draw, 14.41 ER plus
 0.25 fan plus 0.15 pan (HVAC.py:1482-1497), and only HARES moved,
 17.89 to 18.04 kW, so the residual is the documented ER dispatch
 divergence measured at the peak).
+## The run-level energy closure identity
+
+The run reports its own energy closure. On `RunHealth::energy_closure`
+(`crates/hares-core/src/health.rs`), each production step integrates the
+three terms the per-step thermal invariant
+(`invariants.rs::check_thermal`) already enforces:
+
+    residual = integral of ( sum(q_gains) - dE_stored - q_loss ) dt
+
+- `q_gains` [W]: the thermal solver's external term, the capacitance-weighted
+  `B_d*u` product, plus the affine coupling term the coupled steps carry.
+  Every joule entering the RC network from outside it flows here: end-use
+  delivery, passive gains, and the ambient-, ground- and sky-driven boundary
+  fluxes.
+- `dE_stored` [W]: `sum C_i*(T_next_i - T_prev_i)/dt` over every thermal node.
+- `q_loss` [W]: the solver's conduction term, the negated capacitance-weighted
+  `(F-I)*x_prev` redistribution, positive when heat leaves the network.
+
+The report states the integrated residual as an energy (`system.residual_wh`,
+Wh; the kilowatt-hour form divides by 1000) and in ppm of the integrated
+gross flux (`system.residual_ppm_of_gross`, the integral of
+`sum|q_gains|*dt`, the same quantity the per-step relative tolerance scales
+with). The four named columns of the row are the external gains, the stored
+delta-E, the envelope conduction and the delivered end-uses; the identity's
+equation is the first one above, and the delivered end-uses are an
+ATTRIBUTION within the external gains, not a fourth balance term: the
+equipment ports' delivery reaches the network through the same `B_d*u`
+columns the external term integrates, so subtracting it a second time would
+double-count. The delivered column exists so the reader can see how much of
+the external account the meters explain; it splits per zone
+(`zones[].delivered_end_use_wh`, sensible + radiant + short-wave watts,
+latent excluded because latent is the humidity domain's account and never
+enters the thermal network). The stored unit is Wh after
+`RunHealth::discarded_state_energy_wh`, the run-health energy precedent:
+the SI naming rule bans unit segments like `kwh` from identifiers, so the
+kilowatt-hour statement lives in the docs and the conversion, not in the
+field names.
+
+Why the residual is a system row and not per zone: the RC network's wall
+and mass nodes are shared across zones through the A-matrix (StarMesh
+couples every surface), so the stored and conduction terms have no zone
+addressing a per-zone first law could use. The per-zone rows carry the
+terms the zones' own wiring addresses: the port delivery into the zone and
+the zone air node's own storage (`zones[].zone_air_stored_wh`). A per-zone
+residual computed from the zone air balance alone would be the semi-implicit
+coupling split's artifact (legitimately order 100-900 W on freefloat-class
+swings at hourly steps), not a closure violation, so none is reported.
+
+Why the report exists at all: the per-step tolerance `max(1 W, 1e-6*gross)`
+admits each step's residual silently, and integrated over a year that
+tolerance is about 4.4 kWh of bias a run never had to show anyone. The
+report makes the accumulation visible instead of gating it a second time:
+a residual outside the per-step tolerance already quarantines the dwelling
+through the invariant, so the report is telemetry (never a health event),
+and its job is to state what the tolerance actually absorbed. The
+discrimination witness pins it: near-zero on an honest run, and exactly the
+injected imbalance on a perturbed one
+(`crates/hares-core/tests/energy_closure_report.rs`).
+
+Warm-up steps are excluded: the warm-up convergence loop is a replay of the
+run's first day to reach initial conditions, discarded before the horizon,
+and its energy is not the run's account. The fleet folds the per-home
+residual distribution (mean, p99) and the warm-up days-run per dwelling
+(`hares-fleet`'s `FleetResult::energy_closure_telemetry`).
+
+Alternative rejected: reporting the zone-air balance residual the solver
+already computes per zone (`energy_balance_residuals`, the
+`|C_zone*dT/dt - q_port|` check). It is intentionally loose: without the
+matrix-exchange and airflow terms it reads kW during transients on
+multi-node models, and integrating it would report wall-mass redistribution
+as a conservation violation. The system identity integrates the exact
+three-term balance instead.

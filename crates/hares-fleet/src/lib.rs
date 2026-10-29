@@ -16,4 +16,7 @@ pub use fleet::{
     DwellingBuildError, FLEET_REPORT_NAME, Fleet, FleetBuildReport, FleetError, HomeStatus,
     SimError, SteppableFleet, home_status,
 };
-pub use fold::{Alignment, Coverage, FleetReport, FleetResult, HomeResult};
+pub use fold::{
+    Alignment, Coverage, FleetClosureTelemetry, FleetReport, FleetResult, HomeClosureTelemetry,
+    HomeResult,
+};

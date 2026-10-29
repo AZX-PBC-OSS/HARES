@@ -164,6 +164,9 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<py_result::PyRunResult>()?;
     m.add_class::<py_result::PyReportResult>()?;
     m.add_class::<py_result::PyRunHealth>()?;
+    m.add_class::<py_result::PyEnergyClosureReport>()?;
+    m.add_class::<py_result::PyClosureRow>()?;
+    m.add_class::<py_result::PyZoneClosureRow>()?;
     m.add_class::<py_result::PyWarmupOutcome>()?;
     m.add_class::<py_result::PyWarmupResiduals>()?;
     m.add_class::<py_result::PyWarning>()?;

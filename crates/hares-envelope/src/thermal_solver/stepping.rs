@@ -1000,6 +1000,7 @@ impl ThermalSolver {
         // residual for a working multi-node model can approach 6 kW during step
         // changes (see invariants.rs:2770-2777 comment).
         self.energy_balance_residuals.clear();
+        self.zone_air_stored_w.clear();
         for (&zone, &state_idx) in &self.wiring.zone_state_indices {
             let Some(&c_zone) = self.wiring.c_zone_j_k.get(&zone) else {
                 continue;
@@ -1014,6 +1015,7 @@ impl ThermalSolver {
             let residual = (delta_stored - q_port).abs();
 
             self.energy_balance_residuals.insert(zone, residual);
+            self.zone_air_stored_w.insert(zone, delta_stored);
 
             // Diagnostic: residual above 5 kW may indicate port-wiring errors.
             // Wall-mass energy redistribution in multi-node RC models can produce
@@ -1057,14 +1059,9 @@ impl ThermalSolver {
         self.full_system_stored_energy_w = 0.0;
         if !self.wiring.node_capacitances.is_empty() {
             let mut stored_energy_w: f64 = 0.0;
-            for (node_id, c_j_k) in &self.wiring.node_capacitances {
-                if let Some(&idx) = self.wiring.node_index.get(node_id)
-                    && idx < self.x.len()
-                    && idx < self.rhs_buf.len()
-                {
-                    // After the swap, self.x is T_next and self.rhs_buf is T_prev.
-                    stored_energy_w += c_j_k * (self.x[idx] - self.rhs_buf[idx]) / self.dt_s;
-                }
+            for &(idx, c_j_k) in &self.balance_node_terms {
+                // After the swap, self.x is T_next and self.rhs_buf is T_prev.
+                stored_energy_w += c_j_k * (self.x[idx] - self.rhs_buf[idx]) / self.dt_s;
             }
             self.full_system_stored_energy_w = stored_energy_w;
             tracing::debug!(stored_energy_w, "full-system stored energy change rate [W]");
@@ -1102,12 +1099,8 @@ impl ThermalSolver {
                 self.model.step_into(x_zero, &u, b_d_u);
 
                 let mut external_w = 0.0_f64;
-                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id)
-                        && idx < n_states
-                    {
-                        external_w += c_j_k * b_d_u[idx] / dt_s;
-                    }
+                for &(idx, c_j_k) in &self.balance_node_terms {
+                    external_w += c_j_k * b_d_u[idx] / dt_s;
                 }
                 self.thermal_balance_q_gains.push(external_w);
 
@@ -1115,12 +1108,8 @@ impl ThermalSolver {
                 let a_d_x = &mut self.balance_buf_b;
                 self.model.step_into(&self.rhs_buf, u_zero, a_d_x);
                 let mut internal_w = 0.0_f64;
-                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id)
-                        && idx < n_states
-                    {
-                        internal_w += c_j_k * (a_d_x[idx] - self.rhs_buf[idx]) / dt_s;
-                    }
+                for &(idx, c_j_k) in &self.balance_node_terms {
+                    internal_w += c_j_k * (a_d_x[idx] - self.rhs_buf[idx]) / dt_s;
                 }
                 self.thermal_balance_q_loss = -internal_w;
             } else {
@@ -1199,14 +1188,10 @@ impl ThermalSolver {
                 let mut external_w = 0.0_f64;
                 let mut internal_w = 0.0_f64;
                 let mut affine_w = 0.0_f64;
-                for (node_id, &c_j_k) in &self.wiring.node_capacitances {
-                    if let Some(&idx) = self.wiring.node_index.get(node_id)
-                        && idx < n_states
-                    {
-                        external_w += c_j_k * g_u[idx] / dt_s;
-                        internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
-                        affine_w += c_j_k * h[idx] / dt_s;
-                    }
+                for &(idx, c_j_k) in &self.balance_node_terms {
+                    external_w += c_j_k * g_u[idx] / dt_s;
+                    internal_w += c_j_k * f_minus_i_x[idx] / dt_s;
+                    affine_w += c_j_k * h[idx] / dt_s;
                 }
                 self.thermal_balance_q_gains.push(external_w);
                 self.thermal_balance_q_gains.push(affine_w);
