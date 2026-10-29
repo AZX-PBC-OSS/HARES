@@ -115,6 +115,17 @@ impl ScenarioDistribution {
         }
     }
 
+    /// The family's name, for the errors that name the distribution.
+    fn family(&self) -> &'static str {
+        match self {
+            Self::Uniform { .. } => "uniform",
+            Self::Normal { .. } => "normal",
+            Self::LogNormal { .. } => "lognormal",
+            Self::Triangular { .. } => "triangular",
+            Self::Discrete { .. } => "discrete",
+        }
+    }
+
     /// The analytical mean the moment witnesses compare against. The
     /// distribution validates before it computes, so a malformed one is
     /// an error naming it, never a substitute value: a discrete with no
@@ -192,13 +203,28 @@ impl ScenarioDistribution {
     /// the correlated parameter's path (the one-factor Gaussian copula's
     /// transform, which preserves this marginal exactly). The distribution
     /// validates before it maps, so a malformed one is an error naming it,
-    /// never a panic.
+    /// never a panic. A finite `p` outside (0, 1) saturates at the boundary
+    /// probability: the probability is clamped to [EPSILON, 1 - EPSILON]
+    /// (about 8.2 standard deviations for the normal and lognormal
+    /// families), so a degenerate tail returns the boundary quantile
+    /// rather than an infinity. The clamp is reachable from the copula: a
+    /// normal CDF of a finite draw rounds to 1.0 at about 8.6 sigma
+    /// (probability about 1e-16), and the boundary quantile is the
+    /// substituted value. A non-finite `p` (NaN or an infinity) is outside
+    /// every probability's domain and is an error naming the distribution.
     ///
     /// # Errors
     ///
-    /// [`HaresError`] when the distribution's parameters are malformed.
+    /// [`HaresError`] when the distribution's parameters are malformed or
+    /// `p` is not finite.
     pub fn quantile(&self, p: f64) -> Result<f64, HaresError> {
         self.validate()?;
+        if !p.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "the {} distribution's quantile requires a finite probability, got {p}",
+                self.family()
+            )));
+        }
         let p = p.clamp(f64::EPSILON, 1.0 - f64::EPSILON);
         Ok(match self {
             Self::Uniform { low, high } => low + p * (high - low),
@@ -1533,6 +1559,59 @@ mod tests {
                     "{method} must name the {family} distribution: {error}"
                 );
             }
+        }
+    }
+
+    /// The quantile's probability contract: a finite probability outside
+    /// (0, 1) saturates at the [EPSILON, 1 - EPSILON] clamp (about 8.2
+    /// standard deviations for the normal family), a non-finite one is an
+    /// error naming the distribution, and the saturated values are finite.
+    /// The clamp is reachable from the copula: a normal CDF of a finite
+    /// draw rounds to exactly 1.0 at about 8.6 sigma.
+    #[test]
+    fn the_quantile_saturates_a_finite_probability_and_refuses_a_non_finite_one() {
+        let normal = ScenarioDistribution::Normal {
+            mean: 0.0,
+            std_dev: 1.0,
+        };
+        let low = normal
+            .quantile(0.0)
+            .expect("a finite probability saturates at the clamp");
+        let high = normal
+            .quantile(1.0)
+            .expect("a finite probability saturates at the clamp");
+        assert!(
+            low.is_finite() && high.is_finite(),
+            "the saturated quantiles are finite: {low}, {high}"
+        );
+        assert_eq!(
+            low,
+            normal
+                .quantile(f64::EPSILON)
+                .expect("the clamp's own probability"),
+            "p at or below zero reads the clamp's lower boundary"
+        );
+        assert_eq!(
+            high,
+            normal
+                .quantile(1.0 - f64::EPSILON)
+                .expect("the clamp's own probability"),
+            "p at or above one reads the clamp's upper boundary"
+        );
+        // Acklam's Q(2^-52) is 8.2095..., so the saturated tail is the
+        // clamp's 8.2 standard deviations, not an infinity.
+        assert!(
+            (low + 8.2).abs() < 0.1 && (high - 8.2).abs() < 0.1,
+            "the saturated quantiles are the clamp's 8.2 sigma: {low}, {high}"
+        );
+        for p in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = normal
+                .quantile(p)
+                .expect_err("a non-finite probability has no quantile");
+            assert!(
+                err.to_string().contains("normal") && err.to_string().contains("finite"),
+                "the error must name the distribution and the finite domain: {err}"
+            );
         }
     }
 
