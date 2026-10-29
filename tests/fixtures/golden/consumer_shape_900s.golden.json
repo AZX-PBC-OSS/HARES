@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "359884e1373e470a55034516e34b384a1fee05f199af2bec708538b411defec5",
-  "git_head": "641858e0f81a596123bbbcb8fe7aa6a031c1f40a",
+  "git_head": "2afe24dfad6890d4954f629363d2f5ee0acd0cd6",
   "git_dirty": false,
   "metrics": [
     {
@@ -13940,11 +13940,9 @@
     "energy_closure": {
       "system": {
         "delivered_end_use_wh": 11603114.608636878,
-        "envelope_conduction_wh": 1056299067.8232182,
-        "external_gains_wh": 1056256143.4135617,
-        "gross_wh": 1056788068.6197611,
         "residual_wh": 4.467521037554434e-7,
-        "stored_delta_wh": -42924.409655899406
+        "stored_delta_wh": -42924.409655899406,
+        "tolerance_gross_wh": 1056788068.6197611
       },
       "zones": [
         {
