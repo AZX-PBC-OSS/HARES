@@ -136,6 +136,16 @@ impl ScenarioDistribution {
     /// is a silent substitute value, so the result must be finite or the
     /// error names the family and the parameters.
     ///
+    /// The gates are per method, not one predicate over the distribution:
+    /// each method refuses exactly the overflow its own arithmetic reaches
+    /// on parameters validation accepts. A uniform on [-1.5e308, 1.5e308]
+    /// means the representable 0 (its corners sum to exactly 0) while its
+    /// half-span overflows, so it draws and quantiles neither; a discrete
+    /// whose weights' sum overflows refuses all three, because that sum is
+    /// both the probability comparison's denominator and this mean's
+    /// normaliser, and dividing by an infinity would return a finite,
+    /// wrong mean.
+    ///
     /// # Errors
     ///
     /// [`HaresError`] when the distribution's parameters are malformed or
@@ -150,9 +160,13 @@ impl ScenarioDistribution {
             Self::Triangular { min, mode, max } => (min + mode + max) / 3.0,
             Self::LogNormal { mu, sigma } => libm::exp(mu + sigma * sigma / 2.0),
             // Validation holds at least one positive finite weight, so
-            // the total is strictly positive here.
+            // the total is strictly positive here; the same overflow gate
+            // the sampler's probability comparison runs guards the
+            // normaliser, because dividing by an IEEE infinity collapses
+            // every value-weight quotient to zero (a finite, wrong mean
+            // rather than a refused one).
             Self::Discrete { values, weights } => {
-                let total: f64 = weights.iter().sum();
+                let total = self.discrete_total(weights, "mean")?;
                 values
                     .iter()
                     .zip(weights.iter())
@@ -173,8 +187,8 @@ impl ScenarioDistribution {
             return Ok(value);
         }
         Err(HaresError::Equipment(format!(
-            "the {} distribution's {method} is not finite ({value}): the declared \
-             parameters {self:?} leave the finite f64 range",
+            "the {} distribution's {method} is not finite ({value}): the closed form's \
+             arithmetic on the declared parameters {self:?} leaves the finite f64 range",
             self.family()
         )))
     }
@@ -297,10 +311,14 @@ impl ScenarioDistribution {
     }
 
     /// The discrete family's weight total: the probability comparison's
-    /// denominator. A validated discrete's weights are finite and
-    /// non-negative, but their sum can still overflow to an infinity, and
-    /// `u = p * total` is then uncomputable: every probability would
-    /// silently read the last value. The error names the parameters.
+    /// denominator and the mean's normaliser. A validated discrete's
+    /// weights are finite and non-negative, but their sum can still
+    /// overflow to an infinity; `u = p * total` is then uncomputable
+    /// (every probability would silently read the last value) and the
+    /// mean's value-weight division would collapse to zero (a finite,
+    /// wrong value). All three public methods run this gate, so the
+    /// weights' total is one contract rather than three. The error names
+    /// the parameters.
     fn discrete_total(&self, weights: &[f64], method: &str) -> Result<f64, HaresError> {
         let total: f64 = weights.iter().sum();
         if total.is_finite() {
@@ -308,8 +326,7 @@ impl ScenarioDistribution {
         }
         Err(HaresError::Equipment(format!(
             "the discrete distribution's {method}: the weights' sum is {total}, outside \
-             the finite f64 range the probability comparison needs; the declared \
-             parameters {self:?}"
+             the finite f64 range the normalisation needs; the declared parameters {self:?}"
         )))
     }
 }
@@ -1831,6 +1848,18 @@ mod tests {
                 "discrete",
                 "the value-weight products overflow",
             ),
+            (
+                // Each product stays finite, so only the total's overflow
+                // is left: dividing by it collapses every quotient to
+                // zero, and the true mean is the hand-computed
+                // (1.0 * 1e308 + 0.0 * 1e308) / (1e308 + 1e308) = 0.5.
+                ScenarioDistribution::Discrete {
+                    values: vec![1.0, 0.0],
+                    weights: vec![1e308, 1e308],
+                },
+                "discrete",
+                "the weights' sum overflows while the value-weight products stay finite",
+            ),
         ];
         for (distribution, family, why) in &mean_overflows {
             distribution.validate().unwrap_or_else(|err| {
@@ -1919,6 +1948,34 @@ mod tests {
                 "the draw must name the {family} distribution: {error}"
             );
         }
+
+        // The gates are per method, not one predicate over the
+        // distribution: each refuses its own arithmetic's overflow, and
+        // the stored parameters stay finite throughout. A symmetric
+        // uniform's mean is the representable 0 (its corners sum to
+        // exactly 0), while its half-span `high - low` overflows, so it
+        // draws and quantiles neither. The discrete's weight total is
+        // shared by all three, so an overflowing sum refuses every
+        // method, the mean included (the hand-computed mean of the entry
+        // above is 0.5, not the 0.0 an ungated division returns).
+        let symmetric = ScenarioDistribution::Uniform {
+            low: -1.5e308,
+            high: 1.5e308,
+        };
+        assert_eq!(
+            symmetric.mean().expect("the mean's corner sum is finite"),
+            0.0,
+            "the symmetric uniform's mean is representable"
+        );
+        let mut rng = RngStream::scenario_sampler([1_u8; 32]).rng_at(0);
+        assert!(
+            symmetric.sample(&mut rng).is_err(),
+            "the symmetric uniform's half-span overflows: the draw must refuse"
+        );
+        assert!(
+            symmetric.quantile(0.5).is_err(),
+            "the symmetric uniform's half-span overflows: the quantile must refuse"
+        );
     }
 
     /// The spec's sampling error names the parameter the distribution's
