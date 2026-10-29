@@ -1275,6 +1275,85 @@ mod tests {
         );
     }
 
+    /// The copula preserves a non-uniform family's marginal too: a
+    /// correlated Normal(20, 1.5) and LogNormal(0, 0.25) member's sampled
+    /// values hold the declared family's mean and spread. The uniform
+    /// pair's KS and Pearson witness beside this one pins the marginal's
+    /// shape and its correlation; this pins the moments the record says
+    /// the moment witnesses cover, correlated parameters included.
+    #[test]
+    fn correlated_members_hold_their_declared_family_moments() {
+        let member = |name: &str, distribution: ScenarioDistribution| ScenarioParameter {
+            name: name.to_string(),
+            unit: "W".to_string(),
+            target: override_target("all", "heating_capacity_w"),
+            distribution,
+            correlation: Some(ScenarioCorrelation {
+                group: "load".to_string(),
+                rho: 0.9,
+            }),
+        };
+        let s = spec(vec![
+            member(
+                "normal",
+                ScenarioDistribution::Normal {
+                    mean: 20.0,
+                    std_dev: 1.5,
+                },
+            ),
+            member(
+                "lognormal",
+                ScenarioDistribution::LogNormal {
+                    mu: 0.0,
+                    sigma: 0.25,
+                },
+            ),
+        ]);
+        let n = 4_000_u64;
+        let mut normal = Vec::with_capacity(n as usize);
+        let mut lognormal = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let sample = s.sample(6, i, 0).expect("samples");
+            normal.push(sample.values[0].value);
+            lognormal.push(sample.values[1].value);
+        }
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / n as f64;
+        let sd = |v: &[f64]| {
+            let m = mean(v);
+            libm::sqrt(v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / n as f64)
+        };
+        // Normal(20, 1.5): the mean's standard error is 1.5/sqrt(4,000) =
+        // 0.0237, so the 0.1 band is four standard errors; the sd's is
+        // about 1.5/sqrt(2*4,000) = 0.0168, so the 0.075 band is four and
+        // a half.
+        let normal_mean = mean(&normal);
+        assert!(
+            (normal_mean - 20.0).abs() < 0.1,
+            "the correlated normal member's mean {normal_mean} left 20"
+        );
+        let normal_sd = sd(&normal);
+        assert!(
+            (normal_sd - 1.5).abs() < 0.075,
+            "the correlated normal member's spread {normal_sd} left 1.5"
+        );
+        // LogNormal(0, 0.25): mean exp(sigma^2/2) = 1.0317434074991028 and
+        // sd exp(sigma^2/2)*sqrt(exp(sigma^2)-1) = 0.2620190721092012;
+        // the mean's standard error is 0.0041 (the 0.02 band is five) and
+        // the sd's about 0.006 at this kurtosis (the 0.04 band is six).
+        let lognormal_mean = mean(&lognormal);
+        assert!(
+            (lognormal_mean - 1.031_743_407_499_102_8).abs() < 0.02,
+            "the correlated lognormal member's mean {lognormal_mean} left the \
+             analytical mean"
+        );
+        let lognormal_sd = sd(&lognormal);
+        assert!(
+            (lognormal_sd - 0.262_019_072_109_201_2).abs() < 0.04,
+            "the correlated lognormal member's spread {lognormal_sd} left the \
+             analytical spread"
+        );
+    }
+
     /// The sampled record's forms: the overrides map merges per
     /// equipment without clobbering, the patches list carries the patch
     /// targets, and the record serializes to JSON and back.
