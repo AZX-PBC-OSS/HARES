@@ -109,6 +109,13 @@ struct PerformanceSnapshot {
     /// in `step()` zeroes it alongside `electric_power_w` — telemetry and port
     /// contribution must never diverge.
     parasitic_electric_w: f64,
+    /// The step's reference-voltage draw [W]: the on-cycle share at the
+    /// reference voltage plus the parasitic share, the two components'
+    /// pre-scaling sum. The premise aggregate divides the metered draw by
+    /// it to answer the assembled response (the on-cycle share evaluates
+    /// the unit row, the parasitic share does not), so the grid-outage gate
+    /// zeroes it with the metered draw.
+    nominal_electric_w: f64,
 }
 
 pub struct Dehumidifier {
@@ -166,6 +173,12 @@ pub struct Dehumidifier {
     /// deep-sag form (as fitted: the recorded Hajagos & Danai row); Q comes
     /// from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
+    /// The moment's nominal electric draw of the most recent step (W, the
+    /// on-cycle share at the reference voltage plus the off-cycle parasitic
+    /// share): the premise aggregate's weight for this unit, which
+    /// un-scales the stepped draw through the assembled response it
+    /// reports. `None` when the step drew nothing.
+    last_nominal_draw_w: Option<f64>,
 }
 
 impl Dehumidifier {
@@ -229,6 +242,7 @@ impl Dehumidifier {
             zip: hares_types::zip::ResolvedZip::reactive_only(
                 hares_types::zip::ZipLoad::constant_power(),
             ),
+            last_nominal_draw_w: None,
         }
     }
 
@@ -269,6 +283,10 @@ impl Dehumidifier {
                 plf: 1.0,
                 rtf: 0.0,
                 parasitic_electric_w: parasitic,
+                // The parasitic draw is added outside the unit row's
+                // voltage response, so the off-cycle moment's reference
+                // draw is the parasitic itself (a flat response of 1.0).
+                nominal_electric_w: parasitic,
             };
         }
 
@@ -376,6 +394,10 @@ impl Dehumidifier {
             // is the off-cycle fraction of the configured load, matching the
             // parasitic term already blended into electric_power_w above.
             parasitic_electric_w: parasitic * (1.0 - rtf),
+            // The two components' pre-scaling draw: the on-cycle share at the
+            // reference voltage plus the parasitic share the response never
+            // scales.
+            nominal_electric_w: electric_power_w_on * rtf + parasitic * (1.0 - rtf),
         }
     }
 
@@ -594,6 +616,7 @@ impl Equipment for Dehumidifier {
             plf: 1.0,
             rtf: 0.0,
             parasitic_electric_w: 0.0,
+            nominal_electric_w: 0.0,
         });
         Ok(())
     }
@@ -719,11 +742,21 @@ impl Equipment for Dehumidifier {
                 electric_power_w: 0.0,
                 sensible_gain_w: 0.0,
                 parasitic_electric_w: 0.0,
+                // The zeroed step's reference draw is zero too: the
+                // aggregate must not un-scale a dead step through a base
+                // the bus no longer supplies.
+                nominal_electric_w: 0.0,
                 ..raw
             }
         } else {
             raw
         };
+        // The assembled base for the premise aggregate: the step's two
+        // components' pre-scaling sum. A zero draw reports no base, the same
+        // "no positive weight" answer the aggregate gives every switched-off
+        // load.
+        self.last_nominal_draw_w =
+            (snapshot.nominal_electric_w > 0.0).then_some(snapshot.nominal_electric_w);
         self.check_part_load_bounds(snapshot.plf, snapshot.rtf)?;
         #[cfg(feature = "observe")]
         {
@@ -836,6 +869,10 @@ impl Equipment for Dehumidifier {
         Some(self.zip)
     }
 
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.last_nominal_draw_w
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         try_save_versioned(
             &DehumidifierState {
@@ -887,6 +924,9 @@ impl Equipment for Dehumidifier {
             plf: 1.0,
             rtf: 0.0,
             parasitic_electric_w: self.telemetry.get(tk::PARASITIC_ELECTRIC_W).unwrap_or(0.0),
+            // The checkpoint does not carry the assembled base; the zero-flow
+            // restore instant publishes none, and the next step re-derives it.
+            nominal_electric_w: 0.0,
         });
         self.core_output = CoreOutput {
             // Rebuild the restore-instant output from the persisted state
@@ -2676,5 +2716,100 @@ mod tests {
         assert!(eq.telemetry().get(tk::ELECTRIC_POWER_W).unwrap() > 0.0);
         assert_eq!(eq.telemetry().get(tk::IS_ON), Some(1.0));
         assert_eq!(eq.telemetry().get(tk::TEMPERATURE_LOCKOUT), Some(0.0));
+    }
+
+    /// The dehumidifier's draw blends two responses: the on-cycle compressor
+    /// draw evaluates the unit row at the bus voltage (the deep-sag entry),
+    /// while the off-cycle parasitic (standby electronics, controls,
+    /// crankcase heat) is added outside that response (EnergyPlus
+    /// ZoneDehumidifier.cc:852, 880-886 applies it to the off-cycle fraction
+    /// unscaled). The unit therefore needs an assembled base: un-scaling the
+    /// blend through the compressor row publishes the row's 1.145 at 0.5 pu
+    /// for a moment whose true response is (a x 1.145 + b) / (a + b). The
+    /// fixture runs a partial-load on-cycle moment at RH 0.50 (plr 0.5, rtf
+    /// 0.5 with the identity PLF curve) beside a 30 W parasitic.
+    #[test]
+    fn part_load_moment_reports_the_assembled_blend_not_the_compressor_row() {
+        let make_cfg = || {
+            let mut typed = config()
+                .typed::<crate::DehumidifierConfig>()
+                .expect("dehumidifier config")
+                .clone();
+            typed.off_cycle_parasitic_load_w = Some(30.0);
+            EquipmentConfig::from_typed(
+                "Test Dehumidifier".to_string(),
+                "Dehumidifier".to_string(),
+                typed,
+            )
+            .expect("config")
+        };
+        // Off then on at high RH, then a partial-load step at RH 0.50 keeps
+        // the humidistat on: the step's draw blends the on-cycle compressor
+        // and the off-cycle parasitic.
+        let run = |voltage_pu: f64| -> Dehumidifier {
+            let cfg = make_cfg();
+            let mut eq = Dehumidifier::new(cfg.clone());
+            let mut hi = env(0.52);
+            hi.grid.voltage_pu = voltage_pu;
+            eq.init(&cfg, &hi).unwrap();
+            let mut slots = ports();
+            eq.update_control(&hi);
+            eq.step(&hi, Duration::from_secs(60), &mut slots).unwrap();
+            let mut partial = env(0.50);
+            partial.grid.voltage_pu = voltage_pu;
+            eq.update_control(&partial);
+            let mut slots = ports();
+            eq.step(&partial, Duration::from_secs(60), &mut slots)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &Dehumidifier| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the unit must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let nominal_w = draw(&nominal_unit);
+        let parasitic_w = nominal_unit
+            .telemetry()
+            .get(tk::PARASITIC_ELECTRIC_W)
+            .expect("parasitic telemetry");
+        let on_cycle_w = nominal_w - parasitic_w;
+        assert!(on_cycle_w > 0.0, "fixture: the compressor must run");
+        assert!(
+            parasitic_w > 0.0,
+            "fixture: the moment must carry the off-cycle parasitic share"
+        );
+
+        // At the reference voltage every multiplier is exactly 1.0, so the
+        // step's draw is the sum of both components' reference draws: the
+        // base the aggregate must divide by.
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the unit's draw composes two responses, so it must report a base");
+        assert!(
+            (reported_nominal - nominal_w).abs() < 1e-6 * nominal_w,
+            "the reported nominal draw must be the two components' reference \
+             draw {nominal_w}, got {reported_nominal}"
+        );
+
+        // The hand computation: the on-cycle share follows the cooling row
+        // (1.6 x 0.25 - 2.69 x 0.5 + 2.09 = 1.145 at 0.5 pu), the parasitic
+        // share is voltage-invariant.
+        let row_multiplier: f64 = 1.6 * 0.25 - 2.69 * 0.5 + 2.09;
+        assert!((row_multiplier - 1.145).abs() < 1e-12, "hand");
+        let expected_response = (on_cycle_w * row_multiplier + parasitic_w) / nominal_w;
+        let response = draw(&sag_unit) / reported_nominal;
+        assert!(
+            (response - expected_response).abs() < 1e-9,
+            "the assembled response must be the blend {expected_response} \
+             (on-cycle share at the row, parasitic share flat), got {response}"
+        );
+        assert!(
+            (response - row_multiplier).abs() > 1e-3,
+            "the response must not be the compressor row alone: the parasitic \
+             share it never scaled flattens the blend"
+        );
     }
 }
