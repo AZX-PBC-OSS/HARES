@@ -13,8 +13,9 @@
 //! declaration order from that one stream; the correlation groups draw
 //! their shared factors first, and a member's value is its distribution's
 //! quantile at the one-factor Gaussian copula's probability, which
-//! preserves the marginal the spec declares exactly (the moment and KS
-//! witnesses pin it).
+//! preserves the declared marginal: exactly in exact arithmetic, and to
+//! the normal CDF pair's 1e-9 in doubles (the moment, KS and copula
+//! correlation witnesses pin it).
 //!
 //! The sampled record serializes: the per-home payload a run manifest
 //! records (the scenario id, the building id, every parameter's name,
@@ -309,8 +310,11 @@ pub enum ScenarioTarget {
 }
 
 /// A parameter's correlation: the one-factor Gaussian copula's group and
-/// this member's loading. The pairwise correlation of two members with
-/// loadings sqrt(rho1) and sqrt(rho2) is sqrt(rho1 * rho2).
+/// this member's loading. Two members' LATENT factors correlate at
+/// sqrt(rho1 * rho2); the sampled values' correlation is that latent
+/// correlation through each marginal's own transform, so it equals
+/// sqrt(rho1 * rho2) only for normal marginals (two uniform marginals at
+/// rho 0.9 correlate at about 0.891, the copula's closed form).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioCorrelation {
@@ -509,7 +513,8 @@ impl ScenarioSpec {
     /// per-dwelling key; a correlation group draws its shared factors
     /// first (the groups in first-appearance order), and each member's
     /// value is its distribution's quantile at the copula's probability,
-    /// which preserves the declared marginal exactly.
+    /// which preserves the declared marginal (exactly in exact
+    /// arithmetic, to the CDF pair's 1e-9 in doubles).
     ///
     /// # Errors
     ///
@@ -887,6 +892,82 @@ mod tests {
         assert!(
             err.to_string().contains("overflowing"),
             "the error must name the parameter: {err}"
+        );
+    }
+
+    /// The copula preserves the declared marginal: a correlated member's
+    /// values still conform to its own distribution. Two uniform (0, 1)
+    /// members in one rho 0.9 group draw values whose empirical CDF
+    /// stays inside the Kolmogorov band of U(0, 1) at 2,000 homes (the 1
+    /// percent critical value is 1.63/sqrt(2,000) = 0.0365), and whose
+    /// Pearson correlation is the Gaussian copula's closed form for
+    /// uniform marginals, (6/pi) asin(rho/2) = 0.891456 at rho 0.9
+    /// (Kruskal 1958: for uniform marginals Pearson and Spearman
+    /// coincide), within 0.02 (the correlation's standard error is about
+    /// (1 - rho^2)/sqrt(N) = 0.0042). The latent factors correlate at
+    /// rho; the values correlate at the marginal transform of it, which
+    /// is what the sampled record carries.
+    #[test]
+    fn correlated_members_keep_their_declared_marginal() {
+        let s = spec(vec![
+            ScenarioParameter {
+                name: "a".into(),
+                unit: "W".into(),
+                target: override_target("all", "heating_capacity_w"),
+                distribution: uniform(0.0, 1.0),
+                correlation: Some(ScenarioCorrelation {
+                    group: "load".into(),
+                    rho: 0.9,
+                }),
+            },
+            ScenarioParameter {
+                name: "b".into(),
+                unit: "W".into(),
+                target: override_target("all", "tank_volume_m3"),
+                distribution: uniform(0.0, 1.0),
+                correlation: Some(ScenarioCorrelation {
+                    group: "load".into(),
+                    rho: 0.9,
+                }),
+            },
+        ]);
+        let n = 2_000_u64;
+        let mut a: Vec<f64> = Vec::with_capacity(n as usize);
+        let mut b: Vec<f64> = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let sample = s.sample(5, i, 0).expect("samples");
+            a.push(sample.values[0].value);
+            b.push(sample.values[1].value);
+        }
+        // The empirical CDF of one member against U(0, 1).
+        let mut sorted = a.clone();
+        sorted.sort_by(|x, y| x.partial_cmp(y).expect("finite"));
+        let mut d = 0.0_f64;
+        for (i, v) in sorted.iter().enumerate() {
+            d = d.max(((i as f64 + 1.0) / n as f64 - v).abs());
+            d = d.max((v - i as f64 / n as f64).abs());
+        }
+        assert!(
+            d < 0.04,
+            "the correlated member's empirical CDF left U(0, 1): KS = {d}"
+        );
+        let nf = n as f64;
+        let mean_a = a.iter().sum::<f64>() / nf;
+        let mean_b = b.iter().sum::<f64>() / nf;
+        let cov = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - mean_a) * (y - mean_b))
+            .sum::<f64>()
+            / nf;
+        let sd_a = libm::sqrt(a.iter().map(|x| (x - mean_a) * (x - mean_a)).sum::<f64>() / nf);
+        let sd_b = libm::sqrt(b.iter().map(|y| (y - mean_b) * (y - mean_b)).sum::<f64>() / nf);
+        let rho = cov / (sd_a * sd_b);
+        let expected = (6.0 / std::f64::consts::PI) * libm::asin(0.9 / 2.0);
+        assert!(
+            (rho - expected).abs() < 0.02,
+            "the uniform pair's Pearson correlation {rho} left the Gaussian \
+             copula's closed form {expected}"
         );
     }
 

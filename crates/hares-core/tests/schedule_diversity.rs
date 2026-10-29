@@ -202,6 +202,36 @@ fn diversity_off_restores_the_shared_profile() {
     );
 }
 
+/// The CSV path's bitwise safety under the default-on knob: a schedule
+/// CSV is measured or upstream data, so the diversity layer is inert
+/// whatever the setting. The same CSV home built with the knob on and
+/// off is bitwise equal row for row, and its table is not the generated
+/// family's over the same span (the fixture is a real CSV, not a source
+/// that fell back to generation).
+#[test]
+fn a_schedule_csv_is_never_diversified() {
+    let csv = repo_root().join("tests/fixtures/resstock/2025.1/bldg0000002/in.schedules.csv");
+    let mut on = config(1, 42, None);
+    on.schedule = Some(InputSource::Path(csv.clone()));
+    let mut off = config(1, 42, None);
+    off.schedule = Some(InputSource::Path(csv));
+    off.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    let on_dwelling = Dwelling::from_config(on).expect("the CSV home builds");
+    let off_dwelling = Dwelling::from_config(off).expect("the CSV home builds with the layer off");
+    assert_eq!(
+        schedule_rows(&on_dwelling),
+        schedule_rows(&off_dwelling),
+        "a schedule CSV must be bitwise equal with the layer on and off"
+    );
+    let generated = Dwelling::from_config(config(1, 42, None)).expect("the generated home builds");
+    assert_ne!(
+        schedule_rows(&off_dwelling),
+        schedule_rows(&generated),
+        "the CSV fixture's rows must not be the generated family's: the \
+         equality above would then prove nothing"
+    );
+}
+
 /// The new sources add no runtime stochastic state: the diversity's draws
 /// ride the build-time profile transform and no stream of theirs appears
 /// in the dwelling's seeded-stream ledger, and the dwelling's own seeded
