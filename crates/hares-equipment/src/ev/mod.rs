@@ -1602,6 +1602,12 @@ impl Ev {
             // leg is the vehicle's load-side behavior and is never the
             // DER function. An unconfigured layer warns once on the first
             // excursion it declines to govern.
+            // The availability input is the live ceiling with the demand
+            // response fraction applied: the export passed as the model's
+            // own output is already DR scaled, so the droop's up-ramp must
+            // stop at the same cap (the stationary battery reaches the same
+            // bound through the clamp after its layer).
+            let droop_availability_w = self.discharge_ceiling_w * self.dr_power_fraction();
             match &mut self.der1547 {
                 Some(controller) => {
                     // `compute_discharge` returns the port's sign
@@ -1613,7 +1619,7 @@ impl Ev {
                         dt.as_secs_f64(),
                         !env.grid.grid_outage(),
                         -export_ac_w,
-                        self.discharge_ceiling_w,
+                        droop_availability_w,
                         0.0,
                     )?;
                     if outcome.tripped {

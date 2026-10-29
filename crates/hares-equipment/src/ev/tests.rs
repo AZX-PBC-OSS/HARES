@@ -6578,6 +6578,46 @@ fn witness_der1547_ev_export_over_frequency_droop_reduces_export() {
     assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
 }
 
+/// The frequency-Watt reference cannot inject more than the demand
+/// response level allows. The DR fraction is the operator's cap on the
+/// delivered export, the same authority the stationary battery's clamp
+/// carries (there the clamp runs after the layer, so the cap binds the
+/// droop's reference); the EV passes its post-DR export as the layer's
+/// pre-disturbance output, so the availability input must be the DR-scaled
+/// ceiling too, or an under-frequency ramp resurrects the shed watts. A
+/// GridEmergency (a full shed) holds zero export through the excursion;
+/// a High level caps the ramp at half the rating.
+#[test]
+fn witness_der1547_ev_droop_cannot_exceed_the_demand_response_cap() {
+    for (level, expected_w) in [(DRLevel::High, 2500.0), (DRLevel::GridEmergency, 0.0)] {
+        let config = v2g_config_with_der1547(Some(cat2_settings()));
+        let mut ev = Ev::new(config.clone());
+        ev.init(&config, &sample_env()).expect("init");
+        ev.apply_control(&ControlSignal::DemandResponse {
+            level,
+            duration_s: Some(3600.0),
+        })
+        .expect("DR accepted");
+        command_v2g_discharge(&mut ev, 5000.0);
+
+        // 59.5 Hz is 0.464 Hz below the 59.964 Hz deadband edge: the ramp
+        // wants p_pre + 0.464/3 pu. High caps it at half the 5000 W
+        // rating; GridEmergency caps it at zero.
+        let mut low_f = sample_env();
+        low_f.grid.frequency_hz = 59.5;
+        let mut ports = PortSlots::default();
+        ev.step(&low_f, Duration::from_secs(60), &mut ports)
+            .expect("step");
+        let p_w = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            (p_w + expected_w).abs() < 1e-6,
+            "{level:?}: the DR cap must bind the under-frequency ramp: \
+             expected {} W, got {p_w} W",
+            -expected_w
+        );
+    }
+}
+
 /// The droop's anchor is the export the deadband crossing sees, not a
 /// latch left over from an earlier excursion: the V2G inverter conducts
 /// nothing on the idle steps in between (the layer is not stepped while
