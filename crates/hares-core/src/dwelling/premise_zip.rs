@@ -23,6 +23,13 @@
 //! answers at the current bus voltage, with each row's deep-sag form
 //! applied (a held refrigerator row included), which no single published
 //! coefficient row can reproduce when evaluated raw.
+//!
+//! At the de-energized boundary (the channel's admitted 0.0 pu outage
+//! value) the aggregate reports the de-energized state: a load that
+//! stepped and drew zero carries that zero weight, and no expected mean
+//! stands in for any load: the engine draws zero from every load on a
+//! de-energized bus, so no governing equipment carries a positive weight
+//! and the aggregate is `None`.
 
 use hares_equipment::{Equipment, ExpectedMeanPower};
 use hares_io::schedule::ScheduleTimeSeries;
@@ -43,11 +50,14 @@ pub struct PremiseZip {
     /// `(equipment name, weighting draw [W])` for every ZIP-governing
     /// equipment. The weight is the moment's raw draw (the last step's
     /// core-output electric draw, un-scaled through the equipment's own row
-    /// at the bus voltage) when the dwelling has stepped, else the expected
-    /// mean draw over the loaded schedule; `None` when neither is
-    /// computable (stochastic event scheduling without a kW series, or a
-    /// schedule column absent from the loaded data); such equipment is
-    /// listed but contributes no weight to [`PremiseZip::zip`].
+    /// at the bus voltage) when the dwelling has stepped (a stepped zero
+    /// draw is a zero weight, the 0.0 pu outage boundary included), else,
+    /// on an energized bus only, the expected mean draw over the loaded
+    /// schedule; `None` when neither is computable (stochastic event
+    /// scheduling without a kW series, a schedule column absent from the
+    /// loaded data, or a de-energized bus with no stepped draw); such
+    /// equipment is listed but contributes no weight to
+    /// [`PremiseZip::zip`].
     pub governing: Vec<(String, Option<f64>)>,
     /// Equipment whose real power is DER-controller-driven
     /// (`real_power_zip_applies == false`): voltage-invariant by
@@ -135,13 +145,17 @@ pub(crate) fn aggregate_premise_zip(
         // (watts, scaled at the bus voltage), un-scaled through the
         // equipment's own row. A stepped dwelling aggregates the moment's
         // composition: a load that stepped and drew zero is off at the
-        // moment and carries a zero weight, and an unstepped one falls
-        // back to the expected mean over the loaded schedule.
+        // moment and carries a zero weight (at any bus voltage, the 0.0 pu
+        // outage boundary included, where the stepped state is zero draw),
+        // and an unstepped one falls back to the expected mean over the
+        // loaded schedule, on an energized bus only: at the boundary the
+        // engine draws zero from every load, and an expected mean published
+        // as the weight would report a draw the bus cannot supply.
         let moment_raw_draw_w = match eq.core_output().flows.electric_w {
-            Some(hares_types::ElectricPower::Consumption(w)) if bus_voltage_pu > 0.0 => {
+            Some(hares_types::ElectricPower::Consumption(w)) => {
                 if w > 0.0 {
                     let multiplier = resolved.deep_sag_real_multiplier(bus_voltage_pu);
-                    (multiplier > 0.0).then(|| w / multiplier)
+                    (bus_voltage_pu > 0.0 && multiplier > 0.0).then(|| w / multiplier)
                 } else {
                     Some(0.0)
                 }
@@ -150,13 +164,14 @@ pub(crate) fn aggregate_premise_zip(
         };
         let mean_power_w = match moment_raw_draw_w {
             Some(w) => Some(w),
-            None => match eq.expected_mean_power_w() {
+            None if bus_voltage_pu > 0.0 => match eq.expected_mean_power_w() {
                 Some(ExpectedMeanPower::W(w)) => Some(w),
                 Some(ExpectedMeanPower::ScheduleColumn(col_idx)) => {
                     schedule_column_mean_w(schedule, col_idx, upsample_factor)
                 }
                 None => None,
             },
+            None => None,
         };
         // The roster must publish only weights the aggregate actually
         // used: a load whose ZIP coefficients are non-finite (bypassing
@@ -451,6 +466,58 @@ mod tests {
             + premise.zip.ip * bus_voltage
             + premise.zip.pp;
         assert!(raw_row_evaluation != scale);
+    }
+
+    #[test]
+    fn de_energized_boundary_reports_the_stepped_state_not_expected_means() {
+        // Z3's witness: at the admitted 0.0 pu outage value the aggregate
+        // reports the de-energized state. A Lighting load that stepped at
+        // the outage drew zero: its weight is that zero. At the parent the
+        // stepped zero draw fell through the `bus_voltage_pu > 0.0` guard
+        // to the expected-mean fallback, and the aggregate published a
+        // 500 W weight and the Lighting row's 0.0 evaluation (-0.04) as
+        // the scale for a load the outage had turned off, while the
+        // engine drew zero on the same step.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let equipment: Vec<Box<dyn Equipment>> = vec![governing_stepped_load(
+            "Indoor Lighting",
+            lighting,
+            Some(ExpectedMeanPower::W(500.0)),
+            0.0,
+        )];
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.0);
+        assert!(
+            premise.is_none(),
+            "the de-energized boundary must report the stepped state (a \
+             zero weight, no positive weight, no scale): the parent \
+             weighted the stepped-off load by its 500 W expected mean and \
+             published the Lighting row's 0.0 evaluation, -0.04, as the \
+             scale"
+        );
+    }
+
+    #[test]
+    fn static_route_never_weights_an_expectation_at_a_de_energized_bus() {
+        // The boundary contract for the static route: an expected mean is
+        // an energized-bus expectation. At 0.0 pu the engine draws zero
+        // from every load, so weighting the expectation and evaluating the
+        // row there would publish the row's 0.0 residue (Lighting -0.04)
+        // as the scale of a draw the bus cannot supply. The aggregate is
+        // None, the same answer the no-computable-weight contract gives.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let equipment: Vec<Box<dyn Equipment>> = vec![governing_load(
+            "Indoor Lighting",
+            lighting,
+            Some(ExpectedMeanPower::W(500.0)),
+        )];
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.0);
+        assert!(
+            premise.is_none(),
+            "the static route must not weight an expected mean at the \
+             de-energized boundary: the parent published the Lighting \
+             row's 0.0 evaluation, -0.04, as the scale of a 500 W \
+             expectation on a dead bus"
+        );
     }
 
     #[test]
