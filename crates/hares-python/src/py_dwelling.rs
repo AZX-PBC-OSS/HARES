@@ -1985,7 +1985,8 @@ impl PyDwelling {
 
     pub fn reset_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<()> {
         // The reset reuses the blueprint: the shared parses are the same
-        // `Arc`s, the rng derives from the seed, and the settings carry
+        // `Arc`s, the rng derives from the seed, the generated schedule's
+        // diversity re-derives under the seed's key, and the settings carry
         // the seed the config reports.
         #[cfg(test)]
         TEST_BUILD_COUNT.fetch_add(1, Ordering::SeqCst);

@@ -6273,8 +6273,12 @@ impl Dwelling {
     /// event-load equipment's stream (its identity nonce kept, the
     /// dwelling's generator key replaced) and every built-in EV driver
     /// actor's stream recorded at the roster's last commit. Nothing else
-    /// changes: the reset that restores a warmed-up snapshot is
-    /// `load_state` and then this, no re-construction, no second warm-up.
+    /// changes: the generated schedule's behavioral draws are build-time
+    /// constants, not runtime streams, so a reseed does not re-draw them
+    /// (the full rebuild under another seed is
+    /// `DwellingBlueprint::build_with_seed`), and the reset that restores
+    /// a warmed-up snapshot is `load_state` and then this, no
+    /// re-construction, no second warm-up.
     ///
     /// A component the dwelling seeded whose class does not implement the
     /// trait's `reseed` fails here naming it, instead of silently keeping

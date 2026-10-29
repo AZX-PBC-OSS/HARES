@@ -196,6 +196,12 @@ impl DwellingBlueprint {
     /// Build the dwelling from this blueprint with the master seed given,
     /// the rng derived from the seed instead of the blueprint's own.
     ///
+    /// The generated schedule's diversity draws key on the same
+    /// scenario-mixed per-dwelling key as the rng, so a build under
+    /// another seed re-derives the schedule under that seed's key before
+    /// the assembly reads it; the rest of the blueprint (the parses, the
+    /// equipment, the weather) is seed-independent and passes through.
+    ///
     /// # Errors
     ///
     /// [`HaresError`] when the assembly or the warm-up fails.
@@ -205,7 +211,41 @@ impl DwellingBlueprint {
     ) -> Result<super::Dwelling, HaresError> {
         let mut settings = self.settings.clone();
         settings.sim_config.master_seed = master_seed;
-        super::build_from_blueprint_with_seed(self, &settings, master_seed)
+        // Only a generated, diversified schedule keys on the master seed;
+        // every other blueprint builds in place with no re-derivation.
+        if master_seed == self.settings.sim_config.master_seed
+            || !self.inputs.schedule.was_generated()
+            || !self.settings.sim_config.schedule_diversity.is_on()
+        {
+            return super::build_from_blueprint_with_seed(self, &settings, master_seed);
+        }
+        let rebuilt = self.refrozen(master_seed)?;
+        super::build_from_blueprint_with_seed(&rebuilt, &settings, master_seed)
+    }
+
+    /// The blueprint re-frozen under `master_seed`: the generated
+    /// schedule re-derives under the seed's key (the one field the seed
+    /// keys beyond the rng, which the freeze re-derives), and everything
+    /// else is the frozen blueprint's own.
+    fn refrozen(self: &Arc<Self>, master_seed: u64) -> Result<Arc<Self>, HaresError> {
+        let mut builder = DwellingBlueprintBuilder {
+            inputs: self.inputs.clone(),
+            settings: self.settings.clone(),
+            building: Arc::clone(&self.building),
+            site_location: self.site_location,
+            equipment_specs: self.equipment_specs.clone(),
+            equipment_warnings: self.equipment_warnings.clone(),
+            local_start: self.local_start,
+            init_chrono: self.init_chrono,
+            time_res: self.time_res,
+            #[cfg(feature = "dst")]
+            parsed_civil_tz: self.parsed_civil_tz,
+            input_records: self.input_records.clone(),
+            blueprint_edited: self.blueprint_edited,
+        };
+        builder.settings.sim_config.master_seed = master_seed;
+        builder.rediversify_schedule()?;
+        builder.freeze()
     }
 }
 
@@ -236,6 +276,33 @@ pub struct DwellingBlueprintBuilder {
     pub(super) blueprint_edited: bool,
 }
 
+/// The generated-schedule family's behavioral diversity: a no-CSV
+/// dwelling's generated schedule is diversified under the dwelling's
+/// scenario-mixed key before anything reads it. A CSV schedule's or a
+/// code-built series' inputs pass through untouched, and the config's knob
+/// turns the layer off. The span is the run's own, the same span the
+/// schedule was generated over.
+fn diversify_generated_schedule(
+    inputs: ParsedInputs,
+    settings: &DwellingSettings,
+) -> Result<ParsedInputs, HaresError> {
+    let generation = hares_io::ScheduleGeneration {
+        start: settings.sim_config.start_time,
+        duration: settings.sim_config.duration,
+        interval: super::conversions::chrono_to_std_duration(settings.sim_config.time_res)?,
+    };
+    let dwelling_key = hares_types::rng::dwelling_seed_scenario(
+        settings.sim_config.master_seed,
+        settings.sim_config.scenario_seed,
+        settings.bldg_id,
+    );
+    inputs.diversify_generated_schedule(
+        generation,
+        dwelling_key,
+        settings.sim_config.schedule_diversity.is_on(),
+    )
+}
+
 impl DwellingBlueprintBuilder {
     /// Assemble the builder over handles parsed once and shared across
     /// blueprints: parses nothing, resolves the site and the equipment
@@ -246,26 +313,7 @@ impl DwellingBlueprintBuilder {
     /// [`HaresError`] when the site cannot be resolved or the equipment
     /// resolution fails.
     pub fn new(inputs: ParsedInputs, settings: DwellingSettings) -> Result<Self, HaresError> {
-        // The generated-schedule family's behavioral diversity: a no-CSV
-        // dwelling's generated schedule is diversified under the
-        // dwelling's scenario-mixed key before anything reads it. A CSV
-        // schedule's or a code-built series' inputs pass through
-        // untouched, and the config's knob turns the layer off.
-        let generation = hares_io::ScheduleGeneration {
-            start: settings.sim_config.start_time,
-            duration: settings.sim_config.duration,
-            interval: super::conversions::chrono_to_std_duration(settings.sim_config.time_res)?,
-        };
-        let dwelling_key = hares_types::rng::dwelling_seed_scenario(
-            settings.sim_config.master_seed,
-            settings.sim_config.scenario_seed,
-            settings.bldg_id,
-        );
-        let inputs = inputs.diversify_generated_schedule(
-            generation,
-            dwelling_key,
-            settings.sim_config.schedule_diversity.is_on(),
-        )?;
+        let inputs = diversify_generated_schedule(inputs, &settings)?;
         let building = inputs.hpxml.building();
         let site_location = resolve_site_location(
             &building.site,
@@ -398,6 +446,14 @@ impl DwellingBlueprintBuilder {
             Some(generation),
         )?;
         Self::new(inputs, settings)
+    }
+
+    /// Re-derive the generated schedule under the settings' current
+    /// master seed: the same transform the constructor runs, for a build
+    /// under another seed (`DwellingBlueprint::build_with_seed`).
+    fn rediversify_schedule(&mut self) -> Result<(), HaresError> {
+        self.inputs = diversify_generated_schedule(self.inputs.clone(), &self.settings)?;
+        Ok(())
     }
 
     /// Return display names (instance_name if set, otherwise canonical name) of all

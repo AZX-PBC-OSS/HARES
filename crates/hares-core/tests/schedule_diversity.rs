@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use chrono::{Duration, TimeZone};
 
-use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
+use hares_core::{Dwelling, DwellingBlueprint, DwellingConfig, DwellingSettings};
 use hares_io::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
 
 fn repo_root() -> PathBuf {
@@ -152,6 +152,46 @@ fn a_declared_scenario_changes_the_draws() {
     // same home built again with no scenario matches.
     let again = Dwelling::from_config(config(1, 42, None)).expect("absent builds again");
     assert_eq!(absent_rows, schedule_rows(&again));
+}
+
+/// The master seed's reach covers the generated schedule: the schedule's
+/// draws key on the scenario-mixed per-dwelling key, whose master seed is
+/// the seed the dwelling is built with. A blueprint frozen under one seed
+/// and built with another (`DwellingBlueprint::build_with_seed`, the
+/// Python `reset_with_seed`'s full rebuild) must therefore draw the new
+/// seed's schedule and equal a dwelling constructed from a config that
+/// carried that seed; keeping the blueprint's construction seed's draws
+/// would leave the dwelling's schedule and its seeded streams describing
+/// two different seeds.
+#[test]
+fn build_with_seed_draws_the_new_seeds_schedule() {
+    let blueprint =
+        DwellingBlueprint::from_config(config(1, 1, None)).expect("the blueprint builds");
+    let rebuilt = blueprint
+        .build_with_seed(2)
+        .expect("the blueprint builds under the second seed");
+    let direct = Dwelling::from_config(config(1, 2, None)).expect("the seed-2 dwelling builds");
+    let original = blueprint
+        .build()
+        .expect("the blueprint builds under its own seed");
+
+    assert_eq!(
+        schedule_rows(&rebuilt),
+        schedule_rows(&direct),
+        "a dwelling built with master seed 2 must run seed 2's behavioral \
+         schedule, not the blueprint's construction seed's"
+    );
+    assert_eq!(
+        rebuilt.seeded_streams(),
+        direct.seeded_streams(),
+        "the rebuilt dwelling's seeded streams are the seed-2 build's"
+    );
+    assert_ne!(
+        schedule_rows(&rebuilt),
+        schedule_rows(&original),
+        "the two seeds must draw different schedules for the witness to \
+         distinguish the paths"
+    );
 }
 
 /// The escape hatch: `schedule_diversity = "off"` restores the
