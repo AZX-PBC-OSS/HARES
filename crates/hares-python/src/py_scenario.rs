@@ -138,8 +138,9 @@ impl PyScenarioSpec {
     /// The home's sampled scenario: the same (master seed, scenario id,
     /// building id) reproduces the same parameter set bitwise; a
     /// different scenario, building or master seed draws differently.
-    /// The record is a dict of the scenario id, the building id, and the
-    /// values (each parameter's name, value and unit).
+    /// The record is a dict of the scenario id, the building id, the
+    /// values (each parameter's name, value and unit) and the targets
+    /// the application reads.
     pub fn sample(&self, master_seed: u64, scenario_id: u64, bldg_id: i64) -> PyResult<Py<PyAny>> {
         let sample = self
             .inner

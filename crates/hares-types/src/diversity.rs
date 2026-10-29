@@ -276,8 +276,8 @@ mod tests {
     /// drawn with the same probability, so a home is as likely to run an
     /// hour early as an hour late and the fleet's timing mass has no
     /// preferred hour. 14,000 draws over 7 offsets put 2,000 in each (the
-    /// binomial standard error is 41.3, so the 4-standard-error band is
-    /// under 170).
+    /// binomial standard error is sqrt(2000*6/7) = 41.4, so the
+    /// 4-standard-error band is under 170).
     #[test]
     fn shift_draw_is_uniform_over_the_band() {
         use std::collections::BTreeMap;

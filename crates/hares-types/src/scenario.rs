@@ -14,8 +14,9 @@
 //! their shared factors first, and a member's value is its distribution's
 //! quantile at the one-factor Gaussian copula's probability, which
 //! preserves the declared marginal: exactly in exact arithmetic, and to
-//! the normal CDF pair's 1e-9 in doubles (the moment, KS and copula
-//! correlation witnesses pin it).
+//! the normal CDF pair's accuracy in doubles (the inverse CDF's 1.15e-9
+//! relative bound and the composed probability's 1e-8, both pinned; the
+//! moment, KS and copula correlation witnesses pin the marginal).
 //!
 //! The sampled record serializes: the per-home payload a run manifest
 //! records (the scenario id, the building id, every parameter's name,
@@ -514,7 +515,8 @@ impl ScenarioSpec {
     /// first (the groups in first-appearance order), and each member's
     /// value is its distribution's quantile at the copula's probability,
     /// which preserves the declared marginal (exactly in exact
-    /// arithmetic, to the CDF pair's 1e-9 in doubles).
+    /// arithmetic, to the CDF pair's accuracy in doubles: the inverse's
+    /// 1.15e-9 relative bound, the composition's 1e-8).
     ///
     /// # Errors
     ///
