@@ -62,7 +62,7 @@ fn merge_overrides(
 /// The patches a sample carries, applied to `base`: the sample's fields
 /// overlay the base's, every other field passes through. A field the
 /// patches do not carry is an error naming it, and `base` is not touched.
-fn patched_patches(
+fn patches_applied_to(
     base: Option<&hares_io::HpxmlDataPatches>,
     patches: &[(String, f64)],
 ) -> Result<hares_io::HpxmlDataPatches, HaresError> {
@@ -123,7 +123,7 @@ pub fn apply_sample(
     let applied_patches = if patches.is_empty() {
         None
     } else {
-        Some(patched_patches(settings.patches.as_ref(), &patches)?)
+        Some(patches_applied_to(settings.patches.as_ref(), &patches)?)
     };
     if let Some(merged) = merged {
         settings.overrides = Some(merged);
