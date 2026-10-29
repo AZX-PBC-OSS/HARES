@@ -304,6 +304,56 @@ mod tests {
         );
     }
 
+    /// A sampled override whose target names no field the equipment's
+    /// config carries fails the build at the override, naming the field:
+    /// the scenario's application is the existing override path, so the
+    /// assembly's own rejection is the loud error a scenario author sees.
+    #[test]
+    fn an_override_target_naming_no_field_fails_the_build() {
+        let spec = ScenarioSpec {
+            name: "unknown-field".to_string(),
+            parameters: vec![hares_types::ScenarioParameter {
+                name: "capacity".to_string(),
+                unit: "W".to_string(),
+                target: hares_types::ScenarioTarget::Override {
+                    equipment: "Electric Resistance Water Heater".to_string(),
+                    field: "no_such_field".to_string(),
+                },
+                distribution: hares_types::ScenarioDistribution::Uniform {
+                    low: 4000.0,
+                    high: 6000.0,
+                },
+                correlation: None,
+            }],
+        };
+        let sample = spec.sample(42, 1, 7).expect("the sample draws");
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        apply_sample(&sample, &mut settings).expect("the sample applies");
+        let config = DwellingConfig {
+            hpxml: hares_io::InputSource::Path(
+                project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+            ),
+            schedule: Some(hares_io::InputSource::Path(
+                project_root().join("data/examples/BEopt_example_schedule.csv"),
+            )),
+            weather: hares_io::WeatherInput::Path(
+                project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: hares_io::DefaultsSource::directory(
+                project_root().join("python/hares/defaults"),
+            ),
+            settings,
+        };
+        let err = match Dwelling::from_config(config) {
+            Ok(_) => panic!("an override field the equipment cannot take must fail the build"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("no_such_field"),
+            "the error must name the unknown field: {err}"
+        );
+    }
+
     /// The acceptance round-trip: the sampled values land in the typed
     /// config each target NAMES. The override target's value is read
     /// back from the built dwelling's resolved model (the water heater's
