@@ -287,3 +287,73 @@ fn closure_residual_names_a_forced_uncounted_loss() {
          got {ppm} ppm"
     );
 }
+
+/// WITNESS 3 (determinism): identical dwellings record bitwise-identical
+/// closures.
+///
+/// The three-term sums once iterated `node_capacitances`, a HashMap whose
+/// iteration order is seeded per instance, so two identical dwellings
+/// reported ulp-different closures: threshold-based checks tolerated the
+/// wobble, but a recorded run total cannot (the fix iterates the
+/// NodeId-sorted `(state index, capacitance)` list built once at
+/// construction, no per-step sort, no per-step allocation). This pin holds
+/// that fix on the report's own recorded totals: three independent
+/// constructions of the same dwelling, stepped through the same horizon in
+/// one process, must record bitwise-identical rows, every field including
+/// the zone rows, and the residual must read at the float-noise scale the
+/// honest witness derives (this fixture: 1.63e-10 Wh; the landing round's
+/// probe of the same shape read the same), never a dwelt-on drift.
+#[test]
+fn identical_dwellings_record_bitwise_identical_closures() {
+    let mut dwellings = [rc_dwelling(), rc_dwelling(), rc_dwelling()];
+    for dwelling in &mut dwellings {
+        run_horizon(dwelling);
+    }
+
+    let system_bits = |report: &hares_core::EnergyClosureReport| {
+        let row = &report.system;
+        [
+            row.stored_delta_wh.to_bits(),
+            row.delivered_end_use_wh.to_bits(),
+            row.tolerance_gross_wh.to_bits(),
+            row.residual_wh.to_bits(),
+        ]
+    };
+    let zone_bits = |report: &hares_core::EnergyClosureReport| {
+        report
+            .zones
+            .iter()
+            .map(|row| {
+                (
+                    row.zone,
+                    row.delivered_end_use_wh.to_bits(),
+                    row.zone_air_stored_wh.to_bits(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (first, rest) = dwellings.split_first().expect("three dwellings");
+    let expected = &first.health().energy_closure;
+    for (idx, dwelling) in rest.iter().enumerate() {
+        let closure = &dwelling.health().energy_closure;
+        assert_eq!(
+            system_bits(closure),
+            system_bits(expected),
+            "identical dwelling {idx} must record the bitwise-identical system row"
+        );
+        assert_eq!(
+            zone_bits(closure),
+            zone_bits(expected),
+            "identical dwelling {idx} must record the bitwise-identical zone rows"
+        );
+    }
+    for (idx, dwelling) in dwellings.iter().enumerate() {
+        let residual = dwelling.health().energy_closure.system.residual_wh;
+        assert!(
+            residual.abs() < 1e-9,
+            "identical dwelling {idx}'s residual must read at the 1e-10 Wh float-noise \
+             scale, got {residual} Wh"
+        );
+    }
+}
