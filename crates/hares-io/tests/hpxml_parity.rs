@@ -436,7 +436,7 @@ fn heat_pump_extension_install_quality_fields_are_extracted() {
 #[test]
 fn duct_parameters_extracted_for_hvac_equipment() {
     // HPXML 4.x duct structure: HVACDistribution/DistributionSystemType/AirDistribution/Ducts
-    // Reference: https://hpxml.nrel.gov/datadictionary/3.0.0/Building/BuildingDetails/Systems/HVAC/HVACDistribution
+    // Reference: https://hpxml.nlr.gov/datadictionary/3.0.0/Building/BuildingDetails/Systems/HVAC/HVACDistribution
     let xml = r#"<HPXML xmlns="http://hpxmlonline.com/2019/10" schemaVersion="4.0">
   <Building>
     <BuildingDetails>

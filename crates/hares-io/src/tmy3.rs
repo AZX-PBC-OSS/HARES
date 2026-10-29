@@ -5,7 +5,7 @@
 //! data rows.
 //!
 //! Reference: Wilcox, S. and Marion, W. (2008), "Users Manual for TMY3 Data Sets",
-//! NREL/TP-581-43156. <https://docs.nrel.gov/docs/fy08osti/43156.pdf>
+//! NREL/TP-581-43156. <https://docs.nlr.gov/docs/fy08osti/43156.pdf>
 //!
 //! ## Line 1 -- station metadata (7 fields):
 //! `USAF,Station Name,State,TZ,Latitude,Longitude,Elevation`

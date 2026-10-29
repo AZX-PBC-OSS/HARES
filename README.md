@@ -95,7 +95,7 @@ the NREL [OEDI data lake](https://data.openei.org/s3_viewer?bucket=oedi-data-lak
 | `2024.2` | ResStock TMY3 Release 2 | TMY3 EPW (county FIPS) | `2024/resstock_tmy3_release_2/` |
 | `2025.1` | ResStock AMY 2018 Release 1 | AMY 2018 CSV | `2025/resstock_amy2018_release_1/` |
 
-- **2024.2** uses TMY3 EPW files from [BuildStock_TMY3_FIPS.zip](https://data.nrel.gov/submissions/156)
+- **2024.2** uses TMY3 EPW files from [BuildStock_TMY3_FIPS.zip](https://data.nlr.gov/submissions/156)
   (~760 MB, downloaded and extracted once).
 - **2025.1** uses AMY 2018 weather CSVs fetched per-county from S3.
 
