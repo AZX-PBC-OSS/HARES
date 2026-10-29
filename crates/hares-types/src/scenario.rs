@@ -20,7 +20,7 @@
 //! The sampled record serializes: the per-home payload a run manifest
 //! records (the scenario id, the building id, every parameter's name,
 //! value and unit), plus the overrides-map form the dwelling
-//! constructor's overrides accept — the application path the round-trip
+//! constructor's overrides accept, the application path the round-trip
 //! witnesses prove reaches the typed config each target names.
 
 use rand::RngExt;
