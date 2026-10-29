@@ -2468,7 +2468,15 @@ class ScenarioSpec:
     optional ``correlation`` (``{"group": ..., "rho": ...}``). The same
     (master seed, scenario id, building id) reproduces the same
     parameter set bitwise; a different scenario, building or master
-    seed draws differently."""
+    seed draws differently.
+
+    The application surface: ``sample_overrides()`` returns the form the
+    dwelling constructor's ``overrides=`` accepts, so the override
+    targets apply on the Python surface. The patch targets' application
+    is the Rust surface's (``hares_core::scenario::apply_sample``): the
+    Python record carries the sampled patch values (``sample()``'s
+    ``values`` and ``targets``) and there is deliberately no Python
+    apply binding."""
 
     def __init__(self, spec: dict[str, Any]) -> None: ...
     @property

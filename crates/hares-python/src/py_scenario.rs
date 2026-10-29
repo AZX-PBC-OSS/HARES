@@ -124,6 +124,13 @@ fn spec_error(err: hares_types::HaresError) -> PyErr {
 /// unknown-field rejection) or ``{"patch": {"field": ...}}`` (the HPXML
 /// data patches). An optional ``"correlation": {"group": ..., "rho":
 /// ...}`` correlates the parameters sharing a group.
+///
+/// The application surface: `sample_overrides` returns the form the
+/// dwelling constructor's `overrides=` accepts, so the override targets
+/// apply on the Python surface. The patch targets' application is the
+/// Rust surface's (`hares_core::scenario::apply_sample`): the record
+/// `sample` returns carries the sampled patch values (the values and
+/// their targets) and there is deliberately no Python apply binding.
 #[pyclass(name = "ScenarioSpec", from_py_object)]
 #[derive(Clone)]
 pub struct PyScenarioSpec {
