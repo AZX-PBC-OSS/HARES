@@ -95,8 +95,10 @@ enforce the SAME rules at the HELICS boundary:
   discharging V2G/V2L EV): an available source islands the home and
   holds the bus at nominal (1.0 pu); no source means a de-energized bus
   and every load force-offs at the control level. Island formation and
-  collapse take effect with a one-step lag (source availability is
-  evaluated from end-of-previous-step state).
+  collapse take effect with a one-step lag: the formation condition (the
+  outage and the source availability) is evaluated entirely from
+  end-of-previous-step state, so an outage's first step is a dead-bus
+  step and the island forms on the step after.
 - The islanding model is intentionally minimal: the island source
   regulates the bus at nominal; no island power-balance, droop or
   frequency physics is modeled.

@@ -30,10 +30,16 @@ class TestIslandInterchangePublication:
     def test_islanded_interchange_is_exactly_zero_with_the_internal_response(self):
         dw = _battery_dwelling()
         dw.step()  # nominal, grid-connected
-        dw.set_grid_voltage(0.0)  # the outage: island formation
+        dw.set_grid_voltage(0.0)  # the outage
         dw.step()
         t = dw.telemetry()
-        assert t.islanded, "the battery-backed home must island on the outage"
+        assert not t.islanded, (
+            "the outage's first step is a dead-bus step: the island's "
+            "formation takes effect with a one-step lag"
+        )
+        dw.step()
+        t = dw.telemetry()
+        assert t.islanded, "the battery-backed home islands one step after the outage"
         assert t.bus_voltage_pu == pytest.approx(1.0), "the island bus is nominal"
         assert t.grid_interchange_w == 0.0, (
             "the published grid interchange during an island is exactly zero: "
@@ -63,9 +69,11 @@ class TestIslandInterchangePublication:
         dw = _battery_dwelling()
         dw.step()
         dw.set_grid_voltage(0.0)
-        dw.step()
+        dw.step()  # the outage's dead-bus step
+        dw.step()  # the island's formation step
         env = dw.latest_env()
         t = dw.telemetry()
+        assert t.islanded, "the scenario must be islanded at the read"
         assert env["grid_islanded"] == t.islanded
         assert env["grid_bus_voltage_pu"] == t.bus_voltage_pu
         assert env["island_unserved_w"] == t.island_unserved_w

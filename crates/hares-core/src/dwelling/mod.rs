@@ -7523,6 +7523,13 @@ impl Dwelling {
         // Feed zone temperatures back first so the borrow on self.latest_env.zones
         // is released before we mutably borrow self.latest_env for update_in_place.
         self.environment.feed_zones(&self.latest_env.zones);
+        // The grid voltage the previous step resolved with: the update below
+        // overwrites it with this step's. The island's formation condition
+        // reads it beside the equipment state (which is likewise
+        // end-of-previous-step state), so island formation takes effect with
+        // the documented one-step lag: an outage's first step is a dead-bus
+        // step, and the island forms on the step after.
+        let prior_step_outage = self.latest_env.grid.grid_outage();
         self.environment
             .update_in_place(&mut self.latest_env, &self.clock)?;
 
@@ -7545,10 +7552,12 @@ impl Dwelling {
         // charge, generator, discharging V2G EV) holds the home bus at
         // nominal voltage so loads keep running; otherwise the bus is dead
         // and every load force-offs at the control level (see
-        // `GridState::bus_energized`). Source availability is evaluated from
-        // end-of-previous-step equipment state, so island formation/collapse
-        // takes effect with a one-step lag.
-        self.latest_env.grid.island_bus_voltage_pu = if self.latest_env.grid.voltage_pu == 0.0
+        // `GridState::bus_energized`). The formation condition is evaluated
+        // entirely from end-of-previous-step state: the outage from the
+        // capture above, source availability from the equipment state, so
+        // island formation/collapse takes effect with a one-step lag.
+        self.latest_env.grid.island_bus_voltage_pu = if prior_step_outage
+            && self.latest_env.grid.voltage_pu == 0.0
             && self.equipment.iter().any(|eq| eq.island_source_available())
         {
             Some(ISLAND_BUS_NOMINAL_VOLTAGE_PU)

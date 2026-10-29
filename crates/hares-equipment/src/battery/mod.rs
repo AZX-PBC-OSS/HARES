@@ -620,10 +620,18 @@ impl Battery {
 
     /// Determine the target charge/discharge power based on control state and
     /// Stage 1 accumulated electrical power.
-    fn determine_target_power(&mut self, net_load_w: f64, dt_hours: f64) -> crate::Result<f64> {
+    ///
+    /// `dr_fraction` is the resolved demand-response dispatch fraction
+    /// (1.0 while islanded — see `clamp_power`).
+    fn determine_target_power(
+        &mut self,
+        net_load_w: f64,
+        dt_hours: f64,
+        dr_fraction: f64,
+    ) -> crate::Result<f64> {
         // Priority 1: explicit power setpoint from external control
         if let Some(setpoint) = self.power_setpoint_w {
-            return self.clamp_power(setpoint);
+            return self.clamp_power(setpoint, dr_fraction);
         }
 
         // Priority 2: SOC target (simple proportional controller)
@@ -642,7 +650,7 @@ impl Battery {
             } else {
                 dc_power * self.discharge_efficiency
             };
-            return self.clamp_power(ac_power);
+            return self.clamp_power(ac_power, dr_fraction);
         }
 
         // Priority 3: self-consumption
@@ -654,12 +662,12 @@ impl Battery {
             if net_load_w > IDLE_POWER_THRESHOLD_W {
                 // Net load exceeds PV -- discharge to offset
                 let discharge = net_load_w.min(self.max_discharge_w);
-                return self.clamp_power(-discharge);
+                return self.clamp_power(-discharge, dr_fraction);
             } else if net_load_w < -IDLE_POWER_THRESHOLD_W {
                 // PV surplus -- charge from excess (regardless of solar_only flag,
                 // since we already know there's a PV surplus)
                 let charge = (-net_load_w).min(self.max_charge_w);
-                return self.clamp_power(charge);
+                return self.clamp_power(charge, dr_fraction);
             } else if self.solar_only_charging {
                 // No PV surplus and solar-only mode -- do not charge from grid
                 return Ok(0.0);
@@ -673,17 +681,20 @@ impl Battery {
     ///
     /// Positive = charging (grid import), negative = discharging (grid export).
     ///
+    /// `dr_fraction` is the demand-response dispatch fraction the caller
+    /// resolved: 1.0 while islanded (a DR shed curtails grid interchange,
+    /// and an island has none to curtail), `dr_power_fraction()` otherwise.
+    ///
     /// `import_limit_w` caps the charge power (grid → battery).
     /// `export_limit_w` caps the discharge power (battery → grid).
     ///
     /// OCHRE `Generator.get_power_limits` + Battery schedule inputs
     /// `Battery Max Import Limit (kW)` / `Battery Max Export Limit (kW)`.
-    fn clamp_power(&mut self, power_w: f64) -> crate::Result<f64> {
+    fn clamp_power(&mut self, power_w: f64, dr_fraction: f64) -> crate::Result<f64> {
         let temp_derate = self
             .capacity_derate_model
             .evaluate(self.cell_temp_c)
             .clamp(0.0, 1.0);
-        let dr_fraction = self.dr_power_fraction();
         if power_w > 0.0 {
             // One temperature-dependent effect on charge capability, applied
             // once: a configured charging-curve LUT's temperature axis IS the
@@ -1231,11 +1242,14 @@ impl Equipment for Battery {
             && self.max_discharge_w > 0.0
             && self.soc > soc_floor
             && self.discharge_derate_factor() > 0.0
+<<<<<<< HEAD
             && self.dr_power_fraction() > 0.0
             && !self
                 .der1547
                 .as_ref()
                 .is_some_and(|controller| controller.state().tripped)
+=======
+>>>>>>> 929867db (fix: the island forms one step after the outage and a DR shed cannot collapse it)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -1287,8 +1301,20 @@ impl Equipment for Battery {
         let period_idle = env.unavailable_periods.zeroes_battery();
 
         // -- Determine target power --
+        // While islanded (the utility out, the bus energized by an island
+        // source) the DR fraction does not scale the dispatch: a DR shed
+        // curtails grid interchange, and the island's internal balance is
+        // not grid interchange — the same separation that keeps a shed
+        // from withdrawing island availability
+        // (`island_source_available`).
+        let islanded = env.grid.grid_outage() && !bus_dead;
+        let dr_fraction = if islanded {
+            1.0
+        } else {
+            self.dr_power_fraction()
+        };
         let mut target_power_w = if self.grid_connected && !bus_dead && !period_idle {
-            self.determine_target_power(net_load_w, dt_hours)?
+            self.determine_target_power(net_load_w, dt_hours, dr_fraction)?
         } else {
             0.0
         };
@@ -4360,7 +4386,11 @@ mod tests {
     }
 
     /// `island_source_available` reflects dischargeability: SOC above the
-    /// floor and grid-connected → available; disconnected → not.
+    /// floor and grid-connected → available; disconnected → not. A DR
+    /// full shed does not withdraw availability: the shed is a
+    /// grid-supporting curtailment of grid interchange, and the
+    /// islanding function is grid-forming (IEEE 1547-2018 separates the
+    /// two).
     #[test]
     fn island_source_availability_tracks_soc_and_connection() {
         let config = battery_config(&[(KEY_MIN_SOC, 0.2), (KEY_INITIAL_SOC, 0.5)]);
@@ -4374,6 +4404,19 @@ mod tests {
         assert!(
             !bat.island_source_available(),
             "a disconnected battery cannot island the home"
+        );
+
+        bat.apply_control(&ControlSignal::GridConnect { connected: true })
+            .unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        assert!(
+            bat.island_source_available(),
+            "a DR shed must not withdraw island availability: the shed is a \
+             grid-supporting curtailment and the pack still holds charge"
         );
     }
 
@@ -6451,7 +6494,7 @@ mod tests {
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
         bat.set_charging_curve_lut(Some(lut)).unwrap();
-        let clamped = bat.clamp_power(5000.0).unwrap();
+        let clamped = bat.clamp_power(5000.0, 1.0).unwrap();
         let expected = 5000.0_f64 * 0.68;
         assert!(
             (clamped - expected).abs() < 1e-3,
@@ -6497,7 +6540,7 @@ mod tests {
         bat.capacity_j = 9.0 * 3.6e6 * CapacityDerateModel::default().evaluate(5.0);
         bat.set_charging_curve_lut(Some(lut)).unwrap();
 
-        let clamped = bat.clamp_power(5000.0).unwrap();
+        let clamped = bat.clamp_power(5000.0, 1.0).unwrap();
         assert!(
             (clamped - 5000.0).abs() < 1e-3,
             "the c-rate axis must see the SOH-adjusted, temperature-independent \
@@ -6751,7 +6794,7 @@ mod tests {
         bat.set_charging_curve_lut(Some(lut)).unwrap();
         bat.soc = 0.9;
 
-        let clamped = bat.clamp_power(5000.0).unwrap();
+        let clamped = bat.clamp_power(5000.0, 1.0).unwrap();
         assert!(
             clamped < 2000.0,
             "charge should be tapered at high SOC with LUT, got {clamped}"
@@ -6764,7 +6807,7 @@ mod tests {
         let mut bat = Battery::new(config);
         bat.soc = 0.5;
         // Without LUT, charge power should be near max (5 kW)
-        let clamped = bat.clamp_power(5.0).unwrap();
+        let clamped = bat.clamp_power(5.0, 1.0).unwrap();
         assert!(
             clamped > 4.0,
             "without LUT, charge should be near max, got {clamped}"
@@ -6797,11 +6840,11 @@ mod tests {
 
         // At 25C → power fraction 1.0, full power
         bat.cell_temp_c = 25.0;
-        let warm = bat.clamp_power(5000.0).unwrap();
+        let warm = bat.clamp_power(5000.0, 1.0).unwrap();
 
         // At -10C → power fraction 0.5, half power
         bat.cell_temp_c = -10.0;
-        let cold = bat.clamp_power(5000.0).unwrap();
+        let cold = bat.clamp_power(5000.0, 1.0).unwrap();
 
         assert!(
             cold < warm,
@@ -6818,7 +6861,7 @@ mod tests {
         bat.soc = 0.5;
 
         // Discharge (negative power) should not be affected by charging LUT
-        let clamped = bat.clamp_power(-5.0).unwrap();
+        let clamped = bat.clamp_power(-5.0, 1.0).unwrap();
         assert!(
             clamped < -4.0,
             "discharge should not be limited by charging LUT, got {clamped}"
@@ -6837,14 +6880,14 @@ mod tests {
             points: vec![(-20.0, 0.2), (25.0, 0.5)],
         };
 
-        let clamped = bat.clamp_power(-5000.0).unwrap();
+        let clamped = bat.clamp_power(-5000.0, 1.0).unwrap();
         assert!(
             (clamped - (-5000.0)).abs() < 1e-9,
             "discharge clamp_power should not apply capacity_derate_model; expected -5000.0 W, got {clamped}"
         );
 
         // Charge branch still uses capacity_derate_model (interpolates ~0.41 at -10C → 5000.0 * 0.41 ≈ 2050)
-        let charge_clamped = bat.clamp_power(5000.0).unwrap();
+        let charge_clamped = bat.clamp_power(5000.0, 1.0).unwrap();
         assert!(
             charge_clamped < 3000.0,
             "charge clamp_power should still apply capacity_derate_model, got {charge_clamped}"

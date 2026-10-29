@@ -18,16 +18,26 @@ Two distinct concepts, both carried in `GridState` (`hares-types`):
 The dwelling resolves bus energization at the start of every timestep: if the
 utility voltage is `0.0` and any equipment reports
 `Equipment::island_source_available()`, the bus is islanded at 1.0 pu.
-Availability is evaluated from end-of-previous-step equipment state, so
-island formation/collapse takes effect with a one-step lag.
+The formation condition is evaluated entirely from end-of-previous-step
+state — both the utility outage and the source availability — so island
+formation takes effect with a one-step lag: an outage's first step is a
+dead-bus step, and the island forms on the step after. A formed island
+collapses when its source dies, also one step after the availability
+ends (restoration collapses it on the restoration step itself).
 
 Island sources:
 
 - **Battery** — grid-connected and dischargeable: SOC above its effective
   floor (`min_soc`, narrowed by any SOC-target window), hardware discharge
-  capability, cell temperature above the discharge cutoff, DR not commanding
-  a full shed, AND grid-forming (`grid_forming` flag, default true; set
-  false for grid-following-only inverters).
+  capability, cell temperature above the discharge cutoff, AND grid-forming
+  (`grid_forming` flag, default true; set false for grid-following-only
+  inverters). A demand-response shed does not withdraw availability: it is
+  a grid-supporting curtailment of grid interchange, and the islanding
+  function is grid-forming (IEEE 1547-2018 separates the two) — a grid
+  operator's DR event must not reach through the outage gate and remove
+  the only source serving the home. For the same reason the DR fraction
+  does not scale the battery's dispatch while islanded: an island has no
+  interchange to curtail.
 - **Generator** — enabled (self-consumption control active, or an explicit
   positive setpoint) AND grid-forming (`grid_forming` flag, default true).
   Fuel is modeled as unlimited (no on-site tank model). In `standby_mode`
@@ -38,12 +48,11 @@ Island sources:
 - **EV** — plugged in at home **and actually delivering V2L/V2G export**:
   the previous step's delivered export is positive, the pack sits above
   the commanded leg's effective discharge floor, and DR is not commanding
-  a full shed, the same shape as the battery's check. A merely
-  plugged-in EV is not counted (most EVSEs cannot island a home), and
-  neither is a commanded discharge the floor or a DR shed curtailed to
-  zero watts: an island held by a source that delivers nothing runs every
-  load on phantom power. Islanding takes effect one step after export
-  begins and collapses the first step delivery stops.
+  a full shed. A merely plugged-in EV is not counted (most EVSEs cannot
+  island a home), and neither is a commanded discharge the floor or a DR
+  shed curtailed to zero watts: an island held by a source that delivers
+  nothing runs every load on phantom power. Islanding takes effect one
+  step after export begins and collapses the first step delivery stops.
 - **PV is never an island source** — it is a grid-following inverter
   (IEEE 1547) and cannot form a bus on its own.
 

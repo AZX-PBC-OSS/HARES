@@ -141,10 +141,22 @@ fn islanded_publication_reads_zero_interchange_with_the_internal_response() {
     assert_eq!(connected.bus_voltage_pu, 1.0);
     assert_eq!(connected.grid_interchange_w, connected.total_power_w);
 
-    // Island formation: the utility out, the battery holding the bus.
+    // Island formation: the utility out, the battery holding the bus —
+    // one step after the outage itself (the formation condition is
+    // end-of-previous-step state, the documented lag).
     dwelling
         .set_grid_voltage(0.0)
         .expect("the outage override is in contract");
+    dwelling.step().expect("the outage's dead-bus step");
+    assert!(
+        !dwelling.telemetry().expect("telemetry").islanded,
+        "the outage's first step is a dead-bus step"
+    );
+    assert_eq!(
+        dwelling.telemetry().expect("telemetry").grid_interchange_w,
+        0.0,
+        "the breaker is open on the dead-bus step too"
+    );
     dwelling.step().expect("islanded step");
     let islanded = dwelling.telemetry().expect("telemetry");
     assert!(islanded.islanded, "the step islands the dwelling");
