@@ -222,14 +222,14 @@ pub fn normal_inverse_cdf(p: f64) -> f64 {
         2.209_460_984_245_205e2,
         -2.759_285_104_469_687e2,
         1.383_577_518_672_69e2,
-        -3.066_479_806_291_676e1,
+        -3.066_479_806_614_716e1,
         2.506_628_277_459_239,
     ];
     const B: [f64; 5] = [
         -5.447_609_879_822_406e1,
         1.615_858_368_580_409e2,
         -1.556_989_798_598_866e2,
-        6.680_131_188_819_672e1,
+        6.680_131_188_771_972e1,
         -1.328_068_155_288_572e1,
     ];
     const C: [f64; 6] = [
@@ -241,10 +241,10 @@ pub fn normal_inverse_cdf(p: f64) -> f64 {
         2.938_163_982_698_783,
     ];
     const D: [f64; 4] = [
-        7.784_695_702_041_755e-3,
+        7.784_695_709_041_462e-3,
         3.224_671_290_700_398e-1,
         2.445_134_137_142_996,
-        3.754_408_661_635_268,
+        3.754_408_661_907_416,
     ];
     let p_low = 0.024_25;
     if p < p_low {
@@ -895,6 +895,41 @@ mod tests {
         );
         // The sampler validates too: a bad spec's sample is an error.
         assert!(dup.sample(1, 1, 1).is_err());
+    }
+
+    /// The inverse CDF against the published standard normal quantiles:
+    /// the reference values are Wichura's AS241 (1988) quantiles from
+    /// Python's `statistics.NormalDist.inv_cdf`, a different rational
+    /// approximation, printed as the correctly rounded doubles. Acklam's
+    /// published bound is 1.15e-9 relative; the band here is 1.5e-9 (the
+    /// grid's worst measurement is 1.13e-9 at p = 0.02425, the mid/tail
+    /// branch boundary, leaving the reference's own rounding and the
+    /// tail branch's `log` in the margin). p = 0.02425 is the point a
+    /// corrupted coefficient pair misses by 5.7e-8, fifty times this
+    /// band.
+    #[test]
+    fn normal_inverse_cdf_matches_the_published_quantiles() {
+        let cases = [
+            (1e-12, -7.034_483_825_301_132),
+            (1e-8, -5.612_001_244_174_79),
+            (0.001, -3.090_232_306_167_813),
+            (0.02425, -1.972_961_051_311_884_5),
+            (0.3, -0.524_400_512_708_040_7),
+            (0.7, 0.524_400_512_708_040_7),
+            (0.97575, 1.972_961_051_311_884_7),
+            (0.999, 3.090_232_306_167_813),
+            (1.0 - 1e-8, 5.612_001_243_305_506),
+            (1.0 - 1e-12, 7.034_486_910_047_836),
+        ];
+        for (p, reference) in cases {
+            let q = normal_inverse_cdf(p);
+            let relative = (q - reference).abs() / reference.abs();
+            assert!(
+                relative < 1.5e-9,
+                "Q({p}) = {q} is {relative} relative from the published \
+                 quantile {reference}"
+            );
+        }
     }
 
     /// The inverse normal CDF's accuracy: the composition
