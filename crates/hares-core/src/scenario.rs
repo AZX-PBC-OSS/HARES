@@ -59,6 +59,33 @@ fn merge_overrides(
     Ok(())
 }
 
+/// The patches a sample carries, applied to `base`: the sample's fields
+/// overlay the base's, every other field passes through. A field the
+/// patches do not carry is an error naming it, and `base` is not touched.
+fn patched_patches(
+    base: Option<&hares_io::HpxmlDataPatches>,
+    patches: &[(String, f64)],
+) -> Result<hares_io::HpxmlDataPatches, HaresError> {
+    let mut out = base.cloned().unwrap_or_default();
+    for (field, value) in patches {
+        match field.as_str() {
+            "number_of_bedrooms" => out.number_of_bedrooms = Some(*value),
+            // The record's own check refused an unknown field before this
+            // runs; the arm is the compiler-checked place a new patch field
+            // must be named as well as in the record's table, and an error
+            // here leaves the caller's patches untouched.
+            other => {
+                return Err(HaresError::Equipment(format!(
+                    "the scenario sample patches the unknown field '{other}': the \
+                     patch fields are {}",
+                    hares_types::PATCH_FIELDS.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Apply the sample to the settings: the Override targets merge into the
 /// settings' overrides map (created when the settings carried none), the
 /// Patch targets set the settings' patches (created when the settings
@@ -68,8 +95,10 @@ fn merge_overrides(
 /// The record is checked before anything is applied: a value with no
 /// recorded target, a patch target naming an unknown field, or a
 /// settings override map (or one of its equipment entries) of another
-/// shape is refused naming the object it cannot apply. Nothing is
-/// applied and then dropped.
+/// shape is refused naming the object it cannot apply. Both new values are
+/// built beside the settings and assigned only when both have landed, so a
+/// refusal leaves the caller's settings exactly as they were: nothing is
+/// applied and then dropped, and no refusal consumes the caller's state.
 ///
 /// # Errors
 ///
@@ -81,34 +110,26 @@ pub fn apply_sample(
 ) -> Result<(), HaresError> {
     sample.validate_application()?;
     let overrides = sample.overrides_json();
-    if overrides.as_object().is_some_and(|map| !map.is_empty()) {
-        // The merge works on a copy and assigns on success: a refused
-        // record must not touch the settings, and a take() before the
-        // merge would leave the caller's overrides behind a returned
-        // error.
+    let merged = if overrides.as_object().is_some_and(|map| !map.is_empty()) {
+        // The merge works on a copy: a refused record must not touch the
+        // settings.
         let mut merged = settings.overrides.clone().unwrap_or(serde_json::json!({}));
         merge_overrides(&mut merged, &overrides)?;
+        Some(merged)
+    } else {
+        None
+    };
+    let patches = sample.patches();
+    let applied_patches = if patches.is_empty() {
+        None
+    } else {
+        Some(patched_patches(settings.patches.as_ref(), &patches)?)
+    };
+    if let Some(merged) = merged {
         settings.overrides = Some(merged);
     }
-    let patches = sample.patches();
-    if !patches.is_empty() {
-        let mut hpxml_patches = settings.patches.take().unwrap_or_default();
-        for (field, value) in patches {
-            match field.as_str() {
-                "number_of_bedrooms" => hpxml_patches.number_of_bedrooms = Some(value),
-                // The record's own check refused an unknown field above;
-                // the arm stays so a new patch field must be named here
-                // as well as in the record's table.
-                other => {
-                    return Err(HaresError::Equipment(format!(
-                        "the scenario sample patches the unknown field '{other}': the \
-                         patch fields are {}",
-                        hares_types::PATCH_FIELDS.join(", ")
-                    )));
-                }
-            }
-        }
-        settings.patches = Some(hpxml_patches);
+    if let Some(applied_patches) = applied_patches {
+        settings.patches = Some(applied_patches);
     }
     Ok(())
 }
@@ -210,6 +231,53 @@ mod tests {
         assert!(
             settings.patches.is_none(),
             "the refused record must not apply its targeted sibling either"
+        );
+    }
+
+    /// The application is all-or-nothing across the two channels: a
+    /// record whose override target is valid and whose patch target names
+    /// an unknown field applies NEITHER (the merge lands no field, the
+    /// patches keep the caller's), so a record is never half applied.
+    #[test]
+    fn a_refused_record_applies_neither_channel() {
+        let sample: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [
+                {"name": "mel_multiplier", "value": 0.75, "unit": "fraction"},
+                {"name": "bedrooms", "value": 3.0, "unit": "count"}
+            ],
+            "targets": {
+                "mel_multiplier": {"override": {"equipment": "MELs", "field": "usage_multiplier"}},
+                "bedrooms": {"patch": {"field": "not_a_patch_field"}}
+            }
+        }))
+        .expect("the record parses");
+        let base_overrides = serde_json::json!({"Occupancy": {"number_of_occupants": 3.0}});
+        let mut settings = DwellingSettings::new(
+            test_sim_config(),
+            Some(base_overrides.clone()),
+            7,
+            Some(hares_io::HpxmlDataPatches {
+                number_of_bedrooms: Some(2.0),
+            }),
+        );
+        let err = apply_sample(&sample, &mut settings).expect_err(
+            "the unknown patch field must refuse the record before its valid override lands",
+        );
+        assert!(
+            err.to_string().contains("not_a_patch_field"),
+            "the error must name the field: {err}"
+        );
+        assert_eq!(
+            settings.overrides.as_ref(),
+            Some(&base_overrides),
+            "the refused record must not apply its valid override either"
+        );
+        assert_eq!(
+            settings.patches.as_ref().and_then(|p| p.number_of_bedrooms),
+            Some(2.0),
+            "the refused record must leave the caller's patches untouched"
         );
     }
 
