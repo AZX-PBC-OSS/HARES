@@ -1453,8 +1453,25 @@ with). The row's named columns are the stored delta-E, the delivered
 end-uses, the tolerance's gross and the residual; the identity's
 equation is the first one above, and the delivered end-uses are an
 ATTRIBUTION within the affine gains term, not a fourth balance term.
-The delivered column exists so the reader can see the meters' share of
-the account; it splits per zone
+The delivered column is an attribution and is never closed against
+anything: no equation reconciles it against the network's receipt, so
+the report cannot see a port that meters delivery the network does not
+receive (a dropped or duplicated `B_d*u` column, a capacity substitution
+that clamps the network entry while the meter reports the request), nor
+a network entry that never reaches a port meter; in every such case the
+residual still reads zero, because it is built from the same three terms
+as the invariant. That reconciliation is its own deferred row, the
+meter-versus-gains reconciliation: a port-only input vector built from
+the same `apply_port_*_inputs` passes and run through the same `B_d`
+yields the delivery the network actually receives, and the meters
+compare against that receipt directly, no double counting anywhere (the
+double-count objection this paragraph previously raised answered a
+proposal nobody made: reconciling the meters against a port-only
+receipt adds no term to the balance). The class is the end-use
+reconciliation the OCHRE fixtures already run (meter against the zone
+heat the network received); deferred here, named so a reader knows the
+delivered column is checked by nothing rather than by the residual.
+The delivered column splits per zone
 (`zones[].delivered_end_use_wh`, sensible + radiant + short-wave watts,
 latent excluded because latent is the humidity domain's account and never
 enters the thermal network). The stored unit is Wh after
@@ -1489,7 +1506,10 @@ injected imbalance on a perturbed one
 Warm-up steps are excluded: the warm-up convergence loop is a replay of the
 run's first day to reach initial conditions, discarded before the horizon,
 and its energy is not the run's account. The fleet folds the per-home
-residual distribution (mean, p99) and the warm-up days-run per dwelling
+residual distribution (the mean and the nearest-rank p99 of the signed
+per-home residuals in Wh, and the same distribution in ppm of each home's
+own `tolerance_gross_wh`, the fleet's ppm mean a mean of per-home ratios,
+not a fleet-wide denominator) and the warm-up days-run per dwelling
 (`hares-fleet`'s `FleetResult::energy_closure_telemetry`).
 
 Alternative rejected: reporting the zone-air balance residual the solver
