@@ -112,7 +112,10 @@ impl ScenarioDistribution {
     pub fn mean(&self) -> f64 {
         match self {
             Self::Uniform { low, high } => (low + high) / 2.0,
-            Self::Normal { mean, .. } | Self::Triangular { mode: mean, .. } => *mean,
+            Self::Normal { mean, .. } => *mean,
+            // The triangular mean is the average of its three corners; the
+            // mode is the mean only when the triangle is symmetric.
+            Self::Triangular { min, mode, max } => (min + mode + max) / 3.0,
             Self::LogNormal { mu, sigma } => libm::exp(mu + sigma * sigma / 2.0),
             Self::Discrete { values, weights } => {
                 let total: f64 = weights.iter().sum();
@@ -640,9 +643,12 @@ mod tests {
             ),
             (
                 "triangular",
+                // Asymmetric on purpose: (min + mode + max) / 3 = 2.4 is
+                // the analytical mean, and a symmetric triangle would let
+                // the mode stand in for it.
                 ScenarioDistribution::Triangular {
                     min: 1.0,
-                    mode: 3.0,
+                    mode: 1.2,
                     max: 5.0,
                 },
             ),
@@ -909,6 +915,43 @@ mod tests {
                 "Q(1 - {p}) = {mirrored} broke the symmetry with {q}"
             );
         }
+    }
+
+    /// The triangular family's analytical mean is (min + mode + max) / 3,
+    /// not the mode: the two coincide only on a symmetric triangle. The
+    /// witness uses an asymmetric triangle (min 1.0, mode 1.2, max 5.0;
+    /// mean (1.0 + 1.2 + 5.0) / 3 = 2.4) whose mode 1.2 is far from it,
+    /// and compares the sampled fleet against the same 2.4: the sampler's
+    /// triangular path is the quantile inversion, so both paths must
+    /// agree with the closed-form mean.
+    #[test]
+    fn triangular_mean_is_the_analytic_mean() {
+        let asymmetric = ScenarioDistribution::Triangular {
+            min: 1.0,
+            mode: 1.2,
+            max: 5.0,
+        };
+        assert!(
+            (asymmetric.mean() - 2.4).abs() < 1e-12,
+            "the triangular mean is (min + mode + max) / 3 = 2.4, got {}",
+            asymmetric.mean()
+        );
+        // The triangular variance is
+        // (a^2 + b^2 + c^2 - ab - bc - ca) / 18 for (a, b, c) =
+        // (min, mode, max) = (1.0, 1.2, 5.0): 0.84666... so the mean's
+        // standard error at 4,000 draws is 0.92 / sqrt(4,000) = 0.0146;
+        // the 0.04 band is under three standard errors.
+        let s = spec(vec![parameter("p", asymmetric)]);
+        let n = 4000_u64;
+        let total: f64 = (0..n)
+            .map(|i| s.sample(13, i, 0).expect("samples").values[0].value)
+            .sum();
+        let mean = total / n as f64;
+        assert!(
+            (mean - 2.4).abs() < 0.04,
+            "the sampled triangular fleet's mean {mean} left the analytical \
+             mean 2.4 (three standard errors of 0.0146)"
+        );
     }
 
     /// The triangular quantile's shape: the mode's probability is
