@@ -319,6 +319,19 @@ impl ScenarioDistribution {
     /// wrong value). All three public methods run this gate, so the
     /// weights' total is one contract rather than three. The error names
     /// the parameters.
+    ///
+    /// The total is the weights' DECLARATION-ORDER f64 fold, and that
+    /// order is the contract: `sample`'s and `quantile`'s probability
+    /// comparisons accumulate their `cumulative` in exactly this fold,
+    /// so the gate's total and the comparisons' own sums are bitwise one
+    /// value and can never disagree (a re-ordered or compensated gate
+    /// sum would compute a total the comparisons do not replay). The
+    /// weights are validated non-negative, so the fold is monotone: it
+    /// overflows exactly when the running sum crosses the exponent
+    /// range, and its order sensitivity is the accumulated rounding any
+    /// f64 fold carries (a few ulps at the exponent boundary): inside
+    /// that band the fold's own value is the total, and the refusal
+    /// fires whenever the fold itself overflows.
     fn discrete_total(&self, weights: &[f64], method: &str) -> Result<f64, HaresError> {
         let total: f64 = weights.iter().sum();
         if total.is_finite() {
