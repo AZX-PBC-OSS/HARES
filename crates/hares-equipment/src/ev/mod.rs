@@ -1515,6 +1515,9 @@ impl Ev {
                 "the step's unavailable periods zero the EV's rows: the \
                  vehicle is idle for the step"
             );
+            if let Some(controller) = &mut self.der1547 {
+                controller.note_inactive_step();
+            }
             return Ok(ChargeStepPower {
                 charge_leg_ac_w: 0.0,
                 heater_draw_w: 0.0,
@@ -1617,6 +1620,14 @@ impl Ev {
                 export_ac_w,
                 is_discharge: true,
             });
+        }
+
+        // No export leg conducts this step: the charge leg is the
+        // vehicle's load-side behavior, never the DER function, so the
+        // droop's pre-disturbance latch clears rather than surviving into
+        // the next export as a stale anchor.
+        if let Some(controller) = &mut self.der1547 {
+            controller.note_inactive_step();
         }
 
         // Charger capability bound: the EVSE rating for the configured

@@ -6559,6 +6559,66 @@ fn witness_der1547_ev_export_over_frequency_droop_reduces_export() {
     assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
 }
 
+/// The droop's anchor is the export the deadband crossing sees, not a
+/// latch left over from an earlier excursion: the V2G inverter conducts
+/// nothing on the idle steps in between (the layer is not stepped while
+/// the export leg is off), and a ramp from a stale anchor would export
+/// more than the pre-disturbance output on the second excursion, the
+/// wrong direction for an over-frequency droop.
+#[test]
+fn droop_anchor_is_the_deadband_crossing_export_not_a_stale_latch() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+
+    // A 3 kW export at nominal frequency, then the excursion: the anchor
+    // latches at 0.6 pu of the 5 kW rating.
+    command_v2g_discharge(&mut ev, 3000.0);
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .expect("step");
+    let mut hi_f = sample_env();
+    hi_f.grid.frequency_hz = 60.536;
+    let mut ports = PortSlots::default();
+    ev.step(&hi_f, Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert!(
+        ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) < -1000.0,
+        "the excursion step exports the ramped reference"
+    );
+
+    // The driver idles the export for a step at nominal frequency: the
+    // inverter conducts nothing.
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_w: 0.0,
+        reactive_power_var: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .expect("setpoint");
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
+
+    // A 2 kW export on a fresh excursion: 0.3 Hz beyond the 60.036 Hz
+    // edge at 1/3 pu per Hz is 0.1 pu of ramp, so the reference is
+    // 0.4 - 0.1 = 0.3 pu = 1500 W. A stale 0.6 pu anchor would give
+    // 0.5 pu = 2500 W, above the pre-disturbance output.
+    command_v2g_discharge(&mut ev, 2000.0);
+    let mut hi_f = sample_env();
+    hi_f.grid.frequency_hz = 60.336;
+    let mut ports = PortSlots::default();
+    ev.step(&hi_f, Duration::minutes(15), &mut ports)
+        .expect("step");
+    let p_w = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+    assert!(
+        (p_w + 1500.0).abs() < 1e-6,
+        "the ramp anchors on the 2 kW the export is delivering: expected \
+         -1500 W, got {p_w} W"
+    );
+}
+
 /// The 1547 run state survives a checkpoint round trip: a trip latched
 /// before the save still holds after the restore.
 #[test]

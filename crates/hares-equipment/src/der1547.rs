@@ -337,10 +337,9 @@ pub struct Der1547State {
     /// Accumulated in-window seconds toward the return to service.
     pub es_s: f64,
     /// The frequency-droop pre-disturbance output (pu of the active-power
-    /// rating), latched while a frequency excursion holds.
+    /// rating), latched on the step the deadband is crossed and held while
+    /// the excursion holds.
     pub fw_p_pre_pu: Option<f64>,
-    /// The most recent step's normal output (pu), the latch's source.
-    pub last_normal_pu: f64,
     /// The most recent step's frequency-droop adjustment, in per unit of the rating.
     pub last_fw_adj_pu: f64,
 }
@@ -427,6 +426,17 @@ impl Der1547Controller {
     /// Restores checkpointed state.
     pub fn restore_state(&mut self, state: Der1547State) {
         self.state = state;
+    }
+
+    /// Records a step in which the DER function did not conduct (the
+    /// caller's inverter was off): the frequency-droop pre-disturbance
+    /// latch clears, so an excursion that ended while the inverter was
+    /// idle cannot anchor the next one. The trip latch and the
+    /// enter-service accumulation are the export leg's own state and are
+    /// untouched.
+    pub fn note_inactive_step(&mut self) {
+        self.state.fw_p_pre_pu = None;
+        self.state.last_fw_adj_pu = 0.0;
     }
 
     /// True when the bus voltage or the grid frequency sits in a band the
@@ -517,7 +527,6 @@ impl Der1547Controller {
                 self.state.es_s = 0.0;
                 self.state.fw_p_pre_pu = None;
                 self.state.last_fw_adj_pu = 0.0;
-                self.state.last_normal_pu = p_normal_pu;
                 Ok(Der1547Outcome {
                     tripped: false,
                     trip_reason: trip_reason::NONE,
@@ -552,7 +561,6 @@ impl Der1547Controller {
             self.state.of2_s = 0.0;
             self.state.fw_p_pre_pu = None;
             self.state.last_fw_adj_pu = 0.0;
-            self.state.last_normal_pu = p_normal_pu;
             Ok(Der1547Outcome {
                 tripped: false,
                 trip_reason: trip_reason::NONE,
@@ -670,17 +678,19 @@ impl Der1547Controller {
                 let (p_ref_pu, fw_adj_pu) = if !over && !under {
                     self.state.fw_p_pre_pu = None;
                     self.state.last_fw_adj_pu = 0.0;
-                    self.state.last_normal_pu = p_normal_pu;
                     (p_normal_pu, 0.0)
                 } else {
                     let p_pre = match self.state.fw_p_pre_pu {
                         Some(p) => p,
                         None => {
-                            // Engage step: latch the previous step's
-                            // normal output (Eq. 3.7.1-12).
-                            let p = self.state.last_normal_pu;
-                            self.state.fw_p_pre_pu = Some(p);
-                            p
+                            // Engage step: latch the pre-disturbance
+                            // output (Eq. 3.7.1-12), which is the model's
+                            // undrooped output this step: the operating
+                            // point the disturbance found. It is held for
+                            // the excursion, so the ramp does not ratchet
+                            // down with its own curtailment.
+                            self.state.fw_p_pre_pu = Some(p_normal_pu);
+                            p_normal_pu
                         }
                     };
                     let p_ref = if under {
@@ -1057,6 +1067,29 @@ mod tests {
         let expected_pu = 0.5 + (59.964 - 59.5) / 3.0;
         assert!((out.p_ref_w - expected_pu * 5000.0).abs() < 1e-9);
         assert!((out.p_ref_w - 2500.0).abs() > 1.0, "the ramp moved output");
+    }
+
+    /// The pre-disturbance anchor is the model's undrooped output at the
+    /// step the deadband is crossed. A controller whose very first step is
+    /// the excursion has no earlier step to read, and that step's own
+    /// operating point is the pre-disturbance output: an absent history is
+    /// not a zero anchor (a zero anchor would curtail the DER to the
+    /// injection floor for the whole excursion).
+    #[test]
+    fn droop_anchors_on_the_step_the_deadband_is_crossed() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let out = one_step(&mut ctrl, 1.0, 60.536, 900.0, 4500.0);
+        assert!(!out.tripped);
+        // 0.5 Hz beyond the 60.036 edge at 1/3 pu per Hz = 1/6 pu down
+        // from the 0.9 pu the model delivers this step.
+        let expected_w = (0.9 - 1.0 / 6.0) * 5000.0;
+        assert!(
+            (out.p_ref_w - expected_w).abs() < 1e-9,
+            "the ramp starts from the 0.9 pu operating point: expected \
+             {expected_w} W, got {} W",
+            out.p_ref_w
+        );
+        assert!((out.fw_adj_pu + 1.0 / 6.0).abs() < 1e-12);
     }
 
     /// The droop's pre-disturbance latch holds while the excursion holds
