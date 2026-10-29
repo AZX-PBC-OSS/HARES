@@ -4,7 +4,7 @@
 //! Physical Solar Model v3. Format: 3-line header (field names, field values,
 //! column names), then data rows at 5/15/30/60-minute intervals.
 //!
-//! Reference: <https://developer.nlr.gov/docs/solar/nsrdb/psm3-download/>
+//! Reference: <https://developer.nlr.gov/docs/solar/nsrdb/psm3-2-2-download/>
 
 use std::fs;
 use std::path::Path;
@@ -39,7 +39,7 @@ const RECORDS_PER_YEAR_LEAP: [usize; 4] = [105_408, 35_136, 17_568, 8_784];
 ///   an optional IR column is present; Clark-Allen fallback otherwise).
 /// - Ground temperature: DOE-2 sinusoidal model with monthly dry-bulb averages.
 ///
-/// Reference: <https://developer.nlr.gov/docs/solar/nsrdb/psm3-download/>
+/// Reference: <https://developer.nlr.gov/docs/solar/nsrdb/psm3-2-2-download/>
 pub fn parse_psm3(path: impl AsRef<Path>) -> Result<WeatherTimeSeries, WeatherError> {
     let path_ref = path.as_ref();
     let contents = fs::read_to_string(path_ref).map_err(|source| WeatherError::Io {

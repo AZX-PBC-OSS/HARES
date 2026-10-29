@@ -20,7 +20,7 @@ pub enum WeatherFormat {
     /// EnergyPlus Weather file (.epw), hourly data.
     Epw,
     /// NREL NSRDB PSM3 file (.csv), SAM CSV format at 5/15/30/60-min resolution.
-    /// Reference: <https://developer.nlr.gov/docs/solar/nsrdb/psm3-download/>
+    /// Reference: <https://developer.nlr.gov/docs/solar/nsrdb/psm3-2-2-download/>
     Psm3,
     /// ResStock simplified 8-column CSV (AMY 2018, etc.).
     /// Contains only dry bulb, RH, wind, and solar -- missing pressure, dew point,
