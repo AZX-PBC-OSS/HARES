@@ -192,10 +192,11 @@ pub struct HeatPumpWH {
     draw_flow_rate_kg_s: f64,
     /// The wet appliances' untempered draw [kg/s], from its schedule column.
     appliance_draw_source: Option<ScheduleSource>,
-    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`):
     /// blended pf 0.97 (OCHRE lab value) applied to the total electric draw
-    /// (compressor + backup element + fan/parasitic). Real power stays
-    /// bit-identical; Q comes from `ZipLoad::reactive_var`.
+    /// (compressor + backup element + fan/parasitic), whose real polynomial
+    /// scales the draw at the bus voltage through the recorded deep-sag
+    /// form; Q comes from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
@@ -1014,13 +1015,25 @@ impl Equipment for HeatPumpWH {
         // capacity_actual_w = rated compressor input * cap_mult (rated capacity delivered).
         // power_input_w = capacity_actual_w / cop_actual (electrical input required).
         let capacity_actual_w = self.compressor_power_w * cap_mult;
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the unit's motor draw evaluates the unit row
+        // (the OCHRE whole-unit HPWH row) at the ACTUAL bus voltage; the
+        // backup element evaluates the impedance share, P = V²/R. The
+        // tank's deliveries and the zone's waste-heat bookkeeping derive
+        // from these draws (draw × COP, draw × efficiency), so the
+        // delivered heat follows the scaled draw and the energy balance
+        // holds at every voltage.
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
+        let motor_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
+        let v_norm = bus_voltage_pu / self.zip.v0;
+        let resistive_multiplier = v_norm * v_norm;
         let compressor_power_w = if self.compressor_on {
-            (capacity_actual_w / cop_for_physics) * hp_duty
+            (capacity_actual_w / cop_for_physics) * hp_duty * motor_multiplier
         } else {
             0.0
         };
         let backup_power_w = if self.backup_on {
-            self.backup_element_power_w * er_duty
+            self.backup_element_power_w * er_duty * resistive_multiplier
         } else {
             0.0
         };
@@ -1091,14 +1104,15 @@ impl Equipment for HeatPumpWH {
         };
 
         // OCHRE WaterHeater.py:671: total electric = compressor + ER + fan/parasitic.
-        let electric_power_w = compressor_power_w + backup_power_w + fan_parasitic_w;
-        // Rule R1: Q from the already-computed real power (never through the
-        // real-power ZIP polynomial). Blended pf 0.97 on the total draw —
-        // OCHRE lab values are whole-unit; per-component PFs are a future
-        // refinement hook.
-        let reactive_power_var = self
-            .zip
-            .reactive_var(electric_power_w, env.grid.bus_voltage_pu());
+        // The fan/parasitic draw evaluates the unit row at the ACTUAL bus
+        // voltage (the whole-unit row; the draws above carry the same
+        // response).
+        let electric_power_w =
+            compressor_power_w + backup_power_w + fan_parasitic_w * motor_multiplier;
+        // Q from the already-computed (voltage-scaled) real power.
+        // Blended pf 0.97 on the total draw: OCHRE lab values are
+        // whole-unit; per-component PFs are a future refinement hook.
+        let reactive_power_var = self.zip.reactive_var(electric_power_w, bus_voltage_pu);
 
         if electric_power_w > 0.0 || reactive_power_var != 0.0 {
             ports.accumulate(&PortContribution::Electrical {
@@ -2361,7 +2375,7 @@ mod tests {
     /// override (pf 0 sentinel) — must produce bit-identical real power at
     /// every step and voltage.
     #[test]
-    fn real_power_bit_identical_with_and_without_reactive_zip() {
+    fn real_power_follows_the_row_and_reactive_follows_pf() {
         let config_pf = config();
         let mut config_nopf = config();
         config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
@@ -2383,24 +2397,28 @@ mod tests {
             eq_nopf
                 .step(&env, Duration::from_secs(60), &mut ports_nopf)
                 .unwrap();
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged between pf and no-pf twins"
-            );
-            assert_eq!(
-                eq_pf
-                    .telemetry()
-                    .get(tk::ELECTRIC_KW)
-                    .expect("kW")
-                    .to_bits(),
-                eq_nopf
-                    .telemetry()
-                    .get(tk::ELECTRIC_KW)
-                    .expect("kW")
-                    .to_bits(),
-                "step {i} (v={v}): ELECTRIC_KW telemetry diverged"
-            );
+            // The recorded deep-sag decision: the pf twin's draw evaluates
+            // its row's real polynomial at the ACTUAL bus voltage, so the
+            // twins agree bitwise at the reference voltage while they are
+            // still on the same trajectory (the first step), and the
+            // row's response leaves the constant-power twin's flat line
+            // off nominal. After the first off-nominal step the twins'
+            // tank temperatures diverge (the row-governed twin delivers a
+            // different heat), so later steps are not pairwise comparable.
+            if i == 0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step 0 (v={v}): at the reference voltage the twins must agree bitwise"
+                );
+            } else if *v != 1.0 {
+                assert_ne!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): the row-governed draw must leave the \
+                     constant-power twin's flat line"
+                );
+            }
             assert_eq!(
                 ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"

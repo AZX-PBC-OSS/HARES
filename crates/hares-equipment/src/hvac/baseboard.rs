@@ -46,8 +46,10 @@ pub struct ElectricBaseboard {
     mode_override: Option<OperatingMode>,
     /// External DemandResponse level (sticky).
     dr_level: DRLevel,
-    /// Rule R1 reactive-only ZIP: resistive element pf 1.0 →
-    /// Q exactly zero, real power stays bit-identical.
+    /// The class ZIP row: resistive element pf 1.0 → Q exactly zero; the
+    /// element's draw evaluates the row's real polynomial at the bus
+    /// voltage through the recorded deep-sag form (the impedance share,
+    /// P = V²/R), and the delivered heat follows the draw.
     zip: hares_types::zip::ResolvedZip,
 }
 
@@ -219,7 +221,14 @@ impl Equipment for ElectricBaseboard {
         }
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
-        let thermal_output_w = self.rated_capacity_w * duty * sf;
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the resistive element's draw and its delivered
+        // heat evaluate the row's real polynomial at the ACTUAL bus
+        // voltage (the impedance share, P = V²/R, the row's declared
+        // shares honored). The control composition (duty) acts on the
+        // rated draw; the voltage response multiplies the result.
+        let voltage_multiplier = self.zip.deep_sag_real_multiplier(env.grid.bus_voltage_pu());
+        let thermal_output_w = self.rated_capacity_w * duty * sf * voltage_multiplier;
         let electric_w = thermal_output_w * self.eir;
         let reactive_power_var = self.zip.reactive_var(electric_w, env.grid.bus_voltage_pu());
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
@@ -1048,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn electric_baseboard_real_power_bit_identical_with_and_without_reactive_zip() {
+    fn electric_baseboard_real_power_follows_the_row_and_reactive_follows_pf() {
         let cfg_pf = config(3_000.0);
         let mut cfg_nopf = config(3_000.0);
         cfg_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
@@ -1085,11 +1094,30 @@ mod tests {
             eq_nopf
                 .step(&env_v, Duration::from_secs(60), &mut ports_nopf)
                 .unwrap();
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged"
-            );
+            // At the reference voltage the row's multiplier is exactly 1.0
+            // and the twins agree bitwise; off nominal the pf twin's draw
+            // and delivered heat follow its row's deep-sag form (the
+            // impedance share, P = V²/R) while the constant-power twin
+            // stays flat.
+            if *v == 1.0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): at the reference voltage the twins \
+                     must agree bitwise"
+                );
+            } else {
+                let multiplier = hares_types::zip::zip_defaults_for_class("Electric Baseboard")
+                    .expect("class row")
+                    .deep_sag_real_multiplier(*v, false);
+                let expected = ports_nopf.electrical.load_power_w * multiplier;
+                assert!(
+                    (ports_pf.electrical.load_power_w - expected).abs() < 1e-9,
+                    "step {i} (v={v}): the row's twin must draw {expected} W \
+                     (the row's deep-sag form), got {} W",
+                    ports_pf.electrical.load_power_w
+                );
+            }
             assert_eq!(ports_nopf.electrical.reactive_power_var, 0.0);
         }
     }

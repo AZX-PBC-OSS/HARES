@@ -34,15 +34,18 @@ use hares_types::zip::ZipLoad;
 
 /// Indoor blower / outdoor condenser fan motor component (pf 0.87).
 ///
-/// Reactive-only (Rule R1) projection of the OCHRE `fans` ZIP row — the
-/// same row `zip_defaults_for_class("Ventilation Fan")` returns, so a
-/// ducted blower and a standalone ventilation fan with equal wattage
-/// produce identical Q. A drift test below enforces equality with the
-/// canonical class table.
+/// The OCHRE `fans` ZIP row: the same row
+/// `zip_defaults_for_class("Ventilation Fan")` returns, so a ducted blower
+/// and a standalone ventilation fan with equal wattage produce identical
+/// Q and identical deep-sag real response. A drift test below enforces
+/// equality with the canonical class table. The real-power coefficients
+/// are the row's own (they drive the component's deep-sag multiplier);
+/// `ZipLoad::reactive_var` reads only the reactive side, so the Q
+/// behavior is unchanged from the earlier reactive-only projection.
 pub(crate) const FAN_MOTOR_ZIP: ZipLoad = ZipLoad {
-    zp: 0.0,
-    ip: 0.0,
-    pp: 1.0,
+    zp: 0.26,
+    ip: 0.9,
+    pp: -0.16,
     zq: 0.5,
     iq: 0.62,
     pq: -0.12,
@@ -52,13 +55,16 @@ pub(crate) const FAN_MOTOR_ZIP: ZipLoad = ZipLoad {
 
 /// Hydronic / ground-loop circulation pump motor component (pf 0.84).
 ///
-/// Reactive-only (Rule R1) projection of the PUMPS row (Hajagos & Danai
-/// 1998) — the same row `zip_defaults_for_class("Gas Boiler")` returns.
-/// A drift test below enforces equality with the canonical class table.
+/// The PUMPS row (Hajagos & Danai 1998): the same row
+/// `zip_defaults_for_class("Gas Boiler")` returns. A drift test below
+/// enforces equality with the canonical class table. The real-power
+/// coefficients are the row's own (they drive the component's deep-sag
+/// multiplier); `ZipLoad::reactive_var` reads only the reactive side, so
+/// the Q behavior is unchanged from the earlier reactive-only projection.
 pub(crate) const LOOP_PUMP_ZIP: ZipLoad = ZipLoad {
-    zp: 0.0,
-    ip: 0.0,
-    pp: 1.0,
+    zp: 0.72,
+    ip: -0.98,
+    pp: 1.26,
     zq: 14.78,
     iq: -23.71,
     pq: 9.93,
@@ -84,28 +90,38 @@ pub(crate) fn secondary_motor_zip(unit_zip: &ZipLoad, component: ZipLoad) -> Zip
     }
 }
 
+/// The secondary motor component's real-power multiplier at the bus
+/// voltage: the component row's deep-sag form, evaluated as fitted (the
+/// fan and pump rows are recorded motor families whose deep-sag shape the
+/// record licenses; the fan row has no in-band stationary point and the
+/// pump row's is the recorded measured draw).
+pub(crate) fn secondary_motor_real_multiplier(component: &ZipLoad, voltage_pu: f64) -> f64 {
+    component.deep_sag_real_multiplier(voltage_pu, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use hares_types::zip::zip_defaults_for_class;
 
-    fn reactive_only_projection(class: &str) -> ZipLoad {
-        let row = zip_defaults_for_class(class).expect("class row exists");
-        ZipLoad::reactive_only(row.zq, row.iq, row.pq, row.pf)
-    }
-
     /// The fan component constant must not drift from the canonical class
     /// table (single source of truth for the OCHRE `fans` row).
     #[test]
     fn fan_motor_zip_matches_class_table() {
-        assert_eq!(FAN_MOTOR_ZIP, reactive_only_projection("Ventilation Fan"));
+        assert_eq!(
+            FAN_MOTOR_ZIP,
+            zip_defaults_for_class("Ventilation Fan").expect("class row exists")
+        );
     }
 
     /// The pump component constant must not drift from the canonical class
     /// table (PUMPS row, shared by the Gas Boiler class).
     #[test]
     fn loop_pump_zip_matches_class_table() {
-        assert_eq!(LOOP_PUMP_ZIP, reactive_only_projection("Gas Boiler"));
+        assert_eq!(
+            LOOP_PUMP_ZIP,
+            zip_defaults_for_class("Gas Boiler").expect("class row exists")
+        );
     }
 
     /// A unit-level pf=0 sentinel disables secondary components too.

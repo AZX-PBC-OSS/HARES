@@ -160,9 +160,11 @@ pub struct Dehumidifier {
     /// Above this temperature the unit is locked out for compressor thermal
     /// protection. `None` disables the high-temperature lockout.
     max_operating_temp_c: Option<f64>,
-    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
-    /// compressor pf 0.96 on the total electric draw. Real power stays
-    /// bit-identical; Q comes from `ZipLoad::reactive_var`.
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`):
+    /// compressor pf 0.96 on the total electric draw, whose real polynomial
+    /// scales the on-cycle draw at the bus voltage through the recorded
+    /// deep-sag form (as fitted: the recorded Hajagos & Danai row); Q comes
+    /// from `ZipLoad::reactive_var`.
     zip: hares_types::zip::ResolvedZip,
 }
 
@@ -250,7 +252,12 @@ impl Dehumidifier {
         };
     }
 
-    fn performance_snapshot(&self, zone_temp_c: f64, zone_rh: f64) -> PerformanceSnapshot {
+    fn performance_snapshot(
+        &self,
+        zone_temp_c: f64,
+        zone_rh: f64,
+        bus_voltage_pu: f64,
+    ) -> PerformanceSnapshot {
         if !self.is_on {
             let parasitic = self.off_cycle_parasitic_load_w.unwrap_or(0.0);
             return PerformanceSnapshot {
@@ -342,7 +349,17 @@ impl Dehumidifier {
         // parasitic implicitly, so parasitic is only added to the off-cycle
         // portion to avoid double-counting.
         let parasitic = self.off_cycle_parasitic_load_w.unwrap_or(0.0);
-        let electric_power_w = electric_power_w_on * rtf + parasitic * (1.0 - rtf);
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the on-cycle compressor draw evaluates the unit
+        // row (the recorded Hajagos & Danai cooling row, as fitted) at the
+        // ACTUAL bus voltage: its deep-sag elevation is the measured
+        // static draw of the family. The moisture removal is the control's
+        // PLR model (unchanged), so the unit's energy factor degrades at
+        // deep sag and the sensible gain keeps the balance (the zone
+        // receives every drawn watt).
+        let electric_power_w =
+            electric_power_w_on * rtf * self.zip.deep_sag_real_multiplier(bus_voltage_pu)
+                + parasitic * (1.0 - rtf);
         let water_removal_kg_s_avg = water_removal_kg_s * plr;
         let latent_removal_w = water_removal_kg_s_avg * LATENT_HEAT_VAPORISATION_0C_J_KG;
         let sensible_gain_w = latent_removal_w + electric_power_w;
@@ -683,6 +700,7 @@ impl Equipment for Dehumidifier {
         let raw = self.performance_snapshot(
             zone.temperature_c,
             rh.clamp(RH_MIN_FRACTION, RH_MAX_FRACTION),
+            env.grid.bus_voltage_pu(),
         );
         // Grid outage guard: off-cycle parasitic load (standby electronics,
         // controls, crankcase heater) must not be drawn from a de-energized
@@ -2106,7 +2124,7 @@ mod tests {
     /// (pf 0 sentinel) — must produce bit-identical real power at every step
     /// and voltage.
     #[test]
-    fn dehumidifier_real_power_bit_identical_with_and_without_reactive_zip() {
+    fn dehumidifier_real_power_follows_the_row_and_reactive_follows_pf() {
         let config_pf = config();
         let mut config_nopf = config_pf.clone();
         config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
@@ -2130,11 +2148,25 @@ mod tests {
             eq_nopf
                 .step(&environment, Duration::from_secs(60), &mut ports_nopf)
                 .unwrap();
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged between pf and no-pf twins"
-            );
+            // The recorded deep-sag decision: the pf twin's on-cycle draw
+            // evaluates its row's real polynomial at the ACTUAL bus
+            // voltage, so the twins agree bitwise at the reference voltage
+            // (the exact identity) and the row's response leaves the
+            // constant-power twin's flat line off it.
+            if *v == 1.0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): at the reference voltage the twins must agree bitwise"
+                );
+            } else {
+                assert_ne!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): the row-governed draw must leave the \
+                     constant-power twin's flat line"
+                );
+            }
             assert_eq!(
                 ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"

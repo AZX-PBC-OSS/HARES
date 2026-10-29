@@ -86,9 +86,10 @@ pub struct TanklessWH {
     mains_temp_c_source: Option<ScheduleSource>,
     /// The wet appliances' untempered draw [kg/s], from its schedule column.
     appliance_draw_source: Option<ScheduleSource>,
-    /// Rule R1 reactive-only ZIP (resolved via `crate::config::resolve_reactive_zip`):
+    /// The class ZIP row (resolved via `crate::config::resolve_reactive_zip`):
     /// control electronics at unity power factor by class default (Q exactly
-    /// zero, real power untouched).
+    /// zero; the row is constant power by declaration, so the draw's
+    /// deep-sag multiplier is exactly 1 at every voltage).
     zip: hares_types::zip::ResolvedZip,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
@@ -506,9 +507,14 @@ impl Equipment for TanklessWH {
             // Grid outage is gated at the root in `update_control` (electric
             // units are forced Off on a de-energized bus, making fuel_input_w zero),
             // so delivered heat and metered draw are always consistent here.
-            // Rule R1: Q from the already-computed real power (never through
-            // the real-power ZIP polynomial).
-            let electric_w = fuel_input_w;
+            // The declared deep-sag response: the draw evaluates the unit
+            // row at the ACTUAL bus voltage (the tankless class's row is
+            // constant power by declaration, so the multiplier is exactly 1
+            // at every voltage: the uniform evaluation keeps the contract
+            // total across the fleet). Q from the already-computed real
+            // power.
+            let electric_w =
+                fuel_input_w * self.zip.deep_sag_real_multiplier(env.grid.bus_voltage_pu());
             let reactive_var = self.zip.reactive_var(electric_w, env.grid.bus_voltage_pu());
             if electric_w > 0.0 || reactive_var != 0.0 {
                 ports.accumulate(&PortContribution::Electrical {

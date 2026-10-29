@@ -521,7 +521,13 @@ impl EventBasedLoad {
         let raw_electric_w = if is_fuel { 0.0 } else { active_power_w };
 
         let (electric_power_w, reactive_power_var) = if raw_electric_w > 0.0 {
-            self.zip.apply(raw_electric_w, voltage_pu)
+            // The declared deep-sag response: the draw evaluates the row's
+            // real polynomial at the ACTUAL bus voltage through the
+            // recorded deep-sag form; the reactive side scales with the
+            // evaluated real draw.
+            let real_w = raw_electric_w * self.zip.deep_sag_real_multiplier(voltage_pu);
+            let reactive_var = self.zip.reactive_var(real_w, voltage_pu);
+            (real_w, reactive_var)
         } else {
             (0.0, 0.0)
         };
@@ -1125,7 +1131,13 @@ impl WetAppliance {
         let raw_electric_w = if is_fuel { 0.0 } else { active_power_w };
 
         let (electric_power_w, reactive_power_var) = if raw_electric_w > 0.0 {
-            self.zip.apply(raw_electric_w, voltage_pu)
+            // The declared deep-sag response: the draw evaluates the row's
+            // real polynomial at the ACTUAL bus voltage through the
+            // recorded deep-sag form; the reactive side scales with the
+            // evaluated real draw.
+            let real_w = raw_electric_w * self.zip.deep_sag_real_multiplier(voltage_pu);
+            let reactive_var = self.zip.reactive_var(real_w, voltage_pu);
+            (real_w, reactive_var)
         } else {
             (0.0, 0.0)
         };

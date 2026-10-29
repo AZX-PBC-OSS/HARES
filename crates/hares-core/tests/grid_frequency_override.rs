@@ -154,3 +154,54 @@ fn out_of_contract_frequencies_are_rejected() {
         );
     }
 }
+
+/// The recorded non-model's contract witness (docs/PHYSICS_DECISIONS.md,
+/// "The frequency channel is read by nothing"): the frequency channel is
+/// accepted, validated and stored, and read by no load class: no
+/// coefficient source exists in the toolchain (the OCHRE ZIP table's
+/// columns are voltage-only; EnergyPlus supplies no supply-frequency
+/// physics for zone or plant equipment). The brownout round's B4d probe
+/// held a 59 Hz excursion beside a 0.7 pu sag and a pure 58 Hz excursion
+/// and every state channel was bitwise identical. This test pins that
+/// side-effect-freeness as the documented contract: when a frequency
+/// response model lands, this assertion fails and forces the record's
+/// retirement with it.
+#[test]
+fn in_band_frequency_excursions_change_no_state_channel() {
+    let build = |tag: &str| {
+        let mut dwelling = build_dwelling(tag);
+        dwelling
+            .set_grid_voltage(0.7)
+            .expect("the sag the excursions ride beside");
+        dwelling
+    };
+    let mut nominal = build("frequency-nominal");
+    let mut f59 = build("frequency-59");
+    let mut f58 = build("frequency-58");
+    f59.set_frequency(59.0).expect("in-band");
+    f58.set_frequency(58.0).expect("in-band");
+
+    for _ in 0..8 {
+        nominal.step().expect("step");
+        f59.step().expect("step");
+        f58.step().expect("step");
+        // The stored frequencies reach the step (the channel's storage).
+        assert_eq!(f59.latest_env().grid.frequency_hz, 59.0);
+        assert_eq!(f58.latest_env().grid.frequency_hz, 58.0);
+        let base = nominal.latest_env();
+        for (tag, dw) in [("59 Hz", &f59), ("58 Hz", &f58)] {
+            let other = dw.latest_env();
+            assert_eq!(
+                base.zones, other.zones,
+                "{tag}: the zone channels must be bitwise identical (the recorded non-model: the frequency read by nothing)"
+            );
+            let base_core = base.equipment_core.get(&hares_types::EquipmentId(1));
+            let other_core = other.equipment_core.get(&hares_types::EquipmentId(1));
+            assert_eq!(
+                base_core.map(|c| c.flows.electric_w),
+                other_core.map(|c| c.flows.electric_w),
+                "{tag}: the load's electric draw must be bitwise identical (the recorded non-model)"
+            );
+        }
+    }
+}

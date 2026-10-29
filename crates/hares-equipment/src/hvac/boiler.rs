@@ -123,9 +123,10 @@ pub struct ElectricBoiler {
     /// degradations; they reach the run's warning log through
     /// `drain_warnings`).
     warnings: Vec<Warning>,
-    /// Rule R1 reactive-only ZIP for the primary component (resistive
-    /// element, class default pf 1.0 → Q exactly zero); real power stays
-    /// bit-identical.
+    /// The class ZIP row for the primary component (resistive
+    /// element, class default pf 1.0 → Q exactly zero): its real polynomial
+    /// scales the element's draw and delivered heat at the bus voltage
+    /// through the recorded deep-sag form.
     zip: hares_types::zip::ResolvedZip,
     /// Hydronic circulation-pump motor component ZIP (pf 0.84), derived at
     /// init via `hvac::reactive::secondary_motor_zip`.
@@ -175,8 +176,9 @@ pub struct GasBoiler {
     /// Warnings raised since the last drain (the late absent-payload
     /// degradations).
     warnings: Vec<Warning>,
-    /// Rule R1 reactive-only ZIP: circulation pump/aux pf 0.84;
-    /// Q comes from ZipLoad::reactive_var.
+    /// The class ZIP row: circulation pump motor pf 0.84; the pump's draw
+    /// evaluates the row's real polynomial at the bus voltage through the
+    /// recorded deep-sag form; Q comes from ZipLoad::reactive_var.
     zip: hares_types::zip::ResolvedZip,
 }
 
@@ -391,13 +393,24 @@ impl Equipment for ElectricBoiler {
         }
         let duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
         let sf = self.hvac.config.space_fraction;
-        let thermal_output_w = self.rated_capacity_w * duty * sf;
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the resistive element's draw and its delivered
+        // heat evaluate the unit row's real polynomial at the ACTUAL bus
+        // voltage (the impedance share, P = V²/R, the row's declared
+        // shares honored); the circulation pump motor evaluates its own
+        // pump-motor row. The control composition (duty) acts on the
+        // rated draw; the voltage response multiplies the result.
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
+        let element_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
+        let pump_multiplier =
+            super::reactive::secondary_motor_real_multiplier(&self.pump_zip, bus_voltage_pu);
+        let thermal_output_w = self.rated_capacity_w * duty * sf * element_multiplier;
         let element_w = thermal_output_w * self.eir;
         // Circulation pump runs whenever the boiler delivers heat (same
         // modeling as the gas boiler: contactor-switched, rated draw, not
         // modulated by PLR).
         let pump_w = if thermal_output_w > 0.0 {
-            self.pump_w * sf
+            self.pump_w * sf * pump_multiplier
         } else {
             0.0
         };
@@ -993,8 +1006,13 @@ impl Equipment for GasBoiler {
             return_temp_c
         };
 
+        // The declared deep-sag response (docs/PHYSICS_DECISIONS.md, the
+        // deep-sag entry): the circulation pump motor's draw evaluates the
+        // unit row (the pump-motor row) at the ACTUAL bus voltage. The
+        // fuel-side heat is voltage invariant.
+        let bus_voltage_pu = env.grid.bus_voltage_pu();
         let electric_w = if thermal_output_w > 0.0 {
-            self.pump_w * sf
+            self.pump_w * sf * self.zip.deep_sag_real_multiplier(bus_voltage_pu)
         } else {
             0.0
         };
@@ -1006,7 +1024,7 @@ impl Equipment for GasBoiler {
                 consumption_w: fuel_input_w,
             })?;
         }
-        let reactive_power_var = self.zip.reactive_var(electric_w, env.grid.bus_voltage_pu());
+        let reactive_power_var = self.zip.reactive_var(electric_w, bus_voltage_pu);
         if electric_w > 0.0 {
             ports.accumulate(&PortContribution::Electrical {
                 active_power_w: (electric_w),

@@ -1199,11 +1199,13 @@ impl PyEquipment {
     /// the *current* effective power factor (config baseline, later mutated
     /// by a ``PowerFactorSetpoint``). ``None`` means the equipment has no
     /// electrical ZIP concept; ``pf == 0.0`` is the "reactive disabled"
-    /// sentinel. ``real_power_zip_applies`` is ``False`` for Rule R1 physics
-    /// equipment and DER (the published ``(0, 0, 1)`` real side is a
-    /// structural pin — real power comes from the equipment's own physics
-    /// or controller) and ``True`` for scheduled/event loads (the
-    /// coefficients genuinely govern real power at the bus voltage).
+    /// sentinel. ``real_power_zip_applies`` is ``True`` for scheduled/event
+    /// loads and typed physics equipment (the published real coefficients
+    /// govern real power at the bus voltage: the scheduled draw scales by
+    /// the polynomial, the physics-computed draw by the class row through
+    /// the recorded deep-sag form) and ``False`` for DER (real power comes
+    /// from the equipment's own controller; only the reactive coefficients
+    /// apply, with the real side the structural ``(0, 0, 1)`` pin).
     /// Pure inspection — never influences the simulation.
     #[getter]
     fn resolved_zip<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {

@@ -387,15 +387,19 @@ fn premise_zip_to_pydict<'py>(
     out.set_item("pq", zip.pq)?;
     out.set_item("pf", zip.pf)?;
     out.set_item("v0", zip.v0)?;
-    // The aggregate is over ZIP-governed equipment by construction; the
+    // The aggregate is over ZIP-governing equipment by construction; the
     // flag keeps the dict shape consistent with equipment_zip's.
     out.set_item("real_power_zip_applies", true)?;
+    // The assembled governed response at the aggregation's bus voltage
+    // (the moment's composition, each row's deep-sag form applied). None
+    // when no governing equipment carried a positive weight.
+    out.set_item("deep_sag_scale", premise.deep_sag_scale)?;
     let governing = PyList::empty(py);
-    for (name, mean_power_kw) in &premise.governing {
+    for (name, mean_power_w) in &premise.governing {
         let name: &str = name.as_str();
         let entry = PyDict::new(py);
         entry.set_item("name", name)?;
-        entry.set_item("mean_power_kw", *mean_power_kw)?;
+        entry.set_item("mean_power_w", *mean_power_w)?;
         governing.append(entry)?;
     }
     out.set_item("governing_equipment", governing)?;
@@ -1337,15 +1341,15 @@ impl PyDwelling {
     /// ``real_power_zip_applies`` declares whether the real-power
     /// coefficients govern the equipment's real power: ``True`` for
     /// scheduled/event loads (whose scheduled draw is scaled by the
-    /// real-power polynomial at the bus voltage), ``False`` for Rule R1
-    /// physics equipment (HVAC, water heaters, ventilation — real power
-    /// comes from the equipment's own physics and is deliberately
-    /// voltage-invariant, so the published ``(zp, ip, pp) = (0, 0, 1)`` is a
-    /// structural pin, not a measured response; only the reactive
-    /// coefficients apply) and for DER (real power is controller-driven).
-    /// Anything computing voltage sensitivity from the published real
-    /// coefficients must check this flag first; for the whole-dwelling
-    /// answer use [`Dwelling::premise_zip`].
+    /// real-power polynomial at the bus voltage) and for typed physics
+    /// equipment (HVAC, water heaters, ventilation: the physics-computed
+    /// draw is scaled by the class row through the recorded deep-sag form,
+    /// so the published coefficients are the row's own and are real),
+    /// ``False`` for DER (real power is controller-driven and never
+    /// ZIP-scaled; only the reactive coefficients apply). Anything
+    /// computing voltage sensitivity from the published real coefficients
+    /// must check this flag first; for the whole-dwelling answer use
+    /// [`Dwelling::premise_zip`].
     ///
     /// For DER with live var control (battery, EV, PV) ``pf`` is the current
     /// effective power factor (config baseline, later mutated by a
@@ -1367,32 +1371,36 @@ impl PyDwelling {
             .transpose()
     }
 
-    /// The dwelling's aggregate real-power voltage response, without
-    /// simulation: the power-weighted mean ZIP over the equipment whose
-    /// real-power coefficients genuinely govern their real power
-    /// (scheduled and event loads, weighted by expected mean draw over the
-    /// loaded schedule data).
+    /// The dwelling's aggregate real-power voltage response: the
+    /// power-weighted mean ZIP over the equipment whose real-power
+    /// coefficients genuinely govern their real power (scheduled and event
+    /// loads, and the typed physics equipment whose rows scale their
+    /// physics-computed draws). The weights are the moment's raw draws when
+    /// the dwelling has stepped (each equipment's last electric draw,
+    /// un-scaled through its own row at the bus voltage (the moment's
+    /// composition), else the expected mean draw over the loaded schedule
+    /// data.
     ///
     /// Returns a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/
     /// ``pf``/``v0`` (the aggregate coefficients; the real side sums to 1,
     /// the reactive side is a first-order aggregate),
     /// ``real_power_zip_applies`` (always ``True`` — the aggregate describes
-    /// the ZIP-governed mix), ``governing_equipment`` (list of
-    /// ``{"name": str, "mean_power_kw": float | None}`` — equipment
-    /// included in the aggregate; ``None`` marks equipment whose expected
-    /// draw is not computable without simulation, which contribute no
-    /// weight), and ``constant_power_equipment`` (list of names whose real
-    /// power is physics- or DER-driven and therefore voltage-invariant by
-    /// construction — HVAC, water heaters, ventilation, battery, EV, PV).
+    /// the governing mix), ``deep_sag_scale`` (the assembled governed
+    /// response at the current bus voltage: the weighting-draw-weighted
+    /// mean of the governing rows' deep-sag multipliers, each row evaluated
+    /// through its recorded deep-sag form: the number the stepping engine
+    /// answers for the moment's composition; ``None`` when no governing
+    /// equipment carried a positive weight),
+    /// ``governing_equipment`` (list of
+    /// ``{"name": str, "mean_power_w": float | None}`` -- equipment
+    /// included in the aggregate with its weighting draw in watts;
+    /// ``None`` marks equipment whose weight is not computable, which
+    /// contributes no weight), and ``constant_power_equipment`` (list of
+    /// names whose real power is DER-controller-driven and therefore
+    /// voltage-invariant by construction (battery, EV, PV).
     ///
-    /// The aggregate covers the ZIP-governed mix only: the share of total
-    /// draw taken by physics-driven equipment depends on weather, occupancy
-    /// and control, knowable only by simulation, so a whole-premise %P/%V
-    /// combines this aggregate with those equipment's simulated energy
-    /// shares.
-    ///
-    /// ``None`` when no ZIP-governed equipment has a computable positive
-    /// expected draw — never a silent constant-power answer. Pure
+    /// ``None`` when no ZIP-governing equipment has a computable positive
+    /// weight; never a silent constant-power answer. Pure
     /// inspection — never influences the simulation.
     pub fn premise_zip<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
         let dwelling = self.acquire()?;

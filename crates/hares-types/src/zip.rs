@@ -54,15 +54,17 @@ fn default_v0() -> f64 {
 
 /// A [`ZipLoad`] plus the regime it was resolved under: whether the
 /// real-power coefficients govern the equipment's real power, or are the
-/// Rule R1 structural pin with real power coming from elsewhere.
+/// DER controller's reactive-only view with real power coming from
+/// elsewhere.
 ///
-/// A bare `ZipLoad` cannot express this distinction: a Rule-R1 physics
-/// model (HVAC, water heaters, ventilation) publishes `(zp, ip, pp) =
-/// (0, 0, 1)` because its real power is computed by its own physics and
-/// must stay voltage-invariant, while a scheduled load can legitimately
-/// resolve to the *same* `(0, 0, 1)` as a real, governing model (unknown
-/// class → [`ZipLoad::constant_power`] fallback, or an explicit sidecar
-/// override). The coefficients alone are therefore ambiguous; the regime
+/// A bare `ZipLoad` cannot express this distinction: a typed physics
+/// model (HVAC, water heaters, ventilation) resolves its class row and
+/// the row's real coefficients scale the physics-computed draw at the bus
+/// voltage (the declared deep-sag response), while a scheduled load
+/// scales its *scheduled* draw through the same coefficients, and a DER
+/// controller (battery, PV, EV) computes real power entirely on its own:
+/// its resolved row is reactive-only and its real draw is never
+/// ZIP-scaled. The coefficients alone are therefore ambiguous; the regime
 /// must travel with them.
 ///
 /// Derefs to [`ZipLoad`] for field access and computation (`apply`,
@@ -73,29 +75,39 @@ pub struct ResolvedZip {
     /// The ZIP coefficients.
     pub zip: ZipLoad,
     /// Whether `zip`'s real-power coefficients govern this equipment's real
-    /// power at the bus voltage. `false` means the real side is the Rule R1
-    /// pin: real power comes from the equipment's own physics (or a DER
-    /// controller) and only the reactive side of `zip` applies.
+    /// power at the bus voltage. `false` means the real side is the DER
+    /// reactive-only view: real power comes from the equipment's own
+    /// controller and only the reactive side of `zip` applies.
     pub real_power_zip_applies: bool,
+    /// The deep-sag shape policy for the real polynomial: `true` evaluates
+    /// the row as fitted (the recorded motor families whose deep-sag
+    /// elevation is the measured static draw the record licenses),
+    /// `false` evaluates through the monotone-in-voltage form
+    /// ([`ZipLoad::deep_sag_real_multiplier`]).
+    pub real_shape_as_fitted: bool,
 }
 
 impl ResolvedZip {
     /// A ZIP whose real-power coefficients govern the equipment's real
     /// power (scheduled and event loads: the scheduled draw is scaled by
-    /// the real-power polynomial at the bus voltage each step).
+    /// the real-power polynomial at the bus voltage each step; typed
+    /// physics equipment: the physics-computed draw is scaled the same
+    /// way). The deep-sag shape defaults to the monotone form; the
+    /// resolution chain sets the recorded policy for the class.
     #[must_use]
     pub fn governing(zip: ZipLoad) -> Self {
         Self {
             zip,
             real_power_zip_applies: true,
+            real_shape_as_fitted: false,
         }
     }
 
-    /// The Rule R1 regime: real power is computed by the equipment's own
-    /// physics (or a DER controller) and must stay voltage-invariant, so
-    /// only the reactive side of `zip` is used and the real side is pinned
-    /// to constant power `(0, 0, 1)` — the same pin
-    /// [`ZipLoad::reactive_only`] applies.
+    /// The DER reactive-only regime: real power is computed by the
+    /// equipment's own controller (battery BMS, PV inverter, EV charging
+    /// strategy) and stays voltage-invariant, so only the reactive side of
+    /// `zip` is used and the real side is pinned to constant power
+    /// `(0, 0, 1)` -- the same pin [`ZipLoad::reactive_only`] applies.
     #[must_use]
     pub fn reactive_only(zip: ZipLoad) -> Self {
         Self {
@@ -106,7 +118,16 @@ impl ResolvedZip {
                 ..zip
             },
             real_power_zip_applies: false,
+            real_shape_as_fitted: false,
         }
+    }
+
+    /// The equipment's real-power multiplier at the bus voltage: the
+    /// resolved row evaluated through its recorded deep-sag shape.
+    #[must_use]
+    pub fn deep_sag_real_multiplier(&self, voltage_pu: f64) -> f64 {
+        self.zip
+            .deep_sag_real_multiplier(voltage_pu, self.real_shape_as_fitted)
     }
 }
 
@@ -291,6 +312,57 @@ impl ZipLoad {
         let reactive_base = self.zq * v_norm * v_norm + self.iq * v_norm + self.pq;
         p_w * self.tan_phi() * reactive_base
     }
+
+    /// The real-power multiplier of the deep-sag form: the row's real
+    /// polynomial evaluated at the ACTUAL per-unit voltage (`V =
+    /// voltage_pu / v0`), exactly the identity at the reference voltage.
+    ///
+    /// Shape constraint (recorded in `docs/PHYSICS_DECISIONS.md`, the
+    /// deep-sag entry): the evaluated response is monotone non-decreasing
+    /// in voltage across the admitted [0.5, 1.5] pu band for every load
+    /// class whose physics is monotone:
+    ///
+    /// - the resistive classes: monotone increasing through their
+    ///   impedance share (P = V²/R);
+    /// - the constant-power share: flat by declaration;
+    /// - the recorded motor families (the Hajagos & Danai 1998 pumps and
+    ///   compressor rows, and the fan family): the row as fitted, for
+    ///   their deep-sag elevation is the measured static draw the record
+    ///   licenses, so `as_fitted = true` evaluates the raw polynomial;
+    /// - every other class (`as_fitted = false`): a row whose stationary
+    ///   point falls inside the admitted band below nominal is held at the
+    ///   stationary value on the deeper-sag side, so the evaluated
+    ///   response never rises as the voltage falls. The stalled-draw class
+    ///   the record does not model is thereby unreachable: no evaluated
+    ///   multiplier exceeds its nominal value at reduced voltage.
+    ///
+    /// Rows with no in-band stationary point evaluate raw (they are
+    /// already monotone on the band), the identity at the reference
+    /// voltage is exact (the validated coefficient sums make the model a
+    /// pure redistribution there; the polynomial's last-ulp residue at
+    /// `v == v0` is arithmetic, not physics: this is what keeps the
+    /// nominal-voltage evaluation exact), and no value is ever clamped to
+    /// a band edge: the form evaluates at any finite voltage a caller can
+    /// construct.
+    #[must_use]
+    pub fn deep_sag_real_multiplier(&self, voltage_pu: f64, as_fitted: bool) -> f64 {
+        let v_norm = voltage_pu / self.v0;
+        if v_norm == 1.0 {
+            return 1.0;
+        }
+        // The monotone hold lives on the sub-nominal side, where the
+        // stalled-draw class lives. A minimum (zp > 0) whose stationary
+        // point falls inside the admitted band below nominal would
+        // otherwise rise as the voltage falls past it.
+        if !as_fitted && v_norm < 1.0 && self.zp > 0.0 {
+            let v_star = -self.ip / (2.0 * self.zp);
+            if v_star >= 0.5 / self.v0 && v_star < 1.0 {
+                let held = if v_norm < v_star { v_star } else { v_norm };
+                return self.zp * held * held + self.ip * held + self.pp;
+            }
+        }
+        self.zp * v_norm * v_norm + self.ip * v_norm + self.pp
+    }
 }
 
 /// Every class name recognized by [`zip_defaults_for_class`], including the
@@ -348,6 +420,48 @@ pub const ZIP_CLASS_NAMES: &[&str] = &[
     "Tankless Water Heater",
     "Gas Tankless Water Heater",
 ];
+
+/// Whether the class's recorded deep-sag model evaluates its row as
+/// fitted: the Hajagos & Danai 1998 motor families (the pumps and the
+/// compressor rows) and the fan motor family. The deep-sag decision
+/// (`docs/PHYSICS_DECISIONS.md`) licenses their deep-sag elevation as the
+/// measured static draw of the family, fitted across the sag band; no
+/// other class carries that license, so every other class evaluates
+/// through the monotone form ([`ZipLoad::deep_sag_real_multiplier`]):
+/// the refrigerator/freezer class's fitted quadratic turns at 0.843 pu
+/// inside the admitted band, and its extrapolated 1.4675x draw at 0.5 pu
+/// is the stalled-draw class the record does not model.
+///
+/// Kept in sync with the motor-family arms of [`zip_defaults_for_class`];
+/// the completeness test in this module checks that every class named here
+/// resolves to one of the H&D or fan rows.
+#[must_use]
+pub fn deep_sag_row_evaluates_as_fitted(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        "Well Pump"
+            | "Pool Pump"
+            | "Spa Pump"
+            | "Gas Boiler"
+            | "ASHP Heater"
+            | "MSHP Heater"
+            | "GSHP Heater"
+            | "WSHP Heater"
+            | "Air Conditioner"
+            | "ASHP Cooler"
+            | "MSHP Cooler"
+            | "Room AC"
+            | "GSHP Cooler"
+            | "WSHP Cooler"
+            | "Dehumidifier"
+            | "Ceiling Fan"
+            | "Ventilation Fan"
+            | "HRV"
+            | "ERV"
+            | "Gas Furnace"
+            | "Gas Water Heater"
+    )
+}
 
 /// Look up literature-based ZIP coefficients from the OCHRE parameter table
 /// (`vendors/OCHRE/ochre/defaults/ZIP Parameters.csv`). Returns `None` for
@@ -612,7 +726,10 @@ pub fn zip_defaults_for_class(class_name: &str) -> Option<ZipLoad> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ZIP_CLASS_NAMES as ALL_CLASS_NAMES, ZipLoad, zip_defaults_for_class};
+    use super::{
+        ZIP_CLASS_NAMES as ALL_CLASS_NAMES, ZipLoad, deep_sag_row_evaluates_as_fitted,
+        zip_defaults_for_class,
+    };
 
     /// Reference implementation mirroring the legacy
     /// `ZipCoefficients::apply` arithmetic (hares-equipment
@@ -981,6 +1098,156 @@ mod tests {
             assert_eq!((zip.zp, zip.ip, zip.pp), (0.0, 0.0, 1.0));
             assert_eq!(zip.reactive_var(3.2, 1.05), 0.0);
             assert_eq!(zip.apply(3.2, 0.95).0.to_bits(), 3.2_f64.to_bits());
+        }
+    }
+
+    /// The deep-sag form is exactly the identity at the reference voltage
+    /// for every class row, either shape: the validated coefficient sums
+    /// make the model a pure redistribution there, and the nominal-voltage
+    /// goldens (fixtures at 1.0 pu) depend on the identity being exact.
+    #[test]
+    fn deep_sag_multiplier_is_exactly_one_at_the_reference_voltage() {
+        for name in ALL_CLASS_NAMES {
+            let zip = zip_defaults_for_class(name).expect("row");
+            for &as_fitted in &[false, true] {
+                let m = zip.deep_sag_real_multiplier(1.0, as_fitted);
+                assert_eq!(
+                    m.to_bits(),
+                    1.0_f64.to_bits(),
+                    "{name}: the deep-sag multiplier at the reference voltage \
+                     must be exactly 1.0 (as_fitted={as_fitted}), got {m}"
+                );
+            }
+        }
+    }
+
+    /// F3's shape constraint, the non-motor classes: every class row whose
+    /// recorded model is not "as fitted" evaluates monotone non-decreasing
+    /// in voltage across the admitted band. The brownout round's witness:
+    /// the refrigerator's fitted quadratic turned at 0.843 pu (1.4675x
+    /// nominal at 0.5 pu, 0.9787x at 0.7 pu: the draw rose as the voltage
+    /// fell, the stalled-draw class the record does not model). The
+    /// corrected form holds the row at its stationary point below it, so
+    /// the 0.5 pu and 0.7 pu evaluations agree bitwise and no evaluated
+    /// multiplier exceeds its nominal value at reduced voltage.
+    #[test]
+    fn deep_sag_multiplier_is_monotone_across_the_admitted_band_for_non_motor_rows() {
+        for name in ALL_CLASS_NAMES {
+            if deep_sag_row_evaluates_as_fitted(name) {
+                continue;
+            }
+            let zip = zip_defaults_for_class(name).expect("row");
+            let mut previous = f64::NEG_INFINITY;
+            for &v in &[0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0, 1.1, 1.3, 1.5] {
+                let m = zip.deep_sag_real_multiplier(v, false);
+                assert!(
+                    m >= previous,
+                    "{name}: the deep-sag multiplier must be monotone \
+                     non-decreasing in voltage, turned at v={v} ({m} after {previous})"
+                );
+                if v < 1.0 {
+                    assert!(
+                        m <= 1.0,
+                        "{name}: no non-motor load draws above nominal at \
+                         reduced voltage without a stall model: m(0.5)-class \
+                         value {m} at v={v}"
+                    );
+                }
+                previous = m;
+            }
+        }
+    }
+
+    /// The refrigerator row's corrected evaluation: the held stationary
+    /// value below the 0.843 pu turn, bitwise equal at 0.5 and 0.7 pu, and
+    /// strictly below the raw polynomial's stalled-draw value at 0.5 pu.
+    #[test]
+    fn refrigerator_row_holds_at_its_stationary_point_below_the_turn() {
+        let zip = zip_defaults_for_class("Refrigerator").expect("row");
+        let v_star = -zip.ip / (2.0 * zip.zp);
+        assert!(
+            (0.5..1.0).contains(&v_star),
+            "fixture: the turn at {v_star}"
+        );
+        let held = zip.deep_sag_real_multiplier(v_star - 0.01, false);
+        let m_05 = zip.deep_sag_real_multiplier(0.5, false);
+        let m_07 = zip.deep_sag_real_multiplier(0.7, false);
+        assert_eq!(m_05.to_bits(), held.to_bits(), "0.5 pu is below the turn");
+        assert_eq!(m_07.to_bits(), held.to_bits(), "0.7 pu is below the turn");
+        let raw_05 = zip.zp * 0.5 * 0.5 + zip.ip * 0.5 + zip.pp;
+        assert!(
+            raw_05 > 1.0 && m_05 < 1.0,
+            "the raw row extrapolates to the stalled-draw class ({raw_05}) \
+             and the corrected form must not ({m_05})"
+        );
+        // Above the turn the raw polynomial is recovered.
+        let m_09 = zip.deep_sag_real_multiplier(0.9, false);
+        let raw_09 = zip.zp * 0.9 * 0.9 + zip.ip * 0.9 + zip.pp;
+        assert_eq!(m_09.to_bits(), raw_09.to_bits());
+    }
+
+    /// F2's recorded motor families: the Hajagos & Danai rows and the fan
+    /// row evaluate as fitted: the deep-sag elevation is the measured
+    /// static draw the record licenses, so the raw polynomial's values
+    /// survive (the air-conditioner row's +14.5 percent at 0.5 pu is the
+    /// declared response the brownout round's F2 finding quoted).
+    #[test]
+    fn motor_family_rows_evaluate_as_fitted() {
+        let ac = zip_defaults_for_class("Air Conditioner").expect("row");
+        let m_05 = ac.deep_sag_real_multiplier(0.5, true);
+        let raw_05 = ac.zp * 0.5 * 0.5 + ac.ip * 0.5 + ac.pp;
+        assert_eq!(m_05.to_bits(), raw_05.to_bits());
+        assert!(
+            raw_05 > 1.1,
+            "the recorded elevation must survive: {raw_05}"
+        );
+        let pumps = zip_defaults_for_class("Well Pump").expect("row");
+        let m_pumps = pumps.deep_sag_real_multiplier(0.5, true);
+        let raw_pumps = pumps.zp * 0.5 * 0.5 + pumps.ip * 0.5 + pumps.pp;
+        assert_eq!(m_pumps.to_bits(), raw_pumps.to_bits());
+    }
+
+    /// The policy's roster: every class the deep-sag record names as a
+    /// motor family evaluates as fitted; every other class (the
+    /// refrigerator among them) evaluates through the monotone form.
+    #[test]
+    fn deep_sag_policy_rosters_the_recorded_motor_families() {
+        const AS_FITTED: &[&str] = &[
+            "Well Pump",
+            "Pool Pump",
+            "Spa Pump",
+            "Gas Boiler",
+            "ASHP Heater",
+            "MSHP Heater",
+            "GSHP Heater",
+            "WSHP Heater",
+            "Air Conditioner",
+            "ASHP Cooler",
+            "MSHP Cooler",
+            "Room AC",
+            "GSHP Cooler",
+            "WSHP Cooler",
+            "Dehumidifier",
+            "Ceiling Fan",
+            "Ventilation Fan",
+            "HRV",
+            "ERV",
+            "Gas Furnace",
+            "Gas Water Heater",
+        ];
+        for name in AS_FITTED {
+            assert!(
+                deep_sag_row_evaluates_as_fitted(name),
+                "{name} must evaluate as fitted"
+            );
+        }
+        for name in ALL_CLASS_NAMES {
+            let expected = AS_FITTED.contains(name);
+            assert_eq!(
+                deep_sag_row_evaluates_as_fitted(name),
+                expected,
+                "{name}: the policy roster must match the recorded families"
+            );
         }
     }
 }

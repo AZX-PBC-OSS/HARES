@@ -464,7 +464,16 @@ impl Equipment for ScheduledLoad {
                 };
 
                 let (real_w, reactive_var) = if scheduled_power_w > 0.0 {
-                    self.zip.apply(scheduled_power_w, env.grid.bus_voltage_pu())
+                    // The declared deep-sag response (docs/PHYSICS_DECISIONS.md,
+                    // the deep-sag entry): the draw evaluates the row's real
+                    // polynomial at the ACTUAL bus voltage through the
+                    // recorded deep-sag form (the monotone hold for the
+                    // classes whose physics is monotone), and the reactive
+                    // side scales with the evaluated real draw.
+                    let voltage_pu = env.grid.bus_voltage_pu();
+                    let real_w = scheduled_power_w * self.zip.deep_sag_real_multiplier(voltage_pu);
+                    let reactive_var = self.zip.reactive_var(real_w, voltage_pu);
+                    (real_w, reactive_var)
                 } else {
                     (0.0, 0.0)
                 };
@@ -2322,10 +2331,19 @@ mod tests {
                 eq.step(&env, Duration::from_secs(900), &mut ports).unwrap();
 
                 // Legacy ZipCoefficients::apply arithmetic, expression for
-                // expression (scheduled_load.rs pre-migration).
+                // expression (scheduled_load.rs pre-migration), except at
+                // the reference voltage, where the corrected model's
+                // multiplier is exactly 1.0 (the declared pure
+                // redistribution; the validated coefficient sums' last-ulp
+                // residue at v = 1 is arithmetic, not physics).
                 let [z, i, p_coeff, zq, iq, pq, pf] = *row;
                 let v_norm = voltage_pu / 1.0;
-                let zip_multiplier = z * v_norm * v_norm + i * v_norm + p_coeff;
+                let raw_multiplier = z * v_norm * v_norm + i * v_norm + p_coeff;
+                let zip_multiplier = if voltage_pu == 1.0 {
+                    1.0
+                } else {
+                    raw_multiplier
+                };
                 // The W-world arithmetic, expression for expression with
                 // the ZIP apply: the helper's schedule value enters in kW
                 // and converts once (× 1000), the multiplier applies on the

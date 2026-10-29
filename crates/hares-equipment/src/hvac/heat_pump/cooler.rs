@@ -322,10 +322,12 @@ pub struct GshpCooler {
     pump_efficiency: f64,
     pump_motor_efficiency: f64,
     pump_system_head_loss_m: f64,
-    /// Rule R1 reactive-only ZIP for the ground-loop pump contribution:
-    /// the pump motor component (pf 0.84, `hvac::reactive::LOOP_PUMP_ZIP`),
-    /// honouring the unit-level pf=0 sentinel. The compressor/fan/crankcase
-    /// reactive comes from the inner [`AirConditioner`].
+    /// The ground-loop pump motor component (pf 0.84,
+    /// `hvac::reactive::LOOP_PUMP_ZIP`), honouring the unit-level pf=0
+    /// sentinel: its real polynomial scales the pump's draw at the bus
+    /// voltage through the recorded deep-sag form, and its reactive side
+    /// drives Q. The compressor/fan/crankcase
+    /// response comes from the inner [`AirConditioner`].
     pump_zip: hares_types::zip::ZipLoad,
 }
 
@@ -645,6 +647,14 @@ impl Equipment for GshpCooler {
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
             ) * sf
+            // The declared deep-sag response (docs/PHYSICS_DECISIONS.md,
+            // the deep-sag entry): the pump motor's draw evaluates its
+            // pump-motor row at the ACTUAL bus voltage. The inner
+            // AirConditioner carries the compressor/fan response.
+            * crate::hvac::reactive::secondary_motor_real_multiplier(
+                &self.pump_zip,
+                env.grid.bus_voltage_pu(),
+            )
         } else {
             0.0
         };
@@ -999,7 +1009,10 @@ impl Equipment for WshpCooler {
         self.inner.step(env, dt, ports)?;
 
         // space_fraction scales the pump draw exactly like the inner unit's
-        // compressor/fan (see GshpCooler::step).
+        // compressor/fan (see GshpCooler::step). The declared deep-sag
+        // response (docs/PHYSICS_DECISIONS.md, the deep-sag entry): the
+        // pump motor's draw evaluates its pump-motor row at the ACTUAL bus
+        // voltage.
         let compressor_ran = self.inner.core.last_cooling_rtf > 0.0;
         let sf = self.inner.core.hvac.config.space_fraction;
         let pump_w = if compressor_ran {
@@ -1011,6 +1024,10 @@ impl Equipment for WshpCooler {
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
             ) * sf
+                * crate::hvac::reactive::secondary_motor_real_multiplier(
+                    &self.pump_zip,
+                    env.grid.bus_voltage_pu(),
+                )
         } else {
             0.0
         };
@@ -2362,7 +2379,7 @@ mod tests {
     /// class pf 0.96, one with a constant-power sidecar override — must produce
     /// bit-identical real power at every step and voltage.
     #[test]
-    fn ashp_cooler_real_power_bit_identical_with_and_without_reactive_zip() {
+    fn ashp_cooler_real_power_follows_the_row_and_reactive_follows_pf() {
         let config_pf = base_config();
         let mut config_nopf = config_pf.clone();
         config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
@@ -2402,11 +2419,25 @@ mod tests {
             eq_nopf
                 .step(&env, Duration::from_secs(60), &mut ports_nopf)
                 .unwrap();
-            assert_eq!(
-                ports_pf.electrical.load_power_w.to_bits(),
-                ports_nopf.electrical.load_power_w.to_bits(),
-                "step {i} (v={v}): real power diverged between pf and no-pf twins"
-            );
+            // The recorded deep-sag decision: the pf twin's draw evaluates
+            // its row's real polynomial at the ACTUAL bus voltage, so the
+            // twins agree bitwise at the reference voltage (the exact
+            // identity) and the row's response leaves the constant-power
+            // twin's flat line off it.
+            if *v == 1.0 {
+                assert_eq!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): at the reference voltage the twins must agree bitwise"
+                );
+            } else {
+                assert_ne!(
+                    ports_pf.electrical.load_power_w.to_bits(),
+                    ports_nopf.electrical.load_power_w.to_bits(),
+                    "step {i} (v={v}): the row-governed draw must leave the \
+                     constant-power twin's flat line"
+                );
+            }
             assert_eq!(
                 ports_nopf.electrical.reactive_power_var, 0.0,
                 "pf-0 twin must produce zero reactive power"
