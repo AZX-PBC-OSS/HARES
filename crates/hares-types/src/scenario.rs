@@ -146,6 +146,19 @@ impl ScenarioDistribution {
     /// normaliser, and dividing by an infinity would return a finite,
     /// wrong mean.
     ///
+    /// The finite gate passes values the f64 fold has already rounded, and
+    /// that accuracy is the contract: the corners' sum and the discrete's
+    /// value-weight quotients' fold carry an absolute rounding error
+    /// bounded by the largest term's own ulp scale, so the mean's relative
+    /// error is unbounded only where the true mean sits inside that
+    /// absolute error, which is a support whose terms nearly cancel at the
+    /// exponent boundary (a triangular on [-1e308, 1e-10, 1e308] computes
+    /// the fold's 0.0 where the exact mean is 3.3e-11, the uniform's
+    /// symmetric corner sum's own class one corner further). The sampler
+    /// never reads the mean (the draws ride the quantile), and no shipped
+    /// support approaches the exponent range; the boundary's fold values
+    /// are pinned (`the_means_near_cancellation_boundary_is_the_folds_own_value`).
+    ///
     /// # Errors
     ///
     /// [`HaresError`] when the distribution's parameters are malformed or
@@ -2091,6 +2104,48 @@ mod tests {
         assert!(
             symmetric.quantile(0.5).is_err(),
             "the symmetric uniform's half-span overflows: the quantile must refuse"
+        );
+    }
+
+    /// The mean's near-cancellation boundary is the f64 fold's own value:
+    /// the corners' sum and the discrete's value-weight quotients' fold
+    /// carry the largest term's own rounding (about 2e292 at the exponent
+    /// boundary), so a support whose terms nearly cancel computes the
+    /// fold's value, not the exact mean's. The uniform's symmetric corner
+    /// sum's 0.0 is the same contract one corner fewer (pinned beside the
+    /// overflow refusals above); this pin holds the fold's values for the
+    /// triangular's and the discrete's folds, so a change to a fold's
+    /// order or its compensation fails here to be chosen deliberately.
+    /// The exact means are (-1e308 + 1e-10 + 1e308)/3 = 3.3e-11 and the
+    /// same support's quotients'/3: the computed 0.0 is the fold's
+    /// rounding, inside the absolute bound the contract states on
+    /// `mean`.
+    #[test]
+    fn the_means_near_cancellation_boundary_is_the_folds_own_value() {
+        let triangular = ScenarioDistribution::Triangular {
+            min: -1e308,
+            mode: 1e-10,
+            max: 1e308,
+        };
+        // The mode's 1e-10 sits below the corners' ulp: the fold loses it
+        // at the first addition and computes
+        // ((-1e308 + 1e-10) + 1e308) / 3 = 0.0.
+        assert_eq!(
+            triangular.mean().expect("the fold is finite"),
+            0.0,
+            "the near-cancelling triangular's mean is the f64 fold's value"
+        );
+        // The discrete's quotients' fold over the same support: the
+        // weights' total is the exact 3, each quotient v*w/3 rounds to
+        // the corners' magnitude, and the fold computes 0.0 the same way.
+        let discrete = ScenarioDistribution::Discrete {
+            values: vec![-1e308, 1e-10, 1e308],
+            weights: vec![1.0, 1.0, 1.0],
+        };
+        assert_eq!(
+            discrete.mean().expect("the fold is finite"),
+            0.0,
+            "the near-cancelling discrete's mean is the f64 fold's value"
         );
     }
 
