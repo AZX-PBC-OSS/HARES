@@ -272,33 +272,89 @@ fn a_schedule_csv_is_never_diversified() {
     );
 }
 
-/// The new sources add no runtime stochastic state: the diversity's draws
-/// ride the build-time profile transform and no stream of theirs appears
-/// in the dwelling's seeded-stream ledger, and the dwelling's own seeded
-/// streams (key, nonce, word position) are identical with the layer on
-/// and off, warm-up enabled or not.
+/// The checkpoint carries no schedule: a diversified home restored from a
+/// checkpoint holds the draws its build produced, not a re-draw and not
+/// the shared profile. The restored home's schedule is the checkpointed
+/// home's bitwise, and its continuation is bitwise the uninterrupted
+/// home's, so the drawn dimensions survive the restore.
+#[test]
+fn a_checkpoint_restore_keeps_the_drawn_schedule() {
+    let mut original = Dwelling::from_config(config(1, 42, None)).expect("the home builds");
+    for _ in 0..2 {
+        original.step().expect("the home steps");
+    }
+    let checkpoint = original.save_checkpoint().expect("the checkpoint saves");
+
+    let mut restored = Dwelling::from_config(config(1, 42, None)).expect("a second build");
+    restored
+        .load_checkpoint(checkpoint)
+        .expect("the checkpoint restores");
+
+    assert_eq!(
+        schedule_rows(&restored),
+        schedule_rows(&original),
+        "the restored home must hold the checkpointed home's drawn schedule"
+    );
+    let mut off_cfg = config(1, 42, None);
+    off_cfg.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    let off = Dwelling::from_config(off_cfg).expect("the undiversified home builds");
+    assert_ne!(
+        schedule_rows(&restored),
+        schedule_rows(&off),
+        "the restored schedule must be the drawn one, not the shared profile"
+    );
+
+    // The continuation: the two homes' remaining steps agree bitwise, which
+    // the schedule (the loads' driver) would break if the restore re-drew
+    // it.
+    let original_steps: Vec<_> = (0..20)
+        .map(|_| original.step().expect("the checkpointed home steps"))
+        .collect();
+    let restored_steps: Vec<_> = (0..20)
+        .map(|_| restored.step().expect("the restored home steps"))
+        .collect();
+    assert_eq!(
+        restored_steps, original_steps,
+        "the restored home's continuation must be the checkpointed home's"
+    );
+}
+
+/// The diversity layer adds no runtime stochastic state: its draws ride the
+/// build-time profile transform, so the dwelling's seeded-stream ledger (the
+/// key, the nonce and the word position of every stream the build assigns)
+/// is identical with the layer on and off, and so is it warm-up or not. The
+/// schedules differ, which is what makes the ledger's equality a statement
+/// about the layer's state and not about two identical builds.
 #[test]
 fn the_diversity_adds_no_runtime_stochastic_state() {
+    let mut off_cfg = config(1, 42, None);
+    off_cfg.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    let on = Dwelling::from_config(config(1, 42, None)).expect("the diversified dwelling builds");
+    let off = Dwelling::from_config(off_cfg).expect("the undiversified dwelling builds");
+    assert_eq!(
+        on.seeded_streams(),
+        off.seeded_streams(),
+        "the layer's draws must not appear in the dwelling's seeded-stream ledger"
+    );
+    assert_ne!(
+        schedule_rows(&on),
+        schedule_rows(&off),
+        "the knob must move the schedule: the ledger's equality above would \
+         otherwise compare two identical builds"
+    );
+    // Warm-up replays the run's first day; it neither adds a stream nor
+    // moves the layer's build-time draws.
     let mut cfg_warm = config(1, 42, None);
     cfg_warm.settings.sim_config.warmup = hares_io::Warmup::default();
     let mut cfg_nowarm = config(1, 42, None);
     cfg_nowarm.settings.sim_config.warmup = hares_io::Warmup::Disabled;
     let warm = Dwelling::from_config(cfg_warm).expect("the warm-up dwelling builds");
     let nowarm = Dwelling::from_config(cfg_nowarm).expect("the no-warm-up dwelling builds");
-    let warm_streams = warm.seeded_streams();
-    let nowarm_streams = nowarm.seeded_streams();
     assert_eq!(
-        warm_streams, nowarm_streams,
+        warm.seeded_streams(),
+        nowarm.seeded_streams(),
         "the warm-up and no-warm-up builds must hold the same seeded streams"
     );
-    for stream in &warm_streams {
-        assert!(
-            !stream.component.contains("diversity"),
-            "the diversity must not appear in the dwelling's stream ledger: \
-             found '{}'",
-            stream.component
-        );
-    }
     // The schedules are the same bitwise: the draws are build-time
     // constants, not per-day state the warm-up replays or shifts.
     assert_eq!(schedule_rows(&warm), schedule_rows(&nowarm));
