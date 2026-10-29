@@ -31,6 +31,11 @@ replacement.
   `include_step_dict=False` keyword: the row's `"step"` dict, the same
   dict `Dwelling.step()` returns, is built only when asked, and the row's
   zone keys are cached per dwelling instead of rebuilt per step.
+  A multi-dimensional buffer whose declared shape is not
+  `(n_envs, n_actions)` raises `ValueError` naming the expected and the
+  received shape (a wrong-shaped buffer was accepted and read in flat
+  order, landing its floats on the wrong dwellings); a 1-D buffer of the
+  exact item count is the flat form.
   `info["warning_count"]` is an int (was a float), and the single-dwelling
   gym's step info omits `"seed"` when no seed is set (was `0`) and builds
   no telemetry dicts under the default reward.

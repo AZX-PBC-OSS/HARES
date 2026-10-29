@@ -627,7 +627,12 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// `actions` is a C-contiguous `(n_envs, n_actions)` float64 buffer
 /// protocol view (a numpy array among them), read in place, one row per
 /// dwelling: the observation path's zero-copy channel in reverse. `None`
-/// steps every dwelling with no actions.
+/// steps every dwelling with no actions. A multi-dimensional buffer whose
+/// declared shape is not `(n_envs, n_actions)` is a refused call naming
+/// the expected and the received shape, no coercion: the buffer is read
+/// in flat row-major order, so a transposed or reshaped view would land
+/// its floats on the wrong dwellings. A 1-D buffer of the exact item
+/// count is the flat form.
 ///
 /// Each environment's observation is read through the environment's own
 /// frozen plan (`plans`, built at the environment's `reset`) into `obs_out`,
@@ -683,15 +688,35 @@ pub fn batch_step_py(
         Some(obj) => Some(readable_f64_buffer(obj)?),
     };
     let action_width = action_layout.len();
-    if let Some(buffer) = &action_buffer
-        && buffer.item_count() != dwellings.len() * action_width
-    {
-        return Err(PyValueError::new_err(format!(
-            "the action buffer holds {} floats for {} environments of {} action dimensions",
-            buffer.item_count(),
-            dwellings.len(),
-            action_width,
-        )));
+    if let Some(buffer) = &action_buffer {
+        let n_envs = dwellings.len();
+        if buffer.item_count() != n_envs * action_width {
+            return Err(PyValueError::new_err(format!(
+                "the action buffer holds {} floats for {} environments of {} action dimensions",
+                buffer.item_count(),
+                n_envs,
+                action_width,
+            )));
+        }
+        // The declared shape is the contract: one row per environment,
+        // `action_width` floats per row. The buffer is read in flat
+        // row-major order, so a multi-dimensional buffer whose own shape
+        // names anything else (a transposed fleet, a reshaped view) would
+        // land its floats on the wrong dwellings: refused here, naming
+        // the expected and the received shape, no coercion. A 1-D buffer
+        // of the exact count is the documented flat form (a stdlib
+        // `array.array('d')` carries no second dimension to declare).
+        if buffer.dimensions() > 1 && buffer.shape() != [n_envs, action_width] {
+            return Err(PyValueError::new_err(format!(
+                "the action buffer's shape is {:?} for {} environments of {} \
+                 action dimensions: expected [{}, {}]",
+                buffer.shape(),
+                n_envs,
+                action_width,
+                n_envs,
+                action_width,
+            )));
+        }
     }
     if plans.len() != dwellings.len() {
         return Err(PyValueError::new_err(format!(
@@ -700,9 +725,10 @@ pub fn batch_step_py(
             dwellings.len(),
         )));
     }
-    // An empty fleet's result is an empty list: nothing to step, nothing to
-    // write, and the caller's buffer may be any shape they like (a
-    // zero-item stdlib array exposes no float64 format to validate).
+    // An empty fleet's result is an empty list: nothing to step, nothing
+    // to write. The action buffer's validation has already run by then,
+    // so an empty fleet still refuses a malformed buffer; the no-actions
+    // form is `None`.
     if dwellings.is_empty() {
         return Ok(Vec::new());
     }
@@ -1120,6 +1146,130 @@ mod tests {
                 single_dict.repr().expect("repr").to_string_lossy(),
                 batch_dict.repr().expect("repr").to_string_lossy(),
                 "the step dicts are byte-identical: keys, values and order"
+            );
+        });
+    }
+
+    /// The batch's own stepable fixture set: `n_envs` base.xml dwellings,
+    /// a heating and a cooling setpoint column on the furnace, bounds
+    /// (-50, 80) on both columns, and a zeroed `(n_envs, 1)` observation
+    /// buffer.
+    struct SetpointBatch {
+        dwellings: Vec<Py<PyDwelling>>,
+        layout: Vec<(String, String)>,
+        signal_types: HashMap<String, String>,
+        plans: Vec<Py<PyObservationPlan>>,
+        buffer: Py<PyAny>,
+    }
+
+    fn setpoint_batch(py: Python<'_>, n_envs: usize) -> SetpointBatch {
+        let dwellings: Vec<Py<PyDwelling>> = (0..n_envs).map(|_| base_dwelling(py)).collect();
+        let layout = vec![
+            ("Gas Furnace".to_string(), "heating_setpoint_c".to_string()),
+            ("Gas Furnace".to_string(), "cooling_setpoint_c".to_string()),
+        ];
+        let mut signal_types = HashMap::new();
+        signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+        let plans: Vec<Py<PyObservationPlan>> = dwellings
+            .iter()
+            .map(|dwelling| {
+                let plan = dwelling
+                    .bind(py)
+                    .borrow()
+                    .observation_plan(vec!["total_power_w".to_string()])
+                    .expect("the plan builds");
+                Py::new(py, plan).expect("the plan wraps")
+            })
+            .collect();
+        let buffer = numpy::PyArray2::<f64>::zeros(py, (n_envs, 1), false);
+        SetpointBatch {
+            dwellings,
+            layout,
+            signal_types,
+            plans,
+            buffer: buffer.into_any().unbind(),
+        }
+    }
+
+    /// A buffer with the right item count and the wrong declared shape is
+    /// refused at the boundary, naming the expected and the received
+    /// shape. The batch reads the buffer in flat row-major order as
+    /// `(n_envs, action_width)` rows, so the attack's four floats declared
+    /// `(1, 4)` for a `(2, 2)` contract would apply both rows' setpoints
+    /// to environment 0 and leave environment 1 uncontrolled, with no
+    /// diagnostic. A refused call reaches no dwelling.
+    #[test]
+    fn an_action_buffer_with_the_wrong_declared_shape_is_refused() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let batch = setpoint_batch(py, 2);
+
+            // Four floats for a (2, 2) contract, declared (1, 4): the
+            // accepted-at-the-parent reshape.
+            let actions = actions_array(py, &[&[21.0, 24.0, 20.0, 25.0]]);
+            let err = batch_step_py(
+                py,
+                batch.dwellings,
+                Some(actions.bind(py)),
+                batch.plans,
+                batch.layout,
+                batch.signal_types,
+                vec![(-50.0, 80.0), (-50.0, 80.0)],
+                batch.buffer.bind(py),
+                false,
+            )
+            .expect_err("a wrong-shaped buffer is refused, not read flat");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let message = err.value(py).to_string();
+            assert!(
+                message.contains("[2, 2]") && message.contains("[1, 4]"),
+                "the error names the expected and the received shape: {message}"
+            );
+        });
+    }
+
+    /// The transposed batch is refused. A caller whose rows are the
+    /// contract's columns hands over a contiguous buffer of the same six
+    /// floats with the dimensions swapped; read in flat row-major order,
+    /// every action lands on the wrong dwelling: the attack's probe read
+    /// a transposed two-column batch as inverted and narrow setpoint
+    /// pairs, each dispatching with a warning, the call Ok. The error
+    /// names the expected and the received shape. A square batch's
+    /// transpose carries the expected declared shape, and no boundary
+    /// check can refuse it: its wrongness is the values', not the
+    /// buffer's. The shape contract pins every non-square transpose, a
+    /// fleet's common shape.
+    #[test]
+    fn a_transposed_action_buffer_is_refused() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let batch = setpoint_batch(py, 3);
+
+            // The intended matrix is (3, 2), rows (21, 24), (20, 25) and
+            // (21, 24). The transposed buffer is (2, 3), the same six
+            // floats column by column.
+            let actions = actions_array(py, &[&[21.0, 20.0, 21.0], &[24.0, 25.0, 24.0]]);
+            let err = batch_step_py(
+                py,
+                batch.dwellings,
+                Some(actions.bind(py)),
+                batch.plans,
+                batch.layout,
+                batch.signal_types,
+                vec![(-50.0, 80.0), (-50.0, 80.0)],
+                batch.buffer.bind(py),
+                false,
+            )
+            .expect_err("a transposed buffer is refused, not read flat");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let message = err.value(py).to_string();
+            assert!(
+                message.contains("[3, 2]") && message.contains("[2, 3]"),
+                "the error names the expected and the received shape: {message}"
             );
         });
     }

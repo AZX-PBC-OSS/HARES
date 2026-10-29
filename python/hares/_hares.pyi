@@ -3385,7 +3385,12 @@ class Dwelling:
 # batch_step: the actions are a C-contiguous (n_dwellings, action_layout
 # length) float64 buffer protocol view (a numpy array among them), read in
 # place, one row per dwelling, or None to step every dwelling with no
-# actions. action_bounds: one finite (low, high), low <= high, per
+# actions. A multi-dimensional buffer whose declared shape is not
+# (n_dwellings, action_layout length) raises ValueError naming the
+# expected and the received shape, no coercion: the buffer is read in flat
+# row-major order, so a transposed or reshaped view would land its floats
+# on the wrong dwellings. A 1-D buffer of the exact item count is the flat
+# form. action_bounds: one finite (low, high), low <= high, per
 # action_layout column, shared by every dwelling of the call. A bad pair, a
 # dwelling whose deadband target holds a narrower band, or a dwelling whose
 # equipment is missing or would reject its signal raises ValueError before
