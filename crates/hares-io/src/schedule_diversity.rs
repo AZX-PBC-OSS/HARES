@@ -220,6 +220,65 @@ mod tests {
         assert_eq!(base.column_names, diversified_schedule.column_names);
     }
 
+    /// The transform's aggregate contract, per home: the rotation is a
+    /// permutation of each day-type array's same 24 doubles, so a home's
+    /// profile mass is unmoved by its timing draw (the sum can differ
+    /// only by the addition order, at most 24 ulps), and the level scale
+    /// multiplies the mass by exactly the drawn factor. The fleet's mean
+    /// therefore sits at the profile's mean times the mean draw: the mass
+    /// channel carries no other change, which is what makes the fleet
+    /// calibration (the clamped lognormal's mean) the whole story.
+    #[test]
+    fn the_transform_moves_the_profiles_mass_and_scales_it_by_the_factor() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
+        let profiles = crate::load_default_profiles(&dir).expect("the shipped profiles load");
+        let draws = ScheduleDiversityDraws::draw(dwelling_seed_scenario(42, None, 1));
+        let diversified = diversify_profiles(&profiles, &draws);
+        let applied: [(&str, i32, f64); 8] = [
+            (
+                "Occupancy",
+                draws.presence_shift_hours,
+                draws.occupancy_level_scale,
+            ),
+            ("MELs", 0, draws.appliance_factors.mels),
+            ("Indoor Lighting", 0, draws.appliance_factors.lighting),
+            ("Dishwasher", 0, draws.appliance_factors.dishwasher),
+            ("Clothes Washer", 0, draws.appliance_factors.clothes_washer),
+            ("Clothes Dryer", 0, draws.appliance_factors.clothes_dryer),
+            ("Cooking Range", 0, draws.appliance_factors.cooking_range),
+            (
+                "Water Heating",
+                draws.water_shift_hours,
+                draws.water_level_scale,
+            ),
+        ];
+        for (name, shift, factor) in applied {
+            let base = profiles.get(name).expect("the shipped profile");
+            let out = diversified.get(name).expect("the diversified profile");
+            for (base_hours, out_hours) in [
+                (&base.weekday_fractions, &out.weekday_fractions),
+                (&base.weekend_fractions, &out.weekend_fractions),
+            ] {
+                let base_mass: f64 = base_hours.iter().sum();
+                let rotated = rotate_hours(base_hours, shift);
+                let rotated_mass: f64 = rotated.iter().sum();
+                let out_mass: f64 = out_hours.iter().sum();
+                assert!(
+                    (rotated_mass - base_mass).abs() <= 1e-14 * base_mass,
+                    "the {name} profile's rotation moved the mass: {base_mass} to \
+                     {rotated_mass}"
+                );
+                assert!(
+                    (out_mass - rotated_mass * factor).abs() <= 1e-14 * base_mass * factor,
+                    "the {name} profile's mass is not the rotated mass times the \
+                     drawn factor {factor}: {out_mass} vs {}",
+                    rotated_mass * factor
+                );
+            }
+        }
+    }
+
     /// The fleet-aggregate acceptance, stated against the published
     /// reference: the EULP report's distribution of per-home annual
     /// electricity by end use (Pigman, McCarty, et al., NREL 2022,

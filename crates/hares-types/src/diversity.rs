@@ -21,12 +21,18 @@
 //! Parameters.csv; the provenance contract and its pins live on
 //! `hares_io::schedule_resolve::inject_occupancy_schedule`). The SPREADS
 //! below are this record's calibrated choice, not published values: each
-//! scale is drawn mean-one (a lognormal with mu = -sigma^2/2), so the
-//! fleet aggregate's mean stays at the 301 profile's mean whatever the
-//! spread, and the timing shifts are bounded integer hours on the
-//! profiles' own resolution. The published variance reference the
-//! acceptance is stated against is the NREL End-Use Load Profiles report
-//! (Pigman, McCarty, et al., NREL 2022,
+//! scale is drawn mean-one BEFORE its clamp (a lognormal with mu =
+//! -sigma^2/2), so the unclamped draw's mean is exactly one, and the
+//! clamp's fold lowers the fleet mean of the drawn scale to 0.999945
+//! (occupancy, sigma 0.15), 0.999561 (appliance, sigma 0.25) and
+//! 0.997761 (water, sigma 0.30): a low bias of at most 0.23 percent,
+//! not a drift that compounds with the spread (the closed form and its
+//! pin are `the_fleet_scale_means_are_the_clamped_lognormal_means`). The
+//! timing shifts are bounded integer hours on the profiles' own
+//! resolution, a permutation of each day-type array's mass, so a home's
+//! profile integral is unmoved by its timing draw. The published variance
+//! reference the acceptance is stated against is the NREL End-Use Load
+//! Profiles report (Pigman, McCarty, et al., NREL 2022,
 //! <https://www.osti.gov/servlets/purl/1909353>): per-home annual
 //! electricity by end use across the synthetic stock, its moments the
 //! comparison the fleet-aggregate witnesses state their tolerances
@@ -237,8 +243,10 @@ fn shift_draw(rng: &mut ChaCha8Rng, band: i32) -> i32 {
 }
 
 /// A mean-one lognormal draw clamped to `lo..=hi`: the normal's mu is
-/// -sigma^2/2, so the unclamped mean is exp(-sigma^2/2 + sigma^2/2) = 1
-/// and the fleet aggregate's mean stays at the profile's own.
+/// -sigma^2/2, so the UNCLAMPED mean is exp(-sigma^2/2 + sigma^2/2) = 1.
+/// The clamp's fold lowers the mean; the closed form of the clamped mean
+/// and its numbers per spread are on the fleet test
+/// (`the_fleet_scale_means_are_the_clamped_lognormal_means`).
 fn mean_one_lognormal(rng: &mut ChaCha8Rng, sigma: f64, lo: f64, hi: f64) -> f64 {
     let z: f64 = rand_distr::StandardNormal.sample(rng);
     (libm::exp(sigma * (z - sigma / 2.0))).clamp(lo, hi)
@@ -340,63 +348,127 @@ mod tests {
         }
     }
 
-    /// The mean-one calibration: across a fleet of keys the drawn scales'
-    /// mean sits at 1 within the sampling error of the fleet (the fleet
-    /// aggregate the 301 profiles' mean pins), and the fleet's cross-home
-    /// spread is nonzero (the diversity exists).
+    /// The fleet calibration's invariant: the mean of a drawn scale is
+    /// the CLAMPED lognormal's analytic mean, not 1. For
+    /// X = exp(sigma*Z - sigma^2/2) (E[X] = 1) clamped to [lo, hi],
+    ///   E[clamp(X)] = 1 - E[(X-hi)^+] - E[(lo-X)^+],
+    ///   E[(X-c)^+] = Phi((sigma^2/2 - ln c)/sigma)
+    ///                - c*Phi((-sigma^2/2 - ln c)/sigma),
+    ///   E[(c-X)^+] = c*Phi((ln c + sigma^2/2)/sigma)
+    ///                - Phi((ln c - sigma^2/2)/sigma),
+    /// which gives 0.999945363 (occupancy, sigma 0.15, [0.6, 1.6]),
+    /// 0.999560544 (appliance, sigma 0.25, [0.5, 2.0]) and 0.997761048
+    /// (water, sigma 0.30, [0.5, 2.0]). The draw is therefore mean-one
+    /// before the clamp and the clamp's fold is a stated low bias of at
+    /// most 0.23 percent, not an unstated drift: 50,000 homes pin each
+    /// family's mean at the closed form within four standard errors
+    /// (sigma/sqrt(N) = 1.34e-3 at the widest spread) and the drawn
+    /// spread at its own sigma within 20 percent.
     #[test]
-    fn fleet_scales_are_mean_one_with_nonzero_spread() {
-        let n = 400_u64;
-        let mut occupancy_sum = 0.0;
-        let mut mels_sum = 0.0;
-        let mut water_sum = 0.0;
-        let mut mels_first: Option<f64> = None;
+    fn the_fleet_scale_means_are_the_clamped_lognormal_means() {
+        /// The closed-form mean of the clamped lognormal, above.
+        fn clamped_mean(sigma: f64, lo: f64, hi: f64) -> f64 {
+            let mu = -sigma * sigma / 2.0;
+            let upper = crate::scenario::normal_cdf((mu + sigma * sigma - libm::log(hi)) / sigma)
+                - hi * crate::scenario::normal_cdf((mu - libm::log(hi)) / sigma);
+            let lower = lo * crate::scenario::normal_cdf((libm::log(lo) - mu) / sigma)
+                - crate::scenario::normal_cdf((libm::log(lo) - mu - sigma * sigma) / sigma);
+            1.0 - upper - lower
+        }
+
+        let n = 50_000_u64;
+        let mut sums = [0.0_f64; 3];
+        let mut sq_sums = [0.0_f64; 3];
         for i in 0..n {
             let draws = ScheduleDiversityDraws::draw(dwelling_seed_scenario(7, None, i as i64));
-            occupancy_sum += draws.occupancy_level_scale;
-            mels_sum += draws.appliance_factors.mels;
-            water_sum += draws.water_level_scale;
-            if i == 0 {
-                mels_first = Some(draws.appliance_factors.mels);
-            } else if Some(draws.appliance_factors.mels) == mels_first {
-                panic!("two homes drew the same MELs factor: the streams collided");
+            let scales = [
+                draws.occupancy_level_scale,
+                draws.appliance_factors.mels,
+                draws.water_level_scale,
+            ];
+            for (c, scale) in scales.iter().enumerate() {
+                sums[c] += scale;
+                sq_sums[c] += scale * scale;
             }
         }
-        let mean = |sum: f64| sum / n as f64;
-        // N=400 at sigma 0.30: the mean's standard error is about 1.5
-        // percent, so a 10 percent band is several of them plus the
-        // clamp's fold; the band is the fleet witness's stated tolerance.
-        assert!(
-            (mean(occupancy_sum) - 1.0).abs() < 0.10,
-            "the occupancy scale's fleet mean {} left the 1.0 band",
-            mean(occupancy_sum)
-        );
-        assert!(
-            (mean(mels_sum) - 1.0).abs() < 0.10,
-            "the MELs factor's fleet mean {} left the 1.0 band",
-            mean(mels_sum)
-        );
-        assert!(
-            (mean(water_sum) - 1.0).abs() < 0.10,
-            "the water level's fleet mean {} left the 1.0 band",
-            mean(water_sum)
-        );
+        let cases = [
+            ("occupancy", OCCUPANCY_LEVEL_SIGMA, OCCUPANCY_LEVEL_BOUNDS),
+            ("appliance", APPLIANCE_FACTOR_SIGMA, APPLIANCE_FACTOR_BOUNDS),
+            ("water", WATER_LEVEL_SIGMA, WATER_LEVEL_BOUNDS),
+        ];
+        for (c, (name, sigma, (lo, hi))) in cases.iter().enumerate() {
+            let mean = sums[c] / n as f64;
+            let variance = (sq_sums[c] / n as f64 - mean * mean).max(0.0);
+            let sd = libm::sqrt(variance);
+            let analytic = clamped_mean(*sigma, *lo, *hi);
+            let se = sigma / libm::sqrt(n as f64);
+            assert!(
+                (mean - analytic).abs() < 4.0 * se,
+                "the {name} scale's fleet mean {mean} left the clamped \
+                 lognormal's analytic mean {analytic} beyond four standard \
+                 errors ({se})"
+            );
+            assert!(
+                (analytic - 1.0).abs() < 0.0025,
+                "the {name} scale's clamp folds {:.4} percent of the mean: \
+                 the record states at most 0.23 percent",
+                (analytic - 1.0).abs() * 100.0
+            );
+            assert!(
+                (sd - sigma).abs() < 0.2 * sigma,
+                "the {name} scale's drawn spread {sd} left its declared sigma {sigma}"
+            );
+        }
     }
 
-    /// The dimension's draws never touch the dwelling's own RNG: the
-    /// diversity derivation reads no stream the dwelling's build or step
-    /// draws from (the tag and the identity partition prove it, and the
-    /// dwelling's stream-0 generator's state is unchanged by a draw call).
+    /// The draws never share a keystream: over a bounded fleet, each
+    /// home's five dimension streams, the scenario sampler's stream and
+    /// the dwelling's own stream 0 yield distinct first words. The
+    /// derivation's injectivity rides the key's bytes and the reserved
+    /// identities; a shared keystream is the collision it forbids, and
+    /// this is the constructive check over the fleet's actual draws.
     #[test]
-    fn draws_leave_the_dwelling_stream_untouched() {
-        let key = dwelling_seed_scenario(42, None, 7);
-        let dwelling_rng = crate::rng::RngStream {
-            seed: key,
-            stream: 0,
-        };
-        let before = dwelling_rng.rng_at(0).random::<u64>();
-        let _ = ScheduleDiversityDraws::draw(key);
-        let after = dwelling_rng.rng_at(0).random::<u64>();
-        assert_eq!(before, after, "the diversity draws consumed stream 0");
+    fn dimension_keystreams_are_disjoint_across_homes_and_dimensions() {
+        use std::collections::BTreeMap;
+
+        let dimensions = [
+            PRESENCE_TIMING_DIMENSION,
+            OCCUPANCY_LEVEL_DIMENSION,
+            APPLIANCE_FACTORS_DIMENSION,
+            WATER_TIMING_DIMENSION,
+            WATER_LEVEL_DIMENSION,
+        ];
+        let mut seen: BTreeMap<u64, String> = BTreeMap::new();
+        let mut homes = 0_u32;
+        for bldg in 0..64_i64 {
+            let key = dwelling_seed_scenario(42, Some(1), bldg);
+            let own = crate::rng::RngStream {
+                seed: key,
+                stream: 0,
+            }
+            .rng_at(0)
+            .random::<u64>();
+            if let Some(other) = seen.insert(own, format!("dwelling stream 0 of bldg {bldg}")) {
+                panic!("bldg {bldg}'s dwelling stream shares a word with {other}");
+            }
+            for dimension in dimensions {
+                let word = RngStream::schedule_diversity(key, dimension)
+                    .rng_at(0)
+                    .random::<u64>();
+                if let Some(other) = seen.insert(word, format!("{dimension} of bldg {bldg}")) {
+                    panic!("{dimension} of bldg {bldg} shares a word with {other}");
+                }
+            }
+            let word = RngStream::scenario_sampler(key).rng_at(0).random::<u64>();
+            if let Some(other) = seen.insert(word, format!("the sampler of bldg {bldg}")) {
+                panic!("bldg {bldg}'s sampler shares a word with {other}");
+            }
+            homes += 1;
+        }
+        assert_eq!(
+            seen.len(),
+            (homes * 7) as usize,
+            "every home contributes seven distinct keystreams"
+        );
     }
 }
