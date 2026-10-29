@@ -95,7 +95,10 @@ fn patches_applied_to(
 /// The record is checked before anything is applied: a value with no
 /// recorded target, a patch target naming an unknown field, or a
 /// settings override map (or one of its equipment entries) of another
-/// shape is refused naming the object it cannot apply. Both new values are
+/// shape is refused naming the object it cannot apply. A record with
+/// several faults names the FIRST the application reaches: the record's
+/// own value checks in declaration order, then the overrides merge's
+/// entries in the map's order. Both new values are
 /// built beside the settings and assigned only when both have landed, so a
 /// refusal leaves the caller's settings exactly as they were: nothing is
 /// applied and then dropped, and no refusal consumes the caller's state.
@@ -232,6 +235,60 @@ mod tests {
             settings.patches.is_none(),
             "the refused record must not apply its targeted sibling either"
         );
+    }
+
+    /// A record with more than one fault names the FIRST fault the
+    /// application reaches, in the values' declaration order, and applies
+    /// nothing: the caller fixes the named fault and the next attempt
+    /// names the next. The value checks run before the overrides merge, so
+    /// a record's own faults are named before the settings' shape is
+    /// examined.
+    #[test]
+    fn a_record_with_two_faults_names_the_first_in_declaration_order() {
+        let record = |values: serde_json::Value| -> ScenarioSample {
+            serde_json::from_value(serde_json::json!({
+                "scenario_id": 1,
+                "bldg_id": 7,
+                "values": values,
+                "targets": {
+                    "bedrooms": {"patch": {"field": "not_a_patch_field"}}
+                }
+            }))
+            .expect("the record parses")
+        };
+
+        // The untargeted value first: it is the fault named.
+        let sample = record(serde_json::json!([
+            {"name": "orphan", "value": 5.0, "unit": "W"},
+            {"name": "bedrooms", "value": 3.0, "unit": "count"}
+        ]));
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        let err = apply_sample(&sample, &mut settings)
+            .expect_err("a record with two faults must be refused");
+        assert!(
+            err.to_string().contains("orphan"),
+            "the first fault in declaration order is the untargeted value: {err}"
+        );
+        assert_eq!(
+            settings.overrides, None,
+            "the refused record must not apply anything"
+        );
+        assert!(settings.patches.is_none());
+
+        // The unknown patch field first: it is the fault named.
+        let sample = record(serde_json::json!([
+            {"name": "bedrooms", "value": 3.0, "unit": "count"},
+            {"name": "orphan", "value": 5.0, "unit": "W"}
+        ]));
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        let err = apply_sample(&sample, &mut settings)
+            .expect_err("a record with two faults must be refused");
+        assert!(
+            err.to_string().contains("not_a_patch_field"),
+            "the first fault in declaration order is the unknown patch field: {err}"
+        );
+        assert_eq!(settings.overrides, None);
+        assert!(settings.patches.is_none());
     }
 
     /// The application is all-or-nothing across the two channels: a

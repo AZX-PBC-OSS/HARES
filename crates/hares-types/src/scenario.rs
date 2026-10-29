@@ -460,7 +460,11 @@ impl ScenarioSample {
     /// carries values with no target and fails naming the value; a
     /// hand-edited record naming an unknown patch field fails naming the
     /// field. The application calls this before touching the settings, so
-    /// nothing is applied and then dropped.
+    /// nothing is applied and then dropped. When a record carries more
+    /// than one fault, the FIRST fault in the values' declaration order
+    /// is the one named: the check refuses the whole record on the first
+    /// fault it reaches, so the caller fixes that fault and the next
+    /// attempt names the next.
     ///
     /// # Errors
     ///
@@ -1347,6 +1351,110 @@ mod tests {
             err.to_string().contains("discrete"),
             "the error must name the distribution: {err}"
         );
+    }
+
+    /// Every public distribution method refuses a malformed distribution
+    /// and none of them panics: `validate`, `mean`, `sample` and
+    /// `quantile` each run the same validation before they index, divide
+    /// or map, so the family's whole public surface names the malformed
+    /// distribution instead of panicking or substituting a value. The
+    /// table is every family against the malformation classes (a
+    /// non-finite parameter, a degenerate or inverted support, an empty
+    /// or mismatched discrete, a negative or mass-less weight list).
+    #[test]
+    fn every_public_distribution_method_refuses_a_malformed_distribution() {
+        let malformed = [
+            ScenarioDistribution::Uniform {
+                low: 1.0,
+                high: 1.0,
+            },
+            ScenarioDistribution::Uniform {
+                low: f64::NAN,
+                high: 1.0,
+            },
+            ScenarioDistribution::Uniform {
+                low: 0.0,
+                high: f64::INFINITY,
+            },
+            ScenarioDistribution::Normal {
+                mean: 0.0,
+                std_dev: -1.0,
+            },
+            ScenarioDistribution::Normal {
+                mean: f64::NAN,
+                std_dev: 1.0,
+            },
+            ScenarioDistribution::LogNormal {
+                mu: 0.0,
+                sigma: 0.0,
+            },
+            ScenarioDistribution::LogNormal {
+                mu: f64::INFINITY,
+                sigma: 1.0,
+            },
+            ScenarioDistribution::Triangular {
+                min: 1.0,
+                mode: 0.0,
+                max: 2.0,
+            },
+            ScenarioDistribution::Triangular {
+                min: 1.0,
+                mode: 1.0,
+                max: 1.0,
+            },
+            ScenarioDistribution::Triangular {
+                min: 1.0,
+                mode: 1.0,
+                max: f64::NAN,
+            },
+            ScenarioDistribution::Discrete {
+                values: Vec::new(),
+                weights: Vec::new(),
+            },
+            ScenarioDistribution::Discrete {
+                values: vec![1.0],
+                weights: Vec::new(),
+            },
+            ScenarioDistribution::Discrete {
+                values: vec![1.0, 2.0],
+                weights: vec![1.0, -1.0],
+            },
+            ScenarioDistribution::Discrete {
+                values: vec![f64::NAN],
+                weights: vec![1.0],
+            },
+            ScenarioDistribution::Discrete {
+                values: vec![1.0, 2.0],
+                weights: vec![0.0, 0.0],
+            },
+        ];
+        let mut rng = RngStream::scenario_sampler([0_u8; 32]).rng_at(0);
+        for distribution in malformed {
+            let family = match &distribution {
+                ScenarioDistribution::Uniform { .. } => "uniform",
+                ScenarioDistribution::Normal { .. } => "normal",
+                ScenarioDistribution::LogNormal { .. } => "lognormal",
+                ScenarioDistribution::Triangular { .. } => "triangular",
+                ScenarioDistribution::Discrete { .. } => "discrete",
+            };
+            assert!(
+                distribution.validate().is_err(),
+                "{distribution:?} must not validate"
+            );
+            for (method, error) in [
+                ("mean", distribution.mean().expect_err("refused")),
+                (
+                    "sample",
+                    distribution.sample(&mut rng).expect_err("refused"),
+                ),
+                ("quantile", distribution.quantile(0.5).expect_err("refused")),
+            ] {
+                assert!(
+                    error.to_string().contains(family),
+                    "{method} must name the {family} distribution: {error}"
+                );
+            }
+        }
     }
 
     /// The mean has the same arm the draw and the quantile have: a
