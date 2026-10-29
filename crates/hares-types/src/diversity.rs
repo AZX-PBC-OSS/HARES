@@ -226,9 +226,14 @@ fn dimension_rng(dwelling_key: [u8; 32], dimension: &str) -> ChaCha8Rng {
 }
 
 /// A discrete-uniform hour shift over -band..=band.
+///
+/// The draw is the bounded sampler's, not a modulo of a 32-bit word: two
+/// billion is not a multiple of the band's 2*band+1 offsets, so a modulo
+/// would hand the low offsets the remainder (4 of 2^32 here, about 1e-9
+/// relative), and the conversion of the range would need a fallback for
+/// a band the parameter table never declares.
 fn shift_draw(rng: &mut ChaCha8Rng, band: i32) -> i32 {
-    let n = u32::try_from(2 * band + 1).unwrap_or(1);
-    (rng.random::<u32>() % n) as i32 - band
+    rng.random_range(-band..=band)
 }
 
 /// A mean-one lognormal draw clamped to `lo..=hi`: the normal's mu is
@@ -243,6 +248,37 @@ fn mean_one_lognormal(rng: &mut ChaCha8Rng, sigma: f64, lo: f64, hi: f64) -> f64
 mod tests {
     use super::*;
     use crate::rng::dwelling_seed_scenario;
+
+    /// The presence shifts' uniformity pin: every offset in the band is
+    /// drawn with the same probability, so a home is as likely to run an
+    /// hour early as an hour late and the fleet's timing mass has no
+    /// preferred hour. 14,000 draws over 7 offsets put 2,000 in each (the
+    /// binomial standard error is 41.3, so the 4-standard-error band is
+    /// under 170).
+    #[test]
+    fn shift_draw_is_uniform_over_the_band() {
+        use std::collections::BTreeMap;
+
+        let key = dwelling_seed_scenario(42, None, 3);
+        let mut rng = dimension_rng(key, PRESENCE_TIMING_DIMENSION);
+        let mut counts: BTreeMap<i32, u32> = BTreeMap::new();
+        for _ in 0..14_000 {
+            *counts
+                .entry(shift_draw(&mut rng, PRESENCE_SHIFT_BAND_H))
+                .or_insert(0) += 1;
+        }
+        assert_eq!(counts.len(), 7, "the band holds 2*3+1 offsets: {counts:?}");
+        for (offset, count) in counts {
+            assert!(
+                (-3..=3).contains(&offset),
+                "the offset {offset} left the band"
+            );
+            assert!(
+                (2_000_i32 - i32::try_from(count).unwrap_or(i32::MAX)).abs() < 170,
+                "the offset {offset} was drawn {count} times: the band is not uniform"
+            );
+        }
+    }
 
     /// The same key reproduces the same draws bitwise; a different
     /// building, scenario or master seed draws differently.

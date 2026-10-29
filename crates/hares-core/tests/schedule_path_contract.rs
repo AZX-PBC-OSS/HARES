@@ -43,10 +43,14 @@ fn project_root() -> PathBuf {
 /// key (this config's bldg_id 1, master seed 0, no scenario), so the
 /// pinned digest is the diversified family's (the Off mode's digest is
 /// the third state's, and `diversity_off_generates_the_shared_profile`
-/// pins that escape hatch against the undiversified generator).
+/// pins that escape hatch against the undiversified generator). The
+/// diversity layer's hour shifts draw from the unbiased bounded sampler
+/// rather than a modulo of a 32-bit word, so the digest was re-captured
+/// with the shift draws' move (the scales and factors are the same
+/// draws).
 /// The generation path must stay bitwise-equal to it.
 const GENERATED_SCHEDULE_DIGEST: &str =
-    "41c43b36412ca27a2a419ec7e2bdfd713ef7c9d8757668d08b43e0a946b91bcf";
+    "94a57314971f937a69cfc004a954b244479a3afbb77929c68c99247383341853";
 
 fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
     let start_time = denver_offset::denver_offset()
