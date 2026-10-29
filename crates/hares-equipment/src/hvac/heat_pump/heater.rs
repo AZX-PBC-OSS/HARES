@@ -229,12 +229,12 @@ struct HeatPumpHeaterCore {
     /// pf = 0.0 sentinel included; the pump's REAL response never consults
     /// this row (it evaluates the physical `LOOP_PUMP_ZIP` row).
     pump_zip: hares_types::zip::ZipLoad,
-    /// The moment's nominal component draw of the most recent step (the
-    /// final scaled components un-scaled each through its own row, at the
-    /// reference voltage): the premise aggregate's weight for this unit,
-    /// which un-scales the stepped draw through the assembled response it
-    /// reports. `None` when the step drew nothing (or no finite positive
-    /// nominal exists, e.g. a de-energized bus).
+    /// The moment's nominal component draw of the most recent step (W, the
+    /// final components' pre-scaling sum at the reference voltage, the
+    /// served space fraction included): the premise aggregate's weight for
+    /// this unit, which un-scales the stepped draw through the assembled
+    /// response it reports. `None` when the step drew nothing (or no finite
+    /// positive nominal exists, e.g. a de-energized bus).
     last_nominal_draw_w: Option<f64>,
 }
 
@@ -2473,17 +2473,20 @@ impl HeatPumpHeaterCore {
         // weights this unit by; the response it answers is the scaled draw
         // over it. The control composition acts on the scaled values it
         // sees, so the un-scale happens on the final components, each
-        // against the row that scaled it.
+        // against the row that scaled it. `space_fraction` multiplies the
+        // combined draw in `step()`, so it belongs to the base as well: the
+        // reported draw and the metered draw must share one unit.
         let pump_multiplier = crate::hvac::reactive::secondary_motor_real_multiplier(
             &crate::hvac::reactive::LOOP_PUMP_ZIP,
             bus_voltage_pu,
         );
-        let nominal_component_w = compressor_w / motor_multiplier
+        let nominal_component_w = (compressor_w / motor_multiplier
             + fan_w / fan_multiplier
             + backup_er_w / resistive_multiplier
             + step_pan_heater_w / resistive_multiplier
             + defrost_resistive_electric_w / resistive_multiplier
-            + pump_w / pump_multiplier;
+            + pump_w / pump_multiplier)
+            * self.hvac.config.space_fraction;
         self.last_nominal_draw_w = if nominal_component_w.is_finite() && nominal_component_w > 0.0 {
             Some(nominal_component_w)
         } else {
@@ -4239,6 +4242,91 @@ mod tests {
         assert!(
             (eir - 0.401).abs() < 0.01,
             "typed heating_eir=0.401 must be used directly, got {eir}"
+        );
+    }
+
+    /// The reported nominal draw is the reference-voltage draw the stepping
+    /// engine takes for the same operating state: the components' pre-scaling
+    /// sum with `space_fraction` applied, exactly as `step()` applies it to
+    /// the combined electric draw. A heater serving half the conditioned
+    /// space draws half the component watts on the meter; a base that skipped
+    /// the fraction would make the premise aggregate divide the metered draw
+    /// by twice its reference value and publish a scale doubled by 1 / sf.
+    /// The hand computation: the compressor follows the unit row
+    /// (0.72 x 0.25 - 0.98 x 0.5 + 1.26 = 0.95 at 0.5 pu), the blower the
+    /// fan row (0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.355), and both take
+    /// exactly their nominal draw at the reference voltage.
+    #[test]
+    fn reported_nominal_draw_includes_the_space_fraction_the_step_applies() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.fraction_heating_load_served = Some(0.5);
+        });
+        let environment = env(18.0, 10.0, 0.005);
+
+        let run = |voltage_pu: f64| -> ASHPHeater {
+            let mut env_run = env(18.0, 10.0, 0.005);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = ASHPHeater::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &ASHPHeater| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the heater must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let nominal_step_w = draw(&nominal_unit);
+        assert!(nominal_step_w > 0.0, "fixture: the heater must run");
+        assert_eq!(
+            nominal_unit.core.hvac.config.space_fraction, 0.5,
+            "fixture: the served fraction must reach the stepping config"
+        );
+
+        // The reference voltage evaluates every component multiplier at
+        // exactly 1.0, so the step's own draw IS the reference draw (with
+        // the served fraction applied), and the reported base must be it.
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_step_w).abs() < 1e-6 * nominal_step_w,
+            "the reported nominal draw must be the metered reference draw \
+             {nominal_step_w} (the components' pre-scaling sum times the \
+             served fraction), got {reported_nominal}"
+        );
+
+        // The assembled response: the components' own row evaluations over
+        // their nominal draws, space fraction cancelled.
+        let component_w = |eq: &ASHPHeater, key: &str| {
+            let w = eq.telemetry().get(key).unwrap_or(f64::NAN);
+            assert!(w.is_finite(), "fixture: {key} must be finite");
+            w
+        };
+        let hp_row = hares_types::zip::zip_defaults_for_class("ASHP Heater").expect("row");
+        let fan_row = hares_types::zip::zip_defaults_for_class("Ventilation Fan").expect("row");
+        let m_hp = hp_row.zp * 0.25 + hp_row.ip * 0.5 + hp_row.pp;
+        let m_fan = fan_row.zp * 0.25 + fan_row.ip * 0.5 + fan_row.pp;
+        assert!((m_hp - 0.95).abs() < 1e-12, "hand: {m_hp}");
+        assert!((m_fan - 0.355).abs() < 1e-12, "hand: {m_fan}");
+        let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
+        let fan_n = component_w(&nominal_unit, tk::FAN_KW);
+        assert!(compressor_n > 0.0, "fixture: the compressor must run");
+        assert!(fan_n > 0.0, "fixture: the blower must draw");
+        let expected_response = (compressor_n * m_hp + fan_n * m_fan) / (compressor_n + fan_n);
+        let response = draw(&sag_unit) / reported_nominal;
+        assert!(
+            (response - expected_response).abs() < 1e-9,
+            "the assembled response must be the components' own evaluations \
+             over their nominal draws ({expected_response}), got {response}"
         );
     }
 
