@@ -4486,6 +4486,24 @@ fn assemble_from_blueprint_with_seed(
         }
         merged_cfg.zone_map = Some(zone_map.clone());
         if eq.uses_rng_stream() {
+            // The reserved stream identities are this assembly's own
+            // derivations: the diversity dimensions' prefixed identities
+            // and the scenario sampler's, consumed at the blueprint's
+            // profile transform and the spec's sampling. An equipment
+            // named into one would share that stream's keystream
+            // silently, so the build refuses it, naming the identity.
+            if rng_identity.starts_with(hares_types::rng::SCHEDULE_DIVERSITY_IDENTITY_PREFIX)
+                || rng_identity == hares_types::rng::SCENARIO_SAMPLER_IDENTITY
+            {
+                return Err(HaresError::Dwelling(format!(
+                    "event load '{}' (identity '{rng_identity}') carries a reserved \
+                     stream identity: the 'hares/schedule-diversity/' prefixed and \
+                     the 'hares/scenario-sampler/v1' identities are the schedule \
+                     diversity's and the scenario sampler's alone; give the \
+                     equipment a different HPXML SystemIdentifier id or instance name",
+                    merged_cfg.name
+                )));
+            }
             let rng_stream = RngStream::event_load(rng.get_seed(), rng_identity);
             if let Some((other, other_identity)) = equipment_by_rng_stream
                 .insert(rng_stream.stream, (merged_cfg.name.clone(), rng_identity))
