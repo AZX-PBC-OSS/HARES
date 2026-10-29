@@ -3149,6 +3149,108 @@ mod tests {
         );
     }
 
+    /// A checkpoint taken mid-excursion rides the whole composed state:
+    /// the droop's latched anchor, the part-spent ride-through
+    /// accumulator and the active demand-response cap. 58.4 Hz composes
+    /// all three: it is inside UF1's trip band (58.5 Hz, 300 s window)
+    /// and below the droop's under-frequency deadband edge (59.964 Hz).
+    /// The restored battery's next step must equal the twin's (the one
+    /// that stayed live) exactly: the anchor's ride is load-bearing (a
+    /// lost anchor re-latches at the shed output and the published
+    /// adjustment changes), the accumulator's ride is visible in the
+    /// ride-through channel, and the cap's ride is what holds the export
+    /// at zero.
+    #[test]
+    fn a_mid_excursion_checkpoint_rides_the_anchor_the_accumulator_and_the_dr_cap() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let env = base_env();
+
+        // Engage: a 3000 W discharge at nominal (0.6 pu), then the
+        // excursion. The anchor latches at the 0.6 pu output; the ramp
+        // wants 0.6 + (59.964 - 58.4)/3 = 1.121333 pu and caps at the
+        // 1.0 pu availability: 5000 W of export, and UF1's accumulator
+        // runs to 60 s.
+        let mut twin = Battery::new(config.clone());
+        twin.init(&config, &env).unwrap();
+        twin.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut lo_f = base_env();
+        lo_f.grid.frequency_hz = 58.4;
+        let mut ports = default_ports();
+        twin.step(&env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        twin.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        // The port carries the availability-capped export less the 10 W
+        // standby draw, in load convention (negative = export).
+        let engaged = twin.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (engaged - (-5000.0 + 10.0)).abs() < 1e-6,
+            "the ramp caps at the available 5000 W, got {engaged} W"
+        );
+        assert!((twin.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap() - 0.4).abs() < 1e-9);
+        assert_eq!(twin.telemetry().get(tk::DER1547_RIDE_THROUGH_S), Some(60.0));
+
+        // The DR cap becomes active mid-excursion: a full shed. The
+        // latched anchor (0.6 pu) ramps up to the zero cap: zero
+        // injection, the standby draw alone, and the published adjustment
+        // is the capped reference less the anchor (-0.6 pu).
+        twin.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        twin.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(twin.telemetry().get(tk::ACTIVE_POWER_KW), Some(10.0));
+        assert!((twin.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap() + 0.6).abs() < 1e-9);
+
+        // The checkpoint: save mid-excursion (anchor latched, UF1 at
+        // 120 s, the shed active) and restore into fresh equipment.
+        let state = twin.save_state().unwrap();
+        let mut restored = Battery::new(config.clone());
+        restored.init(&config, &env).unwrap();
+        restored.load_state(&state).unwrap();
+
+        // The restored battery's continuation is the twin's, bitwise:
+        // the same shed step publishes the same zero export, the same
+        // -0.6 pu adjustment (the anchor rode the blob; a re-latched
+        // zero anchor would publish 0.0), and the same ride-through
+        // (the accumulator resumed from the checkpointed 120 s to 180 s;
+        // a lost one would restart at 60 s).
+        restored
+            .step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        twin.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            restored.telemetry().get(tk::ACTIVE_POWER_KW),
+            twin.telemetry().get(tk::ACTIVE_POWER_KW),
+            "the restored step's power is the twin's, bitwise"
+        );
+        assert_eq!(
+            restored.telemetry().get(tk::DER1547_FW_ADJ_PU),
+            twin.telemetry().get(tk::DER1547_FW_ADJ_PU),
+            "the anchor's ride keeps the adjustment at -0.6 pu"
+        );
+        assert_eq!(restored.telemetry().get(tk::DER1547_FW_ADJ_PU), Some(-0.6),);
+        assert_eq!(
+            restored.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            twin.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+        );
+        assert_eq!(
+            restored.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            Some(180.0),
+            "the accumulator resumed from the checkpointed 120 s"
+        );
+        assert_eq!(restored.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+    }
+
     #[test]
     fn descriptor_matches_ticket_contract() {
         let config = battery_config(&[]);
