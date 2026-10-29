@@ -11,9 +11,9 @@
 //! never invents a second path: a scenario is only a sampler over
 //! overrides and patches. The record is checked before anything is
 //! applied: a value with no recorded target, a patch target naming an
-//! unknown field, or a settings override map of another shape is refused
-//! naming the object, so a partially applicable record never lands half
-//! applied.
+//! unknown field, or a settings override map (or one of its equipment
+//! entries) of another shape is refused naming the object, so a
+//! partially applicable record never lands half applied.
 
 use crate::dwelling::DwellingSettings;
 use hares_types::{HaresError, ScenarioSample};
@@ -21,9 +21,10 @@ use hares_types::{HaresError, ScenarioSample};
 /// Merge `patch` into the overrides map `base`: the sampled equipment's
 /// fields overlay the base's (a scenario's declared draw is the applied
 /// value), the base's other equipment and fields pass through. Both
-/// sides must be JSON objects: a settings override of another shape
-/// cannot be merged into, and replacing it would silently discard the
-/// caller's configuration.
+/// sides must be JSON objects at every level: a settings override, or
+/// one of its equipment entries, of another shape cannot be merged
+/// into, and replacing it would silently discard the caller's
+/// configuration.
 fn merge_overrides(
     base: &mut serde_json::Value,
     patch: &serde_json::Value,
@@ -40,11 +41,18 @@ fn merge_overrides(
     })?;
     for (key, value) in patch_map {
         match base_map.get_mut(key) {
+            None => {
+                base_map.insert(key.clone(), value.clone());
+            }
             Some(slot) if slot.is_object() && value.is_object() => {
                 merge_overrides(slot, value)?;
             }
-            _ => {
-                base_map.insert(key.clone(), value.clone());
+            Some(_) => {
+                return Err(HaresError::Equipment(format!(
+                    "the settings' override entry '{key}' is not a JSON object of fields: \
+                     the scenario's sampled overrides cannot merge into it, and replacing \
+                     it would silently discard the caller's configuration"
+                )));
             }
         }
     }
@@ -59,8 +67,9 @@ fn merge_overrides(
 ///
 /// The record is checked before anything is applied: a value with no
 /// recorded target, a patch target naming an unknown field, or a
-/// settings override map of another shape is refused naming the object
-/// it cannot apply. Nothing is applied and then dropped.
+/// settings override map (or one of its equipment entries) of another
+/// shape is refused naming the object it cannot apply. Nothing is
+/// applied and then dropped.
 ///
 /// # Errors
 ///
@@ -73,8 +82,11 @@ pub fn apply_sample(
     sample.validate_application()?;
     let overrides = sample.overrides_json();
     if overrides.as_object().is_some_and(|map| !map.is_empty()) {
-        let base = settings.overrides.take().unwrap_or(serde_json::json!({}));
-        let mut merged = base;
+        // The merge works on a copy and assigns on success: a refused
+        // record must not touch the settings, and a take() before the
+        // merge would leave the caller's overrides behind a returned
+        // error.
+        let mut merged = settings.overrides.clone().unwrap_or(serde_json::json!({}));
         merge_overrides(&mut merged, &overrides)?;
         settings.overrides = Some(merged);
     }
@@ -234,6 +246,55 @@ mod tests {
         assert!(
             err.to_string().contains("overrides"),
             "the error must name the settings' overrides: {err}"
+        );
+        assert_eq!(
+            settings.overrides.as_ref(),
+            Some(&serde_json::json!("not a map")),
+            "the refused record must not touch the settings"
+        );
+    }
+
+    /// A base override ENTRY of another shape (a bare value where the
+    /// sampled layer needs an object of fields) is refused naming the
+    /// entry: replacing it would silently repair configuration the
+    /// assembly rejects, the same silent-clobber class the top-level
+    /// map's refusal covers, one level down.
+    #[test]
+    fn a_non_object_override_entry_is_refused_naming_it() {
+        let spec = ScenarioSpec {
+            name: "entry-shape".to_string(),
+            parameters: vec![hares_types::ScenarioParameter {
+                name: "mel_multiplier".to_string(),
+                unit: "fraction".to_string(),
+                target: hares_types::ScenarioTarget::Override {
+                    equipment: "MELs".to_string(),
+                    field: "usage_multiplier".to_string(),
+                },
+                distribution: hares_types::ScenarioDistribution::Uniform {
+                    low: 0.7,
+                    high: 1.3,
+                },
+                correlation: None,
+            }],
+        };
+        let sample = spec.sample(42, 1, 7).expect("the sample draws");
+        let mut settings = DwellingSettings::new(
+            test_sim_config(),
+            Some(serde_json::json!({"MELs": 3.0})),
+            7,
+            None,
+        );
+        let err = apply_sample(&sample, &mut settings).expect_err(
+            "a base override entry the sampled layer cannot merge into must be refused",
+        );
+        assert!(
+            err.to_string().contains("MELs"),
+            "the error must name the entry: {err}"
+        );
+        assert_eq!(
+            settings.overrides.as_ref(),
+            Some(&serde_json::json!({"MELs": 3.0})),
+            "the refused record must not touch the settings"
         );
     }
 
