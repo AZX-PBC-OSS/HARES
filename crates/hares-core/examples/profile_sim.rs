@@ -6,10 +6,12 @@
 //!
 //!     cargo run --release -p hares-core --features profiling --example profile_sim -- [days] [reps]
 //!
-//! NOTE the caveat recorded in the calibrator's Optimization_Register and issue #31: the
-//! per-step VmHWM sampling makes the profiling build several times slower than release
-//! and its cost lands inside whichever phase pays for it — use the phase shares RELATIVE
-//! to each other, and re-baseline absolute times against a non-profiling build.
+//! NOTE: the `profiling` feature charges the step a monotonic clock read at
+//! each phase boundary (plus the step's entry and return) and the per-actor
+//! span bookkeeping, and reads the process high-water mark once when the
+//! summary is taken. The phases partition every completed step exactly, so
+//! use their shares relative to each other, and re-baseline absolute times
+//! against a non-profiling build before quoting one.
 
 #[cfg(feature = "profiling")]
 mod harness {
