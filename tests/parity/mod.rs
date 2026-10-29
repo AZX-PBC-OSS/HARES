@@ -12,6 +12,7 @@ use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
 use hares_core::{DwellingConfig, SimulationEngine};
 use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
 use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
+use hares_types::telemetry_keys as tk;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 use tolerance::{
@@ -319,7 +320,7 @@ fn roster_for(dwelling_config: &DwellingConfig) -> Result<Vec<ReconciledInstance
                 is_hp_heater: d
                     .telemetry_fields
                     .iter()
-                    .any(|field| field.name.as_ref() == "pan_heater_kw"),
+                    .any(|field| field.name.as_ref() == tk::PAN_HEATER_KW),
             }
         })
         .collect();
@@ -472,6 +473,27 @@ fn reconcile_fixture(fixture: &ParityFixture) -> Result<(), Vec<String>> {
     };
 
     let roster = roster_for(&dwelling_config).map_err(|err| vec![err])?;
+
+    // The heat-pump-heater families below iterate the roster's
+    // pan-heater telemetry gate: the meter decomposition for every
+    // heat-pump instance, the mode-consistency block and the pan-heater
+    // pins for the named fixtures. A telemetry-key rename that matches
+    // nothing would empty all of them silently, so every building that
+    // declares a heat pump (the same <HeatPump> element the HPXML
+    // parser reads, hpxml/elements/table.rs) must resolve at least one
+    // instance into the family.
+    let building_xml = fs::read_to_string(&fixture.building_xml)
+        .map_err(|err| vec![format!("{}: read building: {err}", fixture.id)])?;
+    if building_xml.contains("<HeatPump>") && !roster.iter().any(|instance| instance.is_hp_heater) {
+        return Err(vec![format!(
+            "{}: the building declares a heat pump and the roster's \
+             heat-pump-heater family is empty: the '{}' telemetry key \
+             matches no instance, so the decomposition, mode-consistency \
+             and pan-heater assertions would iterate nothing",
+            fixture.id,
+            tk::PAN_HEATER_KW
+        )]);
+    }
 
     let engine = SimulationEngine::new();
     engine
@@ -862,24 +884,31 @@ fn reconcile_fixture(fixture: &ParityFixture) -> Result<(), Vec<String>> {
         }
     }
 
-    // The pan-heater standby column: the OCHRE form, per step. The
-    // fixture windows carry no outage, so every row is energized; the
-    // gate reads ambient temperature alone (HVAC.py:1495).
-    if fixture.id == "cz5a_minisplit_gas_wh" {
-        let oat = columns
-            .get("Outdoor Dry Bulb (C)")
-            .ok_or_else(|| vec![format!("{}: no outdoor dry bulb column", fixture.id)])?;
-        for instance in roster.iter().filter(|instance| instance.is_hp_heater) {
-            let pan = columns
-                .get(&format!("{} Pan Heater Power (kW)", instance.name))
-                .ok_or_else(|| {
-                    vec![format!(
-                        "{}: no Pan Heater Power column for '{}'",
-                        fixture.id, instance.name
-                    )]
-                })?;
-            let mut cold_rows = 0;
-            let mut cold_standby_rows = 0;
+    // The pan-heater column: the OCHRE form, per step. The fixture
+    // windows carry no outage, so every row is energized; the gate
+    // reads ambient temperature alone (HVAC.py:1495).
+    let hp_heaters: Vec<&ReconciledInstance> = roster
+        .iter()
+        .filter(|instance| instance.is_hp_heater)
+        .collect();
+
+    // Above the threshold the column reads zero, on every heat-pump
+    // heater in the corpus: the minisplit's draw is gated on ambient
+    // temperature alone (HVAC.py:1495) and the other variants carry no
+    // pan heater at all. The corpus's weather files hold the -18 C
+    // design temperature, so every committed minute sits below the
+    // threshold today; this side runs on the first warm minute a
+    // fixture ever carries, and the cold pin below holds that shape.
+    let oat = required_column(&columns, "Outdoor Dry Bulb (C)", fixture, &mut failures);
+    if let Some(oat) = oat {
+        for instance in &hp_heaters {
+            let Some(pan) = columns.get(&format!("{} Pan Heater Power (kW)", instance.name)) else {
+                failures.push(format!(
+                    "{}: no Pan Heater Power column for '{}'",
+                    fixture.id, instance.name
+                ));
+                continue;
+            };
             for row in 0..row_count {
                 let (Some(t_ext), Some(pan_kw)) = (
                     oat.get(row).copied().flatten(),
@@ -891,45 +920,94 @@ fn reconcile_fixture(fixture: &ParityFixture) -> Result<(), Vec<String>> {
                     ));
                     continue;
                 };
-                if t_ext < 0.0 {
-                    cold_rows += 1;
-                    // The heater's idle resolutions: Off, Standby, and the
-                    // On a nonzero standby flow resolves to.
-                    let idle = matches!(
-                        columns
-                            .get(&format!("{} Mode (-)", instance.name))
-                            .and_then(|c| c.get(row).copied())
-                            .flatten(),
-                        Some(0.0) | Some(4.0) | Some(12.0)
-                    );
-                    if idle {
-                        cold_standby_rows += 1;
-                    }
-                    if (pan_kw - EXPECTED_PAN_HEATER_COLUMN_KW).abs() > 1e-9 {
-                        failures.push(format!(
-                            "{}: row {row}: pan heater {pan_kw} kW at {t_ext} C, expected {} kW \
-                             (OCHRE HVAC.py:1482, gated on ambient temperature alone, HVAC.py:1495)",
-                            fixture.id, EXPECTED_PAN_HEATER_COLUMN_KW
-                        ));
-                    }
-                } else if pan_kw != 0.0 {
+                if t_ext >= 0.0 && pan_kw != 0.0 {
                     failures.push(format!(
                         "{}: row {row}: pan heater drew {pan_kw} at {t_ext} C, above its 0 C threshold",
                         fixture.id
                     ));
                 }
             }
-            if cold_rows == 0 {
-                failures.push(format!(
-                    "{}: the window has no step below the pan heater's 0 C threshold: \
-                     the standby pin is empty and pins nothing",
-                    fixture.id
-                ));
-            } else {
-                eprintln!(
-                    "[parity] fixture={} pan heater rows: cold {cold_rows}, cold and idle {cold_standby_rows}",
-                    fixture.id
-                );
+        }
+    }
+
+    // Below the threshold the column pins the minisplit fixture's
+    // standby: every below-threshold minute reads the 0.150 kW class
+    // attribute (HVAC.py:1482) whether or not the compressor ran, and
+    // the window's shape is part of the pin. Of cz5a's 60 minutes all
+    // 60 sit below the threshold and 42 of them at the heater's idle
+    // resolutions; both counts are asserted, not logged, so a window,
+    // weather or idle-classification change that empties the standby
+    // half fails the pin instead of passing it unexercised.
+    if fixture.id == "cz5a_minisplit_gas_wh" {
+        if hp_heaters.is_empty() {
+            failures.push(format!(
+                "{}: the roster matches no heat-pump heater, so the pan-heater pin \
+                 iterates nothing: no instance carries the '{}' telemetry key",
+                fixture.id,
+                tk::PAN_HEATER_KW
+            ));
+        }
+        if let Some(oat) = oat {
+            for instance in &hp_heaters {
+                let Some(pan) = columns.get(&format!("{} Pan Heater Power (kW)", instance.name))
+                else {
+                    failures.push(format!(
+                        "{}: no Pan Heater Power column for '{}'",
+                        fixture.id, instance.name
+                    ));
+                    continue;
+                };
+                let mut cold_rows = 0;
+                let mut cold_standby_rows = 0;
+                for row in 0..row_count {
+                    let (Some(t_ext), Some(pan_kw)) = (
+                        oat.get(row).copied().flatten(),
+                        pan.get(row).copied().flatten(),
+                    ) else {
+                        failures.push(format!(
+                            "{}: row {row}: null pan heater or dry bulb cell",
+                            fixture.id
+                        ));
+                        continue;
+                    };
+                    if t_ext < 0.0 {
+                        cold_rows += 1;
+                        // The heater's idle resolutions: Off, Standby, and the
+                        // On a nonzero standby flow resolves to.
+                        let idle = matches!(
+                            columns
+                                .get(&format!("{} Mode (-)", instance.name))
+                                .and_then(|c| c.get(row).copied())
+                                .flatten(),
+                            Some(0.0) | Some(4.0) | Some(12.0)
+                        );
+                        if idle {
+                            cold_standby_rows += 1;
+                        }
+                        if (pan_kw - EXPECTED_PAN_HEATER_COLUMN_KW).abs() > 1e-9 {
+                            failures.push(format!(
+                                "{}: row {row}: pan heater {pan_kw} kW at {t_ext} C, expected {} kW \
+                                 (OCHRE HVAC.py:1482, gated on ambient temperature alone, HVAC.py:1495)",
+                                fixture.id, EXPECTED_PAN_HEATER_COLUMN_KW
+                            ));
+                        }
+                    }
+                }
+                if cold_rows != 60 {
+                    failures.push(format!(
+                        "{}: {cold_rows} of {row_count} minutes below the pan heater's 0 C \
+                         threshold, expected 60: the cold-window shape is part of the standby pin",
+                        fixture.id
+                    ));
+                }
+                if cold_standby_rows != 42 {
+                    failures.push(format!(
+                        "{}: {cold_standby_rows} of {cold_rows} below-threshold minutes at the \
+                         heater's idle resolutions, expected 42: the standby half of the \
+                         pan-heater pin is empty",
+                        fixture.id
+                    ));
+                }
             }
         }
     }
