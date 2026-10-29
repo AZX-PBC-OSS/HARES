@@ -1274,6 +1274,82 @@ mod tests {
         });
     }
 
+    /// The panic that poisons the lock is the fatal classification's own
+    /// case: a step panic unwinds through the dwelling's MutexGuard, the
+    /// batch's panic branch reads the poisoned lock, and the row ends the
+    /// environment with `info["dwelling_fatal"]`. A regression that
+    /// reported the poisoned lock non-fatal fails this pin.
+    #[test]
+    fn a_panic_that_poisons_the_lock_is_flagged_dwelling_fatal() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let dwelling = base_dwelling(py);
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+            let plan = dwelling
+                .bind(py)
+                .borrow()
+                .observation_plan(vec!["total_power_w".to_string()])
+                .expect("the plan builds");
+            let plan = Py::new(py, plan).expect("the plan wraps");
+            let buffer = numpy::PyArray2::<f64>::zeros(py, (1, 1), false);
+
+            crate::py_dwelling::TEST_STEP_PANIC.store(true, Ordering::SeqCst);
+            let actions = actions_array(py, &[&[21.0]]);
+            let result = batch_step_py(
+                py,
+                vec![dwelling.clone_ref(py)],
+                Some(actions.bind(py)),
+                vec![plan],
+                layout,
+                signal_types,
+                vec![(-50.0, 80.0)],
+                buffer.as_any(),
+                false,
+            );
+            crate::py_dwelling::TEST_STEP_PANIC.store(false, Ordering::SeqCst);
+            let rows = result.expect("the batch step itself runs");
+
+            assert!(
+                dwelling.bind(py).borrow().poisoned.load(Ordering::SeqCst),
+                "the panic marked the dwelling poisoned"
+            );
+            let info = rows[0]
+                .bind(py)
+                .get_item("info")
+                .expect("the row carries info")
+                .cast_into::<PyDict>()
+                .expect("info is a dict");
+            assert!(
+                info.get_item("dwelling_fatal")
+                    .expect("info reads")
+                    .is_some(),
+                "a panic that poisoned the lock is a permanent failure: the row \
+                 carries dwelling_fatal, a regression to fatal: false fails here"
+            );
+            let error_msg: String = info
+                .get_item("error_msg")
+                .expect("info reads")
+                .expect("the failed step's info carries error_msg")
+                .extract()
+                .expect("the error message is a string");
+            assert!(
+                error_msg.starts_with("HARES internal panic: ")
+                    && error_msg.contains("injected step panic while the dwelling's lock is held"),
+                "the error is the panic's own, enriched: {error_msg}"
+            );
+            let terminated: bool = rows[0]
+                .bind(py)
+                .get_item("terminated")
+                .and_then(|v| v.extract())
+                .expect("terminated is a bool");
+            assert!(terminated, "the poisoned dwelling ends the environment");
+        });
+    }
+
     /// Set the test-only step-failure injection (`None` clears it): the
     /// message the next `step_core_string` call returns as a non-fatal
     /// failure.

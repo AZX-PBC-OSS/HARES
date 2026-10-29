@@ -81,6 +81,15 @@ pub(crate) static TEST_COUNT_EXCLUSIVITY: std::sync::Mutex<()> = std::sync::Mute
 #[cfg(test)]
 pub(crate) static TEST_STEP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// Test-only fault switch for the batch's panic classification: every
+/// [`PyDwelling::step_core_string`] call panics while its lock is held
+/// when set, so the mutex genuinely poisons and `batch_step_py`'s panic
+/// branch runs against a poisoned lock. `false` panics nobody. Lives in
+/// `hares-python` (the crate under test), never in `hares-core`'s `step`:
+/// `cfg(test)` is set only for the crate under test.
+#[cfg(test)]
+pub(crate) static TEST_STEP_PANIC: AtomicBool = AtomicBool::new(false);
+
 use crate::conversions::naive_chrono_to_py_datetime;
 use crate::py_actor::PyActor;
 use crate::py_actor::PyPriority;
@@ -2610,6 +2619,13 @@ impl PyDwelling {
             });
         }
         let mut dwelling = self.acquire_string()?;
+        #[cfg(test)]
+        if TEST_STEP_PANIC.load(Ordering::SeqCst) {
+            // The guard is the dwelling's own MutexGuard: unwinding this
+            // panic poisons the lock, the state the batch's panic branch
+            // reads.
+            panic!("injected step panic while the dwelling's lock is held");
+        }
         dwelling.step().map_err(|e| StepFailure {
             msg: e.to_string(),
             fatal: false,
