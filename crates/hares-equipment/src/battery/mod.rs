@@ -1313,6 +1313,24 @@ impl Equipment for Battery {
         let mut der1547_ride_through_s = 0.0;
         let mut der1547_enter_service_s = 0.0;
         let mut der1547_fw_adj_pu = 0.0;
+        // The availability input is the deliverable discharge bound: the
+        // demand-response fraction, the export limit and the external
+        // power limit, the same composition `clamp_power` applies to the
+        // model's own output (the export passed below is already clamped
+        // to it). The droop's up-ramp must stop at the same bound, or an
+        // under-frequency excursion would bid the pack's nameplate into a
+        // grid the operator has shed (the export EV carries the
+        // demand-response fraction on its availability input for the same
+        // reason).
+        let dr_fraction = self.dr_power_fraction();
+        let hw_max = self.max_discharge_w * dr_fraction;
+        let deliverable_w = self
+            .export_limit_w
+            .map(|lim| hw_max.min(lim))
+            .unwrap_or(hw_max);
+        let deliverable_w = self
+            .external_power_limit_w
+            .map_or(deliverable_w, |pl| deliverable_w.min(pl));
         match &mut self.der1547 {
             Some(controller) => {
                 let outcome = controller.step(
@@ -1321,7 +1339,7 @@ impl Equipment for Battery {
                     dt_s,
                     !env.grid.grid_outage(),
                     -target_power_w,
-                    self.max_discharge_w,
+                    deliverable_w,
                     -self.max_charge_w,
                 )?;
                 if outcome.tripped {
@@ -2615,11 +2633,9 @@ mod tests {
         }
     }
 
-    fn battery_config_with_der1547(
-        settings: Option<crate::der1547::Der1547Settings>,
-    ) -> EquipmentConfig {
-        let cfg = BatteryConfig {
-            der_1547: settings,
+    fn battery_config_fields() -> BatteryConfig {
+        BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -2656,6 +2672,15 @@ mod tests {
             inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
+        }
+    }
+
+    fn battery_config_with_der1547(
+        settings: Option<crate::der1547::Der1547Settings>,
+    ) -> EquipmentConfig {
+        let cfg = BatteryConfig {
+            der_1547: settings,
+            ..battery_config_fields()
         };
         EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg).unwrap()
     }
@@ -2959,6 +2984,125 @@ mod tests {
             (reconnected - (-2500.0 + 10.0)).abs() < 1e-6,
             "the reconnected inverter resumes the DR-scaled discharge, got \
              {reconnected} W"
+        );
+    }
+
+    /// The export inverter's sibling face (the EV carries the same cap on
+    /// its availability input): the droop's up-ramp cannot export above
+    /// the caps the delivered power was already under. The layer's
+    /// availability input is the deliverable discharge bound (the
+    /// demand-response fraction, the export limit and the external power
+    /// limit: the same composition `clamp_power` applies to the model's
+    /// own output), not the raw rating: an under-frequency ramp out of a
+    /// full shed would otherwise bid the pack's whole nameplate into a
+    /// grid the operator has shed.
+    #[test]
+    fn witness_der1547_battery_droop_cannot_exceed_the_demand_response_cap() {
+        // GridEmergency: the shed's cap is zero. The commanded discharge
+        // is clamped to zero injection; 59.5 Hz is 0.464 Hz below the
+        // 59.964 Hz deadband edge, so the ramp wants 0 + 0.464/3 pu =
+        // 773.33 W of the 5000 W rating. The zero cap holds the reference
+        // at zero injection: the port carries the standby draw alone.
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut lo_f = base_env();
+        lo_f.grid.frequency_hz = 59.5;
+        let mut ports = default_ports();
+        bat.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - 10.0).abs() < 1e-6,
+            "the droop cannot export against a full shed, got {p} W"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+        assert!(
+            (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(1.0)).abs() < 1e-12,
+            "the capped reference's adjustment is zero, got {}",
+            bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(1.0)
+        );
+
+        // High: the cap is half the rating. The discharge sits at the
+        // 2500 W cap; the same 0.154667 pu ramp from the 0.5 pu anchor
+        // must stop at the cap, not reach 3273.33 W.
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            (bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap() - (-2500.0 + 10.0)).abs() < 1e-6,
+            "the DR cap holds the discharge at 2500 W"
+        );
+        bat.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - (-2500.0 + 10.0)).abs() < 1e-6,
+            "the droop's up-ramp stops at the DR cap, got {p} W"
+        );
+
+        // The export limit: the same composition at the interconnection
+        // surface. A 2000 W export limit caps the discharge; the ramp out
+        // of it must stop at the limit, not the 5000 W rating (0.4 pu
+        // anchor + 0.154667 pu ramp capped at 0.4 pu).
+        let cfg = BatteryConfig {
+            der_1547: Some(cat2_settings()),
+            export_limit_w: Some(2000.0),
+            ..battery_config_fields()
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            (bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap() - (-2000.0 + 10.0)).abs() < 1e-6,
+            "the export limit holds the discharge at 2000 W"
+        );
+        bat.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - (-2000.0 + 10.0)).abs() < 1e-6,
+            "the droop's up-ramp stops at the export limit, got {p} W"
         );
     }
 

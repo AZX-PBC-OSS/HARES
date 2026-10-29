@@ -1711,12 +1711,14 @@ obligation without spending or clearing it: the DR-scaled discharge
 resumes on the step the latch clears. The same DR fraction bounds the
 frequency-Watt function's up-ramp, because the DR level is the
 operator's cap on the delivered output, not a pre-disturbance
-operating point the response may exceed: the stationary battery's
-clamp binds its reference after the layer, and the EV's availability
-input carries the fraction (its pre-disturbance output is already the
-DR-scaled export). A full shed (GridEmergency) therefore holds zero
-export through an under-frequency excursion, and a partial shed caps
-the ramp at the shed level.
+operating point the response may exceed: each class's availability
+input carries the cap the delivered export was already under (the
+battery's is the deliverable discharge bound: the DR fraction with the
+export and external power limits, the same composition `clamp_power`
+applies to its own output; the EV's carries the fraction, its
+pre-disturbance output already the DR-scaled export). A full shed
+(GridEmergency) therefore holds zero export through an under-frequency
+excursion, and a partial shed caps the ramp at the shed level.
 
 The checkpoint answer: the PV, Battery and EV formats move to v5, v4 and
 v10 with the layer's state added, so a pre-1547 save (v4, v3, v9) is

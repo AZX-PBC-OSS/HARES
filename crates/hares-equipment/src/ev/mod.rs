@@ -1605,8 +1605,8 @@ impl Ev {
             // The availability input is the live ceiling with the demand
             // response fraction applied: the export passed as the model's
             // own output is already DR scaled, so the droop's up-ramp must
-            // stop at the same cap (the stationary battery reaches the same
-            // bound through the clamp after its layer).
+            // stop at the same cap (the stationary battery's availability
+            // input carries the same deliverable-bound composition).
             let droop_availability_w = self.discharge_ceiling_w * self.dr_power_fraction();
             match &mut self.der1547 {
                 Some(controller) => {
