@@ -10,13 +10,15 @@
 //! no hash of the scenario (the disjointness rides the key's own bytes),
 //! the stream is tagged out of the dwelling's own stream space, and the
 //! same triple reproduces bitwise. The spec's parameters draw in
-//! declaration order from that one stream; the correlation groups draw
-//! their shared factors first, and a member's value is its distribution's
-//! quantile at the one-factor Gaussian copula's probability, which
-//! preserves the declared marginal: exactly in exact arithmetic, and to
-//! the normal CDF pair's accuracy in doubles (the inverse CDF's 1.15e-9
-//! relative bound and the composed probability's 1e-8, both pinned; the
-//! moment, KS and copula correlation witnesses pin the marginal).
+//! declaration order from that one stream, a correlation group's shared
+//! factor at its first member, so appending a parameter never moves the
+//! values already recorded. A correlated member's value is its
+//! distribution's quantile at the one-factor Gaussian copula's
+//! probability, which preserves the declared marginal: exactly in exact
+//! arithmetic, and to the normal CDF pair's accuracy in doubles (the
+//! inverse CDF's 1.15e-9 relative bound and the composed probability's
+//! 1e-8, both pinned; the moment, KS and copula correlation witnesses pin
+//! the marginal).
 //!
 //! The sampled record serializes: the per-home payload a run manifest
 //! records (the scenario id, the building id, every parameter's name,
@@ -529,19 +531,19 @@ impl ScenarioSpec {
 
     /// The home's sampled scenario: the parameters draw in declaration
     /// order from the sampler's own stream under the scenario-mixed
-    /// per-dwelling key; a correlation group draws its shared factors
-    /// first (the groups in first-appearance order), and each member's
-    /// value is its distribution's quantile at the copula's probability,
-    /// which preserves the declared marginal (exactly in exact
-    /// arithmetic, to the CDF pair's accuracy in doubles: the inverse's
-    /// 1.15e-9 relative bound, the composition's 1e-8).
+    /// per-dwelling key; a correlation group's shared factor draws at the
+    /// group's first member, so appending a parameter (a new group
+    /// included) moves no earlier parameter's draw. Each member's value is
+    /// its distribution's quantile at the copula's probability, which
+    /// preserves the declared marginal (exactly in exact arithmetic, to
+    /// the CDF pair's accuracy in doubles: the inverse's 1.15e-9 relative
+    /// bound, the composition's 1e-8).
     ///
     /// # Errors
     ///
-    /// [`HaresError`] when the spec does not validate, when a correlation
-    /// member's group factor is missing, or when a draw is not finite
-    /// (the declared support does not bound it); the error names the
-    /// parameter.
+    /// [`HaresError`] when the spec does not validate or when a draw is
+    /// not finite (the declared support does not bound it); the error
+    /// names the parameter.
     pub fn sample(
         &self,
         master_seed: u64,
@@ -552,20 +554,11 @@ impl ScenarioSpec {
         let key = dwelling_seed_scenario(master_seed, Some(scenario_id), bldg_id);
         let mut rng = RngStream::scenario_sampler(key).rng_at(0);
 
-        // The groups' shared factors: first appearance order, one draw
-        // per group, the group's position recorded so a member's lookup
-        // is total.
-        let mut shared: Vec<f64> = Vec::new();
-        let mut group_index: std::collections::BTreeMap<&str, usize> =
-            std::collections::BTreeMap::new();
-        for parameter in &self.parameters {
-            if let Some(correlation) = &parameter.correlation
-                && !group_index.contains_key(correlation.group.as_str())
-            {
-                group_index.insert(correlation.group.as_str(), shared.len());
-                shared.push(normal_standard(&mut rng));
-            }
-        }
+        // The groups' shared factors, drawn at each group's first member:
+        // the draw order is the declaration order alone, so a study
+        // extending its spec never rewrites the values it already
+        // recorded.
+        let mut shared: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
 
         let mut values = Vec::with_capacity(self.parameters.len());
         let mut targets = std::collections::BTreeMap::new();
@@ -573,17 +566,12 @@ impl ScenarioSpec {
             let value = match &parameter.correlation {
                 None => parameter.distribution.sample(&mut rng)?,
                 Some(correlation) => {
-                    let index = group_index
-                        .get(correlation.group.as_str())
-                        .copied()
-                        .ok_or_else(|| {
-                            HaresError::Equipment(format!(
-                                "the scenario parameter '{}' names the correlation group \
-                                 '{}', whose shared factor was not drawn",
-                                parameter.name, correlation.group
-                            ))
-                        })?;
-                    let z_group = shared[index];
+                    let z_group = match shared.entry(correlation.group.as_str()) {
+                        std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            *entry.insert(normal_standard(&mut rng))
+                        }
+                    };
                     let z_own = normal_standard(&mut rng);
                     let loading = libm::sqrt(correlation.rho);
                     let z = loading * z_group + libm::sqrt(1.0 - correlation.rho) * z_own;
@@ -772,9 +760,9 @@ mod tests {
     /// The declaration-order contract: appending a parameter moves no
     /// earlier parameter's draw. The parameters draw in declaration
     /// order from the one sampler stream (a correlation group's shared
-    /// factors first), so a study extending its spec never rewrites the
-    /// recorded values of the parameters it already had, correlated
-    /// members included.
+    /// factor at its first member), so a study extending its spec never
+    /// rewrites the recorded values of the parameters it already had,
+    /// correlated members included.
     #[test]
     fn appending_a_parameter_moves_no_earlier_draw() {
         let correlated = |name: &str| ScenarioParameter {
@@ -818,6 +806,50 @@ mod tests {
             extended.values[0].value, extended.values[1].value,
             "the two correlated members' draws are distinct values"
         );
+    }
+
+    /// The declaration-order contract covers a new correlation group: a
+    /// parameter appended with a group of its own draws the group's shared
+    /// factor at that parameter's own position, so every value already
+    /// recorded stands. Drawing all groups' factors ahead of the values
+    /// (the first-appearance order) would move every earlier value when a
+    /// study appends a parameter that opens a group.
+    #[test]
+    fn appending_a_new_correlation_group_moves_no_earlier_draw() {
+        let member = |name: &str, group: &str| ScenarioParameter {
+            name: name.to_string(),
+            unit: "W".to_string(),
+            target: override_target("all", "heating_capacity_w"),
+            distribution: uniform(0.0, 1.0),
+            correlation: Some(ScenarioCorrelation {
+                group: group.to_string(),
+                rho: 0.9,
+            }),
+        };
+        let base = spec(vec![member("a", "load"), member("b", "load")]);
+        let extended = spec(vec![
+            member("a", "load"),
+            member("b", "load"),
+            member("c", "weather"),
+        ]);
+
+        let base = base.sample(42, 1, 7).expect("the base spec samples");
+        let extended = extended
+            .sample(42, 1, 7)
+            .expect("the extended spec samples");
+        assert_eq!(
+            extended.values.len(),
+            base.values.len() + 1,
+            "the appended parameter joins the record's tail"
+        );
+        for (i, base_value) in base.values.iter().enumerate() {
+            assert_eq!(
+                extended.values[i], *base_value,
+                "appending the new group's parameter 'c' moved parameter \
+                 '{}'s draw",
+                base_value.name
+            );
+        }
     }
 
     /// The KS witness: the empirical CDF of the sampled fleet conforms
