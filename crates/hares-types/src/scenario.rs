@@ -12,7 +12,11 @@
 //! same triple reproduces bitwise. The spec's parameters draw in
 //! declaration order from that one stream, a correlation group's shared
 //! factor at its first member, so appending a parameter never moves the
-//! values already recorded. A correlated member's value is its
+//! values already recorded (a member appended to an existing group reads
+//! the group's already-drawn factor); the draws are the declaration
+//! order's alone, so inserting or reordering a parameter moves every
+//! draw from the first changed position on. A correlated member's value
+//! is its
 //! distribution's quantile at the one-factor Gaussian copula's
 //! probability, which preserves the declared marginal: exactly in exact
 //! arithmetic, and to the normal CDF pair's accuracy in doubles (the
@@ -539,7 +543,11 @@ impl ScenarioSpec {
     /// order from the sampler's own stream under the scenario-mixed
     /// per-dwelling key; a correlation group's shared factor draws at the
     /// group's first member, so appending a parameter (a new group
-    /// included) moves no earlier parameter's draw. Each member's value is
+    /// included) moves no earlier parameter's draw, and a member appended
+    /// to an existing group reads the group's already-drawn factor. The
+    /// draws are the declaration order's alone: inserting or reordering
+    /// a parameter moves every draw from the first changed position on.
+    /// Each member's value is
     /// its distribution's quantile at the copula's probability, which
     /// preserves the declared marginal (exactly in exact arithmetic, to
     /// the CDF pair's accuracy in doubles: the inverse's 1.15e-9 relative
@@ -931,6 +939,115 @@ mod tests {
                 base_value.name
             );
         }
+    }
+
+    /// The declaration-order contract covers a member appended to an
+    /// EXISTING group: the group's factor drew at the group's first
+    /// member, the appended member reads that already-drawn factor, and
+    /// no earlier draw moves. Drawing the group's factor again for the
+    /// appended member (per-member factors) would move nothing either,
+    /// but would not correlate the member with the group; the members'
+    /// distinct values under one shared factor are what this pin holds.
+    #[test]
+    fn appending_to_an_existing_group_moves_no_earlier_draw() {
+        let member = |name: &str, group: &str| ScenarioParameter {
+            name: name.to_string(),
+            unit: "W".to_string(),
+            target: override_target("all", "heating_capacity_w"),
+            distribution: uniform(0.0, 1.0),
+            correlation: Some(ScenarioCorrelation {
+                group: group.to_string(),
+                rho: 0.9,
+            }),
+        };
+        let base = spec(vec![member("a", "load"), member("b", "load")]);
+        let extended = spec(vec![
+            member("a", "load"),
+            member("b", "load"),
+            member("c", "load"),
+        ]);
+
+        let base = base.sample(42, 1, 7).expect("the base spec samples");
+        let extended = extended
+            .sample(42, 1, 7)
+            .expect("the extended spec samples");
+        assert_eq!(
+            extended.values.len(),
+            base.values.len() + 1,
+            "the appended member joins the record's tail"
+        );
+        for (i, base_value) in base.values.iter().enumerate() {
+            assert_eq!(
+                extended.values[i], *base_value,
+                "appending the group member 'c' moved parameter \
+                 '{}'s draw",
+                base_value.name
+            );
+        }
+        // The appended member drew: its value is the copula's transform
+        // of a probability inside (0, 1), so it stays in the uniform
+        // marginal's support and is distinct from its group's first
+        // member's draw (the chance two copula draws land on one double
+        // is the quantile grid's own, far under any witness's band).
+        assert!(
+            (0.0..=1.0).contains(&extended.values[2].value),
+            "the appended member's value stays in the declared marginal's \
+             support"
+        );
+        assert_ne!(
+            extended.values[2].value, extended.values[0].value,
+            "the appended member's draw is its group's copula transform, \
+             not a repetition of the first member's"
+        );
+    }
+
+    /// The stream is the declaration order's, and the guarantee is
+    /// append-stability alone: a parameter INSERTED at position k leaves
+    /// exactly the first k values bitwise unchanged and moves the tail
+    /// (the inserted parameter's draws sit in the stream there, so every
+    /// later draw shifts). A study reordering or splicing its spec
+    /// re-draws from the first changed position on.
+    #[test]
+    fn inserting_a_parameter_moves_only_its_tail() {
+        let base = spec(vec![
+            parameter("a", uniform(0.0, 1.0)),
+            parameter("b", uniform(0.0, 1.0)),
+            parameter("d", uniform(0.0, 1.0)),
+        ]);
+        let mut spliced = base.parameters.clone();
+        spliced.insert(
+            1,
+            ScenarioParameter {
+                name: "c".to_string(),
+                unit: "W".to_string(),
+                target: override_target("all", "heating_capacity_w"),
+                distribution: uniform(0.0, 1.0),
+                correlation: None,
+            },
+        );
+        let inserted = spec(spliced);
+
+        let base = base.sample(42, 1, 7).expect("the base spec samples");
+        let inserted = inserted.sample(42, 1, 7).expect("the spliced spec samples");
+        assert_eq!(inserted.values[0].name, "a");
+        assert_eq!(
+            inserted.values[0], base.values[0],
+            "the draw before the insertion position is bitwise unchanged"
+        );
+        assert_eq!(
+            inserted.values[1].name, "c",
+            "the inserted parameter sits at its position"
+        );
+        assert_ne!(
+            inserted.values[2].value, base.values[1].value,
+            "the draw after the insertion moved (one inserted uniform draw \
+             sits in the stream before it; two independent uniform draws on \
+             one double is the sampler stream's own collision surface)"
+        );
+        assert_ne!(
+            inserted.values[3].value, base.values[2].value,
+            "every draw after the insertion moved with the stream"
+        );
     }
 
     /// The KS witness: the empirical CDF of the sampled fleet conforms
