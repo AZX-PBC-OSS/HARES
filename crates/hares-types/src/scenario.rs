@@ -2002,6 +2002,108 @@ mod tests {
         );
     }
 
+    /// The overflow refusals consume no stream word: the discrete family's
+    /// total gate runs before the draw, so a refused draw leaves the
+    /// generator exactly where it was and the next draw is the one a
+    /// fresh generator yields. The finiteness gates themselves add no
+    /// arithmetic to a successful path and call no draw, so the accepted
+    /// draws are the sequence the sampler had before the gates: this pin
+    /// holds that sequence's values.
+    #[test]
+    fn the_overflow_gates_leave_the_draw_sequence_alone() {
+        let mut rng = RngStream::scenario_sampler([7_u8; 32]).rng_at(0);
+        let mut untouched = rng.clone();
+        let overflowing = ScenarioDistribution::Discrete {
+            values: vec![1.0, 2.0],
+            weights: vec![1e308, 1e308],
+        };
+        assert!(
+            overflowing.sample(&mut rng).is_err(),
+            "the overflowing total must refuse"
+        );
+        let normal = ScenarioDistribution::Normal {
+            mean: 0.0,
+            std_dev: 1.0,
+        };
+        assert_eq!(
+            normal.sample(&mut rng).expect("the accepted draw"),
+            normal.sample(&mut untouched).expect("the reference draw"),
+            "a refused draw must consume no stream word: the next draw is \
+             the one a generator that saw no refusal yields"
+        );
+    }
+
+    /// The sampler's draw sequence, pinned as literals for one fixed key:
+    /// one parameter per family plus a correlated pair, so a change to
+    /// the draw order, to a family's mapping or to the stream derivation
+    /// moves a value here instead of passing the self-comparison pins.
+    /// The values are the sequence the gates left unmoved (the accepted
+    /// path's arithmetic and draw calls are unchanged).
+    #[test]
+    fn the_samplers_draw_sequence_is_pinned() {
+        let s = spec(vec![
+            parameter("u", uniform(0.0, 1.0)),
+            parameter(
+                "n",
+                ScenarioDistribution::Normal {
+                    mean: 20.0,
+                    std_dev: 1.5,
+                },
+            ),
+            parameter(
+                "l",
+                ScenarioDistribution::LogNormal {
+                    mu: 0.0,
+                    sigma: 0.25,
+                },
+            ),
+            parameter(
+                "t",
+                ScenarioDistribution::Triangular {
+                    min: 1.0,
+                    mode: 1.2,
+                    max: 5.0,
+                },
+            ),
+            parameter(
+                "d",
+                ScenarioDistribution::Discrete {
+                    values: vec![2.0, 3.0, 5.0],
+                    weights: vec![0.2, 0.5, 0.3],
+                },
+            ),
+            ScenarioParameter {
+                correlation: Some(ScenarioCorrelation {
+                    group: "load".to_string(),
+                    rho: 0.5,
+                }),
+                ..parameter("c1", uniform(0.0, 1.0))
+            },
+            ScenarioParameter {
+                correlation: Some(ScenarioCorrelation {
+                    group: "load".to_string(),
+                    rho: 0.5,
+                }),
+                ..parameter("c2", uniform(0.0, 1.0))
+            },
+        ]);
+        let sample = s.sample(42, 1, 7).expect("the spec samples");
+        let values: Vec<f64> = sample.values.iter().map(|value| value.value).collect();
+        assert_eq!(
+            values,
+            vec![
+                0.36856114217327696,
+                20.399528715482926,
+                0.736351153000037,
+                2.9433325182832113,
+                2.0,
+                0.04149018942285346,
+                0.30675311543324435,
+            ],
+            "the pinned draw sequence"
+        );
+    }
+
     /// The spec's loud errors: a repeated name, a rho outside [0, 1), a
     /// malformed distribution, and an unknown patch field all fail
     /// validation naming the parameter.
