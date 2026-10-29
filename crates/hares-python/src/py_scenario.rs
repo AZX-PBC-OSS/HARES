@@ -80,11 +80,12 @@ fn json_to_python(py: Python<'_>, json: serde_json::Value) -> PyResult<Py<PyAny>
             } else if let Some(u) = n.as_u64() {
                 u.into_pyobject(py)?.unbind().into_any()
             } else {
-                n.as_f64()
-                    .unwrap_or(f64::NAN)
-                    .into_pyobject(py)?
-                    .unbind()
-                    .into_any()
+                let v = n.as_f64().ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "the sampled record carries the number {n}, which has no f64 form"
+                    ))
+                })?;
+                v.into_pyobject(py)?.unbind().into_any()
             }
         }
         serde_json::Value::String(s) => s.into_pyobject(py)?.unbind().into_any(),
