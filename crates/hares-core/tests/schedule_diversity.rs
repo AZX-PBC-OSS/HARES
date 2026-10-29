@@ -194,6 +194,107 @@ fn build_with_seed_draws_the_new_seeds_schedule() {
     );
 }
 
+/// The resampled weather's columns as their raw bits: the witness
+/// compares these bitwise, so a substituted value at any step of any
+/// column fails.
+fn weather_bits(series: &hares_io::WeatherTimeSeries) -> Vec<(&'static str, Vec<u64>)> {
+    let bits = |column: &Vec<f64>| column.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    vec![
+        ("dry_bulb_c", bits(&series.dry_bulb_c)),
+        ("dew_point_c", bits(&series.dew_point_c)),
+        ("rel_humidity_pct", bits(&series.rel_humidity_pct)),
+        ("pressure_kpa", bits(&series.pressure_kpa)),
+        ("ghi_w_m2", bits(&series.ghi_w_m2)),
+        ("dni_w_m2", bits(&series.dni_w_m2)),
+        ("dhi_w_m2", bits(&series.dhi_w_m2)),
+        ("wind_speed_m_s", bits(&series.wind_speed_m_s)),
+        ("wind_dir_deg", bits(&series.wind_dir_deg)),
+        ("opaque_sky_cover", bits(&series.opaque_sky_cover)),
+        (
+            "horizontal_infrared_w_m2",
+            bits(&series.horizontal_infrared_w_m2),
+        ),
+        ("sky_temp_c", bits(&series.sky_temp_c)),
+        ("ground_temp_c", bits(&series.ground_temp_c)),
+        ("liquid_precip_m", bits(&series.liquid_precip_m)),
+    ]
+}
+
+/// A seed swap changes the schedule and NOTHING else: the re-frozen
+/// blueprint's weather is the parent's series bitwise (the resample is
+/// cached on the blueprint's shared weather handle, keyed on the step,
+/// the first-hour rule, the start and the weather-year rule, none of
+/// which the seed touches), so a build under another seed re-derives
+/// the schedule alone. The schedule differs (the re-derivation
+/// happened; `build_with_seed_draws_the_new_seeds_schedule` holds
+/// that), which makes the weather's equality a statement about the
+/// swap and not about two identical builds.
+#[test]
+fn a_seed_swap_moves_the_schedule_and_nothing_else() {
+    let blueprint =
+        DwellingBlueprint::from_config(config(1, 1, None)).expect("the blueprint builds");
+    let rebuilt = blueprint
+        .build_with_seed(2)
+        .expect("the blueprint builds under the second seed");
+    let original = blueprint
+        .build()
+        .expect("the blueprint builds under its own seed");
+    assert_ne!(
+        schedule_rows(&rebuilt),
+        schedule_rows(&original),
+        "the swap must re-derive the schedule for the weather pin to mean \
+         anything"
+    );
+    let parent = blueprint.resampled_weather();
+    let reseeded = rebuilt.blueprint().resampled_weather();
+    assert_eq!(
+        parent.len(),
+        reseeded.len(),
+        "the two builds share the weather file's span and step"
+    );
+    for ((name, parent_bits), (_, reseeded_bits)) in weather_bits(&parent)
+        .into_iter()
+        .zip(weather_bits(&reseeded))
+    {
+        assert_eq!(
+            parent_bits, reseeded_bits,
+            "the weather's {name} column moved under a seed swap: the \
+             weather is the environment's, not the schedule's"
+        );
+    }
+}
+
+/// The CSV path's seed swap: a schedule CSV is measured or upstream
+/// data, so a build under another seed runs the blueprint's own
+/// schedule bitwise (the guard takes the in-place build) while its
+/// seeded streams are the new seed's: the swap happened, and it moved
+/// the schedule not at all.
+#[test]
+fn a_csv_homes_seed_swap_changes_nothing_in_the_schedule() {
+    let csv = repo_root().join("tests/fixtures/resstock/2025.1/bldg0000002/in.schedules.csv");
+    let mut cfg = config(1, 1, None);
+    cfg.schedule = Some(InputSource::Path(csv));
+    let blueprint = DwellingBlueprint::from_config(cfg).expect("the CSV blueprint builds");
+    let first = blueprint
+        .build_with_seed(1)
+        .expect("the construction seed's build");
+    let second = blueprint
+        .build_with_seed(2)
+        .expect("the second seed's build");
+    assert_eq!(
+        schedule_rows(&first),
+        schedule_rows(&second),
+        "a CSV schedule's rows must not move under a seed swap: the \
+         measured schedule is no household's draw"
+    );
+    assert_ne!(
+        first.seeded_streams(),
+        second.seeded_streams(),
+        "the swap must reseed the streams: the schedule's equality above \
+         would otherwise compare two identical builds"
+    );
+}
+
 /// The escape hatch: `schedule_diversity = "off"` restores the
 /// pre-diversity behavior, every no-CSV home running the same
 /// default-profile columns bit-for-bit.
