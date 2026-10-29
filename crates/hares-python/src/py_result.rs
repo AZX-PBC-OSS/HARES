@@ -12,10 +12,11 @@ use pyo3::types::{PyDict, PyList};
 use pyo3_arrow::PyTable;
 
 use hares_core::{
-    BuildInfo as RustBuildInfo, EquipmentProvenance as RustEquipmentProvenance,
+    BuildInfo as RustBuildInfo, ClosureRow as RustClosureRow,
+    EnergyClosureReport as RustEnergyClosureReport, EquipmentProvenance as RustEquipmentProvenance,
     Provenance as RustProvenance, ReportOutput, ReportResult as RustReportResult,
     RunResult as RustRunResult, WarmupOutcome as RustWarmupOutcome,
-    WarmupResiduals as RustWarmupResiduals,
+    WarmupResiduals as RustWarmupResiduals, ZoneClosureRow as RustZoneClosureRow,
 };
 use hares_io::InputRecord as RustInputRecord;
 use hares_io::InputRecordSource as RustInputRecordSource;
@@ -336,6 +337,14 @@ impl PyRunHealth {
         }
     }
 
+    /// The run's energy-closure report.
+    #[getter]
+    fn energy_closure(&self) -> PyEnergyClosureReport {
+        PyEnergyClosureReport {
+            inner: self.inner.energy_closure.clone(),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "RunHealth(port_rollbacks={}, rejected_control_signals={}, clamped_actions={}, \
@@ -456,6 +465,125 @@ impl PyWarmupResiduals {
             "WarmupResiduals(worst_zone={}, max_temperature_c={:.3}, min_temperature_c={:.3})",
             self.inner.worst_zone.0, self.inner.max_temperature_c, self.inner.min_temperature_c,
         )
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+/// The run's energy-closure report: the thermal first law the per-step
+/// thermal-balance invariant enforces, integrated over the run's production
+/// steps and stated in energy instead of watts.
+#[pyclass(frozen, name = "EnergyClosureReport")]
+pub struct PyEnergyClosureReport {
+    inner: RustEnergyClosureReport,
+}
+
+#[pymethods]
+impl PyEnergyClosureReport {
+    /// The full-system closure row.
+    #[getter]
+    fn system(&self) -> PyClosureRow {
+        PyClosureRow {
+            inner: self.inner.system,
+        }
+    }
+
+    /// The per-zone rows, in zone-id order.
+    #[getter]
+    fn zones(&self) -> Vec<PyZoneClosureRow> {
+        self.inner
+            .zones
+            .iter()
+            .map(|row| PyZoneClosureRow { inner: *row })
+            .collect()
+    }
+
+    /// The system row's residual in ppm of the gross flux.
+    #[getter]
+    fn residual_ppm_of_gross(&self) -> f64 {
+        self.inner.residual_ppm_of_gross()
+    }
+
+    fn __repr__(&self) -> String {
+        let s = &self.inner.system;
+        format!(
+            "EnergyClosureReport(stored_delta_wh={:.6}, \
+             delivered_end_use_wh={:.6}, tolerance_gross_wh={:.6}, \
+             residual_wh={:.3e}, residual_ppm_of_gross={:.3})",
+            s.stored_delta_wh,
+            s.delivered_end_use_wh,
+            s.tolerance_gross_wh,
+            s.residual_wh,
+            self.inner.residual_ppm_of_gross(),
+        )
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+/// One closure row's integrated terms, in Wh.
+#[pyclass(frozen, name = "ClosureRow")]
+pub struct PyClosureRow {
+    inner: RustClosureRow,
+}
+
+#[pymethods]
+impl PyClosureRow {
+    #[getter]
+    fn stored_delta_wh(&self) -> f64 {
+        self.inner.stored_delta_wh
+    }
+
+    #[getter]
+    fn delivered_end_use_wh(&self) -> f64 {
+        self.inner.delivered_end_use_wh
+    }
+
+    #[getter]
+    fn tolerance_gross_wh(&self) -> f64 {
+        self.inner.tolerance_gross_wh
+    }
+
+    #[getter]
+    fn residual_wh(&self) -> f64 {
+        self.inner.residual_wh
+    }
+
+    #[getter]
+    fn residual_ppm_of_gross(&self) -> f64 {
+        self.inner.residual_ppm_of_gross()
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+/// One zone's run-total share of the energy-closure report, in Wh.
+#[pyclass(frozen, name = "ZoneClosureRow")]
+pub struct PyZoneClosureRow {
+    inner: RustZoneClosureRow,
+}
+
+#[pymethods]
+impl PyZoneClosureRow {
+    #[getter]
+    fn zone(&self) -> u16 {
+        self.inner.zone.0
+    }
+
+    #[getter]
+    fn delivered_end_use_wh(&self) -> f64 {
+        self.inner.delivered_end_use_wh
+    }
+
+    #[getter]
+    fn zone_air_stored_wh(&self) -> f64 {
+        self.inner.zone_air_stored_wh
     }
 
     fn __eq__(&self, other: &Self) -> bool {

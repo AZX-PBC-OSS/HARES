@@ -268,6 +268,11 @@ pub struct ThermalSolver {
     /// Per-zone energy balance residuals [W] from the current timestep's closure check.
     /// Populated by `integrate_inner`, consumed by `format_domain_update` for telemetry.
     energy_balance_residuals: HashMap<ZoneId, f64>,
+    /// Per-zone signed stored-energy rate [W] = C_zone × (T_next − T_prev) / dt
+    /// for each zone's air node. Populated by `integrate_inner` alongside
+    /// `energy_balance_residuals`, consumed by the dwelling's run-level
+    /// energy-closure accumulation.
+    zone_air_stored_w: HashMap<ZoneId, f64>,
     /// Full-system stored energy rate [W] = Σ C_i × (T_next_i − T_prev_i) / dt
     /// across ALL thermal state nodes.  Populated by `integrate_inner`, consumed
     /// by the dwelling invariant check for thermal energy conservation.
@@ -279,6 +284,13 @@ pub struct ThermalSolver {
     /// Total envelope conduction to outdoor [W] = − Σ_i C_i × (A_c × x_prev)[i].
     /// Positive = heat leaving the system.  Populated by `integrate_inner`.
     thermal_balance_q_loss: f64,
+    /// The balance sums' node list, NodeId-sorted: (state index, capacitance)
+    /// per internal node, so the capacitance-weighted sums below accumulate
+    /// in one deterministic order. The HashMap's own iteration order is
+    /// seeded per instance, which the threshold-based invariant tolerated
+    /// but a recorded run total cannot (two identical dwellings would
+    /// report ulp-different closures).
+    balance_node_terms: Vec<(usize, f64)>,
     /// Pre-allocated working buffers for the affine-coupled balance
     /// decomposition (populated by `integrate_inner` in every build profile:
     /// the dwelling's thermal-balance invariant runs unconditionally).
@@ -507,6 +519,16 @@ impl ThermalSolver {
     /// defect.
     pub fn energy_balance_residuals(&self) -> &HashMap<ZoneId, f64> {
         &self.energy_balance_residuals
+    }
+
+    /// Per-zone signed stored-energy rate of each zone's AIR node (W) from the
+    /// most recent `resolve()` call: `C_zone × (T_next − T_prev) / dt`, positive
+    /// when the zone air stores heat. Wall and mass nodes are not part of any
+    /// zone's entry: they are shared across zones through the A-matrix, so the
+    /// full-system storage stays the domain of `thermal_balance_terms`. Consumed
+    /// by the dwelling's run-level energy-closure accumulation.
+    pub fn zone_air_stored_w(&self) -> &HashMap<ZoneId, f64> {
+        &self.zone_air_stored_w
     }
 
     /// Thermal balance terms for the invariant check, populated by the most
@@ -1128,6 +1150,25 @@ impl ThermalSolver {
             }
         };
 
+        // The balance sums' node list, NodeId-sorted: (state index,
+        // capacitance) per internal node. Computed before the wiring moves
+        // into the struct; the sort gives the capacitance-weighted balance
+        // sums one deterministic order (a HashMap's iteration order is
+        // seeded per instance, which the threshold-based invariant
+        // tolerated but a recorded run total cannot).
+        let mut balance_node_terms: Vec<(usize, f64)> = wiring
+            .node_capacitances
+            .iter()
+            .filter_map(|(node_id, &c_j_k)| {
+                wiring
+                    .node_index
+                    .get(node_id)
+                    .filter(|&&idx| idx < model.state_dim())
+                    .map(|&idx| (idx, c_j_k))
+            })
+            .collect();
+        balance_node_terms.sort_unstable_by_key(|&(idx, _)| idx);
+
         Ok(Self {
             model,
             wiring,
@@ -1192,6 +1233,8 @@ impl ThermalSolver {
             lwr_surfaces_buf: Vec::with_capacity(max_interior_surfaces),
             lwr_linearised_warned_zones: HashSet::new(),
             energy_balance_residuals: HashMap::with_capacity(n_zones_for_latent),
+            zone_air_stored_w: HashMap::with_capacity(n_zones_for_latent),
+            balance_node_terms,
             ideal_capacity_failure_counts: HashMap::with_capacity(n_zones_for_latent),
             last_good_capacity_w: HashMap::with_capacity(n_zones_for_latent),
             non_hvac_zone_input_w: HashMap::with_capacity(n_zones_for_latent),

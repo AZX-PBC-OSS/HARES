@@ -47,6 +47,33 @@ floor prevents division-by-zero when gains are near zero.
 
 **Moisture** uses h_fg = 2,501,000 J/kg (latent heat of vaporisation at 0 °C).
 
+### The run-level energy closure report
+
+The per-step tolerance admits each step's thermal residual silently, and
+integrated over a year the tolerance's 1 W floor admits at most 8.76 kWh
+of bias a run never had to show anyone (1 W over the year's 31,536,000 s).
+`RunHealth::energy_closure` makes the accumulation visible: every
+production step (warm-up excluded) integrates the same three terms
+`thermal_balance` checked into run totals stated as Wh (`stored_delta_wh`,
+`Σ C_i·ΔT_i/dt` over every node; `delivered_end_use_wh`, the equipment
+ports' metered delivery, per zone in `zones[]` beside each zone air
+node's own storage; `tolerance_gross_wh`, `Σ|q_gains|` per step, the
+quantity the per-step relative tolerance scales with; the kilowatt-hour
+form of any of them divides by 1000). The solver's gains and conduction
+terms themselves are NOT published: they are the step map's affine
+decomposition against a 0 C boundary reference, each carrying a
+component proportional to the absolute boundary temperatures that
+cancels only in the residual, and read as a house's gains and envelope
+conduction they state three orders beyond the dwellings' own loads.
+`residual_wh` integrates the per-step
+residual itself, and `residual_ppm_of_gross()` denominates it against the
+integrated tolerance gross. The report is telemetry, never a health event: a
+residual outside the per-step tolerance already quarantines the dwelling.
+The identity's definition and the witnesses are recorded in
+`docs/PHYSICS_DECISIONS.md` ("The run-level energy closure identity"); the
+fleet folds the per-home residual distribution (mean, p99) and the
+warm-up days-run per dwelling through `FleetResult::energy_closure_telemetry`.
+
 ### Active Checks in Dwelling::check_step_invariants
 
 These fire every timestep after solver resolution but before port zeroing:

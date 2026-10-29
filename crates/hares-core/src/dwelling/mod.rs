@@ -3021,6 +3021,13 @@ pub struct Dwelling {
     /// `NegativeDeliveredEnergy`.
     #[cfg(any(test, debug_assertions))]
     test_hvac_negative_energy_failure: bool,
+    /// Test-only: watts per step the energy-closure accumulation adds to the
+    /// conduction term without any gains-side counterpart, the uncounted
+    /// loss the report's discrimination witness injects. The invariant check
+    /// never sees the perturbation (the run completes clean), so the report
+    /// alone must surface it.
+    #[cfg(any(test, debug_assertions))]
+    test_closure_uncounted_loss_w: f64,
     /// Everything the step path reads that derives from the equipment and
     /// actor rosters, installed as a whole by each roster change.
     roster: RosterCaches,
@@ -4712,6 +4719,8 @@ fn assemble_from_blueprint_with_seed(
         test_thermal_invariant_failure: false,
         #[cfg(any(test, debug_assertions))]
         test_hvac_negative_energy_failure: false,
+        #[cfg(any(test, debug_assertions))]
+        test_closure_uncounted_loss_w: 0.0,
         equipment,
         equipment_id_by_name,
         next_equipment_id,
@@ -5153,6 +5162,17 @@ impl Dwelling {
     #[cfg(any(test, debug_assertions))]
     pub fn set_hvac_negative_energy_failure_for_test(&mut self) {
         self.test_hvac_negative_energy_failure = true;
+    }
+
+    /// Test-only hook: forces `watts` of uncounted loss into the
+    /// energy-closure accumulation of every later step: the report's loss
+    /// term grows by `watts` with no gains-side counterpart, so the
+    /// report's residual integrates exactly `watts` over the run while
+    /// the per-step invariant (which the perturbation never reaches) keeps
+    /// passing. Zero restores the honest read.
+    #[cfg(any(test, debug_assertions))]
+    pub fn set_energy_closure_uncounted_loss_for_test(&mut self, watts: f64) {
+        self.test_closure_uncounted_loss_w = watts;
     }
 
     /// Executes exactly one simulation timestep.
@@ -9827,6 +9847,29 @@ impl Dwelling {
             #[cfg(not(any(test, debug_assertions)))]
             {
                 checker.check_thermal(q_gains, delta_e_storage, q_loss)?;
+            }
+
+            // The run's energy-closure report: the same three terms the
+            // invariant just checked, integrated into the run's totals so
+            // the residual the per-step tolerance admits per step becomes a
+            // visible run total instead of silent bias. Production steps
+            // only: warm-up is the convergence replay, not the run's
+            // account. The test seam's uncounted loss never reaches the
+            // invariant (the run stays clean), so the report alone must
+            // surface it.
+            if !self.is_warming_up {
+                #[cfg(any(test, debug_assertions))]
+                let closure_q_loss = q_loss + self.test_closure_uncounted_loss_w;
+                #[cfg(not(any(test, debug_assertions)))]
+                let closure_q_loss = q_loss;
+                self.health.energy_closure.record_step(
+                    q_gains,
+                    delta_e_storage,
+                    closure_q_loss,
+                    &self.ports.thermal,
+                    self.thermal_solver.zone_air_stored_w(),
+                    dt_s,
+                );
             }
         }
 
