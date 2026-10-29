@@ -8,7 +8,6 @@ from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from typing import Any
 
 import polars as pl
 

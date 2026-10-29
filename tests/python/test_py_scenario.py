@@ -145,7 +145,7 @@ class TestSpecConformance:
                         "name": "p",
                         "unit": "count",
                         "target": {"patch": {"field": "number_of_bedrooms"}},
-                        "distribution": {"triangular": {"min": 1.0, "mode": 3.0, "max": 5.0}},
+                        "distribution": {"triangular": {"min": 1.0, "mode": 1.2, "max": 5.0}},
                     }
                 ],
             }
@@ -155,7 +155,10 @@ class TestSpecConformance:
             for s in range(4000)
         ]
         assert all(1.0 <= v <= 5.0 for v in values)
-        assert statistics.fmean(values) == pytest.approx(3.0, abs=0.08)
+        # The triangular mean is (min + mode + max) / 3, not the mode: an
+        # asymmetric triangle (min 1.0, mode 1.2, max 5.0) has mean 2.4,
+        # and the mean's standard error at 4,000 draws is about 0.015.
+        assert statistics.fmean(values) == pytest.approx(2.4, abs=0.05)
 
     def test_discrete_values_only(self):
         spec = ScenarioSpec(
