@@ -1364,6 +1364,31 @@ would state a response the engine does not answer. At the reference
 voltage every multiplier is exactly 1.0, so the assembled response is
 exactly 1.0 and no committed golden moves.
 
+## The pf = 0.0 sentinel is a reactive-only switch (the secondary real response keeps its row)
+
+The `pf = 0.0` sentinel means "no reactive ZIP configured" and scopes
+to the reactive side of the whole unit: the primary component's Q (its
+row's own pf is the sentinel) and every secondary fan/pump component's
+Q (`secondary_motor_zip` substitutes the constant-power row into the
+reactive sums). Real power is outside the sentinel's meaning: a
+secondary fan/pump's real response evaluates its own physical
+component row (`FAN_MOTOR_ZIP` / `LOOP_PUMP_ZIP`, as fitted), the
+sentinel or not. The form, the source: the units' own scaling sites
+and the component-assignment contract in
+`docs/equipment/power-factor.md`; the alternative rejected: letting
+the sentinel's constant-power substitution reach the secondary real
+multiplier, which flattened the fan and pump real responses to the
+identity at every voltage (0.355 became 1.0 at 0.5 pu) while the
+unit's `resolved_zip` still declared a governing real response; a
+user disabling reactive power with the documented sentinel silently
+lost the blower's and loop pump's deep-sag response, a Q-only flag
+changing real power. A unit sidecar carrying the sentinel is validated
+on its real sum alone (the reactive sum is unconstrained when pf = 0),
+so the flattening was reachable by configuration. The sentinel or
+not, the secondary's row is unchanged whenever the unit's pf is
+nonzero, so no energized 1.0 pu fixture moves and no committed golden
+moves.
+
 ## The frequency channel is read by nothing (the named gap)
 
 The grid-signal channel's frequency input is accepted, validated and

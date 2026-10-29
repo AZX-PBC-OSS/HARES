@@ -332,7 +332,9 @@ pub struct GshpCooler {
     /// `hvac::reactive::LOOP_PUMP_ZIP`), honouring the unit-level pf=0
     /// sentinel: its real polynomial scales the pump's draw at the bus
     /// voltage through the recorded deep-sag form, and its reactive side
-    /// drives Q. The compressor/fan/crankcase
+    /// drives Q (the reactive sum's surface: the unit-level pf = 0.0
+    /// sentinel included; the pump's REAL response never consults this
+    /// row). The compressor/fan/crankcase
     /// response comes from the inner [`AirConditioner`].
     pump_zip: hares_types::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (the
@@ -667,10 +669,11 @@ impl Equipment for GshpCooler {
             pump_nominal_w
             // The declared deep-sag response (docs/PHYSICS_DECISIONS.md,
             // the deep-sag entry): the pump motor's draw evaluates its
-            // pump-motor row at the ACTUAL bus voltage. The inner
+            // pump-motor row at the ACTUAL bus voltage (the physical row,
+            // the sentinel or not: pf = 0.0 is reactive-only). The inner
             // AirConditioner carries the compressor/fan response.
             * crate::hvac::reactive::secondary_motor_real_multiplier(
-                &self.pump_zip,
+                &crate::hvac::reactive::LOOP_PUMP_ZIP,
                 env.grid.bus_voltage_pu(),
             )
         } else {
@@ -808,7 +811,9 @@ pub struct WshpCooler {
     pump_system_head_loss_m: f64,
     /// Rule R1 reactive-only ZIP for the water-loop pump contribution:
     /// the pump motor component (pf 0.84, `hvac::reactive::LOOP_PUMP_ZIP`),
-    /// honouring the unit-level pf=0 sentinel. The compressor/fan/crankcase
+    /// honouring the unit-level pf=0 sentinel for the reactive side only
+    /// (the pump's REAL response evaluates the physical row). The
+    /// compressor/fan/crankcase
     /// reactive comes from the inner [`AirConditioner`].
     pump_zip: hares_types::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (the
@@ -1066,8 +1071,11 @@ impl Equipment for WshpCooler {
         };
         let pump_w = if compressor_ran {
             pump_nominal_w
+                // The physical pump-motor row, the sentinel or not:
+                // pf = 0.0 is reactive-only and must never flatten the
+                // pump's real response.
                 * crate::hvac::reactive::secondary_motor_real_multiplier(
-                    &self.pump_zip,
+                    &crate::hvac::reactive::LOOP_PUMP_ZIP,
                     env.grid.bus_voltage_pu(),
                 )
         } else {

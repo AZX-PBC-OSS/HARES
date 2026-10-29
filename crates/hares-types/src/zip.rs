@@ -41,7 +41,12 @@ pub struct ZipLoad {
     /// Reactive-power constant fraction.
     pub pq: f64,
     /// Power factor magnitude for reactive power calculation.
-    /// `0.0` is the sentinel for "no reactive ZIP configured".
+    /// `0.0` is the sentinel for "no reactive ZIP configured": a
+    /// reactive-only switch that zeroes the reactive power of the whole
+    /// unit (primary and secondary components) and never alters real
+    /// power: the real coefficients govern as resolved, and a secondary
+    /// fan/pump's real response evaluates its own physical component row
+    /// (see `hares_equipment`'s `hvac::reactive`).
     pub pf: f64,
     /// Reference voltage for ZIP normalization [per-unit]. Default 1.0.
     #[serde(default = "default_v0")]

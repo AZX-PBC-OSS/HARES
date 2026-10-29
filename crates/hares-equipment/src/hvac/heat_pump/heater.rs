@@ -216,12 +216,18 @@ struct HeatPumpHeaterCore {
     /// backup, pan heater, and resistive defrost elements are resistive
     /// (pf 1.0) and contribute Q ≡ 0.
     zip: hares_types::zip::ResolvedZip,
-    /// Indoor blower / outdoor fan motor component ZIP (pf 0.87), derived at
-    /// init via `hvac::reactive::secondary_motor_zip`.
+    /// The indoor blower / outdoor fan motor component's REACTIVE row (pf
+    /// 0.87), derived at init via `hvac::reactive::secondary_motor_zip`:
+    /// the reactive sum's surface, the unit-level pf = 0.0 sentinel
+    /// included. The fan's REAL response never consults this row; it
+    /// evaluates the physical `hvac::reactive::FAN_MOTOR_ZIP` row.
     fan_zip: hares_types::zip::ZipLoad,
-    /// Ground/water-loop circulation pump motor component ZIP (pf 0.84),
-    /// derived at init via `hvac::reactive::secondary_motor_zip`. Only GSHP
-    /// and WSHP variants draw pump power.
+    /// The ground/water-loop circulation pump motor component's REACTIVE
+    /// row (pf 0.84), derived at init via
+    /// `hvac::reactive::secondary_motor_zip`. Only GSHP and WSHP variants
+    /// draw pump power. The reactive sum's surface, the unit-level
+    /// pf = 0.0 sentinel included; the pump's REAL response never consults
+    /// this row (it evaluates the physical `LOOP_PUMP_ZIP` row).
     pump_zip: hares_types::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (the
     /// final scaled components un-scaled each through its own row, at the
@@ -2311,8 +2317,14 @@ impl HeatPumpHeaterCore {
         // the multiplicative parts commute with this response.
         let bus_voltage_pu = env.grid.bus_voltage_pu();
         let motor_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
-        let fan_multiplier =
-            crate::hvac::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
+        // The fan's real response evaluates the physical fan-motor row (the
+        // sentinel or not: pf = 0.0 is reactive-only and must never flatten
+        // it); the sentinel-substituted `fan_zip` row is the reactive sum's
+        // surface only.
+        let fan_multiplier = crate::hvac::reactive::secondary_motor_real_multiplier(
+            &crate::hvac::reactive::FAN_MOTOR_ZIP,
+            bus_voltage_pu,
+        );
         let v_norm = bus_voltage_pu / self.zip.v0;
         let resistive_multiplier = v_norm * v_norm;
         hp_electric_w *= motor_multiplier;
@@ -2442,8 +2454,12 @@ impl HeatPumpHeaterCore {
                 self.pump_efficiency,
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
-            ) * crate::hvac::reactive::secondary_motor_real_multiplier(
-                &self.pump_zip,
+            )
+            // The pump's real response evaluates the physical pump-motor
+            // row (the sentinel or not: pf = 0.0 is reactive-only and must
+            // never flatten it).
+            * crate::hvac::reactive::secondary_motor_real_multiplier(
+                &crate::hvac::reactive::LOOP_PUMP_ZIP,
                 bus_voltage_pu,
             )
         } else {
@@ -2458,8 +2474,10 @@ impl HeatPumpHeaterCore {
         // over it. The control composition acts on the scaled values it
         // sees, so the un-scale happens on the final components, each
         // against the row that scaled it.
-        let pump_multiplier =
-            crate::hvac::reactive::secondary_motor_real_multiplier(&self.pump_zip, bus_voltage_pu);
+        let pump_multiplier = crate::hvac::reactive::secondary_motor_real_multiplier(
+            &crate::hvac::reactive::LOOP_PUMP_ZIP,
+            bus_voltage_pu,
+        );
         let nominal_component_w = compressor_w / motor_multiplier
             + fan_w / fan_multiplier
             + backup_er_w / resistive_multiplier

@@ -55,8 +55,11 @@ pub struct ElectricFurnace {
     /// polynomial scales the element's draw and delivered heat at the bus
     /// voltage through the recorded deep-sag form.
     zip: hares_types::zip::ResolvedZip,
-    /// Blower fan motor component ZIP (pf 0.87), derived at init via
-    /// `hvac::reactive::secondary_motor_zip`.
+    /// The blower fan motor component's REACTIVE row (pf 0.87), derived
+    /// at init via `hvac::reactive::secondary_motor_zip`: the reactive
+    /// sum's surface, the unit-level pf = 0.0 sentinel included. The
+    /// blower's REAL response never consults this row; it evaluates the
+    /// physical `hvac::reactive::FAN_MOTOR_ZIP` row.
     fan_zip: hares_types::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (W, the
     /// element's and blower's pre-scaling sum at the reference voltage):
@@ -282,8 +285,14 @@ impl Equipment for ElectricFurnace {
         // multiplies the result (the two multiplications commute).
         let bus_voltage_pu = env.grid.bus_voltage_pu();
         let element_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
-        let fan_multiplier =
-            super::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
+        // The blower's real response evaluates the physical fan-motor row
+        // (the sentinel or not: pf = 0.0 is reactive-only and must never
+        // flatten it); the sentinel-substituted `fan_zip` row is the
+        // reactive sum's surface only.
+        let fan_multiplier = super::reactive::secondary_motor_real_multiplier(
+            &super::reactive::FAN_MOTOR_ZIP,
+            bus_voltage_pu,
+        );
         // The moment's nominal component draw: the element's and blower's
         // pre-scaling sum, the composition the scaled draws below evaluate
         // through their own rows. The premise aggregate weights this unit

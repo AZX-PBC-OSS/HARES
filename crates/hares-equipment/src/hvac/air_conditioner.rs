@@ -172,8 +172,11 @@ pub(super) struct CoolingCore {
     /// form (as fitted: the recorded Hajagos & Danai row); Q comes from
     /// `ZipLoad::reactive_var` per component (see `hvac::reactive`).
     zip: hares_types::zip::ResolvedZip,
-    /// Indoor blower / condenser fan motor component ZIP (pf 0.87), derived
-    /// at init via `hvac::reactive::secondary_motor_zip`.
+    /// The indoor blower / condenser fan motor component's REACTIVE row
+    /// (pf 0.87), derived at init via `hvac::reactive::secondary_motor_zip`:
+    /// the reactive sum's surface, the unit-level pf = 0.0 sentinel
+    /// included. The blower's REAL response never consults this row; it
+    /// evaluates the physical `hvac::reactive::FAN_MOTOR_ZIP` row.
     fan_zip: hares_types::zip::ZipLoad,
 }
 
@@ -1403,8 +1406,14 @@ impl CoolingCore {
         // result (the two multiplications commute).
         let bus_voltage_pu = env.grid.bus_voltage_pu();
         let motor_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
-        let fan_multiplier =
-            super::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
+        // The blower's real response evaluates the physical fan-motor row
+        // (the sentinel or not: pf = 0.0 is reactive-only and must never
+        // flatten it); the sentinel-substituted `fan_zip` row is the
+        // reactive sum's surface only.
+        let fan_multiplier = super::reactive::secondary_motor_real_multiplier(
+            &super::reactive::FAN_MOTOR_ZIP,
+            bus_voltage_pu,
+        );
         let v_norm = bus_voltage_pu / self.zip.v0;
         let resistive_multiplier = v_norm * v_norm;
         // The moment's nominal component draw: the components' pre-scaling
@@ -3996,6 +4005,86 @@ mod tests {
             "the assembled response must be the hand computation \
              {expected_response}, got {reported_response} (the compressor \
              row alone evaluates {m_compressor})"
+        );
+    }
+
+    /// Z4's witness: the `pf = 0.0` sentinel is a reactive-only switch.
+    /// The attack's scenario: a unit sidecar carrying the pump row's real
+    /// side with the sentinel (zp 0.72, ip -0.98, pp 1.26, pf 0.0) is
+    /// accepted by validate_zip_sums (the real sum is 1.0; the reactive
+    /// sum is unconstrained when pf = 0). At 0.5 pu the compressor follows
+    /// the sidecar row as fitted (0.72 x 0.25 - 0.98 x 0.5 + 1.26 = 0.95)
+    /// and the indoor blower follows the physical fan row (0.26 x 0.25 +
+    /// 0.9 x 0.5 - 0.16 = 0.355); at the parent the sentinel's
+    /// constant-power substitution flattened the blower to 1.0 while the
+    /// unit's resolved_zip still declared a governing real response. The
+    /// whole unit's Q is exactly zero: the sentinel's own meaning.
+    #[test]
+    fn pf_zero_sentinel_is_reactive_only_and_keeps_the_blower_row() {
+        let mut cfg = ac_config_with(|typed| {
+            typed.startup_cd = None;
+        });
+        cfg.zip = Some(hares_types::zip::ZipLoad {
+            zp: 0.72,
+            ip: -0.98,
+            pp: 1.26,
+            zq: 0.0,
+            iq: 0.0,
+            pq: 0.0,
+            pf: 0.0,
+            v0: 1.0,
+        });
+        let environment = env_at_second(27.0, 35.0, 0);
+
+        let run = |voltage_pu: f64| -> AirConditioner {
+            let mut env_run = env_at_second(27.0, 35.0, 0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let compressor_n = nominal_unit.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+        let fan_n = nominal_unit.telemetry().get(tk::FAN_KW).unwrap();
+        assert!(compressor_n > 0.0, "fixture: the compressor must run");
+        assert!(
+            fan_n > 0.0,
+            "fixture: the blower must draw: it is the witness's component"
+        );
+
+        // The sidecar row as fitted at 0.5 pu: the compressor's multiplier.
+        let m_sidecar: f64 = 0.72 * 0.25 - 0.98 * 0.5 + 1.26;
+        assert!((m_sidecar - 0.95).abs() < 1e-12, "hand: {m_sidecar}");
+        // The physical fan row as fitted at 0.5 pu: the blower's multiplier.
+        let m_fan: f64 = 0.26 * 0.25 + 0.9 * 0.5 - 0.16;
+        assert!((m_fan - 0.355).abs() < 1e-12, "hand: {m_fan}");
+
+        let compressor_half = sag_unit.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+        assert!(
+            (compressor_half - compressor_n * m_sidecar).abs() < 1e-9,
+            "the compressor must follow the sidecar row ({compressor_n} x \
+             {m_sidecar}), got {compressor_half}"
+        );
+        let fan_half = sag_unit.telemetry().get(tk::FAN_KW).unwrap();
+        assert!(
+            (fan_half - fan_n * m_fan).abs() < 1e-9,
+            "the blower's real response must evaluate the physical fan row \
+             ({fan_n} x {m_fan}), got {fan_half}; the sentinel's \
+             constant-power substitution flattens it to 1.0"
+        );
+        let q = sag_unit.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(
+            q == 0.0,
+            "the sentinel zeroes the whole unit's reactive power, got {q}"
         );
     }
 

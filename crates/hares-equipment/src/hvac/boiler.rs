@@ -128,8 +128,11 @@ pub struct ElectricBoiler {
     /// scales the element's draw and delivered heat at the bus voltage
     /// through the recorded deep-sag form.
     zip: hares_types::zip::ResolvedZip,
-    /// Hydronic circulation-pump motor component ZIP (pf 0.84), derived at
-    /// init via `hvac::reactive::secondary_motor_zip`.
+    /// The hydronic circulation-pump motor component's REACTIVE row (pf
+    /// 0.84), derived at init via `hvac::reactive::secondary_motor_zip`:
+    /// the reactive sum's surface, the unit-level pf = 0.0 sentinel
+    /// included. The pump's REAL response never consults this row; it
+    /// evaluates the physical `hvac::reactive::LOOP_PUMP_ZIP` row.
     pump_zip: hares_types::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (W, the
     /// element's and pump's pre-scaling sum at the reference voltage):
@@ -409,8 +412,14 @@ impl Equipment for ElectricBoiler {
         // rated draw; the voltage response multiplies the result.
         let bus_voltage_pu = env.grid.bus_voltage_pu();
         let element_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
-        let pump_multiplier =
-            super::reactive::secondary_motor_real_multiplier(&self.pump_zip, bus_voltage_pu);
+        // The pump's real response evaluates the physical pump-motor row
+        // (the sentinel or not: pf = 0.0 is reactive-only and must never
+        // flatten it); the sentinel-substituted `pump_zip` row is the
+        // reactive sum's surface only.
+        let pump_multiplier = super::reactive::secondary_motor_real_multiplier(
+            &super::reactive::LOOP_PUMP_ZIP,
+            bus_voltage_pu,
+        );
         // The moment's nominal component draw: the element's and pump's
         // pre-scaling sum, the composition the scaled draws below evaluate
         // through their own rows. The premise aggregate weights this unit
