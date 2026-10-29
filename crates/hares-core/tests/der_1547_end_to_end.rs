@@ -126,3 +126,52 @@ fn der_1547_override_trips_the_pv_and_the_trip_state_reads_end_to_end() {
         "the run's first excursion is one counted event"
     );
 }
+
+/// A step that trips more than one DER publishes every trip, and the
+/// dense channel is aligned with the equipment names: each entry is that
+/// equipment's own published trip state, in the roster's order. With the
+/// PV's and the battery's inverters both configured, one 0.6 pu sag trips
+/// both on the same step, so an ordering slip (a channel built before the
+/// DERs step, or offset by one name) shows as a mismatched entry.
+#[test]
+fn a_simultaneous_pv_and_battery_trip_aligns_the_dense_channel() {
+    let config = pv_battery_config(json!({
+        "PV": {"der_1547": {"category": "II"}},
+        "Battery": {"der_1547": {"category": "II"}, "bms_mode": "\"Manual\""},
+    }));
+    let mut dwelling = Dwelling::from_config(config).expect("construction");
+    dwelling.step().expect("the first step");
+    dwelling
+        .set_grid_voltage(0.6)
+        .expect("the sag override is in contract");
+    dwelling.step().expect("the sag step");
+
+    let dense = dwelling.telemetry().expect("dense telemetry");
+    assert_eq!(
+        dense.equipment_der1547_tripped.len(),
+        dense.equipment_names.len(),
+        "one trip entry per equipment"
+    );
+    let snapshots = &dwelling.latest_env().equipment_telemetry;
+    for (idx, name) in dense.equipment_names.iter().enumerate() {
+        let published = snapshots
+            .get(name)
+            .and_then(|tel| tel.get("der1547_tripped"))
+            .unwrap_or(0.0);
+        assert_eq!(
+            dense.equipment_der1547_tripped[idx], published,
+            "{name}: the dense entry is that equipment's own published state"
+        );
+    }
+    for class in ["PV", "Battery"] {
+        let idx = dense
+            .equipment_names
+            .iter()
+            .position(|name| name.contains(class))
+            .unwrap_or_else(|| panic!("the {class} is in the roster"));
+        assert_eq!(
+            dense.equipment_der1547_tripped[idx], 1.0,
+            "{class}: the same sag trips every configured inverter"
+        );
+    }
+}

@@ -2725,6 +2725,12 @@ mod tests {
             Some(2.0),
             "uv1"
         );
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            Some(10.0),
+            "the firing step publishes the window it reached, as the PV's and \
+             the EV's channels do"
+        );
 
         // The unconfigured layer's battery face: the pre-1547 behavior.
         let config = battery_config_with_der1547(None);
@@ -2879,6 +2885,81 @@ mod tests {
                 "step {step}: the island source follows the latch"
             );
         }
+    }
+
+    /// A tripped inverter owes nothing to a demand-response event. The
+    /// layer's gate sits on the pack's delivered interchange, so a battery
+    /// commanded to discharge under a DR level delivers nothing while the
+    /// latch holds (neither leg conducts; the standby draw is the port's
+    /// only load) and resumes the DR-scaled discharge on the step the
+    /// latch clears. The DR level is the grid's command, not the
+    /// inverter's state, so the trip suspends the obligation without
+    /// spending it.
+    #[test]
+    fn a_tripped_battery_owes_no_demand_response_delivery_while_offline() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        // High is half the rating: the 5000 W command is capped at
+        // 2500 W of injection; the port carries that less the 10 W
+        // standby draw.
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let dr_power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (dr_power - (-2500.0 + 10.0)).abs() < 1e-6,
+            "the DR level caps the discharge at half the rating, got {dr_power} W"
+        );
+
+        // The sag trips the inverter: no delivery at all, whatever the DR
+        // obligation commanded.
+        let mut sag = base_env();
+        sag.grid.voltage_pu = 0.6;
+        bat.step(&sag, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        let tripped_power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (tripped_power - 10.0).abs() < 1e-6,
+            "the latched inverter owes nothing: the port carries the standby \
+             draw alone, got {tripped_power} W"
+        );
+
+        // The latch clears on the fifth restored 60 s step (the 300 s
+        // delay); the DR-scaled discharge resumes from that step.
+        let mut reconnected = 0.0;
+        for step in 1..=5 {
+            bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+                .unwrap();
+            if step < 5 {
+                assert_eq!(
+                    bat.telemetry().get(tk::DER1547_TRIPPED),
+                    Some(1.0),
+                    "step {step}: the latch still holds"
+                );
+            } else {
+                reconnected = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+            }
+        }
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+        assert!(
+            (reconnected - (-2500.0 + 10.0)).abs() < 1e-6,
+            "the reconnected inverter resumes the DR-scaled discharge, got \
+             {reconnected} W"
+        );
     }
 
     /// The 1547 run state survives a checkpoint round trip: a trip
