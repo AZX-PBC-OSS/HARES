@@ -1366,3 +1366,42 @@ way. The named gap: a frequency-excursion study reads zero response by
 construction, and the channel's only consumers are the setters, the
 validators and the test constructors; a study needing one must land the
 coefficient source and the record first, and retire this entry.
+## The MSHP pan heater runs on ambient temperature alone
+
+The minisplit heat pump's condensate pan heater draws its rated 0.150 kW
+whenever the outdoor dry bulb is below its 0 C threshold, independent of
+compressor operation: standby and ER-only steps carry the draw. The form
+is the reference implementation's own: OCHRE's
+`MinisplitAHSPHeater.calculate_power_and_heat`
+(`ochre/Equipment/HVAC.py:1489-1497`) sets `pan_heater_on =
+pan_heater_kw > 0 and t_ext < pan_heater_temp` after the base class's
+power computation, where the class attributes rate the draw at
+`pan_heater_kw = 0.150` kW below `pan_heater_temp = 0` C
+(`HVAC.py:1482-1483`), and the draw joins `electric_kw` scaled by the
+space fraction with no thermal output ("no impact on sensible heat",
+`HVAC.py:1493`). The real appliance's element keeps the condensate pan
+from freezing whenever the outdoor coil compartment is cold, whether or
+not the compressor ran that hour, so the reference's temperature-only
+gate is the physical form and the previous compressor-gated form
+under-counted every winter standby hour to zero.
+
+The rated draw also converts once where the unit changes: the class
+attribute is a kW value and the field it lands in joins the watt-valued
+electric sum, so the previous read carried 0.15 W where the reference
+carries 150 W.
+
+Alternative rejected: keeping the compressor gate (the pan heater only
+while the compressor runs) would model a relay wired to the compressor
+contactor that the reference appliance does not have, and would keep the
+winter standby under-count the pan-heater column exists to catch.
+
+Direction of the delta: no committed golden fixture moves (the pan
+heater exists only on the `Minisplit` variant and no committed golden
+home declares a mini-split heat pump). The reference-corpus parity
+comparison's peak-minute tolerance for `cz5a_minisplit_gas_wh` re-pins
+21.5 to 22.5 percent with the measured pair (HARES 18.04 kW against
+OCHRE's 14.8094 kW in the ER-only design-temperature minute: OCHRE's
+reference peak already carried its 0.15 kW pan draw, 14.41 ER plus
+0.25 fan plus 0.15 pan (HVAC.py:1482-1497), and only HARES moved,
+17.89 to 18.04 kW, so the residual is the documented ER dispatch
+divergence measured at the peak).

@@ -9,6 +9,7 @@ use hares_equipment::{
     HeatPumpHeaterConfig, HvacSetpointConfig, IdealHvacConfig, RejectUnknownKeys,
     hvac::ThermostatConfig,
 };
+use hares_physics::constants::KW_TO_W;
 use hares_types::{
     ControlCapabilities, ControlSignal, EnvironmentState, FluidAccumulator, FluidType, FuelType,
     GridState, HumidityAccumulator, LoopId, OperatingMode, PortSlots, ScheduleSourceConfig,
@@ -1567,18 +1568,24 @@ fn mshp_defaults_match_reference() {
         "MSHP must have zero backup ER power by default (no strip heater); got {backup_er_kw:.6} kW"
     );
 
-    // Pan heater must fire when OAT < 0°C and HP is running (OCHRE HVAC.py:1492-1496)
-    let pan_kw_cold = eq
+    // Pan heater must fire when OAT < 0°C and HP is running (OCHRE
+    // HVAC.py:1489-1497 conditions the draw on ambient temperature alone;
+    // HVAC.py:1482 rates it at 0.150 kW = 150 W). Telemetry under the power
+    // keys is watts (see docs/equipment/hvac.md), so the expected value is
+    // the rated draw converted once to the surface's unit.
+    let pan_w_cold = eq
         .telemetry()
         .get(tk::PAN_HEATER_KW)
         .expect("PAN_HEATER_KW must be present");
     assert!(
-        pan_kw_cold > 1e-6,
-        "MSHP pan heater must be active when OAT=-5°C and HP is running; got {pan_kw_cold:.4} kW"
+        pan_w_cold > 1e-6,
+        "MSHP pan heater must be active when OAT=-5°C and HP is running; got {pan_w_cold:.4} W"
     );
     assert!(
-        (pan_kw_cold - EXPECTED_PAN_HEATER_KW).abs() < 0.001,
-        "MSHP pan heater must draw {EXPECTED_PAN_HEATER_KW} kW per OCHRE HVAC.py:1482; got {pan_kw_cold:.4} kW"
+        (pan_w_cold - EXPECTED_PAN_HEATER_KW * KW_TO_W).abs() < 1.0,
+        "MSHP pan heater must draw {} W ({} kW) per OCHRE HVAC.py:1482; got {pan_w_cold:.4} W",
+        EXPECTED_PAN_HEATER_KW * KW_TO_W,
+        EXPECTED_PAN_HEATER_KW
     );
 
     // Pan heater must NOT fire when OAT > 0°C (OCHRE HVAC.py:1495: "below 0C")

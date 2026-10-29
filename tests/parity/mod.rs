@@ -12,6 +12,7 @@ use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
 use hares_core::{DwellingConfig, SimulationEngine};
 use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
 use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
+use hares_types::telemetry_keys as tk;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 use tolerance::{
@@ -47,23 +48,31 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
     match (fixture_id, metric) {
         // cz5a_minisplit_gas_wh: the peak's residual is the pinned-start
         // recovery minute's maximum electric draw at the -19 C design
-        // temperature: HARES draws 17.89 kW there and OCHRE's 14.81 kW,
-        // while the window's HVAC energies agree to 1.2 % (the fixture's
-        // orphan air distribution system is gone from both sides' inputs,
-        // so the old 33.6 % / 32.3 % residuals are closed at 1.2 % and
-        // 1.2 %, inside the default bands). The cause is established: the
-        // minute is ER-only on both sides, because the compressor locks
-        // out at OCHRE's 0 F default (-17.78 C, hpxml.py:947-951) above
-        // the window's -19.4 C. HARES's binary backup strip fires its
-        // full 17.58 kW rating for the minute plus ~0.3 kW fan; OCHRE's
-        // ER fills the ideal load 14.41 kW plus its 0.25 kW fan and the
-        // 0.15 kW pan heater (HVAC.py:1396-1407, 1427-1436, 1482-1497).
+        // temperature: HARES draws 18.04 kW there and OCHRE's 14.8094 kW,
+        // while the window's HVAC energies agree to 3.913360 % (the
+        // fixture's orphan air distribution system is gone from both
+        // sides' inputs, so the old 33.6 % / 32.3 % residuals are closed
+        // at 3.913360 % and 3.687947 %, the corpus comparison's measured
+        // cz5a pair, inside the default bands). The cause is established:
+        // the minute is ER-only on both sides, because the compressor
+        // locks out at OCHRE's 0 F default (-17.78 C, hpxml.py:947-951)
+        // above the window's -19.4 C. HARES's binary backup strip fires
+        // its full 17.58 kW rating for the minute plus ~0.3 kW fan;
+        // OCHRE's ER fills the ideal load 14.41 kW plus its 0.25 kW fan
+        // and the 0.15 kW pan heater (HVAC.py:1396-1407, 1427-1436,
+        // 1482-1497). OCHRE's 14.8094 kW reference peak already carried
+        // its 0.15 kW pan draw (OCHRE conditions it on ambient
+        // temperature alone, HVAC.py:1495, so it runs in this ER-only
+        // minute); only HARES moved, 17.89 to 18.04 kW, when its 0.15 kW
+        // joined the larger HARES peak, moving the residual 20.8 to
+        // 21.8 %: the residual is the ER dispatch divergence measured at
+        // the peak.
         // EnergyPlus's unitary heat pump fires the full supplementary
         // element as HARES does; OCHRE's ideal ER fill is its own
         // continuous dispatch. The default stage table (D-020)'s only
         // vote in this window is the fan's capacity-proportional flow
         // (staging.rs:466): the window never operates the compressor.
-        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(21.5),
+        ("cz5a_minisplit_gas_wh", METRIC_PEAK_HVAC_POWER) => Some(22.5),
         // cz6b_resistance_res_wh: both models cycle the resistance element
         // at its rating from the same pinned start, but the two envelope
         // models put the same total capacitance in different places, the
@@ -243,6 +252,790 @@ fn parity_outputs_against_reference_corpus() {
         "parity tolerance violations:\n{}",
         failures.join("\n")
     );
+}
+
+/// The row-aligned column reader: every column a `Vec<Option<f64>>` over
+/// the frame's rows, so per-step identities line up even where a nullable
+/// column carries its documented pre-reconcile nulls.
+fn read_parquet_option_columns(path: &Path) -> Result<BTreeMap<String, Vec<Option<f64>>>, String> {
+    let file = fs::File::open(path)
+        .map_err(|err| format!("unable to open parquet '{}': {err}", path.display()))?;
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|err| format!("unable to build parquet reader '{}': {err}", path.display()))?
+        .build()
+        .map_err(|err| format!("unable to read parquet '{}': {err}", path.display()))?;
+
+    let mut columns: BTreeMap<String, Vec<Option<f64>>> = BTreeMap::new();
+    for next_batch in &mut reader {
+        let batch = next_batch.map_err(|err| {
+            format!(
+                "unable to consume parquet batch '{}': {err}",
+                path.display()
+            )
+        })?;
+
+        let schema = batch.schema();
+        for (idx, field) in schema.fields().iter().enumerate() {
+            if field.name() == "Time" {
+                continue;
+            }
+
+            let Some(float_array) = batch.column(idx).as_any().downcast_ref::<Float64Array>()
+            else {
+                continue;
+            };
+
+            let values = columns.entry(field.name().to_string()).or_default();
+            for row in 0..float_array.len() {
+                values.push(float_array.is_valid(row).then(|| float_array.value(row)));
+            }
+        }
+    }
+
+    Ok(columns)
+}
+
+/// One instance's side of the reconciliation, from the dwelling's own
+/// roster: the column prefix (the instance name the columns are written
+/// under) and the end use the rollup groups it by.
+struct ReconciledInstance {
+    name: String,
+    end_use: String,
+    /// The heat-pump-heater column family's gate: the instance declares
+    /// the pan heater power, and no other heating equipment does.
+    is_hp_heater: bool,
+}
+
+/// Reads the roster the run will record: one entry per equipment
+/// instance, in construction order. The dwelling is dropped after the
+/// read; the run rebuilds from the same config.
+fn roster_for(dwelling_config: &DwellingConfig) -> Result<Vec<ReconciledInstance>, String> {
+    let dwelling = hares_core::Dwelling::from_config(dwelling_config.clone())
+        .map_err(|err| format!("dwelling for the roster: {err}"))?;
+    let roster = dwelling
+        .equipment()
+        .iter()
+        .map(|eq| {
+            let d = eq.descriptor();
+            ReconciledInstance {
+                name: d.name.clone(),
+                end_use: d.end_use.display_name().to_string(),
+                is_hp_heater: d
+                    .telemetry_fields
+                    .iter()
+                    .any(|field| field.name.as_ref() == tk::PAN_HEATER_KW),
+            }
+        })
+        .collect();
+    drop(dwelling);
+    Ok(roster)
+}
+
+/// The hybrid sum tolerance: an absolute floor plus a share of the
+/// magnitude scale. Adding n floating-point terms carries at most n ulps
+/// of the largest partial sum (addition is commutative, not
+/// associative, and the rollup's summation order is the roster's, not
+/// the sum's), so the bound is `1e-9 + 1e-9 * sum(|terms|)` in the
+/// column's own unit: at n = 30 the worst-case n-ulp residual is about
+/// 6.7e-15 of the scale (30 * 2^-52), which the relative floor's 1e-9
+/// exceeds by about 1.5e5, with the absolute floor covering all-zero
+/// sums (cancellation makes the relative form meaningless against a
+/// near-zero total).
+fn sum_close(sum: f64, terms: &[f64], what: &str, failures: &mut Vec<String>) {
+    let scale: f64 = terms.iter().map(|t| t.abs()).sum();
+    let residual = (sum - terms.iter().sum::<f64>()).abs();
+    if residual > 1e-9 + 1e-9 * scale {
+        failures.push(format!(
+            "{what}: sum {sum} differs from [{}] by {residual} (scale {scale})",
+            terms
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
+/// The per-step expected value of the pan heater column: the v8
+/// diagnostic carries the reporting spelling's own unit (kW; the
+/// telemetry key's watts convert at the column's write), and the OCHRE
+/// class attribute rates the draw at 0.150 kW (HVAC.py:1482), so the
+/// column reads 0.150 while the meter carries 150 W.
+const EXPECTED_PAN_HEATER_COLUMN_KW: f64 =
+    hares_equipment::hvac::heat_pump::constants::MSHP_PAN_HEATER_DEFAULT_KW;
+
+/// The heat-pump heater's operating-mode codes the mode column can carry
+/// (`OperatingMode::as_code`): the compressor modes, the ER modes, the
+/// defrost event, and the idle resolutions (Off, Standby, the On a
+/// nonzero standby flow resolves to).
+const HEATER_MODE_CODES: [f64; 9] = [0.0, 1.0, 2.0, 3.0, 4.0, 7.0, 8.0, 9.0, 12.0];
+const MODE_HEATING_HP: f64 = 7.0;
+const MODE_HEATING_ER: f64 = 8.0;
+const MODE_HEATING_HP_AND_ER: f64 = 9.0;
+
+/// The OCHRE-parity expansion's per-equipment end-use reconciliation:
+/// every fixture run closes its own energy books, per step.
+///
+/// - The end-use rollup is exact: each `<End Use> End Use Electric Power
+///   (kW)` column equals the sum of its instances' `<name> Electric
+///   Power (kW)` columns, and the Total equals both sides (the meter
+///   side of the `space_fraction` convention, DIVERGENCES D-035: the
+///   meter and its rollups scale, the zone gains do not). The gas
+///   meter's Total equals the sum of the instances' gas columns the
+///   same way.
+/// - Every heat-pump heater's metered electric decomposes exactly into
+///   its declared sub-meters: Main + ER + Fan + Pan Heater (the
+///   reverse-cycle defrost draw rides the compressor's Main; the
+///   ground/water-source loop pump is not an air-source instance's
+///   term, and the corpus holds none).
+/// - The cold-climate ASHP fixtures carry the Mode, ER Power, Defrost
+///   State, COP and Runtime Fraction columns every step and
+///   mode-consistent: the compressor modes draw on Main, the ER modes
+///   draw on ER, the idle resolutions draw on neither, the COP
+///   publishes exactly while the compressor has input (its null is the
+///   core output's presence rule) and holds (0, 10] there, and the
+///   runtime fraction and defrost state stay inside their code sets.
+/// - The MSHP fixture carries the pan-heater standby column: on every
+///   energized step below the 0 C threshold the column reads the OCHRE
+///   class attribute (HVAC.py:1482, gated on ambient temperature alone,
+///   HVAC.py:1495) - compressor running or not, which is the pin that
+///   holds the winter standby draw in place mechanically.
+#[test]
+fn ochre_fixtures_reconcile_every_end_use() {
+    let discovered = discover_fixtures().expect("failed to discover parity fixtures");
+    let mut complete = Vec::new();
+    let mut incomplete = Vec::new();
+    for fixture in discovered {
+        match fixture {
+            DiscoveredFixture::Complete(fixture) => complete.push(fixture),
+            DiscoveredFixture::Incomplete(fixture) => incomplete.push(fixture.id),
+        }
+    }
+    assert!(
+        complete.len() >= 12,
+        "the OCHRE parity corpus holds 12 complete fixtures; found {} (incomplete: {:?})",
+        complete.len(),
+        incomplete
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    for fixture in &complete {
+        if let Err(errs) = reconcile_fixture(fixture) {
+            failures.extend(errs);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "end-use reconciliation violations:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Runs one fixture at a verbosity-8 frame and reconciles it. All
+/// failures come back as strings so one fixture's violations report
+/// beside the others instead of stopping the corpus at the first.
+fn reconcile_fixture(fixture: &ParityFixture) -> Result<(), Vec<String>> {
+    let config_contents = fs::read_to_string(&fixture.config_toml)
+        .map_err(|err| vec![format!("{}: read config: {err}", fixture.id)])?;
+    let config = parse_fixture_config(&config_contents)
+        .map_err(|err| vec![format!("{}: invalid config.toml: {err}", fixture.id)])?;
+
+    let mut sim_config = parse_simulation_config(&config_contents, &config)
+        .map_err(|err| vec![format!("{}: simulation config invalid: {err}", fixture.id)])?;
+    let output_dir =
+        tempfile::tempdir().map_err(|err| vec![format!("{}: tempdir: {err}", fixture.id)])?;
+    let frame_path = output_dir.path().join(format!("{}.parquet", fixture.id));
+    // The reconciliation reads the per-equipment telemetry families, so
+    // the report runs at verbosity 8 on the fixture's own window, seeds
+    // and overrides; the reference comparison's verbosity-3 frame is the
+    // corpus test's business, not this run's.
+    sim_config.reports = match sim_config.reports.first().cloned() {
+        Some(report) => vec![hares_io::ReportSpec {
+            selection: hares_io::Selection::Verbosity(8),
+            destination: hares_io::Destination::Parquet {
+                path: frame_path.clone(),
+                overwrite: false,
+            },
+            ..report
+        }],
+        None => return Err(vec![format!("{}: no report in config", fixture.id)]),
+    };
+
+    let defaults_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
+    let dwelling_config = DwellingConfig {
+        hpxml: InputSource::Path(fixture.building_xml.clone()),
+        schedule: Some(InputSource::Path(fixture.schedule_csv.clone())),
+        weather: WeatherInput::Path(fixture.weather_ochre_hold.clone()),
+        defaults: DefaultsSource::directory(defaults_path),
+        settings: DwellingSettings::new(
+            sim_config,
+            dwelling_overrides(&config, &fixture.building_xml)
+                .map_err(|err| vec![format!("{}: {err}", fixture.id)])?,
+            config.bldg_id.unwrap_or(1),
+            None,
+        ),
+    };
+
+    let roster = roster_for(&dwelling_config).map_err(|err| vec![err])?;
+
+    // The heat-pump-heater families below iterate the roster's
+    // pan-heater telemetry gate: the meter decomposition for every
+    // heat-pump instance, the mode-consistency block and the pan-heater
+    // pins for the named fixtures. A telemetry-key rename that matches
+    // nothing would empty all of them silently, so every building that
+    // declares a heat pump (the same <HeatPump> element the HPXML
+    // parser reads, hpxml/elements/table.rs) must resolve at least one
+    // instance into the family.
+    let building_xml = fs::read_to_string(&fixture.building_xml)
+        .map_err(|err| vec![format!("{}: read building: {err}", fixture.id)])?;
+    if building_xml.contains("<HeatPump>") && !roster.iter().any(|instance| instance.is_hp_heater) {
+        return Err(vec![format!(
+            "{}: the building declares a heat pump and the roster's \
+             heat-pump-heater family is empty: the '{}' telemetry key \
+             matches no instance, so the decomposition, mode-consistency \
+             and pan-heater assertions would iterate nothing",
+            fixture.id,
+            tk::PAN_HEATER_KW
+        )]);
+    }
+
+    let engine = SimulationEngine::new();
+    engine
+        .run(dwelling_config)
+        .map_err(|err| vec![format!("{}: simulation failed: {err}", fixture.id)])?;
+
+    let columns = read_parquet_option_columns(&frame_path).map_err(|err| vec![err])?;
+    let row_count = columns.values().next().map(Vec::len).unwrap_or(0);
+    if row_count == 0 {
+        return Err(vec![format!("{}: the frame has no rows", fixture.id)]);
+    }
+
+    let mut failures = Vec::new();
+
+    // The meter side closes three ways, per step: every end-use
+    // aggregate equals its instances' sum, the Total equals the
+    // aggregates' sum, and the Total equals the instances' sum.
+    let total = columns
+        .get("Total Electric Power (kW)")
+        .ok_or_else(|| vec![format!("{}: no Total Electric Power column", fixture.id)])?;
+    let mut end_use_names: Vec<(String, Vec<&ReconciledInstance>)> = Vec::new();
+    for instance in &roster {
+        let group = end_use_names
+            .iter_mut()
+            .find(|(name, _)| *name == instance.end_use)
+            .map(|(_, members)| members);
+        match group {
+            Some(members) => members.push(instance),
+            None => end_use_names.push((instance.end_use.clone(), vec![instance])),
+        }
+    }
+    let mut all_instances: Vec<&ReconciledInstance> = Vec::new();
+    let mut all_aggregates: Vec<String> = Vec::new();
+    for (end_use, members) in &end_use_names {
+        let aggregate_name = format!("{end_use} End Use Electric Power (kW)");
+        let Some(aggregate) = columns.get(&aggregate_name) else {
+            failures.push(format!(
+                "{}: no aggregate column '{aggregate_name}' for {} instance(s)",
+                fixture.id,
+                members.len()
+            ));
+            continue;
+        };
+        all_aggregates.push(aggregate_name.clone());
+        let member_columns: Vec<_> = members
+            .iter()
+            .map(|instance| {
+                let name = format!("{} Electric Power (kW)", instance.name);
+                (instance, columns.get(&name))
+            })
+            .collect();
+        for row in 0..row_count {
+            let terms = member_columns
+                .iter()
+                .map(|(instance, column)| {
+                    column
+                        .and_then(|c| c.get(row).copied())
+                        .flatten()
+                        .ok_or_else(|| instance.name.clone())
+                })
+                .collect::<Result<Vec<_>, String>>();
+            let terms = match terms {
+                Ok(terms) => terms,
+                Err(name) => {
+                    failures.push(format!(
+                        "{}: row {row}: missing electric power column for '{name}'",
+                        fixture.id
+                    ));
+                    break;
+                }
+            };
+            match aggregate.get(row).copied().flatten() {
+                Some(sum) => sum_close(
+                    sum,
+                    &terms,
+                    &format!("{}: row {row}: {end_use} end use", fixture.id),
+                    &mut failures,
+                ),
+                None => failures.push(format!(
+                    "{}: row {row}: null cell in '{aggregate_name}'",
+                    fixture.id
+                )),
+            }
+        }
+        all_instances.extend(members.iter().copied());
+    }
+    for row in 0..row_count {
+        let Some(total_kw) = total.get(row).copied().flatten() else {
+            failures.push(format!(
+                "{}: row {row}: null total electric cell",
+                fixture.id
+            ));
+            continue;
+        };
+        let aggregate_terms: Vec<f64> = all_aggregates
+            .iter()
+            .map(|name| {
+                columns
+                    .get(name)
+                    .and_then(|c| c.get(row).copied())
+                    .flatten()
+            })
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
+        if aggregate_terms.len() != all_aggregates.len() {
+            failures.push(format!("{}: row {row}: null end-use aggregate", fixture.id));
+            continue;
+        }
+        sum_close(
+            total_kw,
+            &aggregate_terms,
+            &format!("{}: row {row}: total vs end uses", fixture.id),
+            &mut failures,
+        );
+        let instance_terms: Vec<f64> = all_instances
+            .iter()
+            .map(|instance| {
+                columns
+                    .get(&format!("{} Electric Power (kW)", instance.name))
+                    .and_then(|c| c.get(row).copied())
+                    .flatten()
+            })
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
+        if instance_terms.len() != all_instances.len() {
+            failures.push(format!("{}: row {row}: null instance meter", fixture.id));
+            continue;
+        }
+        sum_close(
+            total_kw,
+            &instance_terms,
+            &format!("{}: row {row}: total vs instances", fixture.id),
+            &mut failures,
+        );
+    }
+
+    // The gas meter closes the same way where the fixture burns gas.
+    if let Some(gas_total) = columns.get("Total Gas Power (therms/hour)") {
+        let gas_columns: Vec<_> = roster
+            .iter()
+            .filter_map(|instance| {
+                let name = format!("{} Gas Power (therms/hour)", instance.name);
+                columns.get(&name).map(|c| (instance, c))
+            })
+            .collect();
+        for row in 0..row_count {
+            let Some(total_therms) = gas_total.get(row).copied().flatten() else {
+                failures.push(format!("{}: row {row}: null total gas cell", fixture.id));
+                continue;
+            };
+            let terms: Vec<f64> = gas_columns
+                .iter()
+                .map(|(_, c)| c.get(row).copied().flatten())
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default();
+            if terms.len() != gas_columns.len() {
+                failures.push(format!("{}: row {row}: null gas meter", fixture.id));
+                continue;
+            }
+            sum_close(
+                total_therms,
+                &terms,
+                &format!("{}: row {row}: total gas", fixture.id),
+                &mut failures,
+            );
+        }
+    }
+
+    // Every heat-pump heater's meter decomposes into its sub-meters: the
+    // air-source instances. The corpus holds no ground/water-source
+    // heater; their loop pump rides the electric meter outside these
+    // sub-meters, so an instance of one must extend the composition with
+    // its pump term here before asserting.
+    for instance in roster.iter().filter(|instance| instance.is_hp_heater) {
+        let prefix = &instance.name;
+        if matches!(prefix.as_str(), "GSHP Heater" | "WSHP Heater") {
+            continue;
+        }
+        let meter = |suffix: &str| -> Result<&Vec<Option<f64>>, Vec<String>> {
+            columns
+                .get(&format!("{prefix} {suffix}"))
+                .ok_or_else(|| vec![format!("{}: no {suffix} column for '{prefix}'", fixture.id)])
+        };
+        let (Ok(electric), Ok(main), Ok(er), Ok(fan), Ok(pan)) = (
+            meter("Electric Power (kW)"),
+            meter("Main Power (kW)"),
+            meter("ER Power (kW)"),
+            meter("Fan Power (kW)"),
+            meter("Pan Heater Power (kW)"),
+        ) else {
+            failures.push(format!(
+                "{}: the heat-pump meter columns for '{prefix}' are incomplete",
+                fixture.id
+            ));
+            continue;
+        };
+        for row in 0..row_count {
+            let parts = [main, er, fan, pan].map(|c| c.get(row).copied().flatten());
+            let (Some(total_e), [Some(main_v), Some(er_v), Some(fan_v), Some(pan_v)]) =
+                (electric.get(row).copied().flatten(), parts)
+            else {
+                failures.push(format!(
+                    "{}: row {row}: null meter cell in '{prefix}'",
+                    fixture.id
+                ));
+                continue;
+            };
+            sum_close(
+                total_e,
+                &[main_v, er_v, fan_v, pan_v],
+                &format!("{}: row {row}: '{prefix}' meter composition", fixture.id),
+                &mut failures,
+            );
+        }
+    }
+
+    // The cold-climate ASHP fixtures carry the telemetry columns, non-null
+    // and mode-consistent, every step. The Mode column is universal (one
+    // per heating instance); the ER Power, Defrost State, COP and Runtime
+    // Fraction columns ride the heat-pump-heater family, so they assert
+    // on the heat-pump heaters the roster declares (the resistance
+    // fixture's furnace carries the Mode column only).
+    if matches!(
+        fixture.id.as_str(),
+        "cz4a_ashp_hpwh" | "cz6b_pv_battery_ev" | "cz6b_resistance_res_wh"
+    ) {
+        for instance in roster
+            .iter()
+            .filter(|instance| instance.end_use == "HVAC Heating")
+        {
+            let prefix = &instance.name;
+            let mode = required_column(
+                &columns,
+                &format!("{prefix} Mode (-)"),
+                fixture,
+                &mut failures,
+            );
+            let Some(mode) = mode else {
+                continue;
+            };
+            for row in 0..row_count {
+                if mode.get(row).copied().flatten().is_none() {
+                    failures.push(format!(
+                        "{}: row {row}: null Mode cell in '{prefix}'",
+                        fixture.id
+                    ));
+                }
+            }
+        }
+        for instance in roster.iter().filter(|instance| instance.is_hp_heater) {
+            let prefix = &instance.name;
+            let mode = required_column(
+                &columns,
+                &format!("{prefix} Mode (-)"),
+                fixture,
+                &mut failures,
+            );
+            let er = required_column(
+                &columns,
+                &format!("{prefix} ER Power (kW)"),
+                fixture,
+                &mut failures,
+            );
+            let defrost = required_column(
+                &columns,
+                &format!("{prefix} Defrost State (-)"),
+                fixture,
+                &mut failures,
+            );
+            let cop = required_column(
+                &columns,
+                &format!("{prefix} COP (-)"),
+                fixture,
+                &mut failures,
+            );
+            let rtf = required_column(
+                &columns,
+                &format!("{prefix} Runtime Fraction (-)"),
+                fixture,
+                &mut failures,
+            );
+            let main = required_column(
+                &columns,
+                &format!("{prefix} Main Power (kW)"),
+                fixture,
+                &mut failures,
+            );
+            if let (Some(mode), Some(er), Some(defrost), Some(cop), Some(rtf), Some(main)) =
+                (mode, er, defrost, cop, rtf, main)
+            {
+                for row in 0..row_count {
+                    let cells = (
+                        mode.get(row).copied().flatten(),
+                        er.get(row).copied().flatten(),
+                        defrost.get(row).copied().flatten(),
+                        cop.get(row).copied().flatten(),
+                        rtf.get(row).copied().flatten(),
+                        main.get(row).copied().flatten(),
+                    );
+                    let (Some(m), Some(e), Some(d), Some(r), Some(p)) =
+                        (cells.0, cells.1, cells.2, cells.4, cells.5)
+                    else {
+                        let missing = [
+                            ("Mode (-)", mode.get(row)),
+                            ("ER Power (kW)", er.get(row)),
+                            ("Defrost State (-)", defrost.get(row)),
+                            ("Runtime Fraction (-)", rtf.get(row)),
+                            ("Main Power (kW)", main.get(row)),
+                        ]
+                        .iter()
+                        .filter_map(|(label, cell)| {
+                            cell.copied().flatten().is_none().then_some(*label)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                        failures.push(format!(
+                            "{}: row {row}: null telemetry cells in '{prefix}': {missing}",
+                            fixture.id
+                        ));
+                        continue;
+                    };
+                    let cop_cell = cells.3;
+                    if !HEATER_MODE_CODES.contains(&m) {
+                        failures.push(format!(
+                            "{}: row {row}: mode code {m} outside the heater's set",
+                            fixture.id
+                        ));
+                    }
+                    let compressor_mode = m == MODE_HEATING_HP || m == MODE_HEATING_HP_AND_ER;
+                    let er_mode = m == MODE_HEATING_ER || m == MODE_HEATING_HP_AND_ER;
+                    if compressor_mode && p <= 0.0 {
+                        failures.push(format!(
+                            "{}: row {row}: mode {m} must draw on Main, got {p}",
+                            fixture.id
+                        ));
+                    }
+                    if er_mode && e <= 0.0 {
+                        failures.push(format!(
+                            "{}: row {row}: mode {m} must draw on ER, got {e}",
+                            fixture.id
+                        ));
+                    }
+                    if !compressor_mode && !er_mode && (p != 0.0 || e != 0.0) {
+                        failures.push(format!(
+                            "{}: row {row}: idle mode {m} must draw nothing, got Main {p} ER {e}",
+                            fixture.id
+                        ));
+                    }
+                    // The COP cell's presence follows the compressor: it
+                    // publishes when the compressor has input and is null
+                    // otherwise (the core output's contract: the null is
+                    // the presence rule, never a 0.0 sentinel).
+                    if compressor_mode {
+                        let Some(c) = cop_cell else {
+                            failures.push(format!(
+                                "{}: row {row}: mode {m} must publish a COP, found null",
+                                fixture.id
+                            ));
+                            continue;
+                        };
+                        if !(c > 0.0 && c <= 10.0) {
+                            failures.push(format!(
+                                "{}: row {row}: COP {c} outside the physical band while the compressor draws",
+                                fixture.id
+                            ));
+                        }
+                    } else if cop_cell.is_some() {
+                        failures.push(format!(
+                            "{}: row {row}: idle mode {m} must leave the COP null, got {}",
+                            fixture.id,
+                            cop_cell.unwrap_or(f64::NAN)
+                        ));
+                    }
+                    if !(0.0..=1.0).contains(&r) {
+                        failures.push(format!(
+                            "{}: row {row}: runtime fraction {r} outside [0, 1]",
+                            fixture.id
+                        ));
+                    }
+                    if !(d == 0.0 || d == 1.0) {
+                        failures.push(format!(
+                            "{}: row {row}: defrost state {d} outside the code set",
+                            fixture.id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // The pan-heater column: the OCHRE form, per step. The fixture
+    // windows carry no outage, so every row is energized; the gate
+    // reads ambient temperature alone (HVAC.py:1495).
+    let hp_heaters: Vec<&ReconciledInstance> = roster
+        .iter()
+        .filter(|instance| instance.is_hp_heater)
+        .collect();
+
+    // Above the threshold the column reads zero, on every heat-pump
+    // heater in the corpus: the minisplit's draw is gated on ambient
+    // temperature alone (HVAC.py:1495) and the other variants carry no
+    // pan heater at all. The corpus's weather files hold the -18 C
+    // design temperature, so every committed minute sits below the
+    // threshold today; this side runs on the first warm minute a
+    // fixture ever carries, and the cold pin below holds that shape.
+    let oat = required_column(&columns, "Outdoor Dry Bulb (C)", fixture, &mut failures);
+    if let Some(oat) = oat {
+        for instance in &hp_heaters {
+            let Some(pan) = columns.get(&format!("{} Pan Heater Power (kW)", instance.name)) else {
+                failures.push(format!(
+                    "{}: no Pan Heater Power column for '{}'",
+                    fixture.id, instance.name
+                ));
+                continue;
+            };
+            for row in 0..row_count {
+                let (Some(t_ext), Some(pan_kw)) = (
+                    oat.get(row).copied().flatten(),
+                    pan.get(row).copied().flatten(),
+                ) else {
+                    failures.push(format!(
+                        "{}: row {row}: null pan heater or dry bulb cell",
+                        fixture.id
+                    ));
+                    continue;
+                };
+                if t_ext >= 0.0 && pan_kw != 0.0 {
+                    failures.push(format!(
+                        "{}: row {row}: pan heater drew {pan_kw} at {t_ext} C, above its 0 C threshold",
+                        fixture.id
+                    ));
+                }
+            }
+        }
+    }
+
+    // Below the threshold the column pins the minisplit fixture's
+    // standby: every below-threshold minute reads the 0.150 kW class
+    // attribute (HVAC.py:1482) whether or not the compressor ran, and
+    // the window's shape is part of the pin. Of cz5a's 60 minutes all
+    // 60 sit below the threshold and 42 of them at the heater's idle
+    // resolutions; both counts are asserted, not logged, so a window,
+    // weather or idle-classification change that empties the standby
+    // half fails the pin instead of passing it unexercised.
+    if fixture.id == "cz5a_minisplit_gas_wh" {
+        if hp_heaters.is_empty() {
+            failures.push(format!(
+                "{}: the roster matches no heat-pump heater, so the pan-heater pin \
+                 iterates nothing: no instance carries the '{}' telemetry key",
+                fixture.id,
+                tk::PAN_HEATER_KW
+            ));
+        }
+        if let Some(oat) = oat {
+            for instance in &hp_heaters {
+                let Some(pan) = columns.get(&format!("{} Pan Heater Power (kW)", instance.name))
+                else {
+                    failures.push(format!(
+                        "{}: no Pan Heater Power column for '{}'",
+                        fixture.id, instance.name
+                    ));
+                    continue;
+                };
+                let mut cold_rows = 0;
+                let mut cold_standby_rows = 0;
+                for row in 0..row_count {
+                    let (Some(t_ext), Some(pan_kw)) = (
+                        oat.get(row).copied().flatten(),
+                        pan.get(row).copied().flatten(),
+                    ) else {
+                        failures.push(format!(
+                            "{}: row {row}: null pan heater or dry bulb cell",
+                            fixture.id
+                        ));
+                        continue;
+                    };
+                    if t_ext < 0.0 {
+                        cold_rows += 1;
+                        // The heater's idle resolutions: Off, Standby, and the
+                        // On a nonzero standby flow resolves to.
+                        let idle = matches!(
+                            columns
+                                .get(&format!("{} Mode (-)", instance.name))
+                                .and_then(|c| c.get(row).copied())
+                                .flatten(),
+                            Some(0.0) | Some(4.0) | Some(12.0)
+                        );
+                        if idle {
+                            cold_standby_rows += 1;
+                        }
+                        if (pan_kw - EXPECTED_PAN_HEATER_COLUMN_KW).abs() > 1e-9 {
+                            failures.push(format!(
+                                "{}: row {row}: pan heater {pan_kw} kW at {t_ext} C, expected {} kW \
+                                 (OCHRE HVAC.py:1482, gated on ambient temperature alone, HVAC.py:1495)",
+                                fixture.id, EXPECTED_PAN_HEATER_COLUMN_KW
+                            ));
+                        }
+                    }
+                }
+                if cold_rows != 60 {
+                    failures.push(format!(
+                        "{}: {cold_rows} of {row_count} minutes below the pan heater's 0 C \
+                         threshold, expected 60: the cold-window shape is part of the standby pin",
+                        fixture.id
+                    ));
+                }
+                if cold_standby_rows != 42 {
+                    failures.push(format!(
+                        "{}: {cold_standby_rows} of {cold_rows} below-threshold minutes at the \
+                         heater's idle resolutions, expected 42: the standby half of the \
+                         pan-heater pin is empty",
+                        fixture.id
+                    ));
+                }
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
+}
+
+/// The column must exist; the failure names the fixture and the column.
+fn required_column<'a>(
+    columns: &'a BTreeMap<String, Vec<Option<f64>>>,
+    name: &str,
+    fixture: &ParityFixture,
+    failures: &mut Vec<String>,
+) -> Option<&'a Vec<Option<f64>>> {
+    let column = columns.get(name);
+    if column.is_none() {
+        failures.push(format!("{}: missing column '{name}'", fixture.id));
+    }
+    column
 }
 
 #[test]
