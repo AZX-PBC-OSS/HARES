@@ -203,6 +203,18 @@ class TestSimulationConfig:
         cfg = SimulationConfig(start_time=START, duration=3600, weather_year="actual")
         assert SimulationConfig.from_toml(cfg.to_toml()).weather_year == "actual"
 
+    def test_schedule_diversity_defaults_on_and_round_trips(self):
+        """The generated-schedule diversity knob defaults on, its getter and
+        setter round-trip the two values, the TOML path carries the same
+        default, and a bad value is a ValueError naming them."""
+        cfg = SimulationConfig(**required_kwargs())
+        assert cfg.schedule_diversity == "on"
+        cfg.schedule_diversity = "off"
+        assert cfg.schedule_diversity == "off"
+        assert SimulationConfig.from_toml(cfg.to_toml()).schedule_diversity == "off"
+        with pytest.raises(ValueError, match="schedule_diversity must be 'on' or 'off'"):
+            SimulationConfig(**required_kwargs(), schedule_diversity="maybe")
+
     def test_step_failure_budget_is_configurable(self):
         cfg = SimulationConfig(start_time=START, duration=3600, max_consecutive_step_failures=0)
         assert cfg.max_consecutive_step_failures == 0
