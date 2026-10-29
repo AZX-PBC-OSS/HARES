@@ -1051,6 +1051,53 @@ mod tests {
         assert!(!ride.tripped, "a fresh disturbance starts a fresh window");
     }
 
+    /// The eight accumulators are independent per-point timers: one
+    /// point's excursion never gates another's timing. A step that leaves
+    /// one band while another holds resets the first point's accumulator
+    /// alone, and a fresh excursion in the first band starts a fresh
+    /// window while the second point's keeps running.
+    #[test]
+    fn each_points_accumulator_runs_independently_of_the_others() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        // Both bands hold at once: UV1 (0.45 <= 0.6 < 0.70) and OF1
+        // (61.5 > 61.2) accumulate together.
+        let both = one_step(&mut ctrl, 0.6, 61.5, 5.0, 2700.0);
+        assert!(!both.tripped, "5 s is inside both windows");
+        assert_eq!(ctrl.state().uv1_s, 5.0);
+        assert_eq!(ctrl.state().of1_s, 5.0);
+
+        // UV1's band clears while OF1's holds: UV1's window resets
+        // alone, OF1's accumulated time is untouched.
+        let of_only = one_step(&mut ctrl, 1.0, 61.5, 5.0, 2700.0);
+        assert!(!of_only.tripped);
+        assert_eq!(
+            ctrl.state().uv1_s,
+            0.0,
+            "UV1's recovery resets UV1's timer alone"
+        );
+        assert_eq!(
+            ctrl.state().of1_s,
+            10.0,
+            "OF1's window does not borrow UV1's recovery"
+        );
+
+        // UV1's band returns while OF1's clears: UV1 starts a fresh
+        // window, OF1's resets alone.
+        let uv_only = one_step(&mut ctrl, 0.6, 60.0, 5.0, 2700.0);
+        assert!(!uv_only.tripped);
+        assert_eq!(ctrl.state().uv1_s, 5.0, "a fresh UV1 disturbance");
+        assert_eq!(
+            ctrl.state().of1_s,
+            0.0,
+            "OF1's recovery resets OF1's timer alone"
+        );
+
+        // Neither band holds: both timers are zero.
+        let neither = one_step(&mut ctrl, 1.0, 60.0, 5.0, 2700.0);
+        assert!(!neither.tripped);
+        assert_eq!(ctrl.state().max_accumulator_s(), 0.0);
+    }
+
     // -- The frequency-droop shape. --
 
     /// The droop's shape beyond the deadband: linear from the
@@ -1324,6 +1371,86 @@ mod tests {
         let out = one_step(&mut ctrl, 1.0, 60.0, 900.0, 2700.0);
         assert!(!out.tripped);
         assert_eq!(out.p_ref_w, 2700.0, "900 s clears the 300 s delay at once");
+    }
+
+    /// A chattering grid restarts the delay: the enter-service
+    /// accumulation is in-window time, and an out-of-window step (a sag
+    /// again before the delay completed) spends it. The restored stretch
+    /// must then hold the whole delay from zero.
+    #[test]
+    fn a_sag_inside_the_delay_restarts_the_enter_service_accumulation() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let trip = one_step(&mut ctrl, 0.6, 60.0, 60.0, 2700.0);
+        assert!(trip.tripped);
+
+        // Two restored steps accumulate 120 s, then the grid sags again.
+        for step in 1..=2 {
+            let out = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2700.0);
+            assert!(out.tripped, "step {step}: the delay has not completed");
+            assert_eq!(out.enter_service_s, 60.0 * step as f64);
+        }
+        let sag_again = one_step(&mut ctrl, 0.6, 60.0, 60.0, 2700.0);
+        assert!(sag_again.tripped, "the latch holds through the second sag");
+        assert_eq!(
+            sag_again.enter_service_s, 0.0,
+            "the out-of-window step spends the accumulation: the delay \
+             restarts, it does not resume"
+        );
+
+        // The restored stretch must hold the whole delay from zero: four
+        // 60 s steps ride offline, the fifth reconnects.
+        let mut out = sag_again;
+        for step in 1..=5 {
+            out = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2700.0);
+            assert_eq!(out.tripped, step < 5, "step {step}");
+        }
+        assert_eq!(out.p_ref_w, 2700.0, "the reconnected step produces");
+    }
+
+    /// The reconnection re-acquires the droop anchor: the trip cleared
+    /// the pre-disturbance latch, so the first excursion after the return
+    /// to service ramps from the output the reconnected inverter
+    /// delivers, not from the spent trip's anchor (a stale anchor would
+    /// ramp from a higher output than the pre-disturbance one: the wrong
+    /// direction for an over-frequency droop). The reconnected step
+    /// itself produces the model's own output.
+    #[test]
+    fn reconnection_reacquires_the_droop_anchor() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        // 0.9 pu at nominal, then the sag trips (60 s clears UV1's 10 s
+        // window).
+        let _ = one_step(&mut ctrl, 1.0, 60.0, 60.0, 4500.0);
+        let trip = one_step(&mut ctrl, 0.6, 60.0, 60.0, 4500.0);
+        assert!(trip.tripped);
+
+        // Five restored 60 s steps complete the 300 s delay; the model's
+        // output is 2500 W by the reconnection.
+        let mut out = trip;
+        for step in 1..=5 {
+            out = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2500.0);
+            if step < 5 {
+                assert!(out.tripped, "step {step}: the delay is still running");
+            }
+        }
+        assert!(!out.tripped, "the fifth restored step reconnects");
+        assert_eq!(
+            out.p_ref_w, 2500.0,
+            "the reconnected step produces the model's own output"
+        );
+
+        // The first post-reconnection excursion ramps from the
+        // reconnected 0.5 pu operating point: 0.5 Hz beyond the 60.036 Hz
+        // edge at 1/3 pu per Hz is 1/6 pu down. A stale pre-trip anchor
+        // (0.9 pu) would put the reference at 3666.67 W, above the
+        // pre-disturbance output.
+        let excursion = one_step(&mut ctrl, 1.0, 60.536, 60.0, 2500.0);
+        let expected_w = (0.5 - 1.0 / 6.0) * 5000.0;
+        assert!(
+            (excursion.p_ref_w - expected_w).abs() < 1e-9,
+            "the ramp anchors on the reconnected operating point: expected \
+             {expected_w} W, got {} W",
+            excursion.p_ref_w
+        );
     }
 
     /// A utility outage resets the trip timers and the droop latch but
