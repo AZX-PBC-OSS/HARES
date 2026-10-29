@@ -66,6 +66,27 @@ def test_validate_returns_the_resolved_model_dict():
             assert set(layer) == {"r_m2k_w", "c_j_m2k"}
 
 
+def test_validate_readback_names_each_equipments_end_use():
+    """The read-back's equipment entries are the built dwelling's own: the
+    name, the id, the end use's contract string (the ``EndUse`` key, e.g.
+    ``water_heating``) and the typed parameters, entry for entry. The
+    ``end_use`` is the string the dwelling's read-back carries, never the
+    type's Rust Debug rendering."""
+    reference = {
+        e["name"]: e for e in _blueprint().build().resolved_model()["equipment"]
+    }
+    entries = {e["name"]: e for e in _blueprint().validate()["equipment"]}
+    assert entries, "the read-back must carry the assembled equipment"
+    assert set(entries) == set(reference)
+    for name, entry in entries.items():
+        assert entry["end_use"] == reference[name]["end_use"], (
+            f"the blueprint read-back's end_use for '{name}' must be the "
+            f"dwelling read-back's contract string, got '{entry['end_use']}'"
+        )
+        assert entry["id"] == reference[name]["id"]
+        assert entry["parameters"] == reference[name]["parameters"]
+
+
 def test_validate_readback_carries_the_active_setpoint_sources():
     """The resolved model's dict carries each side's active setpoint source
     (`SetpointSource`, the setpoint-source rule): the fixture home's schedule
