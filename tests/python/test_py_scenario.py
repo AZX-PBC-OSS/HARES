@@ -305,6 +305,8 @@ class TestSpecSerializationRoundTrip:
         import json
 
         override = {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}}
+        second_override = {"override": {"equipment": "Occupancy", "field": "activity_level"}}
+        wildcard_override = {"override": {"equipment": "all", "field": "heating_capacity_w"}}
         patch = {"patch": {"field": "number_of_bedrooms"}}
         spec_dict = {
             "name": "round-trip",
@@ -318,7 +320,7 @@ class TestSpecSerializationRoundTrip:
                 {
                     "name": "n",
                     "unit": "C",
-                    "target": override,
+                    "target": second_override,
                     "distribution": {"normal": {"mean": 20.5, "std_dev": 1.5}},
                 },
                 {
@@ -331,14 +333,14 @@ class TestSpecSerializationRoundTrip:
                 {
                     "name": "t",
                     "unit": "count",
-                    "target": patch,
+                    "target": wildcard_override,
                     "distribution": {"triangular": {"min": 1.0, "mode": 1.2, "max": 5.0}},
                     "correlation": {"group": "load", "rho": 0.9},
                 },
                 {
                     "name": "d",
                     "unit": "count",
-                    "target": patch,
+                    "target": {"override": {"equipment": "all", "field": "tank_volume_m3"}},
                     "distribution": {"discrete": {"values": [2.0, 3.0, 5.0], "weights": [0.2, 0.5, 0.3]}},
                 },
             ],
@@ -433,3 +435,33 @@ class TestSpecValidation:
                     ],
                 }
             )
+
+    def test_an_overflowing_closed_form_is_a_value_error_naming_the_parameter(self):
+        """A distribution whose parameters validate but whose closed form
+        leaves the finite f64 range refuses at the draw, and the binding
+        carries the refusal as a ``ValueError`` naming the parameter and
+        the family: never a panic crossing (a ``PanicException`` is a
+        ``BaseException``, so it fails this pin) and never a non-finite
+        value in the record. The spec itself constructs: ``mu`` 800 is a
+        finite parameter, and only the exponentiation overflows."""
+        spec = ScenarioSpec(
+            {
+                "name": "overflow",
+                "parameters": [
+                    {
+                        "name": "huge_capacity",
+                        "unit": "W",
+                        "target": {
+                            "override": {
+                                "equipment": "Occupancy",
+                                "field": "number_of_occupants",
+                            }
+                        },
+                        "distribution": {"lognormal": {"mu": 800.0, "sigma": 1.0}},
+                    }
+                ],
+            }
+        )
+        for call in (spec.sample, spec.sample_overrides):
+            with pytest.raises(ValueError, match="huge_capacity.*lognormal"):
+                call(master_seed=1, scenario_id=1, bldg_id=1)
