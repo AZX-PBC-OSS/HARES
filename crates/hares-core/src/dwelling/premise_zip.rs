@@ -31,7 +31,11 @@
 //! stepped and drew zero carries that zero weight, and no expected mean
 //! stands in for any load: the engine draws zero from every load on a
 //! de-energized bus, so no governing equipment carries a positive weight
-//! and the aggregate is `None`.
+//! and the aggregate is `None`. On an energized bus the same answer
+//! follows from a non-positive row evaluation: the classes that publish an
+//! expectation scale their reference draw by the row and report the draw
+//! clamped at zero, so an expectation whose row evaluates at or below zero
+//! at the bus voltage (the near-dead edge) carries no weight either.
 
 use hares_equipment::{Equipment, ExpectedMeanPower};
 use hares_io::schedule::ScheduleTimeSeries;
@@ -54,12 +58,14 @@ pub struct PremiseZip {
     /// core-output electric draw, un-scaled through the equipment's
     /// assembled deep-sag response at the bus voltage: the equipment's own
     /// nominal draw for a multi-component unit, the resolved row's un-scale
-    /// for a single-row one) when the dwelling has stepped (a stepped zero
-    /// draw is a zero weight, the 0.0 pu outage boundary included), else,
-    /// on an energized bus only, the expected mean draw over the loaded
-    /// schedule; `None` when neither is computable (stochastic event
-    /// scheduling without a kW series, a schedule column absent from the
-    /// loaded data, or a de-energized bus with no stepped draw); such
+    /// for a single-row one, which recovers the reference draw to within
+    /// the rounding of one division) when the dwelling has stepped (a
+    /// stepped zero draw is a zero weight, the 0.0 pu outage boundary
+    /// included), else, on an energized bus only, the expected mean draw
+    /// over the loaded schedule; `None` when neither is computable
+    /// (stochastic event scheduling without a kW series, a schedule column
+    /// absent from the loaded data, a de-energized bus with no stepped
+    /// draw, or a row evaluation the bus cannot supply a draw at); such
     /// equipment is listed but contributes no weight to
     /// [`PremiseZip::zip`].
     pub governing: Vec<(String, Option<f64>)>,
@@ -77,7 +83,9 @@ pub struct PremiseZip {
     /// stepping engine answers for the moment's composition; no single
     /// published coefficient row can reproduce it when evaluated raw,
     /// because a held deep-sag row is not a quadratic and a multi-component
-    /// unit's blend is not any one of its rows. `None` when no governing
+    /// unit's blend is not any one of its rows. Every weighted response is
+    /// finite and positive, so a published scale is a positive multiplier,
+    /// never a negative or non-finite one. `None` when no governing
     /// equipment carries a positive weight.
     pub deep_sag_scale: Option<f64>,
 }
@@ -152,8 +160,9 @@ pub(crate) fn aggregate_premise_zip(
         // weights with. A stepped dwelling aggregates the moment's
         // composition: the weight is the stepped draw un-scaled through its
         // ASSEMBLED deep-sag response: the equipment's own nominal draw
-        // when it reports one, else the resolved row's un-scale, exact for
-        // a single-row equipment (a multi-component unit evaluates each
+        // when it reports one, else the resolved row's un-scale, which
+        // recovers a single-row equipment's reference draw to within the
+        // rounding of one division (a multi-component unit evaluates each
         // component through its own row, so the unit row's multiplier alone
         // does not un-scale the blend). The response weighted with it is
         // the assembled ratio or the row's evaluation. A stepped zero
@@ -162,17 +171,37 @@ pub(crate) fn aggregate_premise_zip(
         // positive draw cannot be un-scaled there (a de-energized bus
         // evaluates no draw response), and an unstepped load falls back to
         // the expected mean over the loaded schedule, on an energized bus
-        // only: at the
-        // boundary the engine draws zero from every load, and an expected
-        // mean published as the weight would report a draw the bus cannot
-        // supply.
+        // only: at the boundary the engine draws zero from every load, and
+        // an expected mean published as the weight would report a draw the
+        // bus cannot supply. On an energized bus a row evaluation that is
+        // not finite and positive is a draw the bus cannot supply too: the
+        // classes that publish an expectation scale their reference draw by
+        // the row and report it clamped at zero, so the expectation carries
+        // no weight.
         let (moment_raw_draw_w, moment_response) = match eq.core_output().flows.electric_w {
             Some(hares_types::ElectricPower::Consumption(w)) if bus_voltage_pu > 0.0 && w > 0.0 => {
-                match eq.nominal_electric_draw_w() {
-                    Some(nominal_w) => (Some(nominal_w), Some(w / nominal_w)),
+                // A composed base is usable only when it is a finite
+                // positive draw: the trait is a public hook, and a report of
+                // zero, NaN or infinity would divide the draw into a
+                // non-finite "response" published inside a structurally
+                // normal aggregate. Any other report is no assembled base,
+                // and the row's evaluation is the only single-row route.
+                match eq
+                    .nominal_electric_draw_w()
+                    .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0)
+                {
+                    Some(nominal_w) => {
+                        let response = w / nominal_w;
+                        if response.is_finite() && response > 0.0 {
+                            (Some(nominal_w), Some(response))
+                        } else {
+                            // A non-finite draw is not a positive weight.
+                            (None, None)
+                        }
+                    }
                     None => {
                         let multiplier = resolved.deep_sag_real_multiplier(bus_voltage_pu);
-                        if multiplier > 0.0 {
+                        if multiplier.is_finite() && multiplier > 0.0 {
                             (Some(w / multiplier), Some(multiplier))
                         } else {
                             (None, None)
@@ -194,35 +223,58 @@ pub(crate) fn aggregate_premise_zip(
             },
             None => None,
         };
-        // The roster must publish only weights the aggregate actually
-        // used: a load whose ZIP coefficients are non-finite (bypassing
-        // the loader and init validation, e.g. a hand-built config) is
-        // excluded from the weighted sums, so rostering its real positive
-        // draw would claim a weight the aggregate silently ignored and
-        // break the caller-side audit (recomputing the weighted mean from
-        // the rostered positive weights must reproduce the aggregate).
-        // Such a load takes the established unknown-mean semantics:
-        // rostered by name with an explicitly absent weight.
+        // The response the weight weights with: the moment's assembled ratio
+        // (the stepped draw over the moment's nominal draw) for a stepped
+        // load, the resolved row's evaluation on the static route. A row
+        // evaluation that is not finite and positive is a load the engine
+        // draws nothing from at this bus: every class that publishes an
+        // expectation (the scheduled and event loads) scales its reference
+        // draw by the row and publishes the draw clamped at zero, so the
+        // expectation carries no weight, the answer the de-energized
+        // boundary gives one voltage down.
+        let deep_sag_response = match moment_response {
+            Some(response) => Some(response),
+            None => {
+                let row = resolved.deep_sag_real_multiplier(bus_voltage_pu);
+                (row.is_finite() && row > 0.0).then_some(row)
+            }
+        };
+        // The roster must publish only weights the aggregate actually used:
+        // a load whose ZIP coefficients are non-finite (bypassing the loader
+        // and init validation, e.g. a hand-built config) is excluded from
+        // the weighted sums, so rostering its real positive draw would claim
+        // a weight the aggregate silently ignored and break the caller-side
+        // audit (recomputing the weighted mean from the rostered positive
+        // weights must reproduce the aggregate). Such a load takes the
+        // established unknown-mean semantics: rostered by name with an
+        // explicitly absent weight. A load whose reference draw the bus
+        // cannot supply carries no weight for the same reason: the
+        // expectation was not used.
         let zip = resolved.zip;
         let zip_is_finite = [
             zip.zp, zip.ip, zip.pp, zip.zq, zip.iq, zip.pq, zip.pf, zip.v0,
         ]
         .iter()
         .all(|v| v.is_finite());
-        let roster_weight = if zip_is_finite { mean_power_w } else { None };
+        let roster_weight = if !zip_is_finite {
+            None
+        } else {
+            match moment_raw_draw_w {
+                // A stepped moment is evidence of its own weight, a zero draw
+                // included; a broken (non-finite) report is not.
+                Some(w) => w.is_finite().then_some(w),
+                // An expectation is a weight only when the row's response is
+                // a draw the energized bus can supply.
+                None => mean_power_w
+                    .filter(|w| w.is_finite())
+                    .filter(|_| deep_sag_response.is_some()),
+            }
+        };
         governing.push((name, roster_weight));
-        if let Some(w) = mean_power_w
+        if let Some(w) = roster_weight
             && w > 0.0
-            && w.is_finite()
-            && zip_is_finite
+            && let Some(deep_sag_response) = deep_sag_response
         {
-            // The response the weight weights with: the moment's assembled
-            // ratio (the stepped draw over the moment's nominal draw) for a
-            // stepped load, the resolved row's evaluation on the static
-            // route: the only response an unstepped equipment's expectation
-            // can carry.
-            let deep_sag_response = moment_response
-                .unwrap_or_else(|| resolved.deep_sag_real_multiplier(bus_voltage_pu));
             total_weight += w;
             zp += w * zip.zp;
             ip += w * zip.ip;
@@ -556,6 +608,270 @@ mod tests {
              de-energized boundary: the parent published the Lighting \
              row's 0.0 evaluation, -0.04, as the scale of a 500 W \
              expectation on a dead bus"
+        );
+    }
+
+    #[test]
+    fn near_dead_static_route_weights_no_load_the_engine_draws_nothing_from() {
+        // The near-dead edge of the same boundary: at 0.01 pu the Lighting
+        // row evaluates 0.54 x 0.0001 + 0.5 x 0.01 - 0.04 = -0.034946. The
+        // classes that publish an expectation (scheduled and event loads)
+        // multiply their reference draw by that evaluation and publish the
+        // draw clamped at zero (no electrical port), so the engine draws
+        // nothing from the load at this bus. Weighting the expectation
+        // would publish a negative "response" and a 500 W weight for a draw
+        // the engine never takes; the honest answer is the same one the
+        // de-energized boundary gives: no weight, no aggregate.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        assert!(
+            lighting.deep_sag_real_multiplier(0.01, false) < 0.0,
+            "fixture: the Lighting row must evaluate negative at 0.01 pu"
+        );
+        let equipment: Vec<Box<dyn Equipment>> = vec![governing_load(
+            "Indoor Lighting",
+            lighting,
+            Some(ExpectedMeanPower::W(500.0)),
+        )];
+        assert!(
+            aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.01).is_none(),
+            "a non-positive row evaluation is a load the engine draws \
+             nothing from: the expectation must not be weighted"
+        );
+    }
+
+    #[test]
+    fn near_dead_static_route_keeps_the_loads_the_engine_still_draws_from() {
+        // The other half of the near-dead contract: the gate is the row's
+        // response, not the voltage. A constant-power row evaluates 1.0 at
+        // 0.01 pu, so the engine does draw the scheduled load and the
+        // aggregate weights it. The Lighting expectation is rostered with no
+        // weight (the aggregate did not use it): a positive weight the
+        // aggregate ignored would break the caller-side audit that recomputes
+        // the weighted mean from the rostered positive weights.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let equipment: Vec<Box<dyn Equipment>> = vec![
+            governing_load(
+                "Indoor Lighting",
+                lighting,
+                Some(ExpectedMeanPower::W(500.0)),
+            ),
+            governing_load(
+                "Always On",
+                ZipLoad::constant_power(),
+                Some(ExpectedMeanPower::W(3.0)),
+            ),
+        ];
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.01)
+            .expect("the constant-power load still draws");
+        assert_eq!(
+            premise.governing,
+            vec![
+                ("Indoor Lighting".to_string(), None),
+                ("Always On".to_string(), Some(3.0)),
+            ],
+            "the load whose row evaluates non-positively must carry no weight"
+        );
+        assert_eq!(
+            (premise.zip.zp, premise.zip.ip, premise.zip.pp),
+            (0.0, 0.0, 1.0),
+            "only the constant-power load shapes the aggregate"
+        );
+        assert!(
+            premise.deep_sag_scale.is_some_and(|s| s > 0.0),
+            "a published scale is a positive multiplier, got {:?}",
+            premise.deep_sag_scale
+        );
+    }
+
+    #[test]
+    fn single_row_un_scale_recovers_the_reference_draw_to_the_division_rounding() {
+        // The single-row route's contract: the weight is the stepped draw
+        // un-scaled through the row, `(raw x m) / m`. The double round-trip
+        // is exact for many pairs (1234.5 W under the Lighting row at 0.5 pu
+        // below) but NOT for every one: 100 W under the same row recovers
+        // one ulp low (99.99999999999999), so the honest claim is "within
+        // one rounding of the division", never "bit-for-bit". The response
+        // is the row's evaluation either way.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let bus_voltage = 0.5;
+        let multiplier = lighting.deep_sag_real_multiplier(bus_voltage, false);
+        let weight_for = |raw_draw_w: f64| -> f64 {
+            let equipment: Vec<Box<dyn Equipment>> = vec![governing_stepped_load(
+                "Indoor Lighting",
+                lighting,
+                None,
+                raw_draw_w * multiplier,
+            )];
+            let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, bus_voltage)
+                .expect("the stepped draw carries a positive weight");
+            let scale = premise.deep_sag_scale.expect("stepped weight");
+            assert_eq!(
+                scale.to_bits(),
+                multiplier.to_bits(),
+                "the single-row response is the resolved row's evaluation"
+            );
+            premise.governing[0]
+                .1
+                .expect("the roster publishes the un-scaled weight")
+        };
+
+        // A pair whose round-trip is bitwise exact.
+        let exact = weight_for(1234.5);
+        assert_eq!(
+            exact.to_bits(),
+            1234.5_f64.to_bits(),
+            "the un-scale of 1234.5 W must be bitwise the reference draw"
+        );
+
+        // A pair whose round-trip lands one ulp low: the documented bound is
+        // one ulp, not bit-for-bit equality.
+        let near = weight_for(100.0);
+        assert_eq!(
+            near.to_bits(),
+            100.0_f64.next_down().to_bits(),
+            "hand: 100 x 0.34500000000000003 / 0.34500000000000003 = \
+             99.99999999999999 (one ulp low), got {near}"
+        );
+        assert!(
+            (near - 100.0).abs() <= f64::EPSILON * 100.0,
+            "the un-scale must recover the reference draw to one rounding, \
+             got {near}"
+        );
+    }
+
+    #[test]
+    fn a_stepped_zero_draw_rosters_its_zero_beside_a_live_load() {
+        // The stepped-zero contract, observable: beside a load that still
+        // draws, the roster reports the off load's zero (the moment was
+        // inspected and the load was off), never its 500 W expectation. The
+        // expectation is the pre-step route's evidence and must not stand in
+        // for a moment that was observed.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let equipment: Vec<Box<dyn Equipment>> = vec![
+            governing_stepped_load(
+                "Indoor Lighting",
+                lighting,
+                Some(ExpectedMeanPower::W(500.0)),
+                0.0,
+            ),
+            governing_stepped_load(
+                "Always On",
+                ZipLoad::constant_power(),
+                Some(ExpectedMeanPower::W(300.0)),
+                200.0,
+            ),
+        ];
+        let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0)
+            .expect("the live load carries a positive weight");
+        assert_eq!(
+            premise.governing,
+            vec![
+                ("Indoor Lighting".to_string(), Some(0.0)),
+                // The constant-power row evaluates 1.0 at the reference
+                // voltage, so the un-scale recovers the 200 W draw exactly.
+                ("Always On".to_string(), Some(200.0)),
+            ],
+            "an observed zero draw is a zero weight, not the expectation"
+        );
+        assert_eq!(
+            premise.deep_sag_scale,
+            Some(1.0),
+            "the live load's reference-voltage response is the identity"
+        );
+    }
+
+    #[test]
+    fn live_bus_with_every_load_stepped_off_reports_zero_weights_and_no_aggregate() {
+        // The third boundary class: an energized bus where every governing
+        // load stepped and drew nothing (a control decision, not an outage).
+        // Each load carries a real zero weight (the roster tells the caller
+        // the moment was inspected and was empty), no load carries reactive
+        // power either (Q is derived from the real draw, and a zero-draw
+        // component contributes no var), and the aggregate is None rather
+        // than a fabricated constant-power answer.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let equipment: Vec<Box<dyn Equipment>> = vec![
+            governing_stepped_load(
+                "Indoor Lighting",
+                lighting,
+                Some(ExpectedMeanPower::W(500.0)),
+                0.0,
+            ),
+            governing_stepped_load(
+                "Always On",
+                ZipLoad::constant_power(),
+                Some(ExpectedMeanPower::W(300.0)),
+                0.0,
+            ),
+        ];
+        assert!(
+            aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0).is_none(),
+            "every stepped load drew zero: there is no positive weight to report"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_component_base_never_publishes_a_non_finite_scale() {
+        // `nominal_electric_draw_w` is a public trait hook: a report of zero,
+        // NaN or infinity would make the aggregate's division publish
+        // inf/NaN in `deep_sag_scale` (and a non-finite weight in the
+        // roster) inside a structurally normal aggregate. A base is usable
+        // only when it is finite and positive; otherwise the aggregate falls
+        // back to the resolved row's un-scale, the documented single-row
+        // route.
+        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        for broken in [0.0, f64::NAN, f64::INFINITY] {
+            let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
+                StubLoad::new(
+                    "Air Conditioner",
+                    Some(hares_types::zip::ResolvedZip {
+                        real_shape_as_fitted: true,
+                        ..hares_types::zip::ResolvedZip::governing(ac_row)
+                    }),
+                    None,
+                )
+                .with_last_draw(1216.0)
+                .with_nominal_draw(broken),
+            )];
+            let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.5)
+                .expect("the positive draw still carries a weight");
+            let multiplier = ac_row.deep_sag_real_multiplier(0.5, true);
+            assert_eq!(
+                premise.governing[0],
+                ("Air Conditioner".to_string(), Some(1216.0 / multiplier)),
+                "a base of {broken} is not usable: the row's evaluation is the \
+                 only single-row route"
+            );
+            let scale = premise.deep_sag_scale.expect("stepped weight");
+            assert!(
+                scale.is_finite() && (scale - multiplier).abs() < 1e-12,
+                "the published scale must be the row's finite response \
+                 {multiplier}, got {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_moment_draw_never_publishes_a_non_finite_scale() {
+        // A broken core draw (inf) with a usable base would divide to inf.
+        // The aggregate must not publish it: the aggregate is None, the
+        // no-computable-positive-weight answer.
+        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
+            StubLoad::new(
+                "Air Conditioner",
+                Some(hares_types::zip::ResolvedZip {
+                    real_shape_as_fitted: true,
+                    ..hares_types::zip::ResolvedZip::governing(ac_row)
+                }),
+                None,
+            )
+            .with_last_draw(f64::INFINITY)
+            .with_nominal_draw(1200.0),
+        )];
+        assert!(
+            aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.5).is_none(),
+            "a non-finite draw is not a positive weight"
         );
     }
 

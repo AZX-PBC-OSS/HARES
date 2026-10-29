@@ -1448,7 +1448,11 @@ impl PyDwelling {
     /// aggregate reports the de-energized state: a load that stepped and
     /// drew zero carries that zero weight, no expected mean stands in for
     /// any load, and the aggregate is ``None``: the engine draws zero from
-    /// every load on a de-energized bus.
+    /// every load on a de-energized bus. On an energized bus whose voltage
+    /// a load's row cannot draw at (a non-positive evaluation, the
+    /// near-dead edge) that load's expectation carries no weight either,
+    /// and ``deep_sag_scale`` is always a positive finite multiplier when
+    /// reported.
     ///
     /// ``None`` when no ZIP-governing equipment has a computable positive
     /// weight; never a silent constant-power answer. Pure
