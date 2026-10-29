@@ -516,23 +516,21 @@ mod tests {
     /// bitwise comparison.
     #[test]
     fn a_wildcard_override_sample_reaches_the_equipment_that_reads_it() {
-        let spec_for = |wildcard: &str| {
-            ScenarioSpec {
-                name: "wildcard".to_string(),
-                parameters: vec![hares_types::ScenarioParameter {
-                    name: "load_multiplier".to_string(),
-                    unit: "fraction".to_string(),
-                    target: hares_types::ScenarioTarget::Override {
-                        equipment: wildcard.to_string(),
-                        field: "usage_multiplier".to_string(),
-                    },
-                    distribution: hares_types::ScenarioDistribution::Uniform {
-                        low: 0.7,
-                        high: 1.3,
-                    },
-                    correlation: None,
-                }],
-            }
+        let spec_for = |wildcard: &str| ScenarioSpec {
+            name: "wildcard".to_string(),
+            parameters: vec![hares_types::ScenarioParameter {
+                name: "load_multiplier".to_string(),
+                unit: "fraction".to_string(),
+                target: hares_types::ScenarioTarget::Override {
+                    equipment: wildcard.to_string(),
+                    field: "usage_multiplier".to_string(),
+                },
+                distribution: hares_types::ScenarioDistribution::Uniform {
+                    low: 0.7,
+                    high: 1.3,
+                },
+                correlation: None,
+            }],
         };
         let config_for = |settings: DwellingSettings| DwellingConfig {
             hpxml: hares_io::InputSource::Path(
