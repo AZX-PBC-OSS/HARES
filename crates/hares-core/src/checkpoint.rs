@@ -1,4 +1,22 @@
 //! Simulation checkpoint schema and file I/O.
+//!
+//! The checkpoint carries the run's state, never its inputs. It holds no
+//! HPXML document, no schedule (generated or parsed), no simulation
+//! config, no settings overrides or patches, and no scenario spec. A
+//! restore is over a dwelling rebuilt from the caller's current inputs and
+//! settings, and that rebuild runs the current validation before a
+//! checkpoint byte is read: a form a tightened validation refuses (a
+//! distribution whose closed form leaves the finite f64 range, a record
+//! with a repeated value name or an orphan target, a reserved equipment
+//! stream identity) fails that build, naming it, so no older checkpoint
+//! can admit it and there is no saved spec to re-validate. The version
+//! history on [`CHECKPOINT_VERSION`] gates the state schemas alone, and
+//! the shape's fingerprint pin holds every section to that list: a new
+//! section is a version bump. The generated schedule is the same story:
+//! the draws are build-time constants, so a restored home rebuilds them
+//! under the same (master seed, scenario, building) key and holds the
+//! checkpointed home's schedule bitwise
+//! (`a_checkpoint_restore_keeps_the_drawn_schedule`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
