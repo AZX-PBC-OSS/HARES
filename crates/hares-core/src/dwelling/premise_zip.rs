@@ -741,6 +741,56 @@ mod tests {
             "the un-scale must recover the reference draw to one rounding, \
              got {near}"
         );
+
+        // The bound over the family's parameter range, not just the two
+        // witness points: every governing row shape (the monotone default
+        // and the as-fitted form the typed equipment resolves) at sag,
+        // reference and elevated voltages, over the realistic draw
+        // magnitudes (sub-watt standby electronics up to a 100 kW
+        // whole-premise peak). The raw draw is the row-scaled reference (one
+        // rounding) and the un-scale divides the same multiplier out (one
+        // rounding), so the recovered weight must land on the reference draw
+        // or an immediate neighbour -- never two steps away, whatever the
+        // mantissa the magnitude puts the pair in.
+        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let fitted_ac = hares_types::zip::ResolvedZip {
+            real_shape_as_fitted: true,
+            ..hares_types::zip::ResolvedZip::governing(ac_row)
+        };
+        for (resolved, voltage_pu) in [
+            (hares_types::zip::ResolvedZip::governing(lighting), 0.5),
+            (hares_types::zip::ResolvedZip::governing(lighting), 0.75),
+            (hares_types::zip::ResolvedZip::governing(lighting), 1.0),
+            (hares_types::zip::ResolvedZip::governing(lighting), 1.1),
+            (fitted_ac, 0.5),
+            (fitted_ac, 1.0),
+        ] {
+            let multiplier = resolved.deep_sag_real_multiplier(voltage_pu);
+            assert!(
+                multiplier.is_finite() && multiplier > 0.0,
+                "fixture: the row must evaluate positive at {voltage_pu} pu"
+            );
+            for reference_w in [0.5, 1.0, 7.3, 100.0, 1234.5, 9999.0, 48213.7, 100000.0] {
+                let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
+                    StubLoad::new("Sweep", Some(resolved), None)
+                        .with_last_draw(reference_w * multiplier),
+                )];
+                let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, voltage_pu)
+                    .expect("the stepped draw carries a positive weight");
+                let weight = premise
+                    .governing
+                    .first()
+                    .and_then(|(_, w)| *w)
+                    .expect("the roster publishes the un-scaled weight");
+                let ulps = weight.to_bits() as i64 - reference_w.to_bits() as i64;
+                assert!(
+                    ulps.abs() <= 1,
+                    "the un-scale of {reference_w} W at {voltage_pu} pu must \
+                     land within one ulp of the reference draw, got {weight} \
+                     ({ulps} ulp)"
+                );
+            }
+        }
     }
 
     #[test]
