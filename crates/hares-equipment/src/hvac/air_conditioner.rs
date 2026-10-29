@@ -6950,6 +6950,99 @@ mod dr_tests {
              {expected_response}, got {response}"
         );
     }
+
+    /// A pin over the composed partial-load state (green at the parent and
+    /// the tip): the step's effective load (the duty cycle, load fraction
+    /// and DR factors composing one scalar) acts on the rated composition
+    /// before the voltage response multiplies it, so the reported base is
+    /// the duty-averaged reference draw -- the draw the same half-fractioned
+    /// state takes at 1.0 pu -- not the nameplate rating. A nameplate base
+    /// would publish duty x blend as the response, conflating the control
+    /// state with the voltage response; the row-scaled un-scale would
+    /// publish the compressor row alone. The load fraction is the one
+    /// driven here; the other factors flow through the same scalar.
+    #[test]
+    fn load_fractioned_moment_reports_the_duty_averaged_reference_draw() {
+        let cfg = base_config();
+        let environment = hot_env(30.0);
+
+        let mut eq_full = AirConditioner::new(cfg.clone());
+        eq_full.init(&cfg, &environment).unwrap();
+        let full_w = step_once(&mut eq_full, &environment);
+
+        let run = |voltage_pu: f64| -> AirConditioner {
+            let mut env_run = hot_env(30.0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            // The load fraction is a one-step multiplier: applied before
+            // each run's step, consumed by it.
+            eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.5 })
+                .unwrap();
+            let mut ports = make_ports();
+            eq.update_control(&env_run);
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &AirConditioner| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the unit must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let nominal_w = draw(&nominal_unit);
+        // The fixture discriminates: the crankcase heater is off at 30 C, so
+        // the half-fractioned state's reference draw is exactly half the
+        // full composition's.
+        assert!(
+            (nominal_w - 0.5 * full_w).abs() < 1e-6 * full_w,
+            "fixture: the half-fractioned reference draw must be half the \
+             full draw ({}, half of {full_w}), got {nominal_w}",
+            0.5 * full_w
+        );
+
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_w).abs() < 1e-6 * nominal_w,
+            "the base must be the duty-averaged reference draw {nominal_w} \
+             (the half-fractioned state's own 1.0 pu draw), got \
+             {reported_nominal}; the nameplate rating is {full_w}"
+        );
+
+        // The response: the partial composition's components evaluate their
+        // own rows (compressor 1.6 x 0.25 - 2.69 x 0.5 + 2.09 = 1.145,
+        // blower 0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.355). A nameplate base
+        // would halve this blend; the row-scaled un-scale would answer the
+        // compressor row alone.
+        let component_w = |eq: &AirConditioner, key: &str| {
+            let w = eq.telemetry().get(key).unwrap_or(f64::NAN);
+            assert!(w.is_finite(), "fixture: {key} must be finite");
+            w
+        };
+        let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
+        let fan_n = component_w(&nominal_unit, tk::FAN_KW);
+        assert!(compressor_n > 0.0 && fan_n > 0.0, "fixture: both run");
+        let m_compressor: f64 = 1.6 * 0.25 - 2.69 * 0.5 + 2.09;
+        let m_fan: f64 = 0.26 * 0.25 + 0.9 * 0.5 - 0.16;
+        let expected_response =
+            (compressor_n * m_compressor + fan_n * m_fan) / (compressor_n + fan_n);
+        let response = draw(&sag_unit) / reported_nominal;
+        assert!(
+            (response - expected_response).abs() < 1e-9,
+            "the response must be the partial composition's blend \
+             {expected_response}, got {response}"
+        );
+        assert!(
+            (response - 0.5 * expected_response).abs() > 0.1,
+            "the response must not carry the duty factor ({response} is a \
+             nameplate base's duty-carrying answer; the base already holds \
+             the composition)"
+        );
+    }
 }
 
 #[cfg(test)]
