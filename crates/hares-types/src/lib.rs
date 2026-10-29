@@ -29,6 +29,7 @@ pub mod ports;
 pub mod removed_keys;
 pub mod resolved;
 pub mod rng;
+pub mod scenario;
 pub mod schedule;
 pub mod schema;
 pub mod si_units;
@@ -50,6 +51,7 @@ pub use fluid::*;
 pub use health::*;
 pub use output::*;
 pub use resolved::*;
+pub use scenario::*;
 pub use schema::{
     Bounds, DescribeFields, FieldMeta, FieldSchema, ValueType, describe, field_schema,
 };

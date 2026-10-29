@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from typing import Any
 
 import polars as pl
 
@@ -2455,6 +2456,26 @@ class WarmupConfig:
     def max_days(self) -> int: ...
     def __eq__(self, other: object) -> bool: ...
     def __repr__(self) -> str: ...
+
+class ScenarioSpec:
+    """The declared scenario: the parameters' distributions, units,
+    targets and correlation groups, and the deterministic sampler.
+    Declared as a dict (the Rust schema's serde shape): each parameter
+    carries its ``name``, ``unit``, ``target`` (either
+    ``{"override": {"equipment": ..., "field": ...}}``, landing in the
+    dwelling's overrides map, or ``{"patch": {"field": ...}}``, landing
+    in the HPXML data patches), ``distribution`` (one of ``uniform``,
+    ``normal``, ``lognormal``, ``triangular`` or ``discrete``), and an
+    optional ``correlation`` (``{"group": ..., "rho": ...}``). The same
+    (master seed, scenario id, building id) reproduces the same
+    parameter set bitwise; a different scenario, building or master
+    seed draws differently."""
+
+    def __init__(self, spec: dict[str, Any]) -> None: ...
+    @property
+    def name(self) -> str: ...
+    def sample(self, master_seed: int, scenario_id: int, bldg_id: int) -> dict[str, Any]: ...
+    def sample_overrides(self, master_seed: int, scenario_id: int, bldg_id: int) -> dict[str, Any]: ...
 
 class SimulationConfig:
     """The one simulation config. The `warmup` keyword has three cases:

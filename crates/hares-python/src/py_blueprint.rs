@@ -500,10 +500,29 @@ pub(crate) fn resolved_model_to_py(
         }
     }
 
+    let equipment = PyList::empty(py);
+    for eq in &model.equipment {
+        let entry = PyDict::new(py);
+        entry.set_item("name", eq.name.clone())?;
+        entry.set_item("id", eq.id.0)?;
+        entry.set_item("end_use", format!("{:?}", eq.end_use))?;
+        let parameters = PyList::empty(py);
+        for p in &eq.parameters {
+            let parameter = PyDict::new(py);
+            parameter.set_item("name", p.name)?;
+            parameter.set_item("value", p.value)?;
+            parameter.set_item("unit", p.unit.symbol())?;
+            parameters.append(parameter)?;
+        }
+        entry.set_item("parameters", parameters)?;
+        equipment.append(entry)?;
+    }
+
     let out = PyDict::new(py);
     out.set_item("site", site)?;
     out.set_item("clock", clock)?;
     out.set_item("boundaries", boundaries)?;
+    out.set_item("equipment", equipment)?;
     out.set_item("setpoints", setpoints)?;
     Ok(out.into_any().unbind())
 }

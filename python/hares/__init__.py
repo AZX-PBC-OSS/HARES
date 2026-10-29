@@ -16,6 +16,7 @@ from ._hares import FleetResult
 from ._hares import Coverage
 from ._hares import Alignment
 from ._hares import SimulationConfig
+from ._hares import ScenarioSpec
 from ._hares import HealthPolicy
 from ._hares import WarmupConfig
 from ._hares import SiteLocationOverride
@@ -193,6 +194,7 @@ __all__ = [
     "SimulationConfig",
     "HealthPolicy",
     "WarmupConfig",
+    "ScenarioSpec",
     "SiteLocationOverride",
     "DwellingConfig",
     "ReportSpec",

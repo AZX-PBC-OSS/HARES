@@ -36,6 +36,7 @@ pub mod replay;
 pub mod resolved;
 pub mod result;
 pub mod rng;
+pub mod scenario;
 pub mod scheduler;
 pub mod step_counts;
 pub mod telemetry;

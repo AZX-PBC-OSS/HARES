@@ -30,6 +30,7 @@ mod py_metrics;
 mod py_pv_sizing;
 mod py_report;
 mod py_result;
+mod py_scenario;
 mod py_schema;
 mod py_tariff;
 mod py_telemetry;
@@ -81,6 +82,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWarmupConfig>()?;
     m.add_class::<PySiteLocationOverride>()?;
     m.add_class::<PyDwellingConfig>()?;
+    m.add_class::<py_scenario::PyScenarioSpec>()?;
     m.add_class::<PyReportSpec>()?;
     m.add_class::<PySelection>()?;
     m.add_class::<PyFrequency>()?;

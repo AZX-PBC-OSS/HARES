@@ -26,15 +26,15 @@
 //! spread, and the timing shifts are bounded integer hours on the
 //! profiles' own resolution. The published variance reference the
 //! acceptance is stated against is the NREL End-Use Load Profiles report
-//! (Pigman, McCarty, et al., NREL 2022, https://www.osti.gov/servlets/
-//! purl/1909353): per-home annual electricity by end use across the
-//! synthetic stock, its moments the comparison the fleet-aggregate
-//! witnesses state their tolerances against. The stochastic occupancy
-//! FAMILY the layer mirrors (the Markov presence chains, seven ATUS
-//! activities 2013-2017) is OS-HPXML v1.12.0's
-//! BuildResidentialScheduleFile; the engine runs no ATUS chain (the
-//! schedule-sources doc's provenance tiers), and this layer varies the
-//! 301 profiles per home instead.
+//! (Pigman, McCarty, et al., NREL 2022,
+//! <https://www.osti.gov/servlets/purl/1909353>): per-home annual
+//! electricity by end use across the synthetic stock, its moments the
+//! comparison the fleet-aggregate witnesses state their tolerances
+//! against. The stochastic occupancy FAMILY the layer mirrors (the
+//! Markov presence chains, seven ATUS activities 2013-2017) is
+//! OS-HPXML v1.12.0's BuildResidentialScheduleFile; the engine runs no
+//! ATUS chain (the schedule-sources doc's provenance tiers), and this
+//! layer varies the 301 profiles per home instead.
 
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
@@ -49,8 +49,9 @@ pub const PRESENCE_TIMING_DIMENSION: &str = "presence-timing";
 /// The occupancy-level dimension: the home's occupancy magnitude scale.
 pub const OCCUPANCY_LEVEL_DIMENSION: &str = "occupancy-level";
 /// The appliance-factors dimension: one diversity factor per appliance
-/// end-use profile, drawn in the fixed order of
-/// [`ApplianceFactors::draw`].
+/// end-use profile, drawn in the fixed order of the generated columns'
+/// own names, so appending a family never moves an earlier family's
+/// draws.
 pub const APPLIANCE_FACTORS_DIMENSION: &str = "appliance-factors";
 /// The water-draw-timing dimension: the water-heating schedule's hour
 /// shift, its own draw so the water timing diverges from the presence
