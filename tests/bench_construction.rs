@@ -121,15 +121,67 @@ fn bench_checkpoint_bench_is_registered() {
 
 /// The CI bench job's gate set is the complete registered set: every
 /// `[[bench]]` entry across EVERY workspace member's manifest is named
-/// with `--bench <name>` on both of the bench job's `cargo bench`
-/// command lines (the baseline generation and the PR run). The members
-/// are enumerated by `cargo metadata` at test time, the bench names
-/// parsed from each member's manifest, so a bench added to any crate's
-/// manifest (hares-fleet's or hares-io's included) without a CI flag
-/// fails this test the same way the five ungated benches this test was
-/// written against do.
+/// with `--bench <name>` on EVERY gated `cargo bench` command line the
+/// bench job runs: the baseline generation, the PR run, and the
+/// confirmation re-run of flagged benches (a bench missing from the
+/// confirmation line's flags could never be re-run, so a regression on
+/// it could never confirm and the job would pass it silently). The
+/// members are enumerated by `cargo metadata` at test time, the bench
+/// names parsed from each member's manifest, so a bench added to any
+/// crate's manifest (hares-fleet's or hares-io's included) without a CI
+/// flag fails this test the same way the five ungated benches this test
+/// was written against do.
 #[test]
 fn ci_bench_job_gates_every_registered_bench() {
+    let registered = registered_bench_names();
+    let ci = include_str!("../.github/workflows/ci.yml");
+    let commands = bench_job_command_lines(ci);
+    assert!(
+        commands.len() >= 2,
+        "the bench job's baseline and PR command lines did not parse \
+         from ci.yml: {commands:?}"
+    );
+    for command in &commands {
+        let missing = ungated_benches(&registered, command);
+        assert!(
+            missing.is_empty(),
+            "a gated CI bench command line does not name every registered \
+             bench: missing {missing:?} on {command:?}"
+        );
+    }
+}
+
+/// The gate's teeth: a bench that is registered but named on no gated
+/// command line is refused. The fixture world is the real enumerated
+/// set plus one phantom bench no ci.yml line carries; the same refusal
+/// the coverage gate runs must name the phantom on every gated command
+/// line. A parser that refuses nothing fails here; a parser that
+/// refuses everything fails the coverage gate above.
+#[test]
+fn ci_bench_gate_refuses_a_registered_but_ungated_bench() {
+    let mut registered = registered_bench_names();
+    registered.push("phantom_ungated_bench".to_string());
+    let ci = include_str!("../.github/workflows/ci.yml");
+    let commands = bench_job_command_lines(ci);
+    assert!(
+        commands.len() >= 2,
+        "the bench job's baseline and PR command lines did not parse \
+         from ci.yml: {commands:?}"
+    );
+    for command in &commands {
+        let missing = ungated_benches(&registered, command);
+        assert!(
+            missing.contains(&"phantom_ungated_bench"),
+            "the gate did not refuse a registered bench no gated command \
+             line names: refused only {missing:?} on {command:?}"
+        );
+    }
+}
+
+/// The `[[bench]]` names across every workspace member's manifest,
+/// enumerated by `cargo metadata` at test time: the complete registered
+/// set the CI bench job must gate.
+fn registered_bench_names() -> Vec<String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = std::process::Command::new(cargo)
         .args([
@@ -175,29 +227,32 @@ fn ci_bench_job_gates_every_registered_bench() {
         registered.contains(&"single_building".to_string()),
         "the manifest parse found no benches: {registered:?}"
     );
+    registered
+}
 
-    let ci = include_str!("../.github/workflows/ci.yml");
-    let commands: Vec<&str> = ci
-        .lines()
-        .filter(|line| line.contains("cargo bench") && line.contains("--save-baseline"))
-        .collect();
-    assert_eq!(
-        commands.len(),
-        2,
-        "expected the bench job's baseline and PR command lines, found: {commands:?}"
-    );
-    for command in &commands {
-        let missing: Vec<&str> = registered
-            .iter()
-            .map(String::as_str)
-            .filter(|name| !command.contains(&format!("--bench {name} ")))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "the CI bench command line does not gate every registered bench: \
-             missing {missing:?} on {command:?}"
-        );
-    }
+/// The bench job's gated `cargo bench` command lines: every workflow
+/// line that statically enumerates bench targets with `--bench` flags.
+/// The gate runs three of them (the baseline generation, the PR run,
+/// and the confirmation re-run of flagged benches, whose flags
+/// enumerate the search space its positional filter selects from); the
+/// step summary's echoed example command mentions `cargo bench` with no
+/// flag at all, so the `--bench ` requirement is what tells an
+/// invocation from prose.
+fn bench_job_command_lines(ci: &str) -> Vec<&str> {
+    ci.lines()
+        .filter(|line| line.contains("cargo bench") && line.contains("--bench "))
+        .collect()
+}
+
+/// The registered benches one gated command line fails to name: the
+/// meta-gate's refusal list for that line. Empty means the line's gate
+/// set is the complete registered set.
+fn ungated_benches<'a>(registered: &'a [String], command: &str) -> Vec<&'a str> {
+    registered
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !command.contains(&format!("--bench {name} ")))
+        .collect()
 }
 
 /// The `[[bench]]` entries' names in one manifest's text, in declaration
