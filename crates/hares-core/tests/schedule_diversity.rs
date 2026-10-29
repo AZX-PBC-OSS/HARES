@@ -1,8 +1,10 @@
 //! The generated-schedule family's per-dwelling behavioral diversity: two
-//! homes that share one blueprint and one master seed draw different
+//! homes under one master seed and different building ids draw different
 //! behavioral schedules, the same home reproduces its draws bitwise, and a
 //! declared scenario moves the draws (the diversity's key is the
-//! scenario-mixed per-dwelling key, so the scenario rides it).
+//! scenario-mixed per-dwelling key, so the scenario rides it). One
+//! blueprint carries one building id, so two builds of one blueprint under
+//! one seed are the same home and are identical by design.
 //!
 //! The diversity layer lives on the GENERATED schedule only: a schedule
 //! CSV is measured or upstream data and is never diversified. Every
@@ -112,12 +114,25 @@ fn two_homes_same_blueprint_draw_different_behavior() {
 }
 
 /// The reproducibility witness: the same (master seed, bldg id, scenario)
-/// builds the same home twice and the schedules are bit-identical.
+/// builds the same home twice and the schedules are bit-identical. One
+/// blueprint carries one building id, so two builds of one blueprint under
+/// one seed are that same home: the key names the boundary, and only a new
+/// seed (`build_with_seed`) or a new blueprint re-derives the schedule.
 #[test]
 fn same_seed_same_home_reproduces_bitwise() {
     let a = Dwelling::from_config(config(1, 42, None)).expect("home a builds");
     let b = Dwelling::from_config(config(1, 42, None)).expect("home a builds again");
     assert_eq!(schedule_rows(&a), schedule_rows(&b));
+    let blueprint =
+        DwellingBlueprint::from_config(config(1, 42, None)).expect("the blueprint builds");
+    let first = blueprint.build().expect("the blueprint's first build");
+    let second = blueprint.build().expect("the blueprint's second build");
+    assert_eq!(
+        schedule_rows(&first),
+        schedule_rows(&second),
+        "one blueprint is one building: its two builds under one seed are \
+         the same home's schedule"
+    );
 }
 
 /// The scenario axis: the same home under two declared scenarios draws
