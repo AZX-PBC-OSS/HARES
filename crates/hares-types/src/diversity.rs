@@ -23,20 +23,29 @@
 //! below are this record's calibrated choice, not published values: each
 //! scale is drawn mean-one BEFORE its clamp (a lognormal with mu =
 //! -sigma^2/2), so the unclamped draw's mean is exactly one, and the
-//! clamp's fold lowers the fleet mean of the drawn scale to 0.999945
-//! (occupancy, sigma 0.15), 0.999561 (appliance, sigma 0.25) and
-//! 0.997761 (water, sigma 0.30): a low bias of at most 0.23 percent,
-//! not a drift that compounds with the spread (the closed form and its
-//! pin are `the_fleet_scale_means_are_the_clamped_lognormal_means`). The
-//! timing shifts are bounded integer hours on the profiles' own
-//! resolution, a permutation of each day-type array's mass, so a home's
-//! profile integral is unmoved by its timing draw. The published variance
-//! reference the acceptance is stated against is the NREL End-Use Load
+//! clamp's two folded tails (the upper at `hi`, the lower at `lo`, which
+//! enter the mean with opposite signs) leave the fleet mean of the drawn
+//! scale at 0.999965 (occupancy, sigma 0.15), 0.999854 (appliance, sigma
+//! 0.25) and 0.999254 (water, sigma 0.30): a low bias of at most 0.075
+//! percent, not a drift that compounds with the spread. The clamp folds
+//! the variance too: the clamped lognormal's variance is 0.022687,
+//! 0.063662 and 0.089734 at the three spreads, 0.30, 1.29 and 4.71
+//! percent below the unclamped exp(sigma^2) - 1, so a home's per-home
+//! spread is the clamped draw's, narrower than the log-space sigma's.
+//! The closed forms are held to an independent quadrature and to the
+//! drawn fleet's moments by
+//! `the_fleet_scale_moments_are_the_clamped_lognormals`. The timing
+//! shifts are bounded integer hours on the profiles' own resolution, a
+//! permutation of each day-type array's mass, so a home's profile
+//! integral is unmoved by its timing draw. The published reference the
+//! fleet-aggregate acceptance is stated against is the NREL End-Use Load
 //! Profiles report (Pigman, McCarty, et al., NREL 2022,
-//! <https://www.osti.gov/servlets/purl/1909353>): per-home annual
-//! electricity by end use across the synthetic stock, its moments the
-//! comparison the fleet-aggregate witnesses state their tolerances
-//! against. The stochastic occupancy FAMILY the layer mirrors (the
+//! <https://www.osti.gov/servlets/purl/1909353>): its per-home annual
+//! electricity by end use across the synthetic stock is the published
+//! scale for the fleet's spread, while the witnesses pin the fleet MEAN
+//! at the 301 profile's own integral and the cross-home spread at the
+//! clamped closed form, never at a table read from the report. The
+//! stochastic occupancy FAMILY the layer mirrors (the
 //! Markov presence chains, seven ATUS activities 2013-2017) is
 //! OS-HPXML v1.12.0's BuildResidentialScheduleFile; the engine runs no
 //! ATUS chain (the schedule-sources doc's provenance tiers), and this
@@ -259,9 +268,9 @@ fn shift_draw(rng: &mut ChaCha8Rng, band: i32) -> i32 {
 
 /// A mean-one lognormal draw clamped to `lo..=hi`: the normal's mu is
 /// -sigma^2/2, so the UNCLAMPED mean is exp(-sigma^2/2 + sigma^2/2) = 1.
-/// The clamp's fold lowers the mean; the closed form of the clamped mean
-/// and its numbers per spread are on the fleet test
-/// (`the_fleet_scale_means_are_the_clamped_lognormal_means`).
+/// The clamp's two folded tails move the mean and the variance; the
+/// closed forms and the numbers per spread are on the fleet test
+/// (`the_fleet_scale_moments_are_the_clamped_lognormals`).
 fn mean_one_lognormal(rng: &mut ChaCha8Rng, sigma: f64, lo: f64, hi: f64) -> f64 {
     let z: f64 = rand_distr::StandardNormal.sample(rng);
     (libm::exp(sigma * (z - sigma / 2.0))).clamp(lo, hi)
@@ -363,43 +372,62 @@ mod tests {
         }
     }
 
-    /// The fleet calibration's invariant: the mean of a drawn scale is
-    /// the CLAMPED lognormal's analytic mean, not 1. For
-    /// X = exp(sigma*Z - sigma^2/2) (E[X] = 1) clamped to [lo, hi],
-    ///   E[clamp(X)] = 1 - E[(X-hi)^+] - E[(lo-X)^+],
-    ///   E[(X-c)^+] = Phi((sigma^2/2 - ln c)/sigma)
-    ///                - c*Phi((-sigma^2/2 - ln c)/sigma),
-    ///   E[(c-X)^+] = c*Phi((ln c + sigma^2/2)/sigma)
-    ///                - Phi((ln c - sigma^2/2)/sigma),
-    /// which gives 0.999945363 (occupancy, sigma 0.15, [0.6, 1.6]),
-    /// 0.999560544 (appliance, sigma 0.25, [0.5, 2.0]) and 0.997761048
-    /// (water, sigma 0.30, [0.5, 2.0]). The draw is therefore mean-one
-    /// before the clamp and the clamp's fold is a stated low bias of at
-    /// most 0.23 percent, not an unstated drift: 50,000 homes pin each
-    /// family's mean at the closed form within four standard errors
-    /// (sigma/sqrt(N) = 1.34e-3 at the widest spread) and the drawn
-    /// spread at its own sigma within 20 percent.
+    /// The fleet calibration's invariants, at the distribution level: the
+    /// mean of a drawn scale is the CLAMPED lognormal's analytic mean, not
+    /// 1, and its variance is the clamped variance, not sigma's. For
+    /// X = exp(sigma*Z - sigma^2/2) (E[X] = 1) clamped to [lo, hi], with
+    /// mu = -sigma^2/2 and Phi the standard normal CDF,
+    ///   clamp^k = X^k - (X^k - hi^k)^+ + (lo^k - X^k)^+,
+    ///   E[X^k] = exp(k mu + k^2 sigma^2 / 2),
+    ///   E[X^k 1{X > c}] = E[X^k] Phi((mu + k sigma^2 - ln c) / sigma),
+    ///   E[X^k 1{X < c}] = E[X^k] Phi((ln c - mu - k sigma^2) / sigma),
+    /// so E[(X^k - c)^+] = E[X^k 1{X>c}] - c^k P(X>c) and
+    /// E[(c^k - X^k)^+] = c^k P(X<c) - E[X^k 1{X<c}], and the two folded
+    /// tails ENTER the mean with opposite signs: the upper fold lowers it,
+    /// the lower fold raises it. The mean is 0.999965 (occupancy, sigma
+    /// 0.15, [0.6, 1.6]), 0.999854 (appliance, sigma 0.25, [0.5, 2.0]) and
+    /// 0.999254 (water, sigma 0.30, [0.5, 2.0]), a stated low bias of at
+    /// most 0.075 percent; the variance is 0.022687, 0.063662 and
+    /// 0.089734, 0.30, 1.29 and 4.71 percent below the unclamped
+    /// exp(sigma^2) - 1. The closed form is held to an independent Simpson
+    /// quadrature of the normal density at 1e-6 relative, and 50,000 drawn
+    /// homes hold it at four standard errors of the mean and of the
+    /// variance estimator (the fourth moment gives the latter's spread).
     #[test]
-    fn the_fleet_scale_means_are_the_clamped_lognormal_means() {
-        /// The closed-form mean of the clamped lognormal, above.
-        fn clamped_mean(sigma: f64, lo: f64, hi: f64) -> f64 {
+    fn the_fleet_scale_moments_are_the_clamped_lognormals() {
+        /// The closed-form first, second and fourth moments of the clamped
+        /// lognormal, from the folded-tail identity above.
+        fn clamped_moments(sigma: f64, lo: f64, hi: f64) -> [f64; 3] {
             let mu = -sigma * sigma / 2.0;
-            let upper = crate::scenario::normal_cdf((mu + sigma * sigma - libm::log(hi)) / sigma)
-                - hi * crate::scenario::normal_cdf((mu - libm::log(hi)) / sigma);
-            let lower = lo * crate::scenario::normal_cdf((libm::log(lo) - mu) / sigma)
-                - crate::scenario::normal_cdf((libm::log(lo) - mu - sigma * sigma) / sigma);
-            1.0 - upper - lower
+            let phi = crate::scenario::normal_cdf;
+            let moment = |k: u32| -> f64 {
+                let kf = f64::from(k);
+                let e_k = libm::exp(kf * mu + kf * kf * sigma * sigma / 2.0);
+                let (hi_k, lo_k) = match k {
+                    1 => (hi, lo),
+                    2 => (hi * hi, lo * lo),
+                    _ => (hi * hi * hi * hi, lo * lo * lo * lo),
+                };
+                let log_hi = libm::log(hi);
+                let log_lo = libm::log(lo);
+                let above = e_k * phi((mu + kf * sigma * sigma - log_hi) / sigma);
+                let below = e_k * phi((log_lo - mu - kf * sigma * sigma) / sigma);
+                let p_above = phi((mu - log_hi) / sigma);
+                let p_below = phi((log_lo - mu) / sigma);
+                e_k - (above - hi_k * p_above) + (lo_k * p_below - below)
+            };
+            let mean = moment(1);
+            let second = moment(2);
+            [mean, second - mean * mean, moment(4)]
         }
 
-        /// The clamped lognormal's moments by direct Simpson quadrature of
-        /// the standard normal density, an independent reference for the
-        /// closed form: with z the standard normal and
-        /// x = exp(mu + sigma*z),
+        /// The same moments by direct Simpson quadrature of the standard
+        /// normal density, an independent reference: with z standard
+        /// normal and x = exp(mu + sigma*z),
         ///   E[g(clamp(x))] = integral g(clamp(exp(mu + sigma z))) phi(z) dz.
         /// The grid is z in [-12, 12] (the truncated mass is exp(-72)) with
         /// 100,000 intervals, so the rule's error on this integrand is
-        /// about 1e-11 absolute: far below the 1e-6 relative band the
-        /// closed form must hold.
+        /// about 1e-11 absolute: far below the 1e-6 relative band.
         fn quadrature_moments(sigma: f64, lo: f64, hi: f64) -> [f64; 3] {
             const INTERVALS: usize = 100_000;
             let mu = -sigma * sigma / 2.0;
@@ -422,7 +450,8 @@ mod tests {
                 sums[1] += w * x * x;
                 sums[2] += w * x * x * x * x;
             }
-            [sums[0], sums[1], sums[2]]
+            let mean = sums[0];
+            [mean, sums[1] - mean * mean, sums[2]]
         }
 
         let n = 50_000_u64;
@@ -440,38 +469,91 @@ mod tests {
                 sq_sums[c] += scale * scale;
             }
         }
+        // (name, sigma, bounds, the record's mean, the record's variance
+        // fold below exp(sigma^2) - 1, in percent).
         let cases = [
-            ("occupancy", OCCUPANCY_LEVEL_SIGMA, OCCUPANCY_LEVEL_BOUNDS),
-            ("appliance", APPLIANCE_FACTOR_SIGMA, APPLIANCE_FACTOR_BOUNDS),
-            ("water", WATER_LEVEL_SIGMA, WATER_LEVEL_BOUNDS),
+            (
+                "occupancy",
+                OCCUPANCY_LEVEL_SIGMA,
+                OCCUPANCY_LEVEL_BOUNDS,
+                0.999_965_f64,
+                0.30_f64,
+            ),
+            (
+                "appliance",
+                APPLIANCE_FACTOR_SIGMA,
+                APPLIANCE_FACTOR_BOUNDS,
+                0.999_854_f64,
+                1.29_f64,
+            ),
+            (
+                "water",
+                WATER_LEVEL_SIGMA,
+                WATER_LEVEL_BOUNDS,
+                0.999_254_f64,
+                4.71_f64,
+            ),
         ];
-        for (c, (name, sigma, (lo, hi))) in cases.iter().enumerate() {
+        for (c, (name, sigma, (lo, hi), documented_mean, documented_fold)) in
+            cases.iter().enumerate()
+        {
+            let [analytic, analytic_variance, fourth] = clamped_moments(*sigma, *lo, *hi);
+            let [q_mean, q_variance, _] = quadrature_moments(*sigma, *lo, *hi);
+            // The closed form against the quadrature: an identity whose
+            // folded-tail sign is wrong cannot hold this band.
+            assert!(
+                (analytic - q_mean).abs() < 1e-6 * q_mean,
+                "the {name} closed-form mean {analytic} left the quadrature \
+                 reference {q_mean} by {:.3e} relative",
+                (analytic - q_mean).abs() / q_mean
+            );
+            assert!(
+                (analytic_variance - q_variance).abs() < 1e-6 * q_variance,
+                "the {name} closed-form variance {analytic_variance} left the \
+                 quadrature reference {q_variance} by {:.3e} relative",
+                (analytic_variance - q_variance).abs() / q_variance
+            );
+            // The record's stated numbers are the closed form's: the six
+            // decimals of the mean and the two of the variance fold.
+            assert!(
+                (analytic - documented_mean).abs() < 1e-6,
+                "the record states the {name} clamped mean as {documented_mean}, \
+                 the closed form computes {analytic}"
+            );
+            let unclamped_variance = libm::exp(sigma * sigma) - 1.0;
+            let fold_percent = (1.0 - analytic_variance / unclamped_variance) * 100.0;
+            assert!(
+                (fold_percent - documented_fold).abs() < 0.005,
+                "the record states the {name} variance fold as {documented_fold} \
+                 percent, the closed form computes {fold_percent}"
+            );
+            assert!(
+                (1.0 - analytic).abs() < 0.00075,
+                "the {name} scale's clamp folds {:.4} percent of the mean: the \
+                 record states at most 0.075 percent",
+                (1.0 - analytic).abs() * 100.0
+            );
+
+            // The drawn homes at the estimators' resolution: the mean's
+            // standard error is sd/sqrt(N); the sample variance's is
+            // sqrt((E[clamp^4] - var^2)/N).
             let mean = sums[c] / n as f64;
             let variance = (sq_sums[c] / n as f64 - mean * mean).max(0.0);
             let sd = libm::sqrt(variance);
-            let analytic = clamped_mean(*sigma, *lo, *hi);
-            // The closed form against the quadrature: an identity whose
-            // folded-tail sign is wrong cannot hold this band.
-            let quadrature = quadrature_moments(*sigma, *lo, *hi);
+            let se_mean = libm::sqrt(analytic_variance) / libm::sqrt(n as f64);
             assert!(
-                (analytic - quadrature[0]).abs() < 1e-6 * quadrature[0],
-                "the {name} closed-form mean {analytic} left the quadrature \
-                 reference {} by {:.3e} relative",
-                quadrature[0],
-                (analytic - quadrature[0]).abs() / quadrature[0]
-            );
-            let se = sigma / libm::sqrt(n as f64);
-            assert!(
-                (mean - analytic).abs() < 4.0 * se,
+                (mean - analytic).abs() < 4.0 * se_mean,
                 "the {name} scale's fleet mean {mean} left the clamped \
                  lognormal's analytic mean {analytic} beyond four standard \
-                 errors ({se})"
+                 errors ({se_mean})"
             );
+            let se_variance =
+                libm::sqrt((fourth - analytic_variance * analytic_variance) / n as f64);
             assert!(
-                (analytic - 1.0).abs() < 0.0025,
-                "the {name} scale's clamp folds {:.4} percent of the mean: \
-                 the record states at most 0.23 percent",
-                (analytic - 1.0).abs() * 100.0
+                (variance - analytic_variance).abs() < 4.0 * se_variance,
+                "the {name} scale's fleet variance {variance} left the clamped \
+                 lognormal's analytic variance {analytic_variance} beyond four \
+                 standard errors of the variance estimator ({se_variance})"
             );
             assert!(
                 (sd - sigma).abs() < 0.2 * sigma,
