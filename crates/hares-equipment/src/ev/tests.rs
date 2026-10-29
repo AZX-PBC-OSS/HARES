@@ -6672,6 +6672,46 @@ fn witness_der1547_ev_trip_latch_survives_checkpoint_round_trip() {
     assert_eq!(restored.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
 }
 
+/// The firing step's ride-through publication: the EV's
+/// `der1547_ride_through_s` channel reports the window the firing step
+/// reached, as the PV's and the battery's channels do (the step outcome's
+/// contract: "the firing step reports the window it reached"). The trip
+/// spends the run state's accumulators, so the channel cannot read them
+/// on the firing step: a state-based read publishes 0.0 exactly where the
+/// other DER classes publish the reached window, and the same telemetry
+/// key then means different things per equipment.
+#[test]
+fn witness_der1547_ev_publishes_the_window_the_firing_step_reached() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    // The 10 s UV1 window is reached inside the 60 s sag step: the
+    // firing step's channel must carry the 10 s it reached.
+    let mut sag = sample_env();
+    sag.grid.voltage_pu = 0.6;
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+        Some(10.0),
+        "the firing step reports the window it reached"
+    );
+
+    // The latched step reports no window (the per-disturbance timers are
+    // spent) and the enter-service accumulation is its own channel: 60 s
+    // inside the windows at nominal.
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+    assert_eq!(ev.telemetry().get(tk::DER1547_RIDE_THROUGH_S), Some(0.0));
+    assert_eq!(ev.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(60.0));
+}
+
 #[test]
 fn ev_config_rejects_unknown_fields() {
     use crate::config::ConfigPayload;
