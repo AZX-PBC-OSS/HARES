@@ -137,11 +137,11 @@ impl ScenarioDistribution {
         match self {
             Self::Uniform { low, high } => Ok(*low + rng.random::<f64>() * (high - low)),
             Self::Normal { mean, std_dev } => {
-                let z = normal_standard(rng)?;
+                let z = normal_standard(rng);
                 Ok(mean + std_dev * z)
             }
             Self::LogNormal { mu, sigma } => {
-                let z = normal_standard(rng)?;
+                let z = normal_standard(rng);
                 Ok(libm::exp(mu + sigma * z))
             }
             Self::Triangular { min, mode, max } => {
@@ -196,14 +196,23 @@ impl ScenarioDistribution {
 /// A standard normal draw (Box-Muller from two uniforms; the pairs the
 /// draw order produces are independent and deterministic like any other
 /// ChaCha8 draw).
-fn normal_standard(rng: &mut ChaCha8Rng) -> Result<f64, HaresError> {
-    let u1: f64 = rng.random::<f64>();
+fn normal_standard(rng: &mut ChaCha8Rng) -> f64 {
+    let u1 = open_unit(rng);
     let u2: f64 = rng.random::<f64>();
-    if u1 <= 0.0 {
-        return Ok(0.0);
-    }
     let r = libm::sqrt(-2.0 * libm::log(u1));
-    Ok(r * (2.0 * std::f64::consts::PI * u2).cos())
+    r * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+/// A uniform draw on the open interval (0, 1]: the uniform sampler yields
+/// [0, 1), and the single degenerate 0 would make the Box-Muller radius
+/// infinite, so it is resampled (probability 2^-53) rather than
+/// substituted with a plausible value.
+fn open_unit(rng: &mut ChaCha8Rng) -> f64 {
+    let mut u: f64 = rng.random::<f64>();
+    while u <= 0.0 {
+        u = rng.random::<f64>();
+    }
+    u
 }
 
 /// The standard normal CDF at `z`: Phi(z) = erfc(-z / sqrt(2)) / 2.
@@ -471,7 +480,10 @@ impl ScenarioSpec {
     ///
     /// # Errors
     ///
-    /// [`HaresError`] when the spec does not validate.
+    /// [`HaresError`] when the spec does not validate, when a correlation
+    /// member's group factor is missing, or when a draw is not finite
+    /// (the declared support does not bound it); the error names the
+    /// parameter.
     pub fn sample(
         &self,
         master_seed: u64,
@@ -483,13 +495,17 @@ impl ScenarioSpec {
         let mut rng = RngStream::scenario_sampler(key).rng_at(0);
 
         // The groups' shared factors: first appearance order, one draw
-        // per group.
-        let mut shared: Vec<(String, f64)> = Vec::new();
+        // per group, the group's position recorded so a member's lookup
+        // is total.
+        let mut shared: Vec<f64> = Vec::new();
+        let mut group_index: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
         for parameter in &self.parameters {
             if let Some(correlation) = &parameter.correlation
-                && !shared.iter().any(|(name, _)| *name == correlation.group)
+                && !group_index.contains_key(correlation.group.as_str())
             {
-                shared.push((correlation.group.clone(), normal_standard(&mut rng)?));
+                group_index.insert(correlation.group.as_str(), shared.len());
+                shared.push(normal_standard(&mut rng));
             }
         }
 
@@ -499,17 +515,34 @@ impl ScenarioSpec {
             let value = match &parameter.correlation {
                 None => parameter.distribution.sample(&mut rng)?,
                 Some(correlation) => {
-                    let z_group = shared
-                        .iter()
-                        .find(|(name, _)| *name == correlation.group)
-                        .map(|(_, z)| *z)
-                        .unwrap_or(0.0);
-                    let z_own = normal_standard(&mut rng)?;
+                    let index = group_index
+                        .get(correlation.group.as_str())
+                        .copied()
+                        .ok_or_else(|| {
+                            HaresError::Equipment(format!(
+                                "the scenario parameter '{}' names the correlation group \
+                                 '{}', whose shared factor was not drawn",
+                                parameter.name, correlation.group
+                            ))
+                        })?;
+                    let z_group = shared[index];
+                    let z_own = normal_standard(&mut rng);
                     let loading = libm::sqrt(correlation.rho);
                     let z = loading * z_group + libm::sqrt(1.0 - correlation.rho) * z_own;
                     parameter.distribution.quantile(normal_cdf(z))
                 }
             };
+            // A draw the declared support does not bound cannot be
+            // carried: serde_json maps a non-finite f64 to null, so the
+            // overrides form would silently lose it and the assembly
+            // would reject a null without naming this parameter.
+            if !value.is_finite() {
+                return Err(HaresError::Equipment(format!(
+                    "the scenario parameter '{}' drew the non-finite value {value} from its \
+                     declared distribution",
+                    parameter.name
+                )));
+            }
             targets.insert(parameter.name.clone(), parameter.target.clone());
             values.push(SampledValue {
                 name: parameter.name.clone(),
@@ -793,6 +826,34 @@ mod tests {
         assert!(
             rho.abs() < 0.15,
             "the independent parameters' rho {rho} must stay near zero"
+        );
+    }
+
+    /// A draw the declared distribution's support does not bound is an
+    /// error naming the parameter: an infinite value would reach the
+    /// overrides form as JSON null (serde_json maps a non-finite f64 to
+    /// Null), and the assembly would then reject a null override without
+    /// naming the parameter that overflowed.
+    #[test]
+    fn a_non_finite_draw_is_an_error_naming_the_parameter() {
+        let s = spec(vec![ScenarioParameter {
+            name: "overflowing".into(),
+            unit: "W".into(),
+            target: override_target("all", "heating_capacity_w"),
+            // exp(800 + z) is +inf for every z near zero: the declared
+            // mu is finite, so validation accepts it.
+            distribution: ScenarioDistribution::LogNormal {
+                mu: 800.0,
+                sigma: 1.0,
+            },
+            correlation: None,
+        }]);
+        let err = s
+            .sample(1, 1, 1)
+            .expect_err("an infinite draw must not be silently carried");
+        assert!(
+            err.to_string().contains("overflowing"),
+            "the error must name the parameter: {err}"
         );
     }
 
