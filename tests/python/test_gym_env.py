@@ -275,7 +275,7 @@ def test_vec_env_bounds_a_deadband_by_each_dwelling_s_target_class():
     assert env._action_bounds[column] == (MIN_THERMOSTAT_BAND_C, MAX_HVAC_THERMOSTAT_BAND_C)
     assert [field for _, field in env._action_layout] == ["deadband_c", "heat_c"]
     _, _, _, _, infos = env.step(np.asarray([[30.0, 21.0], [30.0, 21.0]]))
-    assert [info["warning_count"] for info in infos] == [0.0, 0.0], "the band is clipped"
+    assert [info["warning_count"] for info in infos] == [0, 0], "the band is clipped"
 
 
 class _DwellingWithBand:
@@ -1053,6 +1053,28 @@ def test_reset_observation_contains_nan_for_uninitialized():
     assert np.all(mask), "all fields should be masked (NaN) on initial observation"
 
     assert "seed" in info
+
+
+def test_step_before_reset_omits_the_seed():
+    """A step taken before the first ``reset`` carries no ``seed``: the
+    episode's seed exists once a reset assigns one. Every post-reset step
+    carries it (``reset(seed=None)`` draws one too), so this omission is
+    the pre-reset branch's own, and the warning count rides the same info
+    as an int."""
+    env = _make_env()
+    _, _, _, _, info = env.step(np.array([21.0], dtype=np.float64))
+    assert "seed" not in info, "a pre-reset step has no episode seed to report"
+    assert isinstance(info["warning_count"], int)
+
+
+def test_reset_without_a_seed_reports_the_drawn_seed_on_every_info():
+    """``reset(seed=None)`` draws the episode's seed, so the reset info
+    carries it and the next step's info carries the same one."""
+    env = _make_env()
+    _, reset_info = env.reset()
+    assert isinstance(reset_info["seed"], int)
+    _, _, _, _, step_info = env.step(np.array([21.0], dtype=np.float64))
+    assert step_info["seed"] == reset_info["seed"]
 
 
 def test_step_observation_all_finite_after_first_step():

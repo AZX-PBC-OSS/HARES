@@ -18,9 +18,7 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 
 use crate::py_control::PyControlSignal;
-use crate::py_dwelling::{
-    FATAL_DWELLING_PREFIX, PyDwelling, step_result_to_py_dict, zone_keys_for_step,
-};
+use crate::py_dwelling::{PyDwelling, StepFailure, step_result_to_py_dict, zone_keys_for_step};
 
 /// The frozen observation plan, built once per episode against a built
 /// dwelling and read every step: the Python handle over
@@ -72,7 +70,12 @@ struct StepResult {
     /// no key strings; the dict is built only for the keys set in that
     /// step.
     info: Vec<(&'static str, f64)>,
-    error_msg: Option<String>,
+    /// The step's warning count, its own dict entry (an int in Python,
+    /// the flags beside it being floats).
+    warning_count: usize,
+    /// The step's failure, `None` when the step stepped: the message and
+    /// the fatality flag cross as data.
+    failure: Option<StepFailure>,
     /// Warnings drained from the dwelling after this step (e.g.
     /// control-dispatch rejections). Surfaced under `info["warnings"]` so RL
     /// loops see rejected control signals without polling `take_warnings()`.
@@ -82,7 +85,9 @@ struct StepResult {
 /// The batch path reads each environment's observation through this one
 /// wrapper around `Dwelling::observe_into`: the plan fills the
 /// environment's row of the caller's buffer in place, no per-row lists
-/// and no Python object per field.
+/// and no Python object per field. A failed acquire or read crosses as
+/// the message alone: the row ends that environment with `error_msg` and
+/// no `dwelling_fatal`, whatever poisoned the acquire.
 fn observe_environment_into(
     dwelling: &PyDwelling,
     plan: &hares_core::ObservationPlan,
@@ -98,8 +103,24 @@ fn observe_environment_into(
         }
     }
     let _ = env_index;
-    let guard = dwelling.acquire_string()?;
+    let guard = dwelling.acquire_string().map_err(|failure| failure.msg)?;
     guard.observe_into(plan, out).map_err(|err| err.to_string())
+}
+
+/// A readable `f64` view of `obj`'s buffer. The batch's action buffer is
+/// the vector environment's own `(n_envs, n_actions)` array, read in
+/// place, one row per dwelling: the observation path's zero-copy channel
+/// in reverse. A read-only view is accepted (the batch only reads).
+fn readable_f64_buffer(obj: &Bound<'_, PyAny>) -> PyResult<PyBuffer<f64>> {
+    let buffer = PyBuffer::<f64>::get(obj).map_err(|_| {
+        PyValueError::new_err("the action buffer must expose a float64 buffer protocol view")
+    })?;
+    if !buffer.is_c_contiguous() {
+        return Err(PyValueError::new_err(
+            "the action buffer must be C-contiguous",
+        ));
+    }
+    Ok(buffer)
 }
 
 /// A writable `f64` view of `obj`'s buffer. The batch's observation
@@ -432,7 +453,7 @@ fn check_signals_accepted(
     dwelling: &PyDwelling,
     signals: &[(String, ControlSignal)],
 ) -> Result<(), String> {
-    let dwelling = dwelling.acquire_string()?;
+    let dwelling = dwelling.acquire_string().map_err(|failure| failure.msg)?;
     for (equipment, signal) in signals {
         debug_assert!(!signal.is_immediate_state_update());
         dwelling
@@ -605,22 +626,35 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// releases the GIL so Rayon threads can step dwellings in true parallel.
 /// The GIL is only re-acquired afterwards for Python dict construction.
 ///
+/// `actions` is a C-contiguous `(n_envs, n_actions)` float64 buffer
+/// protocol view (a numpy array among them), read in place, one row per
+/// dwelling: the observation path's zero-copy channel in reverse. `None`
+/// steps every dwelling with no actions. A multi-dimensional buffer whose
+/// declared shape is not `(n_envs, n_actions)` is a refused call naming
+/// the expected and the received shape, no coercion: the buffer is read
+/// in flat row-major order, so a transposed or reshaped view would land
+/// its floats on the wrong dwellings. A 1-D buffer of the exact item
+/// count is the flat form.
+///
 /// Each environment's observation is read through the environment's own
 /// frozen plan (`plans`, built at the environment's `reset`) into `obs_out`,
 /// the vector environment's `(n_envs, n_fields)` float64 buffer, filled in
 /// place through its buffer protocol: no per-row lists and no Python object
 /// per field. The buffer's row width is the plan's field count.
 ///
-/// Each result dict carries `"step"`, the same dict `Dwelling.step()`
-/// returns (both go through one conversion), so the caller's `reward_fn`
-/// sees the same context on the batch path as on a single dwelling's step.
-/// A failed step carries `"step": None` and keeps the batch rectangular:
+/// When `include_step_dict` is true, each result dict carries `"step"`, the
+/// same dict `Dwelling.step()` returns (both go through one conversion), so
+/// the caller's `reward_fn` sees the same context on the batch path as on a
+/// single dwelling's step. The default false builds no step dicts: the
+/// observation buffer is the fast channel the RL consumers read, and the
+/// batch pays for no dicts it does not need. With the dict asked for, a
+/// failed step carries `"step": None` and keeps the batch rectangular:
 /// its row of the buffer holds the dwelling's last observation (the failed
 /// step changed nothing, so the telemetry on hand is that state). A step
 /// whose observation read fails ends that environment with its error:
 /// `terminated=True`, `info["error_msg"]` holding the error, and its row of
 /// the buffer set to NaN; no substitute vector is produced. Its `info`
-/// dict always carries `"warning_count"` (float), the
+/// dict always carries `"warning_count"` (int), the
 /// number of warnings the dwelling accumulated during the step (e.g. control
 /// signals rejected at dispatch time). When non-zero, `"warnings"`
 /// (list of str) holds the drained messages; they are consumed here, so a
@@ -635,25 +669,56 @@ fn assert_no_nan_inf_in_signal(signal: &ControlSignal) {
 /// or would reject its signal) is a `ValueError` raised before a signal
 /// reaches any dwelling.
 #[pyfunction(name = "batch_step")]
-#[pyo3(signature = (dwellings, actions, plans, action_layout, signal_type_by_equipment, action_bounds, obs_out))]
+#[pyo3(signature = (dwellings, actions, plans, action_layout, signal_type_by_equipment, action_bounds, obs_out, include_step_dict = false))]
 #[allow(clippy::too_many_arguments)]
 pub fn batch_step_py(
     py: Python<'_>,
     dwellings: Vec<Py<PyDwelling>>,
-    actions: Vec<Vec<f64>>,
+    actions: Option<&Bound<'_, PyAny>>,
     plans: Vec<Py<PyObservationPlan>>,
     action_layout: Vec<(String, String)>,
     signal_type_by_equipment: HashMap<String, String>,
     action_bounds: Vec<(f64, f64)>,
     obs_out: &Bound<'_, PyAny>,
+    include_step_dict: bool,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    // Dimension check first (useful error regardless of mapping status).
-    if !actions.is_empty() && actions.len() != dwellings.len() {
-        return Err(PyValueError::new_err(format!(
-            "actions length ({}) must match dwellings length ({})",
-            actions.len(),
-            dwellings.len(),
-        )));
+    // The action buffer's shape check first (a useful error regardless of
+    // mapping status): one row of `action_layout.len()` floats per
+    // dwelling, read in place.
+    let action_buffer = match actions {
+        None => None,
+        Some(obj) => Some(readable_f64_buffer(obj)?),
+    };
+    let action_width = action_layout.len();
+    if let Some(buffer) = &action_buffer {
+        let n_envs = dwellings.len();
+        if buffer.item_count() != n_envs * action_width {
+            return Err(PyValueError::new_err(format!(
+                "the action buffer holds {} floats for {} environments of {} action dimensions",
+                buffer.item_count(),
+                n_envs,
+                action_width,
+            )));
+        }
+        // The declared shape is the contract: one row per environment,
+        // `action_width` floats per row. The buffer is read in flat
+        // row-major order, so a multi-dimensional buffer whose own shape
+        // names anything else (a transposed fleet, a reshaped view) would
+        // land its floats on the wrong dwellings: refused here, naming
+        // the expected and the received shape, no coercion. A 1-D buffer
+        // of the exact count is the documented flat form (a stdlib
+        // `array.array('d')` carries no second dimension to declare).
+        if buffer.dimensions() > 1 && buffer.shape() != [n_envs, action_width] {
+            return Err(PyValueError::new_err(format!(
+                "the action buffer's shape is {:?} for {} environments of {} \
+                 action dimensions: expected [{}, {}]",
+                buffer.shape(),
+                n_envs,
+                action_width,
+                n_envs,
+                action_width,
+            )));
+        }
     }
     if plans.len() != dwellings.len() {
         return Err(PyValueError::new_err(format!(
@@ -662,9 +727,10 @@ pub fn batch_step_py(
             dwellings.len(),
         )));
     }
-    // An empty fleet's result is an empty list: nothing to step, nothing to
-    // write, and the caller's buffer may be any shape they like (a
-    // zero-item stdlib array exposes no float64 format to validate).
+    // An empty fleet's result is an empty list: nothing to step, nothing
+    // to write. The action buffer's validation has already run by then,
+    // so an empty fleet still refuses a malformed buffer; the no-actions
+    // form is `None`.
     if dwellings.is_empty() {
         return Ok(Vec::new());
     }
@@ -708,6 +774,15 @@ pub fn batch_step_py(
     let borrows: Vec<PyRef<'_, PyDwelling>> =
         dwellings.iter().map(|d| d.bind(py).borrow()).collect();
 
+    // The action buffer is read in place through its own pointer: the
+    // typed get above guarantees float64, the contiguity check guarantees
+    // the row layout, and the PyBuffer keeps the export alive for the
+    // read, which runs on the calling thread with the GIL held, so no
+    // writer can touch the floats while they are read.
+    let actions_view: Option<&[f64]> = action_buffer.as_ref().map(|buffer| unsafe {
+        slice::from_raw_parts(buffer.buf_ptr().cast::<f64>(), buffer.item_count())
+    });
+
     // Map every dwelling's actions to ControlSignals before applying any, so
     // a refused action leaves every dwelling untouched; then apply them
     // before entering the GIL-free section.
@@ -716,7 +791,13 @@ pub fn batch_step_py(
     // NaN/inf guarding is enforced unconditionally in map_action_to_signals
     // and as a defense-in-depth invariant check in build_control_signal.
     let mut mapped = Vec::with_capacity(borrows.len());
-    for (dwelling_ref, action) in borrows.iter().zip(&actions) {
+    for (env_index, dwelling_ref) in borrows.iter().enumerate() {
+        // No action buffer steps every dwelling with no signals; a zero
+        // width row is the same no-op for its dwelling.
+        let action = match actions_view {
+            Some(view) => &view[env_index * action_width..(env_index + 1) * action_width],
+            None => continue,
+        };
         if action.is_empty() {
             continue;
         }
@@ -779,13 +860,17 @@ pub fn batch_step_py(
                 let step_result = match step_result {
                     Ok(inner) => inner,
                     Err(payload) => {
-                        if dwelling.dwelling.is_poisoned() {
+                        let poisoned = dwelling.dwelling.is_poisoned();
+                        if poisoned {
                             dwelling.mark_poisoned();
                         }
-                        Err(format!(
-                            "HARES internal panic: {}",
-                            panic_hook::panic_payload_to_string(payload)
-                        ))
+                        Err(StepFailure {
+                            msg: format!(
+                                "HARES internal panic: {}",
+                                panic_hook::panic_payload_to_string(payload)
+                            ),
+                            fatal: poisoned,
+                        })
                     }
                 };
                 // Drain warnings accumulated during this step (e.g. control
@@ -803,7 +888,7 @@ pub fn batch_step_py(
                             .collect::<Vec<String>>()
                     })
                     .unwrap_or_default();
-                info.push(("warning_count", warnings.len() as f64));
+                let warning_count = warnings.len();
                 match step_result {
                     Ok(step) => {
                         let plan = &plan_handles[idx];
@@ -812,6 +897,12 @@ pub fn batch_step_py(
                             // A step whose observation fails ends that
                             // environment with its error: no substitute
                             // vector, the row NaN, the environment done.
+                            // The failure is not classified here: the row
+                            // reports the message under `error_msg` and
+                            // no `dwelling_fatal`, whatever poisoned the
+                            // observation's acquire (a poisoned lock's
+                            // message still carries the fatal sentinel's
+                            // text, which no field reads).
                             info.push(("observation_error", 1.0));
                             row.fill(f64::NAN);
                             StepResult {
@@ -819,7 +910,11 @@ pub fn batch_step_py(
                                 terminated: true,
                                 truncated: false,
                                 info,
-                                error_msg: Some(e),
+                                warning_count,
+                                failure: Some(StepFailure {
+                                    msg: e,
+                                    fatal: false,
+                                }),
                                 warnings,
                             }
                         } else {
@@ -828,15 +923,18 @@ pub fn batch_step_py(
                                 terminated: false,
                                 truncated: false,
                                 info,
-                                error_msg: None,
+                                warning_count,
+                                failure: None,
                                 warnings,
                             }
                         }
                     }
-                    Err(e) => {
-                        let is_fatal = e.starts_with(FATAL_DWELLING_PREFIX);
+                    Err(step_failure) => {
+                        // The fatality flag crossed as data: a permanent
+                        // failure is the dwelling's own state, never its
+                        // message's wording.
                         info.push(("error", 1.0));
-                        if is_fatal {
+                        if step_failure.fatal {
                             info.push(("dwelling_fatal", 1.0));
                         }
                         // A failed row carries the dwelling's last
@@ -859,7 +957,8 @@ pub fn batch_step_py(
                             terminated: true,
                             truncated: false,
                             info,
-                            error_msg: Some(e),
+                            warning_count,
+                            failure: Some(step_failure),
                             warnings,
                         }
                     }
@@ -871,23 +970,33 @@ pub fn batch_step_py(
 
     // GIL re-acquired here -- convert results to Python dicts.
     let mut out = Vec::with_capacity(results.len());
-    for item in results {
+    for (env_index, item) in results.into_iter().enumerate() {
         let d = PyDict::new(py);
-        match item.step {
-            Some(step) => {
-                let zone_keys = zone_keys_for_step(&step);
-                d.set_item("step", step_result_to_py_dict(py, &step, &zone_keys)?)?;
+        if include_step_dict {
+            match item.step {
+                Some(step) => {
+                    // The row's zone keys come from the dwelling's cache:
+                    // derived at the first dict build, reused for every
+                    // later step, so a step allocates no key strings.
+                    let mut cache = borrows[env_index]
+                        .zone_keys
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let zone_keys = cache.get_or_insert_with(|| zone_keys_for_step(&step));
+                    d.set_item("step", step_result_to_py_dict(py, &step, zone_keys)?)?;
+                }
+                None => d.set_item("step", py.None())?,
             }
-            None => d.set_item("step", py.None())?,
         }
         d.set_item("terminated", item.terminated)?;
         d.set_item("truncated", item.truncated)?;
         let info_dict = PyDict::new(py);
+        info_dict.set_item("warning_count", item.warning_count)?;
         for (k, v) in &item.info {
             info_dict.set_item(k, v)?;
         }
-        if let Some(ref msg) = item.error_msg {
-            info_dict.set_item("error_msg", msg)?;
+        if let Some(ref failure) = item.failure {
+            info_dict.set_item("error_msg", &failure.msg)?;
         }
         if !item.warnings.is_empty() {
             info_dict.set_item("warnings", &item.warnings)?;
@@ -962,6 +1071,311 @@ mod tests {
     /// here holds the lock for its whole body and the flag's window is
     /// the test's alone.
     static OBSERVATION_FAULT_EXCLUSIVITY: Mutex<()> = Mutex::new(());
+
+    /// The content pin: when the batch builds a row's step dict, it is the
+    /// single-step path's own dict. Both dwellings take the same action and
+    /// step once from the same fixture state; the pin holds the keys, the
+    /// values and the key order identical, which the one shared conversion
+    /// (`step_result_to_py_dict`) gives both paths.
+    #[test]
+    fn batch_step_dict_content_matches_the_single_step_dict() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let single = base_dwelling(py);
+            let batched = base_dwelling(py);
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+            let plan = batched
+                .bind(py)
+                .borrow()
+                .observation_plan(vec!["total_power_w".to_string()])
+                .expect("the plan builds");
+            let plan = Py::new(py, plan).expect("the plan wraps");
+            let buffer = numpy::PyArray2::<f64>::zeros(py, (1, 1), false);
+
+            // The same action both paths step under: the single path clips
+            // and queues it itself (the batch path does the same inside).
+            let values = clip_action_py(&single.bind(py).borrow(), vec![21.0], layout.clone())
+                .expect("the clip runs");
+            let mut field_values = HashMap::new();
+            for ((_, field), value) in layout.iter().zip(values) {
+                field_values.insert(field.clone(), value);
+            }
+            let signal =
+                build_control_signal("ThermalSetpoint", &field_values).expect("the signal builds");
+            single
+                .bind(py)
+                .borrow()
+                .apply_control("Gas Furnace".to_string(), &PyControlSignal { signal }, None)
+                .expect("the control applies");
+            let single_dict = single
+                .bind(py)
+                .borrow_mut()
+                .step(py)
+                .expect("the single step runs");
+
+            let rows = batch_step_py(
+                py,
+                vec![batched.clone_ref(py)],
+                Some(actions_array(py, &[&[21.0]]).bind(py)),
+                vec![plan],
+                layout,
+                signal_types,
+                vec![(-50.0, 80.0)],
+                buffer.as_any(),
+                true,
+            )
+            .expect("the batch step runs");
+            let batch_dict = rows[0]
+                .bind(py)
+                .get_item("step")
+                .expect("the row carries a step dict")
+                .cast_into::<PyDict>()
+                .expect("the step is a dict");
+
+            let single_dict = single_dict
+                .into_bound(py)
+                .cast_into::<PyDict>()
+                .expect("the step is a dict");
+            let single_keys: Vec<String> = single_dict
+                .iter()
+                .map(|(k, _)| k.extract::<String>().expect("the keys are strings"))
+                .collect();
+            let batch_keys: Vec<String> = batch_dict
+                .iter()
+                .map(|(k, _)| k.extract::<String>().expect("the keys are strings"))
+                .collect();
+            assert_eq!(single_keys, batch_keys, "the same keys in the same order");
+            assert_eq!(
+                single_dict.repr().expect("repr").to_string_lossy(),
+                batch_dict.repr().expect("repr").to_string_lossy(),
+                "the step dicts are byte-identical: keys, values and order"
+            );
+        });
+    }
+
+    /// The batch's own stepable fixture set: `n_envs` base.xml dwellings,
+    /// a heating and a cooling setpoint column on the furnace, bounds
+    /// (-50, 80) on both columns, and a zeroed `(n_envs, 1)` observation
+    /// buffer.
+    struct SetpointBatch {
+        dwellings: Vec<Py<PyDwelling>>,
+        layout: Vec<(String, String)>,
+        signal_types: HashMap<String, String>,
+        plans: Vec<Py<PyObservationPlan>>,
+        buffer: Py<PyAny>,
+    }
+
+    fn setpoint_batch(py: Python<'_>, n_envs: usize) -> SetpointBatch {
+        let dwellings: Vec<Py<PyDwelling>> = (0..n_envs).map(|_| base_dwelling(py)).collect();
+        let layout = vec![
+            ("Gas Furnace".to_string(), "heating_setpoint_c".to_string()),
+            ("Gas Furnace".to_string(), "cooling_setpoint_c".to_string()),
+        ];
+        let mut signal_types = HashMap::new();
+        signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+        let plans: Vec<Py<PyObservationPlan>> = dwellings
+            .iter()
+            .map(|dwelling| {
+                let plan = dwelling
+                    .bind(py)
+                    .borrow()
+                    .observation_plan(vec!["total_power_w".to_string()])
+                    .expect("the plan builds");
+                Py::new(py, plan).expect("the plan wraps")
+            })
+            .collect();
+        let buffer = numpy::PyArray2::<f64>::zeros(py, (n_envs, 1), false);
+        SetpointBatch {
+            dwellings,
+            layout,
+            signal_types,
+            plans,
+            buffer: buffer.into_any().unbind(),
+        }
+    }
+
+    /// A buffer with the right item count and the wrong declared shape is
+    /// refused at the boundary, naming the expected and the received
+    /// shape. The batch reads the buffer in flat row-major order as
+    /// `(n_envs, action_width)` rows, so the attack's four floats declared
+    /// `(1, 4)` for a `(2, 2)` contract would apply both rows' setpoints
+    /// to environment 0 and leave environment 1 uncontrolled, with no
+    /// diagnostic. A refused call reaches no dwelling.
+    #[test]
+    fn an_action_buffer_with_the_wrong_declared_shape_is_refused() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let batch = setpoint_batch(py, 2);
+
+            // Four floats for a (2, 2) contract, declared (1, 4): the
+            // accepted-at-the-parent reshape.
+            let actions = actions_array(py, &[&[21.0, 24.0, 20.0, 25.0]]);
+            let err = batch_step_py(
+                py,
+                batch.dwellings,
+                Some(actions.bind(py)),
+                batch.plans,
+                batch.layout,
+                batch.signal_types,
+                vec![(-50.0, 80.0), (-50.0, 80.0)],
+                batch.buffer.bind(py),
+                false,
+            )
+            .expect_err("a wrong-shaped buffer is refused, not read flat");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let message = err.value(py).to_string();
+            assert!(
+                message.contains("[2, 2]") && message.contains("[1, 4]"),
+                "the error names the expected and the received shape: {message}"
+            );
+        });
+    }
+
+    /// The transposed batch is refused. A caller whose rows are the
+    /// contract's columns hands over a contiguous buffer of the same six
+    /// floats with the dimensions swapped; read in flat row-major order,
+    /// every action lands on the wrong dwelling: the attack's probe read
+    /// a transposed two-column batch as inverted and narrow setpoint
+    /// pairs, each dispatching with a warning, the call Ok. The error
+    /// names the expected and the received shape. A square batch's
+    /// transpose carries the expected declared shape, and no boundary
+    /// check can refuse it: its wrongness is the values', not the
+    /// buffer's. The shape contract pins every non-square transpose, a
+    /// fleet's common shape.
+    #[test]
+    fn a_transposed_action_buffer_is_refused() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let batch = setpoint_batch(py, 3);
+
+            // The intended matrix is (3, 2), rows (21, 24), (20, 25) and
+            // (21, 24). The transposed buffer is (2, 3), the same six
+            // floats column by column.
+            let actions = actions_array(py, &[&[21.0, 20.0, 21.0], &[24.0, 25.0, 24.0]]);
+            let err = batch_step_py(
+                py,
+                batch.dwellings,
+                Some(actions.bind(py)),
+                batch.plans,
+                batch.layout,
+                batch.signal_types,
+                vec![(-50.0, 80.0), (-50.0, 80.0)],
+                batch.buffer.bind(py),
+                false,
+            )
+            .expect_err("a transposed buffer is refused, not read flat");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let message = err.value(py).to_string();
+            assert!(
+                message.contains("[3, 2]") && message.contains("[2, 3]"),
+                "the error names the expected and the received shape: {message}"
+            );
+        });
+    }
+
+    /// The panic that poisons the lock is the fatal classification's own
+    /// case: a step panic unwinds through the dwelling's MutexGuard, the
+    /// batch's panic branch reads the poisoned lock, and the row ends the
+    /// environment with `info["dwelling_fatal"]`. A regression that
+    /// reported the poisoned lock non-fatal fails this pin.
+    #[test]
+    fn a_panic_that_poisons_the_lock_is_flagged_dwelling_fatal() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let dwelling = base_dwelling(py);
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+            let plan = dwelling
+                .bind(py)
+                .borrow()
+                .observation_plan(vec!["total_power_w".to_string()])
+                .expect("the plan builds");
+            let plan = Py::new(py, plan).expect("the plan wraps");
+            let buffer = numpy::PyArray2::<f64>::zeros(py, (1, 1), false);
+
+            crate::py_dwelling::TEST_STEP_PANIC.store(true, Ordering::SeqCst);
+            let actions = actions_array(py, &[&[21.0]]);
+            let result = batch_step_py(
+                py,
+                vec![dwelling.clone_ref(py)],
+                Some(actions.bind(py)),
+                vec![plan],
+                layout,
+                signal_types,
+                vec![(-50.0, 80.0)],
+                buffer.as_any(),
+                false,
+            );
+            crate::py_dwelling::TEST_STEP_PANIC.store(false, Ordering::SeqCst);
+            let rows = result.expect("the batch step itself runs");
+
+            assert!(
+                dwelling.bind(py).borrow().poisoned.load(Ordering::SeqCst),
+                "the panic marked the dwelling poisoned"
+            );
+            let info = rows[0]
+                .bind(py)
+                .get_item("info")
+                .expect("the row carries info")
+                .cast_into::<PyDict>()
+                .expect("info is a dict");
+            assert!(
+                info.get_item("dwelling_fatal")
+                    .expect("info reads")
+                    .is_some(),
+                "a panic that poisoned the lock is a permanent failure: the row \
+                 carries dwelling_fatal, a regression to fatal: false fails here"
+            );
+            let error_msg: String = info
+                .get_item("error_msg")
+                .expect("info reads")
+                .expect("the failed step's info carries error_msg")
+                .extract()
+                .expect("the error message is a string");
+            assert!(
+                error_msg.starts_with("HARES internal panic: ")
+                    && error_msg.contains("injected step panic while the dwelling's lock is held"),
+                "the error is the panic's own, enriched: {error_msg}"
+            );
+            let terminated: bool = rows[0]
+                .bind(py)
+                .get_item("terminated")
+                .and_then(|v| v.extract())
+                .expect("terminated is a bool");
+            assert!(terminated, "the poisoned dwelling ends the environment");
+        });
+    }
+
+    /// Set the test-only step-failure injection (`None` clears it): the
+    /// message the next `step_core_string` call returns as a non-fatal
+    /// failure.
+    fn inject_step_failure(msg: Option<String>) {
+        *crate::py_dwelling::TEST_STEP_FAILURE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = msg;
+    }
+
+    /// The batch's action buffer: one C-contiguous row per environment,
+    /// the `(n_envs, width)` float64 array the extension reads in place.
+    fn actions_array(py: Python<'_>, rows: &[&[f64]]) -> Py<PyAny> {
+        let width = rows.first().map_or(0, |row| row.len());
+        let flat: Vec<f64> = rows.iter().flat_map(|row| row.iter().copied()).collect();
+        let array = numpy::PyArray1::<f64>::from_slice(py, &flat)
+            .reshape([rows.len(), width])
+            .expect("the rows are rectangular");
+        array.into_any().unbind()
+    }
 
     /// A stepable base.xml dwelling for the batch health tests.
     fn base_dwelling(py: Python<'_>) -> Py<PyDwelling> {
@@ -1060,15 +1474,17 @@ mod tests {
                 .collect();
             let buffer = numpy::PyArray2::<f64>::zeros(py, (2, 1), false);
 
+            let actions = actions_array(py, &[&[100.0], &[20.0]]);
             batch_step_py(
                 py,
                 vec![first.clone_ref(py), second.clone_ref(py)],
-                vec![vec![100.0], vec![20.0]],
+                Some(actions.bind(py)),
                 plans,
                 layout,
                 signal_types,
                 vec![(-50.0, 80.0)],
                 buffer.as_any(),
+                false,
             )
             .expect("the batch step must run");
 
@@ -1124,15 +1540,17 @@ mod tests {
             let buffer = numpy::PyArray2::<f64>::zeros(py, (2, 1), false);
 
             TEST_OBSERVATION_FAULT.store(0, Ordering::Relaxed);
+            let actions = actions_array(py, &[&[20.0], &[20.0]]);
             let result = batch_step_py(
                 py,
                 vec![first.clone_ref(py), second.clone_ref(py)],
-                vec![vec![20.0], vec![20.0]],
+                Some(actions.bind(py)),
                 plans,
                 layout,
                 signal_types,
                 vec![(-50.0, 80.0)],
                 buffer.as_any(),
+                false,
             );
             TEST_OBSERVATION_FAULT.store(usize::MAX, Ordering::Relaxed);
             let rows = result.expect("the batch step itself runs");
@@ -1171,6 +1589,87 @@ mod tests {
                 view[[1, 0]].is_finite(),
                 "the stepping environment's row is a real observation"
             );
+        });
+    }
+
+    /// The prefix-collision witness: a step failure is classified by its
+    /// typed flag, never by its message's text. The injected failure is a
+    /// transient step failure whose message carries the fatal sentinel's own
+    /// text; the batch must end the environment for the failure while
+    /// reporting it non-fatal, because the dwelling is not poisoned. A
+    /// classification that reads the message flags it fatal.
+    #[test]
+    fn a_transient_failure_whose_message_carries_the_fatal_sentinel_is_not_flagged_fatal() {
+        let _observation_fault_exclusive = OBSERVATION_FAULT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Python::attach(|py| {
+            let dwelling = base_dwelling(py);
+            let layout = vec![("Gas Furnace".to_string(), "heating_setpoint_c".to_string())];
+            let mut signal_types = HashMap::new();
+            signal_types.insert("Gas Furnace".to_string(), "ThermalSetpoint".to_string());
+            let plan = dwelling
+                .bind(py)
+                .borrow()
+                .observation_plan(vec!["total_power_w".to_string()])
+                .expect("the plan builds");
+            let plan = Py::new(py, plan).expect("the plan wraps");
+            let buffer = numpy::PyArray2::<f64>::zeros(py, (1, 1), false);
+
+            // The message below is the fatal messages' own leading text
+            // (py_dwelling's FATAL_DWELLING_PREFIX) followed by ordinary
+            // transient-failure wording: the collision the string-sniffing
+            // classification misread as a poisoned dwelling.
+            let injected = "[FATAL_DWELLING] transient failure: the furnace \
+                            refused the signal"
+                .to_string();
+            inject_step_failure(Some(injected.clone()));
+            let actions = actions_array(py, &[&[21.0]]);
+            let result = batch_step_py(
+                py,
+                vec![dwelling.clone_ref(py)],
+                Some(actions.bind(py)),
+                vec![plan],
+                layout,
+                signal_types,
+                vec![(-50.0, 80.0)],
+                buffer.as_any(),
+                false,
+            );
+            inject_step_failure(None);
+            let rows = result.expect("the batch step itself runs");
+
+            let info = rows[0]
+                .bind(py)
+                .get_item("info")
+                .expect("the row carries info")
+                .cast_into::<PyDict>()
+                .expect("info is a dict");
+            assert!(
+                info.get_item("dwelling_fatal")
+                    .expect("info reads")
+                    .is_none(),
+                "a transient failure whose message carries the fatal sentinel's \
+                 text must not be flagged dwelling_fatal: the classification \
+                 reads the failure's typed flag, never its message"
+            );
+            assert!(
+                info.get_item("error").expect("info reads").is_some(),
+                "the failure is still surfaced as a step error"
+            );
+            let error_msg: String = info
+                .get_item("error_msg")
+                .expect("info reads")
+                .expect("the failed step's info carries error_msg")
+                .extract()
+                .expect("the error message is a string");
+            assert_eq!(error_msg, injected);
+            let terminated: bool = rows[0]
+                .bind(py)
+                .get_item("terminated")
+                .and_then(|v| v.extract())
+                .expect("terminated is a bool");
+            assert!(terminated, "the failed step ends the environment");
         });
     }
 
@@ -1934,11 +2433,14 @@ mod tests {
         );
     }
 
-    /// Hand-run measurement (ignored; `cargo test -p hares-python --all-features
-    /// --release --lib batch_step_allocation_counts -- --ignored --nocapture`):
+    /// Hand-run measurement (ignored; `cargo test -p hares-python --release
+    /// --lib batch_step_allocation_counts -- --ignored --nocapture`; the
+    /// counting allocator is this crate's test-build global allocator, which
+    /// the profiling feature's dev-dependency allocator displaces):
     /// the counting allocator's per-call allocation delta for whole
     /// `batch_step` calls at 1 and 8 environments, 20 calls each after 10
-    /// warm ones. The count is the calling thread's own: the parallel
+    /// warm ones, with the step dict asked for and with it not. The count is
+    /// the calling thread's own: the parallel
     /// section's worker-thread allocations are not in it, so the 8-environment
     /// figure covers the GIL-held conversion section, and the per-environment
     /// observation read's own count is pinned exactly by hares-core's
@@ -1972,38 +2474,43 @@ mod tests {
                     })
                     .collect();
                 let buffer = numpy::PyArray2::<f64>::zeros(py, (n_envs, 1), false);
+                let actions = actions_array(py, &vec![&[21.0][..]; n_envs]);
 
-                let mut deltas: Vec<u64> = Vec::new();
-                for call in 0..30 {
-                    let before = thread_allocations().expect("the counting allocator");
-                    batch_step_py(
-                        py,
-                        dwellings
-                            .iter()
-                            .map(|dwelling| dwelling.clone_ref(py))
-                            .collect(),
-                        vec![vec![21.0]; n_envs],
-                        plans.iter().map(|plan| plan.clone_ref(py)).collect(),
-                        layout.clone(),
-                        signal_types.clone(),
-                        bounds_pair.clone(),
-                        buffer.as_any(),
-                    )
-                    .expect("the batch step runs");
-                    let after = thread_allocations().expect("the counting allocator");
-                    if call >= 10 {
-                        deltas.push(after - before);
+                for include_step_dict in [false, true] {
+                    let mut deltas: Vec<u64> = Vec::new();
+                    for call in 0..30 {
+                        let before = thread_allocations().expect("the counting allocator");
+                        batch_step_py(
+                            py,
+                            dwellings
+                                .iter()
+                                .map(|dwelling| dwelling.clone_ref(py))
+                                .collect(),
+                            Some(actions.bind(py)),
+                            plans.iter().map(|plan| plan.clone_ref(py)).collect(),
+                            layout.clone(),
+                            signal_types.clone(),
+                            bounds_pair.clone(),
+                            buffer.as_any(),
+                            include_step_dict,
+                        )
+                        .expect("the batch step runs");
+                        let after = thread_allocations().expect("the counting allocator");
+                        if call >= 10 {
+                            deltas.push(after - before);
+                        }
                     }
+                    deltas.sort_unstable();
+                    let median = deltas[deltas.len() / 2];
+                    println!(
+                        "batch_step n_envs={n_envs} include_step_dict={include_step_dict}: \
+                         per-call calling-thread allocations \
+                         median {median}, min {}, max {} over {} calls",
+                        deltas[0],
+                        deltas[deltas.len() - 1],
+                        deltas.len()
+                    );
                 }
-                deltas.sort_unstable();
-                let median = deltas[deltas.len() / 2];
-                println!(
-                    "batch_step n_envs={n_envs}: per-call calling-thread allocations \
-                     median {median}, min {}, max {} over {} calls",
-                    deltas[0],
-                    deltas[deltas.len() - 1],
-                    deltas.len()
-                );
             }
         });
     }

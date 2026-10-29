@@ -278,6 +278,16 @@ the buffer set to NaN. And a Python actor's publication made outside
 `decide()` lands at the next drain (the next `decide()`'s return); one
 made after the last drain is dropped.
 
+The extension's `batch_step` takes the actions as a C-contiguous
+`(n_envs, n_actions)` float64 buffer (read in place, one row per dwelling;
+`None` steps every dwelling with no actions) and builds no step dicts
+unless asked: `include_step_dict=True` adds each row's `"step"`, the same
+dict `Dwelling.step()` returns, for the reward functions that read it.
+Its `info` carries `"warning_count"` as an int on every step (the warnings
+themselves under `"warnings"`, only when the count is non-zero), and a
+failed step's fatal flag is the dwelling's own state, never its message's
+wording.
+
 ## Warm-up
 
 Every dwelling warms up by default: the warm-up repeats the run's

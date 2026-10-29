@@ -4,7 +4,10 @@ Lives outside test_gym_env.py because ``batch_step`` needs neither numpy nor
 gymnasium — these tests must run even where those optional deps are absent.
 The batch's observations are read into the caller's own buffer through its
 buffer protocol, so every call here passes a stdlib ``array.array('d')``
-buffer: the same protocol a numpy array exposes, without numpy.
+buffer: the same protocol a numpy array exposes, without numpy. The actions
+are the same channel in reverse: a flat ``array.array('d')`` of one
+``(n_envs, n_actions)`` C-contiguous float64 row set, or ``None`` for no
+actions.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from __future__ import annotations
 from array import array
 
 import pytest
-from conftest import make_dwelling
+from conftest import HARES_DEFAULTS, ROOT, SCHEDULE, WEATHER, make_dwelling
 
 _OBS_FIELDS = ["total_power_w", "outdoor_temp"]
 _SETPOINT_BOUNDS = [(-50.0, 80.0)]
@@ -43,14 +46,14 @@ def test_batch_step_clips_a_deadband_to_the_bounds_it_is_given():
     assert band is not None
     results = batch_step(
         [dwelling],
-        [[30.0, 21.0]],
+        array("d", [30.0, 21.0]),
         [_plan(dwelling)],
         [("Gas Furnace", "deadband_c"), ("Gas Furnace", "heat_c")],
         {"Gas Furnace": "ThermalSetpoint"},
         [band, (-50.0, 80.0)],
         _zero_buffer(1, len(_OBS_FIELDS)),
     )
-    assert results[0]["info"]["warning_count"] == 0.0
+    assert results[0]["info"]["warning_count"] == 0
 
 
 def test_batch_step_refuses_bounds_that_do_not_match_the_layout():
@@ -60,7 +63,7 @@ def test_batch_step_refuses_bounds_that_do_not_match_the_layout():
     with pytest.raises(ValueError, match="action_bounds length"):
         batch_step(
             [dwelling],
-            [[21.0]],
+            array("d", [21.0]),
             [_plan(dwelling)],
             [("Gas Furnace", "heat_c")],
             {"Gas Furnace": "ThermalSetpoint"},
@@ -84,7 +87,7 @@ def test_batch_step_refuses_a_bad_bounds_pair(pair, reason):
     with pytest.raises(ValueError, match=reason):
         batch_step(
             [dwelling],
-            [[21.0]],
+            array("d", [21.0]),
             [_plan(dwelling)],
             [("Gas Furnace", "heat_c")],
             {"Gas Furnace": "ThermalSetpoint"},
@@ -105,7 +108,7 @@ def test_batch_step_refuses_deadband_bounds_wider_than_a_dwellings_band():
     with pytest.raises(ValueError, match="band range of its thermostat"):
         batch_step(
             [dwelling],
-            [[1.0, 21.0]],
+            array("d", [1.0, 21.0]),
             [_plan(dwelling)],
             [("Gas Furnace", "deadband_c"), ("Gas Furnace", "heat_c")],
             {"Gas Furnace": "ThermalSetpoint"},
@@ -136,7 +139,7 @@ def test_batch_step_refusal_reaches_no_dwelling():
     with pytest.raises(ValueError, match="not finite"):
         batch_step(
             [first, second],
-            [[70.0], [float("nan")]],
+            array("d", [70.0, float("nan")]),
             [_plan(first), _plan(second)],
             [("Gas Furnace", "cool_c")],
             {"Gas Furnace": "ThermalSetpoint"},
@@ -163,7 +166,7 @@ def test_batch_step_refuses_a_missing_unit_before_any_dwelling_changes():
     with pytest.raises(ValueError, match="not found"):
         batch_step(
             [first, second],
-            [[27.0], [27.0]],
+            array("d", [27.0, 27.0]),
             [_plan(first), _plan(second)],
             [("Gas Furnace", "heat_c")],
             {"Gas Furnace": "ThermalSetpoint"},
@@ -181,7 +184,7 @@ def test_batch_step_with_no_actions_steps_every_dwelling():
 
     dwelling = make_dwelling(duration_s=600)
     results = batch_step(
-        [dwelling], [], [_plan(dwelling)], [], {}, [], _zero_buffer(1, len(_OBS_FIELDS))
+        [dwelling], None, [_plan(dwelling)], [], {}, [], _zero_buffer(1, len(_OBS_FIELDS))
     )
     assert len(results) == 1
 
@@ -201,17 +204,17 @@ def test_a_failed_row_carries_the_last_observation():
         {"Gas Furnace": "ThermalSetpoint"},
         _SETPOINT_BOUNDS,
     )
-    actions = [[21.0], [21.0]]
+    actions = array("d", [21.0, 21.0])
 
     # The short home's sim holds two steps of 60 s; both homes step them.
-    batch_step([short, living], actions, *args, buffer)
-    second = batch_step([short, living], actions, *args, buffer)
+    batch_step([short, living], actions, *args, buffer, True)
+    second = batch_step([short, living], actions, *args, buffer, True)
     assert second[0]["step"] is not None
     last_obs = bytes(buffer)
 
     # The third step fails the short home (past its end) while the living
     # home steps on.
-    third = batch_step([short, living], actions, *args, buffer)
+    third = batch_step([short, living], actions, *args, buffer, True)
     failed, ok = third
     assert failed["step"] is None
     assert failed["terminated"] is True
@@ -227,25 +230,101 @@ def test_a_failed_row_carries_the_last_observation():
 
 
 def test_batch_step_rows_carry_no_reward_key():
-    """A row carries the step dict, never a Rust-computed reward: the reward
-    is the environment's ``reward_fn`` decision, on one contract for both
-    step paths."""
+    """A row carries the step dict when it is asked for, never a
+    Rust-computed reward: the reward is the environment's ``reward_fn``
+    decision, on one contract for both step paths."""
     from hares._hares import batch_step
 
     dwelling = make_dwelling(duration_s=600)
     dwelling.take_warnings()
     results = batch_step(
         [dwelling],
-        [[21.0]],
+        array("d", [21.0]),
+        [_plan(dwelling)],
+        [("Gas Furnace", "heat_c")],
+        {"Gas Furnace": "ThermalSetpoint"},
+        _SETPOINT_BOUNDS,
+        _zero_buffer(1, len(_OBS_FIELDS)),
+        True,
+    )
+    row = results[0]
+    assert "reward" not in row
+    assert "step" in row
+
+
+def test_batch_step_builds_no_step_dict_unless_asked():
+    """The default batch step pays for no dicts: the row carries
+    ``terminated``, ``truncated`` and ``info`` and no ``step`` dict, and
+    ``include_step_dict=True`` builds it. The info's ``warning_count`` is
+    an int on both paths through the row."""
+    from hares._hares import batch_step
+
+    dwelling = make_dwelling(duration_s=600)
+    dwelling.take_warnings()
+    unasked = batch_step(
+        [dwelling],
+        array("d", [21.0]),
         [_plan(dwelling)],
         [("Gas Furnace", "heat_c")],
         {"Gas Furnace": "ThermalSetpoint"},
         _SETPOINT_BOUNDS,
         _zero_buffer(1, len(_OBS_FIELDS)),
     )
-    row = results[0]
-    assert "reward" not in row
-    assert "step" in row
+    row = unasked[0]
+    assert "step" not in row
+    assert row["terminated"] is False
+    assert row["truncated"] is False
+    assert isinstance(row["info"]["warning_count"], int)
+    assert row["info"]["warning_count"] == 0
+
+    asked = batch_step(
+        [dwelling],
+        array("d", [21.0]),
+        [_plan(dwelling)],
+        [("Gas Furnace", "heat_c")],
+        {"Gas Furnace": "ThermalSetpoint"},
+        _SETPOINT_BOUNDS,
+        _zero_buffer(1, len(_OBS_FIELDS)),
+        True,
+    )
+    assert asked[0]["step"] is not None
+
+
+def test_batch_step_dict_content_matches_the_single_step_dict():
+    """The content pin: when the batch is asked for the step dict, the
+    row's dict is the single-step path's own dict. Both dwellings take the
+    same action and step once from the same fixture state; the pin holds
+    the keys, the values and the key order identical, which the one shared
+    conversion both paths build through gives them."""
+    from hares._hares import batch_step
+    from hares.rl.gym_env import build_control_signal
+
+    single, batched = make_dwelling(duration_s=600), make_dwelling(duration_s=600)
+    signal = build_control_signal("ThermalSetpoint", {"heat_c": 21.0})
+    single.apply_control("Gas Furnace", signal)
+    single_dict = single.step()
+
+    results = batch_step(
+        [batched],
+        array("d", [21.0]),
+        [_plan(batched)],
+        [("Gas Furnace", "heat_c")],
+        {"Gas Furnace": "ThermalSetpoint"},
+        _SETPOINT_BOUNDS,
+        _zero_buffer(1, len(_OBS_FIELDS)),
+        True,
+    )
+    batch_dict = results[0]["step"]
+
+    assert list(single_dict.keys()) == list(batch_dict.keys()), (
+        "the same keys in the same order"
+    )
+    assert list(single_dict.items()) == list(batch_dict.items()), (
+        "the same key-value pairs in the same order"
+    )
+    assert repr(single_dict) == repr(batch_dict), (
+        "the step dicts are byte-identical: keys, values and order"
+    )
 
 
 def test_batch_step_info_reports_zero_warnings_on_clean_step():
@@ -258,7 +337,7 @@ def test_batch_step_info_reports_zero_warnings_on_clean_step():
     dwelling.take_warnings()
     results = batch_step(
         [dwelling],
-        [[21.0]],
+        array("d", [21.0]),
         [_plan(dwelling)],
         [("Gas Furnace", "heat_c")],
         {"Gas Furnace": "ThermalSetpoint"},
@@ -266,7 +345,7 @@ def test_batch_step_info_reports_zero_warnings_on_clean_step():
         _zero_buffer(1, len(_OBS_FIELDS)),
     )
     info = results[0]["info"]
-    assert info["warning_count"] == 0.0
+    assert info["warning_count"] == 0
     assert "warnings" not in info
 
 
@@ -283,7 +362,7 @@ def test_batch_step_surfaces_rejected_control_signal_in_info():
     # during dispatch -- the silent-warning path this test guards.
     results = batch_step(
         [dwelling],
-        [[70.0]],
+        array("d", [70.0]),
         [_plan(dwelling)],
         [("Gas Furnace", "cool_c")],
         {"Gas Furnace": "ThermalSetpoint"},
@@ -291,8 +370,83 @@ def test_batch_step_surfaces_rejected_control_signal_in_info():
         _zero_buffer(1, len(_OBS_FIELDS)),
     )
     info = results[0]["info"]
-    assert info["warning_count"] >= 1.0
+    assert info["warning_count"] >= 1
     assert any("control apply failed" in w for w in info["warnings"])
     assert any("Gas Furnace" in w for w in info["warnings"])
     # The messages were drained into info -- a subsequent poll is empty.
     assert dwelling.take_warnings() == []
+
+
+# The multi-zone fixture: the PV+battery example's home resolves to zones
+# 1 and 2 and no zone 0, so a step dict's zone keys are the two Zone_N
+# keys in zone order and no "Temperature - Indoor (C)" at all: the list a
+# single-zone dwelling's cache build would produce is absent, so a cache
+# built from the wrong dwelling's shape fails the pin. The battery's
+# bms_mode is the declaration its HPXML omits (a construction error
+# without it).
+_PV_BATTERY_HPXML = ROOT / "data" / "examples" / "pv_battery_example.xml"
+_BATTERY_BMS_MODE = (
+    '{"SelfConsumption": {"min_soc": 0.1, "max_soc": 1.0, '
+    '"solar_only_charging": false, "surplus_deadband_w": 0}}'
+)
+_ZONE_KEYS = [
+    "Temperature - Zone_1 (C)",
+    "Temperature - Zone_2 (C)",
+]
+
+
+def _multi_zone_dwelling():
+    from hares import Dwelling, SimulationConfig
+
+    dwelling = Dwelling.from_hpxml(
+        str(_PV_BATTERY_HPXML),
+        str(SCHEDULE),
+        str(WEATHER),
+        config=SimulationConfig(
+            start_time="2019-07-01T12:00:00",
+            duration=1800,
+            time_res=900,
+            master_seed=42,
+        ),
+        defaults=str(HARES_DEFAULTS),
+        bldg_id=1,
+        overrides={"Battery": {"bms_mode": _BATTERY_BMS_MODE}},
+    )
+    dwelling.initialize()
+    return dwelling
+
+
+def test_batch_step_zone_keys_cache_on_a_two_zone_batch():
+    """The per-dwelling zone-key cache is shared by the batch and the
+    single-step dict builds: a two-dwelling multi-zone batch carries the
+    full zone key list in zone order, the same dwelling's single step()
+    taken after the batch filled its cache carries the same keys, and the
+    batch row's zone values are the step's own (a fresh copy's first
+    single step, taken through its own cache, is byte-identical to the
+    batch's row). A cache indexed by anything other than the dwelling, a
+    single-zone key build, or a rebuild that reorders the keys fails this
+    pin."""
+    from hares._hares import batch_step
+
+    first, second, fresh = (
+        _multi_zone_dwelling() for _ in range(3)
+    )
+    buffer = _zero_buffer(2, 1)
+    plans = [_plan(first, ["total_power_w"]), _plan(second, ["total_power_w"])]
+    rows = batch_step([first, second], None, plans, [], {}, [], buffer, True)
+    for row in rows:
+        assert row["step"] is not None
+        assert list(row["step"].keys())[-len(_ZONE_KEYS):] == _ZONE_KEYS
+
+    # The shared-cache sequence the single-zone pins never run: the batch
+    # built this dwelling's cache, the single step() reuses it.
+    after = first.step()
+    assert list(after.keys())[-len(_ZONE_KEYS):] == _ZONE_KEYS
+
+    # The values are the step's own: the fresh copy's first step is the
+    # same state the batch's first row stepped, so a mis-indexed cache
+    # (zone temperatures under the wrong keys) moves the repr.
+    assert repr(fresh.step()) == repr(rows[0]["step"]), (
+        "the batch row's step dict is the single-step dict's own bytes, "
+        "zone keys and values included"
+    )

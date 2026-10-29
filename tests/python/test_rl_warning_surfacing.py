@@ -1,7 +1,7 @@
 """Warning-surfacing contract tests for the RL step paths.
 
 The Rust ``batch_step`` entrypoint (covered in test_gym_batch_step.py) drains
-``Dwelling.take_warnings()`` into ``info["warning_count"]`` (float, always
+``Dwelling.take_warnings()`` into ``info["warning_count"]`` (int, always
 present) and ``info["warnings"]`` (list[str], only when non-zero). These tests
 pin that contract onto ``VecDwellingGymEnv.step``, which runs on the extension's
 ``batch_step`` alone, and onto ``DwellingGymEnv.step``, which drives one
@@ -81,7 +81,7 @@ def test_vec_rust_path_preserves_warning_count_key():
     _, _, _, _, infos = env.step(np.full((1, 1), 21.0, dtype=np.float64))
 
     info = infos[0]
-    assert info["warning_count"] == 0.0
+    assert info["warning_count"] == 0
     assert "warnings" not in info
 
 
@@ -148,7 +148,7 @@ def _make_gym_env(action_config: dict[str, list[str]]):
 
 
 def test_gym_env_clean_step_reports_zero_warnings():
-    """A clean DwellingGymEnv step surfaces warning_count == 0.0, no list."""
+    """A clean DwellingGymEnv step surfaces warning_count == 0, no list."""
     env = _make_gym_env(_CLEAN_ACTION_CONFIG)
     env.reset(seed=42)
     # The first step's info carries the fixture's construction notices
@@ -158,7 +158,7 @@ def test_gym_env_clean_step_reports_zero_warnings():
 
     _, _, _, _, info = env.step(np.array([21.0], dtype=np.float64))
 
-    assert info["warning_count"] == 0.0
+    assert info["warning_count"] == 0
     assert "warnings" not in info
 
 
@@ -170,7 +170,7 @@ def test_gym_env_surfaces_rejected_control_signal():
 
     _, _, _, _, info = env.step(np.array([70.0], dtype=np.float64))
 
-    assert info["warning_count"] >= 1.0
+    assert info["warning_count"] >= 1
     assert any("control apply failed" in w for w in info["warnings"])
     assert any("Gas Furnace" in w for w in info["warnings"])
     # The messages were drained into info — a subsequent poll is empty.
