@@ -1419,10 +1419,11 @@ impl PyDwelling {
     /// physics-computed draws). The weights are the moment's raw draws when
     /// the dwelling has stepped (each equipment's last electric draw,
     /// un-scaled through its assembled deep-sag response at the bus voltage
-    /// (the equipment's own nominal draw for a multi-component unit, the
-    /// resolved row's un-scale for a single-row one, the moment's
-    /// composition)), else the expected mean draw over the loaded schedule
-    /// data.
+    /// (the equipment's own nominal draw when it reports one: a
+    /// multi-component unit, or a state its row does not scale such as a
+    /// commanded power override; the resolved row's un-scale otherwise, the
+    /// moment's composition)), else the expected mean draw over the loaded
+    /// schedule data.
     ///
     /// Returns a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/
     /// ``pf``/``v0`` (the aggregate coefficients; the real side sums to 1,
@@ -1433,9 +1434,10 @@ impl PyDwelling {
     /// of each governing equipment's own deep-sag response: the
     /// components' actual evaluated draws over the components' nominal
     /// draws for a stepped multi-component unit, the resolved row's
-    /// recorded deep-sag form for a single-row one: the number the stepping
-    /// engine answers for the moment's composition; ``None`` when no
-    /// governing equipment carried a positive weight),
+    /// recorded deep-sag form for a row-scaled step, the flat identity for
+    /// a step the row does not scale (a commanded power override): the
+    /// number the stepping engine answers for the moment's composition;
+    /// ``None`` when no governing equipment carried a positive weight),
     /// ``governing_equipment`` (list of
     /// ``{"name": str, "mean_power_w": float | None}`` -- equipment
     /// included in the aggregate with its weighting draw in watts;

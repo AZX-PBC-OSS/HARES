@@ -539,6 +539,10 @@ pub trait Equipment: Send + Sync {
     /// the premise aggregate needs no answer here: un-scaling the stepped
     /// draw through that row recovers the reference draw to within the
     /// rounding of one division (it is not bit-exact for every pair). A
+    /// unit whose step the row does not scale reports one anyway: a
+    /// scheduled load does so when a `PowerSetpoint` override commands real
+    /// power, because the override is not row-scaled and the moment's
+    /// reference draw is the commanded draw. A
     /// multi-component unit (a compressor with its own blower and crankcase
     /// elements, a heat-pump water heater's compressor and backup element, a
     /// dehumidifier's on-cycle draw and off-cycle parasitic) evaluates each

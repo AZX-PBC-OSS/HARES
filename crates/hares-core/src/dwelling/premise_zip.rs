@@ -14,8 +14,10 @@
 //! covered. The weights are the moment's raw draws when the dwelling has
 //! stepped (each equipment's last core-output electric draw, un-scaled
 //! through its assembled deep-sag response at the bus voltage (the
-//! equipment's own nominal draw for a multi-component unit, the resolved
-//! row's un-scale for a single-row one, the moment's composition)),
+//! equipment's own nominal draw when it reports one: a multi-component
+//! unit, or a state its row does not scale such as a commanded power
+//! override; the resolved row's un-scale otherwise, the moment's
+//! composition)),
 //! falling back to the expected mean draw over the loaded schedule for a
 //! dwelling that has not stepped (the static route). The aggregate
 //! cannot know the *share* of total draw that physics-driven equipment
@@ -57,16 +59,17 @@ pub struct PremiseZip {
     /// equipment. The weight is the moment's raw draw (the last step's
     /// core-output electric draw, un-scaled through the equipment's
     /// assembled deep-sag response at the bus voltage: the equipment's own
-    /// nominal draw for a multi-component unit, the resolved row's un-scale
-    /// for a single-row one, which recovers the reference draw to within
-    /// the rounding of one division) when the dwelling has stepped (a
-    /// stepped zero draw is a zero weight, the 0.0 pu outage boundary
-    /// included), else, on an energized bus only, the expected mean draw
-    /// over the loaded schedule; `None` when neither is computable
-    /// (stochastic event scheduling without a kW series, a schedule column
-    /// absent from the loaded data, a de-energized bus with no stepped
-    /// draw, or a row evaluation the bus cannot supply a draw at); such
-    /// equipment is listed but contributes no weight to
+    /// nominal draw when it reports one (a multi-component unit, or a state
+    /// its row does not scale such as a commanded power override), the
+    /// resolved row's un-scale otherwise, which recovers the reference draw
+    /// to within the rounding of one division) when the dwelling has
+    /// stepped (a stepped zero draw is a zero weight, the 0.0 pu outage
+    /// boundary included), else, on an energized bus only, the expected
+    /// mean draw over the loaded schedule; `None` when neither is
+    /// computable (stochastic event scheduling without a kW series, a
+    /// schedule column absent from the loaded data, a de-energized bus with
+    /// no stepped draw, or a row evaluation the bus cannot supply a draw
+    /// at); such equipment is listed but contributes no weight to
     /// [`PremiseZip::zip`].
     pub governing: Vec<(String, Option<f64>)>,
     /// Equipment whose real power is DER-controller-driven
@@ -79,14 +82,15 @@ pub struct PremiseZip {
     /// equipment's own deep-sag response: the components' actual evaluated
     /// draws over the components' nominal draws for a stepped
     /// multi-component unit, the resolved row's recorded deep-sag form for
-    /// a single-row one and on the static route. This is the number the
-    /// stepping engine answers for the moment's composition; no single
-    /// published coefficient row can reproduce it when evaluated raw,
-    /// because a held deep-sag row is not a quadratic and a multi-component
-    /// unit's blend is not any one of its rows. Every weighted response is
-    /// finite and positive, so a published scale is a positive multiplier,
-    /// never a negative or non-finite one. `None` when no governing
-    /// equipment carries a positive weight.
+    /// a row-scaled step and on the static route, and the flat identity for
+    /// a step the row does not scale (a commanded power override). This is
+    /// the number the stepping engine answers for the moment's composition;
+    /// no single published coefficient row can reproduce it when evaluated
+    /// raw, because a held deep-sag row is not a quadratic and a
+    /// multi-component unit's blend is not any one of its rows. Every
+    /// weighted response is finite and positive, so a published scale is a
+    /// positive multiplier, never a negative or non-finite one. `None` when
+    /// no governing equipment carries a positive weight.
     pub deep_sag_scale: Option<f64>,
 }
 
