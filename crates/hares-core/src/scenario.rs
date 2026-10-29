@@ -93,11 +93,15 @@ fn patches_applied_to(
 /// sample of the same parameter clobbering an earlier one's field.
 ///
 /// The record is checked before anything is applied: a value with no
-/// recorded target, a patch target naming an unknown field, or a
-/// settings override map (or one of its equipment entries) of another
-/// shape is refused naming the object it cannot apply. A record with
-/// several faults names the FIRST the application reaches: the record's
-/// own value checks in declaration order, then the overrides merge's
+/// recorded target, a repeated value name, an orphan target (a target
+/// whose name carries no value), a patch target naming an unknown field,
+/// or a settings override map (or one of its equipment entries) of
+/// another shape is refused naming the object it cannot apply. A record
+/// with several faults names the FIRST the application reaches: the
+/// record's own value checks in declaration order (a repeated name at
+/// its second occurrence, then a value with no target, then an unknown
+/// patch field), then the record's orphan targets in the target map's
+/// order, then the overrides merge's
 /// entries in the map's order. Both new values are
 /// built beside the settings and assigned only when both have landed, so a
 /// refusal leaves the caller's settings exactly as they were: nothing is
@@ -419,6 +423,59 @@ mod tests {
         assert_eq!(
             settings.overrides.as_ref(),
             Some(&serde_json::json!({"MELs": 3.0})),
+            "the refused record must not touch the settings"
+        );
+    }
+
+    /// The hand-written record's extra fault classes refuse at the
+    /// application with the settings untouched: a repeated value name
+    /// (the duplicates would apply last wins) and a target whose name
+    /// carries no value (the orphan would be silently ignored). The
+    /// sampler produces neither shape; a hand-edited manifest
+    /// deserializing to either is the record's own check refusing, before
+    /// anything is applied.
+    #[test]
+    fn a_hand_written_records_duplicate_name_and_orphan_target_are_refused() {
+        let duplicate: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [
+                {"name": "bedrooms", "value": 3.0, "unit": "count"},
+                {"name": "bedrooms", "value": 4.0, "unit": "count"}
+            ],
+            "targets": {"bedrooms": {"patch": {"field": "number_of_bedrooms"}}}
+        }))
+        .expect("the record parses");
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        let err = apply_sample(&duplicate, &mut settings)
+            .expect_err("a repeated value name must be refused");
+        assert!(
+            err.to_string().contains("bedrooms") && err.to_string().contains("repeats"),
+            "the error must name the repeated value: {err}"
+        );
+        assert!(
+            settings.patches.is_none() && settings.overrides.is_none(),
+            "the refused record must not touch the settings"
+        );
+
+        let orphan: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [{"name": "bedrooms", "value": 3.0, "unit": "count"}],
+            "targets": {
+                "bedrooms": {"patch": {"field": "number_of_bedrooms"}},
+                "ghost": {"override": {"equipment": "MELs", "field": "usage_multiplier"}}
+            }
+        }))
+        .expect("the record parses");
+        let err = apply_sample(&orphan, &mut settings)
+            .expect_err("a target with no value must be refused");
+        assert!(
+            err.to_string().contains("ghost"),
+            "the error must name the orphan target: {err}"
+        );
+        assert!(
+            settings.patches.is_none() && settings.overrides.is_none(),
             "the refused record must not touch the settings"
         );
     }

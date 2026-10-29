@@ -544,22 +544,39 @@ impl ScenarioSample {
     }
 
     /// The sample is applicable: every value carries the target recorded
-    /// with it, and every patch target names a field the settings'
-    /// patches carry. A record written before the target map existed
-    /// carries values with no target and fails naming the value; a
-    /// hand-edited record naming an unknown patch field fails naming the
-    /// field. The application calls this before touching the settings, so
-    /// nothing is applied and then dropped. When a record carries more
-    /// than one fault, the FIRST fault in the values' declaration order
-    /// is the one named: the check refuses the whole record on the first
-    /// fault it reaches, so the caller fixes that fault and the next
-    /// attempt names the next.
+    /// with it, every patch target names a field the settings'
+    /// patches carry, every value's name is unique (the names are the
+    /// record's application keys; a repeat would apply last wins), and
+    /// every target's name carries a value (an orphan target would be
+    /// silently ignored). The sampler produces none of the faults; a
+    /// hand-written record (the shape a hand-edited manifest
+    /// deserializes to) can carry each of them. A record written before
+    /// the target map existed carries values with no target and fails
+    /// naming the value; a hand-edited record naming an unknown patch
+    /// field fails naming the field. The application calls this before
+    /// touching the settings, so nothing is applied and then dropped.
+    /// When a record carries more than one fault, the FIRST fault is the
+    /// one named: the values' walk in declaration order (a repeated name
+    /// at its second occurrence, then a value with no target, then an
+    /// unknown patch field), then the orphan targets in the target map's
+    /// order. The check refuses the whole record on the first fault it
+    /// reaches, so the caller fixes that fault and the next attempt names
+    /// the next.
     ///
     /// # Errors
     ///
-    /// [`HaresError`] naming the value or field the record cannot apply.
+    /// [`HaresError`] naming the value, name or field the record cannot
+    /// apply.
     pub fn validate_application(&self) -> Result<(), HaresError> {
+        let mut seen = std::collections::BTreeSet::new();
         for value in &self.values {
+            if !seen.insert(value.name.as_str()) {
+                return Err(HaresError::Equipment(format!(
+                    "the scenario sample repeats the value name '{}': the names are \
+                     the record's application keys and a repeat would apply last wins",
+                    value.name
+                )));
+            }
             let Some(target) = self.targets.get(&value.name) else {
                 return Err(HaresError::Equipment(format!(
                     "the scenario sample carries '{}' with no recorded target: the value \
@@ -574,6 +591,16 @@ impl ScenarioSample {
                     "the scenario sample's parameter '{}' patches the unknown field '{}': \
                      the patch fields are {PATCH_FIELDS:?}",
                     value.name, field
+                )));
+            }
+        }
+        for name in self.targets.keys() {
+            if !seen.contains(name.as_str()) {
+                return Err(HaresError::Equipment(format!(
+                    "the scenario sample's target '{}' records no value: the target \
+                     map's keys are the values' names, and an orphan target's value \
+                     would be silently ignored",
+                    name
                 )));
             }
         }
@@ -1490,6 +1517,53 @@ mod tests {
         let json = serde_json::to_string(&sample).expect("serializes");
         let back: ScenarioSample = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, sample);
+    }
+
+    /// A hand-written record (the shape a hand-edited manifest
+    /// deserializes to) can carry two values under one name or a target
+    /// whose name carries no value; the sampler produces neither shape,
+    /// but the application's contract is the record's own check, so both
+    /// are refused naming the offense: a repeated name because the names
+    /// are the record's application keys and a repeat would apply last
+    /// wins, an orphan target because its value would be silently
+    /// ignored.
+    #[test]
+    fn a_hand_written_records_duplicate_name_and_orphan_target_are_refused() {
+        let duplicate: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [
+                {"name": "bedrooms", "value": 3.0, "unit": "count"},
+                {"name": "bedrooms", "value": 4.0, "unit": "count"}
+            ],
+            "targets": {"bedrooms": {"patch": {"field": "number_of_bedrooms"}}}
+        }))
+        .expect("the record parses");
+        let err = duplicate
+            .validate_application()
+            .expect_err("a repeated value name must be refused");
+        assert!(
+            err.to_string().contains("bedrooms") && err.to_string().contains("repeats"),
+            "the error must name the repeated value: {err}"
+        );
+
+        let orphan: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [{"name": "bedrooms", "value": 3.0, "unit": "count"}],
+            "targets": {
+                "bedrooms": {"patch": {"field": "number_of_bedrooms"}},
+                "ghost": {"override": {"equipment": "MELs", "field": "usage_multiplier"}}
+            }
+        }))
+        .expect("the record parses");
+        let err = orphan
+            .validate_application()
+            .expect_err("a target with no value must be refused");
+        assert!(
+            err.to_string().contains("ghost"),
+            "the error must name the orphan target: {err}"
+        );
     }
 
     /// A malformed distribution is an error naming it, never a panic or a
