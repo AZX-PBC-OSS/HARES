@@ -177,14 +177,19 @@ mod tests {
         let a_occ = a.get("Occupancy").expect("the profile transforms");
         let b_occ = b.get("Occupancy").expect("the profile transforms");
         let a_again = again.get("Occupancy").expect("the profile transforms");
-        if draws_a.presence_shift_hours != draws_b.presence_shift_hours
-            || draws_a.occupancy_level_scale != draws_b.occupancy_level_scale
-        {
-            assert_ne!(
-                a_occ.weekday_fractions, b_occ.weekday_fractions,
-                "two homes' keys must diversify the profile differently"
-            );
-        }
+        // The probe's two keys must draw different occupancy parameters for
+        // the comparison below to be a statement about the draws, not about
+        // two keys that happen to agree.
+        assert!(
+            draws_a.presence_shift_hours != draws_b.presence_shift_hours
+                || draws_a.occupancy_level_scale != draws_b.occupancy_level_scale,
+            "the probe's two keys drew the same occupancy parameters: pick \
+             keys whose draws differ"
+        );
+        assert_ne!(
+            a_occ.weekday_fractions, b_occ.weekday_fractions,
+            "two homes' keys must diversify the profile differently"
+        );
         assert_eq!(
             a_occ.weekday_fractions, a_again.weekday_fractions,
             "the same key reproduces the diversified profile"

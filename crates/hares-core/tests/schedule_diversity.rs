@@ -475,3 +475,27 @@ fn the_diversity_adds_no_runtime_stochastic_state() {
     // constants, not per-day state the warm-up replays or shifts.
     assert_eq!(schedule_rows(&warm), schedule_rows(&nowarm));
 }
+
+/// A runtime reseed re-keys the dwelling's streams and does NOT re-draw the
+/// schedule: the behavioral draws are build-time constants, the blueprint's,
+/// so the reset that reseeds an episode keeps the home's behavior and moves
+/// its stochastic state. The full re-derivation under another seed is
+/// `DwellingBlueprint::build_with_seed` (`build_with_seed_draws_the_new_seeds_schedule`).
+#[test]
+fn a_runtime_reseed_keeps_the_build_time_schedule() {
+    let mut dwelling = Dwelling::from_config(config(1, 42, None)).expect("the home builds");
+    let before_schedule = schedule_rows(&dwelling);
+    let before_streams = dwelling.seeded_streams();
+    dwelling.reseed(9).expect("the reseed re-keys the streams");
+    assert_ne!(
+        dwelling.seeded_streams(),
+        before_streams,
+        "the reseed must move the seeded streams for this pin to mean anything"
+    );
+    assert_eq!(
+        schedule_rows(&dwelling),
+        before_schedule,
+        "a runtime reseed must keep the build-time behavioral draws: only a \
+         rebuild under another seed re-derives the schedule"
+    );
+}
