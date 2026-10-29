@@ -11,8 +11,10 @@ use crate::schedule::{ColumnAggregation, ScheduleTimeSeries};
 use crate::schedule_resolve::{DefaultProfiles, DefaultScheduleProfile};
 
 /// Mapping from generated schedule column names to the OCHRE profile names used
-/// in the Default Schedule Parameters.csv.
-const COLUMN_TO_PROFILE: &[(&str, &str)] = &[
+/// in the Default Schedule Parameters.csv. The schedule-diversity transform
+/// walks the same list's profiles, so a column added here joins the diversity
+/// layer or its pin fails.
+pub(crate) const COLUMN_TO_PROFILE: &[(&str, &str)] = &[
     ("occupants", "Occupancy"),
     ("plug_loads_other", "MELs"),
     ("plug_loads_tv", "MELs"),

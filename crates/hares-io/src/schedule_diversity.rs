@@ -279,6 +279,62 @@ mod tests {
         }
     }
 
+    /// Every profile the generated family reads is diversified: the
+    /// transform's applied list is the generated columns' own profile
+    /// list (`COLUMN_TO_PROFILE`), so a column added to the generation
+    /// without its profile joining the transform fails here instead of
+    /// silently running the shared profile. The probe's draws are
+    /// distinctive (the bands' extreme shifts and a 1.5 scale on every
+    /// level, inside all three bands), so an untransformed profile is
+    /// visible as the base profile's own values.
+    #[test]
+    fn every_generated_profile_is_diversified() {
+        use hares_types::diversity::{ApplianceFactors, PRESENCE_SHIFT_BAND_H, WATER_SHIFT_BAND_H};
+
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
+        let profiles = crate::load_default_profiles(&dir).expect("the shipped profiles load");
+        // Inside every level's clamp band ([0.6, 1.6] occupancy,
+        // [0.5, 2.0] appliance and water) and distinct from the identity.
+        let scale = 1.5;
+        let draws = ScheduleDiversityDraws {
+            presence_shift_hours: PRESENCE_SHIFT_BAND_H,
+            occupancy_level_scale: scale,
+            appliance_factors: ApplianceFactors {
+                mels: scale,
+                lighting: scale,
+                dishwasher: scale,
+                clothes_washer: scale,
+                clothes_dryer: scale,
+                cooking_range: scale,
+            },
+            water_shift_hours: WATER_SHIFT_BAND_H,
+            water_level_scale: scale,
+        };
+        let diversified = diversify_profiles(&profiles, &draws);
+        for (_, profile_name) in crate::hpxml_schedule::COLUMN_TO_PROFILE {
+            let base = profiles
+                .get(profile_name)
+                .unwrap_or_else(|_| panic!("the generated column's profile '{profile_name}'"));
+            let out = diversified
+                .get(profile_name)
+                .unwrap_or_else(|_| panic!("the diversified profile '{profile_name}'"));
+            for (day_type, base_hours, out_hours) in [
+                ("weekday", &base.weekday_fractions, &out.weekday_fractions),
+                ("weekend", &base.weekend_fractions, &out.weekend_fractions),
+            ] {
+                let base_mass: f64 = base_hours.iter().sum();
+                let out_mass: f64 = out_hours.iter().sum();
+                assert!(
+                    (out_mass - scale * base_mass).abs() <= 1e-14 * base_mass * scale,
+                    "the generated column's {day_type} profile '{profile_name}' is not \
+                     diversified: its mass {out_mass} is not the drawn scale {scale} times \
+                     the base's {base_mass}"
+                );
+            }
+        }
+    }
+
     /// The fleet-aggregate acceptance, stated against the published
     /// reference: the EULP report's distribution of per-home annual
     /// electricity by end use (Pigman, McCarty, et al., NREL 2022,
