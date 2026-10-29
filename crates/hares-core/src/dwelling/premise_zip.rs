@@ -773,6 +773,15 @@ mod tests {
             ],
             "an observed zero draw is a zero weight, not the expectation"
         );
+        // A zero real draw carries no reactive coefficient into the aggregate
+        // either: the Lighting row's zq/iq (0.46/0.51) would poison the
+        // reactive blend of a load that drew nothing at the moment, and its
+        // model derives Q from the real draw, so it has no var to contribute.
+        assert_eq!(
+            (premise.zip.zq, premise.zip.iq, premise.zip.pq),
+            (0.0, 0.0, 1.0),
+            "only the live load's reactive coefficients shape the aggregate"
+        );
         assert_eq!(
             premise.deep_sag_scale,
             Some(1.0),
