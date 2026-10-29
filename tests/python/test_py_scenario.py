@@ -294,6 +294,66 @@ class TestOverridesRoundTrip:
         assert setpoint["unit"] == "C"
 
 
+class TestSpecSerializationRoundTrip:
+    """The Python dict IS the spec's serialized form: a spec written out to
+    JSON text and read back parses to the same spec and samples the same
+    values bit for bit, so a study can record and reload its declaration.
+    Every family is declared, with a correlated pair and a patch target,
+    and the keys are reordered on the way through."""
+
+    def test_a_json_round_tripped_spec_samples_bitwise_the_same(self):
+        import json
+
+        override = {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}}
+        patch = {"patch": {"field": "number_of_bedrooms"}}
+        spec_dict = {
+            "name": "round-trip",
+            "parameters": [
+                {
+                    "name": "u",
+                    "unit": "W",
+                    "target": override,
+                    "distribution": {"uniform": {"low": 1.0, "high": 5.0}},
+                },
+                {
+                    "name": "n",
+                    "unit": "C",
+                    "target": override,
+                    "distribution": {"normal": {"mean": 20.5, "std_dev": 1.5}},
+                },
+                {
+                    "name": "l",
+                    "unit": "W",
+                    "target": patch,
+                    "distribution": {"lognormal": {"mu": 0.0, "sigma": 0.25}},
+                    "correlation": {"group": "load", "rho": 0.9},
+                },
+                {
+                    "name": "t",
+                    "unit": "count",
+                    "target": patch,
+                    "distribution": {"triangular": {"min": 1.0, "mode": 1.2, "max": 5.0}},
+                    "correlation": {"group": "load", "rho": 0.9},
+                },
+                {
+                    "name": "d",
+                    "unit": "count",
+                    "target": patch,
+                    "distribution": {"discrete": {"values": [2.0, 3.0, 5.0], "weights": [0.2, 0.5, 0.3]}},
+                },
+            ],
+        }
+        original = ScenarioSpec(spec_dict)
+        reloaded = ScenarioSpec(json.loads(json.dumps(spec_dict, sort_keys=True)))
+        for master_seed, scenario_id, bldg_id in [(42, 1, 7), (0, 0, 0), (7, 2**63, -3)]:
+            assert reloaded.sample(master_seed, scenario_id, bldg_id) == original.sample(
+                master_seed, scenario_id, bldg_id
+            )
+            assert reloaded.sample_overrides(
+                master_seed, scenario_id, bldg_id
+            ) == original.sample_overrides(master_seed, scenario_id, bldg_id)
+
+
 class TestSpecValidation:
     """The declared spec's loud errors: a typed ``ValueError`` from the
     binding, never a Rust panic crossing (a panic surfaces as pyo3's
