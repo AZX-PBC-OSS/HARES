@@ -1660,7 +1660,7 @@ fn run_home_body(
         metrics: result.metrics,
         closure: Some(HomeClosureTelemetry {
             residual_wh: result.health.energy_closure.system.residual_wh,
-            gross_wh: result.health.energy_closure.system.gross_wh,
+            gross_wh: result.health.energy_closure.system.tolerance_gross_wh,
             warmup_days_run: match &result.health.warmup {
                 WarmupOutcome::Disabled => None,
                 WarmupOutcome::Ran { days_run, .. } => Some(*days_run),

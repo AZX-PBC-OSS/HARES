@@ -231,58 +231,69 @@ pub struct ZoneClosureRow {
     pub zone_air_stored_wh: f64,
 }
 
-/// One closure row's integrated terms [Wh]: the gains side and the sinks
-/// side of the run's thermal first law, the gross flux the per-step
-/// relative tolerance scales with, and the integrated per-step residual.
-/// The report's statement in kilowatt-hours is these Wh totals divided by
-/// 1000; the unit lives in the docs, never in the identifier (the SI
-/// naming rule).
+/// One closure row's integrated terms [Wh]: the run's physical stored
+/// change, the meters' delivered attribution, the per-step tolerance's
+/// gross flux, and the integrated per-step residual. The report's
+/// statement in kilowatt-hours is these Wh totals divided by 1000; the
+/// unit lives in the docs, never in the identifier (the SI naming rule).
+///
+/// The row carries no gains and no conduction column. The solver's two
+/// remaining terms are the step map's affine decomposition against a 0 C
+/// boundary reference (`B_d·u` with the boundary temperatures as absolute
+/// degrees Celsius, and the matching `(A_d − I)·x` free decay), so each
+/// carries a component proportional to the absolute boundary temperatures
+/// that cancels only in the residual; read as a house's gains and envelope
+/// conduction they state three orders beyond the dwelling's own loads. The
+/// residual and the tolerance's gross are the invariant's account of those
+/// terms; the physical quantities themselves are the meter-versus-network
+/// reconciliation's deferred surface (the record names it).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct ClosureRow {
-    /// External gains integrated over the run [Wh]: the thermal solver's
-    /// `B_d·u` external term (every joule entering the RC network from
-    /// outside it: end-use delivery, passive gains, ambient- and
-    /// ground-driven boundary fluxes), plus the affine coupling term the
-    /// coupled steps carry.
-    pub external_gains_wh: f64,
     /// Stored-energy change integrated over the run [Wh]:
-    /// `Σ C_i·(T_next_i − T_prev_i)/dt` over every thermal node.
+    /// `Σ C_i·(T_next_i − T_prev_i)/dt` over every thermal node. A
+    /// difference, so it carries no boundary reference.
     pub stored_delta_wh: f64,
-    /// Envelope conduction integrated over the run [Wh]: the thermal
-    /// solver's conduction term, positive when heat leaves the network.
-    pub envelope_conduction_wh: f64,
     /// Equipment-port delivery integrated over the run [Wh] (sensible,
     /// radiant and short-wave; latent is the humidity domain's). An
-    /// attribution within the external gains, not a fourth balance term:
-    /// the ports' delivery arrives in the network through the same `B_d·u`
-    /// columns `external_gains_wh` integrates.
+    /// attribution, not a fourth balance term: the ports' delivery arrives
+    /// in the network through the same `B_d·u` columns the invariant's
+    /// gains term integrates.
     pub delivered_end_use_wh: f64,
-    /// Gross flux integrated over the run [Wh]: `Σ|q_gains|` per step, the
-    /// quantity the per-step relative tolerance scales with. The residual's
-    /// ppm denominator.
-    pub gross_wh: f64,
+    /// The per-step tolerance's gross flux integrated over the run [Wh]:
+    /// `Σ|q_gains|` per step, the quantity the per-step relative tolerance
+    /// `max(1 W, 1e-6·gross)` scales with and the residual's ppm
+    /// denominator. The invariant's own account, not a physical energy: the
+    /// affine terms' 0 C boundary reference inflates it far beyond the
+    /// dwelling's loads, which is why it is named for the tolerance and
+    /// never for the house.
+    pub tolerance_gross_wh: f64,
     /// The integrated per-step residual [Wh]: `Σ (Σq_gains − ΔE_stored −
-    /// q_loss)·dt`. Each step's residual is bounded by the per-step
-    /// tolerance `max(1 W, 1e-6·gross)`, which a step can carry silently;
-    /// integrated over a year that tolerance admits about 4.4 kWh (4400 Wh)
-    /// of silent bias. This row states what actually accumulated.
+    /// q_loss)·dt`, the affine decomposition's own closure. Each step's
+    /// residual is bounded by the per-step tolerance `max(1 W, 1e-6·gross)`,
+    /// which a step can carry silently; integrated over a year the
+    /// tolerance's 1 W floor admits at most 8.76 kWh of silent bias (1 W
+    /// over the year's 31,536,000 s). This row states what actually
+    /// accumulated.
     pub residual_wh: f64,
 }
 
 impl ClosureRow {
     /// Integrates one step's balance into the row.
     ///
-    /// `q_gains` is the thermal solver's external-gain terms [W] (external,
-    /// then the affine coupling term when the step is coupled),
+    /// `q_gains` is the thermal solver's external-gain terms [W] (the
+    /// affine decomposition's input side: the `B_d·u` term, then the affine
+    /// coupling term when the step is coupled),
     /// `delta_e_storage_w` the stored rate over all nodes [W], and
     /// `q_loss_w` the conduction term [W] (positive when heat leaves).
-    /// `dt_s` is the step's length. The delivered end-uses are not a term
-    /// of the identity (an attribution within the external gains, and a
-    /// per-zone one: see [`ZoneClosureRow`]) and accumulate outside this
-    /// method. The residual is accumulated per step, not recovered from the
-    /// integrated columns: the per-step residual is the quantity the
-    /// per-step tolerance bounds, and its integral is the silent bias this
-    /// report makes visible.
+    /// `dt_s` is the step's length. The row integrates the stored change,
+    /// the tolerance's gross and the residual; the gains and conduction
+    /// terms themselves are the affine decomposition's, not physical
+    /// quantities, and are not published. The delivered end-uses are not a
+    /// term of the identity (an attribution, and a per-zone one: see
+    /// [`ZoneClosureRow`]) and accumulate outside this method. The residual
+    /// is accumulated per step, not recovered from the integrated columns:
+    /// the per-step residual is the quantity the per-step tolerance bounds,
+    /// and its integral is the silent bias this report makes visible.
     pub fn record_step(
         &mut self,
         q_gains: &[f64],
@@ -293,22 +304,20 @@ impl ClosureRow {
         let external_w: f64 = q_gains.iter().sum();
         let gross_w: f64 = q_gains.iter().map(|q| q.abs()).sum();
         let hours = dt_s / SECONDS_PER_HOUR;
-        self.external_gains_wh += external_w * hours;
         self.stored_delta_wh += delta_e_storage_w * hours;
-        self.envelope_conduction_wh += q_loss_w * hours;
-        self.gross_wh += gross_w * hours;
+        self.tolerance_gross_wh += gross_w * hours;
         self.residual_wh += (external_w - delta_e_storage_w - q_loss_w) * hours;
     }
 
-    /// The row's residual in parts per million of the gross flux. 0.0 when
-    /// the run carried no gains (nothing stepped or the terms were never
-    /// seen): a ppm of nothing is defined as nothing.
+    /// The row's residual in parts per million of the tolerance's gross
+    /// flux. 0.0 when the run carried no gains (nothing stepped or the
+    /// terms were never seen): a ppm of nothing is defined as nothing.
     #[must_use]
     pub fn residual_ppm_of_gross(&self) -> f64 {
-        if self.gross_wh == 0.0 {
+        if self.tolerance_gross_wh == 0.0 {
             0.0
         } else {
-            self.residual_wh / self.gross_wh * 1e6
+            self.residual_wh / self.tolerance_gross_wh * 1e6
         }
     }
 }
@@ -498,11 +507,9 @@ mod tests {
             },
             energy_closure: EnergyClosureReport {
                 system: ClosureRow {
-                    external_gains_wh: 10000.0,
                     stored_delta_wh: 4000.0,
-                    envelope_conduction_wh: 6000.0,
                     delivered_end_use_wh: 9000.0,
-                    gross_wh: 12000.0,
+                    tolerance_gross_wh: 12000.0,
                     residual_wh: 1e-9,
                 },
                 zones: vec![super::ZoneClosureRow {
@@ -517,26 +524,25 @@ mod tests {
         assert_eq!(decoded, health);
     }
 
-    /// The closure row integrates a steady balance exactly: 1000 W gains,
-    /// 200 W stored, 800 W conduction, 3600 s. The identity closes per step,
-    /// so the residual integral reads zero to the accumulation's own float
-    /// noise, and the terms land at their hand-computed watt-hours.
+    /// The closure row integrates a steady balance exactly: 1000 W of
+    /// affine gains, 200 W stored, 800 W loss, 3600 s. The identity closes
+    /// per step, so the residual integral reads zero to the accumulation's
+    /// own float noise, and the stored change and the tolerance's gross
+    /// land at their hand-computed watt-hours.
     #[test]
     fn closure_row_integrates_a_steady_balance_to_zero_residual() {
         let mut row = ClosureRow::default();
-        // 1000 W x 1 h = 1000 Wh exactly; 200 W x 1 h = 200 Wh; 800 Wh.
+        // 200 W x 1 h = 200 Wh exactly; 1000 W of |gains| x 1 h = 1000 Wh.
         row.record_step(&[1000.0], 200.0, 800.0, 3600.0);
-        assert_eq!(row.external_gains_wh, 1000.0);
         assert_eq!(row.stored_delta_wh, 200.0);
-        assert_eq!(row.envelope_conduction_wh, 800.0);
-        assert_eq!(row.gross_wh, 1000.0);
+        assert_eq!(row.tolerance_gross_wh, 1000.0);
         assert_eq!(row.residual_wh, 0.0);
         assert_eq!(row.residual_ppm_of_gross(), 0.0);
     }
 
     /// A 100 W loss the gains side never saw surfaces in the residual: 100 W
     /// for 3600 s is exactly 100 Wh, and the ppm denominator scales it
-    /// against the row's own gross flux.
+    /// against the row's own tolerance gross.
     #[test]
     fn closure_row_names_an_injected_uncounted_loss() {
         let mut row = ClosureRow::default();
@@ -545,7 +551,7 @@ mod tests {
         // Step 1 closes (residual 0); step 2 carries the 100 W uncounted loss:
         // 100 W x 1 h = 100 Wh integrated.
         assert!((row.residual_wh + 100.0).abs() < 1e-9);
-        // 100 Wh against 2000 Wh of gross flux = 50,000 ppm.
+        // 100 Wh against 2000 Wh of tolerance gross = 50,000 ppm.
         assert!((row.residual_ppm_of_gross() + 50_000.0).abs() < 1e-6);
     }
 

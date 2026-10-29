@@ -106,11 +106,21 @@ use serde::{Deserialize, Serialize};
 ///
 /// v23: `RunHealth` carries `energy_closure`, the run's energy-closure
 /// report: the integrated thermal balance the per-step invariant bounds,
-/// stated in kWh so the tolerance's silent per-step bias is visible in the
+/// stated in Wh so the tolerance's silent per-step bias is visible in the
 /// run total. Run bookkeeping again, but the schema rides the checkpoint,
 /// so the fingerprint moves. Checkpoints written by v22 builds are
 /// rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 23;
+///
+/// v24: the closure report's gains and conduction columns are gone: they
+/// were the step map's affine decomposition against a 0 C boundary
+/// reference, not physical quantities (a 9.2 MWh/yr fixture read 1,056.3
+/// MWh on each), and the row's gross flux is `tolerance_gross_wh`, named
+/// for the tolerance whose relative term scales with it. The row carries
+/// the stored change, the delivered end-uses, the tolerance's gross and
+/// the residual. Run bookkeeping again, but the schema rides the
+/// checkpoint, so the fingerprint moves. Checkpoints written by v23
+/// builds are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 24;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -539,11 +549,9 @@ mod tests {
                 warmup: crate::health::WarmupOutcome::Disabled,
                 energy_closure: crate::health::EnergyClosureReport {
                     system: crate::health::ClosureRow {
-                        external_gains_wh: 1500.0,
                         stored_delta_wh: 500.0,
-                        envelope_conduction_wh: 1000.0,
                         delivered_end_use_wh: 1250.0,
-                        gross_wh: 2000.0,
+                        tolerance_gross_wh: 2000.0,
                         residual_wh: 2.5e-9,
                     },
                     zones: vec![crate::health::ZoneClosureRow {
@@ -595,9 +603,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 23;
+    const PINNED_VERSION: u32 = 24;
     const PINNED_SCHEMA_SHA256: &str =
-        "28166e043027093d079eec3c8512af40b92e11af39ae596cb56cdb70ceb6ba17";
+        "d4d215a7a15e768b6b83510e88c5378d1b9bf78e859bb1eb30df521ed9c00632";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

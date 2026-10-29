@@ -2,32 +2,49 @@
 //!
 //! The per-step thermal invariant (`invariants.rs::check_thermal`) bounds
 //! each step's balance residual by `max(1 W, 1e-6·gross)`; a step inside
-//! that tolerance passes silently, and the tolerance integrates to ~4.4
-//! kWh/yr of bias a run never had to show anyone. The report on
+//! that tolerance passes silently, and the tolerance integrates to at most
+//! 8.76 kWh/yr of bias a run never had to show anyone (the 1 W floor over
+//! the year's 31,536,000 s). The report on
 //! `RunHealth::energy_closure` integrates the same three terms over the
 //! run's production steps and states the accumulated residual (Wh in the
-//! fields, 0.001 kWh per Wh) in energy and in ppm of gross, making that
-//! bias visible.
+//! fields, 0.001 kWh per Wh) in energy and in ppm of the tolerance's
+//! gross, making that bias visible.
 //!
-//! Two witnesses, both hand-derived:
+//! The three terms are the solver's affine decomposition against a 0 C
+//! boundary reference, and the report publishes no gains and no conduction
+//! column: each term carries a component proportional to the absolute
+//! boundary temperatures that cancels only in the residual (the record has
+//! the derivation; the misread this refuses is a 9.2 MWh/yr house reading
+//! 1,056.3 MWh of annual gains and conduction). What the witnesses pin is
+//! the report's published account: the residual, the tolerance's gross,
+//! the stored change, the delivered meters and the per-zone rows.
+//!
+//! Three witnesses, all hand-derived:
 //!
 //! 1. The honest case: a single-zone dwelling on constant inputs. The
 //!    zero-order-hold identity `x_next = A_d·x_prev + B_d·u`, weighted by
 //!    node capacitance and divided by dt, reads
 //!    `Σq_gains = ΔE_stored + q_loss` exactly (the three terms are the same
 //!    matrix products the solver evaluated), so each step's residual is a
-//!    float-rounding artifact of the three separately summed terms, order
-//!    1e-9 W, and its hourly integral is order 1e-12 Wh. The report's
-//!    residual must read zero at that scale.
-//! 2. The perturbed case: the same dwelling with 100 W per step of
-//!    uncounted loss forced into the report's conduction term by the test
-//!    seam (a loss with no gains-side counterpart; the per-step invariant
+//!    float-rounding artifact of the three separately summed terms, at most
+//!    order 1e-9 W, and its hourly integral is at most order 1e-9 Wh; this
+//!    fixture measures 1.63e-10 Wh. The report's residual must read zero at
+//!    that scale.
+//! 2. The delivered control: the same dwelling's meters. The fixture
+//!    drives constant 200 W internal gains through the thermal ports for
+//!    the 3600 s horizon: 200 Wh exactly, delivered as the ports' sensible
+//!    + radiant + short-wave watts, on the system row and the zone's own.
+//! 3. The perturbed case: the same dwelling with 100 W per step of
+//!    uncounted loss forced into the report's loss term by the test seam
+//!    (a loss with no gains-side counterpart; the per-step invariant
 //!    is never reached by the perturbation, so the run completes clean and
 //!    only the report can surface it). 100 W × 3600 s = 360,000 J = 100 Wh
 //!    exactly: the report's residual must name that number, and nothing
-//!    else in the account moves.
+//!    else in the account may move (the seam perturbs the report's loss
+//!    input alone, so the physics is the honest run's and every other
+//!    column is the honest run's own, bitwise).
 //!
-//! Both run on the minimal synthetic RC dwelling
+//! All run on the minimal synthetic RC dwelling
 //! (`thermal_invariant_wiring.rs`'s fixture): one zone, one wall and floor
 //! boundary, constant 200 W internal gains, 60 steps of 60 s.
 
@@ -126,9 +143,10 @@ fn run_horizon(dwelling: &mut Dwelling) {
 /// WITNESS 1 (honest case): the report's residual reads approximately zero.
 ///
 /// Hand-derivation (see the module comment): the ZOH identity makes each
-/// step's residual a rounding artifact of order 1e-9 W; 60 steps of 60 s
-/// integrate to order 1e-12 Wh. The bound below is a billion times coarser
-/// than the expectation and still a million times below the 60-step
+/// step's residual a rounding artifact of at most order 1e-9 W; 60 steps of
+/// 60 s integrate to at most order 1e-9 Wh, and this fixture measures
+/// 1.63e-10 Wh. The bound below is a thousand times coarser than that
+/// expectation and still a million times below the 60-step
 /// silent-bias ceiling (60 x 1 W x 60 s = 3.6 kJ = 1 Wh) the per-step
 /// tolerance admits.
 #[test]
@@ -139,12 +157,8 @@ fn closure_residual_reads_zero_on_the_honest_run() {
     let closure = &dwelling.health().energy_closure;
     let system = &closure.system;
     assert!(
-        system.external_gains_wh > 0.0,
-        "the honest run's external gains must be positive: the account saw real terms"
-    );
-    assert!(
-        system.gross_wh > 0.0,
-        "the honest run's gross flux must be positive: the ppm denominator is live"
+        system.tolerance_gross_wh > 0.0,
+        "the honest run's tolerance gross must be positive: the ppm denominator is live"
     );
     assert!(
         system.residual_wh.abs() < 1e-6,
@@ -156,15 +170,12 @@ fn closure_residual_reads_zero_on_the_honest_run() {
         "the honest run's residual must read zero in ppm of gross, got {}",
         closure.residual_ppm_of_gross()
     );
-    // The columns' own consistency: the stored + conduction integrals
-    // explain the external gains integral to the residual's value.
-    let recovered =
-        system.external_gains_wh - system.stored_delta_wh - system.envelope_conduction_wh;
+    // The stored change is a physical difference (no boundary reference):
+    // the transient hour stores or releases a finite account, and the row's
+    // business is to state it, not to pin its sign.
     assert!(
-        (recovered - system.residual_wh).abs() < 1e-6,
-        "the report's columns must reconcile: external - stored - conduction = {recovered} \
-         against residual {}",
-        system.residual_wh
+        system.stored_delta_wh.is_finite(),
+        "the stored change must be a finite reported quantity"
     );
 }
 
@@ -214,11 +225,13 @@ fn closure_zone_row_carries_the_delivered_end_use_account() {
 /// the residual, and by nothing else.
 ///
 /// Hand-derivation (see the module comment): the seam adds 100 W to the
-/// report's conduction term with no gains-side counterpart, so each step's
+/// report's loss term with no gains-side counterpart, so each step's
 /// residual is exactly -100 W and the 3600 s horizon integrates to
 /// -100 W x 3600 s = -100 Wh. The per-step invariant never sees the
 /// perturbation (the run stays clean); a report that silently absorbed the
-/// loss would read zero here and read as an honest run.
+/// loss would read zero here and read as an honest run. The seam perturbs
+/// the report's loss input alone: the trajectory is the honest run's, so
+/// every other published column is the honest run's own, bitwise.
 #[test]
 fn closure_residual_names_a_forced_uncounted_loss() {
     let mut dwelling = rc_dwelling();
@@ -233,31 +246,39 @@ fn closure_residual_names_a_forced_uncounted_loss() {
          3600 s horizon), got {} Wh",
         system.residual_wh
     );
-    // The perturbation lives in the conduction term alone: the gains side
-    // and the ports' delivery account are untouched by it.
+    // The perturbation lives in the report's loss input alone: the stored
+    // change, the tolerance's gross, the ports' delivery account and the
+    // zone rows are the honest run's own, bitwise.
     let mut honest = rc_dwelling();
     run_horizon(&mut honest);
     let honest_closure = &honest.health().energy_closure;
-    assert!(
-        (system.external_gains_wh - honest_closure.system.external_gains_wh).abs() < 1e-9,
-        "the injected loss must not move the gains side"
+    let honest_system = &honest_closure.system;
+    assert_eq!(
+        system.stored_delta_wh.to_bits(),
+        honest_system.stored_delta_wh.to_bits(),
+        "the injected loss must not move the stored change"
     );
-    assert!(
-        (system.delivered_end_use_wh - honest_closure.system.delivered_end_use_wh).abs() < 1e-9,
+    assert_eq!(
+        system.tolerance_gross_wh.to_bits(),
+        honest_system.tolerance_gross_wh.to_bits(),
+        "the injected loss must not move the tolerance's gross"
+    );
+    assert_eq!(
+        system.delivered_end_use_wh.to_bits(),
+        honest_system.delivered_end_use_wh.to_bits(),
         "the injected loss must not move the delivered end-uses"
     );
-    assert!(
-        (system.envelope_conduction_wh - honest_closure.system.envelope_conduction_wh - 100.0)
-            .abs()
-            < 1e-6,
-        "the injected loss must land in the conduction column: +100 Wh over the horizon"
+    assert_eq!(
+        closure.zones, honest_closure.zones,
+        "the injected loss must not move the zone rows: {:?} against {:?}",
+        closure.zones, honest_closure.zones
     );
     // The residual is stated in ppm of gross at the report's face: the
-    // perturbed run's ppm is the residual against the gross flux, a large
-    // negative number, not a rounding whisper.
+    // perturbed run's ppm is the residual against the tolerance's gross, a
+    // large negative number, not a rounding whisper.
     let ppm = closure.residual_ppm_of_gross();
     assert!(
-        (ppm - system.residual_wh / system.gross_wh * 1e6).abs() < 1e-6,
+        (ppm - system.residual_wh / system.tolerance_gross_wh * 1e6).abs() < 1e-6,
         "the ppm accessor must denominate the residual against the run's own gross flux"
     );
     assert!(

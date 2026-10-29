@@ -1416,25 +1416,45 @@ three terms the per-step thermal invariant
 
 - `q_gains` [W]: the thermal solver's external term, the capacitance-weighted
   `B_d*u` product, plus the affine coupling term the coupled steps carry.
-  Every joule entering the RC network from outside it flows here: end-use
-  delivery, passive gains, and the ambient-, ground- and sky-driven boundary
-  fluxes.
 - `dE_stored` [W]: `sum C_i*(T_next_i - T_prev_i)/dt` over every thermal node.
 - `q_loss` [W]: the solver's conduction term, the negated capacitance-weighted
   `(F-I)*x_prev` redistribution, positive when heat leaves the network.
+
+The three terms are the step map's AFFINE DECOMPOSITION, not physical
+quantities. The input vector carries the outdoor-air and ground
+temperatures as absolute degrees Celsius and the state is Celsius, so
+`u = 0` means every boundary at 0 C: `q_loss` is the heat the envelope
+would release decaying toward a 0 C environment and `q_gains`' boundary
+component is the re-injection from the boundary temperatures measured
+against that same reference. Each term carries a component proportional
+to the absolute boundary temperatures; the components cancel only in the
+residual, which is why the residual is exact while the terms are not
+physical. The report therefore publishes NO gains column and NO
+envelope-conduction column: read as a house's annual gains and conduction
+the two terms state three orders beyond the dwelling's own loads (the
+year fixtures' goldens read 1,056.3 MWh on each against a 9.2 MWh/yr
+house), and a reader would conclude the meters explain a hundredth of
+gains that do not exist. The row publishes instead: the stored change
+(`stored_delta_wh`, a difference, so no boundary reference), the
+delivered end-uses (the ports' meters, an attribution),
+`tolerance_gross_wh` (`sum |q_gains| * dt`, named for the tolerance whose
+relative term scales with exactly this quantity) and the residual. The
+physical gains and conduction themselves are not recoverable from the
+affine terms by a reference conversion: the exact physical account needs
+the source side (every non-boundary injection path, including the
+coupling paths' affine term) reconciled against the meters, which is the
+meter-versus-network reconciliation's own deferred surface.
 
 The report states the integrated residual as an energy (`system.residual_wh`,
 Wh; the kilowatt-hour form divides by 1000) and in ppm of the integrated
 gross flux (`system.residual_ppm_of_gross`, the integral of
 `sum|q_gains|*dt`, the same quantity the per-step relative tolerance scales
-with). The four named columns of the row are the external gains, the stored
-delta-E, the envelope conduction and the delivered end-uses; the identity's
+with). The row's named columns are the stored delta-E, the delivered
+end-uses, the tolerance's gross and the residual; the identity's
 equation is the first one above, and the delivered end-uses are an
-ATTRIBUTION within the external gains, not a fourth balance term: the
-equipment ports' delivery reaches the network through the same `B_d*u`
-columns the external term integrates, so subtracting it a second time would
-double-count. The delivered column exists so the reader can see how much of
-the external account the meters explain; it splits per zone
+ATTRIBUTION within the affine gains term, not a fourth balance term.
+The delivered column exists so the reader can see the meters' share of
+the account; it splits per zone
 (`zones[].delivered_end_use_wh`, sensible + radiant + short-wave watts,
 latent excluded because latent is the humidity domain's account and never
 enters the thermal network). The stored unit is Wh after
@@ -1454,8 +1474,10 @@ coupling split's artifact (legitimately order 100-900 W on freefloat-class
 swings at hourly steps), not a closure violation, so none is reported.
 
 Why the report exists at all: the per-step tolerance `max(1 W, 1e-6*gross)`
-admits each step's residual silently, and integrated over a year that
-tolerance is about 4.4 kWh of bias a run never had to show anyone. The
+admits each step's residual silently, and integrated over a year the
+tolerance's 1 W floor admits at most 8.76 kWh of bias a run never had to
+show anyone (1 W over the year's 31,536,000 s; the ~4.4 kWh this entry
+previously quoted is half of that ceiling and had no derivation). The
 report makes the accumulation visible instead of gating it a second time:
 a residual outside the per-step tolerance already quarantines the dwelling
 through the invariant, so the report is telemetry (never a health event),

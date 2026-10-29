@@ -5165,9 +5165,9 @@ impl Dwelling {
     }
 
     /// Test-only hook: forces `watts` of uncounted loss into the
-    /// energy-closure accumulation of every later step: the report's
-    /// conduction term grows by `watts` with no gains-side counterpart, so
-    /// the report's residual integrates exactly `watts` over the run while
+    /// energy-closure accumulation of every later step: the report's loss
+    /// term grows by `watts` with no gains-side counterpart, so the
+    /// report's residual integrates exactly `watts` over the run while
     /// the per-step invariant (which the perturbation never reaches) keeps
     /// passing. Zero restores the honest read.
     #[cfg(any(test, debug_assertions))]

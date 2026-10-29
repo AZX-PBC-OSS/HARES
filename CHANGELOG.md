@@ -14,16 +14,18 @@ Every callable, class and keyword added to, changed in or removed from
 replacement.
 
 - Added: `EnergyClosureReport` (with `system`, `zones`,
-  `residual_ppm_of_gross`), `ClosureRow` (with `external_gains_wh`,
-  `stored_delta_wh`, `envelope_conduction_wh`, `delivered_end_use_wh`,
-  `gross_wh`, `residual_wh`, `residual_ppm_of_gross`) and
+  `residual_ppm_of_gross`), `ClosureRow` (with `stored_delta_wh`,
+  `delivered_end_use_wh`, `tolerance_gross_wh`, `residual_wh`,
+  `residual_ppm_of_gross`) and
   `ZoneClosureRow` (with `zone`, `delivered_end_use_wh`,
   `zone_air_stored_wh`): the run's energy-closure report, exposed at
   `RunResult.health.energy_closure`. The report integrates the per-step
   thermal balance the `thermal_balance` invariant enforces over the run's
   production steps (warm-up excluded), so the residual the per-step
   tolerance `max(1 W, 1e-6·gross)` admits silently becomes a visible run
-  total.
+  total. The row carries no gains or conduction column: the solver's two
+  remaining terms are the step map's affine decomposition against a 0 C
+  boundary reference, not physical quantities.
 
 - Changed: the `Battery`, `PV` and `EV` constructors take the SI names,
   keyword-only: `Battery(name, *, capacity_j, max_charge_w=None,

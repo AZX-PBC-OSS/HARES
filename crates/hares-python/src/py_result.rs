@@ -509,11 +509,12 @@ impl PyEnergyClosureReport {
     fn __repr__(&self) -> String {
         let s = &self.inner.system;
         format!(
-            "EnergyClosureReport(external_gains_wh={:.6}, stored_delta_wh={:.6}, \
-             envelope_conduction_wh={:.6}, residual_wh={:.3e}, residual_ppm_of_gross={:.3})",
-            s.external_gains_wh,
+            "EnergyClosureReport(stored_delta_wh={:.6}, \
+             delivered_end_use_wh={:.6}, tolerance_gross_wh={:.6}, \
+             residual_wh={:.3e}, residual_ppm_of_gross={:.3})",
             s.stored_delta_wh,
-            s.envelope_conduction_wh,
+            s.delivered_end_use_wh,
+            s.tolerance_gross_wh,
             s.residual_wh,
             self.inner.residual_ppm_of_gross(),
         )
@@ -533,18 +534,8 @@ pub struct PyClosureRow {
 #[pymethods]
 impl PyClosureRow {
     #[getter]
-    fn external_gains_wh(&self) -> f64 {
-        self.inner.external_gains_wh
-    }
-
-    #[getter]
     fn stored_delta_wh(&self) -> f64 {
         self.inner.stored_delta_wh
-    }
-
-    #[getter]
-    fn envelope_conduction_wh(&self) -> f64 {
-        self.inner.envelope_conduction_wh
     }
 
     #[getter]
@@ -553,8 +544,8 @@ impl PyClosureRow {
     }
 
     #[getter]
-    fn gross_wh(&self) -> f64 {
-        self.inner.gross_wh
+    fn tolerance_gross_wh(&self) -> f64 {
+        self.inner.tolerance_gross_wh
     }
 
     #[getter]
