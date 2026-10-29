@@ -661,6 +661,79 @@ mod tests {
         assert_ne!(zero, base);
     }
 
+    /// The sampler is stateless: a sample is a pure function of the spec
+    /// and the key. Two specs sampled interleaved, and on separate
+    /// threads, are bitwise the sequential samples; a shared stream or a
+    /// process-global counter anywhere in the path would move a value
+    /// here.
+    #[test]
+    fn interleaved_and_concurrent_samples_are_the_sequential_ones() {
+        let a = spec(vec![
+            parameter("a", uniform(0.0, 1.0)),
+            ScenarioParameter {
+                correlation: Some(ScenarioCorrelation {
+                    group: "g".to_string(),
+                    rho: 0.5,
+                }),
+                ..parameter("b", uniform(0.0, 1.0))
+            },
+        ]);
+        let b = spec(vec![parameter(
+            "b",
+            ScenarioDistribution::Normal {
+                mean: 0.0,
+                std_dev: 1.0,
+            },
+        )]);
+        let sequential: Vec<_> = (0..32_i64)
+            .map(|i| a.sample(1, i as u64, 3).expect("samples"))
+            .collect();
+
+        // Interleaved: the two specs' draws alternate on one thread.
+        let mut interleaved = Vec::with_capacity(sequential.len());
+        for i in 0..32_i64 {
+            b.sample(1, i as u64, 3).expect("the other spec samples");
+            interleaved.push(a.sample(1, i as u64, 3).expect("samples"));
+        }
+        assert_eq!(
+            interleaved, sequential,
+            "another spec's sampling between two draws must not move them"
+        );
+
+        // Concurrent: the same draws on four threads, joined in order.
+        let concurrent: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..32_i64)
+                            .map(|i| a.sample(1, i as u64, 3).expect("samples"))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let mut out = Vec::new();
+            for handle in handles {
+                out.push(handle.join().expect("the sampling thread joins"));
+            }
+            out
+        })
+        .into_iter()
+        .flatten()
+        .collect();
+        assert_eq!(
+            concurrent.len(),
+            sequential.len() * 4,
+            "every thread returns the whole sequence"
+        );
+        for (i, chunk) in concurrent.chunks(sequential.len()).enumerate() {
+            assert_eq!(
+                chunk,
+                sequential.as_slice(),
+                "thread {i}'s samples must be the sequential ones"
+            );
+        }
+    }
+
     /// The sampled values land inside the declared supports.
     #[test]
     fn samples_hold_their_supports() {
