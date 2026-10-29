@@ -129,14 +129,20 @@ impl ScenarioDistribution {
     /// The analytical mean the moment witnesses compare against. The
     /// distribution validates before it computes, so a malformed one is
     /// an error naming it, never a substitute value: a discrete with no
-    /// positive weight has no mean to stand in for one.
+    /// positive weight has no mean to stand in for one. A validated
+    /// distribution's closed form can still leave the finite f64 range
+    /// (a corner sum, an exponentiation, a weight product on an absurd
+    /// finite support), and an IEEE infinity or NaN from a public method
+    /// is a silent substitute value, so the result must be finite or the
+    /// error names the family and the parameters.
     ///
     /// # Errors
     ///
-    /// [`HaresError`] when the distribution's parameters are malformed.
+    /// [`HaresError`] when the distribution's parameters are malformed or
+    /// the closed form leaves the finite f64 range.
     pub fn mean(&self) -> Result<f64, HaresError> {
         self.validate()?;
-        Ok(match self {
+        let mean = match self {
             Self::Uniform { low, high } => (low + high) / 2.0,
             Self::Normal { mean, .. } => *mean,
             // The triangular mean is the average of its three corners; the
@@ -153,50 +159,79 @@ impl ScenarioDistribution {
                     .map(|(v, w)| v * w / total)
                     .sum()
             }
-        })
+        };
+        self.finite("mean", mean)
+    }
+
+    /// The public method's result is finite: a validated distribution's
+    /// closed form can still leave the f64 range (the sampler's own
+    /// non-finite refusal would then have nothing left to refuse), and an
+    /// IEEE infinity or NaN from a public method is a silent substitute
+    /// value. The error names the family and the parameters.
+    fn finite(&self, method: &str, value: f64) -> Result<f64, HaresError> {
+        if value.is_finite() {
+            return Ok(value);
+        }
+        Err(HaresError::Equipment(format!(
+            "the {} distribution's {method} is not finite ({value}): the declared \
+             parameters {self:?} leave the finite f64 range",
+            self.family()
+        )))
     }
 
     /// Draw one value directly from the distribution: the uncorrelated
     /// parameter's path. The distribution validates before it draws, so a
     /// malformed one is an error naming it, never a panic or a
-    /// substitute value.
+    /// substitute value, and a closed form that leaves the finite f64
+    /// range (an exponentiation on an absurd finite support) is refused
+    /// the same way: a public draw is finite or the error names the
+    /// family and the parameters.
     ///
     /// # Errors
     ///
-    /// [`HaresError`] when the distribution's parameters are malformed.
+    /// [`HaresError`] when the distribution's parameters are malformed or
+    /// the draw leaves the finite f64 range.
     pub fn sample(&self, rng: &mut ChaCha8Rng) -> Result<f64, HaresError> {
         self.validate()?;
-        match self {
-            Self::Uniform { low, high } => Ok(*low + rng.random::<f64>() * (high - low)),
+        let value = match self {
+            Self::Uniform { low, high } => *low + rng.random::<f64>() * (high - low),
             Self::Normal { mean, std_dev } => {
                 let z = normal_standard(rng);
-                Ok(mean + std_dev * z)
+                mean + std_dev * z
             }
             Self::LogNormal { mu, sigma } => {
                 let z = normal_standard(rng);
-                Ok(libm::exp(mu + sigma * z))
+                libm::exp(mu + sigma * z)
             }
             Self::Triangular { min, mode, max } => {
                 let u: f64 = rng.random();
-                Ok(triangular_quantile(*min, *mode, *max, u))
+                triangular_quantile(*min, *mode, *max, u)
             }
             Self::Discrete { values, weights } => {
-                let total: f64 = weights.iter().sum();
+                let total = self.discrete_total(weights, "sample")?;
                 let u: f64 = rng.random::<f64>() * total;
                 let mut cumulative = 0.0;
+                let mut chosen = None;
                 for (v, w) in values.iter().zip(weights.iter()) {
                     cumulative += w;
                     if u < cumulative {
-                        return Ok(*v);
+                        chosen = Some(*v);
+                        break;
                     }
                 }
-                values.last().copied().ok_or_else(|| {
-                    HaresError::Equipment(
-                        "the discrete distribution carries no values to draw".to_string(),
-                    )
-                })
+                match chosen {
+                    Some(v) => v,
+                    // The draw's `u` reached the total: the last value is
+                    // the boundary's own.
+                    None => values.last().copied().ok_or_else(|| {
+                        HaresError::Equipment(
+                            "the discrete distribution carries no values to draw".to_string(),
+                        )
+                    })?,
+                }
             }
-        }
+        };
+        self.finite("sample", value)
     }
 
     /// The distribution's quantile function at probability `p` in (0, 1):
@@ -210,13 +245,18 @@ impl ScenarioDistribution {
     /// rather than an infinity. The clamp is reachable from the copula: a
     /// normal CDF of a finite draw rounds to 1.0 at about 8.6 sigma
     /// (probability about 1e-16), and the boundary quantile is the
-    /// substituted value. A non-finite `p` (NaN or an infinity) is outside
+    /// substituted value. The saturation keeps the mapped value inside
+    /// the family's own range, but the family's exponentiation can still
+    /// leave the finite f64 range (a lognormal's `mu`, a uniform's
+    /// half-span on an absurd finite support), and that is refused: a
+    /// public quantile is finite or the error names the family and the
+    /// parameters. A non-finite `p` (NaN or an infinity) is outside
     /// every probability's domain and is an error naming the distribution.
     ///
     /// # Errors
     ///
-    /// [`HaresError`] when the distribution's parameters are malformed or
-    /// `p` is not finite.
+    /// [`HaresError`] when the distribution's parameters are malformed,
+    /// `p` is not finite, or the mapped value leaves the finite f64 range.
     pub fn quantile(&self, p: f64) -> Result<f64, HaresError> {
         self.validate()?;
         if !p.is_finite() {
@@ -226,28 +266,51 @@ impl ScenarioDistribution {
             )));
         }
         let p = p.clamp(f64::EPSILON, 1.0 - f64::EPSILON);
-        Ok(match self {
+        let value = match self {
             Self::Uniform { low, high } => low + p * (high - low),
             Self::Normal { mean, std_dev } => mean + std_dev * normal_inverse_cdf(p),
             Self::LogNormal { mu, sigma } => libm::exp(mu + sigma * normal_inverse_cdf(p)),
             Self::Triangular { min, mode, max } => triangular_quantile(*min, *mode, *max, p),
             Self::Discrete { values, weights } => {
-                let total: f64 = weights.iter().sum();
+                let total = self.discrete_total(weights, "quantile")?;
                 let u = p * total;
                 let mut cumulative = 0.0;
+                let mut chosen = None;
                 for (v, w) in values.iter().zip(weights.iter()) {
                     cumulative += w;
                     if u < cumulative {
-                        return Ok(*v);
+                        chosen = Some(*v);
+                        break;
                     }
                 }
-                values.last().copied().ok_or_else(|| {
-                    HaresError::Equipment(
-                        "the discrete distribution carries no values to quantile".to_string(),
-                    )
-                })?
+                match chosen {
+                    Some(v) => v,
+                    None => values.last().copied().ok_or_else(|| {
+                        HaresError::Equipment(
+                            "the discrete distribution carries no values to quantile".to_string(),
+                        )
+                    })?,
+                }
             }
-        })
+        };
+        self.finite("quantile", value)
+    }
+
+    /// The discrete family's weight total: the probability comparison's
+    /// denominator. A validated discrete's weights are finite and
+    /// non-negative, but their sum can still overflow to an infinity, and
+    /// `u = p * total` is then uncomputable: every probability would
+    /// silently read the last value. The error names the parameters.
+    fn discrete_total(&self, weights: &[f64], method: &str) -> Result<f64, HaresError> {
+        let total: f64 = weights.iter().sum();
+        if total.is_finite() {
+            return Ok(total);
+        }
+        Err(HaresError::Equipment(format!(
+            "the discrete distribution's {method}: the weights' sum is {total}, outside \
+             the finite f64 range the probability comparison needs; the declared \
+             parameters {self:?}"
+        )))
     }
 }
 
@@ -585,9 +648,10 @@ impl ScenarioSpec {
     ///
     /// # Errors
     ///
-    /// [`HaresError`] when the spec does not validate or when a draw is
-    /// not finite (the declared support does not bound it); the error
-    /// names the parameter.
+    /// [`HaresError`] when the spec does not validate, or when a draw's
+    /// closed form leaves the finite f64 range (the distribution's own
+    /// refusal, carried through the error naming this parameter); the
+    /// error names the parameter either way.
     pub fn sample(
         &self,
         master_seed: u64,
@@ -608,7 +672,7 @@ impl ScenarioSpec {
         let mut targets = std::collections::BTreeMap::new();
         for parameter in &self.parameters {
             let value = match &parameter.correlation {
-                None => parameter.distribution.sample(&mut rng)?,
+                None => parameter.distribution.sample(&mut rng),
                 Some(correlation) => {
                     let z_group = match shared.entry(correlation.group.as_str()) {
                         std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
@@ -619,20 +683,16 @@ impl ScenarioSpec {
                     let z_own = normal_standard(&mut rng);
                     let loading = libm::sqrt(correlation.rho);
                     let z = loading * z_group + libm::sqrt(1.0 - correlation.rho) * z_own;
-                    parameter.distribution.quantile(normal_cdf(z))?
+                    parameter.distribution.quantile(normal_cdf(z))
                 }
-            };
-            // A draw the declared support does not bound cannot be
-            // carried: serde_json maps a non-finite f64 to null, so the
-            // overrides form would silently lose it and the assembly
-            // would reject a null without naming this parameter.
-            if !value.is_finite() {
-                return Err(HaresError::Equipment(format!(
-                    "the scenario parameter '{}' drew the non-finite value {value} from its \
-                     declared distribution",
-                    parameter.name
-                )));
             }
+            .map_err(|err| {
+                HaresError::Equipment(format!(
+                    "the scenario parameter '{}' cannot draw from its declared \
+                     distribution: {err}",
+                    parameter.name
+                ))
+            })?;
             targets.insert(parameter.name.clone(), parameter.target.clone());
             values.push(SampledValue {
                 name: parameter.name.clone(),
@@ -1644,6 +1704,170 @@ mod tests {
         assert!(
             err.to_string().contains("discrete"),
             "the error must name the distribution: {err}"
+        );
+    }
+
+    /// A distribution whose parameters validate can still have a closed
+    /// form that leaves the finite f64 range: a corner sum past the
+    /// exponent range, an exponentiation past it, weight products past
+    /// it. An IEEE infinity or NaN from a public method is a silent
+    /// substitute value (and serde_json maps it to null downstream), so
+    /// `mean`, `sample` and `quantile` refuse naming the family and the
+    /// parameters. The support's own values never overflow here (a
+    /// finite support's draws stay inside it): the refusal is the closed
+    /// form's arithmetic, which is why the first entry's `sample` and
+    /// `quantile` stay finite while its mean refuses. A discrete whose
+    /// weights' sum overflows is refused outright: its probability
+    /// comparison `u = p * total` is uncomputable, and every probability
+    /// would silently read the last value.
+    #[test]
+    fn a_distribution_whose_closed_form_overflows_refuses_naming_it() {
+        // Every entry validates: the parameters are finite and ordered.
+        let mean_overflows = [
+            (
+                ScenarioDistribution::Uniform {
+                    low: 1e308,
+                    high: 1.5e308,
+                },
+                "uniform",
+                "the corners' sum 2.5e308 overflows",
+            ),
+            (
+                ScenarioDistribution::Triangular {
+                    min: 1e308,
+                    mode: 1.2e308,
+                    max: 1.7e308,
+                },
+                "triangular",
+                "the corners' sum 3.9e308 overflows",
+            ),
+            (
+                ScenarioDistribution::LogNormal {
+                    mu: 800.0,
+                    sigma: 1.0,
+                },
+                "lognormal",
+                "exp(800 + sigma^2/2) overflows",
+            ),
+            (
+                ScenarioDistribution::Discrete {
+                    values: vec![1e308, 1e308],
+                    weights: vec![1e308, 1e308],
+                },
+                "discrete",
+                "the value-weight products overflow",
+            ),
+        ];
+        for (distribution, family, why) in &mean_overflows {
+            distribution.validate().unwrap_or_else(|err| {
+                panic!("the parameters validate for {family} ({why}): {err}")
+            });
+            let error = distribution
+                .mean()
+                .expect_err("an overflowing closed form must refuse");
+            assert!(
+                error.to_string().contains(family),
+                "the mean must name the {family} distribution ({why}): {error}"
+            );
+        }
+        // The support's own values are representable: the draws and the
+        // quantiles stay inside it, so the refusal above is the closed
+        // form's corner sum and nothing else.
+        let mut rng = RngStream::scenario_sampler([0_u8; 32]).rng_at(0);
+        let drawn = mean_overflows[0]
+            .0
+            .clone()
+            .sample(&mut rng)
+            .expect("the support's values are representable");
+        assert!(
+            (1e308..=1.5e308).contains(&drawn),
+            "the draw {drawn} stays inside the declared support"
+        );
+
+        // The quantile's and the draw's own overflow classes: an
+        // exponentiation past the range (every probability, every draw:
+        // the standard normal's quantile stays within about 8.2 sigma),
+        // a half-span subtraction past it, and the weights' sum past it.
+        let quantile_overflows = [
+            (
+                ScenarioDistribution::LogNormal {
+                    mu: 800.0,
+                    sigma: 1.0,
+                },
+                "lognormal",
+            ),
+            (
+                ScenarioDistribution::Uniform {
+                    low: -1.5e308,
+                    high: 1.5e308,
+                },
+                "uniform",
+            ),
+            (
+                ScenarioDistribution::Discrete {
+                    values: vec![1.0, 2.0],
+                    weights: vec![1e308, 1e308],
+                },
+                "discrete",
+            ),
+        ];
+        for (distribution, family) in quantile_overflows {
+            let error = distribution
+                .quantile(0.5)
+                .expect_err("an overflowing quantile must refuse");
+            assert!(
+                error.to_string().contains(family),
+                "the quantile must name the {family} distribution: {error}"
+            );
+        }
+        let sample_overflows = [
+            (
+                ScenarioDistribution::LogNormal {
+                    mu: 800.0,
+                    sigma: 1.0,
+                },
+                "lognormal",
+            ),
+            (
+                ScenarioDistribution::Discrete {
+                    values: vec![1.0, 2.0],
+                    weights: vec![1e308, 1e308],
+                },
+                "discrete",
+            ),
+        ];
+        for (distribution, family) in sample_overflows {
+            let error = distribution
+                .sample(&mut rng)
+                .expect_err("an overflowing draw must refuse");
+            assert!(
+                error.to_string().contains(family),
+                "the draw must name the {family} distribution: {error}"
+            );
+        }
+    }
+
+    /// The spec's sampling error names the parameter the distribution's
+    /// refusal belongs to: the record's consumers fix the declared
+    /// parameter, not the family's abstract parameters.
+    #[test]
+    fn the_specs_overflow_refusal_names_the_parameter() {
+        let s = spec(vec![ScenarioParameter {
+            name: "huge".into(),
+            unit: "W".into(),
+            target: override_target("all", "heating_capacity_w"),
+            distribution: ScenarioDistribution::LogNormal {
+                mu: 800.0,
+                sigma: 1.0,
+            },
+            correlation: None,
+        }]);
+        let err = s
+            .sample(1, 1, 1)
+            .expect_err("an overflowing closed form must refuse");
+        assert!(
+            err.to_string().contains("huge") && err.to_string().contains("lognormal"),
+            "the error must name the parameter and the family: {err}"
         );
     }
 
