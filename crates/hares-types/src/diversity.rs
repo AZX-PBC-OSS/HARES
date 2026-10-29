@@ -485,6 +485,21 @@ mod tests {
         );
     }
 
+    /// The factors' names are the drawn pairs' names, in the same order:
+    /// one list feeds the record a manifest reports and the drawn values,
+    /// so the two cannot name different orders.
+    #[test]
+    fn the_appliance_factor_names_are_the_drawn_pairs() {
+        let draws = ScheduleDiversityDraws::draw(dwelling_seed_scenario(9, None, 0));
+        let pairs = draws.appliance_factors.as_pairs();
+        let names: Vec<&str> = pairs.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            ApplianceFactors::NAMES,
+            "the record's names must be the drawn pairs' names in draw order"
+        );
+    }
+
     /// The registry's guard against the pin's count: the shipped family
     /// holds five dimensions, and this file's disjointness walk and the
     /// draw's five streams are written against that count. A registry
