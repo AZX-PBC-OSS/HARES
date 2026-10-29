@@ -9,29 +9,46 @@
 //! set the HPXML data patches (`HpxmlDataPatches`) the assembly consumes
 //! the same way external metadata's patches arrive. The application
 //! never invents a second path: a scenario is only a sampler over
-//! overrides and patches.
+//! overrides and patches. The record is checked before anything is
+//! applied: a value with no recorded target, a patch target naming an
+//! unknown field, or a settings override map of another shape is refused
+//! naming the object, so a partially applicable record never lands half
+//! applied.
 
 use crate::dwelling::DwellingSettings;
-use hares_types::ScenarioSample;
+use hares_types::{HaresError, ScenarioSample};
 
 /// Merge `patch` into the overrides map `base`: the sampled equipment's
 /// fields overlay the base's (a scenario's declared draw is the applied
-/// value), the base's other equipment and fields pass through.
-fn merge_overrides(base: &mut serde_json::Value, patch: &serde_json::Value) {
-    let (Some(base_map), Some(patch_map)) = (base.as_object_mut(), patch.as_object()) else {
-        *base = patch.clone();
-        return;
-    };
+/// value), the base's other equipment and fields pass through. Both
+/// sides must be JSON objects: a settings override of another shape
+/// cannot be merged into, and replacing it would silently discard the
+/// caller's configuration.
+fn merge_overrides(
+    base: &mut serde_json::Value,
+    patch: &serde_json::Value,
+) -> Result<(), HaresError> {
+    let base_map = base.as_object_mut().ok_or_else(|| {
+        HaresError::Equipment(
+            "the settings' overrides are not a JSON object: the scenario's sampled \
+             overrides cannot merge into them"
+                .to_string(),
+        )
+    })?;
+    let patch_map = patch.as_object().ok_or_else(|| {
+        HaresError::Equipment("the scenario's sampled overrides are not a JSON object".to_string())
+    })?;
     for (key, value) in patch_map {
         match base_map.get_mut(key) {
             Some(slot) if slot.is_object() && value.is_object() => {
-                merge_overrides(slot, value);
+                merge_overrides(slot, value)?;
             }
             _ => {
                 base_map.insert(key.clone(), value.clone());
             }
         }
     }
+    Ok(())
 }
 
 /// Apply the sample to the settings: the Override targets merge into the
@@ -39,12 +56,26 @@ fn merge_overrides(base: &mut serde_json::Value, patch: &serde_json::Value) {
 /// Patch targets set the settings' patches (created when the settings
 /// carried none). The sampled values land in declaration order, a later
 /// sample of the same parameter clobbering an earlier one's field.
-pub fn apply_sample(sample: &ScenarioSample, settings: &mut DwellingSettings) {
+///
+/// The record is checked before anything is applied: a value with no
+/// recorded target, a patch target naming an unknown field, or a
+/// settings override map of another shape is refused naming the object
+/// it cannot apply. Nothing is applied and then dropped.
+///
+/// # Errors
+///
+/// [`HaresError`] naming the value, field or override map the record
+/// cannot apply.
+pub fn apply_sample(
+    sample: &ScenarioSample,
+    settings: &mut DwellingSettings,
+) -> Result<(), HaresError> {
+    sample.validate_application()?;
     let overrides = sample.overrides_json();
     if overrides.as_object().is_some_and(|map| !map.is_empty()) {
         let base = settings.overrides.take().unwrap_or(serde_json::json!({}));
         let mut merged = base;
-        merge_overrides(&mut merged, &overrides);
+        merge_overrides(&mut merged, &overrides)?;
         settings.overrides = Some(merged);
     }
     let patches = sample.patches();
@@ -53,23 +84,21 @@ pub fn apply_sample(sample: &ScenarioSample, settings: &mut DwellingSettings) {
         for (field, value) in patches {
             match field.as_str() {
                 "number_of_bedrooms" => hpxml_patches.number_of_bedrooms = Some(value),
+                // The record's own check refused an unknown field above;
+                // the arm stays so a new patch field must be named here
+                // as well as in the record's table.
                 other => {
-                    // The spec's validation rejects unknown patch fields
-                    // at declaration; a sample whose target map was
-                    // captured by an older spec cannot reach here, and a
-                    // hand-built one is refused loudly rather than
-                    // silently dropped.
-                    tracing::warn!(
-                        field = %other,
-                        "the scenario sample patches unknown field '{other}': \
-                         the patch fields are number_of_bedrooms"
-                    );
-                    continue;
+                    return Err(HaresError::Equipment(format!(
+                        "the scenario sample patches the unknown field '{other}': the \
+                         patch fields are {}",
+                        hares_types::PATCH_FIELDS.join(", ")
+                    )));
                 }
             }
         }
         settings.patches = Some(hpxml_patches);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -117,6 +146,97 @@ mod tests {
             .to_path_buf()
     }
 
+    /// A sample whose recorded patch target names a field the patches do
+    /// not carry is refused with the field's name, not applied as an
+    /// empty patch set. The record is deserialized, the shape a manifest
+    /// written by a hand-edited or older spec arrives in.
+    #[test]
+    fn an_unknown_patch_field_is_refused_naming_it() {
+        let sample: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [{"name": "bedrooms", "value": 3.0, "unit": "count"}],
+            "targets": {"bedrooms": {"patch": {"field": "not_a_patch_field"}}}
+        }))
+        .expect("the record parses");
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        let err = apply_sample(&sample, &mut settings)
+            .expect_err("an unknown patch field must be refused");
+        assert!(
+            err.to_string().contains("not_a_patch_field"),
+            "the error must name the field: {err}"
+        );
+        assert!(
+            settings.patches.is_none(),
+            "the refused record must not touch the settings"
+        );
+    }
+
+    /// A value with no recorded target cannot be applied anywhere: the
+    /// application refuses the whole record naming the parameter rather
+    /// than applying its siblings and dropping it (a record written
+    /// before the target map existed deserializes with an empty map).
+    #[test]
+    fn a_value_without_a_target_is_refused_naming_it() {
+        let sample: ScenarioSample = serde_json::from_value(serde_json::json!({
+            "scenario_id": 1,
+            "bldg_id": 7,
+            "values": [
+                {"name": "bedrooms", "value": 3.0, "unit": "count"},
+                {"name": "orphan", "value": 5.0, "unit": "W"}
+            ],
+            "targets": {"bedrooms": {"patch": {"field": "number_of_bedrooms"}}}
+        }))
+        .expect("the record parses");
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        let err = apply_sample(&sample, &mut settings)
+            .expect_err("a value with no target must be refused");
+        assert!(
+            err.to_string().contains("orphan"),
+            "the error must name the value with no target: {err}"
+        );
+        assert!(
+            settings.patches.is_none(),
+            "the refused record must not apply its targeted sibling either"
+        );
+    }
+
+    /// A settings override map of another shape cannot be merged into,
+    /// and replacing it would discard the caller's configuration: the
+    /// application refuses it naming the map.
+    #[test]
+    fn a_non_object_override_map_is_refused_naming_it() {
+        let spec = ScenarioSpec {
+            name: "non-object".to_string(),
+            parameters: vec![hares_types::ScenarioParameter {
+                name: "wh_capacity".to_string(),
+                unit: "W".to_string(),
+                target: hares_types::ScenarioTarget::Override {
+                    equipment: "Electric Resistance Water Heater".to_string(),
+                    field: "heating_capacity_w".to_string(),
+                },
+                distribution: hares_types::ScenarioDistribution::Uniform {
+                    low: 4000.0,
+                    high: 6000.0,
+                },
+                correlation: None,
+            }],
+        };
+        let sample = spec.sample(42, 1, 7).expect("the sample draws");
+        let mut settings = DwellingSettings::new(
+            test_sim_config(),
+            Some(serde_json::json!("not a map")),
+            7,
+            None,
+        );
+        let err = apply_sample(&sample, &mut settings)
+            .expect_err("a non-object override map must be refused");
+        assert!(
+            err.to_string().contains("overrides"),
+            "the error must name the settings' overrides: {err}"
+        );
+    }
+
     /// The apply helper's contract: the override targets merge into the
     /// settings' overrides map, the patch targets set the patches, and
     /// both land when the settings carried neither.
@@ -159,7 +279,7 @@ mod tests {
             7,
             None,
         );
-        apply_sample(&sample, &mut settings);
+        apply_sample(&sample, &mut settings).expect("the sample applies");
         let overrides = settings.overrides.expect("the overrides land");
         let map = overrides.as_object().expect("the overrides map");
         assert!(
@@ -227,7 +347,7 @@ mod tests {
         let sampled_bedrooms = sample.values[1].value;
 
         let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
-        apply_sample(&sample, &mut settings);
+        apply_sample(&sample, &mut settings).expect("the sample applies");
         let config = DwellingConfig {
             hpxml: hares_io::InputSource::Path(
                 project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),

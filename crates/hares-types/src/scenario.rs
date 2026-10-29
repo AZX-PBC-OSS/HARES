@@ -419,6 +419,39 @@ impl ScenarioSample {
             .collect()
     }
 
+    /// The sample is applicable: every value carries the target recorded
+    /// with it, and every patch target names a field the settings'
+    /// patches carry. A record written before the target map existed
+    /// carries values with no target and fails naming the value; a
+    /// hand-edited record naming an unknown patch field fails naming the
+    /// field. The application calls this before touching the settings, so
+    /// nothing is applied and then dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] naming the value or field the record cannot apply.
+    pub fn validate_application(&self) -> Result<(), HaresError> {
+        for value in &self.values {
+            let Some(target) = self.targets.get(&value.name) else {
+                return Err(HaresError::Equipment(format!(
+                    "the scenario sample carries '{}' with no recorded target: the value \
+                     cannot be applied",
+                    value.name
+                )));
+            };
+            if let ScenarioTarget::Patch { field } = target
+                && !PATCH_FIELDS.contains(&field.as_str())
+            {
+                return Err(HaresError::Equipment(format!(
+                    "the scenario sample's parameter '{}' patches the unknown field '{}': \
+                     the patch fields are {PATCH_FIELDS:?}",
+                    value.name, field
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn override_triples(&self) -> Vec<(String, String, f64)> {
         let mut out = Vec::new();
         for v in &self.values {
