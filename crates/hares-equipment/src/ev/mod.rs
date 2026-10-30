@@ -2004,14 +2004,7 @@ impl Equipment for Ev {
             && self.dr_power_fraction() > 0.0
     }
 
-    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
-        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
-            *remaining -= env.time_res.num_seconds() as f64;
-            if *remaining <= 0.0 {
-                self.dr_level = DRLevel::Normal;
-                self.dr_duration_remaining_s = None;
-            }
-        }
+    fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
         // Mode is a step outcome, keyed on the pack-side net charge rate
         // (see `classify_mode`): the control phase runs between steps, so
         // the last computed mode is the honest report — re-deriving it
@@ -2203,6 +2196,19 @@ impl Equipment for Ev {
             },
             performance: CorePerformance::default(),
         };
+
+        // Advance the DR duration once per step, at the step's end: the
+        // duration names the steps the event covers, so the step whose
+        // interval it covers stays curtailed and the release lands on the
+        // next step's control pass.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= dt.as_secs_f64();
+            if *remaining <= 0.0 {
+                self.dr_level = DRLevel::Normal;
+                self.dr_duration_remaining_s = None;
+            }
+        }
+
         Ok(())
     }
 

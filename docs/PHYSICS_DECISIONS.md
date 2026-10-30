@@ -1548,9 +1548,20 @@ time and the release landed on the second control pass - after the
 solve, which read the still-forced-off mode and solved nothing; the
 release step then ran the raw duty, which for the ideal path is the
 full-duty arm's 1.0. The countdown now advances once per step, in
-`step()`: the release lands on the next step's first control pass,
-ahead of the solve, and the event sheds exactly the steps its duration
-named. Measured on the `cz6b_pv_battery_ev` fixture at 900 s (the
+`step()`, at the step's end: the release lands on the next step's first
+control pass, ahead of the solve, and the event sheds exactly the steps
+its duration named. The step's own interval is the last one the timer
+consumes, so the step that closes the event still dispatches under the
+event's level (a partial shed's last step keeps its load fraction, not
+a mid-dispatch revert). The rule is the same for every DR-capable
+equipment, not the HVAC cores alone: the water heaters, the indirect
+tank, the tankless heater and the ventilation also advanced the timer
+in `update_control` (twice per step from the pipeline's two control
+passes, and a third time from their own `step`'s re-run), so each such
+event burned several timesteps of wall time per step; the battery and
+the EV (one control pass per step) decremented before the step's
+dispatch, releasing one named step early. All of them advance the timer
+in `step()` now. Measured on the `cz6b_pv_battery_ev` fixture at 900 s (the
 brownout attack's B3a scenario): the release step formerly delivered
 14.06 MJ against a 3.48 MJ correction need plus 0.34 MJ of gains offset
 (2.5x the computed-need bound; 4.05x the bare correction), driving the

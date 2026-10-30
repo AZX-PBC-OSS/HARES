@@ -138,7 +138,7 @@ Each equipment type implements DR behavior independently:
 | Critical | -10C | 0.5 | Yes |
 | GridEmergency | -15C | 0.25 | Locked out |
 
-**Duration auto-revert**: timer decrements each step, reverts to Normal on expiration. `duration_s = None` means indefinite.
+**Duration auto-revert**: the timer advances once per timestep, at the step's end (the step's `step()`, never `update_control`, which the thermal pipeline calls more than once per step). The duration therefore names the steps the event covers: each of them dispatches under the event's level, and the release lands on the next step's control pass. `duration_s = None` means indefinite.
 
 ### Control State Separation
 

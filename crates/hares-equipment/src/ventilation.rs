@@ -599,21 +599,14 @@ impl Equipment for Ventilation {
         self.init_typed(config)
     }
 
-    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
-        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
-            *remaining -= env.time_res.num_seconds() as f64;
-            if *remaining <= 0.0 {
-                self.dr_level = DRLevel::Normal;
-                self.dr_duration_remaining_s = None;
-            }
-        }
+    fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
         self.mode
     }
 
     fn step(
         &mut self,
         env: &EnvironmentState,
-        _dt: Duration,
+        dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         let zone_id = self.zone_id.ok_or_else(|| {
@@ -653,6 +646,21 @@ impl Equipment for Ventilation {
             && self.dr_level != DRLevel::GridEmergency
             && env.grid.bus_energized()
             && !period_zeroed;
+
+        // Advance the DR duration once per step, at this step's own on/off
+        // decision (the paths below return early): the thermal pipeline
+        // calls `update_control` before the control dispatch and again
+        // after it, so a countdown that lived there burned two timesteps
+        // of the event per step. The step whose interval the event covers
+        // stays shed, and the release lands on the next step's control
+        // pass.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= dt.as_secs_f64();
+            if *remaining <= 0.0 {
+                self.dr_level = DRLevel::Normal;
+                self.dr_duration_remaining_s = None;
+            }
+        }
 
         if !is_running {
             // Clear stored effective effectiveness so that the thermal solver
@@ -3039,6 +3047,65 @@ mod tests {
         assert!(
             eff_l.abs() < 1e-12,
             "latent effectiveness should be 0.0 during GridEmergency, got {eff_l}"
+        );
+    }
+
+    /// The DR duration is a timestep's clock, not a control pass's: the
+    /// thermal pipeline runs `update_control` twice per step, so a
+    /// countdown that lives there burns two timesteps of the event per
+    /// step. A 4-step (1200 s at 300 s) GridEmergency must stop the fans
+    /// for the four steps its duration names, and the step after must run.
+    #[test]
+    fn dr_duration_advances_once_per_timestep_not_per_control_pass() {
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e = env(5.0, 20.0);
+        hrv.init(&cfg, &e).expect("init");
+        hrv.apply_control(&ControlSignal::ModeOverride {
+            mode: OperatingMode::On,
+        })
+        .unwrap();
+        hrv.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(1200.0),
+        })
+        .unwrap();
+
+        for step in 0..4 {
+            hrv.update_control(&e);
+            hrv.update_control(&e);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            hrv.step(&e, Duration::from_secs(300), &mut ports)
+                .expect("step");
+            let kw = hrv
+                .telemetry()
+                .get(hares_types::telemetry_keys::ELECTRIC_KW)
+                .unwrap_or(f64::NAN);
+            assert_eq!(
+                kw, 0.0,
+                "step {step}: the event's four named steps must all stop the \
+                 fans, got {kw} kW"
+            );
+        }
+
+        hrv.update_control(&e);
+        hrv.update_control(&e);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e, Duration::from_secs(300), &mut ports)
+            .expect("step");
+        let kw = hrv
+            .telemetry()
+            .get(hares_types::telemetry_keys::ELECTRIC_KW)
+            .unwrap_or(0.0);
+        assert!(
+            kw > 0.0,
+            "the event is over: the commanded unit must run again, got {kw} kW"
         );
     }
 

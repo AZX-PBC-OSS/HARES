@@ -1250,25 +1250,6 @@ impl CoolingCore {
         if let Some(err) = self.hvac.take_control_error() {
             return Err(err);
         }
-        // Advance the DR duration once per step. The thermal pipeline runs
-        // `update_control` twice per step (before the solver-feedback phase
-        // and again after the control dispatch), so the countdown lived
-        // there it burned twice the event's wall time and the post-event
-        // release landed after the solve, which read the still-forced-off
-        // mode and solved nothing; the release step then ran the unit's
-        // raw full duty, unmetered. Advancing here puts the release on the
-        // next step's first control pass, ahead of the solve, so the
-        // release step delivers the solved capacity.
-        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
-            *remaining -= dt.as_secs_f64();
-            if *remaining <= 0.0 {
-                self.dr_duration_remaining_s = None;
-                self.dr_level = DRLevel::Normal;
-                self.dr_setpoint_offset_c = 0.0;
-                self.dr_load_fraction = 1.0;
-                self.dr_duty_cycle = 1.0;
-            }
-        }
         let ebm_window = step_equivalent_battery(&self.hvac, env)?;
         self.crankcase_heater_on = false;
         self.crankcase_heater_w = 0.0;
@@ -1631,6 +1612,29 @@ impl CoolingCore {
         self.ideal_capacity_signal_arrived = false;
         // LoadFraction is a one-step post-thermostat multiplier.
         self.ctrl_load_fraction = 1.0;
+
+        // Advance the DR duration once per step, at the step's end. The
+        // thermal pipeline runs `update_control` twice per step (before the
+        // solver-feedback phase and again after the control dispatch), so
+        // the countdown lived there it burned twice the event's wall time
+        // and the post-event release landed after the solve, which read the
+        // still-forced-off mode and solved nothing; the release step then
+        // ran the unit's raw full duty, unmetered. Advancing here puts the
+        // release on the next step's first control pass, ahead of the
+        // solve, so the release step delivers the solved capacity; the
+        // step whose interval the event covers keeps the event's own
+        // dispatch level (the partial sheds included), and the timer
+        // reverts after it.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= dt.as_secs_f64();
+            if *remaining <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.dr_level = DRLevel::Normal;
+                self.dr_setpoint_offset_c = 0.0;
+                self.dr_load_fraction = 1.0;
+                self.dr_duty_cycle = 1.0;
+            }
+        }
 
         #[cfg(feature = "observe")]
         {
@@ -4004,6 +4008,59 @@ mod tests {
             eq.take_health_counts().ideal_capacity_unsolved_steps,
             0,
             "a solved step is not a starvation"
+        );
+    }
+
+    /// The event's LAST named step keeps the event's dispatch level: a
+    /// partial shed (High, load fraction 0.8) over two named steps
+    /// delivers the same reduced draw on both. The timer advances after
+    /// the step's dispatch, so the level's end is the release, never the
+    /// last step's own interval reverting mid-dispatch.
+    #[test]
+    fn the_last_named_dr_step_keeps_the_events_dispatch_level() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(1800.0),
+        })
+        .unwrap();
+
+        let mut delivered = Vec::new();
+        for step in 0..2 {
+            assert_eq!(
+                eq.update_control(&environment),
+                OperatingMode::Cooling,
+                "step {step}: the zone is past the DR-adjusted setpoint"
+            );
+            eq.apply_control(&ControlSignal::IdealCapacity {
+                capacity_w: -4_000.0,
+                degraded: false,
+            })
+            .unwrap();
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&environment, Duration::from_secs(900), &mut ports)
+                .unwrap();
+            delivered.push(eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN));
+        }
+
+        assert!(delivered[0] > 0.0, "fixture: the driven capacity runs");
+        assert!(
+            (delivered[1] - delivered[0]).abs() < 1e-9,
+            "the event's second named step keeps the 0.8 level: {} kW against \
+             the first step's {} kW",
+            delivered[1],
+            delivered[0]
         );
     }
 

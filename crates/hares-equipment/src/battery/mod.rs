@@ -1252,15 +1252,7 @@ impl Equipment for Battery {
 >>>>>>> 929867db (fix: the island forms one step after the outage and a DR shed cannot collapse it)
     }
 
-    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
-        // DR duration countdown: auto-revert to Normal when timer expires.
-        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
-            *remaining -= env.time_res.num_seconds() as f64;
-            if *remaining <= 0.0 {
-                self.dr_level = DRLevel::Normal;
-                self.dr_duration_remaining_s = None;
-            }
-        }
+    fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
         self.mode
     }
 
@@ -1862,6 +1854,18 @@ impl Equipment for Battery {
             },
             performance: CorePerformance::default(),
         };
+
+        // Advance the DR duration once per step, at the step's end: the
+        // duration names the steps the event covers, so the step whose
+        // interval it covers stays curtailed and the release lands on the
+        // next step's control pass.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= dt_s;
+            if *remaining <= 0.0 {
+                self.dr_level = DRLevel::Normal;
+                self.dr_duration_remaining_s = None;
+            }
+        }
 
         Ok(())
     }
@@ -6445,6 +6449,57 @@ mod tests {
         assert!(
             power < -1.0,
             "after DR expiry, discharge should be available again, got {power}"
+        );
+    }
+
+    /// The DR duration is the timestep's clock: a four-step GridEmergency
+    /// sheds the four steps it names, not three. The timer advances once
+    /// per timestep at the step's end, so the step whose interval the
+    /// event covers is still shed; the step after recovers.
+    #[test]
+    fn dr_event_sheds_every_named_step() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(4.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        for step in 0..4 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+            let standby = DEFAULT_STANDBY_POWER_W;
+            assert!(
+                (power - standby).abs() < 10.0,
+                "step {step}: the event's four named steps must all hold the \
+                 commanded discharge at standby, got {power} W"
+            );
+        }
+
+        // The timestep after the event: the discharge resumes.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power < -1000.0,
+            "the event is over: the commanded 2 kW discharge must resume, \
+             got {power} W"
         );
     }
 

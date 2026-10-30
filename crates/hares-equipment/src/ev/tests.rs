@@ -7802,13 +7802,24 @@ fn ev_dr_timer_reverts_to_normal_after_duration() {
     })
     .expect("DemandResponse signal should be accepted");
 
-    // advance 60s at a time; timer should hit zero during the second call
-    ev.update_control(&env);
-    ev.update_control(&env);
+    // The duration is the timestep's clock: 120 s at 60 s steps is the
+    // two named steps the event sheds, and no more.
+    for _ in 0..2 {
+        ev.update_control(&env);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+        assert_eq!(
+            ev.telemetry().get("dr_power_fraction"),
+            Some(0.5),
+            "the event's two named steps stay shed"
+        );
+    }
 
-    // After timer expiry, DR reverts to Normal and charging returns to full power
+    // The step after the event: DR has reverted to Normal and charging
+    // returns to full power.
+    ev.update_control(&env);
     let mut ports = PortSlots::default();
-    ev.step(&env, Duration::minutes(60), &mut ports).unwrap();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
 
     let power = ev
         .telemetry()
@@ -7820,6 +7831,49 @@ fn ev_dr_timer_reverts_to_normal_after_duration() {
         power >= ev.rated_power_w * 0.5,
         "post-timer power should be near full rated (was {:.3} kW)",
         power
+    );
+}
+
+/// The DR duration is the timestep's clock: a 4-step (240 s at 60 s)
+/// GridEmergency sheds the four steps it names, not three. The timer
+/// advances once per timestep at the step's end, so the step whose
+/// interval the event covers is still shed.
+#[test]
+fn ev_dr_event_sheds_every_named_step() {
+    let config = ev_config(base_raw());
+    let mut ev = Ev::new(config.clone());
+    let env = sample_env();
+    ev.init(&config, &env).unwrap();
+
+    ev.apply_control(&ControlSignal::DemandResponse {
+        level: DRLevel::GridEmergency,
+        duration_s: Some(240.0),
+    })
+    .expect("DemandResponse signal should be accepted");
+
+    for step in 0..4 {
+        ev.update_control(&env);
+        let mut ports = PortSlots::default();
+        ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+        assert_eq!(
+            ev.telemetry().get("dr_power_fraction"),
+            Some(0.0),
+            "step {step}: the event's four named steps must all be shed"
+        );
+        assert_eq!(
+            ev.telemetry().get("active_power_kw"),
+            Some(0.0),
+            "step {step}: the shed leaves no charging draw"
+        );
+    }
+
+    ev.update_control(&env);
+    let mut ports = PortSlots::default();
+    ev.step(&env, Duration::minutes(1), &mut ports).unwrap();
+    assert_eq!(
+        ev.telemetry().get("dr_power_fraction"),
+        Some(1.0),
+        "the event is over: the next step charges again"
     );
 }
 
