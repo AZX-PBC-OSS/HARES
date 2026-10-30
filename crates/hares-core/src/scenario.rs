@@ -957,6 +957,90 @@ mod tests {
         );
     }
 
+    /// An autosized resistance water heater's capacity override reaches the
+    /// model: the post-autosize rebuild builds the typed config from the
+    /// raw parameters, and folding the sized capacity into
+    /// `element_power_w` (the channel the init reads ahead of
+    /// `heating_capacity_w`) would give the alias precedence and silently
+    /// drop an override of the capacity field on every home the autosizer
+    /// sized. The control build pins the sized value as distinct, so the
+    /// override comparison cannot pass by the draw landing on it by chance.
+    #[test]
+    fn a_capacity_override_reaches_an_autosized_water_heater() {
+        let spec = ScenarioSpec {
+            name: "autosized-capacity".to_string(),
+            parameters: vec![hares_types::ScenarioParameter {
+                name: "capacity".to_string(),
+                unit: "W".to_string(),
+                target: hares_types::ScenarioTarget::Override {
+                    equipment: "Electric Resistance Water Heater".to_string(),
+                    field: "heating_capacity_w".to_string(),
+                },
+                distribution: hares_types::ScenarioDistribution::Discrete {
+                    values: vec![4_737.12],
+                    weights: vec![1.0],
+                },
+                correlation: None,
+            }],
+        };
+        let sample = spec.sample(42, 1, 7).expect("the sample draws");
+        let sampled = sample.values[0].value;
+
+        let dwelling_config = |settings: DwellingSettings| DwellingConfig {
+            hpxml: hares_io::InputSource::Path(
+                project_root()
+                    .join("tests/fixtures/hpxml/ochre_samples/base-water-heater-autosize.xml"),
+            ),
+            schedule: Some(hares_io::InputSource::Path(
+                project_root().join("data/examples/BEopt_example_schedule.csv"),
+            )),
+            weather: hares_io::WeatherInput::Path(
+                project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: hares_io::DefaultsSource::directory(
+                project_root().join("python/hares/defaults"),
+            ),
+            settings,
+        };
+        let control = Dwelling::from_config(dwelling_config(DwellingSettings::new(
+            test_sim_config(),
+            None,
+            7,
+            None,
+        )))
+        .expect("the control dwelling builds");
+        let resolved_capacity = |dwelling: &Dwelling| {
+            dwelling
+                .resolved_model()
+                .equipment
+                .iter()
+                .find(|eq| eq.name == "Electric Resistance Water Heater")
+                .unwrap_or_else(|| panic!("the water heater resolves"))
+                .parameters
+                .iter()
+                .find(|p| p.name == "heating_capacity_w")
+                .unwrap_or_else(|| panic!("the water heater resolves its heating capacity"))
+                .value
+        };
+        let sized_capacity = resolved_capacity(&control);
+        assert_ne!(
+            sized_capacity, sampled,
+            "the autosized capacity must differ from the sampled override, or \
+             the comparison below cannot prove the override applied"
+        );
+
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        apply_sample(&sample, &mut settings).expect("the sample applies");
+        let dwelling =
+            Dwelling::from_config(dwelling_config(settings)).expect("the scenario dwelling builds");
+        assert_eq!(
+            resolved_capacity(&dwelling),
+            sampled,
+            "the sampled capacity must reach the autosized water heater bit \
+             for bit: the resolved element power is the accepted override"
+        );
+    }
+
     /// The reserved `envelope` target is part of the scenario's overridable
     /// surface: it is not an equipment (the assembly's equipment-key walk
     /// skips the reserved key), so the equipment round-trips above do not
