@@ -495,13 +495,13 @@ pub const IEEE1547_FW_DEADBAND_OF_HZ: f64 = 0.036;
 pub const IEEE1547_FW_DEADBAND_UF_HZ: f64 = 0.036;
 
 /// Frequency-droop (frequency-Watt) slope, over-frequency side, in pu power per pu
-/// per pu frequency (all categories): a frequency deviation of 5 percent
+/// frequency (all categories): a frequency deviation of 5 percent
 /// of nominal beyond the deadband edge drives a full-nameplate power
 /// change. Same source as `IEEE1547_FW_DEADBAND_OF_HZ`.
 pub const IEEE1547_FW_SLOPE_OF: f64 = 0.05;
 
 /// Frequency-droop (frequency-Watt) slope, under-frequency side, in pu power per pu
-/// per pu frequency (all categories). Same source as
+/// frequency (all categories). Same source as
 /// `IEEE1547_FW_DEADBAND_OF_HZ`.
 pub const IEEE1547_FW_SLOPE_UF: f64 = 0.05;
 
