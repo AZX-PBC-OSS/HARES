@@ -237,6 +237,21 @@ impl Telemetry {
         }
     }
 
+    /// Withdraws a channel's registration: the key leaves the map, so
+    /// `get` reports `None` and the key set no longer contains it. This is
+    /// the restore path's write for a channel whose registration is itself
+    /// state (a lazily registered channel whose saved map omitted the key):
+    /// a checkpoint replaces the whole telemetry timeline, so the restored
+    /// map is the saved map's key set, never the union with the pre-restore
+    /// run's. A key not registered is a no-op.
+    ///
+    /// Intended for lazily registered channels on a map built without
+    /// declarations; a sealed map's declared keys are its contract, since a
+    /// later write to a removed declared key would latch as undeclared.
+    pub fn unregister(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+
     #[inline]
     #[must_use]
     pub fn get(&self, key: &str) -> Option<f64> {
@@ -377,6 +392,26 @@ mod tests {
         t.insert("v", 1.0);
         t.set("v", 42.0);
         assert_eq!(t.get("v"), Some(42.0));
+    }
+
+    #[test]
+    fn unregister_drops_the_key_and_its_slot() {
+        // A lazily registered channel's registration is its timeline: the
+        // restore path removes the key when the saved map omitted it, so
+        // the key set (not only `get`) must lose it.
+        let mut t = Telemetry::new();
+        t.insert("kept", 1.0);
+        t.insert("lazy", 2.0);
+        t.unregister("lazy");
+        assert_eq!(t.get("lazy"), None);
+        assert!(!t.0.contains_key("lazy"));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.get("kept"), Some(1.0));
+        // An absent key is a no-op, not a latch: unregistering a channel
+        // the map never held is the "still never registered" state.
+        t.unregister("never");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.unknown_key_latch(), None);
     }
 
     #[test]

@@ -2084,9 +2084,13 @@ impl CoolingCore {
         // The step's own write: registered at the first cooled restore,
         // updated in place after, so the restored map carries the key only
         // when a cooling step produced a value: the null-until-first-
-        // cooling timeline a continuously-run never-cooled unit holds.
-        if let Some(shr) = decoded.shr {
-            self.telemetry.set_or_register(tk::SHR, shr);
+        // cooling timeline a continuously-run never-cooled unit holds. An
+        // absent key leaves the map entirely: the checkpoint replaces the
+        // pre-restore timeline, so loading a never-cooled blob into a unit
+        // that cooled earlier must not keep the stale key.
+        match decoded.shr {
+            Some(shr) => self.telemetry.set_or_register(tk::SHR, shr),
+            None => self.telemetry.unregister(tk::SHR),
         }
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
@@ -3304,6 +3308,58 @@ mod tests {
             restored_keys, twin_keys,
             "the restored cooled-then-idle map must carry exactly the \
              continuously-run twin's keys"
+        );
+    }
+
+    /// A checkpoint replaces the whole run state, the telemetry timeline
+    /// included: loading a never-cooled unit's blob (no `shr` key) into a
+    /// unit that cooled earlier must leave the never-cooled key set. The
+    /// saved map is the contract; a key the blob never registered must not
+    /// survive from the pre-restore run, or the same blob restores two
+    /// different maps depending on the target's history.
+    #[test]
+    fn restore_into_a_previously_cooled_unit_drops_the_stale_shr_key() {
+        let cfg = ac_config();
+        let cool_env = env_at_second(28.0, 35.0, 0);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+
+        // The source: a never-cooled unit, its map without the key.
+        let mut source = AirConditioner::new(cfg.clone());
+        source.init(&cfg, &env(20.0, 0.008, 15.0, 20.0)).unwrap();
+        step_idle_windows(&mut source, &mut ports);
+        assert!(
+            source.telemetry().get(tk::SHR).is_none(),
+            "the source must never have cooled"
+        );
+        let state = source.save_state().unwrap();
+
+        // The target: it cooled before the restore, so its map holds the
+        // key the checkpoint's map does not.
+        let mut target = AirConditioner::new(cfg.clone());
+        target.init(&cfg, &cool_env).unwrap();
+        target.update_control(&cool_env);
+        target
+            .step(&cool_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        ports.zero();
+        assert!(
+            target.telemetry().get(tk::SHR).is_some(),
+            "the target must hold the key before the restore"
+        );
+
+        target.load_state(&state).unwrap();
+        assert!(
+            target.telemetry().get(tk::SHR).is_none(),
+            "the restored map must be the checkpoint's: no shr key survives \
+             from the pre-restore run"
+        );
+        assert!(
+            !target.telemetry().0.keys().any(|key| key == tk::SHR),
+            "the restored key set must not carry the pre-restore shr key"
         );
     }
 
