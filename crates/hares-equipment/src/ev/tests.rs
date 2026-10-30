@@ -6523,6 +6523,39 @@ fn witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_si
     );
 }
 
+/// An unavailable step does not step the export layer: the row-zeroing
+/// convention (a Vacancy or a Power Outage period) leaves the vehicle
+/// idle for the step, so an excursion there cannot trip the inverter and
+/// no timer advances; the channels read the run state (the unconfigured
+/// layer's contract is the same shape). The charge leg is load-side and
+/// zeroed with the rest of the vehicle's rows.
+#[test]
+fn an_unavailable_step_neither_trips_nor_advances_the_export_layer() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    let mut env = sample_env();
+    env.unavailable_periods.power_outage = true;
+    ev.init(&config, &env).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    let mut sag = env.clone();
+    sag.grid.voltage_pu = 0.6;
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::from_secs(900), &mut ports)
+        .expect("step");
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_TRIPPED),
+        Some(0.0),
+        "the idle vehicle's export function is not conducting: no trip"
+    );
+    assert_eq!(ev.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+        Some(0.0),
+        "no timer advances on an idle step"
+    );
+}
+
 /// The F7 guard on the EV's face: on a utility-outage step the export leg
 /// can be the island's source, so the layer is bypassed and the export
 /// flows; the layer is never tripped off its own island.
@@ -6580,13 +6613,13 @@ fn witness_der1547_ev_export_over_frequency_droop_reduces_export() {
 
 /// The frequency-Watt reference cannot inject more than the demand
 /// response level allows. The DR fraction is the operator's cap on the
-/// delivered export, the same authority the stationary battery's clamp
-/// carries (there the clamp runs after the layer, so the cap binds the
-/// droop's reference); the EV passes its post-DR export as the layer's
-/// pre-disturbance output, so the availability input must be the DR-scaled
-/// ceiling too, or an under-frequency ramp resurrects the shed watts. A
-/// GridEmergency (a full shed) holds zero export through the excursion;
-/// a High level caps the ramp at half the rating.
+/// delivered export, the same authority the stationary battery's
+/// availability input carries (there the layer's up-ramp stops at the
+/// deliverable discharge bound); the EV passes its post-DR export as the
+/// layer's pre-disturbance output, so the availability input must be the
+/// DR-scaled ceiling too, or an under-frequency ramp resurrects the shed
+/// watts. A GridEmergency (a full shed) holds zero export through the
+/// excursion; a High level caps the ramp at half the rating.
 #[test]
 fn witness_der1547_ev_droop_cannot_exceed_the_demand_response_cap() {
     for (level, expected_w) in [(DRLevel::High, 2500.0), (DRLevel::GridEmergency, 0.0)] {
@@ -6616,6 +6649,61 @@ fn witness_der1547_ev_droop_cannot_exceed_the_demand_response_cap() {
             -expected_w
         );
     }
+}
+
+/// The availability input is the export the delivered power was already
+/// under, and below the pack's charge-temperature floor the pack heater
+/// spends that energy budget first (the branch `compute_discharge`
+/// allocates in). The export budget net of the heater is therefore the
+/// droop's availability: without it an under-frequency ramp exports a
+/// near-reserve pack's remaining headroom over the top of the heater and
+/// lands the SOC below its reserve floor.
+///
+/// The pack sits just above its V2G reserve. The energy above the floor
+/// spread over a 900 s step sustains a couple hundred watts of DC at
+/// most (temperature-derated at -5 C, which only lowers it), and the
+/// 2000 W heater's priority draw spends all of it. Nothing remains for
+/// export, so the reference the layer may command is zero.
+#[test]
+fn witness_der1547_ev_droop_export_obeys_the_heater_budgeted_ceiling() {
+    let cfg = EvConfig {
+        der_1547: Some(cat2_settings()),
+        v2g_enabled: Some(true),
+        v2g_soc_reserve: Some(0.2),
+        v2g_max_discharge_w: Some(5000.0),
+        capacity_j: 10.0 * 3.6e6,
+        initial_soc: Some(0.205),
+        battery_temp_c: Some(-5.0),
+        min_charge_temp_c: Some(0.0),
+        heater_power_w: Some(2000.0),
+        heater_threshold_c: Some(0.0),
+        ..minimal_ev_config()
+    };
+    let config =
+        crate::EquipmentConfig::from_typed("EV #1".to_string(), "EV".to_string(), cfg).unwrap();
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    // 59.5 Hz asks 0.464/3 pu = 773.33 W of up-ramp from the zero export
+    // the heater-budgeted pack delivers.
+    let mut low_f = sample_env();
+    low_f.grid.frequency_hz = 59.5;
+    let mut ports = PortSlots::default();
+    ev.step(&low_f, Duration::from_secs(900), &mut ports)
+        .expect("step");
+    let p_w = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+    assert_eq!(
+        p_w, 0.0,
+        "the heater spends the whole budget: the droop may command no \
+         export, got {p_w} W"
+    );
+    let soc = ev.telemetry().get(tk::SOC).unwrap_or(f64::NAN);
+    assert!(
+        soc >= 0.2 - 1e-12,
+        "the step must not spend the reserve the export ceiling protects, \
+         got SOC {soc}"
+    );
 }
 
 /// The droop's anchor is the export the deadband crossing sees, not a
@@ -6710,6 +6798,70 @@ fn witness_der1547_ev_trip_latch_survives_checkpoint_round_trip() {
         "the latch rode the checkpoint"
     );
     assert_eq!(restored.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
+}
+
+/// The channels on the steps the layer does not step: a tripped export
+/// leg the driver idles keeps reporting the latch (an idle step cannot
+/// clear it), holds the enter-service clock (no in-window time accrues
+/// while the export function is not conducting), and reads zero for the
+/// droop's adjustment (the idle step clears the anchor, so no stale
+/// value survives). The clock resumes from where it stopped when the
+/// export returns.
+#[test]
+fn witness_der1547_ev_idle_steps_hold_the_latch_and_freeze_the_clock() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    // The 10 s UV1 window is reached inside the 60 s sag step.
+    let mut sag = sample_env();
+    sag.grid.voltage_pu = 0.6;
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+    assert_eq!(ev.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(0.0));
+
+    // The driver idles the export for a nominal step: the layer is not
+    // stepped, so the published channels read the run state.
+    ev.apply_control(&ControlSignal::PowerSetpoint {
+        active_power_w: 0.0,
+        reactive_power_var: None,
+        min_soc: None,
+        max_soc: None,
+    })
+    .expect("setpoint");
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_TRIPPED),
+        Some(1.0),
+        "the idle step keeps the latch reported"
+    );
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_ENTER_SERVICE_S),
+        Some(0.0),
+        "the export leg is its own state: no in-window time accrues idle"
+    );
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_FW_ADJ_PU),
+        Some(0.0),
+        "the idle step clears the droop adjustment"
+    );
+
+    // The export returns: the clock resumes from the frozen zero.
+    command_v2g_discharge(&mut ev, 3000.0);
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_ENTER_SERVICE_S),
+        Some(60.0),
+        "the first exporting step after the idle accrues one step"
+    );
 }
 
 /// The firing step's ride-through publication: the EV's

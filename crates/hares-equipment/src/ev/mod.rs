@@ -1159,22 +1159,60 @@ impl Ev {
         )
     }
 
-    /// One discharge leg's live AC ceiling [W]: the tighter of the leg's
-    /// rating and the AC power the pack's energy above the leg's effective
-    /// discharge floor sustains over the step (the same budget
-    /// `compute_discharge` spends against). Zero at or below the floor.
-    fn leg_discharge_ceiling_w(&self, leg: DischargeLeg, dt_s: f64) -> f64 {
-        let rating = match leg {
+    /// The DC power the pack's energy above one discharge leg's effective
+    /// floor sustains over the step, with the AC conversion efficiency
+    /// applied to it. The one home of the budget `compute_discharge`
+    /// spends and of the ceilings the dispatch votes and the IEEE 1547
+    /// availability input read.
+    fn discharge_headroom(&self, leg: DischargeLeg, dt_s: f64) -> (f64, f64) {
+        let effective_floor = self.effective_discharge_floor(leg);
+        let available_dc_w =
+            ((self.soc - effective_floor) * self.battery_capacity_j / dt_s).max(0.0);
+        (available_dc_w, self.charging_efficiency.max(0.01))
+    }
+
+    fn leg_rating_w(&self, leg: DischargeLeg) -> f64 {
+        match leg {
             DischargeLeg::V2G => self.v2g_max_discharge_w,
             DischargeLeg::V2L => self.v2l_max_discharge_w,
-        };
-        let effective_floor = self.effective_discharge_floor(leg);
-        if self.soc <= effective_floor {
-            return 0.0;
         }
-        let eta = self.charging_efficiency.max(0.01);
-        let available_dc_w = (self.soc - effective_floor) * self.battery_capacity_j / dt_s;
-        rating.min(available_dc_w * eta).max(0.0)
+    }
+
+    /// One discharge leg's live AC ceiling [W]: the tighter of the leg's
+    /// rating and the AC power the pack's energy above the leg's effective
+    /// discharge floor sustains over the step (the same energy budget
+    /// `compute_discharge` spends against, before that method's heater
+    /// allocation: the ceiling is the dispatch vote's bound, and the
+    /// heater's priority share is the step's to spend). Zero at or below
+    /// the floor.
+    fn leg_discharge_ceiling_w(&self, leg: DischargeLeg, dt_s: f64) -> f64 {
+        let (available_dc_w, eta) = self.discharge_headroom(leg, dt_s);
+        self.leg_rating_w(leg).min(available_dc_w * eta).max(0.0)
+    }
+
+    /// One discharge leg's AC export budget for the step, before the
+    /// demand-response scaling: the tighter of the leg's rating and what
+    /// the pack's energy above the leg's floor sustains after the pack
+    /// heater's priority draw. The heater takes its share first only at or
+    /// below the pack's charge-temperature floor (the branch
+    /// `compute_discharge` spends in); above it the export has priority
+    /// and the heater absorbs the shortfall, so the energy budget bounds
+    /// the export alone. This is the bound the delivered export is under,
+    /// and so the one the frequency-droop availability input carries.
+    fn leg_discharge_budget_w(
+        &self,
+        leg: DischargeLeg,
+        dt: Duration,
+        heater_desired_dc_w: f64,
+    ) -> f64 {
+        let dt_s = dt.as_secs_f64().max(MIN_TIMESTEP_HOURS * 3600.0);
+        let (available_dc_w, eta) = self.discharge_headroom(leg, dt_s);
+        let headroom_dc_w = if self.battery_temp_c <= self.min_charge_temp_c {
+            (available_dc_w - heater_desired_dc_w.min(available_dc_w).max(0.0)).max(0.0)
+        } else {
+            available_dc_w
+        };
+        self.leg_rating_w(leg).min(headroom_dc_w * eta).max(0.0)
     }
 
     /// The pack's live AC discharge ceiling [W]: the tighter of the
@@ -1602,12 +1640,19 @@ impl Ev {
             // leg is the vehicle's load-side behavior and is never the
             // DER function. An unconfigured layer warns once on the first
             // excursion it declines to govern.
-            // The availability input is the live ceiling with the demand
-            // response fraction applied: the export passed as the model's
-            // own output is already DR scaled, so the droop's up-ramp must
-            // stop at the same cap (the stationary battery's availability
+            // The availability input is the export the delivered power is
+            // already under: the live ceiling with the demand response
+            // fraction applied, and net of the pack heater's priority draw
+            // (the export passed as the model's own output is already DR
+            // scaled and heater budgeted, so the droop's up-ramp must stop
+            // at the same bound; the stationary battery's availability
             // input carries the same deliverable-bound composition).
-            let droop_availability_w = self.discharge_ceiling_w * self.dr_power_fraction();
+            let export_budget_w = self.discharge_ceiling_w.min(self.leg_discharge_budget_w(
+                leg,
+                dt,
+                heater_desired_dc_w,
+            ));
+            let droop_availability_w = export_budget_w * self.dr_power_fraction();
             match &mut self.der1547 {
                 Some(controller) => {
                     // `compute_discharge` returns the port's sign

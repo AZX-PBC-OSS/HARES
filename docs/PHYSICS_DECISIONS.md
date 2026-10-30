@@ -1715,8 +1715,9 @@ operating point the response may exceed: each class's availability
 input carries the cap the delivered export was already under (the
 battery's is the deliverable discharge bound: the DR fraction with the
 export and external power limits, the same composition `clamp_power`
-applies to its own output; the EV's carries the fraction, its
-pre-disturbance output already the DR-scaled export). A full shed
+applies to its own output; the EV's carries the fraction and the
+ceiling net of the pack heater's priority draw, its pre-disturbance
+output already the DR-scaled, heater-budgeted export). A full shed
 (GridEmergency) therefore holds zero export through an under-frequency
 excursion, and a partial shed caps the ramp at the shed level.
 
@@ -1728,7 +1729,11 @@ fraction with the import and external power limits), and the pack's
 charge capability derate and a configured charging-curve LUT's fraction
 apply to the delivered charge through `clamp_power`. Without the bound
 an over-frequency excursion would absorb through a service's import
-limit or a full shed.
+limit or a full shed. The EV export's floor is zero (a
+generation-only inverter does not absorb), and an under-frequency
+excursion would export a near-reserve pack's heater headroom without
+the availability's heater budget, landing the pack's SOC below its
+reserve floor.
 
 The checkpoint answer: the PV, Battery and EV formats move to v5, v4 and
 v10 with the layer's state added, so a pre-1547 save (v4, v3, v9) is
