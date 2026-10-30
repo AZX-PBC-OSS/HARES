@@ -570,12 +570,23 @@ cmd_test() {
         printf '#!/bin/sh\nexit 0\n' > "$stub/target/head-bench/$target"
         chmod +x "$stub/target/base-bench/$target" "$stub/target/head-bench/$target"
     done
+    # The base tree predates one target (a PR's new bench); the head's
+    # same target crashes at startup.
+    rm "$stub/target/base-bench/fleet"
+    printf '#!/bin/sh\nexit 1\n' > "$stub/target/head-bench/fleet"
+    chmod +x "$stub/target/head-bench/fleet"
     local stub_rc
     stub_rc=0
     ( cd "$stub" && bash "$SCRIPT_DIR/bench-gate.sh" rounds 1 1 ) \
         >/dev/null 2>"$scratch/stub-err" || stub_rc=$?
+    local stub_err
+    stub_err="$(cat "$scratch/stub-err")"
+    check "a side without a binary warns that its benchmarks are unpaired" 1 \
+        "$(grep -c 'base/fleet has no binary' <<<"$stub_err")"
+    check "a binary that fails to run warns that its benchmarks are unpaired" 1 \
+        "$(grep -c 'head/fleet failed in round 1' <<<"$stub_err")"
     check "a round with no export data is an error" 1 \
-        "$(grep -c 'no base benchmark data was recorded for round 1' <<<"$(cat "$scratch/stub-err")")"
+        "$(grep -c 'no base benchmark data was recorded for round 1' <<<"$stub_err")"
     check "a round with no export data fails the gate" 1 "$stub_rc"
 
     # A critcmp that succeeds but writes nothing is missing data too: the
@@ -590,6 +601,17 @@ cmd_test() {
         "$(grep -c 'no base benchmark data was recorded for round 1' \
             <<<"$(cat "$scratch/empty-err")")"
     check "an export with no benchmark data fails the gate" 1 "$stub_rc"
+
+    # 11. The flip schedule: odd rounds run the base side first, even
+    #     rounds the head side, so a positional effect lands on the second
+    #     side of its own round instead of accumulating on one side. The
+    #     stub workspace's own log names each run in order.
+    local flip_log first_target="${BENCH_TARGETS[0]}"
+    flip_log="$( cd "$stub" && bash "$SCRIPT_DIR/bench-gate.sh" rounds 1 2 2>/dev/null || true )"
+    check "an odd round runs the base side first" "== round 1 base/$first_target" \
+        "$(grep -m1 '^== round 1 ' <<<"$flip_log")"
+    check "an even round runs the head side first" "== round 2 head/$first_target" \
+        "$(grep -m1 '^== round 2 ' <<<"$flip_log")"
 
     echo ""
     if [ "$failures" -gt 0 ]; then
