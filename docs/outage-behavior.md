@@ -54,6 +54,12 @@ Island sources:
   shed curtailed to zero watts: an island held by a source that delivers
   nothing runs every load on phantom power. Islanding takes effect one
   step after export begins and collapses the first step delivery stops.
+  The event's fraction scales the EV's islanded dispatch itself (export
+  and charge), unlike the battery's: the EV's availability keys on the
+  delivery, so a delivery the shed could not touch would keep the island
+  alive through a full event. A partial event's shortfall therefore
+  surfaces as `island_unserved_w`, and a full event's zero delivery
+  collapses the island.
 - **PV is never an island source** — it is a grid-following inverter
   (IEEE 1547) and cannot form a bus on its own.
 

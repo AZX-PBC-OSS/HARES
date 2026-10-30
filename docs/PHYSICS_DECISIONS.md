@@ -1641,4 +1641,7 @@ removes the home's resilience function exactly when the DR event and the
 outage coincide, which is the resilience scenario the island exists for.
 The EV keeps its delivered-export form of the same capability pattern
 (its availability reads the previous step's delivered watts, so a
-shed EV delivers nothing and no island forms on it).
+shed EV delivers nothing and no island forms on it); the event's
+fraction scales the EV's islanded dispatch itself, the dispatch the
+island runs on, because lifting it would keep a fully shed EV
+delivering and the island alive through the event.
