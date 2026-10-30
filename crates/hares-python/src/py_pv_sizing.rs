@@ -123,7 +123,7 @@ impl PyRoofPlane {
 }
 
 /// A candidate PV placement on a roof plane.
-#[pyclass(frozen, name = "PvCandidate", skip_from_py_object)]
+#[pyclass(frozen, name = "PvCandidate")]
 #[derive(Debug, Clone)]
 pub struct PyPvCandidate {
     inner: PvCandidate,
@@ -202,7 +202,7 @@ impl PyPvCandidate {
 }
 
 /// PV system sizing result.
-#[pyclass(frozen, name = "PvSizingResult", skip_from_py_object)]
+#[pyclass(frozen, name = "PvSizingResult")]
 #[derive(Debug, Clone)]
 pub struct PyPvSizingResult {
     pub(crate) inner: PvSizingResult,
@@ -298,7 +298,7 @@ impl PyPvSizingResult {
 }
 
 /// Result of usable roof area computation from `compute_usable_area`.
-#[pyclass(frozen, name = "UsableRoofArea", skip_from_py_object)]
+#[pyclass(frozen, name = "UsableRoofArea")]
 #[derive(Debug, Clone)]
 pub struct PyUsableRoofArea {
     inner: UsableRoofArea,

@@ -2796,7 +2796,7 @@ impl PyBmsMode {
 
 // ── ExtrapolationStrategy ────────────────────────────────────────────
 
-#[pyclass(name = "ExtrapolationStrategy", skip_from_py_object)]
+#[pyclass(name = "ExtrapolationStrategy")]
 #[derive(Clone, Copy)]
 pub struct PyExtrapolationStrategy {
     inner: RustExtrapolationStrategy,

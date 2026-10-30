@@ -316,7 +316,7 @@ impl PyTariffEvaluator {
 // PyTariffBuilder
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "TariffBuilder", skip_from_py_object)]
+#[pyclass(name = "TariffBuilder")]
 #[derive(Debug, Clone)]
 pub struct PyTariffBuilder {
     name: Option<String>,
@@ -765,7 +765,7 @@ impl PyGasTariff {
 // PyGasTariffBuilder
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "GasTariffBuilder", skip_from_py_object)]
+#[pyclass(name = "GasTariffBuilder")]
 #[derive(Debug, Clone)]
 pub struct PyGasTariffBuilder {
     name: Option<String>,
