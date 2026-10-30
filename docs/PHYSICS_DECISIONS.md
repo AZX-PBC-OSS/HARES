@@ -1577,7 +1577,12 @@ The duration is the steps the event covers, so the boundary is a
 contract too: a zero-second event is legal (`duration_s` is validated to
 a finite value of at least zero) and names no step, so it resolves to no
 event at all and sheds nothing; the classes apply that boundary through
-one resolver, `demand_response_command`. A later command supersedes a
+one resolver, `demand_response_command`. A duration that is not a whole
+number of timesteps covers every step whose interval overlaps the
+window, and a partial final overlap sheds the step in full: a 90 s event
+at 60 s steps sheds the step it lands in and the step after (the
+release's revert runs at the step's end, never mid-dispatch). A later
+command supersedes a
 running one: its level applies and the countdown restarts from its own
 duration.
 
