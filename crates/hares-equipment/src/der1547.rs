@@ -1521,6 +1521,33 @@ mod tests {
         assert_eq!(ctrl.state().fw_p_pre_pu, None, "the trip clears the anchor");
     }
 
+    /// The bitwise guard: when the droop's reference coincides with the
+    /// model's own output in per unit, the outcome carries the model's
+    /// value bitwise, so a caller's exact comparison leaves the undrooped
+    /// path untouched. 2795 W of a 5000 W rating is a value whose per-unit
+    /// round trip is not the identity (0.559 x 5000 returns
+    /// 2795.0000000000005), so a layer that rebuilt the reference from its
+    /// per-unit form would hand the caller a different number.
+    #[test]
+    fn the_reference_is_bitwise_the_models_output_when_the_droop_is_inactive() {
+        let p_normal_w = 2795.0;
+        assert_ne!(
+            p_normal_w / 5000.0 * 5000.0,
+            p_normal_w,
+            "the hand-computed witness: the round trip moves this value"
+        );
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let out = ctrl
+            .step(1.0, 60.0, 900.0, true, p_normal_w, p_normal_w, 0.0)
+            .expect("valid step");
+        assert!(!out.tripped);
+        assert_eq!(
+            out.p_ref_w, p_normal_w,
+            "the inactive droop's reference is the model's own value bitwise"
+        );
+        assert_eq!(out.fw_adj_pu, 0.0);
+    }
+
     // -- Return to service (the reconnection delay). --
 
     /// The reconnection delay's pin: after a trip, the inverter stays
@@ -1715,6 +1742,18 @@ mod tests {
         let ride = one_step(&mut ctrl, 0.6, 60.0, 5.0, 2700.0);
         assert!(!ride.tripped);
 
+        // Consecutive outage steps are the same reset, so the part-spent
+        // window the ride left does not survive an outage step either: the
+        // branch carries no state of its own across an outage.
+        let again = ctrl
+            .step(0.0, 60.0, 900.0, false, 2700.0, 2700.0, 0.0)
+            .expect("valid step");
+        assert!(!again.tripped, "no outage step trips an online inverter");
+        assert_eq!(again.p_ref_w, 2700.0);
+        assert_eq!(again.ride_through_s, 0.0, "the part-spent window resets");
+        assert_eq!(ctrl.state().max_accumulator_s(), 0.0);
+        assert_eq!(ctrl.state().fw_p_pre_pu, None);
+
         // A latched trip survives the outage step (the caller's dead-bus
         // gate holds the power at zero either way), and the islanded bus
         // (1.0 pu, in the enter-service windows) accumulates the delay.
@@ -1763,6 +1802,49 @@ mod tests {
         assert!(latched.tripped);
         assert_eq!(latched.ride_through_s, 0.0);
         assert_eq!(latched.enter_service_s, 60.0);
+    }
+
+    /// A trip band that holds on a reconnection-delay step neither re-fires
+    /// the trip nor renames it: the latch's reason is the one the trip set,
+    /// and the enter-service clock is the windows' alone. A deeper band (a
+    /// 0.4 pu sag inside UV2's band while a UV1 latch holds) leaves the
+    /// reason at UV1, re-runs no window, and its out-of-window reading
+    /// spends the clock exactly as any other out-of-window step does.
+    #[test]
+    fn a_trip_band_on_a_delay_step_restates_neither_the_reason_nor_the_clock() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let trip = one_step(&mut ctrl, 0.6, 60.0, 60.0, 2700.0);
+        assert_eq!(trip.trip_reason, trip_reason::UV1);
+        let wait = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2700.0);
+        assert_eq!(wait.enter_service_s, 60.0, "the restored step accrues");
+
+        // 0.4 pu is inside UV2's band and outside the enter-service
+        // windows: the latched inverter keeps its own reason and spends the
+        // clock. A re-evaluating latch would name UV2 and restart the
+        // delay from a fresh trip.
+        let deeper = one_step(&mut ctrl, 0.4, 60.0, 60.0, 2700.0);
+        assert!(deeper.tripped, "the latch holds through the deeper band");
+        assert_eq!(
+            deeper.trip_reason,
+            trip_reason::UV1,
+            "the latch keeps the reason its own trip set"
+        );
+        assert_eq!(
+            deeper.ride_through_s, 0.0,
+            "no point's window runs while the latch holds"
+        );
+        assert_eq!(
+            deeper.enter_service_s, 0.0,
+            "0.4 pu is outside the windows: the clock is spent, not re-timed"
+        );
+        assert_eq!(ctrl.state().max_accumulator_s(), 0.0);
+        assert_eq!(ctrl.state().trip_reason, trip_reason::UV1);
+
+        // The restored stretch then holds the whole delay from zero.
+        for step in 1..=5 {
+            let out = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2700.0);
+            assert_eq!(out.tripped, step < 5, "step {step}");
+        }
     }
 
     /// The fail-safe: a non-finite bus voltage or frequency de-energizes

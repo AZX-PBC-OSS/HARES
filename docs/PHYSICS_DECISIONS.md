@@ -1377,6 +1377,7 @@ the entry "The DER inverters answer the grid signals per IEEE 1547 when
 configured" (the coefficient source the gap demanded, landed and cited
 there). The unconfigured DER classes still read nothing, exactly as
 this entry records.
+
 ## The MSHP pan heater runs on ambient temperature alone
 
 The minisplit heat pump's condensate pan heater draws its rated 0.150 kW
@@ -1671,7 +1672,11 @@ window and never another band's timer that ran on the same step (a 0.4 pu
 sag fills both UV1's and UV2's timers and reports UV2's 0.16 s, not UV1's
 10 s), and the latched inverter's per-disturbance timers are spent (the
 ride-through channel resets when the point trips), so a save taken while
-the latch holds carries no partial window.
+the latch holds carries no partial window. A trip condition that holds on
+a reconnection-delay step is not re-evaluated: the latch keeps the reason
+its own trip set and the enter-service clock is the windows' alone, so a
+deeper band on such a step re-fires nothing and renames nothing while its
+out-of-window reading spends the clock.
 
 A simultaneous voltage and frequency excursion runs both trip paths: the
 eight points are independent on-delay timers, a step in two bands
@@ -1684,7 +1689,13 @@ itself is the same whichever point names it. Every equipment publishes
 its own trip state on the step it fires, and the dwelling's dense
 per-DER channel is aligned with the equipment roster, so a step that
 trips several DERs publishes each at its own index in the roster's
-order.
+order. The six channels' names (`der1547_tripped`,
+`der1547_trip_reason`, `der1547_ride_through_s`,
+`der1547_enter_service_s`, `der1547_fw_adj_pu`,
+`der1547_unconfigured_excursions`) are the consumer's contract, not an
+internal spelling: each is pinned by its literal name with a value only
+that channel produces, so a rename shows as a broken pin rather than a
+silent break for the reader keyed on it.
 
 The frequency-droop pre-disturbance anchor is the inverter's undrooped
 output at the step the deadband is crossed, held while the excursion
@@ -1703,7 +1714,9 @@ output. The island model reads the latch: a battery whose trip latch is
 set has ceased to energize and is not an island source (an island
 founded on it would run the loads on phantom power), while an island
 bus another source holds up counts toward the latched inverter's
-enter-service delay as any in-window bus does.
+enter-service delay as any in-window bus does. The EV's export leg
+answers the same question from its delivered export, which a tripped
+step zeroes, so a latched EV cannot found an island either.
 
 A tripped inverter owes nothing to a demand-response event: its
 delivered interchange is zero while the latch holds (for the
@@ -1759,7 +1772,7 @@ named witness; the layer's inputs in parentheses):
 | PV | the array's irradiance output (weather, soiling, shading), then the operator curtailment (fraction, then limit), then the layer's reference, then the DC follows the delivery. The availability input IS the irradiance-capped output, so the layer's window is the whole composition and no caller-side re-clamp exists | `pv::tests::witness_der1547_pv_droop_reference_never_exceeds_the_available_irradiance` (a falling sky inside a held excursion: the composed output is the dim sky's deliverable, not the stale anchor's ask) |
 | Battery | `determine_target_power` (whose `clamp_power` applies the temperature capability and a configured charging-curve LUT), then the layer's reference (the availability input = the deliverable discharge bound, the floor = the deliverable charge bound: the DR fraction, the import/export limits, the external power limit), then `clamp_power` again on the layered reference, then the pack's SOC and thermal machinery. The droop runs only on a step the pack is dispatched on: a zeroed row, a dead bus and a disconnected pack take no response (the trip tables still watch) | `battery::tests::witness_der1547_battery_droop_absorption_obeys_the_charge_bound` (the import limit, the full shed), `witness_der1547_layered_reference_delivery_obeys_the_charge_capability` (the cold pack's derate on the delivered charge) and `witness_der1547_an_unavailable_period_takes_no_droop_response` (the zeroed rows) |
 | EV (export leg) | `compute_discharge` (the heater's priority budget), then the layer's reference (the availability input = the resolved leg's own export budget times the DR fraction: its rating, the pack's energy above that leg's floor, and the heater's priority share, never the pack-wide dispatch ceiling that may be a smaller sibling leg's; the floor = 0) | `ev::tests::witness_der1547_ev_droop_export_obeys_the_heater_budgeted_ceiling` and `witness_der1547_ev_droop_availability_is_the_resolved_legs_budget` (both legs enabled: a smaller V2L rating does not bind the V2G leg's reference) |
-| EV (charge leg) | outside the layer entirely: the vehicle's load-side behavior (the charge leg is never the DER function), the droop anchor cleared on the steps it conducts | `ev::tests::witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_side` |
+| EV (charge leg) | outside the layer entirely: the vehicle's load-side behavior (the charge leg is never the DER function), the droop anchor cleared on the steps it conducts. Both faces are the exclusion's: a sag neither trips it, and an over-frequency excursion does not curtail it (the configured step delivers the unconfigured twin's port power) | `ev::tests::witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_side` |
 
 The PV needs no caller-side re-clamp and the battery needs one because
 of what each class's availability input can carry: the PV's input is

@@ -2268,6 +2268,78 @@ mod tests {
         );
     }
 
+    /// The six IEEE 1547 channels publish under the consumer's exact names.
+    /// The strings are the shipped contract (a reader keys on them; a
+    /// rename is a silent break), so each is read here by its literal name
+    /// with a value only that channel produces: the droop's ramp, the
+    /// trip's state, reason and firing window, the enter-service clock of
+    /// a latched inverter, and the unconfigured excursion count.
+    #[test]
+    fn the_six_der1547_channels_publish_under_their_contract_names() {
+        // A 10 000 s enter-service delay (the operator surface admits it)
+        // holds the latch across the restored step, so the clock's
+        // published value is that step's own 900 s rather than zero.
+        let settings = Der1547Settings {
+            category: crate::der1547::Der1547Category::CatII,
+            overrides: Some(crate::der1547::Der1547Overrides {
+                es_delay_s: Some(10_000.0),
+                ..Default::default()
+            }),
+        };
+        let config = config_single_with_der1547(settings);
+        let mut pv = PV::new(config.clone());
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config, &env_nominal).unwrap();
+
+        // 60.536 Hz is 0.5 Hz beyond the 60.036 Hz edge: the ramp sheds
+        // 1/6 pu, and the adjustment's own channel carries it.
+        let mut hi_f = env_with_surfaces(sunny.clone(), 25.0);
+        hi_f.grid.frequency_hz = 60.536;
+        let mut ports = PortSlots::default();
+        pv.step(&hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert!(
+            pv.telemetry().get("der1547_fw_adj_pu").unwrap_or(0.0) < -1e-6,
+            "the droop's adjustment rides its own channel"
+        );
+
+        // The 0.6 pu sag reaches UV1's 10 s window: the trip and its
+        // window channels.
+        let mut sag = env_with_surfaces(sunny.clone(), 25.0);
+        sag.grid.voltage_pu = 0.6;
+        ports.zero();
+        pv.step(&sag, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(pv.telemetry().get("der1547_tripped"), Some(1.0));
+        assert_eq!(pv.telemetry().get("der1547_trip_reason"), Some(2.0));
+        assert_eq!(pv.telemetry().get("der1547_ride_through_s"), Some(10.0));
+
+        // The restored bus is inside the enter-service windows: the clock
+        // accrues the step and the latch holds.
+        let restored = env_with_surfaces(sunny, 25.0);
+        ports.zero();
+        pv.step(&restored, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            pv.telemetry().get("der1547_enter_service_s"),
+            Some(900.0),
+            "the latched inverter's clock rides its own channel"
+        );
+        assert_eq!(pv.telemetry().get("der1547_tripped"), Some(1.0));
+        assert_eq!(
+            pv.telemetry().get("der1547_unconfigured_excursions"),
+            Some(0.0),
+            "the configured layer counts no excursion"
+        );
+    }
+
     /// The ride-through window honored at a timestep finer than the
     /// clearing time: 5 s steps at 0.6 pu accumulate 5 s of UV1's 10 s
     /// window on the first step (the inverter keeps producing), and the

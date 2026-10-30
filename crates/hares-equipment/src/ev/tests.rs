@@ -6504,6 +6504,44 @@ fn witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_si
          function: it continues through the sag"
     );
 
+    // The exclusion's over-frequency face: the same charge step at 61.5 Hz
+    // delivers the same port power with the layer configured as without it.
+    // The frequency-Watt function governs the export inverter, not the
+    // vehicle's load, so a configured layer curtails nothing here.
+    let mut hi_f = sample_env();
+    hi_f.grid.frequency_hz = 61.5;
+    let mut charged_w = Vec::new();
+    for settings in [Some(cat2_settings()), None] {
+        let config = v2g_config_with_der1547(settings);
+        let mut ev = Ev::new(config.clone());
+        ev.init(&config, &sample_env()).expect("init");
+        ev.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: 7200.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+        let mut ports = PortSlots::default();
+        ev.step(&hi_f, Duration::minutes(15), &mut ports)
+            .expect("step");
+        assert_eq!(
+            ev.telemetry().get(tk::DER1547_TRIPPED),
+            Some(0.0),
+            "the charge leg is no DER function: no trip"
+        );
+        charged_w.push(ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0));
+    }
+    assert!(
+        charged_w[0] > 1.0,
+        "the charge leg keeps charging through an over-frequency excursion"
+    );
+    assert_eq!(
+        charged_w[0], charged_w[1],
+        "the configured layer changes nothing on the charge leg: the \
+         unconfigured twin delivers the same port power"
+    );
+
     // The unconfigured layer's EV face: the pre-1547 behavior, warned and
     // counted.
     let config = v2g_config_with_der1547(None);
@@ -6721,6 +6759,41 @@ fn witness_der1547_ev_island_source_is_never_tripped_off_its_island() {
         "the island source exports through the outage step"
     );
     assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+}
+
+/// A latched export inverter has ceased to energize, so it is not an
+/// island source: the trip's zero export is what the island gate reads.
+/// The stationary battery's gate reads its latch directly; the EV's reads
+/// the step's delivery, and a tripped step delivers nothing, so an island
+/// founded on the EV would have to run every load on phantom power.
+#[test]
+fn witness_der1547_a_tripped_ev_is_not_an_island_source() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert!(
+        ev.island_source_available(),
+        "the delivering export leg can found an island"
+    );
+
+    // The 0.6 pu sag trips the inverter: the export is zero from the
+    // firing step on, so the gate that reads the delivery closes.
+    let mut sag = sample_env();
+    sag.grid.voltage_pu = 0.6;
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::minutes(15), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+    assert_eq!(ev.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
+    assert!(
+        !ev.island_source_available(),
+        "a latched inverter cannot hold the bus up"
+    );
 }
 
 /// The frequency-droop shape on the export leg: 60.536 Hz is 0.5 Hz
