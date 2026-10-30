@@ -1589,6 +1589,22 @@ fn apply_typed_overrides(
     Ok(())
 }
 
+/// The value a key's override layers give it, by the merge's own layer
+/// order: the equipment's own entry when it names the key, else the
+/// wildcard's. `None` when no layer names it. A layer that names the key
+/// with a `null` returns that null: the merge applies the own layer after
+/// the wildcard, so a null is the last word on the key (an unset), not a
+/// fall-through to the layer beneath.
+fn override_layer_value<'a>(
+    layers: hares_io::hpxml::OverrideLayers<'a>,
+    key: &str,
+) -> Option<&'a Value> {
+    layers
+        .own
+        .and_then(|own| own.get(key))
+        .or_else(|| layers.wildcard.and_then(|(_, wildcard)| wildcard.get(key)))
+}
+
 /// The ideal HVAC's fraction fields are two channels for ONE load-fraction
 /// control its init reads the heating field ahead of, so an override of one
 /// field could never apply while the resolution's value stood in the other.
@@ -1596,7 +1612,9 @@ fn apply_typed_overrides(
 /// the other, making the overridden field the tier the init reads (the same
 /// shadow removal a constant setpoint's override applies to its schedule
 /// source). The layers naming both fields remove neither: the init refuses
-/// the differing pair that remains, naming both.
+/// the differing pair that remains, naming both. A `null` names no value
+/// (the merge's own unset), so it sets neither field and removes neither:
+/// the resolution's value on the surviving channel stands.
 fn remove_override_shadowed_ideal_fractions(
     merged: &mut Map<String, Value>,
     layers: hares_io::hpxml::OverrideLayers<'_>,
@@ -1606,14 +1624,7 @@ fn remove_override_shadowed_ideal_fractions(
     if type_name != "Ideal HVAC" {
         return;
     }
-    let set = |key: &str| {
-        layers
-            .own
-            .into_iter()
-            .flatten()
-            .chain(layers.wildcard.into_iter().flat_map(|(_, layer)| layer))
-            .any(|(key_set, _)| key_set.as_str() == key)
-    };
+    let set = |key: &str| override_layer_value(layers, key).is_some_and(|value| !value.is_null());
     let heating_set = set("fraction_heating_load_served");
     let cooling_set = set("fraction_cooling_load_served");
     let removed = match (heating_set, cooling_set) {
@@ -1645,25 +1656,29 @@ const SETPOINT_SOURCE_SHADOWS: [(&str, &str); 2] = [
 
 /// The constant setpoint, in Celsius, that the override layers set on one
 /// thermostat side, when they set one: the equipment's own entry's
-/// `setpoint` object first, then the wildcard's. A `null` value does not
-/// set a constant (it unsets one), and a non-numeric value fails the
-/// merged payload's schema at the validation that follows the merge.
+/// `setpoint` object first, then the wildcard's. The merge applies the own
+/// layer after the wildcard, so the own layer's entry is the last word on
+/// the key: a `null` there unsets the constant and does not re-expose the
+/// wildcard's replaced value, and a non-numeric value fails the merged
+/// payload's schema at the validation that follows the merge.
 pub(crate) fn override_constant_setpoint_value(
     layers: hares_io::hpxml::OverrideLayers<'_>,
     prefix: &str,
 ) -> Option<f64> {
     let key = format!("{prefix}_setpoint_c");
-    let constant = |layer: &Map<String, Value>| {
-        layer
-            .get("setpoint")
-            .and_then(Value::as_object)
-            .and_then(|sp| sp.get(&key))
-            .and_then(Value::as_f64)
-    };
-    layers
+    let value = layers
         .own
-        .and_then(constant)
-        .or_else(|| layers.wildcard.and_then(|(_, wildcard)| constant(wildcard)))
+        .and_then(|own| own.get("setpoint"))
+        .and_then(Value::as_object)
+        .and_then(|sp| sp.get(&key))
+        .or_else(|| {
+            layers
+                .wildcard
+                .and_then(|(_, wildcard)| wildcard.get("setpoint"))
+                .and_then(Value::as_object)
+                .and_then(|sp| sp.get(&key))
+        })?;
+    value.as_f64()
 }
 
 /// Remove the merged config's per-side schedule sources that a constant
@@ -2648,6 +2663,36 @@ mod tests {
         );
     }
 
+    /// An explicit null on one fraction channel unsets that channel; it
+    /// names no value, so it must not remove the other channel's resolved
+    /// value. The init then reads the surviving resolved value, exactly as
+    /// a null constant leaves the setpoint's schedule source governing.
+    #[test]
+    fn a_null_ideal_fraction_does_not_remove_the_other_channel() {
+        let spec = ideal_hvac_spec();
+        let overrides = json!({
+            "Ideal HVAC": {
+                "fraction_cooling_load_served": null
+            }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<IdealHvacConfig>("Ideal HVAC")
+            .expect("the merged config decodes");
+
+        assert_eq!(
+            cfg.fraction_cooling_load_served, None,
+            "the null unsets the channel it names"
+        );
+        assert_eq!(
+            cfg.fraction_heating_load_served,
+            Some(0.9),
+            "an unset channel names no value: the resolution's heating value \
+             must stand, not be removed as if the null set the other channel"
+        );
+    }
+
     /// A 24-hour constant daily profile, the shape the resolver stamps.
     fn constant_profile(value: f64) -> Value {
         Value::Array(vec![Value::from(value); 24])
@@ -2765,6 +2810,51 @@ mod tests {
 
         assert_eq!(cfg.setpoint.heating_setpoint_c, None);
         assert!(cfg.setpoint.heating_setpoint_source.is_some());
+    }
+
+    /// The highest-precedence layer that names a side's constant decides
+    /// it: the own layer lands after the wildcard, so an equipment-specific
+    /// null replaces the wildcard's constant with no constant at all, and
+    /// the resolution's schedule source must then stand. The shadow removal
+    /// reads the layers, so it must apply the same precedence: a null must
+    /// not let the wildcard's value remove the source the payload keeps.
+    #[test]
+    fn a_null_constant_in_the_own_layer_unsets_the_wildcards_and_keeps_the_source() {
+        let mut spec = gas_furnace_spec();
+        if let Some(typed) = spec.typed_config.as_mut()
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            let obj = data.as_object_mut().expect("furnace payload object");
+            obj.insert(
+                "setpoint".to_string(),
+                json!({
+                    "heating_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(20.0),
+                        "weekend": constant_profile(20.0)
+                    }
+                }),
+            );
+        }
+        let overrides = json!({
+            "all": {"setpoint": {"heating_setpoint_c": 25.0}},
+            "Gas Furnace": {"setpoint": {"heating_setpoint_c": null}}
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("the merged config decodes");
+
+        assert_eq!(
+            cfg.setpoint.heating_setpoint_c, None,
+            "the own layer's null is the last word: no constant governs"
+        );
+        assert!(
+            cfg.setpoint.heating_setpoint_source.is_some(),
+            "no constant governs, so the resolution's schedule source must stand; \
+             the wildcard's replaced 25.0 must not remove it"
+        );
     }
 
     // ── the spec's parameter bag as an override layer on typed specs ────
