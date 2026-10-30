@@ -6565,10 +6565,15 @@ mod tests {
 
     /// A duration between two timesteps covers every step whose interval
     /// overlaps the window, and a partial final overlap sheds the step in
-    /// full: a 90 s event at 60 s steps sheds the step it lands in and the
-    /// step after, and the release lands on the third step's control pass.
-    /// The step's dispatch reads the level at its start; the timer reverts
-    /// at the step's end, never mid-dispatch.
+    /// full. The fixture's step is `step_s`, and the event lasts 1.25 of
+    /// them: the window overlaps the second step by a quarter step, which
+    /// is still an overlap, so the second step sheds and the release lands
+    /// on the third step's control pass. A quarter step, not a half: the
+    /// half-step alternative (rounding the duration to the nearest whole
+    /// number of timesteps) sheds two steps at 1.5 and one at 1.25, so only
+    /// a window strictly inside the second step's first half separates the
+    /// overlap rule from rounding. The step's dispatch reads the level at
+    /// its start; the timer reverts at the step's end, never mid-dispatch.
     #[test]
     fn a_duration_between_steps_sheds_every_step_it_overlaps() {
         let env = warm_env();
@@ -6578,7 +6583,7 @@ mod tests {
         bat.init(&config, &env).expect("init");
         bat.apply_control(&ControlSignal::DemandResponse {
             level: DRLevel::GridEmergency,
-            duration_s: Some(1.5 * step_s as f64),
+            duration_s: Some(1.25 * step_s as f64),
         })
         .expect("DR accepted");
         bat.apply_control(&ControlSignal::PowerSetpoint {
@@ -6590,7 +6595,7 @@ mod tests {
         .expect("setpoint");
 
         // Both overlapped steps shed in full: the event's window overlaps
-        // the second step's first half, and a partial overlap is a shed
+        // the second step's first quarter, and a partial overlap is a shed
         // step (the advance runs at the step's end).
         for step in 0..2 {
             bat.update_control(&env);
@@ -6606,7 +6611,7 @@ mod tests {
             );
         }
 
-        // The third step: the 90 s window is behind, the discharge resumes.
+        // The third step: the window is behind, the discharge resumes.
         bat.update_control(&env);
         let mut ports = default_ports();
         bat.step(&env, Duration::from_secs(step_s), &mut ports)
@@ -6614,8 +6619,11 @@ mod tests {
         let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
         assert!(
             power < -1000.0,
-            "the 90 s event at 60 s steps is over after the two overlapped \
-             steps: the commanded 2 kW discharge must resume, got {power} W"
+            "the 1.25-timestep event ({} s at {} s steps) is over after the \
+             two overlapped steps: the commanded 2 kW discharge must resume, \
+             got {power} W",
+            1.25 * step_s as f64,
+            step_s,
         );
     }
 
