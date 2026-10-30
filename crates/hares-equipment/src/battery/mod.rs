@@ -3206,6 +3206,58 @@ mod tests {
         );
     }
 
+    /// The layered reference's delivery is the pack's clamp's business:
+    /// the charge the droop commands is a charge command like the model's
+    /// own, so the temperature-dependent charge capability governs what
+    /// is delivered (a configured charging-curve LUT's fraction rides the
+    /// same `clamp_power` call). The anchor latches at the crossing
+    /// step's charging output (-0.6 pu from the 3000 W setpoint); the
+    /// 62 Hz ramp asks 1.254667 pu of absorption out of it (0.6 + the
+    /// 0.654667 pu reach), the layer's own floor (the operator bounds:
+    /// 5000 W at Normal, no import limit) passes 5000 W, and the cold
+    /// pack's capability derate (5/6 at +5 °C on the piecewise model
+    /// pinned below: 0.0 at -20 °C, 1.0 at 10 °C) caps the delivery at
+    /// 5000 x 5/6 = 4166.667 W. Without the clamp the full 5000 W would
+    /// reach the port. OF2 is strict at 62.0 and OF1's 300 s window is
+    /// not reached in 60 s, so the step does not trip.
+    #[test]
+    fn witness_der1547_layered_reference_delivery_obeys_the_charge_capability() {
+        let config = EquipmentConfig::from_typed(
+            "Test Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                der_1547: Some(cat2_settings()),
+                ..battery_config_fields()
+            },
+        )
+        .unwrap();
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear {
+            points: vec![(-20.0, 0.0), (10.0, 1.0)],
+        };
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: 3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        bat.cell_temp_c = 5.0;
+        let mut hi_f = base_env();
+        hi_f.grid.frequency_hz = 62.0;
+        let mut ports = default_ports();
+        bat.step(&hi_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - 4176.6666667).abs() < 1e-6,
+            "the cold pack's charge capability governs the layered \
+             reference's delivery: expected 4166.667 W of charge plus the \
+             10 W standby draw, got {p} W"
+        );
+    }
+
     /// The trip tables watch the bus through an unavailable period. The
     /// HPXML unavailable-period convention zeroes the battery's dispatch
     /// rows; its inverter stays connected and supplied (the standby draw
