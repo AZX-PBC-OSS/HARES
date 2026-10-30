@@ -50,7 +50,10 @@
 #       and head-r<k> and exports them to
 #       target/bench-rounds/{base,head}-r<k>.json. The optional filter is
 #       criterion's positional FILTER (the confirmation re-runs only the
-#       flagged ids). Run from the workspace root: critcmp reads
+#       flagged ids). A side whose binary is missing or fails to run is a
+#       warning and its benchmarks are unpaired this round; an export
+#       that records no benchmark data is an error, never a completed
+#       round. Run from the workspace root: critcmp reads
 #       ./target/criterion, where the binaries write.
 #   paired <base-1.json> <head-1.json> [<base-2.json> <head-2.json> ...]
 #       Emit {"statistic", "threshold_ratio", "rounds", "regressions",
@@ -299,8 +302,15 @@ cmd_rounds() {
     for r in $(seq "$first" $((first + count - 1))); do
         for side in base head; do
             local f="$out/$side-r$r.json"
-            if ! critcmp --export "$side-r$r" > "$f" 2>/dev/null \
-                || [ "$(jq '.benchmarks | length' "$f")" -eq 0 ]; then
+            # A critcmp that exits 0 having recorded nothing (a truncated
+            # write) or a document whose shape it cannot read leaves no
+            # count below: both are missing data, never a clean round.
+            local recorded=0
+            if critcmp --export "$side-r$r" > "$f" 2>/dev/null; then
+                recorded="$(jq -r '(.benchmarks // {}) | length' "$f" 2>/dev/null)" \
+                    || recorded=0
+            fi
+            if [ -z "$recorded" ] || [ "$recorded" -eq 0 ]; then
                 echo "::error::no $side benchmark data was recorded for round $r" >&2
                 return 1
             fi
@@ -546,6 +556,40 @@ cmd_test() {
         "$(grep -c 'per-round (head/base)' <<<"$table_out")"
     check "table renders the rel stddev column" 1 \
         "$(grep -c 'rel stddev' <<<"$table_out")"
+
+    # 10. The round's export guard: a critcmp that exits 0 having recorded
+    #     nothing (a truncated write) or a document whose shape it cannot
+    #     read leaves no count, and the round fails. Stub binaries in a
+    #     scratch workspace write no criterion data, so the export is the
+    #     script's own read.
+    local stub="$scratch/stub"
+    mkdir -p "$stub/target/base-bench" "$stub/target/head-bench" "$scratch/bin"
+    local target
+    for target in "${BENCH_TARGETS[@]}"; do
+        printf '#!/bin/sh\nexit 0\n' > "$stub/target/base-bench/$target"
+        printf '#!/bin/sh\nexit 0\n' > "$stub/target/head-bench/$target"
+        chmod +x "$stub/target/base-bench/$target" "$stub/target/head-bench/$target"
+    done
+    local stub_rc
+    stub_rc=0
+    ( cd "$stub" && bash "$SCRIPT_DIR/bench-gate.sh" rounds 1 1 ) \
+        >/dev/null 2>"$scratch/stub-err" || stub_rc=$?
+    check "a round with no export data is an error" 1 \
+        "$(grep -c 'no base benchmark data was recorded for round 1' <<<"$(cat "$scratch/stub-err")")"
+    check "a round with no export data fails the gate" 1 "$stub_rc"
+
+    # A critcmp that succeeds but writes nothing is missing data too: the
+    # guard reads no count from the file and the round fails, rather than
+    # reporting a completed round with no benchmarks.
+    printf '#!/bin/sh\nexit 0\n' > "$scratch/bin/critcmp"
+    chmod +x "$scratch/bin/critcmp"
+    stub_rc=0
+    ( cd "$stub" && PATH="$scratch/bin:$PATH" bash "$SCRIPT_DIR/bench-gate.sh" rounds 1 1 ) \
+        >/dev/null 2>"$scratch/empty-err" || stub_rc=$?
+    check "an export with no benchmark data is an error" 1 \
+        "$(grep -c 'no base benchmark data was recorded for round 1' \
+            <<<"$(cat "$scratch/empty-err")")"
+    check "an export with no benchmark data fails the gate" 1 "$stub_rc"
 
     echo ""
     if [ "$failures" -gt 0 ]; then
