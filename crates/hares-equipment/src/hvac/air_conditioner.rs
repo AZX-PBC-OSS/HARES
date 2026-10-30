@@ -4055,6 +4055,42 @@ mod tests {
         }
 
         assert!(delivered[0] > 0.0, "fixture: the driven capacity runs");
+
+        // The event's 0.8 load fraction must be load-bearing: an identical
+        // unit without the event runs the same first step and delivers the
+        // unshed level. The two steps share every input but the multiplier,
+        // so the event step is the single product `0.8 * unshed` (one f64
+        // multiplication on each side, commutative and therefore exact).
+        let mut baseline = AirConditioner::new(cfg.clone());
+        baseline.init(&cfg, &environment).unwrap();
+        baseline.update_control(&environment);
+        baseline
+            .apply_control(&ControlSignal::IdealCapacity {
+                capacity_w: -4_000.0,
+                degraded: false,
+            })
+            .unwrap();
+        let mut baseline_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        baseline
+            .step(&environment, Duration::from_secs(900), &mut baseline_ports)
+            .unwrap();
+        let unshed = baseline
+            .telemetry()
+            .get(tk::COMPRESSOR_KW)
+            .unwrap_or(f64::NAN);
+        assert!(unshed > 0.0, "fixture: the unshed capacity runs");
+        assert_eq!(
+            delivered[0],
+            0.8 * unshed,
+            "the High event's 0.8 load fraction must scale the unshed step: \
+             {} kW against the unshed {} kW",
+            delivered[0],
+            unshed
+        );
         assert!(
             (delivered[1] - delivered[0]).abs() < 1e-9,
             "the event's second named step keeps the 0.8 level: {} kW against \
