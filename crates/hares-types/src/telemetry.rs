@@ -22,6 +22,21 @@ use serde::{Deserialize, Serialize};
 /// owner's next step-end check fails the run. The seal is not serialised:
 /// a restored map's keys are the declarations' anyway.
 ///
+/// The registration lifecycle is the contract. Init registers the
+/// owner's config-determined keys (`insert`, or the declarations of
+/// [`Telemetry::from_fields`], which also seal the map); a channel whose
+/// registration is itself state is admitted lazily by its first
+/// registering write ([`Telemetry::set_or_register`]). A withdrawal
+/// either clears the value for the step and keeps the registration
+/// ([`Telemetry::remove`]'s NaN marker, the key set unchanged) or drops
+/// the registration itself ([`Telemetry::unregister`], the key set loses
+/// the name). A registering write re-admits a withdrawn registration: on
+/// a sealed map the surviving declaration admits it, and a plain `set`
+/// of a withdrawn declared key latches as unknown until it does. A
+/// checkpoint's telemetry face is the saved key set, so a restore
+/// reproduces the registration timeline rather than merging it with the
+/// target's.
+///
 /// The dwelling turns a latched telemetry into a run failure (a
 /// `HaresError` naming the owner and the key); that dwelling check is the
 /// only enforcement, and it is always on. The latches join the derived
