@@ -1313,15 +1313,18 @@ impl Equipment for Battery {
         let mut der1547_ride_through_s = 0.0;
         let mut der1547_enter_service_s = 0.0;
         let mut der1547_fw_adj_pu = 0.0;
-        // The availability input is the deliverable discharge bound: the
-        // demand-response fraction, the export limit and the external
-        // power limit, the same composition `clamp_power` applies to the
-        // model's own output (the export passed below is already clamped
-        // to it). The droop's up-ramp must stop at the same bound, or an
-        // under-frequency excursion would bid the pack's nameplate into a
-        // grid the operator has shed (the export EV carries the
-        // demand-response fraction on its availability input for the same
-        // reason).
+        // The droop's two ends are bounded the way `clamp_power` bounds
+        // the model's own output. The availability input is the
+        // deliverable discharge bound (the demand-response fraction, the
+        // export limit and the external power limit), so the under-
+        // frequency up-ramp stops at the bound the export passed below is
+        // already clamped to; the export EV carries the demand-response
+        // fraction on its availability input for the same reason. The
+        // floor is the deliverable charge bound (the same scalar
+        // composition, consumption side), so the over-frequency down-ramp
+        // cannot absorb through a service's import limit or the
+        // operator's shed. The temperature-dependent capability derates
+        // ride the delivered power, not these two operator bounds.
         let dr_fraction = self.dr_power_fraction();
         let hw_max = self.max_discharge_w * dr_fraction;
         let deliverable_w = self
@@ -1331,6 +1334,18 @@ impl Equipment for Battery {
         let deliverable_w = self
             .external_power_limit_w
             .map_or(deliverable_w, |pl| deliverable_w.min(pl));
+        let charge_hw_max = self.max_charge_w * dr_fraction;
+        let absorbable_w = self
+            .import_limit_w
+            .map(|lim| charge_hw_max.min(lim))
+            .unwrap_or(charge_hw_max);
+        let absorbable_w = self
+            .external_power_limit_w
+            .map_or(absorbable_w, |pl| absorbable_w.min(pl));
+        // True when the layer's reference replaced the model's own output
+        // on this step: the reference is a power command like any other,
+        // so the pack's clamp governs the delivered power below.
+        let mut layered_reference = false;
         match &mut self.der1547 {
             Some(controller) => {
                 let outcome = controller.step(
@@ -1340,7 +1355,7 @@ impl Equipment for Battery {
                     !env.grid.grid_outage(),
                     -target_power_w,
                     deliverable_w,
-                    -self.max_charge_w,
+                    -absorbable_w,
                 )?;
                 if outcome.tripped {
                     target_power_w = 0.0;
@@ -1352,6 +1367,7 @@ impl Equipment for Battery {
                     // the layer returns the model's output bitwise, so this
                     // comparison leaves the grid-connected path untouched.
                     target_power_w = -outcome.p_ref_w;
+                    layered_reference = true;
                 }
                 der1547_tripped = outcome.tripped;
                 der1547_reason = outcome.trip_reason;
@@ -1382,6 +1398,15 @@ impl Equipment for Battery {
                 }
                 self.der1547_unconfigured_in_excursion = excursion;
             }
+        }
+        if layered_reference {
+            // The droop's reference is a power command: the pack's clamp
+            // (the charge capability's temperature derate and a configured
+            // charging-curve LUT's fraction, on top of the operator bounds
+            // the layer's inputs already carry) governs what is delivered,
+            // exactly as it governs the model's own target, and exactly as
+            // the discharge derate governs the export leg below.
+            target_power_w = self.clamp_power(target_power_w)?;
         }
 
         // -- Islanded charge clamp: no phantom grid import during an outage --
@@ -3103,6 +3128,115 @@ mod tests {
         assert!(
             (p - (-2000.0 + 10.0)).abs() < 1e-6,
             "the droop's up-ramp stops at the export limit, got {p} W"
+        );
+    }
+
+    /// The absorption leg's sibling face: an over-frequency droop ramps
+    /// active power down through zero into charge, and the charge it
+    /// commands is a charge command like the model's own, so the pack's
+    /// deliverable charge bound governs it. The bound is the same
+    /// composition `clamp_power` applies to every charge target (the
+    /// demand-response fraction, the import limit and the external power
+    /// limit, with the temperature-dependent capability derate on the
+    /// delivered charge): without it the droop absorbs through a small
+    /// service's import limit or a full demand-response shed.
+    ///
+    /// A 62.0 Hz step is 1.964 Hz beyond the 60.036 Hz deadband edge; at
+    /// 1/(60 x 0.05) = 1/3 pu of the 5000 W rating per Hz the ramp asks
+    /// 0.654667 pu = 3273.33 W of absorption out of a zero anchor. It
+    /// does not trip: OF2's 62.0 Hz is strict (the step is exactly at it)
+    /// and OF1's 300 s window is not reached in 60 s.
+    #[test]
+    fn witness_der1547_battery_droop_absorption_obeys_the_charge_bound() {
+        // The import limit: a 500 W service caps the absorption at 0.1 pu
+        // of the rating. The port carries the charge plus the 10 W
+        // standby draw.
+        let cfg = BatteryConfig {
+            der_1547: Some(cat2_settings()),
+            import_limit_w: Some(500.0),
+            ..battery_config_fields()
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        let mut hi_f = base_env();
+        hi_f.grid.frequency_hz = 62.0;
+        let mut ports = default_ports();
+        bat.step(&hi_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - 510.0).abs() < 1e-6,
+            "the import limit caps the droop's absorption at 500 W plus \
+             the 10 W standby draw, got {p} W"
+        );
+        assert!(
+            (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap() + 0.1).abs() < 1e-9,
+            "the capped reference is -0.1 pu: the published adjustment is \
+             the reference the pack was held to, got {}",
+            bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap()
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+
+        // A full shed: the same ramp asks 3273.33 W of absorption and the
+        // zero cap holds it at zero injection (the standby draw alone).
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&hi_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - 10.0).abs() < 1e-6,
+            "a full shed absorbs nothing: the port carries the standby draw \
+             alone, got {p} W"
+        );
+        assert!(
+            (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap()).abs() < 1e-12,
+            "the zero cap holds the reference at zero injection, got {}",
+            bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap()
+        );
+    }
+
+    /// The trip tables watch the bus through an unavailable period. The
+    /// HPXML unavailable-period convention zeroes the battery's dispatch
+    /// rows; its inverter stays connected and supplied (the standby draw
+    /// continues), so the shall-trip settings still govern the bus it
+    /// sees. A 0.6 pu sag inside such a step reaches UV1's 10 s window and
+    /// latches the trip like any other step's. The EV's export function,
+    /// which conducts only on a commanded discharge step, is not stepped
+    /// there at all.
+    #[test]
+    fn the_trip_tables_watch_the_bus_through_an_unavailable_period() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        let mut env = base_env();
+        env.unavailable_periods.power_outage = true;
+        bat.init(&config, &env).unwrap();
+
+        let mut sag = env.clone();
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = default_ports();
+        bat.step(&sag, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIPPED),
+            Some(1.0),
+            "the connected inverter's trip tables still watch the bus"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIP_REASON), Some(2.0));
+        assert_eq!(
+            bat.telemetry().get(tk::ACTIVE_POWER_KW),
+            Some(10.0),
+            "the dispatch rows are zeroed: the port carries the standby draw"
         );
     }
 

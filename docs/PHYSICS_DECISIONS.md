@@ -1720,6 +1720,16 @@ pre-disturbance output already the DR-scaled export). A full shed
 (GridEmergency) therefore holds zero export through an under-frequency
 excursion, and a partial shed caps the ramp at the shed level.
 
+The droop's absorption leg is bounded at the sink the same way. An
+over-frequency excursion ramps active power down through zero into
+charge, and the charge it commands is a charge command like the model's
+own: the battery's floor is the deliverable charge bound (the DR
+fraction with the import and external power limits), and the pack's
+charge capability derate and a configured charging-curve LUT's fraction
+apply to the delivered charge through `clamp_power`. Without the bound
+an over-frequency excursion would absorb through a service's import
+limit or a full shed.
+
 The checkpoint answer: the PV, Battery and EV formats move to v5, v4 and
 v10 with the layer's state added, so a pre-1547 save (v4, v3, v9) is
 refused with the typed version-mismatch error rather than migrated or
