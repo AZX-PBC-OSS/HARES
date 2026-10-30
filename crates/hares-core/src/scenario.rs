@@ -5,7 +5,8 @@
 //! (the equipment-keyed map the assembly validates field-by-field with
 //! its loud unknown-field rejection, so a sampled value whose target
 //! names no real field fails the build at the point the override is
-//! applied, before any equipment init runs); the Patch targets' values
+//! applied, before that equipment is constructed or initialized); the
+//! Patch targets' values
 //! set the HPXML data patches (`HpxmlDataPatches`) the assembly consumes
 //! the same way external metadata's patches arrive. The application
 //! never invents a second path: a scenario is only a sampler over
@@ -71,8 +72,9 @@ fn patches_applied_to(
         match field.as_str() {
             "number_of_bedrooms" => out.number_of_bedrooms = Some(*value),
             // The record's own check refused an unknown field before this
-            // runs; the arm is the compiler-checked place a new patch field
-            // must be named as well as in the record's table, and an error
+            // runs; this arm is the application's write a new patch field
+            // must join as well as the record's table (the two lists' drift
+            // is pinned by every_recorded_patch_field_applies), and an error
             // here leaves the caller's patches untouched.
             other => {
                 return Err(HaresError::Equipment(format!(
