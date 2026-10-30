@@ -306,7 +306,7 @@ cmd_rounds() {
             fi
         done
     done
-    echo "wrote $out/{base,head}-r{$(seq -s, "$first" $((first + count - 1)))}.json"
+    echo "wrote the base and head exports for rounds $(seq -s, "$first" $((first + count - 1))) to $out"
 }
 
 run_round() {
