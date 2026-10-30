@@ -249,6 +249,26 @@ class TestOverridesRoundTrip:
         assert {v["name"] for v in sample["values"]} == {"wh_setpoint", "bedrooms"}
         assert {v["unit"] for v in sample["values"]} <= {"C", "count"}
 
+    def test_the_sample_record_carries_the_declared_targets(self):
+        """The record's ``targets`` map is the application payload a manifest
+        consumer reads: every sampled value's name maps to the target the
+        spec declared, in the serde shape (``override``/``patch``). The
+        record's top-level keys and the target shapes are the contract; a
+        rename would break a consumer while the sampler's own values stayed
+        the same."""
+        spec = load_spec()
+        sample = spec.sample(master_seed=42, scenario_id=1, bldg_id=7)
+        assert set(sample) == {"scenario_id", "bldg_id", "values", "targets"}
+        assert sample["targets"] == {
+            "wh_setpoint": {
+                "override": {
+                    "equipment": "Electric Resistance Water Heater",
+                    "field": "setpoint_c",
+                }
+            },
+            "bedrooms": {"patch": {"field": "number_of_bedrooms"}},
+        }
+
     def test_sampled_override_reaches_the_typed_config(self):
         """The round-trip: sample, apply through the dwelling constructor's
         overrides, and the built dwelling runs the sampled value (read
