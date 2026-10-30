@@ -2470,7 +2470,9 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
         ),
         TelemetryField::ratio(
             tk::DR_POWER_FRACTION,
-            "Demand response power scaling factor [0..1]",
+            "The demand response level's power fraction [0..1]: the factor the \
+             event commands for grid interchange. While islanded the dispatch \
+             is not scaled by it (an island has no interchange to curtail)",
         ),
         TelemetryField::code_code(
             tk::DR_LEVEL,
