@@ -852,8 +852,11 @@ impl PyDwelling {
         })
     }
 
-    /// The blueprint the dwelling was built from: the shared parses (one
-    /// per unique input) and the state every build clones.
+    /// The blueprint the current dwelling was built from: the shared parses
+    /// (one per unique input) and the state every build clones. A
+    /// `reset_with_seed` rebuild reports the blueprint it re-froze (a
+    /// generated diversified schedule re-derives under the new seed), so
+    /// this accessor follows the dwelling the object currently carries.
     pub fn blueprint(&self) -> crate::py_blueprint::PyDwellingBlueprintRef {
         crate::py_blueprint::PyDwellingBlueprintRef {
             inner: Arc::clone(&self.blueprint),
@@ -1984,10 +1987,13 @@ impl PyDwelling {
     }
 
     pub fn reset_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<()> {
-        // The reset reuses the blueprint: the shared parses are the same
-        // `Arc`s, the rng derives from the seed, the generated schedule's
-        // diversity re-derives under the seed's key, and the settings carry
-        // the seed the config reports.
+        // The reset reuses the blueprint's shared parses (the HPXML, the
+        // weather and the defaults are the same `Arc`s), the rng derives
+        // from the seed, and the generated schedule's diversity re-derives
+        // under the seed's key: that re-derivation re-freezes the
+        // blueprint, so the wrapper reports the rebuilt one (the one the
+        // dwelling actually runs) and the settings carry the seed the
+        // config reports.
         #[cfg(test)]
         TEST_BUILD_COUNT.fetch_add(1, Ordering::SeqCst);
         let mut config = self.config.clone();
@@ -1998,6 +2004,7 @@ impl PyDwelling {
             move || blueprint.build_with_seed(seed).map_err(to_py_err)
         })
         .map_err(|_| PyRuntimeError::new_err("reset_with_seed panicked"))?;
+        self.blueprint = Arc::clone(dwelling.blueprint());
         self.dwelling = Mutex::new(dwelling);
         self.poisoned.store(false, Ordering::SeqCst);
         self.mutex_poison_events.store(0, Ordering::SeqCst);
@@ -4918,10 +4925,13 @@ mod construction_gil_tests {
         });
     }
 
-    /// The reset reuses the blueprint: the `Arc<DwellingBlueprint>` the
-    /// dwelling was built from is the same before and after
+    /// The reset reuses the blueprint's shared parses: a CSV-schedule
+    /// dwelling takes `build_with_seed`'s in-place path, so the
+    /// `Arc<DwellingBlueprint>` is the same before and after
     /// `reset_with_seed`, and the reset run's frame equals a fresh build
-    /// with that seed, so no input was re-parsed.
+    /// with that seed, so no input was re-parsed. A generated diversified
+    /// schedule re-freezes the blueprint under the seed's key
+    /// (`reset_with_seed_reports_the_blueprint_it_built_from`).
     #[test]
     fn reset_with_seed_reuses_blueprint() {
         let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
@@ -5011,6 +5021,108 @@ mod construction_gil_tests {
                     }
                 }
             }
+        });
+    }
+}
+
+/// The blueprint the dwelling reports is the one it currently runs:
+/// `reset_with_seed` re-freezes a generated diversified schedule under the
+/// new seed (the schedule is a build-time draw), so the wrapper's
+/// blueprint must move with the build rather than keep the construction
+/// seed's. The reset's shared parses (HPXML, weather, defaults) stay the
+/// same handles; the generated schedule is the re-derived one.
+#[cfg(test)]
+mod blueprint_readback_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use pyo3::Python;
+    use pyo3::types::PyString;
+
+    use crate::py_config::{PySimulationConfig, WholeSeconds};
+    use crate::py_dwelling::{PyDwelling, TEST_COUNT_EXCLUSIVITY};
+
+    fn fixture_paths() -> (PathBuf, PathBuf, PathBuf) {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
+        (
+            fixture.join("building.xml"),
+            fixture.join("weather.epw"),
+            root.join("python/hares/defaults"),
+        )
+    }
+
+    fn sim_config_1h_900s() -> PySimulationConfig {
+        PySimulationConfig::new(
+            "2023-01-01T00:00:00-07:00",
+            WholeSeconds(3600),
+            WholeSeconds(900),
+            None,
+            false,
+            false,
+            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            None,
+            0,
+            None,
+            "on",
+            None,
+            None,
+            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            None,
+            crate::py_config::PyWarmupArg::Absent,
+            "hour24",
+            "typical",
+            None,
+        )
+        .expect("the sim config builds")
+    }
+
+    #[test]
+    fn reset_with_seed_reports_the_blueprint_it_built_from() {
+        let _test_count_exclusive = TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (hpxml, weather, defaults) = fixture_paths();
+        Python::attach(|py| {
+            let cls = py.get_type::<PyDwelling>();
+            let mut dwelling = PyDwelling::from_hpxml(
+                &cls,
+                PyString::new(py, hpxml.to_str().expect("utf8")).as_any(),
+                // No schedule source: the generated, diversified family.
+                None,
+                PyString::new(py, weather.to_str().expect("utf8")).as_any(),
+                sim_config_1h_900s(),
+                1,
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
+                None,
+                None,
+            )
+            .expect("the generated-schedule fixture must construct");
+            let construction_schedule = dwelling.blueprint.inputs().schedule.schedule();
+            dwelling
+                .reset_with_seed(py, 7)
+                .expect("the seed reset must rebuild the dwelling");
+            let built = {
+                let guard = dwelling.acquire().expect("the rebuilt dwelling is not poisoned");
+                Arc::clone(guard.blueprint())
+            };
+            let built_schedule = built.inputs().schedule.schedule();
+            assert_ne!(
+                construction_schedule.columns, built_schedule.columns,
+                "the seed swap must re-derive the schedule for the accessor's \
+                 equality below to mean anything"
+            );
+            assert!(
+                Arc::ptr_eq(&dwelling.blueprint, &built),
+                "the blueprint accessor must report the blueprint the current \
+                 dwelling was built from, not the construction seed's"
+            );
+            let exposed_schedule = dwelling.blueprint.inputs().schedule.schedule();
+            assert_eq!(
+                exposed_schedule.columns, built_schedule.columns,
+                "the exposed blueprint's generated schedule must be the one \
+                 the dwelling runs"
+            );
         });
     }
 }
