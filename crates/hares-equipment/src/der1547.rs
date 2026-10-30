@@ -902,6 +902,22 @@ mod tests {
         assert!(err.to_string().contains("active-power rating"), "{err}");
     }
 
+    /// The timestep's contract: the layer integrates a positive finite
+    /// number of seconds. A zero or negative step would freeze or rewind
+    /// every timer, and a non-finite one would leave the accumulators
+    /// meaningless, so both are refused with an error naming the
+    /// timestep.
+    #[test]
+    fn a_non_positive_or_non_finite_timestep_is_refused() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let err = ctrl
+                .step(0.6, 60.0, bad, true, 2700.0, 2700.0, 0.0)
+                .expect_err("a non-positive or non-finite timestep is refused");
+            assert!(err.to_string().contains("timestep"), "{err}");
+        }
+    }
+
     // -- The trip and ride-through witnesses. --
 
     /// The brownout round's F8 defect witness: a sustained 0.6 pu sag sits

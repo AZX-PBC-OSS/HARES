@@ -440,8 +440,9 @@ pub const IEEE1547_CAT12_UV2_TRIP_V_PU: f64 = 0.45;
 /// Same source as `IEEE1547_OV2_TRIP_V_PU`.
 pub const IEEE1547_CAT3_UV2_TRIP_V_PU: f64 = 0.50;
 
-/// Under-voltage must-trip point UV2's clearing time, in seconds (all
-/// categories). Same source as `IEEE1547_OV2_TRIP_V_PU`.
+/// Under-voltage must-trip point UV2's clearing time, in seconds,
+/// Categories I and II. Same source as `IEEE1547_OV2_TRIP_V_PU`
+/// (Category III's default is 2.0 s, `IEEE1547_CAT3_UV2_TRIP_T_S`).
 pub const IEEE1547_CAT12_UV2_TRIP_T_S: f64 = 0.16;
 
 /// Under-voltage must-trip point UV2's default clearing time, in seconds,

@@ -1756,6 +1756,16 @@ load-side behavior and is not the DER function; the layer gates the
 export leg alone, while the battery's layer gates its inverter's both
 legs (one bidirectional DER inverter).
 
+The step's own availability follows from that scope. The EV's export
+function conducts only on a commanded discharge step, so the steps it
+does not conduct (an idle export leg, an unavailable period) clear the
+droop anchor and do not advance a timer: the channels read the run state
+there, which keeps a latch already set reported. The battery's inverter
+stays connected and supplied across its dispatch-row zeroing (the HPXML
+unavailable-period convention zeroes the rows, not the connection: its
+standby draw continues), so its trip tables keep watching the bus and an
+excursion on such a step trips it as any other step's would.
+
 Alternative rejected: defaults always on. The engine's existing
 scenarios (and their goldens and parity fixtures) were built against the
 pre-1547 inverter behavior, and turning the trip tables on without a

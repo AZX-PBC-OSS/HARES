@@ -52,6 +52,91 @@ fn pv_telemetry(dwelling: &Dwelling) -> &hares_types::Telemetry {
     entry.1
 }
 
+fn equipment_telemetry<'a>(dwelling: &'a Dwelling, class: &str) -> &'a hares_types::Telemetry {
+    dwelling
+        .latest_env()
+        .equipment_telemetry
+        .iter()
+        .find(|(name, _)| name.contains(class))
+        .unwrap_or_else(|| panic!("the {class}'s telemetry snapshot is populated after a step"))
+        .1
+}
+
+/// The `der_1547` surface is per equipment, and so is the unconfigured
+/// layer's counted event: in a dwelling with one inverter configured and
+/// the other not, the configured one's layer governs (its trip state, no
+/// excursion count) while the unconfigured one rides the same excursion
+/// and counts it once. Both assignments are pinned, so a fleet-wide
+/// switch (or a count shared across equipment) shows as a mismatch.
+#[test]
+fn der_1547_configuration_and_the_excursion_count_are_per_equipment() {
+    // The PV configured, the battery not.
+    let config = pv_battery_config(json!({
+        "PV": {"der_1547": {"category": "II"}},
+        "Battery": {"bms_mode": "\"Manual\""},
+    }));
+    let mut dwelling = Dwelling::from_config(config).expect("construction");
+    dwelling.step().expect("the first step");
+    dwelling
+        .set_grid_voltage(0.6)
+        .expect("the sag override is in contract");
+    dwelling.step().expect("the sag step");
+
+    let pv = equipment_telemetry(&dwelling, "PV");
+    assert_eq!(pv.get("der1547_tripped"), Some(1.0), "the PV is configured");
+    assert_eq!(
+        pv.get("der1547_unconfigured_excursions"),
+        Some(0.0),
+        "the configured PV counts nothing"
+    );
+    let battery = equipment_telemetry(&dwelling, "Battery");
+    assert_eq!(
+        battery.get("der1547_tripped"),
+        Some(0.0),
+        "the unconfigured battery rides the same excursion"
+    );
+    assert_eq!(
+        battery.get("der1547_unconfigured_excursions"),
+        Some(1.0),
+        "the unconfigured battery counts the excursion"
+    );
+
+    // The battery configured, the PV not: the mirror, so neither class's
+    // answer is an accident of the roster's order.
+    let config = pv_battery_config(json!({
+        "Battery": {"der_1547": {"category": "II"}, "bms_mode": "\"Manual\""},
+    }));
+    let mut dwelling = Dwelling::from_config(config).expect("construction");
+    dwelling.step().expect("the first step");
+    dwelling
+        .set_grid_voltage(0.6)
+        .expect("the sag override is in contract");
+    dwelling.step().expect("the sag step");
+
+    let pv = equipment_telemetry(&dwelling, "PV");
+    assert_eq!(
+        pv.get("der1547_tripped"),
+        Some(0.0),
+        "the unconfigured PV rides the excursion"
+    );
+    assert_eq!(
+        pv.get("der1547_unconfigured_excursions"),
+        Some(1.0),
+        "the unconfigured PV counts the excursion"
+    );
+    let battery = equipment_telemetry(&dwelling, "Battery");
+    assert_eq!(
+        battery.get("der1547_tripped"),
+        Some(1.0),
+        "the configured battery trips"
+    );
+    assert_eq!(
+        battery.get("der1547_unconfigured_excursions"),
+        Some(0.0),
+        "the configured battery counts nothing"
+    );
+}
+
 /// The brownout round's F8 finding, end to end: a 0.6 pu sag (inside
 /// UV1's 0.70 pu band; the Category II default clearing time 10 s is
 /// reached within a 900 s step) trips the configured PV's inverter, and
