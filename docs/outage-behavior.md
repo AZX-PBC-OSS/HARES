@@ -15,15 +15,16 @@ Two distinct concepts, both carried in `GridState` (`hares-types`):
 | Utility outage | `voltage_pu == 0.0` (`GridState::grid_outage()`) | The distribution feeder is dead. Set externally: scenario config, `Dwelling::set_grid_voltage(0.0)`, `Fleet::set_grid_voltage*`. (HELICS voltage subscriptions reject values outside [0.5, 1.5] pu and hold the last valid value, so co-simulation outages are signalled through the explicit setter, not through the voltage topic.) |
 | Bus energization | `GridState::bus_energized()` / `GridState::bus_voltage_pu()` | Whether the **home's bus** carries voltage. During an outage, an island-capable source holds the bus at nominal (`island_bus_voltage_pu == Some(1.0)`); otherwise the bus is dead. |
 
-The dwelling resolves bus energization at the start of every timestep: if the
-utility voltage is `0.0` and any equipment reports
-`Equipment::island_source_available()`, the bus is islanded at 1.0 pu.
-The formation condition is evaluated entirely from end-of-previous-step
-state (both the utility outage and the source availability), so island
-formation takes effect with a one-step lag: an outage's first step is a
-dead-bus step, and the island forms on the step after. A formed island
-collapses when its source dies, also one step after the availability
-ends (restoration collapses it on the restoration step itself).
+The dwelling resolves bus energization at the start of every timestep:
+during an outage, an island-capable source holds the bus at 1.0 pu (the
+formation condition and its one-step lag are below).
+The formation condition reads the previous step's outage and the source
+availability (both end-of-previous-step state) beside the step's own
+utility voltage, so island formation takes effect with a one-step lag:
+an outage's first step is a dead-bus step, and the island forms on the
+step after. A formed island collapses when its source dies, also one
+step after the availability ends (restoration collapses it on the
+restoration step itself).
 
 Island sources:
 

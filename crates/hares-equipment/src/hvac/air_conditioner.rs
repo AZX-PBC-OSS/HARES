@@ -1263,11 +1263,11 @@ impl CoolingCore {
         if self.operating_mode == OperatingMode::Cooling {
             // The ideal path's starvation census: an ideal step with no
             // capacity signal this step runs the raw thermostat duty (the
-            // PLR arms below fall through to the duty cycle, 1.0 on the
-            // ideal path), so the delivery is the unit's full rated
-            // capacity unmetered to the zone's need. Counted, never
-            // silent: the starvation's cause is a mode flip downstream of
-            // the solver-feedback phase, and a rising count is the trace a
+            // PLR arms below fall through to the duty cycle: 1.0 on a
+            // single-speed ideal path, the band estimate on a variable-speed
+            // one), so the delivery is unmetered to the zone's need. Counted,
+            // never silent: the starvation's cause is a mode flip downstream
+            // of the solver-feedback phase, and a rising count is the trace a
             // dispatch-order regression leaves.
             if self.use_ideal && !self.ideal_capacity_signal_arrived {
                 self.ideal_capacity_unsolved_steps += 1;

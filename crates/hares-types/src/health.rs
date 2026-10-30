@@ -54,8 +54,8 @@ pub struct EquipmentHealthCounts {
     /// the zone's need (the full rated capacity on a single-speed ideal
     /// path, the band estimate on a variable-speed one). The count is
     /// that fallback's visibility: a rising count is the trace a dispatch
-    /// order regression leaves, and the fallback's energy is the unit's
-    /// own rated duty for the step.
+    /// order regression leaves, and the fallback's energy is that raw
+    /// duty's delivery for the step.
     pub ideal_capacity_unsolved_steps: u64,
 }
 

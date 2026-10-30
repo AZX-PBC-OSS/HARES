@@ -1548,25 +1548,29 @@ time and the release landed on the second control pass - after the
 solve, which read the still-forced-off mode and solved nothing; the
 release step then ran the raw duty, which for the ideal path is the
 full-duty arm's 1.0. The countdown now advances once per step, in
-`step()`, at the step's end: the release lands on the next step's first
-control pass, ahead of the solve, and the event sheds exactly the steps
-its duration named. The step's own interval is the last one the timer
-consumes, so the step that closes the event still dispatches under the
-event's level (a partial shed's last step keeps its load fraction, not
-a mid-dispatch revert). The rule is the same for every DR-capable
-equipment, not the HVAC cores alone: the water heaters, the indirect
-tank, the tankless heater and the ventilation also advanced the timer
-in `update_control` (twice per step from the pipeline's two control
-passes, and a third time from their own `step`'s re-run), so each such
-event burned several timesteps of wall time per step; the battery and
-the EV (one control pass per step) decremented before the step's
-dispatch, releasing one named step early. All of them advance the timer
-in `step()` now. Measured on the `cz6b_pv_battery_ev` fixture at 900 s (the
-brownout attack's B3a scenario): the release step formerly delivered
-14.06 MJ against a 3.48 MJ correction need plus 0.34 MJ of gains offset
-(2.5x the computed-need bound; 4.05x the bare correction), driving the
-zone 25.63 to 20.09 C in one step, 4.35 C below the 24.44 C setpoint,
-then a six-step rebound; the fixed release delivers 3.37 MJ (0.72x the
+`step()` after the step's dispatch decision (at the step's end, or at
+the ventilation's on/off decision ahead of its early returns): the
+release lands on the next step's first control pass, ahead of the
+solve, and the event sheds exactly the steps its duration named. The
+step's own interval is the last one the timer consumes, so the step
+that closes the event still dispatches under the event's level (a
+partial shed's last step keeps its load fraction, not a mid-dispatch
+revert). The rule is the same for every DR-capable equipment, not the
+HVAC cores alone: the water heaters, the indirect tank and the tankless
+heater also advanced the timer in `update_control` (twice per step from
+the pipeline's two control passes, and a third time from their own
+`step`'s re-run), and the ventilation advanced there twice per step
+(its `step` does not re-run `update_control`); the water heaters
+therefore burned three timesteps of the event per step and the
+ventilation two. The battery and the EV (one control pass per step)
+decremented before the step's dispatch, releasing one named step early.
+All of them advance the timer in `step()` now. Measured on the
+`cz6b_pv_battery_ev` fixture at 900 s (the brownout attack's B3a
+scenario): the release step formerly delivered 14.06 MJ against a 3.48
+MJ correction need plus 0.34 MJ of gains offset (2.5x the
+computed-need bound; 4.05x the bare correction), driving the zone 25.63
+to 20.09 C in one step, 4.35 C below the 24.44 C setpoint, then a
+six-step rebound; the fixed release delivers 3.37 MJ (0.72x the
 correction) and lands the zone from above with no rebound.
 
 The solve's own gate read the published operating mode, which is the
@@ -1596,18 +1600,19 @@ fix plus the count, not a delivery collapse.
 Two rules complete the island's semantics
 (`docs/cosim.md`, `docs/outage-behavior.md`):
 
-The island's formation condition is evaluated entirely from
-end-of-previous-step state: the utility outage AND the source
-availability. The outage signal's first step is therefore a dead-bus
-step (every load force-offs at the control level), and the island forms
-on the second step when an available source holds the bus; a source that
-dies inside a formed island still collapses it one step later
-(availability is end-of-previous-step state, unchanged). The former
-resolution read the outage fresh and the availability with a lag, so a
-battery-backed home islanded on the outage step itself - no transfer
-detection delay - contradicting the documented one-step lag. The
-restoration collapse is unchanged (a formed island collapses on the
-restoration step; the interchange is the meter's net flow again).
+The island's formation condition reads the previous step's utility
+outage and the source availability (both end-of-previous-step state)
+beside the step's own utility voltage. The outage signal's first step
+is therefore a dead-bus step (every load force-offs at the control
+level), and the island forms on the second step when an available
+source holds the bus; a source that dies inside a formed island still
+collapses it one step later (availability is end-of-previous-step
+state, unchanged). The former resolution read the outage fresh and the
+availability with a lag, so a battery-backed home islanded on the
+outage step itself - no transfer detection delay - contradicting the
+documented one-step lag. The restoration collapse is unchanged (a
+formed island collapses on the restoration step; the interchange is the
+meter's net flow again).
 
 A demand-response shed is a grid-supporting curtailment: it scales the
 battery's grid interchange (the dispatch limits, `clamp_power`). It is

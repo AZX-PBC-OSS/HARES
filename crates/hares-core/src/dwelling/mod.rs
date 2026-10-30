@@ -7552,10 +7552,13 @@ impl Dwelling {
         // charge, generator, discharging V2G EV) holds the home bus at
         // nominal voltage so loads keep running; otherwise the bus is dead
         // and every load force-offs at the control level (see
-        // `GridState::bus_energized`). The formation condition is evaluated
-        // entirely from end-of-previous-step state: the outage from the
-        // capture above, source availability from the equipment state, so
-        // island formation/collapse takes effect with a one-step lag.
+        // `GridState::bus_energized`). The formation condition reads the
+        // previous step's outage (the capture above) and the source
+        // availability from the equipment state, both end-of-previous-step
+        // state, beside the step's own utility voltage. The two lagged terms
+        // give an outage's first step the dead bus and formation the step
+        // after; the step's own voltage collapses a formed island on the
+        // restoration step itself.
         self.latest_env.grid.island_bus_voltage_pu = if prior_step_outage
             && self.latest_env.grid.voltage_pu == 0.0
             && self.equipment.iter().any(|eq| eq.island_source_available())
