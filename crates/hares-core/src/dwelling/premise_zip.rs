@@ -38,9 +38,11 @@
 //! expectation scale their reference draw by the row and report the draw
 //! clamped at zero, so an expectation whose row evaluates at or below zero
 //! at the bus voltage (the near-dead edge) carries no weight either. A
-//! stepped report that is not a draw (a negative watt value, or a
-//! non-finite one: a broken core state) is no evidence of an observed
-//! zero either: it carries no weight and no expectation stands in for it.
+//! stepped report that is not a draw (a negative watt value, a non-finite
+//! one, or a positive draw whose assembled response is not a finite positive
+//! ratio: broken core state, or a report and base of different magnitudes)
+//! is no evidence of an observed zero either: it carries no weight and no
+//! expectation stands in for it.
 
 use hares_equipment::{Equipment, ExpectedMeanPower};
 use hares_io::schedule::ScheduleTimeSeries;
@@ -72,8 +74,9 @@ pub struct PremiseZip {
     /// computable (stochastic event scheduling without a kW series, a
     /// schedule column absent from the loaded data, a de-energized bus with
     /// no stepped draw, a row evaluation the bus cannot supply a draw
-    /// at, or a stepped report that is not a finite non-negative draw);
-    /// such equipment is listed but contributes no weight to
+    /// at, a stepped report that is not a finite non-negative draw, or a
+    /// stepped report whose assembled response is not a finite positive
+    /// ratio); such equipment is listed but contributes no weight to
     /// [`PremiseZip::zip`].
     pub governing: Vec<(String, Option<f64>)>,
     /// Equipment whose real power is DER-controller-driven
@@ -125,6 +128,28 @@ fn schedule_column_mean_w(
         .flat_map(|v| std::iter::repeat_n(v.max(0.0), factor))
         .sum();
     Some(sum / (column.len() * factor) as f64)
+}
+
+/// The step's own report about its electric draw, as the aggregation sees
+/// it. `Stepped` records that the equipment published a consumption this
+/// step, even when the value is not a draw or its assembled response is not
+/// a usable ratio: the expected mean is pre-step evidence, so it may stand
+/// in only for a load that reported no consumption at all.
+#[derive(Clone, Copy)]
+enum MomentDraw {
+    /// The equipment published no consumption this step (it has not
+    /// stepped, or it reports another flow): the expectation route is the
+    /// only evidence.
+    NotReported,
+    /// The equipment published a consumption: the moment's reference draw
+    /// when it is usable, and the assembled response that weights it. Both
+    /// are `None` when the report is not a draw (a negative watt value,
+    /// NaN, an infinite draw) or its assembled response is not a finite
+    /// positive ratio.
+    Stepped {
+        weight_w: Option<f64>,
+        response: Option<f64>,
+    },
 }
 
 /// Aggregate the premise-level ZIP over a dwelling's equipment. `None` when
@@ -186,7 +211,7 @@ pub(crate) fn aggregate_premise_zip(
         // classes that publish an expectation scale their reference draw by
         // the row and report it clamped at zero, so the expectation carries
         // no weight.
-        let (moment_raw_draw_w, moment_response) = match eq.core_output().flows.electric_w {
+        let moment = match eq.core_output().flows.electric_w {
             Some(hares_types::ElectricPower::Consumption(w)) if bus_voltage_pu > 0.0 && w > 0.0 => {
                 // A composed base is usable only when it is a finite
                 // positive draw: the trait is a public hook, and a report of
@@ -201,48 +226,78 @@ pub(crate) fn aggregate_premise_zip(
                     Some(nominal_w) => {
                         let response = w / nominal_w;
                         if response.is_finite() && response > 0.0 {
-                            (Some(nominal_w), Some(response))
+                            MomentDraw::Stepped {
+                                weight_w: Some(nominal_w),
+                                response: Some(response),
+                            }
                         } else {
-                            // A non-finite draw is not a positive weight.
-                            (None, None)
+                            // The report dwarfs or is dwarfed by its base:
+                            // the ratio is not a response the engine can
+                            // answer. The equipment still observed this
+                            // draw, so it carries no weight and no
+                            // expectation stands in for it.
+                            MomentDraw::Stepped {
+                                weight_w: None,
+                                response: None,
+                            }
                         }
                     }
                     None => {
                         let multiplier = resolved.deep_sag_real_multiplier(bus_voltage_pu);
                         if multiplier.is_finite() && multiplier > 0.0 {
-                            (Some(w / multiplier), Some(multiplier))
+                            MomentDraw::Stepped {
+                                weight_w: Some(w / multiplier),
+                                response: Some(multiplier),
+                            }
                         } else {
-                            (None, None)
+                            MomentDraw::Stepped {
+                                weight_w: None,
+                                response: None,
+                            }
                         }
                     }
                 }
             }
             // An energized bus's observed zero is a zero weight. A negative
             // or non-finite stepped report is broken, not an observed zero:
-            // it carries its own value so the roster's finite-and-
-            // non-negative filter publishes no weight, and the expected
-            // mean never stands in for a stepped moment (a fabricated zero
-            // would tell the caller the moment was inspected and came up
-            // empty).
+            // it keeps its own value so the roster's finite-and-non-negative
+            // filter publishes no weight, and the expected mean never stands
+            // in for a stepped moment (a fabricated zero would tell the
+            // caller the moment was inspected and came up empty).
             Some(hares_types::ElectricPower::Consumption(w)) if bus_voltage_pu > 0.0 => {
-                (Some(w), None)
+                MomentDraw::Stepped {
+                    weight_w: Some(w),
+                    response: None,
+                }
             }
             // The de-energized boundary: the bus draws zero from every
             // load, so the stepped state is a zero weight whatever the
             // report carries.
-            Some(hares_types::ElectricPower::Consumption(_)) => (Some(0.0), None),
-            _ => (None, None),
+            Some(hares_types::ElectricPower::Consumption(_)) => MomentDraw::Stepped {
+                weight_w: Some(0.0),
+                response: None,
+            },
+            _ => MomentDraw::NotReported,
         };
-        let mean_power_w = match moment_raw_draw_w {
-            Some(w) => Some(w),
-            None if bus_voltage_pu > 0.0 => match eq.expected_mean_power_w() {
+        let (moment_raw_draw_w, moment_response) = match moment {
+            MomentDraw::Stepped { weight_w, response } => (weight_w, response),
+            MomentDraw::NotReported => (None, None),
+        };
+        let mean_power_w = match moment {
+            MomentDraw::Stepped {
+                weight_w: Some(w), ..
+            } => Some(w),
+            // A stepped moment's expectation never stands in for its own
+            // report, whatever the report carries.
+            MomentDraw::Stepped { weight_w: None, .. } => None,
+            MomentDraw::NotReported if bus_voltage_pu > 0.0 => match eq.expected_mean_power_w() {
                 Some(ExpectedMeanPower::W(w)) => Some(w),
                 Some(ExpectedMeanPower::ScheduleColumn(col_idx)) => {
                     schedule_column_mean_w(schedule, col_idx, upsample_factor)
                 }
                 None => None,
             },
-            None => None,
+            MomentDraw::NotReported => None,
         };
         // The response the weight weights with: the moment's assembled ratio
         // (the stepped draw over the moment's nominal draw) for a stepped
@@ -807,6 +862,25 @@ mod tests {
         // Every row shape at every band voltage: two literal arrays, no
         // sampling, the completeness structural (a nested loop cannot skip
         // a shape-voltage pair).
+        let hold = pure(0.5, -0.75, 1.25);
+        // The route each shape takes is part of the sweep's claim, so pin
+        // it: the hold row resolves through the hold arm at 0.5 pu (the raw
+        // polynomial evaluates exactly 1.0 there, the held one 0.96875), and
+        // the AC row through the raw as-fitted polynomial (the monotone hold
+        // would evaluate 0.959359375 at its own stationary point). A shape
+        // whose arm silently changed would leave that route unexercised
+        // while the sweep below still passed.
+        assert_eq!(
+            hold.deep_sag_real_multiplier(0.5).to_bits(),
+            0.96875_f64.to_bits(),
+            "fixture: the hold shape must evaluate the hold arm at 0.5 pu"
+        );
+        assert!(
+            (fitted_ac.deep_sag_real_multiplier(0.5) - 1.145).abs() < 1e-12,
+            "fixture: the AC shape must evaluate the raw as-fitted polynomial \
+             (1.145 at 0.5 pu), got {}",
+            fitted_ac.deep_sag_real_multiplier(0.5)
+        );
         let shapes = [
             hares_types::zip::ResolvedZip::governing(lighting), // raw, mixed signs
             fitted_ac,                                          // the as-fitted polynomial
@@ -814,7 +888,7 @@ mod tests {
             pure(0.0, 1.0, 0.0), // pure current: 0.5 at 0.5 pu, 1.5 at 1.5 pu
             pure(0.0, 0.0, 1.0), // pure constant power: 1.0 at every voltage
             pure(0.8, 0.2, 0.0), // mixed low: 0.3 at 0.5 pu, 2.1 at 1.5 pu
-            pure(0.5, -0.75, 1.25), // the hold arm: 0.96875 at 0.5 pu, 1.25 at 1.5 pu
+            hold,                // the hold arm: 0.96875 at 0.5 pu, 1.25 at 1.5 pu
         ];
         for voltage_pu in [0.5, 0.75, 1.0, 1.1, 1.5] {
             for resolved in shapes {
@@ -943,6 +1017,93 @@ mod tests {
                 (premise.zip.zp, premise.zip.ip, premise.zip.pp),
                 (0.0, 0.0, 1.0),
                 "only the live load shapes the aggregate"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stepped_draw_whose_response_is_not_a_ratio_carries_no_weight() {
+        // The assembled base's own acceptance rule ("finite and positive")
+        // bounds the base, not the ratio. A stepped report that dwarfs its
+        // base divides to infinity, and one the base dwarfs divides to
+        // zero; either way the equipment observed its draw this step, so
+        // the pre-step expectation may not stand in for it. The roster
+        // must publish no weight for the broken ratio (the unknown-mean
+        // semantics), never the 500 W expected mean, and the aggregate
+        // must weight only the load it can see.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        for (draw_w, nominal_w) in [(f64::INFINITY, 1200.0), (1e300, 1e-300), (1e-300, 1e300)] {
+            let equipment: Vec<Box<dyn Equipment>> = vec![
+                Box::new(
+                    StubLoad::new(
+                        "Broken Ratio",
+                        Some(hares_types::zip::ResolvedZip::governing(lighting)),
+                        Some(ExpectedMeanPower::W(500.0)),
+                    )
+                    .with_last_draw(draw_w)
+                    .with_nominal_draw(nominal_w),
+                ),
+                governing_stepped_load(
+                    "Always On",
+                    ZipLoad::constant_power(),
+                    Some(ExpectedMeanPower::W(300.0)),
+                    200.0,
+                ),
+            ];
+            let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0)
+                .expect("the live load carries a positive weight");
+            assert_eq!(
+                premise.governing[0],
+                ("Broken Ratio".to_string(), None),
+                "a stepped report of {draw_w} W over a {nominal_w} W base is \
+                 not a usable response ratio: the 500 W expectation must not \
+                 stand in for the moment the load observed"
+            );
+            assert_eq!(
+                premise.governing[1],
+                ("Always On".to_string(), Some(200.0)),
+                "the live load's weight is untouched by the broken ratio"
+            );
+            assert_eq!(
+                (premise.zip.zp, premise.zip.ip, premise.zip.pp),
+                (0.0, 0.0, 1.0),
+                "only the live load shapes the aggregate"
+            );
+        }
+    }
+
+    #[test]
+    fn the_de_energized_arm_zeroes_every_stepped_report() {
+        // The de-energized arm is the broken-draw class's other sibling: at
+        // the admitted 0.0 pu outage the bus draws zero from every load, so
+        // the stepped state is a zero weight whatever the last core report
+        // carries. The pin sweeps the arm's reports: an observed zero, a
+        // stale positive draw, and the broken values F3's witness pins one
+        // voltage up (a negative watt value, NaN, an infinite draw). None
+        // of them, and none of the loads' expectations, may enter the
+        // aggregate: a weight here would report a draw a dead bus cannot
+        // supply.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        for reported_w in [0.0, 300.0, -3.0, f64::NAN, f64::INFINITY] {
+            let equipment: Vec<Box<dyn Equipment>> = vec![
+                governing_stepped_load(
+                    "Indoor Lighting",
+                    lighting,
+                    Some(ExpectedMeanPower::W(500.0)),
+                    reported_w,
+                ),
+                governing_stepped_load(
+                    "Always On",
+                    ZipLoad::constant_power(),
+                    Some(ExpectedMeanPower::W(300.0)),
+                    200.0,
+                ),
+            ];
+            assert!(
+                aggregate_premise_zip(&equipment, &empty_schedule(), 1, 0.0).is_none(),
+                "at 0.0 pu the engine draws zero from every load: a stepped \
+                 report of {reported_w} W is a zero weight, never the report \
+                 and never an expected mean"
             );
         }
     }

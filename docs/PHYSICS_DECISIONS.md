@@ -1415,7 +1415,11 @@ that is not a draw (a negative watt value, violating
 one from a broken core state) is no evidence of an observed zero either:
 the roster publishes no weight for it (the unknown-mean semantics) and
 no expected mean stands in for a stepped moment, so a broken report
-never fabricates an "inspected and empty" zero.
+never fabricates an "inspected and empty" zero. The same holds for a
+positive report whose assembled response is not a finite positive ratio
+(a report that dwarfs its base, or a base that dwarfs the report): the
+base's acceptance rule bounds the base, not the ratio, and such a moment
+carries no weight rather than its expected mean.
 
 ## The pf = 0.0 sentinel is a reactive-only switch (the secondary real response keeps its row)
 

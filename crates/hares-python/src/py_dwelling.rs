@@ -1441,8 +1441,10 @@ impl PyDwelling {
     /// ``governing_equipment`` (list of
     /// ``{"name": str, "mean_power_w": float | None}`` -- equipment
     /// included in the aggregate with its weighting draw in watts;
-    /// ``None`` marks equipment whose weight is not computable, which
-    /// contributes no weight), and ``constant_power_equipment`` (list of
+    /// ``0.0`` is an observed zero draw (the moment was inspected and the
+    /// load drew nothing, the de-energized boundary included); ``None``
+    /// marks equipment whose weight is not computable, which contributes
+    /// no weight), and ``constant_power_equipment`` (list of
     /// names whose real power is DER-controller-driven and therefore
     /// voltage-invariant by construction (battery, EV, PV).
     ///
@@ -1454,7 +1456,11 @@ impl PyDwelling {
     /// a load's row cannot draw at (a non-positive evaluation, the
     /// near-dead edge) that load's expectation carries no weight either,
     /// and ``deep_sag_scale`` is always a positive finite multiplier when
-    /// reported.
+    /// reported. A stepped report whose assembled response is not a finite
+    /// positive ratio (a broken sensor value, or a report and base of
+    /// different magnitudes) carries no weight and never its expected
+    /// mean: an expectation is pre-step evidence and stands in only for a
+    /// load that reported no draw.
     ///
     /// ``None`` when no ZIP-governing equipment has a computable positive
     /// weight; never a silent constant-power answer. Pure
