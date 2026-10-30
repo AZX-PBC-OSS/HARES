@@ -1444,7 +1444,7 @@ impl Equipment for Battery {
             // the layer's inputs already carry) governs what is delivered,
             // exactly as it governs the model's own target, and exactly as
             // the discharge derate governs the export leg below.
-            target_power_w = self.clamp_power(target_power_w)?;
+            target_power_w = self.clamp_power(target_power_w, dr_fraction)?;
         }
 
         // -- Islanded charge clamp: no phantom grid import during an outage --
