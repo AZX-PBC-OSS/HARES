@@ -227,6 +227,7 @@ fn blueprint_added_pv_applies_the_spec_bag_override() {
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         };
         let mut parameters = serde_json::to_value(&typed_cfg)
             .expect("serializable PV config")

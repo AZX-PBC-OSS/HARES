@@ -71,7 +71,6 @@ pub struct BatteryConfig {
     // BMS / grid rules (serialised as string, parsed at init)
     pub bms_mode: Option<String>,
     pub grid_export_rule: Option<String>,
-
     // Reactive power / smart-inverter control (VPP / RL use cases).
     // power_factor defaults to 1.0 (no reactive); inverter_capacity_va
     // defaults to max(max_charge_w, max_discharge_w) at init time.
@@ -88,6 +87,19 @@ pub struct BatteryConfig {
     // Defaults to 0 (no dwell enforcement) for backward compatibility.
     #[serde(default)]
     pub min_dwell_steps: usize,
+
+    /// The inverter's IEEE 1547-2018 response: the assigned
+    /// abnormal-performance category's default trip tables, the
+    /// frequency-droop (frequency-Watt) parameters and the enter-service
+    /// criteria, operator-settable per parameter. `None` (the default)
+    /// leaves the layer unconfigured: the inverter behaves as the
+    /// pre-1547 model did and the run's first grid excursion is warned
+    /// with the excursion counted in `der1547_unconfigured_excursions`
+    /// telemetry. The layer governs grid-connected operation: on a
+    /// utility-outage step the outage model's contract governs instead
+    /// (an island source is never tripped off its own island).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub der_1547: Option<crate::der1547::Der1547Settings>,
 }
 
 impl EquipmentTypedConfig for BatteryConfig {
@@ -489,6 +501,21 @@ impl hares_types::DescribeFields for BatteryConfig {
                     ..Default::default()
                 },
             ),
+            (
+                "der_1547",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the inverter's IEEE 1547-2018 response: the assigned \
+                         abnormal-performance category (I, II or III) whose \
+                         default trip, frequency-droop and enter-service \
+                         settings govern, plus optional per-parameter \
+                         overrides; absent means unconfigured (the pre-1547 \
+                         behavior, excursions warned once and counted); the \
+                         layer governs grid-connected operation only",
+                    ),
+                    ..Default::default()
+                },
+            ),
         ])
     }
 }
@@ -500,6 +527,7 @@ mod tests {
 
     fn minimal_battery_config() -> BatteryConfig {
         BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 13.5 * 3.6e6,

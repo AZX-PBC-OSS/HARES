@@ -87,4 +87,14 @@ pub(super) struct EvCheckpoint {
     /// it between steps (mode is a step outcome, keyed on the pack-side
     /// net charge rate and the export leg — see `classify_mode`).
     pub(super) last_mode: OperatingMode,
+    /// The IEEE 1547 layer's run state (the per-point trip timers, the
+    /// trip latch, the enter-service accumulation, the frequency-droop
+    /// anchor) and the unconfigured layer's excursion count and warn
+    /// latch. The state is the layer's own across steps: no step's inputs
+    /// re-derive a part-spent window, a latched reason or a held anchor,
+    /// so it rides the blob verbatim.
+    pub(super) der1547_state: crate::der1547::Der1547State,
+    pub(super) der1547_unconfigured_excursions: u32,
+    pub(super) der1547_unconfigured_warned: bool,
+    pub(super) der1547_unconfigured_in_excursion: bool,
 }

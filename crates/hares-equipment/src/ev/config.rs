@@ -355,6 +355,21 @@ pub struct EvConfig {
     /// acceptable).
     #[serde(default = "default_true")]
     pub discharge_respects_deadline: bool,
+
+    /// The export inverter's IEEE 1547-2018 response: the assigned
+    /// abnormal-performance category's default trip tables, the
+    /// frequency-droop (frequency-Watt) parameters and the
+    /// enter-service criteria, operator-settable per parameter. `None`
+    /// (the default) leaves the layer unconfigured: the export behaves
+    /// as the pre-1547 model did and the run's first grid excursion is
+    /// warned with the excursion counted in
+    /// `der1547_unconfigured_excursions` telemetry. The layer governs
+    /// the grid-connected export function: on a utility-outage step the
+    /// outage model's contract governs instead (an island source is
+    /// never tripped off its own island), and the charge leg is the
+    /// vehicle's load-side behavior, never the DER function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub der_1547: Option<crate::der1547::Der1547Settings>,
 }
 
 impl EquipmentTypedConfig for EvConfig {
@@ -809,6 +824,22 @@ impl hares_types::DescribeFields for EvConfig {
                 "discharge_respects_deadline",
                 hares_types::FieldMeta {
                     description: Some("whether discharge respects the deadline"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "der_1547",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the export inverter's IEEE 1547-2018 response: the \
+                         assigned abnormal-performance category (I, II or \
+                         III) whose default trip, frequency-droop and \
+                         enter-service settings govern, plus optional \
+                         per-parameter overrides; absent means unconfigured \
+                         (the pre-1547 behavior, excursions warned once and \
+                         counted); the layer governs the grid-connected \
+                         export function only",
+                    ),
                     ..Default::default()
                 },
             ),

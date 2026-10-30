@@ -557,6 +557,55 @@ pub const PV_LUT_NN_FALLBACK_COUNT: &str = "pv_lut_nn_fallback_count";
 /// scope: internal
 pub const Q_SOURCE: &str = "q_source";
 
+// ── IEEE 1547 DER response ─────────────────────────────────────────────────
+
+/// The DER inverter's IEEE 1547 trip state: 0.0 = online, 1.0 = tripped.
+/// A tripped inverter ceases to energize: no active power, no vars.
+///
+/// scope: internal
+pub const DER1547_TRIPPED: &str = "der1547_tripped";
+
+/// The trip condition that fired: 0.0 = none, 1.0 = UV2 (deep
+/// under-voltage), 2.0 = UV1 (sustained under-voltage), 3.0 = OV1
+/// (sustained over-voltage), 4.0 = OV2 (deep over-voltage), 5.0 = UF2
+/// (deep under-frequency), 6.0 = UF1 (sustained under-frequency), 7.0 =
+/// OF1 (sustained over-frequency), 8.0 = OF2 (deep over-frequency).
+///
+/// scope: internal
+pub const DER1547_TRIP_REASON: &str = "der1547_trip_reason";
+
+/// Seconds accumulated in the governing abnormal band this disturbance:
+/// how far into the active trip point's clearing-time (ride-through)
+/// window the inverter is. The trip ends the measurement: the firing step
+/// reports the window it reached (its firing point's own), and the
+/// latched steps report zero because the per-disturbance timers are
+/// spent. A recovery inside the window resets it to zero.
+///
+/// scope: internal
+pub const DER1547_RIDE_THROUGH_S: &str = "der1547_ride_through_s";
+
+/// Seconds accumulated inside the enter-service windows since the last
+/// out-of-window step: how far into the return-to-service delay a tripped
+/// inverter is.
+///
+/// scope: internal
+pub const DER1547_ENTER_SERVICE_S: &str = "der1547_enter_service_s";
+
+/// The frequency-droop (frequency-Watt) function's active-power adjustment
+/// in per unit of the inverter's active-power rating: the reference minus
+/// the pre-disturbance output. 0.0 when the function is inactive or the
+/// layer is unconfigured.
+///
+/// scope: internal
+pub const DER1547_FW_ADJ_PU: &str = "der1547_fw_adj_pu";
+
+/// Cumulative count of grid excursions this DER saw while no IEEE 1547
+/// trip tables were configured: the counted-event surface behind the
+/// run's first warning. 0.0 when the layer is configured.
+///
+/// scope: internal
+pub const DER1547_UNCONFIGURED_EXCURSIONS: &str = "der1547_unconfigured_excursions";
+
 // ── HVAC capacity reporting ────────────────────────────────────────────────
 
 /// scope: internal — capacity output comes from CoreOutput, not telemetry key

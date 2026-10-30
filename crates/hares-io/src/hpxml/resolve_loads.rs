@@ -1281,6 +1281,7 @@ pub(super) fn resolve_scheduled_loads(
                             cc_cv_transition_soc: None,
                             charging_priority: None,
                             discharge_respects_deadline: true,
+                            der_1547: None,
                         };
                         specs.push(build_typed_spec(
                             "Electric Vehicle".to_string(),

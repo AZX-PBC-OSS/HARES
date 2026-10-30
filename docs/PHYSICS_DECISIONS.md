@@ -1366,6 +1366,18 @@ way. The named gap: a frequency-excursion study reads zero response by
 construction, and the channel's only consumers are the setters, the
 validators and the test constructors; a study needing one must land the
 coefficient source and the record first, and retire this entry.
+
+Scope update, the DER response layer's landing: the gap's load-side
+statement stands (no residential load class reads the channel), but the
+channel is no longer read by nothing - the inverter-based DER equipment
+(the PV, the battery's inverter, the EV's export leg) reads
+`GridState::frequency_hz` for its IEEE 1547 frequency trip tables and
+frequency-droop function when a `der_1547` block configures them, per
+the entry "The DER inverters answer the grid signals per IEEE 1547 when
+configured" (the coefficient source the gap demanded, landed and cited
+there). The unconfigured DER classes still read nothing, exactly as
+this entry records.
+
 ## The MSHP pan heater runs on ambient temperature alone
 
 The minisplit heat pump's condensate pan heater draws its rated 0.150 kW
@@ -1553,3 +1565,288 @@ per home is the smaller claim. A schedule CSV is never diversified:
 measured, upstream and hand-built schedules pass through untouched whatever
 the knob says. The parameter table, the provenance tiers and the
 `SimulationConfig.schedule_diversity` knob are docs/schedule-sources.md.
+## The DER inverters answer the grid signals per IEEE 1547 when configured
+
+The brownout round's F8 finding: the PV at a sustained 0.5 pu sag held
+2569.856304378 W bitwise, the same output as the 1.0 pu run, because the
+only voltage dependence a DER inverter had was the de-energized bus
+(`inverter_online = bus_energized()`), and at restoration from an island
+the PV was immediately back at full output with no reconnection timer.
+The frequency channel's own gap entry (above) records the channel being
+read by nothing. This entry records the DER response layer that closes
+both, for the inverter-based DER classes (the PV, the stationary
+battery's inverter, the EV's V2L/V2G export inverter).
+
+The form: an explicit per-equipment configuration surface, `der_1547`,
+on the PV, Battery and EV configs. **Unconfigured (the default): the
+pre-1547 behavior is kept** - the inverter rides any energized-bus
+excursion as a pinned source and only a de-energized bus stops it - and
+the layer is not silent about it: the first grid excursion the layer
+declines to govern is warned once per equipment (naming the equipment,
+the excursion and the `der_1547` key) and every excursion event is
+counted in `der1547_unconfigured_excursions` telemetry. **Configured:**
+the block states the DER's assigned abnormal-performance category (I, II
+or III) and optionally overrides any parameter. The category selects the
+standard's default settings; the overrides are the operator-settable
+surface (each parameter maps to one of the standard's setting names, and
+an out-of-range or non-finite override is a configuration error naming
+the parameter).
+
+The category this model's defaults follow is **Category II** (the
+residential DER class the engine models). The default values, and the
+public reproductions they are pinned against (the standard's tables are
+IEEE-copyrighted; these reproduce them verbatim):
+
+- Voltage shall-trip defaults, Category II (IEEE 1547-2018 voltage
+  shall-trip tables; NERC, "Bulk Power System Reliability Perspectives
+  on the Adoption of IEEE 1547-2018", March 2023, Table 1.2; MISO,
+  "Guideline for IEEE Std 1547 Implementation", Table 3): OV2 1.20 pu /
+  0.16 s, OV1 1.10 pu / 2.0 s, UV1 0.70 pu / 10 s, UV2 0.45 pu / 0.16 s.
+  (Category I differs in UV1's clearing time, 2.0 s; Category III in
+  OV1 13 s, UV1 0.88 pu / 21 s, UV2 0.50 pu / 2 s; both pinned from the
+  same sources.)
+- Frequency shall-trip defaults (identical across categories; MISO
+  Table 6): OF2 62.0 Hz / 0.16 s, OF1 61.2 Hz / 300 s, UF1 58.5 Hz /
+  300 s, UF2 56.5 Hz / 0.16 s.
+- Frequency-droop (frequency-Watt) parameters (identical across
+  categories; IEEE 1547-2018 clause 6.5.2.7.2 defaults, MISO Table 8):
+  dbOF = dbUF = 0.036 Hz, kOF = kUF = 0.05 pu power per pu frequency.
+- Enter-service criteria (identical across categories; IEEE 1547-2018
+  clauses 4.10.2/4.10.3 defaults, MISO Table 9): voltage within
+  [0.917, 1.05] pu, frequency within [59.5, 60.1] Hz, held for a
+  minimum 300 s delay before the DER re-energizes.
+
+The dynamic forms follow EPRI's OpenDER reference implementation
+(`epri-dev/OpenDER`, the IEEE 1547-2018 model of record; EPRI Report
+3002030962): each shall-trip point is an on-delay timer
+(`ConditionalDelay`, Eq. 3.12.4-2..4) whose accumulated in-band time
+integrates the timestep and caps at the clearing time; the point trips
+when the accumulator reaches the window, and the clearing time is a
+maximum, so a step whose accumulated time reaches it is a tripped step.
+The trip latches: a tripped inverter ceases to energize (no active
+power, no vars, and for the bidirectional battery inverter neither leg
+conducts) until the enter-service delay completes inside the
+enter-service windows. The frequency-droop function adjusts active power
+in injection space: inside the deadband, nothing; beyond it, a linear
+ramp from the pre-disturbance output latched on engagement, at
+1/(60 x k) pu per Hz - over-frequency down toward the injection floor
+(zero for a generation-only inverter, the negative charge limit for the
+battery), under-frequency up toward the available injection, the same
+reference equations OpenDER uses (Eq. 3.7.1-12/13/14). With the default
+tables a full-output inverter's ramp cannot reach the floor inside the
+frequency trip bands (at OF1's edge the reach is 0.388 pu, leaving a
+1.0 pu output at 0.612 pu), so a full-output inverter's deep
+over-frequency excursion trips rather than ramping to zero output. The
+floor is the standard's zero, not a surface-specific clamp: a partly
+loaded inverter (an output below the 0.388 pu reach) is curtailed to
+zero inside the trip band while its ride-through timer runs, and the
+trip still fires at the window's end.
+
+The discrete-time statement is the model's own: the engine steps at 900 s
+(typically), so a trip-band excursion reached in one step trips on that
+step and the 300 s reconnection delay completes within one step at
+nominal conditions - the pre-1547 restoration behavior is preserved at
+the 900 s timestep and the delay's pin lives at fine timesteps, where
+the ride-through windows hold step by step. OpenDER's open-loop response
+time (5 s) and reaction time for the droop are below any timestep the
+engine runs and are not modeled; the shape the row pins is the
+steady-state reference, not the filtered response. Momentary cessation
+(the ride-through operating mode where the inverter ceases to energize
+without disconnecting) is not modeled: the shall-trip settings govern
+the whole ride-through window instead, which is the default settings'
+own semantics.
+
+The per-disturbance accounting, stated: each trip point's accumulator
+resets on the first step its condition does not hold, so two 6 s sags
+separated by a recovery are two rides (neither borrows the other's
+time), and the clearing time is a maximum: a step whose in-band time
+reaches it exactly is a tripped step (a disturbance held for exactly the
+window trips; it does not ride). The enter-service window's bounds are
+inside the window: a bus at 0.917 or 1.05 pu, at 59.5 or 60.1 Hz,
+accumulates the delay. The delay is a minimum and the windows are the
+criterion, so a zero-length delay (the operator surface admits 0.0)
+still reconnects only on an in-window step: the windows gate the return
+to service whatever the wait. The trip ends the ride-through measurement:
+the firing step reports the window it reached, the firing point's own
+window and never another band's timer that ran on the same step (a 0.4 pu
+sag fills both UV1's and UV2's timers and reports UV2's 0.16 s, not UV1's
+10 s), and the latched inverter's per-disturbance timers are spent (the
+ride-through channel resets when the point trips), so a save taken while
+the latch holds carries no partial window. A trip condition that holds on
+a reconnection-delay step is not re-evaluated: the latch keeps the reason
+its own trip set and the enter-service clock is the windows' alone, so a
+deeper band on such a step re-fires nothing and renames nothing while its
+out-of-window reading spends the clock.
+
+A simultaneous voltage and frequency excursion runs both trip paths: the
+eight points are independent on-delay timers, a step in two bands
+accumulates both, and the point that reaches its window trips the
+inverter. The standard sets each point against its own disturbance and
+does not rank them; the reason the model publishes is the first fired in
+the tables' fixed order (the deeper point before the shallower within a
+class, the voltage points before the frequency points), while the trip
+itself is the same whichever point names it. Every equipment publishes
+its own trip state on the step it fires, and the dwelling's dense
+per-DER channel is aligned with the equipment roster, so a step that
+trips several DERs publishes each at its own index in the roster's
+order. The six channels' names (`der1547_tripped`,
+`der1547_trip_reason`, `der1547_ride_through_s`,
+`der1547_enter_service_s`, `der1547_fw_adj_pu`,
+`der1547_unconfigured_excursions`) are the consumer's contract, not an
+internal spelling: each is pinned by its literal name with a value only
+that channel produces, so a rename shows as a broken pin rather than a
+silent break for the reader keyed on it.
+
+The frequency-droop pre-disturbance anchor is the inverter's undrooped
+output at the step the deadband is crossed, held while the excursion
+holds: the model's own output for that step is the operating point the
+disturbance found, and a controller with no earlier step is not anchored
+at zero. The reference governs whenever it differs from the model's own
+output: a zero anchor holds the inverter at the floor (zero injection)
+for the rest of an over-frequency excursion even as its irradiance or
+dispatch would otherwise raise it, and the layer returns the model's own
+output bitwise when the two coincide, so the undrooped path stays
+unchanged. An inverter whose export function is off (the EV's export leg
+between dispatch steps) clears the anchor, so an excursion that ended
+while the inverter was idle cannot anchor the next ramp; a stale anchor
+would let an over-frequency droop command more than the pre-disturbance
+output. The island model reads the latch: a battery whose trip latch is
+set has ceased to energize and is not an island source (an island
+founded on it would run the loads on phantom power), while an island
+bus another source holds up counts toward the latched inverter's
+enter-service delay as any in-window bus does. The EV's export leg
+answers the same question from its delivered export, which a tripped
+step zeroes, so a latched EV cannot found an island either.
+
+A tripped inverter owes nothing to a demand-response event: its
+delivered interchange is zero while the latch holds (for the
+bidirectional battery inverter neither leg conducts, so the inverter
+throughput is zero and the port carries the standby draw; a cold pack's
+cell heater is a bus load rather than inverter throughput and keeps its
+supply while the utility is up), and the DR level is the grid's
+command rather than the inverter's state, so the trip suspends the
+obligation without spending or clearing it: the DR-scaled discharge
+resumes on the step the latch clears. The same DR fraction bounds the
+frequency-Watt function's up-ramp, because the DR level is the
+operator's cap on the delivered output, not a pre-disturbance
+operating point the response may exceed: each class's availability
+input carries the cap the delivered export was already under (the
+battery's is the deliverable discharge bound: the DR fraction with the
+export and external power limits, the same composition `clamp_power`
+applies to its own output; the EV's carries the fraction and the
+resolved leg's own budget, its rating and the pack heater's priority
+draw included, its pre-disturbance output already the DR-scaled,
+heater-budgeted export). A full shed
+(GridEmergency) therefore holds zero export through an under-frequency
+excursion, and a partial shed caps the ramp at the shed level.
+
+The droop's absorption leg is bounded at the sink the same way. An
+over-frequency excursion ramps active power down through zero into
+charge, and the charge it commands is a charge command like the model's
+own: the battery's floor is the deliverable charge bound (the DR
+fraction with the import and external power limits), and the pack's
+charge capability derate and a configured charging-curve LUT's fraction
+apply to the delivered charge through `clamp_power`. Without the bound
+an over-frequency excursion would absorb through a service's import
+limit or a full shed. The EV export's floor is zero (a
+generation-only inverter does not absorb), and an under-frequency
+excursion would export a near-reserve pack's heater headroom without
+the availability's heater budget, landing the pack's SOC below its
+reserve floor. Both ramps' references compose as the floor-bounded ask
+capped at the available injection: the up-ramp rises from the anchor and
+caps at the availability input, and the down-ramp - whose anchor is the
+crossing step's operating point - floors at the injection floor and then
+caps at the availability, so a capability that tightened inside a held
+excursion (a falling irradiance, a deepening shed, a pack cooling toward
+its charge floor) governs the reference the same way it governs the
+model's own output. The cap composes last: an availability below the
+floor is a contradictory pair (the DER cannot reach the floor's
+injection), and the availability governs there, so the response never
+commands past what the DER can deliver and never invents the floor.
+
+The composed delivery's order, one table (each corner pinned by its
+named witness; the layer's inputs in parentheses):
+
+| Class | The delivered power's composition, in order | The corner pin |
+|---|---|---|
+| PV | the array's irradiance output (weather, soiling, shading), then the operator curtailment (fraction, then limit), then the layer's reference, then the DC follows the delivery. The availability input IS the irradiance-capped output, so the layer's window is the whole composition and no caller-side re-clamp exists | `pv::tests::witness_der1547_pv_droop_reference_never_exceeds_the_available_irradiance` (a falling sky inside a held excursion: the composed output is the dim sky's deliverable, not the stale anchor's ask) |
+| Battery | `determine_target_power` (whose `clamp_power` applies the temperature capability and a configured charging-curve LUT), then the layer's reference (the availability input = the deliverable discharge bound, the floor = the deliverable charge bound: the DR fraction, the import/export limits, the external power limit), then `clamp_power` again on the layered reference, then the pack's SOC and thermal machinery. The droop runs only on a step the pack is dispatched on: a zeroed row, a dead bus and a disconnected pack take no response (the trip tables still watch) | `battery::tests::witness_der1547_battery_droop_absorption_obeys_the_charge_bound` (the import limit, the full shed), `witness_der1547_layered_reference_delivery_obeys_the_charge_capability` (the cold pack's derate on the delivered charge) and `witness_der1547_an_unavailable_period_takes_no_droop_response` (the zeroed rows) |
+| EV (export leg) | `compute_discharge` (the heater's priority budget), then the layer's reference (the availability input = the resolved leg's own export budget times the DR fraction: its rating, the pack's energy above that leg's floor, and the heater's priority share, never the pack-wide dispatch ceiling that may be a smaller sibling leg's; the floor = 0) | `ev::tests::witness_der1547_ev_droop_export_obeys_the_heater_budgeted_ceiling` and `witness_der1547_ev_droop_availability_is_the_resolved_legs_budget` (both legs enabled: a smaller V2L rating does not bind the V2G leg's reference) |
+| EV (charge leg) | outside the layer entirely: the vehicle's load-side behavior (the charge leg is never the DER function), the droop anchor cleared on the steps it conducts. Both faces are the exclusion's: a sag neither trips it, and an over-frequency excursion does not curtail it (the configured step delivers the unconfigured twin's port power) | `ev::tests::witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_side` |
+
+The PV needs no caller-side re-clamp and the battery needs one because
+of what each class's availability input can carry: the PV's input is
+the array's full capability (the irradiance-capped output itself), so
+the layer's window is the whole composition; the battery's inputs are
+the operator bounds only (the temperature capability and the LUT are
+invisible to them), so the caller re-clamps the layered reference with
+`clamp_power`, the same function that bounds the model's own target.
+
+The checkpoint answer: the PV, Battery and EV formats move to v5, v4 and
+v10 with the layer's state added, so a pre-1547 save (v4, v3, v9) is
+refused with the typed version-mismatch error rather than migrated or
+re-derived; a save taken mid-disturbance restores the exact 1547 state,
+the accumulator's window position included, into the controller the
+configuration built before the load. Only the layer's own state rides
+the checkpoint: the availability and floor inputs are per-step caller
+values (stateless), so nothing of a capability cap is carried, and a
+restored step recomposes them from its own weather, dispatch and limits
+as the live twin does.
+
+The layer's scope per DER class: the PV's inverter is governed at every
+step (a de-energized bus is the extreme under-voltage: the trip it
+produces is latched, and the return to service follows the enter-service
+delay, which closes F8's "immediately back at full output" half); the
+battery's and the EV export's layers govern **grid-connected operation
+only** - on a utility-outage step the outage model's contract governs
+instead (its timers reset and a latched trip waits on the enter-service
+windows), because those inverters can be their island's grid-forming
+source and the layer must never trip one off the island it is holding up
+(the brownout round's F7 lesson). The EV's charge leg is the vehicle's
+load-side behavior and is not the DER function; the layer gates the
+export leg alone, while the battery's layer gates its inverter's both
+legs (one bidirectional DER inverter).
+
+The step's own availability follows from that scope. The EV's export
+function conducts only on a commanded discharge step, so the steps it
+does not conduct (an idle export leg, an unavailable period) clear the
+droop anchor and do not advance a timer: the channels read the run state
+there, which keeps a latch already set reported and holds its
+enter-service clock where it stopped. The battery's inverter stays
+connected and supplied across its dispatch-row zeroing (the HPXML
+unavailable-period convention zeroes the rows, not the connection: its
+standby draw continues), so its trip tables keep watching the bus and an
+excursion on such a step trips it as any other step's would. Its
+frequency-Watt response does not run there: the period, a dead bus and a
+disconnected pack all command zero interchange, so the layer steps for
+its trip tables and its return-to-service clock, the step's published
+adjustment is zero, and the step clears the droop anchor (a step that
+conducted nothing cannot anchor the next ramp). The step the pack is
+dispatched on re-anchors on its own output. The return-to-service clock
+is the latched inverter's own state machine, not the pack's dispatch:
+the battery's delay accrues on the period's in-window steps and the
+inverter can reconnect through the period, while the EV's unstepped
+layer holds its latch and its clock through it.
+
+The fail-safe is a per-step answer and never more: a non-finite bus
+voltage or frequency de-energizes the inverter for that step without
+latching it (a poisoned grid state is not evidence about any table's
+condition: no trip reason, no ride-through window spent, no
+enter-service time accrued), and the next finite step resumes the state
+exactly as it stood. The composition with the unavailable period follows
+from each class's scope: the battery's layer steps through the period,
+so the fail-safe fires on its unavailable steps too; the EV's layer does
+not step there, so the period's idleness cannot fire it (an unstepped
+layer sees no reading at all).
+
+Alternative rejected: defaults always on. The engine's existing
+scenarios (and their goldens and parity fixtures) were built against the
+pre-1547 inverter behavior, and turning the trip tables on without a
+configuration act would silently change every fleet run's DER response -
+the exact "silent default" class the quality bar bans. The explicit
+surface, the warn-once and the counted excursion keep the unconfigured
+runs honest and byte-compatible. A second alternative, porting OpenDER's
+full dynamic chain (the low-pass filter, the reaction time, momentary
+cessation, the enter-service soft-start ramp), is deferred: none of it
+is observable at the engine's timestep resolution, and each piece would
+be untestable behavior at this resolution rather than pinned physics.

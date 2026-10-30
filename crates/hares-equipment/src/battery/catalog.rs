@@ -246,6 +246,7 @@ impl BatterySpec {
                 inverter_capacity_va: None,
                 grid_forming: None,
                 min_dwell_steps: 0,
+                der_1547: None,
             },
         )
     }
@@ -775,6 +776,7 @@ mod tests {
             inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
+            der_1547: None,
         };
         // n_series derived: round(50.4 / 3.2) = round(15.75) = 16
         // Verify through init: create battery, init, check n_series
@@ -1452,6 +1454,7 @@ mod tests {
                     inverter_capacity_va: None,
                     grid_forming: None,
                     min_dwell_steps: 0,
+                    der_1547: None,
                 },
             )
             .unwrap()

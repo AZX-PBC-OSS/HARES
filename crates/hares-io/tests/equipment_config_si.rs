@@ -116,6 +116,7 @@ fn full_pv_config() -> PvConfig {
             sam_lut_path: None,
             attached_boundary_id: Some(2),
         }]),
+        der_1547: None,
     }
 }
 
@@ -157,6 +158,7 @@ fn full_battery_config(bms_mode: Option<String>) -> BatteryConfig {
         inverter_capacity_va: Some(5000.0),
         grid_forming: Some(true),
         min_dwell_steps: 0,
+        der_1547: None,
     }
 }
 
@@ -199,6 +201,7 @@ fn full_ev_config(strategy: Option<String>) -> EvConfig {
         cc_cv_transition_soc: Some(0.85),
         charging_priority: None,
         discharge_respects_deadline: true,
+        der_1547: None,
     }
 }
 

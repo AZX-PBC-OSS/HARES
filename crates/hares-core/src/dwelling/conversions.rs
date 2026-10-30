@@ -2981,6 +2981,7 @@ mod tests {
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         };
         let mut parameters = serde_json::to_value(&typed_cfg)
             .expect("serializable PV config")

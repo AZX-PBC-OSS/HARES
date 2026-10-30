@@ -242,6 +242,7 @@ fn add_ev(
         cc_cv_transition_soc: None,
         charging_priority: None,
         discharge_respects_deadline: true,
+        der_1547: None,
     };
     let config = EquipmentConfig::from_typed("EV".to_string(), "EV".to_string(), cfg).unwrap();
     let env = dwelling.latest_env().clone();
@@ -319,6 +320,7 @@ fn add_battery_with_discharge_limit(
         inverter_capacity_va: None,
         grid_forming: None,
         min_dwell_steps: 0,
+        der_1547: None,
     };
     let config =
         EquipmentConfig::from_typed("Battery".to_string(), "Battery".to_string(), cfg).unwrap();

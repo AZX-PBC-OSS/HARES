@@ -29,6 +29,12 @@ pub(super) fn default_telemetry(charging_level: ChargingLevel) -> Telemetry {
     t.insert(tk::DR_POWER_FRACTION, 1.0);
     t.insert(tk::DR_LEVEL, 0.0);
     t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
+    t.insert(tk::DER1547_TRIPPED, 0.0);
+    t.insert(tk::DER1547_TRIP_REASON, 0.0);
+    t.insert(tk::DER1547_RIDE_THROUGH_S, 0.0);
+    t.insert(tk::DER1547_ENTER_SERVICE_S, 0.0);
+    t.insert(tk::DER1547_FW_ADJ_PU, 0.0);
+    t.insert(tk::DER1547_UNCONFIGURED_EXCURSIONS, 0.0);
     t
 }
 
@@ -123,6 +129,42 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::power_kvar(
             tk::REACTIVE_POWER_KVAR,
             "Reactive power (positive=absorbing vars, negative=supplying)",
+        ),
+        TelemetryField::code_code(
+            tk::DER1547_TRIPPED,
+            &["online", "tripped"],
+            "IEEE 1547 export-inverter trip state: 0.0 = online, 1.0 = \
+                 tripped (cease to energize). Always 0.0 when no `der_1547` \
+                 block is configured.",
+        ),
+        TelemetryField::code_code(
+            tk::DER1547_TRIP_REASON,
+            crate::der1547::trip_reason::LABELS.as_slice(),
+            "The IEEE 1547 trip condition that fired: 0.0 = none, 1.0 = uv2, \
+                 2.0 = uv1, 3.0 = ov1, 4.0 = ov2, 5.0 = uf2, 6.0 = uf1, \
+                 7.0 = of1, 8.0 = of2",
+        ),
+        TelemetryField::flow_mean(
+            tk::DER1547_RIDE_THROUGH_S,
+            hares_types::Unit::Second,
+            "Seconds accumulated in the governing IEEE 1547 trip band this \
+                 disturbance (the clearing-time window's position)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DER1547_ENTER_SERVICE_S,
+            hares_types::Unit::Second,
+            "Seconds accumulated inside the IEEE 1547 enter-service windows \
+                 while tripped (the return-to-service delay's position)",
+        ),
+        TelemetryField::ratio(
+            tk::DER1547_FW_ADJ_PU,
+            "The IEEE 1547 frequency-droop adjustment, per unit of the \
+                 export inverter's active-power rating (negative = curtailed)",
+        ),
+        TelemetryField::running_total(
+            tk::DER1547_UNCONFIGURED_EXCURSIONS,
+            hares_types::Unit::Count,
+            "Grid excursions seen while no der_1547 tables were configured",
         ),
     ]
 }

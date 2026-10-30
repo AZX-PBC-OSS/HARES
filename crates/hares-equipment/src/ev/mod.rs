@@ -98,6 +98,22 @@ pub struct Ev {
     v2g_soc_reserve: f64,
     v2g_max_discharge_w: f64,
     discharge_respects_deadline: bool,
+    /// The export inverter's IEEE 1547 controller, `Some` when the config
+    /// carries a `der_1547` block. Its state rides the checkpoint. The
+    /// layer governs the grid-connected export function only.
+    der1547: Option<crate::der1547::Der1547Controller>,
+    /// The layer's outcome for the step in flight, `Some` on the steps
+    /// the layer stepped: the step's outcome is authoritative for the
+    /// channels it sets (a fail-safe trip never reaches the latch, and
+    /// the firing step's window is spent in the run state), so the
+    /// publication reads it there and the run state on the steps the
+    /// layer does not step.
+    der1547_step_outcome: Option<crate::der1547::Der1547Outcome>,
+    /// Grid excursions seen while the layer is unconfigured (the counted
+    /// event behind the run's first warning). Always 0 when configured.
+    der1547_unconfigured_excursions: u32,
+    der1547_unconfigured_warned: bool,
+    der1547_unconfigured_in_excursion: bool,
     /// The pack's live AC discharge ceiling [W] published for the driver
     /// actor's dispatch votes: the tighter of each enabled leg's rating
     /// and that leg's energy above its effective discharge floor over the
@@ -333,6 +349,11 @@ impl Ev {
             v2g_soc_reserve: DEFAULT_V2G_SOC_RESERVE,
             v2g_max_discharge_w: DEFAULT_V2G_MAX_DISCHARGE_W,
             discharge_respects_deadline: true,
+            der1547: None,
+            der1547_step_outcome: None,
+            der1547_unconfigured_excursions: 0,
+            der1547_unconfigured_warned: false,
+            der1547_unconfigured_in_excursion: false,
             discharge_ceiling_w: 0.0,
             capacity_derate_model: crate::battery::CapacityDerateModel::default(),
             soc: DEFAULT_SOC.clamp(0.0, 1.0),
@@ -474,6 +495,32 @@ impl Ev {
         self.v2g_max_discharge_w = c.v2g_max_discharge_w.unwrap_or(DEFAULT_V2G_MAX_DISCHARGE_W);
 
         self.discharge_respects_deadline = c.discharge_respects_deadline;
+        // The export inverter's IEEE 1547 layer: built from the config's
+        // `der_1547` block. The droop's per-unit base is the export
+        // rating: the larger of the two legs' discharge ceilings. An EV
+        // with no enabled export leg has no DER function for the layer to
+        // govern, so a `der_1547` block there is a configuration error.
+        self.der1547 = match &c.der_1547 {
+            Some(settings) => {
+                let p_max_w = self.v2g_max_discharge_w.max(self.v2l_max_discharge_w);
+                if !self.v2g_enabled && !self.v2l_enabled {
+                    return Err(HaresError::Equipment(format!(
+                        "{}: der_1547 is configured but the EV has no export \
+                         function (v2g_enabled and v2l_enabled are both false)",
+                        self.descriptor.name
+                    )));
+                }
+                Some(crate::der1547::Der1547Controller::new(
+                    settings,
+                    p_max_w,
+                    &self.descriptor.name,
+                )?)
+            }
+            None => None,
+        };
+        self.der1547_unconfigured_excursions = 0;
+        self.der1547_unconfigured_warned = false;
+        self.der1547_unconfigured_in_excursion = false;
         self.capacity_derate_model = crate::battery::CapacityDerateModel::default();
 
         self.chemistry = match c.chemistry.as_deref() {
@@ -1112,22 +1159,60 @@ impl Ev {
         )
     }
 
-    /// One discharge leg's live AC ceiling [W]: the tighter of the leg's
-    /// rating and the AC power the pack's energy above the leg's effective
-    /// discharge floor sustains over the step (the same budget
-    /// `compute_discharge` spends against). Zero at or below the floor.
-    fn leg_discharge_ceiling_w(&self, leg: DischargeLeg, dt_s: f64) -> f64 {
-        let rating = match leg {
+    /// The DC power the pack's energy above one discharge leg's effective
+    /// floor sustains over the step, with the AC conversion efficiency
+    /// applied to it. The one home of the budget `compute_discharge`
+    /// spends and of the ceilings the dispatch votes and the IEEE 1547
+    /// availability input read.
+    fn discharge_headroom(&self, leg: DischargeLeg, dt_s: f64) -> (f64, f64) {
+        let effective_floor = self.effective_discharge_floor(leg);
+        let available_dc_w =
+            ((self.soc - effective_floor) * self.battery_capacity_j / dt_s).max(0.0);
+        (available_dc_w, self.charging_efficiency.max(0.01))
+    }
+
+    fn leg_rating_w(&self, leg: DischargeLeg) -> f64 {
+        match leg {
             DischargeLeg::V2G => self.v2g_max_discharge_w,
             DischargeLeg::V2L => self.v2l_max_discharge_w,
-        };
-        let effective_floor = self.effective_discharge_floor(leg);
-        if self.soc <= effective_floor {
-            return 0.0;
         }
-        let eta = self.charging_efficiency.max(0.01);
-        let available_dc_w = (self.soc - effective_floor) * self.battery_capacity_j / dt_s;
-        rating.min(available_dc_w * eta).max(0.0)
+    }
+
+    /// One discharge leg's live AC ceiling [W]: the tighter of the leg's
+    /// rating and the AC power the pack's energy above the leg's effective
+    /// discharge floor sustains over the step (the same energy budget
+    /// `compute_discharge` spends against, before that method's heater
+    /// allocation: the ceiling is the dispatch vote's bound, and the
+    /// heater's priority share is the step's to spend). Zero at or below
+    /// the floor.
+    fn leg_discharge_ceiling_w(&self, leg: DischargeLeg, dt_s: f64) -> f64 {
+        let (available_dc_w, eta) = self.discharge_headroom(leg, dt_s);
+        self.leg_rating_w(leg).min(available_dc_w * eta).max(0.0)
+    }
+
+    /// One discharge leg's AC export budget for the step, before the
+    /// demand-response scaling: the tighter of the leg's rating and what
+    /// the pack's energy above the leg's floor sustains after the pack
+    /// heater's priority draw. The heater takes its share first only at or
+    /// below the pack's charge-temperature floor (the branch
+    /// `compute_discharge` spends in); above it the export has priority
+    /// and the heater absorbs the shortfall, so the energy budget bounds
+    /// the export alone. This is the bound the delivered export is under,
+    /// and so the one the frequency-droop availability input carries.
+    fn leg_discharge_budget_w(
+        &self,
+        leg: DischargeLeg,
+        dt: Duration,
+        heater_desired_dc_w: f64,
+    ) -> f64 {
+        let dt_s = dt.as_secs_f64().max(MIN_TIMESTEP_HOURS * 3600.0);
+        let (available_dc_w, eta) = self.discharge_headroom(leg, dt_s);
+        let headroom_dc_w = if self.battery_temp_c <= self.min_charge_temp_c {
+            (available_dc_w - heater_desired_dc_w.min(available_dc_w).max(0.0)).max(0.0)
+        } else {
+            available_dc_w
+        };
+        self.leg_rating_w(leg).min(headroom_dc_w * eta).max(0.0)
     }
 
     /// The pack's live AC discharge ceiling [W]: the tighter of the
@@ -1218,6 +1303,56 @@ impl Ev {
     fn write_telemetry(&mut self) {
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry.set(tk::ACTIVE_POWER_KW, self.active_power_w);
+        // The IEEE 1547 layer's channels. The step the layer stepped
+        // publishes its outcome, the same source the PV's and the
+        // battery's channels read: a fail-safe trip on a poisoned grid
+        // reading is the step's outcome and never reaches the latch, and
+        // the firing step's window is spent in the run state. The steps
+        // the layer does not step (an idle export leg) publish the run
+        // state, so a latched trip stays reported while the export leg is
+        // off.
+        match &self.der1547 {
+            Some(controller) => {
+                let state = controller.state();
+                let (tripped, trip_reason, ride_through_s, enter_service_s, fw_adj_pu) =
+                    match self.der1547_step_outcome {
+                        Some(outcome) => (
+                            outcome.tripped,
+                            outcome.trip_reason,
+                            outcome.ride_through_s,
+                            outcome.enter_service_s,
+                            outcome.fw_adj_pu,
+                        ),
+                        None => (
+                            state.tripped,
+                            state.trip_reason,
+                            state.max_accumulator_s(),
+                            state.es_s,
+                            state.last_fw_adj_pu,
+                        ),
+                    };
+                self.telemetry.set(tk::DER1547_TRIPPED, f64::from(tripped));
+                self.telemetry
+                    .set(tk::DER1547_TRIP_REASON, f64::from(trip_reason));
+                self.telemetry
+                    .set(tk::DER1547_RIDE_THROUGH_S, ride_through_s);
+                self.telemetry
+                    .set(tk::DER1547_ENTER_SERVICE_S, enter_service_s);
+                self.telemetry.set(tk::DER1547_FW_ADJ_PU, fw_adj_pu);
+                self.telemetry.set(tk::DER1547_UNCONFIGURED_EXCURSIONS, 0.0);
+            }
+            None => {
+                self.telemetry.set(tk::DER1547_TRIPPED, 0.0);
+                self.telemetry.set(tk::DER1547_TRIP_REASON, 0.0);
+                self.telemetry.set(tk::DER1547_RIDE_THROUGH_S, 0.0);
+                self.telemetry.set(tk::DER1547_ENTER_SERVICE_S, 0.0);
+                self.telemetry.set(tk::DER1547_FW_ADJ_PU, 0.0);
+                self.telemetry.set(
+                    tk::DER1547_UNCONFIGURED_EXCURSIONS,
+                    f64::from(self.der1547_unconfigured_excursions),
+                );
+            }
+        }
         self.telemetry.set(
             tk::CONNECTION_STATE,
             match self.connection_state {
@@ -1434,6 +1569,9 @@ impl Ev {
         // whatever the commanded leg: a vote is cast before the leg
         // resolves.
         self.discharge_ceiling_w = self.live_discharge_ceiling_w(dt);
+        // The step-outcome capture is per step: the steps that do not
+        // step the layer publish the run state instead.
+        self.der1547_step_outcome = None;
 
         // An unavailable period zeroing the EV's rows (`Vacancy` or
         // `Power Outage`, the `electric_vehicle_charging` and
@@ -1448,6 +1586,9 @@ impl Ev {
                 "the step's unavailable periods zero the EV's rows: the \
                  vehicle is idle for the step"
             );
+            if let Some(controller) = &mut self.der1547 {
+                controller.note_inactive_step();
+            }
             return Ok(ChargeStepPower {
                 charge_leg_ac_w: 0.0,
                 heater_draw_w: 0.0,
@@ -1484,13 +1625,100 @@ impl Ev {
         let heater_ac_eq_w = heater_desired_dc_w / self.charging_efficiency.max(0.01);
 
         if let Some(leg) = discharge_leg {
-            let (export_ac_w, heater_dc_w) = self.compute_discharge(leg, dt, heater_desired_dc_w);
+            let (mut export_ac_w, heater_dc_w) =
+                self.compute_discharge(leg, dt, heater_desired_dc_w);
+
+            // The configured IEEE 1547 layer (grid-connected export
+            // surface): the abnormal-condition trip tables, the
+            // frequency-droop (frequency-Watt) function and the
+            // return-to-service delay apply to the export leg's
+            // grid-connected interchange. On a utility-outage step the
+            // outage model's contract governs instead: the layer is
+            // bypassed (its timers reset, a latched trip waits on the
+            // enter-service windows): the export leg can be the island's
+            // source and is never tripped off its own island. The charge
+            // leg is the vehicle's load-side behavior and is never the
+            // DER function. An unconfigured layer warns once on the first
+            // excursion it declines to govern.
+            // The availability input is the export the delivered power is
+            // already under: the resolved leg's own budget (its rating,
+            // the pack's energy above the leg's floor, and the pack
+            // heater's priority draw) with the demand response fraction
+            // applied. The dispatch vote's pack-wide ceiling is the min
+            // across the enabled legs because a vote may resolve to
+            // either; the layer is stepped after the leg resolves, so the
+            // bound is that leg's, or a smaller sibling's rating would
+            // bind the droop below the export the model is delivering.
+            // The stationary battery's availability input carries the
+            // same deliverable-bound composition.
+            let export_budget_w = self.leg_discharge_budget_w(leg, dt, heater_desired_dc_w);
+            let droop_availability_w = export_budget_w * self.dr_power_fraction();
+            match &mut self.der1547 {
+                Some(controller) => {
+                    // `compute_discharge` returns the port's sign
+                    // (negative = export); the controller's contract is
+                    // injection space (positive = export), negated here.
+                    let outcome = controller.step(
+                        env.grid.bus_voltage_pu(),
+                        env.grid.frequency_hz,
+                        dt.as_secs_f64(),
+                        !env.grid.grid_outage(),
+                        -export_ac_w,
+                        droop_availability_w,
+                        0.0,
+                    )?;
+                    if outcome.tripped {
+                        export_ac_w = 0.0;
+                    } else if outcome.p_ref_w != -export_ac_w {
+                        // The reference governs whenever it differs from
+                        // the model's own output, even when the droop's net
+                        // adjustment is zero (a zero pre-disturbance anchor
+                        // holds injection at zero). When the droop is
+                        // inactive the layer returns the model's output
+                        // bitwise, so the nominal path is untouched.
+                        export_ac_w = -outcome.p_ref_w;
+                    }
+                    self.der1547_step_outcome = Some(outcome);
+                }
+                None => {
+                    let v = env.grid.bus_voltage_pu();
+                    let f = env.grid.frequency_hz;
+                    let excursion = env.grid.bus_energized()
+                        && crate::der1547::Der1547Controller::excursion_present(v, f);
+                    if excursion && !self.der1547_unconfigured_in_excursion {
+                        self.der1547_unconfigured_excursions += 1;
+                        if !self.der1547_unconfigured_warned {
+                            self.der1547_unconfigured_warned = true;
+                            tracing::warn!(
+                                ev = %self.descriptor.name,
+                                bus_voltage_pu = v,
+                                grid_frequency_hz = f,
+                                "EV export inverter has no der_1547 trip \
+                                 tables configured: the IEEE 1547 voltage and \
+                                 frequency response layer is inactive and the \
+                                 export rides the excursion as a pinned source; \
+                                 configure `der_1547` to enable it"
+                            );
+                        }
+                    }
+                    self.der1547_unconfigured_in_excursion = excursion;
+                }
+            }
+
             return Ok(ChargeStepPower {
                 charge_leg_ac_w: 0.0,
                 heater_draw_w: (heater_dc_w),
                 export_ac_w,
                 is_discharge: true,
             });
+        }
+
+        // No export leg conducts this step: the charge leg is the
+        // vehicle's load-side behavior, never the DER function, so the
+        // droop's pre-disturbance latch clears rather than surviving into
+        // the next export as a stale anchor.
+        if let Some(controller) = &mut self.der1547 {
+            controller.note_inactive_step();
         }
 
         // Charger capability bound: the EVSE rating for the configured
@@ -2058,6 +2286,14 @@ impl Equipment for Ev {
                 v2l_power_w: self.v2l_power_w,
                 away_charge_actual_w: self.away_charge_actual_w,
                 last_mode: self.last_mode,
+                der1547_state: self
+                    .der1547
+                    .as_ref()
+                    .map(|c| c.state().clone())
+                    .unwrap_or_default(),
+                der1547_unconfigured_excursions: self.der1547_unconfigured_excursions,
+                der1547_unconfigured_warned: self.der1547_unconfigured_warned,
+                der1547_unconfigured_in_excursion: self.der1547_unconfigured_in_excursion,
             },
             Self::checkpoint_version(),
             "Ev",
@@ -2115,6 +2351,15 @@ impl Equipment for Ev {
         self.drive_shortfall_j = cp.drive_shortfall_j;
         self.pending_drive_j = cp.pending_drive_j;
         self.last_mode = cp.last_mode;
+        // The IEEE 1547 layer's run state: restored into the live
+        // controller when the layer is configured (init_typed built it
+        // from the config before load_state ran).
+        self.der1547_unconfigured_excursions = cp.der1547_unconfigured_excursions;
+        self.der1547_unconfigured_warned = cp.der1547_unconfigured_warned;
+        self.der1547_unconfigured_in_excursion = cp.der1547_unconfigured_in_excursion;
+        if let Some(controller) = &mut self.der1547 {
+            controller.restore_state(cp.der1547_state);
+        }
 
         // `battery_capacity_j` is static config set by `init`, not
         // stored in the checkpoint (the caller must call `init` before
@@ -2226,7 +2471,11 @@ impl Equipment for Ev {
         //     charge leg, is not derivable at restore because the away
         //     state publishes zero port power; the charge-side
         //     counterpart of `v2l_power_w`, completing the family).
-        9
+        // v10: gained the IEEE 1547 layer's run state (der_1547 trip
+        //     timers, trip latch, enter-service accumulation,
+        //     frequency-droop latch) and the unconfigured layer's
+        //     excursion counter and warn latch.
+        10
     }
 
     /// The pack's stored charge (J), on the Battery reporter's exact

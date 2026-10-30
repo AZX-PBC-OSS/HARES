@@ -13,6 +13,17 @@ Every callable, class and keyword added to, changed in or removed from
 `hares._hares` since `ebdb1a17`, each removed or renamed one with its
 replacement.
 
+- Added: the `der_1547` keyword on the `PV`, `Battery` and `EV`
+  constructors: the inverter's IEEE 1547-2018 response surface, a dict
+  with `category` ("I", "II" or "III") selecting the standard's default
+  abnormal-condition settings and an optional `overrides` dict
+  parameterizing the trip tables, the frequency-droop function and the
+  enter-service criteria. Absent (the default) leaves the layer
+  unconfigured: the pre-1547 behavior with the run's first grid
+  excursion warned and every excursion counted. The per-DER trip state
+  (0.0 online, 1.0 tripped) reads on the telemetry surface's
+  `equipment()` dict under `der1547_tripped`, aligned with `names`.
+
 - Added: `EnergyClosureReport` (with `system`, `zones`,
   `residual_ppm_of_gross`), `ClosureRow` (with `stored_delta_wh`,
   `delivered_end_use_wh`, `tolerance_gross_wh`, `residual_wh`,

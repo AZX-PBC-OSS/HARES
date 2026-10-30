@@ -14,6 +14,7 @@ mod macros;
 pub mod battery;
 pub mod combustion;
 pub mod config;
+pub mod der1547;
 pub mod describe_fields;
 pub mod ev;
 pub mod event_load;
@@ -68,6 +69,10 @@ pub use config::{
     SetpointReconciliation, TypedPayloadError, constructor_equipment_id, equipment_id_from_config,
     normalize_enum_text, resolve_zip, typed_payload_reads, validate_typed_payload,
     validate_typed_payload_detailed,
+};
+pub use der1547::{
+    Der1547Category, Der1547Controller, Der1547Overrides, Der1547Settings, Der1547State,
+    Der1547Tables, trip_reason,
 };
 pub use ev::ChargingCurveLut;
 pub use ev::EvConfig;

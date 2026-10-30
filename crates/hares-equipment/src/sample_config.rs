@@ -500,6 +500,7 @@ pub fn sample_config_for_class(class: &str) -> Option<EquipmentConfig> {
                 inverter_capacity_va: None,
                 grid_forming: None,
                 min_dwell_steps: 0,
+                der_1547: None,
             },
         ),
         "PV" => typed_alias_config(
@@ -522,6 +523,7 @@ pub fn sample_config_for_class(class: &str) -> Option<EquipmentConfig> {
                 sam_lut_path: None,
                 soiling: None,
                 arrays: None,
+                der_1547: None,
             },
         ),
         "EV" | "Electric Vehicle" => typed_alias_config(
@@ -564,6 +566,7 @@ pub fn sample_config_for_class(class: &str) -> Option<EquipmentConfig> {
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
+                der_1547: None,
             },
         ),
         "Scheduled EV" | "EventBasedLoad" | "Clothes Washer" | "Dishwasher" | "Clothes Dryer"

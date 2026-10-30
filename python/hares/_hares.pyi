@@ -1237,6 +1237,7 @@ class Battery:
         charging_curve_lut: str | dict[str, Any] | None = ...,
         ocv_table: list[tuple[float, float]] | dict[str, Any] | None = ...,
         uneg_table: list[tuple[float, float]] | dict[str, Any] | None = ...,
+        der_1547: dict[str, Any] | None = ...,
     ) -> None: ...
     @staticmethod
     def from_product(product_id: BatteryProductId) -> Battery: ...
@@ -1314,6 +1315,7 @@ class PV:
         azimuth: float,
         sam_lut_path: str | None = ...,
         soiling: PvSoilingConfig | None = ...,
+        der_1547: dict[str, Any] | None = ...,
     ) -> None: ...
     def __repr__(self) -> str: ...
 
@@ -1466,6 +1468,7 @@ class EV:
         n_parallel: int | None = ...,
         cell_resistance_ohm: float | None = ...,
         charging_curve_lut: str | dict[str, Any] | None = ...,
+        der_1547: dict[str, Any] | None = ...,
     ) -> None: ...
     @staticmethod
     def from_vehicle(vehicle_id: VehicleId) -> EV: ...

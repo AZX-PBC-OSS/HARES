@@ -39,6 +39,7 @@ pub use hares_types::BatteryLutType;
 // ---------------------------------------------------------------------------
 
 use crate::config::{KEY_ZONE_ID, constructor_equipment_id};
+use crate::der1547::{Der1547Controller, Der1547State};
 #[cfg(test)]
 pub(crate) const KEY_CAPACITY_J: &str = "capacity_j";
 #[cfg(test)]
@@ -295,6 +296,13 @@ struct BatteryCheckpoint {
     /// power-factor path); `Some(0.0)` is a commanded zero and forces Q = 0.
     q_setpoint_var: Option<f64>,
     power_factor: f64,
+    /// v4: the IEEE 1547 layer's run state (trip timers, the trip latch,
+    /// the enter-service accumulation, the frequency-droop latch) and the
+    /// unconfigured layer's excursion count and warn latch.
+    der1547_state: Der1547State,
+    der1547_unconfigured_excursions: u32,
+    der1547_unconfigured_warned: bool,
+    der1547_unconfigured_in_excursion: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +434,16 @@ pub struct Battery {
     /// `island_source_available` even when charged and dischargeable.
     grid_forming: bool,
 
+    /// The inverter's IEEE 1547 controller, `Some` when the config carries
+    /// a `der_1547` block. Its state rides the checkpoint. The layer
+    /// governs grid-connected operation only.
+    der1547: Option<Der1547Controller>,
+    /// Grid excursions seen while the layer is unconfigured (the counted
+    /// event behind the run's first warning). Always 0 when configured.
+    der1547_unconfigured_excursions: u32,
+    der1547_unconfigured_warned: bool,
+    der1547_unconfigured_in_excursion: bool,
+
     /// Guards against post-registration LUT mutation via the `Equipment` trait
     /// setters. Set to `true` by `Dwelling::add_equipment` → `mark_initialized()`.
     initialized: bool,
@@ -529,6 +547,10 @@ impl Battery {
             grid_export_rule: GridExportRule::Unrestricted,
             min_dwell_steps: 0,
             grid_forming: true,
+            der1547: None,
+            der1547_unconfigured_excursions: 0,
+            der1547_unconfigured_warned: false,
+            der1547_unconfigured_in_excursion: false,
             initialized: false,
             warnings: Vec::new(),
         }
@@ -1068,6 +1090,24 @@ impl Battery {
         self.min_dwell_steps = c.min_dwell_steps;
         self.grid_forming = c.grid_forming.unwrap_or(true);
 
+        // The IEEE 1547 layer: built from the config's `der_1547` block.
+        // The droop's per-unit base is the inverter's active-power rating
+        // at unity power factor: the larger of the two dispatch limits.
+        self.der1547 = match &c.der_1547 {
+            Some(settings) => {
+                let p_max_w = self.max_charge_w.max(self.max_discharge_w);
+                Some(Der1547Controller::new(
+                    settings,
+                    p_max_w,
+                    &self.descriptor.name,
+                )?)
+            }
+            None => None,
+        };
+        self.der1547_unconfigured_excursions = 0;
+        self.der1547_unconfigured_warned = false;
+        self.der1547_unconfigured_in_excursion = false;
+
         self.power_factor = c.power_factor.unwrap_or(1.0);
         // An apparent power, dimensionally W: the held value is VA (SI).
         self.inverter_capacity_va = c
@@ -1179,6 +1219,9 @@ impl Equipment for Battery {
         // temperature above the discharge cutoff, and DR not commanding a
         // full shed. `grid_forming` (default true) gates grid-following-only
         // inverters that cannot form an island bus even when dischargeable.
+        // A latched IEEE 1547 trip means the inverter has ceased to
+        // energize: it cannot hold the bus up, so an island founded on it
+        // would run every load on phantom power.
         let soc_floor = self
             .soc_target_min
             .map(|v| v.max(self.min_soc))
@@ -1189,6 +1232,10 @@ impl Equipment for Battery {
             && self.soc > soc_floor
             && self.discharge_derate_factor() > 0.0
             && self.dr_power_fraction() > 0.0
+            && !self
+                .der1547
+                .as_ref()
+                .is_some_and(|controller| controller.state().tripped)
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
@@ -1245,6 +1292,143 @@ impl Equipment for Battery {
         } else {
             0.0
         };
+
+        // -- The configured IEEE 1547 layer (grid-connected surface) --
+        // The abnormal-condition trip tables, the frequency-droop
+        // (frequency-Watt) function and the return-to-service delay apply
+        // to the inverter's grid-connected interchange, in injection
+        // space (positive = export): a tripped inverter ceases to
+        // energize (neither leg conducts), and the droop ramps the
+        // interchange toward the grid-supporting direction within the
+        // pack's charge/discharge limits. On a utility-outage step the
+        // outage model's contract governs instead - the layer is bypassed
+        // (its timers reset, a latched trip waits on the enter-service
+        // windows): an island source is never tripped off its own island.
+        // An unconfigured layer warns once on the first excursion it
+        // declines to govern. The layer's reference is a target: the
+        // pack's own SOC, temperature and limit machinery below still
+        // governs what is delivered.
+        let mut der1547_tripped = false;
+        let mut der1547_reason = crate::der1547::trip_reason::NONE;
+        let mut der1547_ride_through_s = 0.0;
+        let mut der1547_enter_service_s = 0.0;
+        let mut der1547_fw_adj_pu = 0.0;
+        // The droop's two ends are bounded the way `clamp_power` bounds
+        // the model's own output. The availability input is the
+        // deliverable discharge bound (the demand-response fraction, the
+        // export limit and the external power limit), so the under-
+        // frequency up-ramp stops at the bound the export passed below is
+        // already clamped to; the export EV carries the demand-response
+        // fraction on its availability input for the same reason. The
+        // floor is the deliverable charge bound (the same scalar
+        // composition, consumption side), so the over-frequency down-ramp
+        // cannot absorb through a service's import limit or the
+        // operator's shed. The temperature-dependent capability derates
+        // ride the delivered power, not these two operator bounds.
+        let dr_fraction = self.dr_power_fraction();
+        let hw_max = self.max_discharge_w * dr_fraction;
+        let deliverable_w = self
+            .export_limit_w
+            .map(|lim| hw_max.min(lim))
+            .unwrap_or(hw_max);
+        let deliverable_w = self
+            .external_power_limit_w
+            .map_or(deliverable_w, |pl| deliverable_w.min(pl));
+        let charge_hw_max = self.max_charge_w * dr_fraction;
+        let absorbable_w = self
+            .import_limit_w
+            .map(|lim| charge_hw_max.min(lim))
+            .unwrap_or(charge_hw_max);
+        let absorbable_w = self
+            .external_power_limit_w
+            .map_or(absorbable_w, |pl| absorbable_w.min(pl));
+        // True when the layer's reference replaced the model's own output
+        // on this step: the reference is a power command like any other,
+        // so the pack's clamp governs the delivered power below.
+        let mut layered_reference = false;
+        // The step the battery is actually dispatched on: the layer steps
+        // on every step (the trip tables watch the bus, and a trip is a
+        // de-energization), but its frequency-Watt response may not create
+        // the interchange a zeroed row, a dead bus or a disconnected pack
+        // commands away. An unavailable period is an HPXML end-use
+        // convention that leaves the battery idle for the step whatever
+        // the bus.
+        let dispatch_live = self.grid_connected && !bus_dead && !period_idle;
+        match &mut self.der1547 {
+            Some(controller) => {
+                let outcome = controller.step(
+                    env.grid.bus_voltage_pu(),
+                    env.grid.frequency_hz,
+                    dt_s,
+                    !env.grid.grid_outage(),
+                    -target_power_w,
+                    deliverable_w,
+                    -absorbable_w,
+                )?;
+                if outcome.tripped {
+                    target_power_w = 0.0;
+                } else if !dispatch_live {
+                    // The step conducted nothing: the droop's anchor does
+                    // not survive it, so an excursion that ran while the
+                    // inverter was idle cannot anchor the next ramp.
+                    controller.note_inactive_step();
+                } else if outcome.p_ref_w != -target_power_w {
+                    // The reference governs whenever it differs from the
+                    // model's own output, even when the droop's net
+                    // adjustment is zero (a zero pre-disturbance anchor
+                    // holds injection at zero). When the droop is inactive
+                    // the layer returns the model's output bitwise, so this
+                    // comparison leaves the grid-connected path untouched.
+                    target_power_w = -outcome.p_ref_w;
+                    layered_reference = true;
+                }
+                der1547_tripped = outcome.tripped;
+                der1547_reason = outcome.trip_reason;
+                der1547_ride_through_s = outcome.ride_through_s;
+                der1547_enter_service_s = outcome.enter_service_s;
+                // The step's published adjustment is the one the step
+                // delivered: a step that conducted nothing publishes no
+                // adjustment, whatever the excursion the trip tables
+                // watched.
+                der1547_fw_adj_pu = if dispatch_live {
+                    outcome.fw_adj_pu
+                } else {
+                    0.0
+                };
+            }
+            None => {
+                let v = env.grid.bus_voltage_pu();
+                let f = env.grid.frequency_hz;
+                let excursion =
+                    env.grid.bus_energized() && Der1547Controller::excursion_present(v, f);
+                if excursion && !self.der1547_unconfigured_in_excursion {
+                    self.der1547_unconfigured_excursions += 1;
+                    if !self.der1547_unconfigured_warned {
+                        self.der1547_unconfigured_warned = true;
+                        tracing::warn!(
+                            battery = %self.descriptor.name,
+                            bus_voltage_pu = v,
+                            grid_frequency_hz = f,
+                            "battery inverter has no der_1547 trip tables \
+                             configured: the IEEE 1547 voltage and frequency \
+                             response layer is inactive and the inverter rides \
+                             the excursion as a pinned source; configure \
+                             `der_1547` to enable it"
+                        );
+                    }
+                }
+                self.der1547_unconfigured_in_excursion = excursion;
+            }
+        }
+        if layered_reference {
+            // The droop's reference is a power command: the pack's clamp
+            // (the charge capability's temperature derate and a configured
+            // charging-curve LUT's fraction, on top of the operator bounds
+            // the layer's inputs already carry) governs what is delivered,
+            // exactly as it governs the model's own target, and exactly as
+            // the discharge derate governs the export leg below.
+            target_power_w = self.clamp_power(target_power_w)?;
+        }
 
         // -- Islanded charge clamp: no phantom grid import during an outage --
         // While the utility is out and the bus is energized (islanded), there
@@ -1589,6 +1773,19 @@ impl Equipment for Battery {
         // -- Update telemetry --
         self.telemetry.set(tk::SOC, self.soc);
         self.telemetry.set(tk::ACTIVE_POWER_KW, port_power_w);
+        self.telemetry
+            .set(tk::DER1547_TRIPPED, f64::from(der1547_tripped));
+        self.telemetry
+            .set(tk::DER1547_TRIP_REASON, f64::from(der1547_reason));
+        self.telemetry
+            .set(tk::DER1547_RIDE_THROUGH_S, der1547_ride_through_s);
+        self.telemetry
+            .set(tk::DER1547_ENTER_SERVICE_S, der1547_enter_service_s);
+        self.telemetry.set(tk::DER1547_FW_ADJ_PU, der1547_fw_adj_pu);
+        self.telemetry.set(
+            tk::DER1547_UNCONFIGURED_EXCURSIONS,
+            f64::from(self.der1547_unconfigured_excursions),
+        );
         self.telemetry.set(tk::OHMIC_LOSS_W, ohmic_loss_w);
         self.telemetry
             .set(tk::STANDBY_POWER_W, self.standby_power_w);
@@ -1685,7 +1882,11 @@ impl Equipment for Battery {
         // v3: DegradationState gained the negative-electrode site-loss
         // branch (c0/c2 accumulators, dq_neg) and the corrected break-in
         // convention — its serialized schema changed with them.
-        3
+        // v4: gained the IEEE 1547 layer's run state (der_1547 trip
+        //     timers, trip latch, enter-service accumulation,
+        //     frequency-droop latch) and the unconfigured layer's
+        //     excursion counter and warn latch.
+        4
     }
 
     fn stored_energy_j(&self) -> Option<f64> {
@@ -1716,6 +1917,14 @@ impl Equipment for Battery {
                 external_power_limit_w: self.external_power_limit_w,
                 q_setpoint_var: self.q_setpoint_var,
                 power_factor: self.power_factor,
+                der1547_state: self
+                    .der1547
+                    .as_ref()
+                    .map(|c| c.state().clone())
+                    .unwrap_or_default(),
+                der1547_unconfigured_excursions: self.der1547_unconfigured_excursions,
+                der1547_unconfigured_warned: self.der1547_unconfigured_warned,
+                der1547_unconfigured_in_excursion: self.der1547_unconfigured_in_excursion,
             },
             Self::checkpoint_version(),
             "Battery",
@@ -1753,6 +1962,15 @@ impl Equipment for Battery {
         self.external_power_limit_w = cp.external_power_limit_w;
         self.q_setpoint_var = cp.q_setpoint_var;
         self.power_factor = cp.power_factor;
+        // The IEEE 1547 layer's run state: restored into the live
+        // controller when the layer is configured (init_typed built it
+        // from the config before load_state ran).
+        self.der1547_unconfigured_excursions = cp.der1547_unconfigured_excursions;
+        self.der1547_unconfigured_warned = cp.der1547_unconfigured_warned;
+        self.der1547_unconfigured_in_excursion = cp.der1547_unconfigured_in_excursion;
+        if let Some(controller) = &mut self.der1547 {
+            controller.restore_state(cp.der1547_state);
+        }
 
         // Recompute capacity_kwh_nominal from rated capacity and restored SOH.
         let soh = 1.0 - self.degradation.capacity_fade_fraction();
@@ -2116,6 +2334,12 @@ fn default_telemetry() -> Telemetry {
     t.insert(tk::DR_POWER_FRACTION, 1.0);
     t.insert(tk::DR_LEVEL, 0.0);
     t.insert(tk::REACTIVE_POWER_KVAR, 0.0);
+    t.insert(tk::DER1547_TRIPPED, 0.0);
+    t.insert(tk::DER1547_TRIP_REASON, 0.0);
+    t.insert(tk::DER1547_RIDE_THROUGH_S, 0.0);
+    t.insert(tk::DER1547_ENTER_SERVICE_S, 0.0);
+    t.insert(tk::DER1547_FW_ADJ_PU, 0.0);
+    t.insert(tk::DER1547_UNCONFIGURED_EXCURSIONS, 0.0);
     t
 }
 
@@ -2219,6 +2443,41 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
             &["Normal", "Moderate", "High", "Critical", "GridEmergency"],
             "Demand response level (0=Normal, 1=Moderate, 2=High, 3=Critical, 4=GridEmergency)",
         ),
+        TelemetryField::code_code(
+            tk::DER1547_TRIPPED,
+            &["online", "tripped"],
+            "IEEE 1547 trip state: 0.0 = online, 1.0 = tripped (cease to \
+                 energize). Always 0.0 when no `der_1547` block is configured.",
+        ),
+        TelemetryField::code_code(
+            tk::DER1547_TRIP_REASON,
+            crate::der1547::trip_reason::LABELS.as_slice(),
+            "The IEEE 1547 trip condition that fired: 0.0 = none, 1.0 = uv2, \
+                 2.0 = uv1, 3.0 = ov1, 4.0 = ov2, 5.0 = uf2, 6.0 = uf1, \
+                 7.0 = of1, 8.0 = of2",
+        ),
+        TelemetryField::flow_mean(
+            tk::DER1547_RIDE_THROUGH_S,
+            hares_types::Unit::Second,
+            "Seconds accumulated in the governing IEEE 1547 trip band this \
+                 disturbance (the clearing-time window's position)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DER1547_ENTER_SERVICE_S,
+            hares_types::Unit::Second,
+            "Seconds accumulated inside the IEEE 1547 enter-service windows \
+                 while tripped (the return-to-service delay's position)",
+        ),
+        TelemetryField::ratio(
+            tk::DER1547_FW_ADJ_PU,
+            "The IEEE 1547 frequency-droop adjustment, per unit of the \
+                 inverter's active-power rating (negative = curtailed)",
+        ),
+        TelemetryField::running_total(
+            tk::DER1547_UNCONFIGURED_EXCURSIONS,
+            hares_types::Unit::Count,
+            "Grid excursions seen while no der_1547 tables were configured",
+        ),
     ]
 }
 
@@ -2291,6 +2550,7 @@ mod tests {
 
     fn battery_config(overrides: &[(&str, f64)]) -> EquipmentConfig {
         let mut cfg = BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -2365,6 +2625,7 @@ mod tests {
 
     fn typed_battery_config(chemistry: Option<&str>, bms_mode: Option<BmsMode>) -> EquipmentConfig {
         let cfg = BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -2407,6 +2668,988 @@ mod tests {
 
     fn default_ports() -> PortSlots {
         PortSlots::default()
+    }
+
+    // -- The IEEE 1547 response layer (der_1547). --
+
+    fn cat2_settings() -> crate::der1547::Der1547Settings {
+        crate::der1547::Der1547Settings {
+            category: crate::der1547::Der1547Category::CatII,
+            overrides: None,
+        }
+    }
+
+    fn battery_config_fields() -> BatteryConfig {
+        BatteryConfig {
+            der_1547: None,
+            equipment_id: None,
+            zone_id: None,
+            capacity_j: 10.0 * 3.6e6,
+            max_charge_w: 5000.0,
+            max_discharge_w: 5000.0,
+            n_series: None,
+            n_parallel: None,
+            ah_cell: None,
+            v_cell: None,
+            cell_resistance_ohm: None,
+            pack_voltage_v: None,
+            chemistry: None,
+            standby_power_w: Some(10.0),
+            self_discharge_pct_per_day: None,
+            min_soc: None,
+            max_soc: None,
+            initial_soc: Some(0.5),
+            initial_cell_temp_c: None,
+            import_limit_w: None,
+            export_limit_w: None,
+            heater_power_w: None,
+            heater_threshold_c: None,
+            min_discharge_temp_c: None,
+            full_power_temp_c: None,
+            min_charge_temp_c: None,
+            cell_thermal_mass_j_per_k: None,
+            cell_ua_w_per_k: None,
+            inverter_efficiency: None,
+            charge_efficiency: None,
+            discharge_efficiency: None,
+            bms_mode: None,
+            grid_export_rule: None,
+            power_factor: None,
+            inverter_capacity_va: None,
+            grid_forming: None,
+            min_dwell_steps: 0,
+        }
+    }
+
+    fn battery_config_with_der1547(
+        settings: Option<crate::der1547::Der1547Settings>,
+    ) -> EquipmentConfig {
+        let cfg = BatteryConfig {
+            der_1547: settings,
+            ..battery_config_fields()
+        };
+        EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg).unwrap()
+    }
+
+    /// A pre-1547 battery checkpoint (format v3, before the layer's state
+    /// existed) is refused with the typed version-mismatch error naming
+    /// both versions: the layer's state is checkpointed, never re-derived
+    /// from a save that predates it.
+    #[test]
+    fn a_pre_der1547_checkpoint_is_refused_not_migrated() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        let mut blob = bat.save_state().expect("the state saves");
+        blob[..4].copy_from_slice(&3u32.to_le_bytes());
+        let err = bat.load_state(&blob).expect_err("a v3 blob is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("blob=3"), "{msg}");
+        assert!(
+            msg.contains(&format!("expected={}", Battery::checkpoint_version())),
+            "{msg}"
+        );
+    }
+
+    /// The F8-class defect's battery face: a sustained 0.6 pu sag sits
+    /// inside UV1's band (0.45 <= V < 0.70); the Category II default
+    /// clearing time is 10 s, so a 900 s timestep reaches it and the
+    /// inverter is tripped for the step - neither leg conducts. The
+    /// pre-1547 model discharged through the sag unchanged.
+    #[test]
+    fn witness_der1547_battery_trips_on_a_sustained_06pu_sag() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        let env = base_env();
+        bat.init(&config, &env).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert!(
+            bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap() < -2000.0,
+            "the discharge command flows at nominal voltage"
+        );
+
+        let mut sag = base_env();
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = default_ports();
+        bat.step(&sag, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        // The tripped inverter's throughput is zero: the port carries the
+        // 10 W parasitic standby draw alone (the bus is energized, so the
+        // electronics stay supplied).
+        assert_eq!(
+            bat.telemetry().get(tk::ACTIVE_POWER_KW),
+            Some(10.0),
+            "the 0.6 pu sag trips the configured inverter (UV1: 10 s window)"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIP_REASON),
+            Some(2.0),
+            "uv1"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            Some(10.0),
+            "the firing step publishes the window it reached, as the PV's and \
+             the EV's channels do"
+        );
+
+        // The unconfigured layer's battery face: the pre-1547 behavior.
+        let config = battery_config_with_der1547(None);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&sag, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert!(
+            bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap() < -2000.0,
+            "unconfigured: the pre-1547 pinned-source behavior"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_UNCONFIGURED_EXCURSIONS),
+            Some(1.0)
+        );
+    }
+
+    /// The F7 guard: an island source is never tripped off its own
+    /// island. On a utility-outage step with an energized island bus the
+    /// layer is bypassed (the outage model's contract governs), so the
+    /// discharging battery keeps holding the bus up.
+    #[test]
+    fn witness_der1547_battery_island_source_is_never_tripped_off_its_island() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut islanded = base_env();
+        islanded.grid.voltage_pu = 0.0;
+        islanded.grid.island_bus_voltage_pu = Some(1.0);
+        let mut ports = default_ports();
+        bat.step(&islanded, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert!(
+            bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap() < -2000.0,
+            "the island source discharges through the outage step"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+    }
+
+    /// The frequency-droop shape on the battery's discharge leg: 60.536 Hz
+    /// is 0.5 Hz beyond the 60.036 Hz deadband edge; the 5 percent droop
+    /// slope is 1/(60 x 0.05) = 1/3 pu of the 5000 W rating per Hz, so a
+    /// 3000 W (0.6 pu) discharge ramps down 1/6 pu = 833.333 W to
+    /// 2166.667 W.
+    #[test]
+    fn witness_der1547_battery_over_frequency_droop_reduces_discharge() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        // A normal step first: the droop's pre-disturbance latch takes
+        // the running output.
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(900), &mut ports)
+            .unwrap();
+
+        let mut hi_f = base_env();
+        hi_f.grid.frequency_hz = 60.536;
+        let mut ports = default_ports();
+        bat.step(&hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        // The droop's reference is the 3000 W target less 1/6 pu of the
+        // 5000 W rating = 2166.667 W of injection; the port carries that
+        // plus the 10 W parasitic standby draw.
+        let expected = -(3000.0 - 833.3333333333334) + 10.0;
+        assert!(
+            (p - expected).abs() < 1e-6,
+            "the droop sheds 1/6 pu of the 5000 W rating: expected \
+             {expected} W, got {p} W"
+        );
+        assert!(
+            (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(0.0) + 1.0 / 6.0).abs() < 1e-9,
+            "the droop's published adjustment is -1/6 pu"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+    }
+
+    /// A battery whose 1547 trip latch is set has ceased to energize: it
+    /// cannot be the home's island source. Counting it would declare an
+    /// energized island bus that nothing sources (the loads would run on
+    /// phantom power until the enter-service delay completed), so the
+    /// island resolution must read the latch beside the SOC and the
+    /// grid-forming gate.
+    #[test]
+    fn a_tripped_battery_is_not_an_island_source() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            bat.island_source_available(),
+            "a dischargeable grid-forming pack is an island source"
+        );
+
+        // The 10 s UV1 window is reached inside the 60 s sag step.
+        let mut sag = base_env();
+        sag.grid.voltage_pu = 0.6;
+        bat.step(&sag, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        assert!(
+            !bat.island_source_available(),
+            "a ceased-to-energize inverter must not be counted as the island's source"
+        );
+
+        // Once the bus has held the enter-service windows for the 300 s
+        // delay the latch clears and the pack can island the home again.
+        for step in 1..=5 {
+            bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+                .unwrap();
+            let tripped = bat.telemetry().get(tk::DER1547_TRIPPED);
+            assert_eq!(
+                tripped,
+                Some(if step < 5 { 1.0 } else { 0.0 }),
+                "step {step}: the latch clears when the delay completes"
+            );
+            assert_eq!(
+                bat.island_source_available(),
+                step == 5,
+                "step {step}: the island source follows the latch"
+            );
+        }
+    }
+
+    /// A tripped inverter owes nothing to a demand-response event. The
+    /// layer's gate sits on the pack's delivered interchange, so a battery
+    /// commanded to discharge under a DR level delivers nothing while the
+    /// latch holds (neither leg conducts; the standby draw is the port's
+    /// only load) and resumes the DR-scaled discharge on the step the
+    /// latch clears. The DR level is the grid's command, not the
+    /// inverter's state, so the trip suspends the obligation without
+    /// spending it.
+    #[test]
+    fn a_tripped_battery_owes_no_demand_response_delivery_while_offline() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        // High is half the rating: the 5000 W command is capped at
+        // 2500 W of injection; the port carries that less the 10 W
+        // standby draw.
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let dr_power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (dr_power - (-2500.0 + 10.0)).abs() < 1e-6,
+            "the DR level caps the discharge at half the rating, got {dr_power} W"
+        );
+
+        // The sag trips the inverter: no delivery at all, whatever the DR
+        // obligation commanded.
+        let mut sag = base_env();
+        sag.grid.voltage_pu = 0.6;
+        bat.step(&sag, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        let tripped_power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (tripped_power - 10.0).abs() < 1e-6,
+            "the latched inverter owes nothing: the port carries the standby \
+             draw alone, got {tripped_power} W"
+        );
+
+        // The latch clears on the fifth restored 60 s step (the 300 s
+        // delay); the DR-scaled discharge resumes from that step.
+        let mut reconnected = 0.0;
+        for step in 1..=5 {
+            bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+                .unwrap();
+            if step < 5 {
+                assert_eq!(
+                    bat.telemetry().get(tk::DER1547_TRIPPED),
+                    Some(1.0),
+                    "step {step}: the latch still holds"
+                );
+            } else {
+                reconnected = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+            }
+        }
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+        assert!(
+            (reconnected - (-2500.0 + 10.0)).abs() < 1e-6,
+            "the reconnected inverter resumes the DR-scaled discharge, got \
+             {reconnected} W"
+        );
+    }
+
+    /// The export inverter's sibling face (the EV carries the same cap on
+    /// its availability input): the droop's up-ramp cannot export above
+    /// the caps the delivered power was already under. The layer's
+    /// availability input is the deliverable discharge bound (the
+    /// demand-response fraction, the export limit and the external power
+    /// limit: the same composition `clamp_power` applies to the model's
+    /// own output), not the raw rating: an under-frequency ramp out of a
+    /// full shed would otherwise bid the pack's whole nameplate into a
+    /// grid the operator has shed.
+    #[test]
+    fn witness_der1547_battery_droop_cannot_exceed_the_demand_response_cap() {
+        // GridEmergency: the shed's cap is zero. The commanded discharge
+        // is clamped to zero injection; 59.5 Hz is 0.464 Hz below the
+        // 59.964 Hz deadband edge, so the ramp wants 0 + 0.464/3 pu =
+        // 773.33 W of the 5000 W rating. The zero cap holds the reference
+        // at zero injection: the port carries the standby draw alone.
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut lo_f = base_env();
+        lo_f.grid.frequency_hz = 59.5;
+        let mut ports = default_ports();
+        bat.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - 10.0).abs() < 1e-6,
+            "the droop cannot export against a full shed, got {p} W"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+        assert!(
+            (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(1.0)).abs() < 1e-12,
+            "the capped reference's adjustment is zero, got {}",
+            bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(1.0)
+        );
+
+        // High: the cap is half the rating. The discharge sits at the
+        // 2500 W cap; the same 0.154667 pu ramp from the 0.5 pu anchor
+        // must stop at the cap, not reach 3273.33 W.
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            (bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap() - (-2500.0 + 10.0)).abs() < 1e-6,
+            "the DR cap holds the discharge at 2500 W"
+        );
+        bat.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - (-2500.0 + 10.0)).abs() < 1e-6,
+            "the droop's up-ramp stops at the DR cap, got {p} W"
+        );
+
+        // The export limit: the same composition at the interconnection
+        // surface. A 2000 W export limit caps the discharge; the ramp out
+        // of it must stop at the limit, not the 5000 W rating (0.4 pu
+        // anchor + 0.154667 pu ramp capped at 0.4 pu).
+        let cfg = BatteryConfig {
+            der_1547: Some(cat2_settings()),
+            export_limit_w: Some(2000.0),
+            ..battery_config_fields()
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -5000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            (bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap() - (-2000.0 + 10.0)).abs() < 1e-6,
+            "the export limit holds the discharge at 2000 W"
+        );
+        bat.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - (-2000.0 + 10.0)).abs() < 1e-6,
+            "the droop's up-ramp stops at the export limit, got {p} W"
+        );
+    }
+
+    /// The absorption leg's sibling face: an over-frequency droop ramps
+    /// active power down through zero into charge, and the charge it
+    /// commands is a charge command like the model's own, so the pack's
+    /// deliverable charge bound governs it. The bound is the same
+    /// composition `clamp_power` applies to every charge target (the
+    /// demand-response fraction, the import limit and the external power
+    /// limit, with the temperature-dependent capability derate on the
+    /// delivered charge): without it the droop absorbs through a small
+    /// service's import limit or a full demand-response shed.
+    ///
+    /// A 62.0 Hz step is 1.964 Hz beyond the 60.036 Hz deadband edge; at
+    /// 1/(60 x 0.05) = 1/3 pu of the 5000 W rating per Hz the ramp asks
+    /// 0.654667 pu = 3273.33 W of absorption out of a zero anchor. It
+    /// does not trip: OF2's 62.0 Hz is strict (the step is exactly at it)
+    /// and OF1's 300 s window is not reached in 60 s.
+    #[test]
+    fn witness_der1547_battery_droop_absorption_obeys_the_charge_bound() {
+        // The import limit: a 500 W service caps the absorption at 0.1 pu
+        // of the rating. The port carries the charge plus the 10 W
+        // standby draw.
+        let cfg = BatteryConfig {
+            der_1547: Some(cat2_settings()),
+            import_limit_w: Some(500.0),
+            ..battery_config_fields()
+        };
+        let config =
+            EquipmentConfig::from_typed("Test Battery".to_string(), "Battery".to_string(), cfg)
+                .unwrap();
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        let mut hi_f = base_env();
+        hi_f.grid.frequency_hz = 62.0;
+        let mut ports = default_ports();
+        bat.step(&hi_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - 510.0).abs() < 1e-6,
+            "the import limit caps the droop's absorption at 500 W plus \
+             the 10 W standby draw, got {p} W"
+        );
+        assert!(
+            (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap() + 0.1).abs() < 1e-9,
+            "the capped reference is -0.1 pu: the published adjustment is \
+             the reference the pack was held to, got {}",
+            bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap()
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+
+        // A full shed: the same ramp asks 3273.33 W of absorption and the
+        // zero cap holds it at zero injection (the standby draw alone).
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        let mut ports = default_ports();
+        bat.step(&hi_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - 10.0).abs() < 1e-6,
+            "a full shed absorbs nothing: the port carries the standby draw \
+             alone, got {p} W"
+        );
+        assert!(
+            (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap()).abs() < 1e-12,
+            "the zero cap holds the reference at zero injection, got {}",
+            bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap()
+        );
+    }
+
+    /// The layered reference's delivery is the pack's clamp's business:
+    /// the charge the droop commands is a charge command like the model's
+    /// own, so the temperature-dependent charge capability governs what
+    /// is delivered (a configured charging-curve LUT's fraction rides the
+    /// same `clamp_power` call). The anchor latches at the crossing
+    /// step's charging output (-0.6 pu from the 3000 W setpoint); the
+    /// 62 Hz ramp asks 1.254667 pu of absorption out of it (0.6 + the
+    /// 0.654667 pu reach), the layer's own floor (the operator bounds:
+    /// 5000 W at Normal, no import limit) passes 5000 W, and the cold
+    /// pack's capability derate (5/6 at +5 °C on the piecewise model
+    /// pinned below: 0.0 at -20 °C, 1.0 at 10 °C) caps the delivery at
+    /// 5000 x 5/6 = 4166.667 W. Without the clamp the full 5000 W would
+    /// reach the port. OF2 is strict at 62.0 and OF1's 300 s window is
+    /// not reached in 60 s, so the step does not trip.
+    #[test]
+    fn witness_der1547_layered_reference_delivery_obeys_the_charge_capability() {
+        let config = EquipmentConfig::from_typed(
+            "Test Battery".to_string(),
+            "Battery".to_string(),
+            BatteryConfig {
+                der_1547: Some(cat2_settings()),
+                ..battery_config_fields()
+            },
+        )
+        .unwrap();
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.capacity_derate_model = CapacityDerateModel::PiecewiseLinear {
+            points: vec![(-20.0, 0.0), (10.0, 1.0)],
+        };
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: 3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        bat.cell_temp_c = 5.0;
+        let mut hi_f = base_env();
+        hi_f.grid.frequency_hz = 62.0;
+        let mut ports = default_ports();
+        bat.step(&hi_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p - 4176.6666667).abs() < 1e-6,
+            "the cold pack's charge capability governs the layered \
+             reference's delivery: expected 4166.667 W of charge plus the \
+             10 W standby draw, got {p} W"
+        );
+    }
+
+    /// The trip tables watch the bus through an unavailable period. The
+    /// HPXML unavailable-period convention zeroes the battery's dispatch
+    /// rows; its inverter stays connected and supplied (the standby draw
+    /// continues), so the shall-trip settings still govern the bus it
+    /// sees. A 0.6 pu sag inside such a step reaches UV1's 10 s window and
+    /// latches the trip like any other step's. The EV's export function,
+    /// which conducts only on a commanded discharge step, is not stepped
+    /// there at all.
+    #[test]
+    fn the_trip_tables_watch_the_bus_through_an_unavailable_period() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        let mut env = base_env();
+        env.unavailable_periods.power_outage = true;
+        bat.init(&config, &env).unwrap();
+
+        let mut sag = env.clone();
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = default_ports();
+        bat.step(&sag, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIPPED),
+            Some(1.0),
+            "the connected inverter's trip tables still watch the bus"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIP_REASON), Some(2.0));
+        assert_eq!(
+            bat.telemetry().get(tk::ACTIVE_POWER_KW),
+            Some(10.0),
+            "the dispatch rows are zeroed: the port carries the standby draw"
+        );
+    }
+
+    /// An unavailable period zeroes the battery's dispatch rows, and the
+    /// zeroed rows leave the inverter idle for the step: the trip tables
+    /// still watch the bus, but the frequency-Watt function may not
+    /// create the interchange the period zeroed. An excursion inside the
+    /// ride-through window (61.5 Hz is inside OF1's band, 60 s inside its
+    /// 300 s window; 58.4 Hz likewise inside UF1's) commands a droop
+    /// charge or export from the zero the rows set; the period forbids
+    /// both. The step the inverter does conduct re-anchors on its own
+    /// output, so an excursion that ran while it was idle cannot anchor
+    /// the next ramp at zero.
+    #[test]
+    fn witness_der1547_an_unavailable_period_takes_no_droop_response() {
+        for (f_hz, leg) in [(61.5, "charge"), (58.4, "export")] {
+            let config = battery_config_with_der1547(Some(cat2_settings()));
+            let mut bat = Battery::new(config.clone());
+            let mut env = base_env();
+            env.unavailable_periods.power_outage = true;
+            bat.init(&config, &env).unwrap();
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_w: -3000.0,
+                reactive_power_var: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+            let mut excursion = env.clone();
+            excursion.grid.frequency_hz = f_hz;
+            let mut ports = default_ports();
+            bat.step(&excursion, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+            assert!(
+                (p - 10.0).abs() < 1e-6,
+                "({leg} face) the zeroed rows leave only the standby draw, \
+                 got {p} W"
+            );
+            assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+            assert!(
+                (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(1.0)).abs() < 1e-12,
+                "({leg} face) no adjustment is published for a response the \
+                 period forbids, got {}",
+                bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(1.0)
+            );
+
+            // The same excursion on a conducting step: the droop ramps
+            // from the 0.6 pu this step exports (0.6 + 0.154667 pu at
+            // 59.5 Hz), not from an anchor the idle step latched at zero.
+            if f_hz < 60.0 {
+                let mut conducting = base_env();
+                conducting.grid.frequency_hz = 59.5;
+                let mut ports = default_ports();
+                bat.step(&conducting, Duration::from_secs(60), &mut ports)
+                    .unwrap();
+                let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+                let expected = -(0.6 + (59.964 - 59.5) / 3.0) * 5000.0 + 10.0;
+                assert!(
+                    (p - expected).abs() < 1e-6,
+                    "({leg} face) the conducting step anchors on its own \
+                     0.6 pu export: expected {expected} W, got {p} W"
+                );
+            }
+        }
+    }
+
+    /// The enter-service clock is the latched inverter's own state
+    /// machine, not the pack's dispatch: an unavailable period zeroes the
+    /// battery's dispatch rows, but its inverter stays connected and
+    /// supplied, so the return-to-service delay accrues on the period's
+    /// in-window steps and the inverter reconnects through the period.
+    /// Five 60 s steps complete the 300 s default delay; the zeroed rows
+    /// hold the port at the standby draw throughout, and the period's end
+    /// finds the pack dispatching on its command again.
+    #[test]
+    fn the_enter_service_delay_runs_through_an_unavailable_period() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        // The trip: 0.6 pu reaches UV1's 10 s window inside a 60 s step.
+        let mut sag = base_env();
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = default_ports();
+        bat.step(&sag, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+
+        // The unavailable period at the nominal bus: the rows are zeroed
+        // and every step is in the enter-service windows, so the delay
+        // accrues 60 s per step (the inverter's connection and supply are
+        // unchanged; the period commands the interchange, not the return
+        // to service).
+        let mut idle = base_env();
+        idle.unavailable_periods.power_outage = true;
+        for step in 1..=4 {
+            let mut ports = default_ports();
+            bat.step(&idle, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+            assert_eq!(
+                bat.telemetry().get(tk::DER1547_ENTER_SERVICE_S),
+                Some(60.0 * step as f64),
+                "step {step}: the period does not stop the inverter's clock"
+            );
+            assert_eq!(
+                bat.telemetry().get(tk::ACTIVE_POWER_KW),
+                Some(10.0),
+                "the zeroed rows hold the port at the standby draw"
+            );
+        }
+
+        // The fifth in-window step completes the 300 s delay: reconnected
+        // through the period, still at the standby draw.
+        let mut ports = default_ports();
+        bat.step(&idle, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIPPED),
+            Some(0.0),
+            "the delay completed inside the period: reconnected"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(0.0));
+        assert_eq!(bat.telemetry().get(tk::ACTIVE_POWER_KW), Some(10.0));
+
+        // The period ends: the pack delivers its command again (the latch
+        // is gone and the nominal bus fires no fresh trip). The port is
+        // the commanded 3000 W of export less the 10 W standby draw.
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p + 2990.0).abs() < 1e-6,
+            "the post-period step discharges on its command, got {p} W"
+        );
+    }
+
+    /// The fail-safe fires on an unavailable step without latching: the
+    /// battery's layer steps through the period (its trip tables watch
+    /// the bus), so a non-finite grid reading on such a step reaches it
+    /// and the fail-safe's per-step de-energization is the step's
+    /// outcome. It names no table and never reaches the latch: the next
+    /// finite step resumes the period's idle with the trip state
+    /// released.
+    #[test]
+    fn a_non_finite_reading_on_an_unavailable_step_fires_the_failsafe_not_a_latch() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        // The period is on in both steps; only the reading differs.
+        let mut poisoned = base_env();
+        poisoned.unavailable_periods.power_outage = true;
+        poisoned.grid.frequency_hz = f64::NAN;
+        let mut ports = default_ports();
+        bat.step(&poisoned, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIPPED),
+            Some(1.0),
+            "the poisoned reading de-energizes the step"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIP_REASON),
+            Some(0.0),
+            "the fail-safe names no table"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::ACTIVE_POWER_KW),
+            Some(10.0),
+            "the zeroed rows hold the port at the standby draw"
+        );
+
+        let mut idle = base_env();
+        idle.unavailable_periods.power_outage = true;
+        let mut ports = default_ports();
+        bat.step(&idle, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIPPED),
+            Some(0.0),
+            "the fail-safe is the step's, not a latch: the finite step \
+             resumes the period's idle"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(0.0));
+    }
+
+    /// The 1547 run state survives a checkpoint round trip: a trip
+    /// latched before the save still holds after the restore.
+    #[test]
+    fn witness_der1547_battery_trip_latch_survives_checkpoint_round_trip() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        let mut sag = base_env();
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = default_ports();
+        bat.step(&sag, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+
+        let state = bat.save_state().unwrap();
+        let mut restored = Battery::new(config.clone());
+        restored.init(&config, &base_env()).unwrap();
+        restored.load_state(&state).unwrap();
+
+        // The sag's disturbance continues: the restored battery is still
+        // tripped (the latch rode the checkpoint), so the pack draws or
+        // delivers nothing the next step either.
+        let mut ports = default_ports();
+        restored
+            .step(&sag, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(restored.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        assert_eq!(
+            restored.telemetry().get(tk::ACTIVE_POWER_KW),
+            Some(10.0),
+            "the latch rode the checkpoint: the throughput is zero and the \
+             port carries the standby draw alone"
+        );
+    }
+
+    /// A checkpoint taken mid-excursion rides the whole composed state:
+    /// the droop's latched anchor, the part-spent ride-through
+    /// accumulator and the active demand-response cap. 58.4 Hz composes
+    /// all three: it is inside UF1's trip band (58.5 Hz, 300 s window)
+    /// and below the droop's under-frequency deadband edge (59.964 Hz).
+    /// The restored battery's next step must equal the twin's (the one
+    /// that stayed live) exactly: the anchor's ride is load-bearing (a
+    /// lost anchor re-latches at the shed output and the published
+    /// adjustment changes), the accumulator's ride is visible in the
+    /// ride-through channel, and the cap's ride is what holds the export
+    /// at zero.
+    #[test]
+    fn a_mid_excursion_checkpoint_rides_the_anchor_the_accumulator_and_the_dr_cap() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let env = base_env();
+
+        // Engage: a 3000 W discharge at nominal (0.6 pu), then the
+        // excursion. The anchor latches at the 0.6 pu output; the ramp
+        // wants 0.6 + (59.964 - 58.4)/3 = 1.121333 pu and caps at the
+        // 1.0 pu availability: 5000 W of export, and UF1's accumulator
+        // runs to 60 s.
+        let mut twin = Battery::new(config.clone());
+        twin.init(&config, &env).unwrap();
+        twin.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+        let mut lo_f = base_env();
+        lo_f.grid.frequency_hz = 58.4;
+        let mut ports = default_ports();
+        twin.step(&env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        twin.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        // The port carries the availability-capped export less the 10 W
+        // standby draw, in load convention (negative = export).
+        let engaged = twin.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (engaged - (-5000.0 + 10.0)).abs() < 1e-6,
+            "the ramp caps at the available 5000 W, got {engaged} W"
+        );
+        assert!((twin.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap() - 0.4).abs() < 1e-9);
+        assert_eq!(twin.telemetry().get(tk::DER1547_RIDE_THROUGH_S), Some(60.0));
+
+        // The DR cap becomes active mid-excursion: a full shed. The
+        // latched anchor (0.6 pu) ramps up to the zero cap: zero
+        // injection, the standby draw alone, and the published adjustment
+        // is the capped reference less the anchor (-0.6 pu).
+        twin.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        twin.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(twin.telemetry().get(tk::ACTIVE_POWER_KW), Some(10.0));
+        assert!((twin.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap() + 0.6).abs() < 1e-9);
+
+        // The checkpoint: save mid-excursion (anchor latched, UF1 at
+        // 120 s, the shed active) and restore into fresh equipment.
+        let state = twin.save_state().unwrap();
+        let mut restored = Battery::new(config.clone());
+        restored.init(&config, &env).unwrap();
+        restored.load_state(&state).unwrap();
+
+        // The restored battery's continuation is the twin's, bitwise:
+        // the same shed step publishes the same zero export, the same
+        // -0.6 pu adjustment (the anchor rode the blob; a re-latched
+        // zero anchor would publish 0.0), and the same ride-through
+        // (the accumulator resumed from the checkpointed 120 s to 180 s;
+        // a lost one would restart at 60 s).
+        restored
+            .step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        twin.step(&lo_f, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            restored.telemetry().get(tk::ACTIVE_POWER_KW),
+            twin.telemetry().get(tk::ACTIVE_POWER_KW),
+            "the restored step's power is the twin's, bitwise"
+        );
+        assert_eq!(
+            restored.telemetry().get(tk::DER1547_FW_ADJ_PU),
+            twin.telemetry().get(tk::DER1547_FW_ADJ_PU),
+            "the anchor's ride keeps the adjustment at -0.6 pu"
+        );
+        assert_eq!(restored.telemetry().get(tk::DER1547_FW_ADJ_PU), Some(-0.6),);
+        assert_eq!(
+            restored.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            twin.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+        );
+        assert_eq!(
+            restored.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            Some(180.0),
+            "the accumulator resumed from the checkpointed 120 s"
+        );
+        assert_eq!(restored.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
     }
 
     #[test]
@@ -3422,6 +4665,7 @@ mod tests {
             "Test Battery".to_string(),
             "Battery".to_string(),
             BatteryConfig {
+                der_1547: None,
                 heater_power_w: Some(500.0),
                 heater_threshold_c: Some(5.0),
                 self_discharge_pct_per_day: Some(0.0),
@@ -3706,6 +4950,7 @@ mod tests {
                 "TestBat".to_string(),
                 "Battery".to_string(),
                 BatteryConfig {
+                    der_1547: None,
                     standby_power_w: Some(0.0),
                     self_discharge_pct_per_day: Some(0.0),
                     min_soc: Some(0.0),
@@ -3804,6 +5049,7 @@ mod tests {
                 "TestBat".to_string(),
                 "Battery".to_string(),
                 BatteryConfig {
+                    der_1547: None,
                     capacity_j,
                     standby_power_w: Some(0.0),
                     min_soc: Some(0.0),
@@ -4012,6 +5258,7 @@ mod tests {
             "Test Battery".to_string(),
             "Battery".to_string(),
             BatteryConfig {
+                der_1547: None,
                 standby_power_w: Some(0.0),
                 initial_soc: Some(0.5),
                 min_soc: Some(0.0),
@@ -6623,6 +7870,7 @@ mod tests {
     #[test]
     fn charging_baseline_q_positive_absorbing() {
         let cfg = BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -6696,6 +7944,7 @@ mod tests {
     #[test]
     fn discharging_baseline_q_negative_supplying() {
         let cfg = BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -6769,6 +8018,7 @@ mod tests {
     #[test]
     fn reactive_setpoint_overrides_baseline_q() {
         let cfg = BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -6834,6 +8084,7 @@ mod tests {
     #[test]
     fn reactive_setpoint_zero_forces_q_zero_over_pf_baseline() {
         let cfg = BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -7014,6 +8265,7 @@ mod tests {
     #[test]
     fn kva_clamp_curtails_reactive_not_active_power() {
         let cfg = BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -7096,6 +8348,7 @@ mod tests {
     #[test]
     fn kva_clamp_reduces_q_to_inverter_limit() {
         let cfg = BatteryConfig {
+            der_1547: None,
             equipment_id: None,
             zone_id: None,
             capacity_j: 10.0 * 3.6e6,
@@ -7238,6 +8491,7 @@ mod tests {
                     "Test Battery".to_string(),
                     "Battery".to_string(),
                     BatteryConfig {
+                        der_1547: None,
                         equipment_id: None,
                         zone_id: None,
                         capacity_j: 10.0 * 3.6e6,
@@ -7509,6 +8763,7 @@ mod tests {
             "Test Battery".to_string(),
             "Battery".to_string(),
             BatteryConfig {
+                der_1547: None,
                 heater_power_w: Some(900.0),
                 ..battery_config(&[])
                     .typed::<BatteryConfig>()

@@ -133,6 +133,7 @@ fn battery_cfg(capacity_energy_j: f64, initial_soc: f64, inverter_eta: f64) -> E
             inverter_capacity_va: None,
             grid_forming: None,
             min_dwell_steps: 0,
+            der_1547: None,
         },
     )
     .unwrap()
@@ -400,6 +401,7 @@ fn pv_cell_temperature_noct_model() {
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         },
     )
     .unwrap();
@@ -516,6 +518,7 @@ fn pv_peak_generation_in_good_conditions() {
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         },
     )
     .unwrap();
@@ -621,6 +624,7 @@ fn pv_power_temperature_derating() {
                 sam_lut_path: None,
                 soiling: None,
                 arrays: None,
+                der_1547: None,
             },
         )
         .unwrap();

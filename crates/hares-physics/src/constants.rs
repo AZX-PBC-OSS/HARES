@@ -378,6 +378,159 @@ pub const SETPOINT_PLAUSIBILITY_MIN_C: f64 = 5.0;
 /// magnitude above the converted OS-HPXML defaults.
 pub const SETPOINT_PLAUSIBILITY_MAX_C: f64 = 40.0;
 
+// --- IEEE 1547-2018 DER abnormal-condition response ---
+
+/// Nominal frequency the IEEE 1547 tables are written against, in Hz. The
+/// engine's grid-frequency channel is 60 Hz-nominal (the UFLS bands its
+/// validation band spans are the 60 Hz ones), so the standard's 60 Hz-based
+/// deadbands and droop slopes apply as published.
+pub const IEEE1547_NOMINAL_FREQ_HZ: f64 = 60.0;
+
+/// Over-voltage must-trip point OV2's voltage, in per unit. IEEE 1547-2018 default
+/// shall-trip settings (voltage Tables 11-13; the identical default across
+/// Categories I, II and III), reproduced in NERC's "Bulk Power System
+/// Reliability Perspectives on the Adoption of IEEE 1547-2018" Table 1.2
+/// and the MISO Guideline for IEEE Std 1547 Implementation Table 3.
+pub const IEEE1547_OV2_TRIP_V_PU: f64 = 1.20;
+
+/// Over-voltage must-trip point OV2's clearing time, in seconds (all categories).
+/// Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_OV2_TRIP_T_S: f64 = 0.16;
+
+/// Over-voltage must-trip point OV1's voltage, in per unit (all categories).
+/// Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_OV1_TRIP_V_PU: f64 = 1.10;
+
+/// Over-voltage must-trip point OV1's default clearing time, in seconds,
+/// Category I and II. Same source as `IEEE1547_OV2_TRIP_V_PU`
+/// (Category III's default is 13.0 s).
+pub const IEEE1547_CAT12_OV1_TRIP_T_S: f64 = 2.0;
+
+/// Over-voltage must-trip point OV1's default clearing time, in seconds,
+/// Category III. Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_CAT3_OV1_TRIP_T_S: f64 = 13.0;
+
+/// Under-voltage must-trip point UV1's voltage, in per unit, Category I and II.
+/// Same source as `IEEE1547_OV2_TRIP_V_PU` (Category III's default is
+/// 0.88 pu).
+pub const IEEE1547_CAT12_UV1_TRIP_V_PU: f64 = 0.70;
+
+/// Under-voltage must-trip point UV1's voltage, in per unit, Category III.
+/// Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_CAT3_UV1_TRIP_V_PU: f64 = 0.88;
+
+/// Under-voltage must-trip point UV1's default clearing time, in seconds,
+/// Category I. Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_CAT1_UV1_TRIP_T_S: f64 = 2.0;
+
+/// Under-voltage must-trip point UV1's default clearing time, in seconds,
+/// Category II. Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_CAT2_UV1_TRIP_T_S: f64 = 10.0;
+
+/// Under-voltage must-trip point UV1's default clearing time, in seconds,
+/// Category III. Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_CAT3_UV1_TRIP_T_S: f64 = 21.0;
+
+/// Under-voltage must-trip point UV2's voltage, in per unit, Category I and II.
+/// Same source as `IEEE1547_OV2_TRIP_V_PU` (Category III's default is
+/// 0.50 pu).
+pub const IEEE1547_CAT12_UV2_TRIP_V_PU: f64 = 0.45;
+
+/// Under-voltage must-trip point UV2's voltage, in per unit, Category III.
+/// Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_CAT3_UV2_TRIP_V_PU: f64 = 0.50;
+
+/// Under-voltage must-trip point UV2's clearing time, in seconds,
+/// Categories I and II. Same source as `IEEE1547_OV2_TRIP_V_PU`
+/// (Category III's default is 2.0 s, `IEEE1547_CAT3_UV2_TRIP_T_S`).
+pub const IEEE1547_CAT12_UV2_TRIP_T_S: f64 = 0.16;
+
+/// Under-voltage must-trip point UV2's default clearing time, in seconds,
+/// Category III. Same source as `IEEE1547_OV2_TRIP_V_PU`.
+pub const IEEE1547_CAT3_UV2_TRIP_T_S: f64 = 2.0;
+
+/// Over-frequency must-trip point OF2's frequency, in Hz (all categories).
+/// IEEE 1547-2018 default frequency trip settings, reproduced in the MISO
+/// Guideline Table 6 ("default settings and ranges of allowable settings
+/// for Category I, II and III": all four points identical across
+/// categories).
+pub const IEEE1547_OF2_TRIP_F_HZ: f64 = 62.0;
+
+/// Over-frequency must-trip point OF2's clearing time, in seconds (all
+/// categories). Same source as `IEEE1547_OF2_TRIP_F_HZ`.
+pub const IEEE1547_OF2_TRIP_T_S: f64 = 0.16;
+
+/// Over-frequency must-trip point OF1's frequency, in Hz (all categories).
+/// Same source as `IEEE1547_OF2_TRIP_F_HZ`.
+pub const IEEE1547_OF1_TRIP_F_HZ: f64 = 61.2;
+
+/// Over-frequency must-trip point OF1's clearing time, in seconds (all
+/// categories). Same source as `IEEE1547_OF2_TRIP_F_HZ`.
+pub const IEEE1547_OF1_TRIP_T_S: f64 = 300.0;
+
+/// Under-frequency must-trip point UF1's frequency, in Hz (all categories).
+/// Same source as `IEEE1547_OF2_TRIP_F_HZ`.
+pub const IEEE1547_UF1_TRIP_F_HZ: f64 = 58.5;
+
+/// Under-frequency must-trip point UF1's clearing time, in seconds (all
+/// categories). Same source as `IEEE1547_OF2_TRIP_F_HZ`.
+pub const IEEE1547_UF1_TRIP_T_S: f64 = 300.0;
+
+/// Under-frequency must-trip point UF2's frequency, in Hz (all categories).
+/// Same source as `IEEE1547_OF2_TRIP_F_HZ`.
+pub const IEEE1547_UF2_TRIP_F_HZ: f64 = 56.5;
+
+/// Under-frequency must-trip point UF2's clearing time, in seconds (all
+/// categories). Same source as `IEEE1547_OF2_TRIP_F_HZ`.
+pub const IEEE1547_UF2_TRIP_T_S: f64 = 0.16;
+
+/// Frequency-droop (frequency-Watt) deadband, over-frequency side, in Hz
+/// (all categories). IEEE 1547-2018 clause 6.5.2.7.2 defaults, reproduced
+/// in the MISO Guideline Table 8 (dbOF = dbUF = 0.036 Hz, kOF = kUF = 0.05,
+/// identical across categories).
+pub const IEEE1547_FW_DEADBAND_OF_HZ: f64 = 0.036;
+
+/// Frequency-droop (frequency-Watt) deadband, under-frequency side, in Hz
+/// (all categories). Same source as `IEEE1547_FW_DEADBAND_OF_HZ`.
+pub const IEEE1547_FW_DEADBAND_UF_HZ: f64 = 0.036;
+
+/// Frequency-droop (frequency-Watt) slope, over-frequency side, in pu power per pu
+/// frequency (all categories): a frequency deviation of 5 percent
+/// of nominal beyond the deadband edge drives a full-nameplate power
+/// change. Same source as `IEEE1547_FW_DEADBAND_OF_HZ`.
+pub const IEEE1547_FW_SLOPE_OF: f64 = 0.05;
+
+/// Frequency-droop (frequency-Watt) slope, under-frequency side, in pu power per pu
+/// frequency (all categories). Same source as
+/// `IEEE1547_FW_DEADBAND_OF_HZ`.
+pub const IEEE1547_FW_SLOPE_UF: f64 = 0.05;
+
+/// Enter-service (return-to-service) voltage window's lower bound, in per unit
+/// (all categories). IEEE 1547-2018 clause 4.10.2 default enter-service
+/// criteria (Table 4 of the standard), reproduced in the MISO Guideline
+/// Table 9 and EPRI OpenDER's applied-settings file (`ES_V_LOW`).
+pub const IEEE1547_ES_V_LOW_PU: f64 = 0.917;
+
+/// Enter-service voltage window's upper bound, in per unit (all categories).
+/// Same source as `IEEE1547_ES_V_LOW_PU` (`ES_V_HIGH`).
+pub const IEEE1547_ES_V_HIGH_PU: f64 = 1.05;
+
+/// Enter-service frequency window's lower bound, in Hz (all categories).
+/// Same source as `IEEE1547_ES_V_LOW_PU` (`ES_F_LOW`).
+pub const IEEE1547_ES_F_LOW_HZ: f64 = 59.5;
+
+/// Enter-service frequency window's upper bound, in Hz (all categories).
+/// Same source as `IEEE1547_ES_V_LOW_PU` (`ES_F_HIGH`).
+pub const IEEE1547_ES_F_HIGH_HZ: f64 = 60.1;
+
+/// Enter-service minimum intentional delay, in seconds (all categories): after a
+/// trip, the DER stays disconnected until the voltage and frequency have
+/// stayed within the enter-service windows for this long. IEEE 1547-2018
+/// clause 4.10.3 ("Minimum delay of 300 s"), reproduced in the MISO
+/// Guideline Table 9 and EPRI OpenDER's applied-settings file
+/// (`ES_DELAY`).
+pub const IEEE1547_ES_DELAY_S: f64 = 300.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

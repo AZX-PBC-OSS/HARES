@@ -5963,6 +5963,21 @@ impl Dwelling {
             equipment_modes,
             equipment_soc,
             equipment_power_w,
+            // The per-DER IEEE 1547 trip state, read from each
+            // equipment's own telemetry snapshot (0.0 for equipment
+            // without the channel: the unconfigured contract).
+            equipment_der1547_tripped: self
+                .equipment
+                .iter()
+                .map(|eq| {
+                    eq.telemetry()
+                        // allowed: the 1547 trip state is the equipment's published
+                        // trip telemetry until the DER surface gains a typed field;
+                        // the key is the shared tk:: constant.
+                        .get(hares_types::telemetry_keys::DER1547_TRIPPED)
+                        .unwrap_or(0.0)
+                })
+                .collect(),
             setpoint_heat_c,
             setpoint_cool_c,
             energy_balance_residuals,
@@ -12918,6 +12933,7 @@ fn cfg_gated_helper() {
                 cc_cv_transition_soc: None,
                 charging_priority: None,
                 discharge_respects_deadline: true,
+                der_1547: None,
             },
         )
         .expect("typed EV config");
@@ -19364,6 +19380,7 @@ occupancy = 0.0
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         };
         hares_io::hpxml::build_typed_spec(
             "PV".to_string(),

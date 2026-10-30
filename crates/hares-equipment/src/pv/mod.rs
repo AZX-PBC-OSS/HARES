@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use crate::config::constructor_equipment_id;
+use crate::der1547::{Der1547Controller, Der1547State, trip_reason};
 
 /// Nominal operating cell temperature for SAM PVWatts v8 open-rack (array_type=0).
 ///
@@ -188,6 +189,14 @@ struct PvCheckpoint {
     /// `q_setpoint_active` without it would leave a stale live value after a
     /// checkpoint load onto already-stepped equipment.
     q_setpoint_source: u8,
+    /// v5: the IEEE 1547 layer's run state (trip timers, the trip latch,
+    /// the enter-service accumulation, the frequency-droop latch) and the
+    /// unconfigured layer's excursion count and warn latch. A checkpoint
+    /// taken mid-disturbance restores the inverter's exact 1547 state.
+    der1547_state: Der1547State,
+    der1547_unconfigured_excursions: u32,
+    der1547_unconfigured_warned: bool,
+    der1547_unconfigured_in_excursion: bool,
 }
 
 pub struct PV {
@@ -247,6 +256,14 @@ pub struct PV {
     soiling_config: Option<soiling::SoilingConfig>,
     soiling_state: Option<soiling::SoilingState>,
     shading_model: shading::ShadingModel,
+    /// The inverter's IEEE 1547 controller, `Some` when the config carries
+    /// a `der_1547` block. Its state rides the checkpoint.
+    der1547: Option<Der1547Controller>,
+    /// Grid excursions seen while the layer is unconfigured (the counted
+    /// event behind the run's first warning). Always 0 when configured.
+    der1547_unconfigured_excursions: u32,
+    der1547_unconfigured_warned: bool,
+    der1547_unconfigured_in_excursion: bool,
     init_error: Option<HaresError>,
     /// Warnings raised since the last drain (init-time LUT and loss checks).
     warnings: Vec<Warning>,
@@ -296,7 +313,7 @@ impl PV {
             zone_type: None,
         };
 
-        let mut telemetry = Telemetry::with_capacity(14);
+        let mut telemetry = Telemetry::with_capacity(20);
         telemetry.insert(tk::DC_POWER_KW, 0.0);
         telemetry.insert(tk::AC_POWER_KW, 0.0);
         telemetry.insert(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -310,6 +327,12 @@ impl PV {
         telemetry.insert(tk::PV_LUT_INTERP_METHOD, 0.0);
         telemetry.insert(tk::PV_LUT_NN_FALLBACK_COUNT, 0.0);
         telemetry.insert(tk::Q_SOURCE, 0.0);
+        telemetry.insert(tk::DER1547_TRIPPED, 0.0);
+        telemetry.insert(tk::DER1547_TRIP_REASON, 0.0);
+        telemetry.insert(tk::DER1547_RIDE_THROUGH_S, 0.0);
+        telemetry.insert(tk::DER1547_ENTER_SERVICE_S, 0.0);
+        telemetry.insert(tk::DER1547_FW_ADJ_PU, 0.0);
+        telemetry.insert(tk::DER1547_UNCONFIGURED_EXCURSIONS, 0.0);
 
         Self {
             descriptor,
@@ -337,6 +360,10 @@ impl PV {
             soiling_config: None,
             soiling_state: None,
             shading_model,
+            der1547: None,
+            der1547_unconfigured_excursions: 0,
+            der1547_unconfigured_warned: false,
+            der1547_unconfigured_in_excursion: false,
             init_error,
             warnings: Vec::new(),
         }
@@ -719,6 +746,24 @@ impl PV {
         // to compute the supplying-vars reactive output. pf=1.0 (default) →
         // tan_phi = 0 → no reactive output.
         self.zip_pf = ZipLoad::reactive_only(0.0, 0.0, 1.0, self.power_factor);
+        // The IEEE 1547 layer: built from the config's `der_1547` block.
+        // The droop's per-unit base is the inverter's active-power rating
+        // at unity power factor: the explicit inverter capacity when
+        // configured, else the DC nameplate times the inverter
+        // efficiency (the model's AC ceiling).
+        self.der1547 = match &c.der_1547 {
+            Some(settings) => {
+                let p_max_w = self
+                    .inverter_capacity_w
+                    .unwrap_or(self.capacity_w * self.inverter_efficiency);
+                Some(Der1547Controller::new(
+                    settings,
+                    p_max_w,
+                    &self.descriptor.name,
+                )?)
+            }
+            None => None,
+        };
         self.system_losses_fraction = c
             .system_losses_fraction
             .unwrap_or(DEFAULT_SYSTEM_LOSSES_FRACTION);
@@ -1001,7 +1046,7 @@ impl Equipment for PV {
     fn step(
         &mut self,
         env: &EnvironmentState,
-        _dt: Duration,
+        dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         // Advance soiling model with current-timestep rainfall.
@@ -1109,10 +1154,90 @@ impl Equipment for PV {
         // bus stays energized and the PV keeps producing alongside the
         // grid-forming source. Panel thermal/soiling states keep evolving
         // either way. See docs/outage-behavior.md.
-        let inverter_online = env.grid.bus_energized();
+        let mut inverter_online = env.grid.bus_energized();
         if !inverter_online {
             total_ac_power_w = 0.0;
             total_dc_power_w = 0.0;
+        }
+
+        // The configured IEEE 1547 layer: the abnormal-condition trip
+        // tables, the frequency-droop (frequency-Watt) function and the
+        // return-to-service delay, on the bus voltage and the grid
+        // frequency the inverter's terminals see. A de-energized bus is
+        // the extreme under-voltage: the trip it produces is latched, and
+        // the inverter re-enters service only after the enter-service
+        // delay completes inside the enter-service windows (an islanded
+        // bus at nominal satisfies them). The frequency-droop curtails the
+        // inverter's operating point, so the array's extracted DC follows
+        // the adjusted AC delivery. An unconfigured layer defers to the
+        // dead-bus gate above and warns once on the first grid excursion
+        // it declines to govern.
+        let mut der1547_tripped = false;
+        let mut der1547_reason = trip_reason::NONE;
+        let mut der1547_ride_through_s = 0.0;
+        let mut der1547_enter_service_s = 0.0;
+        let mut der1547_fw_adj_pu = 0.0;
+        match &mut self.der1547 {
+            Some(controller) => {
+                let outcome = controller.step(
+                    env.grid.bus_voltage_pu(),
+                    env.grid.frequency_hz,
+                    dt.as_secs_f64(),
+                    true,
+                    total_ac_power_w,
+                    total_ac_power_w,
+                    0.0,
+                )?;
+                if outcome.tripped {
+                    total_ac_power_w = 0.0;
+                    total_dc_power_w = 0.0;
+                    inverter_online = false;
+                } else if outcome.p_ref_w != total_ac_power_w {
+                    // The reference governs whenever it differs from the
+                    // model's own output, even when the droop's net
+                    // adjustment is zero (a zero pre-disturbance anchor
+                    // holds injection at zero). When the droop is inactive
+                    // the layer returns the model's output bitwise, so this
+                    // comparison leaves the nominal path untouched. The
+                    // reference arrives inside the deliverable window (the
+                    // layer caps both ramp directions at the available
+                    // injection, which is this array's irradiance-capped
+                    // output), so no re-clamp applies here: the battery's
+                    // caller re-clamps because its temperature and
+                    // charging-curve capability is invisible to the
+                    // layer's operator-bound inputs, while this
+                    // availability input already is the full capability.
+                    total_ac_power_w = outcome.p_ref_w;
+                    total_dc_power_w = total_ac_power_w / self.inverter_efficiency;
+                }
+                der1547_tripped = outcome.tripped;
+                der1547_reason = outcome.trip_reason;
+                der1547_ride_through_s = outcome.ride_through_s;
+                der1547_enter_service_s = outcome.enter_service_s;
+                der1547_fw_adj_pu = outcome.fw_adj_pu;
+            }
+            None => {
+                let v = env.grid.bus_voltage_pu();
+                let f = env.grid.frequency_hz;
+                let excursion =
+                    env.grid.bus_energized() && Der1547Controller::excursion_present(v, f);
+                if excursion && !self.der1547_unconfigured_in_excursion {
+                    self.der1547_unconfigured_excursions += 1;
+                    if !self.der1547_unconfigured_warned {
+                        self.der1547_unconfigured_warned = true;
+                        tracing::warn!(
+                            pv = %self.descriptor.name,
+                            bus_voltage_pu = v,
+                            grid_frequency_hz = f,
+                            "PV has no der_1547 trip tables configured: the \
+                             IEEE 1547 voltage and frequency response layer is \
+                             inactive and the inverter rides the excursion as a \
+                             pinned source; configure `der_1547` to enable it"
+                        );
+                    }
+                }
+                self.der1547_unconfigured_in_excursion = excursion;
+            }
         }
 
         // Compute ONE signed bus reactive power [kVAR] used identically for
@@ -1246,6 +1371,19 @@ impl Equipment for PV {
         self.telemetry.set(tk::Q_SOURCE, q_source);
         self.telemetry
             .set(tk::PV_LUT_INTERP_METHOD, f64::from(lut_nn_fallback));
+        self.telemetry
+            .set(tk::DER1547_TRIPPED, f64::from(der1547_tripped));
+        self.telemetry
+            .set(tk::DER1547_TRIP_REASON, f64::from(der1547_reason));
+        self.telemetry
+            .set(tk::DER1547_RIDE_THROUGH_S, der1547_ride_through_s);
+        self.telemetry
+            .set(tk::DER1547_ENTER_SERVICE_S, der1547_enter_service_s);
+        self.telemetry.set(tk::DER1547_FW_ADJ_PU, der1547_fw_adj_pu);
+        self.telemetry.set(
+            tk::DER1547_UNCONFIGURED_EXCURSIONS,
+            f64::from(self.der1547_unconfigured_excursions),
+        );
         if lut_nn_fallback {
             let prev = self
                 .telemetry
@@ -1298,7 +1436,11 @@ impl Equipment for PV {
         //     survives a checkpoint restore onto already-stepped equipment
         //     (T-0424 review). Persisting q_setpoint_active without its source
         //     left a stale live source after load_state.
-        4
+        // v5: added the IEEE 1547 layer's run state (der_1547 trip timers,
+        //     trip latch, enter-service accumulation, frequency-droop
+        //     latch) and the unconfigured layer's excursion counter and
+        //     warn latch.
+        5
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -1314,6 +1456,14 @@ impl Equipment for PV {
                 shading_model: self.shading_model.clone(),
                 q_setpoint_active: self.q_setpoint_active,
                 q_setpoint_source: self.q_setpoint_source,
+                der1547_state: self
+                    .der1547
+                    .as_ref()
+                    .map(|c| c.state().clone())
+                    .unwrap_or_default(),
+                der1547_unconfigured_excursions: self.der1547_unconfigured_excursions,
+                der1547_unconfigured_warned: self.der1547_unconfigured_warned,
+                der1547_unconfigured_in_excursion: self.der1547_unconfigured_in_excursion,
             },
             Self::checkpoint_version(),
             "PV",
@@ -1357,6 +1507,15 @@ impl Equipment for PV {
         } else {
             self.system_losses_fraction
         };
+        // The IEEE 1547 layer's run state: restored into the live
+        // controller when the layer is configured (init_typed built it
+        // from the config before load_state ran).
+        self.der1547_unconfigured_excursions = decoded.der1547_unconfigured_excursions;
+        self.der1547_unconfigured_warned = decoded.der1547_unconfigured_warned;
+        self.der1547_unconfigured_in_excursion = decoded.der1547_unconfigured_in_excursion;
+        if let Some(controller) = &mut self.der1547 {
+            controller.restore_state(decoded.der1547_state);
+        }
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 // PV generation depends on live irradiance and environmental
@@ -1562,6 +1721,41 @@ fn telemetry_fields() -> Vec<TelemetryField> {
             "Reactive-power source: 0.0 = none, 1.0 = reactive_setpoint, \
                  2.0 = power_factor, 3.0 = power_setpoint",
         ),
+        TelemetryField::code_code(
+            tk::DER1547_TRIPPED,
+            &["online", "tripped"],
+            "IEEE 1547 trip state: 0.0 = online, 1.0 = tripped (cease to \
+                 energize). Always 0.0 when no `der_1547` block is configured.",
+        ),
+        TelemetryField::code_code(
+            tk::DER1547_TRIP_REASON,
+            crate::der1547::trip_reason::LABELS.as_slice(),
+            "The IEEE 1547 trip condition that fired: 0.0 = none, 1.0 = uv2, \
+                 2.0 = uv1, 3.0 = ov1, 4.0 = ov2, 5.0 = uf2, 6.0 = uf1, \
+                 7.0 = of1, 8.0 = of2",
+        ),
+        TelemetryField::flow_mean(
+            tk::DER1547_RIDE_THROUGH_S,
+            hares_types::Unit::Second,
+            "Seconds accumulated in the governing IEEE 1547 trip band this \
+                 disturbance (the clearing-time window's position)",
+        ),
+        TelemetryField::flow_mean(
+            tk::DER1547_ENTER_SERVICE_S,
+            hares_types::Unit::Second,
+            "Seconds accumulated inside the IEEE 1547 enter-service windows \
+                 while tripped (the return-to-service delay's position)",
+        ),
+        TelemetryField::ratio(
+            tk::DER1547_FW_ADJ_PU,
+            "The IEEE 1547 frequency-droop adjustment, per unit of the \
+                 inverter's active-power rating (negative = curtailed)",
+        ),
+        TelemetryField::running_total(
+            tk::DER1547_UNCONFIGURED_EXCURSIONS,
+            hares_types::Unit::Count,
+            "Grid excursions seen while no der_1547 tables were configured",
+        ),
     ]
 }
 
@@ -1597,6 +1791,7 @@ mod tests {
         PVWATTS_SOILING_COMPONENT, PvArray, PvArraySpec, PvConfig, ResolvedZip,
         cell_temperature_noct_wind, surface_id_for_orientation,
     };
+    use crate::der1547::Der1547Settings;
 
     fn env_with_surfaces(
         surfaces: Vec<SurfaceIrradiance>,
@@ -1672,6 +1867,7 @@ mod tests {
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         }
     }
 
@@ -1924,6 +2120,674 @@ mod tests {
         pv.step(&env_nominal, Duration::from_secs(60), &mut ports)
             .unwrap();
         assert!((-ports.electrical.generation_power_w - baseline_gen_w).abs() < 1e-6);
+    }
+
+    // -- The IEEE 1547 response layer (der_1547). --
+
+    fn config_single_with_der1547(settings: Der1547Settings) -> EquipmentConfig {
+        let mut cfg = base_pv_typed_config();
+        cfg.der_1547 = Some(settings);
+        EquipmentConfig::from_typed("PV South".to_string(), "PV".to_string(), cfg).unwrap()
+    }
+
+    fn cat2_settings() -> Der1547Settings {
+        Der1547Settings {
+            category: crate::der1547::Der1547Category::CatII,
+            overrides: None,
+        }
+    }
+
+    /// A pre-1547 PV checkpoint (format v4, before the layer's state
+    /// existed) is refused with the typed version-mismatch error naming
+    /// both versions: the layer's state is checkpointed, never re-derived
+    /// from a save that predates it.
+    #[test]
+    fn a_pre_der1547_checkpoint_is_refused_not_migrated() {
+        let config = config_single_with_der1547(cat2_settings());
+        let mut pv = PV::new(config.clone());
+        let mut blob = pv.save_state().expect("the state saves");
+        blob[..4].copy_from_slice(&4u32.to_le_bytes());
+        let err = pv.load_state(&blob).expect_err("a v4 blob is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("blob=4"), "{msg}");
+        assert!(
+            msg.contains(&format!("expected={}", PV::checkpoint_version())),
+            "{msg}"
+        );
+    }
+
+    /// The droop reference governs whenever it differs from the model's own
+    /// output, even when the pre-disturbance anchor is zero: a PV whose
+    /// output was zero on the step the deadband was crossed (heavy cloud)
+    /// and rises while the excursion holds stays at the reference the zero
+    /// anchor floored at zero injection, rather than exporting the new
+    /// irradiance's output into an over-frequency grid.
+    #[test]
+    fn a_zero_anchor_excursion_holds_the_reference_as_the_output_rises() {
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let dark = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 0.0,
+            diffuse_w_m2: 0.0,
+            reflected_w_m2: 0.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        pv.init(
+            &config_single_with_der1547(cat2_settings()),
+            &env_with_surfaces(dark.clone(), 25.0),
+        )
+        .unwrap();
+
+        // The deadband crossing finds a zero-output array: the anchor is
+        // 0 pu and the 0.5 Hz ramp floors at zero injection.
+        let mut hi_f_dark = env_with_surfaces(dark, 25.0);
+        hi_f_dark.grid.frequency_hz = 60.536;
+        let mut ports = PortSlots::default();
+        pv.step(&hi_f_dark, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(ports.electrical.generation_power_w, 0.0);
+        assert_eq!(pv.telemetry().get(tk::DER1547_FW_ADJ_PU), Some(0.0));
+
+        // The irradiance returns while the excursion holds: the latched
+        // zero anchor's reference is still zero injection.
+        let mut hi_f_sunny = env_with_surfaces(sunny, 25.0);
+        hi_f_sunny.grid.frequency_hz = 60.536;
+        ports.zero();
+        pv.step(&hi_f_sunny, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            ports.electrical.generation_power_w, 0.0,
+            "the held zero anchor's reference is zero injection"
+        );
+        assert_eq!(pv.telemetry().get(tk::AC_POWER_KW), Some(0.0));
+        assert_eq!(pv.telemetry().get(tk::DER1547_FW_ADJ_PU), Some(0.0));
+    }
+
+    /// The brownout round's F8 defect witness: a sustained 0.6 pu sag sits
+    /// inside UV1's band (0.45 <= V < 0.70); the Category II default
+    /// clearing time is 10 s (IEEE 1547-2018 voltage shall-trip defaults,
+    /// NERC Table 1.2 / MISO Table 3), so a 900 s timestep reaches it and
+    /// the inverter is tripped for the step: no AC export, no DC
+    /// extraction, no vars. The pre-1547 model left the inverter at full
+    /// bitwise output through the sag; the unconfigured witness below
+    /// pins that pre-1547 contract.
+    #[test]
+    fn witness_der1547_configured_pv_trips_on_a_sustained_06pu_sag() {
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+            .unwrap();
+
+        let mut ports = PortSlots::default();
+        pv.step(&env_nominal, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let baseline_w = -ports.electrical.generation_power_w;
+        assert!(baseline_w > 0.0, "the sunny baseline produces");
+
+        let mut sag = env_with_surfaces(sunny.clone(), 25.0);
+        sag.grid.voltage_pu = 0.6;
+        ports.zero();
+        pv.step(&sag, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.generation_power_w, 0.0,
+            "the 0.6 pu sag trips the configured inverter (UV1: 10 s window)"
+        );
+        assert_eq!(ports.electrical.reactive_power_var, 0.0, "no vars tripped");
+        assert_eq!(pv.telemetry().get(tk::AC_POWER_KW), Some(0.0));
+        assert_eq!(pv.telemetry().get(tk::DC_POWER_KW), Some(0.0));
+        assert_eq!(pv.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        assert_eq!(
+            pv.telemetry().get(tk::DER1547_TRIP_REASON),
+            Some(2.0),
+            "UV1 is the fired condition"
+        );
+        assert_eq!(
+            pv.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            Some(10.0),
+            "the accumulator caps at the 10 s window"
+        );
+        assert_eq!(
+            pv.telemetry().get(tk::DER1547_UNCONFIGURED_EXCURSIONS),
+            Some(0.0)
+        );
+    }
+
+    /// The six IEEE 1547 channels publish under the consumer's exact names.
+    /// The strings are the shipped contract (a reader keys on them; a
+    /// rename is a silent break), so each is read here by its literal name
+    /// with a value only that channel produces: the droop's ramp, the
+    /// trip's state, reason and firing window, the enter-service clock of
+    /// a latched inverter, and the unconfigured excursion count.
+    #[test]
+    fn the_six_der1547_channels_publish_under_their_contract_names() {
+        // A 10 000 s enter-service delay (the operator surface admits it)
+        // holds the latch across the restored step, so the clock's
+        // published value is that step's own 900 s rather than zero.
+        let settings = Der1547Settings {
+            category: crate::der1547::Der1547Category::CatII,
+            overrides: Some(crate::der1547::Der1547Overrides {
+                es_delay_s: Some(10_000.0),
+                ..Default::default()
+            }),
+        };
+        let config = config_single_with_der1547(settings);
+        let mut pv = PV::new(config.clone());
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config, &env_nominal).unwrap();
+
+        // 60.536 Hz is 0.5 Hz beyond the 60.036 Hz edge: the ramp sheds
+        // 1/6 pu, and the adjustment's own channel carries it.
+        let mut hi_f = env_with_surfaces(sunny.clone(), 25.0);
+        hi_f.grid.frequency_hz = 60.536;
+        let mut ports = PortSlots::default();
+        pv.step(&hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert!(
+            pv.telemetry().get("der1547_fw_adj_pu").unwrap_or(0.0) < -1e-6,
+            "the droop's adjustment rides its own channel"
+        );
+
+        // The 0.6 pu sag reaches UV1's 10 s window: the trip and its
+        // window channels.
+        let mut sag = env_with_surfaces(sunny.clone(), 25.0);
+        sag.grid.voltage_pu = 0.6;
+        ports.zero();
+        pv.step(&sag, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(pv.telemetry().get("der1547_tripped"), Some(1.0));
+        assert_eq!(pv.telemetry().get("der1547_trip_reason"), Some(2.0));
+        assert_eq!(pv.telemetry().get("der1547_ride_through_s"), Some(10.0));
+
+        // The restored bus is inside the enter-service windows: the clock
+        // accrues the step and the latch holds.
+        let restored = env_with_surfaces(sunny, 25.0);
+        ports.zero();
+        pv.step(&restored, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            pv.telemetry().get("der1547_enter_service_s"),
+            Some(900.0),
+            "the latched inverter's clock rides its own channel"
+        );
+        assert_eq!(pv.telemetry().get("der1547_tripped"), Some(1.0));
+        assert_eq!(
+            pv.telemetry().get("der1547_unconfigured_excursions"),
+            Some(0.0),
+            "the configured layer counts no excursion"
+        );
+    }
+
+    /// The ride-through window honored at a timestep finer than the
+    /// clearing time: 5 s steps at 0.6 pu accumulate 5 s of UV1's 10 s
+    /// window on the first step (the inverter keeps producing), and the
+    /// second step reaches the window's boundary and trips.
+    #[test]
+    fn witness_der1547_ride_through_window_holds_to_its_boundary() {
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+            .unwrap();
+
+        let mut sag = env_with_surfaces(sunny, 25.0);
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = PortSlots::default();
+        pv.step(&sag, Duration::from_secs(5), &mut ports).unwrap();
+        let riding_w = -ports.electrical.generation_power_w;
+        assert!(
+            riding_w > 0.0,
+            "5 s inside the 10 s ride-through window keeps producing"
+        );
+        assert_eq!(pv.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+        assert_eq!(
+            pv.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            Some(5.0),
+            "the window's position is published"
+        );
+        ports.zero();
+        pv.step(&sag, Duration::from_secs(5), &mut ports).unwrap();
+        assert_eq!(
+            ports.electrical.generation_power_w, 0.0,
+            "the accumulated 10 s reaches the window: tripped"
+        );
+        assert_eq!(pv.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+    }
+
+    /// The frequency-droop shape at an over-frequency excursion: 60.536 Hz
+    /// is 0.5 Hz beyond the 60.036 Hz deadband edge; the 5 percent droop
+    /// slope is 1/(60 x 0.05) = 1/3 pu of the rating per Hz, so the
+    /// reference is p_pre - (0.5 / 3) pu = p_pre - 1/6 pu. The rating is
+    /// capacity x inverter efficiency = 4800 W, so the step sheds exactly
+    /// 800 W from the pre-disturbance output. 60.036 Hz itself (the edge)
+    /// adjusts nothing.
+    #[test]
+    fn witness_der1547_over_frequency_droop_sheds_linearly_beyond_the_deadband() {
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+            .unwrap();
+
+        let mut ports = PortSlots::default();
+        pv.step(&env_nominal, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let baseline_w = -ports.electrical.generation_power_w;
+
+        let mut hi_f = env_with_surfaces(sunny.clone(), 25.0);
+        hi_f.grid.frequency_hz = 60.536;
+        ports.zero();
+        pv.step(&hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let shed_w = -ports.electrical.generation_power_w;
+        let expected_w = baseline_w - 800.0;
+        assert!(
+            (shed_w - expected_w).abs() < 1e-6,
+            "the droop sheds 1/6 pu of the 4800 W rating: expected \
+             {expected_w} W, got {shed_w} W (baseline {baseline_w} W)"
+        );
+        assert!(
+            (pv.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(0.0) + 1.0 / 6.0).abs() < 1e-9
+        );
+
+        // At the deadband edge: no adjustment, bitwise the baseline.
+        let mut edge = env_with_surfaces(sunny, 25.0);
+        edge.grid.frequency_hz = 60.0 + 0.036;
+        ports.zero();
+        pv.step(&edge, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            -ports.electrical.generation_power_w, baseline_w,
+            "60.036 Hz is the deadband edge: no droop"
+        );
+    }
+
+    /// The composed output's capability face: the droop's reference is a
+    /// power command, and the array's available output governs its
+    /// delivery the same way the pack's clamp governs the battery's. A
+    /// held over-frequency excursion latches its anchor at the crossing
+    /// step's output; when the irradiance falls inside the excursion, the
+    /// reference computed from the stale anchor exceeds what the array
+    /// can deliver, and the composed output must be the sky's
+    /// deliverable, not the stale ask. 60.536 Hz sheds 1/6 pu of the
+    /// 4800 W rating (800 W) from the anchor; the dimmed sky (a quarter
+    /// of the irradiance) delivers roughly a quarter of the sunny output,
+    /// far below the ask.
+    #[test]
+    fn witness_der1547_pv_droop_reference_never_exceeds_the_available_irradiance() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let dim = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 200.0,
+            diffuse_w_m2: 25.0,
+            reflected_w_m2: 5.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        let mut hi_f = env_with_surfaces(sunny, 25.0);
+        hi_f.grid.frequency_hz = 60.536;
+        let mut dim_hi_f = env_with_surfaces(dim, 25.0);
+        dim_hi_f.grid.frequency_hz = 60.536;
+
+        // The capability probe: the same model without the layer, ridden
+        // through the same weather, is the dim sky's own deliverable. The
+        // array's state is the weather's (the NOCT cell temperature and
+        // the shading are per-step computations from the environment),
+        // so the probe's dim step is the subject's dim-step availability.
+        let probe_config = config_single();
+        let mut probe = PV::new(probe_config.clone());
+        probe.init(&probe_config, &env_nominal).unwrap();
+        let mut ports = PortSlots::default();
+        probe
+            .step(&env_nominal, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        ports.zero();
+        probe
+            .step(&hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        ports.zero();
+        probe
+            .step(&dim_hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let sky_available_w = -ports.electrical.generation_power_w;
+        assert!(
+            sky_available_w > 0.0,
+            "precondition: the dim sky still delivers, got {sky_available_w} W"
+        );
+
+        // The subject: the same weather, the excursion held across the
+        // sky's fall. The crossing step's shed is the shape pin's 800 W.
+        let config = config_single_with_der1547(cat2_settings());
+        let mut pv = PV::new(config.clone());
+        pv.init(&config, &env_nominal).unwrap();
+        let mut ports = PortSlots::default();
+        pv.step(&env_nominal, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let baseline_w = -ports.electrical.generation_power_w;
+        ports.zero();
+        pv.step(&hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let held_w = -ports.electrical.generation_power_w;
+        assert!(
+            (held_w - (baseline_w - 800.0)).abs() < 1e-6,
+            "the crossing step sheds 1/6 pu of the 4800 W rating: expected \
+             {} W, got {held_w} W",
+            baseline_w - 800.0
+        );
+        assert!(
+            held_w > sky_available_w,
+            "precondition: the stale anchor's ask {held_w} W must exceed the \
+             dim sky's deliverable {sky_available_w} W for the capability \
+             face to bind"
+        );
+        ports.zero();
+        pv.step(&dim_hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let composed_w = -ports.electrical.generation_power_w;
+        assert!(
+            composed_w <= sky_available_w,
+            "the held excursion's composed output must not exceed the \
+             array's available output: composed {composed_w} W against \
+             {sky_available_w} W of available irradiance"
+        );
+    }
+
+    /// The reconnection delay's pin: after a trip, the inverter stays
+    /// offline until the bus has held the enter-service windows (0.917 to
+    /// 1.05 pu, 59.5 to 60.1 Hz: IEEE 1547-2018 clause 4.10.2/4.10.3
+    /// defaults) for the 300 s delay. At 60 s steps the fifth restored
+    /// step completes the delay; the pre-1547 model produced on the first
+    /// restored step.
+    #[test]
+    fn witness_der1547_reconnection_waits_out_the_enter_service_delay() {
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+            .unwrap();
+
+        // Trip on the sag (60 s clears UV1's 10 s window).
+        let mut sag = env_with_surfaces(sunny.clone(), 25.0);
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = PortSlots::default();
+        pv.step(&sag, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(ports.electrical.generation_power_w, 0.0);
+        assert_eq!(pv.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(0.0));
+
+        // Restoration: four 60 s steps stay offline while the delay
+        // accumulates, the fifth completes it.
+        let mut offline_steps = 0;
+        let last_w = loop {
+            ports.zero();
+            pv.step(&env_nominal, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            let w = -ports.electrical.generation_power_w;
+            if w > 0.0 {
+                break w;
+            }
+            offline_steps += 1;
+            assert!(offline_steps < 10, "the reconnection delay never completed");
+        };
+        assert_eq!(
+            offline_steps, 4,
+            "300 s at 60 s steps: four offline steps, the fifth reconnected"
+        );
+        let baseline_w = {
+            let mut probe = PV::new(config_single_with_der1547(cat2_settings()));
+            probe
+                .init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+                .unwrap();
+            let mut ports = PortSlots::default();
+            probe
+                .step(&env_nominal, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            -ports.electrical.generation_power_w
+        };
+        assert!(
+            (last_w - baseline_w).abs() < 1e-6,
+            "the reconnected step produces the normal output"
+        );
+    }
+
+    /// The unconfigured layer's contract: a PV without a `der_1547` block
+    /// behaves exactly as the pre-1547 model did (the 0.6 pu sag leaves
+    /// full bitwise output - the brownout round's F8 defect, kept as the
+    /// explicit unconfigured behavior) and the first excursion is warned
+    /// once and counted as one event per disturbance.
+    #[test]
+    fn witness_der1547_unconfigured_pv_behaves_as_today_and_counts_excursions() {
+        let mut pv = PV::new(config_single());
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config_single(), &env_nominal).unwrap();
+
+        let mut ports = PortSlots::default();
+        pv.step(&env_nominal, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let baseline_w = -ports.electrical.generation_power_w;
+
+        let mut sag = env_with_surfaces(sunny.clone(), 25.0);
+        sag.grid.voltage_pu = 0.6;
+        ports.zero();
+        pv.step(&sag, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            -ports.electrical.generation_power_w, baseline_w,
+            "unconfigured: the pre-1547 pinned-source behavior, bitwise"
+        );
+        assert_eq!(pv.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+        assert_eq!(
+            pv.telemetry().get(tk::DER1547_UNCONFIGURED_EXCURSIONS),
+            Some(1.0),
+            "the excursion is one counted event"
+        );
+
+        // The held sag is still the same disturbance: no second event.
+        ports.zero();
+        pv.step(&sag, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            pv.telemetry().get(tk::DER1547_UNCONFIGURED_EXCURSIONS),
+            Some(1.0)
+        );
+
+        // A fresh disturbance after recovery counts again.
+        ports.zero();
+        pv.step(&env_nominal, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        ports.zero();
+        pv.step(&sag, Duration::from_secs(900), &mut ports).unwrap();
+        assert_eq!(
+            pv.telemetry().get(tk::DER1547_UNCONFIGURED_EXCURSIONS),
+            Some(2.0)
+        );
+    }
+
+    /// A de-energized bus is the extreme under-voltage: a configured
+    /// inverter's trip on it is latched, and the return to service follows
+    /// the enter-service delay. At the 900 s timestep the delay completes
+    /// on the first step with an energized bus, so the existing
+    /// outage/island/restoration contract is preserved; at 60 s the delay
+    /// holds the inverter off for four steps.
+    #[test]
+    fn witness_der1547_outage_trip_is_latched_and_reenters_via_the_delay() {
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+            .unwrap();
+
+        // Utility outage, no backup: the dead bus trips UV2 (0.0 pu is
+        // below the 0.45 pu point).
+        let mut outage = env_with_surfaces(sunny.clone(), 25.0);
+        outage.grid.voltage_pu = 0.0;
+        let mut ports = PortSlots::default();
+        pv.step(&outage, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(ports.electrical.generation_power_w, 0.0);
+        assert_eq!(pv.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        assert_eq!(
+            pv.telemetry().get(tk::DER1547_TRIP_REASON),
+            Some(1.0),
+            "uv2"
+        );
+
+        // Islanded on a backup source at 900 s steps: the enter-service
+        // delay (300 s) completes within the first islanded step.
+        let mut islanded = env_with_surfaces(sunny.clone(), 25.0);
+        islanded.grid.voltage_pu = 0.0;
+        islanded.grid.island_bus_voltage_pu = Some(1.0);
+        ports.zero();
+        pv.step(&islanded, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert!(
+            -ports.electrical.generation_power_w > 0.0,
+            "900 s inside the enter-service windows reconnects the inverter"
+        );
+
+        // At 60 s steps the delay holds the inverter off for four steps.
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        pv.init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+            .unwrap();
+        let mut ports = PortSlots::default();
+        pv.step(&outage, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(ports.electrical.generation_power_w, 0.0);
+        for step in 1..=4 {
+            ports.zero();
+            pv.step(&islanded, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            assert_eq!(
+                ports.electrical.generation_power_w, 0.0,
+                "islanded step {step}: the 300 s delay is still running"
+            );
+            assert_eq!(
+                pv.telemetry().get(tk::DER1547_ENTER_SERVICE_S),
+                Some(60.0 * step as f64)
+            );
+        }
+        ports.zero();
+        pv.step(&islanded, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert!(
+            -ports.electrical.generation_power_w > 0.0,
+            "the fifth islanded step completes the 300 s delay"
+        );
+    }
+
+    /// The 1547 run state survives a checkpoint round trip: a trip latched
+    /// before the save still holds after the restore, and the restored
+    /// controller continues the enter-service accumulation exactly as the
+    /// original does.
+    #[test]
+    fn der1547_state_survives_checkpoint_round_trip() {
+        let mut pv = PV::new(config_single_with_der1547(cat2_settings()));
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        pv.init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+            .unwrap();
+
+        // Ride 5 s into the window (no trip yet) at 0.6 pu.
+        let mut sag = env_with_surfaces(sunny, 25.0);
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = PortSlots::default();
+        pv.step(&sag, Duration::from_secs(5), &mut ports).unwrap();
+        assert_eq!(pv.telemetry().get(tk::DER1547_RIDE_THROUGH_S), Some(5.0));
+
+        let state = pv.save_state().unwrap();
+        let mut restored = PV::new(config_single_with_der1547(cat2_settings()));
+        restored
+            .init(&config_single_with_der1547(cat2_settings()), &env_nominal)
+            .unwrap();
+        restored.load_state(&state).unwrap();
+
+        // Both continue with the next 5 s step: the original trips (the
+        // window completes), and the restored one must trip identically.
+        ports.zero();
+        pv.step(&sag, Duration::from_secs(5), &mut ports).unwrap();
+        ports.zero();
+        restored
+            .step(&sag, Duration::from_secs(5), &mut ports)
+            .unwrap();
+        assert_eq!(pv.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+        assert_eq!(
+            restored.telemetry().get(tk::DER1547_TRIPPED),
+            Some(1.0),
+            "the restored controller trips at the same step"
+        );
+        assert_eq!(
+            restored.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+            pv.telemetry().get(tk::DER1547_RIDE_THROUGH_S)
+        );
     }
 
     #[test]
@@ -2257,6 +3121,7 @@ mod tests {
                 sam_lut_path: None,
                 soiling: None,
                 arrays: None,
+                der_1547: None,
             },
         )
         .unwrap();

@@ -86,6 +86,17 @@ pub struct PvConfig {
     /// `attached_boundary_id` attaches it.
     #[serde(default)]
     pub arrays: Option<Vec<PvArraySpec>>,
+
+    /// The inverter's IEEE 1547-2018 response: the assigned
+    /// abnormal-performance category's default trip tables, the
+    /// frequency-droop (frequency-Watt) parameters and the
+    /// enter-service criteria, operator-settable per parameter. `None`
+    /// (the default) leaves the layer unconfigured: the inverter behaves
+    /// as the pre-1547 model did (only a de-energized bus stops it) and
+    /// the run's first grid excursion is warned with the excursion
+    /// counted in `der1547_unconfigured_excursions` telemetry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub der_1547: Option<crate::der1547::Der1547Settings>,
 }
 
 impl EquipmentTypedConfig for PvConfig {
@@ -364,6 +375,20 @@ impl hares_types::DescribeFields for PvConfig {
                     ..Default::default()
                 },
             ),
+            (
+                "der_1547",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the inverter's IEEE 1547-2018 response: the assigned \
+                         abnormal-performance category (I, II or III) whose \
+                         default trip, frequency-droop and enter-service \
+                         settings govern, plus optional per-parameter \
+                         overrides; absent means unconfigured (the pre-1547 \
+                         behavior, excursions warned once and counted)",
+                    ),
+                    ..Default::default()
+                },
+            ),
         ])
     }
 }
@@ -392,6 +417,7 @@ mod tests {
             sam_lut_path: None,
             soiling: None,
             arrays: None,
+            der_1547: None,
         }
     }
 
