@@ -275,8 +275,6 @@ cmd_rounds() {
     local k r side target
     for k in $(seq "$first" $((first + count - 1))); do
         for target in "${BENCH_TARGETS[@]}"; do
-            [ -x "$bin_dir_head/$target" ] || continue
-            [ -x "$bin_dir_base/$target" ] || continue
             # Odd rounds run base then head, even rounds the reverse: a
             # positional effect (the sitting's own warm-up, a co-tenant
             # arriving) cancels across rounds instead of accumulating on
@@ -309,6 +307,13 @@ cmd_rounds() {
 run_round() {
     local side="$1" target="$2" round="$3" filter="${4:-}"
     local bin="target/$side-bench/$target"
+    if [ ! -x "$bin" ]; then
+        # A side without a binary (a base tree that predates the target)
+        # still runs its opposite: the half pair reports as unpaired
+        # instead of the target vanishing from the gate.
+        echo "::warning::$side/$target has no binary: its benchmarks are unpaired this round" >&2
+        return 0
+    fi
     local args=(--bench --save-baseline "$side-r$round")
     if [ -n "$filter" ]; then
         args+=("$filter")
