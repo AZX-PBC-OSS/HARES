@@ -6505,6 +6505,60 @@ mod tests {
         );
     }
 
+    /// The countdown accumulates across a long event: a ten-step
+    /// GridEmergency sheds all ten steps its duration names, and the
+    /// eleventh releases. The four-step witness pins the one-step-early
+    /// boundary; this pins the accumulation over an event long enough for
+    /// a per-pass or per-dispatch drift to move the release off the named
+    /// step.
+    #[test]
+    fn dr_event_sheds_ten_named_steps_across_the_accumulated_countdown() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(10.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        for step in 0..10 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+            let standby = DEFAULT_STANDBY_POWER_W;
+            assert!(
+                (power - standby).abs() < 10.0,
+                "step {step}: the event's ten named steps must all hold the \
+                 commanded discharge at standby, got {power} W"
+            );
+        }
+
+        // The eleventh step releases the event: the discharge resumes with
+        // the ten dead steps counted toward the duration the signal named.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power < -1000.0,
+            "the event is over after its ten named steps: the commanded 2 kW \
+             discharge must resume, got {power} W"
+        );
+    }
+
     /// The countdown is a wall-clock contract: an outage does not pause
     /// it. A dead-bus step (the outage's first step, before any island
     /// forms) runs the battery's step to its end, where the timer

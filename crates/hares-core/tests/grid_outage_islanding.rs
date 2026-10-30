@@ -776,11 +776,11 @@ fn islanded_pack_energy_is_bounded_by_island_sources() {
 }
 
 /// The island forms one step AFTER the outage begins: the formation
-/// condition (the utility outage and the source availability) is
-/// evaluated entirely from end-of-previous-step state, so the outage's
-/// first step is a dead-bus step (every load force-offs) and the second
-/// step is islanded. The documented one-step lag
-/// (docs/cosim.md, docs/outage-behavior.md).
+/// condition reads the previous step's outage and the source
+/// availability (both end-of-previous-step state) beside the step's own
+/// utility voltage, so the outage's first step is a dead-bus step (every
+/// load force-offs) and the second step is islanded. The documented
+/// one-step lag (docs/cosim.md, docs/outage-behavior.md).
 #[test]
 fn island_forms_one_step_after_the_outage() {
     let mut dwelling = build_dwelling_with_base_load("formation-lag");
@@ -949,4 +949,73 @@ fn dr_shed_during_island_keeps_the_bus_alive() {
         "after the event the battery serves the load again, got {} W",
         summary.battery_power_w
     );
+}
+
+/// The island's survival through a DR shed is a capability boundary, not
+/// a headroom one: a battery whose discharge limit exactly equals the
+/// island's load still holds the bus and serves the load while a full
+/// shed holds its grid-side dispatch at standby. Source availability keys
+/// on capacity (grid-forming, dischargeable above the floor), never on
+/// surplus over the load, and the islanded dispatch is uncurtailed.
+#[test]
+fn dr_shed_island_survives_at_the_source_capacity_edge() {
+    let mut dwelling = build_dwelling_with_base_load("island-dr-edge");
+    // The 1.5 kW base load exactly: zero discharge headroom.
+    add_battery_with_discharge_limit(&mut dwelling, 0.6, 1.5);
+
+    dwelling.step().expect("nominal step");
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
+    dwelling.step().expect("the outage's dead-bus step");
+    dwelling.step().expect("the island's formation step");
+    assert!(dwelling.latest_env().grid.islanded(), "the island formed");
+
+    dwelling.apply_control(
+        "Battery",
+        ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            // Four steps at the fixture's 60 s timestep.
+            duration_s: Some(4.0 * 60.0),
+        },
+    );
+    for step in 0..4 {
+        dwelling.step().expect("the island's shed step");
+        assert!(
+            dwelling.latest_env().grid.islanded(),
+            "step {step}: the island survives at the source-capacity edge"
+        );
+        let battery_dr = dwelling
+            .latest_env()
+            .equipment_telemetry
+            .get("Battery")
+            .and_then(|t| t.get(tk::DR_POWER_FRACTION))
+            .unwrap_or_else(|| panic!("step {step}: the battery publishes its DR fraction"));
+        assert_eq!(
+            battery_dr, 0.0,
+            "step {step}: the event is in force (without it the battery \
+             would serve the load anyway and the edge would prove nothing)"
+        );
+        let summary = dwelling
+            .save_checkpoint()
+            .expect("checkpoint")
+            .prior_electrical_summary;
+        // The pack discharges at its 1.5 kW limit less its 5 W standby
+        // draw: the load equals the capability exactly, so the residual
+        // imbalance is the standby alone.
+        assert!(
+            summary.battery_power_w < -1_400.0,
+            "step {step}: the battery serves the 1.5 kW load at its rated \
+             discharge edge, got {} W",
+            summary.battery_power_w
+        );
+        let telem = dwelling.telemetry().expect("telemetry");
+        assert!(
+            telem.island_unserved_w <= 50.0,
+            "step {step}: the load exactly at the source's capacity is \
+             served (the only imbalance is the pack's standby draw), got \
+             {} W unserved",
+            telem.island_unserved_w
+        );
+    }
 }
