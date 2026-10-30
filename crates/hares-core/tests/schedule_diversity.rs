@@ -278,6 +278,20 @@ fn a_seed_swap_moves_the_schedule_and_nothing_else() {
              weather is the environment's, not the schedule's"
         );
     }
+    // The rest of the blueprint is seed-independent too: the assembled
+    // model (the equipment with its autosized capacities, the boundaries,
+    // the windows, the infiltration, the site and the clock) is the
+    // parent's. The schedule's difference above makes this a statement
+    // about the swap, not about two identical builds: the seed keys the
+    // schedule's draws and the rng, and autosizing reads the design
+    // conditions and the building, never the schedule.
+    assert_eq!(
+        rebuilt.resolved_model(),
+        original.resolved_model(),
+        "a seed swap must move the schedule and nothing the resolved model \
+         carries: the autosized capacities and the assembled envelope are \
+         the same home's"
+    );
 }
 
 /// The CSV path's seed swap: a schedule CSV is measured or upstream
@@ -458,6 +472,17 @@ fn the_diversity_adds_no_runtime_stochastic_state() {
         schedule_rows(&off),
         "the knob must move the schedule: the ledger's equality above would \
          otherwise compare two identical builds"
+    );
+    // The layer is behavioral alone: the assembled model (the equipment
+    // with its autosized capacities, the envelope, the site and the clock)
+    // is the same with the layer on and off. Autosizing reads the design
+    // conditions and the building's default internal gains, never the
+    // schedule, so a schedule draw may not move a capacity.
+    assert_eq!(
+        on.resolved_model(),
+        off.resolved_model(),
+        "the behavioral layer's draws must not move the assembled model: the \
+         autosized capacities are the schedule-independent sizing's"
     );
     // Warm-up replays the run's first day; it neither adds a stream nor
     // moves the layer's build-time draws.
