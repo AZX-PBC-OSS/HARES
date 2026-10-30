@@ -273,12 +273,13 @@ impl ScenarioDistribution {
     /// transform, which preserves this marginal exactly). The distribution
     /// validates before it maps, so a malformed one is an error naming it,
     /// never a panic. A finite `p` outside (0, 1) saturates at the boundary
-    /// probability: the probability is clamped to [EPSILON, 1 - EPSILON]
-    /// (about 8.2 standard deviations for the normal and lognormal
-    /// families), so a degenerate tail returns the boundary quantile
-    /// rather than an infinity. The clamp is reachable from the copula: a
-    /// normal CDF of a finite draw rounds to 1.0 at about 8.6 sigma
-    /// (probability about 1e-16), and the boundary quantile is the
+    /// probability: the probability is clamped to [EPSILON, 1 - EPSILON],
+    /// whose tail is exactly 2^-52, so the boundary quantile is about 8.13
+    /// standard deviations for the normal and lognormal families and a
+    /// degenerate tail returns that quantile rather than an infinity. The
+    /// clamp is reachable from the copula: a normal CDF of a finite draw
+    /// rounds to exactly 1.0 from about 8.3 sigma up (the tail at the
+    /// double 1.0's half-ulp, 2^-54), and the boundary quantile is the
     /// substituted value. The saturation keeps the mapped value inside
     /// the family's own range, but the family's exponentiation can still
     /// leave the finite f64 range (a lognormal's `mu`, a uniform's
@@ -1901,11 +1902,12 @@ mod tests {
     }
 
     /// The quantile's probability contract: a finite probability outside
-    /// (0, 1) saturates at the [EPSILON, 1 - EPSILON] clamp (about 8.2
-    /// standard deviations for the normal family), a non-finite one is an
-    /// error naming the distribution, and the saturated values are finite.
-    /// The clamp is reachable from the copula: a normal CDF of a finite
-    /// draw rounds to exactly 1.0 at about 8.6 sigma.
+    /// (0, 1) saturates at the [EPSILON, 1 - EPSILON] clamp (the tail
+    /// exactly 2^-52, so about 8.13 standard deviations for the normal
+    /// family), a non-finite one is an error naming the distribution, and
+    /// the saturated values are finite. The clamp is reachable from the
+    /// copula: a normal CDF of a finite draw rounds to exactly 1.0 from
+    /// about 8.3 sigma up (the double 1.0's half-ulp tail, 2^-54).
     #[test]
     fn the_quantile_saturates_a_finite_probability_and_refuses_a_non_finite_one() {
         let normal = ScenarioDistribution::Normal {
@@ -1936,11 +1938,36 @@ mod tests {
                 .expect("the clamp's own probability"),
             "p at or above one reads the clamp's upper boundary"
         );
-        // Acklam's Q(2^-52) is 8.2095..., so the saturated tail is the
-        // clamp's 8.2 standard deviations, not an infinity.
-        assert!(
-            (low + 8.2).abs() < 0.1 && (high - 8.2).abs() < 0.1,
-            "the saturated quantiles are the clamp's 8.2 sigma: {low}, {high}"
+        // The clamp's tail is exactly 2^-52: the exact quantile is
+        // 8.125890664701907 and Acklam's approximation computes
+        // 8.125890657833585, 8.4e-10 inside its 1.15e-9 bound, so the
+        // saturated tail is the clamp's 8.13 standard deviations, not an
+        // infinity. The band is the published-quantiles pin's own.
+        let boundary = 8.125_890_657_833_585_f64;
+        for q in [low, high] {
+            let relative = (q.abs() - boundary).abs() / boundary;
+            assert!(
+                relative < 1.5e-9,
+                "the saturated quantile {q} is {relative} relative from the \
+                 clamp's boundary quantile {boundary}"
+            );
+        }
+        // The CDF's saturation, the reachability claim's own pin: the
+        // computed Phi first equals exactly 1.0 where its tail crosses the
+        // double 1.0's half-ulp (2^-54), about 8.29 sigma. Both points sit
+        // a factor of two in tail inside their sides of that boundary, so
+        // the pin holds whatever the erfc implementation's last ulp does.
+        assert_eq!(
+            normal_cdf(8.2),
+            1.0 - 2.0_f64.powi(-53),
+            "Phi(8.2) is the last double below 1.0: the copula's \
+             probability still distinguishes the clamp's boundary there"
+        );
+        assert_eq!(
+            normal_cdf(8.35),
+            1.0,
+            "Phi(8.35) is exactly 1.0: the copula's probability has \
+             saturated, and the quantile reads the clamp's boundary"
         );
         for p in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let err = normal
@@ -2076,7 +2103,8 @@ mod tests {
 
         // The quantile's and the draw's own overflow classes: an
         // exponentiation past the range (every probability, every draw:
-        // the standard normal's quantile stays within about 8.2 sigma),
+        // the standard normal's quantile stays within the clamp's
+        // 8.13 sigma),
         // a half-span subtraction past it, and the weights' sum past it.
         let quantile_overflows = [
             (
