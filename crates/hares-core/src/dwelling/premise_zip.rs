@@ -763,19 +763,26 @@ mod tests {
         );
 
         // The bound over the family's parameter range, not just the two
-        // witness points: the two real shapes the typed equipment resolves
-        // (the monotone hold and the as-fitted polynomial) and the real
-        // coefficient patterns a row override can carry (pure impedance,
-        // pure current, pure constant power, and a mixed row evaluating below
-        // the class rows' floor), at sag (0.5 and 0.75 pu), reference and
-        // elevated voltages, over the realistic draw magnitudes (sub-watt
-        // standby electronics up to a 100 kW whole-premise peak). The raw
-        // draw is the row-scaled reference (one rounding) and the un-scale
-        // divides the same multiplier out (one rounding), so the recovered
-        // weight must land on the reference draw or an immediate neighbour,
-        // whatever the mantissa the magnitude puts the pair in. (A product
-        // that underflows to the subnormal range loses the bound; the
-        // admitted voltage band and these draws keep every product normal.)
+        // witness points: every evaluation route the multiplier has and
+        // every real coefficient pattern a row can carry, at every voltage
+        // of the admitted [0.5, 1.5] pu band with both edges included,
+        // over the realistic draw magnitudes (sub-watt standby electronics
+        // up to a 100 kW whole-premise peak). The routes: the Lighting row
+        // (mixed signs, monotone form) and the pure impedance, pure
+        // current and pure constant-power overrides and a mixed row
+        // evaluating below the class rows' floor evaluate raw; a row
+        // override with an in-band stationary point (zp 0.5, ip -0.75,
+        // pp 1.25, summing to one, v* = 0.75) resolves through the hold
+        // arm below nominal (0.5 x 0.75² - 0.75 x 0.75 + 1.25 = 0.96875 at
+        // 0.5 and 0.75 pu); the air conditioner's row as fitted evaluates
+        // the raw Hajagos & Danai polynomial. The raw draw is the
+        // row-scaled reference (one rounding) and the un-scale divides the
+        // same multiplier out (one rounding), so the recovered weight must
+        // land on the reference draw or an immediate neighbour, whatever
+        // the mantissa the magnitude puts the pair in. (A product or
+        // quotient that leaves the normal range loses the bound; the
+        // band's multipliers and these draws keep every product and
+        // quotient normal.)
         let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
         let fitted_ac = hares_types::zip::ResolvedZip {
             real_shape_as_fitted: true,
@@ -797,51 +804,46 @@ mod tests {
                 v0: 1.0,
             })
         };
-        let z_pure = pure(1.0, 0.0, 0.0); // P = V²/R: 0.25 at 0.5 pu
-        let i_pure = pure(0.0, 1.0, 0.0); // P = V: 0.5 at 0.5 pu, 1.1 at 1.1 pu
-        let p_pure = pure(0.0, 0.0, 1.0); // P = const: 1.0 at every voltage
-        let mixed_low = pure(0.8, 0.2, 0.0); // 0.3 at 0.5 pu
-        for (resolved, voltage_pu) in [
-            (hares_types::zip::ResolvedZip::governing(lighting), 0.5),
-            (hares_types::zip::ResolvedZip::governing(lighting), 0.75),
-            (hares_types::zip::ResolvedZip::governing(lighting), 1.0),
-            (hares_types::zip::ResolvedZip::governing(lighting), 1.1),
-            (fitted_ac, 0.5),
-            (fitted_ac, 0.75),
-            (fitted_ac, 1.0),
-            (fitted_ac, 1.1),
-            (z_pure, 0.5),
-            (i_pure, 0.5),
-            (i_pure, 1.1),
-            (p_pure, 0.5),
-            (p_pure, 1.1),
-            (mixed_low, 0.5),
-            (mixed_low, 0.75),
-        ] {
-            let multiplier = resolved.deep_sag_real_multiplier(voltage_pu);
-            assert!(
-                multiplier.is_finite() && multiplier > 0.0,
-                "fixture: the row must evaluate positive at {voltage_pu} pu"
-            );
-            for reference_w in [0.5, 1.0, 7.3, 100.0, 1234.5, 9999.0, 48213.7, 100000.0] {
-                let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
-                    StubLoad::new("Sweep", Some(resolved), None)
-                        .with_last_draw(reference_w * multiplier),
-                )];
-                let premise = aggregate_premise_zip(&equipment, &empty_schedule(), 1, voltage_pu)
-                    .expect("the stepped draw carries a positive weight");
-                let weight = premise
-                    .governing
-                    .first()
-                    .and_then(|(_, w)| *w)
-                    .expect("the roster publishes the un-scaled weight");
-                let ulps = weight.to_bits() as i64 - reference_w.to_bits() as i64;
+        // Every row shape at every band voltage: two literal arrays, no
+        // sampling, the completeness structural (a nested loop cannot skip
+        // a shape-voltage pair).
+        let shapes = [
+            hares_types::zip::ResolvedZip::governing(lighting), // raw, mixed signs
+            fitted_ac,                                          // the as-fitted polynomial
+            pure(1.0, 0.0, 0.0), // pure impedance: 0.25 at 0.5 pu, 2.25 at 1.5 pu
+            pure(0.0, 1.0, 0.0), // pure current: 0.5 at 0.5 pu, 1.5 at 1.5 pu
+            pure(0.0, 0.0, 1.0), // pure constant power: 1.0 at every voltage
+            pure(0.8, 0.2, 0.0), // mixed low: 0.3 at 0.5 pu, 2.1 at 1.5 pu
+            pure(0.5, -0.75, 1.25), // the hold arm: 0.96875 at 0.5 pu, 1.25 at 1.5 pu
+        ];
+        for voltage_pu in [0.5, 0.75, 1.0, 1.1, 1.5] {
+            for resolved in shapes {
+                let multiplier = resolved.deep_sag_real_multiplier(voltage_pu);
                 assert!(
-                    ulps.abs() <= 1,
-                    "the un-scale of {reference_w} W at {voltage_pu} pu must \
-                     land within one ulp of the reference draw, got {weight} \
-                     ({ulps} ulp)"
+                    multiplier.is_finite() && multiplier > 0.0,
+                    "fixture: the row must evaluate positive at {voltage_pu} pu"
                 );
+                for reference_w in [0.5, 1.0, 7.3, 100.0, 1234.5, 9999.0, 48213.7, 100000.0] {
+                    let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
+                        StubLoad::new("Sweep", Some(resolved), None)
+                            .with_last_draw(reference_w * multiplier),
+                    )];
+                    let premise =
+                        aggregate_premise_zip(&equipment, &empty_schedule(), 1, voltage_pu)
+                            .expect("the stepped draw carries a positive weight");
+                    let weight = premise
+                        .governing
+                        .first()
+                        .and_then(|(_, w)| *w)
+                        .expect("the roster publishes the un-scaled weight");
+                    let ulps = weight.to_bits() as i64 - reference_w.to_bits() as i64;
+                    assert!(
+                        ulps.abs() <= 1,
+                        "the un-scale of {reference_w} W at {voltage_pu} pu must \
+                         land within one ulp of the reference draw, got {weight} \
+                         ({ulps} ulp)"
+                    );
+                }
             }
         }
     }
