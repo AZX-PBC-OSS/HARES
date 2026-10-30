@@ -19,7 +19,7 @@ The dwelling resolves bus energization at the start of every timestep: if the
 utility voltage is `0.0` and any equipment reports
 `Equipment::island_source_available()`, the bus is islanded at 1.0 pu.
 The formation condition is evaluated entirely from end-of-previous-step
-state — both the utility outage and the source availability — so island
+state (both the utility outage and the source availability), so island
 formation takes effect with a one-step lag: an outage's first step is a
 dead-bus step, and the island forms on the step after. A formed island
 collapses when its source dies, also one step after the availability
@@ -33,7 +33,7 @@ Island sources:
   (`grid_forming` flag, default true; set false for grid-following-only
   inverters). A demand-response shed does not withdraw availability: it is
   a grid-supporting curtailment of grid interchange, and the islanding
-  function is grid-forming (IEEE 1547-2018 separates the two) — a grid
+  function is grid-forming (IEEE 1547-2018 separates the two), so a grid
   operator's DR event must not reach through the outage gate and remove
   the only source serving the home. For the same reason the DR fraction
   does not scale the battery's dispatch while islanded: an island has no

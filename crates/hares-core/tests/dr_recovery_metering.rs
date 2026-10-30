@@ -5,10 +5,10 @@
 //! 2023-06-01, warm-up disabled, a 288-step (3 day) warm-in, then a
 //! GridEmergency shed on the ASHP cooler armed at the 15:00 step, then
 //! the release. The contract the witness pins: the ideal path's delivery
-//! is the zone's computed need for the step — the ideal solve's capacity
+//! is the zone's computed need for the step: the ideal solve's capacity
 //! (OCHRE HVAC.py:424 "h_desired should be equal to
 //! self.delivered_heat"; EnergyPlus meters the DX coil's PLR to the
-//! zone's computed load, DXCoils.cc) — and the recovery never drives the
+//! zone's computed load, DXCoils.cc), and the recovery never drives the
 //! zone below the cooling setpoint.
 //!
 //! The zone's computed need for a cooling step is the correction energy

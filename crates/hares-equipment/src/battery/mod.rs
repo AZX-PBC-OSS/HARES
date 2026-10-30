@@ -622,7 +622,7 @@ impl Battery {
     /// Stage 1 accumulated electrical power.
     ///
     /// `dr_fraction` is the resolved demand-response dispatch fraction
-    /// (1.0 while islanded — see `clamp_power`).
+    /// (1.0 while islanded; see `clamp_power`).
     fn determine_target_power(
         &mut self,
         net_load_w: f64,
@@ -1227,12 +1227,14 @@ impl Equipment for Battery {
         // The battery can island the home when it is grid-connected and able
         // to discharge: SOC above its effective floor (physical min narrowed
         // by any SOC-target window), hardware discharge capability, cell
-        // temperature above the discharge cutoff, and DR not commanding a
-        // full shed. `grid_forming` (default true) gates grid-following-only
-        // inverters that cannot form an island bus even when dischargeable.
-        // A latched IEEE 1547 trip means the inverter has ceased to
-        // energize: it cannot hold the bus up, so an island founded on it
-        // would run every load on phantom power.
+        // temperature above the discharge cutoff. `grid_forming` (default
+        // true) gates grid-following-only inverters that cannot form an
+        // island bus even when dischargeable. A DR shed is deliberately not
+        // consulted: it is a grid-supporting curtailment of grid
+        // interchange, and the islanding function is grid-forming (IEEE
+        // 1547-2018 separates the two), so a grid operator's shed must not
+        // reach through the outage gate and remove the only source serving
+        // the home.
         let soc_floor = self
             .soc_target_min
             .map(|v| v.max(self.min_soc))
@@ -1296,7 +1298,7 @@ impl Equipment for Battery {
         // While islanded (the utility out, the bus energized by an island
         // source) the DR fraction does not scale the dispatch: a DR shed
         // curtails grid interchange, and the island's internal balance is
-        // not grid interchange — the same separation that keeps a shed
+        // not grid interchange, the same separation that keeps a shed
         // from withdrawing island availability
         // (`island_source_available`).
         let islanded = env.grid.grid_outage() && !bus_dead;

@@ -141,8 +141,8 @@ fn islanded_publication_reads_zero_interchange_with_the_internal_response() {
     assert_eq!(connected.bus_voltage_pu, 1.0);
     assert_eq!(connected.grid_interchange_w, connected.total_power_w);
 
-    // Island formation: the utility out, the battery holding the bus —
-    // one step after the outage itself (the formation condition is
+    // Island formation: the utility out, the battery holding the bus one
+    // step after the outage itself (the formation condition is
     // end-of-previous-step state, the documented lag).
     dwelling
         .set_grid_voltage(0.0)
