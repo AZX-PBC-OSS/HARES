@@ -60,7 +60,7 @@
 #       exceeds the threshold. rel stddev and rel MAD are the head
 #       side's round-to-round spread (the sitting's noise, measured in
 #       the same rounds the ratio comes from; null on a one-round
-#       screen). A bench that appears in only one side is listed under
+#       screen). A bench without a sample in every round is listed under
 #       "unpaired" and never gated.
 #   flag <baseline.json> <current.json> [median|mean]
 #       The single-pair comparison (one base export against one current
@@ -277,8 +277,13 @@ cmd_rounds() {
         for target in "${BENCH_TARGETS[@]}"; do
             # Odd rounds run base then head, even rounds the reverse: a
             # positional effect (the sitting's own warm-up, a co-tenant
-            # arriving) cancels across rounds instead of accumulating on
-            # one side.
+            # arriving) lands on the second side of its own round instead
+            # of accumulating on one side across the job. An odd round
+            # count cannot balance the two orders exactly (the
+            # confirmation's three rounds run head-first twice and
+            # base-first once); what survives is one round's positional
+            # effect, and the spread columns report exactly that
+            # round-to-round movement.
             if [ $((k % 2)) -eq 1 ]; then
                 for side in base head; do
                     run_round "$side" "$target" "$k" "$filter"
