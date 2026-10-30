@@ -106,9 +106,9 @@ fn v2g_driver() -> EvDriverActor {
     )
 }
 
-/// One dwelling run's island-unserved warnings: built once, stepped once,
-/// islanded with `set_grid_voltage(0.0)` and stepped three more times, the
-/// finished run's `RunResult.warnings`.
+/// One dwelling run's island-unserved warnings: built once, stepped once
+/// (nominal), taken through the outage (the dead-bus step and two islanded
+/// steps), the finished run's `RunResult.warnings`.
 fn islanded_run_warnings(tag: &str) -> usize {
     let mut dwelling = build_dwelling_with_base_load(tag);
     add_battery_with_discharge_limit(&mut dwelling, 0.6, 0.5);
@@ -117,9 +117,9 @@ fn islanded_run_warnings(tag: &str) -> usize {
     dwelling
         .set_grid_voltage(0.0)
         .expect("the override is in contract");
+    dwelling.step().expect("the outage's dead-bus step");
     dwelling.step().expect("islanded step");
     dwelling.step().expect("second islanded step");
-    dwelling.step().expect("third islanded step");
 
     let result = dwelling.finish().expect("the run finishes");
     result
@@ -1016,6 +1016,39 @@ fn dr_shed_island_survives_at_the_source_capacity_edge() {
              served (the only imbalance is the pack's standby draw), got \
              {} W unserved",
             telem.island_unserved_w
+        );
+    }
+
+    // The event ends while the island holds: the release is the island's
+    // own step. The bus stays formed (the shed never touched the
+    // capability), the pack keeps serving the load, and the published
+    // fraction returns to the released level.
+    for step in 0..2 {
+        dwelling.step().expect("the post-event islanded step");
+        assert!(
+            dwelling.latest_env().grid.islanded(),
+            "step {step}: the event's end leaves the island formed"
+        );
+        let battery_dr = dwelling
+            .latest_env()
+            .equipment_telemetry
+            .get("Battery")
+            .and_then(|t| t.get(tk::DR_POWER_FRACTION))
+            .unwrap_or_else(|| panic!("step {step}: the battery publishes its DR fraction"));
+        assert_eq!(
+            battery_dr, 1.0,
+            "step {step}: the event ended while islanded: the released \
+             level is the published fraction"
+        );
+        let summary = dwelling
+            .save_checkpoint()
+            .expect("checkpoint")
+            .prior_electrical_summary;
+        assert!(
+            summary.battery_power_w < -1_400.0,
+            "step {step}: the islanded load is still served after the \
+             event, got {} W",
+            summary.battery_power_w
         );
     }
 }

@@ -139,11 +139,14 @@ use serde::{Deserialize, Serialize};
 /// checkpoint, so the fingerprint moves. Checkpoints written by v23
 /// builds are rejected by the version gate.
 ///
-/// v25: `EquipmentHealthCounts` carries `ideal_capacity_unsolved_steps`,
-/// the ideal-path HVAC steps the pipeline starved of a solved capacity.
-/// The counter is run bookkeeping, not physics state, but the type rides
-/// the checkpoint's schema, so the fingerprint moves. Checkpoints
-/// written by v24 builds are rejected by the version gate.
+/// v25: `RunHealth` carries `ideal_capacity_unsolved_steps`, the
+/// ideal-path HVAC steps the pipeline starved of a solved capacity. The
+/// counter is run bookkeeping, not physics state, but the checkpoint
+/// carries the run's health totals, so the field's type rides the
+/// checkpoint's schema and the fingerprint moves. (`EquipmentHealthCounts`
+/// carries the same name as its per-step drain into that total; it is not
+/// checkpointed itself.) Checkpoints written by v24 builds are rejected by
+/// the version gate.
 pub const CHECKPOINT_VERSION: u32 = 25;
 
 /// One equipment's checkpointed state, identity-keyed.

@@ -7528,7 +7528,10 @@ impl Dwelling {
         // reads it beside the equipment state (which is likewise
         // end-of-previous-step state), so island formation takes effect with
         // the documented one-step lag: an outage's first step is a dead-bus
-        // step, and the island forms on the step after.
+        // step, and the island forms on the step after. The capture is a
+        // local over the environment, not checkpoint state: a checkpoint
+        // carries no grid input (the same external rule as the voltage), so
+        // a resumed run's first step reads the grid it is restored into.
         let prior_step_outage = self.latest_env.grid.grid_outage();
         self.environment
             .update_in_place(&mut self.latest_env, &self.clock)?;
