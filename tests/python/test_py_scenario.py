@@ -110,7 +110,11 @@ class TestSpecConformance:
                                 "field": "setpoint_c",
                             }
                         },
-                        "distribution": {"normal": {"mean": 20.0, "std_dev": 1.5}},
+                        # The water heater's setpoint validates in [40, 85]
+                        # (the typed config's check_range), so the fixture's
+                        # mean sits inside the band its target accepts: the
+                        # 4,000-draw range at sigma 1.5 stays inside it.
+                        "distribution": {"normal": {"mean": 50.0, "std_dev": 1.5}},
                     }
                 ],
             }
@@ -119,7 +123,7 @@ class TestSpecConformance:
             spec.sample(master_seed=7, scenario_id=s, bldg_id=0)["values"][0]["value"]
             for s in range(4000)
         ]
-        assert statistics.fmean(values) == pytest.approx(20.0, abs=0.08)
+        assert statistics.fmean(values) == pytest.approx(50.0, abs=0.08)
         assert statistics.stdev(values) == pytest.approx(1.5, rel=0.05)
 
     def test_lognormal_moments(self):
@@ -345,6 +349,12 @@ class TestSpecSerializationRoundTrip:
     def test_a_json_round_tripped_spec_samples_bitwise_the_same(self):
         import json
 
+        # Each family pairs with a target whose units and validated domain
+        # the family's draws carry: the capacities at the resistance
+        # element's kW band (W), the setpoint inside the typed config's
+        # [40, 85] C validation, the lognormal at the MELs usage multiplier
+        # it is the class of (fraction), the discrete at the integer
+        # bedroom counts its patch field holds (count).
         override = {
             "override": {
                 "equipment": "Electric Resistance Water Heater",
@@ -357,6 +367,9 @@ class TestSpecSerializationRoundTrip:
                 "field": "setpoint_c",
             }
         }
+        multiplier_override = {
+            "override": {"equipment": "MELs", "field": "usage_multiplier"}
+        }
         wildcard_override = {"override": {"equipment": "all", "field": "heating_capacity_w"}}
         patch = {"patch": {"field": "number_of_bedrooms"}}
         spec_dict = {
@@ -366,32 +379,32 @@ class TestSpecSerializationRoundTrip:
                     "name": "u",
                     "unit": "W",
                     "target": override,
-                    "distribution": {"uniform": {"low": 1.0, "high": 5.0}},
+                    "distribution": {"uniform": {"low": 4000.0, "high": 6000.0}},
                 },
                 {
                     "name": "n",
                     "unit": "C",
                     "target": second_override,
-                    "distribution": {"normal": {"mean": 20.5, "std_dev": 1.5}},
+                    "distribution": {"normal": {"mean": 50.5, "std_dev": 1.5}},
                 },
                 {
                     "name": "l",
-                    "unit": "W",
-                    "target": patch,
+                    "unit": "fraction",
+                    "target": multiplier_override,
                     "distribution": {"lognormal": {"mu": 0.0, "sigma": 0.25}},
                     "correlation": {"group": "load", "rho": 0.9},
                 },
                 {
                     "name": "t",
-                    "unit": "count",
+                    "unit": "W",
                     "target": wildcard_override,
-                    "distribution": {"triangular": {"min": 1.0, "mode": 1.2, "max": 5.0}},
+                    "distribution": {"triangular": {"min": 3000.0, "mode": 4500.0, "max": 6000.0}},
                     "correlation": {"group": "load", "rho": 0.9},
                 },
                 {
                     "name": "d",
                     "unit": "count",
-                    "target": {"override": {"equipment": "all", "field": "tank_volume_m3"}},
+                    "target": patch,
                     "distribution": {"discrete": {"values": [2.0, 3.0, 5.0], "weights": [0.2, 0.5, 0.3]}},
                 },
             ],
@@ -479,13 +492,13 @@ class TestSpecValidation:
                     "parameters": [
                         {
                             "name": "ok",
-                            "unit": "W",
+                            "unit": "fraction",
                             "target": {"override": {"equipment": "MELs", "field": "usage_multiplier"}},
                             "distribution": {"uniform": {"low": 0.0, "high": 1.0}},
                         },
                         {
                             "name": "inverted",
-                            "unit": "W",
+                            "unit": "fraction",
                             "target": {"override": {"equipment": "TV", "field": "usage_multiplier"}},
                             "distribution": {"uniform": {"low": 5.0, "high": 1.0}},
                         },
@@ -525,13 +538,13 @@ class TestSpecValidation:
                     "parameters": [
                         {
                             "name": "a",
-                            "unit": "count",
+                            "unit": "fraction",
                             "target": target,
                             "distribution": {"uniform": {"low": 1.0, "high": 2.0}},
                         },
                         {
                             "name": "b",
-                            "unit": "count",
+                            "unit": "fraction",
                             "target": target,
                             "distribution": {"uniform": {"low": 2.0, "high": 3.0}},
                         },
