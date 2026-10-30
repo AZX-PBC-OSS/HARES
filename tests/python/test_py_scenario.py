@@ -81,8 +81,8 @@ class TestSpecConformance:
                 "parameters": [
                     {
                         "name": "p",
-                        "unit": "W",
-                        "target": {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}},
+                        "unit": "count",
+                        "target": {"patch": {"field": "number_of_bedrooms"}},
                         "distribution": {"uniform": {"low": 1.0, "high": 5.0}},
                     }
                 ],
@@ -104,7 +104,12 @@ class TestSpecConformance:
                     {
                         "name": "p",
                         "unit": "C",
-                        "target": {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}},
+                        "target": {
+                            "override": {
+                                "equipment": "Electric Resistance Water Heater",
+                                "field": "setpoint_c",
+                            }
+                        },
                         "distribution": {"normal": {"mean": 20.0, "std_dev": 1.5}},
                     }
                 ],
@@ -124,8 +129,10 @@ class TestSpecConformance:
                 "parameters": [
                     {
                         "name": "p",
-                        "unit": "W",
-                        "target": {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}},
+                        "unit": "fraction",
+                        "target": {
+                            "override": {"equipment": "MELs", "field": "usage_multiplier"}
+                        },
                         "distribution": {"lognormal": {"mu": 0.0, "sigma": 0.25}},
                     }
                 ],
@@ -198,15 +205,19 @@ class TestSpecConformance:
                 "parameters": [
                     {
                         "name": "a",
-                        "unit": "W",
-                        "target": {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}},
+                        "unit": "fraction",
+                        "target": {
+                            "override": {"equipment": "MELs", "field": "usage_multiplier"}
+                        },
                         "distribution": {"uniform": {"low": 0.0, "high": 1.0}},
                         "correlation": {"group": "load", "rho": 0.9},
                     },
                     {
                         "name": "b",
-                        "unit": "W",
-                        "target": {"patch": {"field": "number_of_bedrooms"}},
+                        "unit": "fraction",
+                        "target": {
+                            "override": {"equipment": "TV", "field": "usage_multiplier"}
+                        },
                         "distribution": {"uniform": {"low": 0.0, "high": 1.0}},
                         "correlation": {"group": "load", "rho": 0.9},
                     },
@@ -334,8 +345,18 @@ class TestSpecSerializationRoundTrip:
     def test_a_json_round_tripped_spec_samples_bitwise_the_same(self):
         import json
 
-        override = {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}}
-        second_override = {"override": {"equipment": "Occupancy", "field": "activity_level"}}
+        override = {
+            "override": {
+                "equipment": "Electric Resistance Water Heater",
+                "field": "heating_capacity_w",
+            }
+        }
+        second_override = {
+            "override": {
+                "equipment": "Electric Resistance Water Heater",
+                "field": "setpoint_c",
+            }
+        }
         wildcard_override = {"override": {"equipment": "all", "field": "heating_capacity_w"}}
         patch = {"patch": {"field": "number_of_bedrooms"}}
         spec_dict = {
@@ -496,7 +517,7 @@ class TestSpecValidation:
         """A target is the application's map key: two parameters writing one
         field would keep the later value and drop the earlier silently, so
         the spec refuses the authoring shape naming both parameters."""
-        target = {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}}
+        target = {"override": {"equipment": "MELs", "field": "usage_multiplier"}}
         with pytest.raises(ValueError, match="'a'.*'b'"):
             ScenarioSpec(
                 {
@@ -535,8 +556,8 @@ class TestSpecValidation:
                         "unit": "W",
                         "target": {
                             "override": {
-                                "equipment": "Occupancy",
-                                "field": "number_of_occupants",
+                                "equipment": "Electric Resistance Water Heater",
+                                "field": "heating_capacity_w",
                             }
                         },
                         "distribution": {"lognormal": {"mu": 800.0, "sigma": 1.0}},
