@@ -446,6 +446,32 @@ class TestSpecValidation:
                 }
             )
 
+    def test_a_malformed_distribution_names_its_parameter(self):
+        """The spec's validation names the parameter carrying a malformed
+        distribution, so a multi-parameter spec's author fixes the named
+        one; the family's own reason rides after it. The refusal is the
+        binding's ``ValueError``, not a panic crossing."""
+        with pytest.raises(ValueError, match="'inverted'.*uniform"):
+            ScenarioSpec(
+                {
+                    "name": "malformed-distribution",
+                    "parameters": [
+                        {
+                            "name": "ok",
+                            "unit": "W",
+                            "target": {"override": {"equipment": "MELs", "field": "usage_multiplier"}},
+                            "distribution": {"uniform": {"low": 0.0, "high": 1.0}},
+                        },
+                        {
+                            "name": "inverted",
+                            "unit": "W",
+                            "target": {"override": {"equipment": "TV", "field": "usage_multiplier"}},
+                            "distribution": {"uniform": {"low": 5.0, "high": 1.0}},
+                        },
+                    ],
+                }
+            )
+
     def test_a_spec_that_is_not_a_mapping_is_an_error(self):
         with pytest.raises(ValueError, match="does not parse"):
             ScenarioSpec("not a spec")  # type: ignore[arg-type]

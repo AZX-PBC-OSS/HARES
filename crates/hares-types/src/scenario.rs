@@ -691,7 +691,10 @@ impl ScenarioSpec {
     /// The spec validates: every distribution's parameters are
     /// well-formed, the names are unique, the correlations' rhos are in
     /// [0, 1), every patch target names a field the patches carry, and
-    /// every application target carries one parameter. Two parameters
+    /// every application target carries one parameter. Every refusal names
+    /// the parameter it belongs to (the distribution's own parameters and
+    /// family included), so a multi-parameter spec's first fault is
+    /// addressable. Two parameters
     /// writing one field would sample two values for one map key and the
     /// application would keep the later, dropping the earlier silently;
     /// targets are compared as recorded (the assembly's own wildcard
@@ -700,7 +703,12 @@ impl ScenarioSpec {
         let mut seen = std::collections::BTreeSet::new();
         let mut targets: Vec<(&str, &ScenarioTarget)> = Vec::with_capacity(self.parameters.len());
         for parameter in &self.parameters {
-            parameter.distribution.validate()?;
+            parameter.distribution.validate().map_err(|err| {
+                HaresError::Equipment(format!(
+                    "the scenario parameter '{}' has an invalid distribution: {err}",
+                    parameter.name
+                ))
+            })?;
             if !seen.insert(parameter.name.as_str()) {
                 return Err(HaresError::Equipment(format!(
                     "the scenario spec repeats the parameter name '{}': names are \
@@ -2322,6 +2330,30 @@ mod tests {
                 0.30675311543324435,
             ],
             "the pinned draw sequence"
+        );
+    }
+
+    /// A malformed distribution's refusal names the scenario parameter that
+    /// carries it: a spec with several parameters must tell the author which
+    /// one to fix, not only which distribution family is wrong. The sampler's
+    /// draw errors already name the parameter; validation is the earlier
+    /// surface and names it too.
+    #[test]
+    fn a_malformed_distribution_names_its_parameter() {
+        let s = spec(vec![
+            parameter("ok", uniform(0.0, 1.0)),
+            parameter("inverted", uniform(5.0, 1.0)),
+        ]);
+        let err = s
+            .validate()
+            .expect_err("an inverted uniform must fail the spec's validation");
+        assert!(
+            err.to_string().contains("'inverted'"),
+            "the error must name the malformed parameter: {err}"
+        );
+        assert!(
+            err.to_string().contains("uniform"),
+            "the error must name the distribution family: {err}"
         );
     }
 
