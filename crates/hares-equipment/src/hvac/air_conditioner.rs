@@ -3200,11 +3200,14 @@ mod tests {
     /// insert, the step writes the key only when the step's sensible cooling
     /// is above 0) holds on the restore path: a never-cooled unit's
     /// checkpoint round trip restores exactly the continuously-run twin's
-    /// telemetry key set. The checkpoint's telemetry face is the step's
-    /// five carried keys and the next step rewrites the rest, so the pin is
-    /// the key set: the restore's unconditional `tk::SHR` insert added a
-    /// key the continuous twin never holds, a `shr` cell the unit never
-    /// publishes.
+    /// telemetry key set. The checkpoint carries the step's five telemetry
+    /// values and the map's registration set; the other channels are
+    /// recomputed by the metered path. The last-cooling markers the
+    /// observe feature writes, and the high-side clamp marker, are not
+    /// carried and keep the target's values until a cooling step, so the
+    /// pin is the key set: the restore's unconditional `tk::SHR` insert
+    /// added a key the continuous twin never holds, a `shr` cell the unit
+    /// never publishes.
     #[test]
     fn restored_never_cooled_map_matches_the_never_restored_twin() {
         let cfg = ac_config();
