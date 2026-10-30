@@ -1337,7 +1337,10 @@ draw more.
 
 The premise aggregate's `deep_sag_scale` is the number the stepping
 engine answers for the moment's composition: the weighting-draw-weighted
-mean of each governing equipment's own deep-sag response. For an
+mean of each governing equipment's own deep-sag response. The weight is
+the moment's consumption: a bidirectional flow contributes its positive
+part, and a generation report contributes nothing (a load exporting
+draws no power). For an
 equipment whose draw is scaled through a single resolved row, that
 response is the row's evaluation and un-scaling the stepped draw through
 the same row recovers the reference draw to within the rounding of one

@@ -12,8 +12,10 @@
 //! mean over the equipment whose real-power coefficients genuinely
 //! govern their real power, plus an explicit roster of what is and is not
 //! covered. The weights are the moment's raw draws when the dwelling has
-//! stepped (each equipment's last core-output electric draw, un-scaled
-//! through its assembled deep-sag response at the bus voltage (the
+//! stepped (each equipment's last core-output electric draw: a consumed
+//! value, a bidirectional flow's positive part, or zero for a generation
+//! report, un-scaled through its assembled deep-sag response at the bus
+//! voltage (the
 //! equipment's own nominal draw when it reports one: a multi-component
 //! unit, or a state its row does not scale such as a commanded power
 //! override; the resolved row's un-scale otherwise, the moment's
@@ -62,8 +64,10 @@ pub struct PremiseZip {
     pub zip: ZipLoad,
     /// `(equipment name, weighting draw [W])` for every ZIP-governing
     /// equipment. The weight is the moment's raw draw (the last step's
-    /// core-output electric draw, un-scaled through the equipment's
-    /// assembled deep-sag response at the bus voltage: the equipment's own
+    /// core-output electric draw: a consumed value, a bidirectional flow's
+    /// positive part, or zero for a generation report, un-scaled through the
+    /// equipment's assembled deep-sag response at the bus voltage: the
+    /// equipment's own
     /// nominal draw when it reports one (a multi-component unit, or a state
     /// its row does not scale such as a commanded power override), the
     /// resolved row's un-scale otherwise, which recovers the reference draw
@@ -213,8 +217,24 @@ pub(crate) fn aggregate_premise_zip(
         // classes that publish an expectation scale their reference draw by
         // the row and report it clamped at zero, so the expectation carries
         // no weight.
-        let moment = match eq.core_output().flows.electric_w {
-            Some(hares_types::ElectricPower::Consumption(w)) if bus_voltage_pu > 0.0 && w > 0.0 => {
+        // The equipment's reported consumption this step. Every flow variant
+        // is a report of the moment: a bidirectional flow consumes its
+        // positive part (a zero or negative value is an idle or exporting
+        // moment that draws nothing), and a generation report is the load
+        // exporting, so it consumed nothing either. Only an absent flow is
+        // "not reported", the one state the expectation route may cover. A
+        // non-finite value stays non-finite (broken), so the roster's filter
+        // refuses it rather than laundering it into an observed zero.
+        let reported_draw_w = match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => Some(w),
+            Some(hares_types::ElectricPower::Bidirectional(w)) => {
+                Some(if w.is_finite() { w.max(0.0) } else { w })
+            }
+            Some(hares_types::ElectricPower::Generation(_)) => Some(0.0),
+            None => None,
+        };
+        let moment = match reported_draw_w {
+            Some(w) if bus_voltage_pu > 0.0 && w > 0.0 => {
                 // A composed base is usable only when it is a finite
                 // positive draw: the trait is a public hook, and a report of
                 // zero, NaN or infinity would divide the draw into a
@@ -266,20 +286,18 @@ pub(crate) fn aggregate_premise_zip(
             // filter publishes no weight, and the expected mean never stands
             // in for a stepped moment (a fabricated zero would tell the
             // caller the moment was inspected and came up empty).
-            Some(hares_types::ElectricPower::Consumption(w)) if bus_voltage_pu > 0.0 => {
-                MomentDraw::Stepped {
-                    weight_w: Some(w),
-                    response: None,
-                }
-            }
+            Some(w) if bus_voltage_pu > 0.0 => MomentDraw::Stepped {
+                weight_w: Some(w),
+                response: None,
+            },
             // The de-energized boundary: the bus draws zero from every
             // load, so the stepped state is a zero weight whatever the
             // report carries.
-            Some(hares_types::ElectricPower::Consumption(_)) => MomentDraw::Stepped {
+            Some(_) => MomentDraw::Stepped {
                 weight_w: Some(0.0),
                 response: None,
             },
-            _ => MomentDraw::NotReported,
+            None => MomentDraw::NotReported,
         };
         let (moment_raw_draw_w, moment_response) = match moment {
             MomentDraw::Stepped { weight_w, response } => (weight_w, response),
@@ -476,6 +494,11 @@ mod tests {
 
         fn with_last_draw(mut self, w: f64) -> Self {
             self.core.flows.electric_w = Some(hares_types::ElectricPower::Consumption(w));
+            self
+        }
+
+        fn with_last_flow(mut self, power: hares_types::ElectricPower) -> Self {
+            self.core.flows.electric_w = Some(power);
             self
         }
 
@@ -1188,6 +1211,58 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn a_bidirectional_or_generating_moment_is_its_report_not_the_expectation() {
+        // `CoreFlows::electric_w` is an `ElectricPower`: a governing load may
+        // report a bidirectional flow (positive = consuming) or a generation
+        // flow (it exported and drew nothing). Both are the moment's report,
+        // not an absent one. Reading only `Consumption` handed the moment to
+        // the static route, and the roster published the 500 W expectation
+        // for a load that reported a 200 W draw, or for one that reported an
+        // export and drew nothing.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let run = |power| {
+            let equipment: Vec<Box<dyn Equipment>> = vec![
+                Box::new(
+                    StubLoad::new(
+                        "Reported Moment",
+                        Some(hares_types::zip::ResolvedZip::governing(lighting)),
+                        Some(ExpectedMeanPower::W(500.0)),
+                    )
+                    .with_last_flow(power),
+                ),
+                governing_stepped_load(
+                    "Always On",
+                    ZipLoad::constant_power(),
+                    Some(ExpectedMeanPower::W(300.0)),
+                    200.0,
+                ),
+            ];
+            aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0)
+                .expect("the live load carries a positive weight")
+        };
+
+        // A bidirectional draw consumes its positive value: the weight is
+        // the report un-scaled by the row (1.0 at the reference voltage).
+        let consuming = run(hares_types::ElectricPower::Bidirectional(200.0));
+        assert_eq!(
+            consuming.governing[0],
+            ("Reported Moment".to_string(), Some(200.0)),
+            "a bidirectional draw is a 200 W consumption, not the 500 W \
+             expectation"
+        );
+
+        // A generation report consumes nothing: the moment's weight is the
+        // observed zero, not the expectation.
+        let generating = run(hares_types::ElectricPower::Generation(200.0));
+        assert_eq!(
+            generating.governing[0],
+            ("Reported Moment".to_string(), Some(0.0)),
+            "a generating moment drew nothing: its weight is the observed \
+             zero, not the 500 W expectation"
+        );
     }
 
     #[test]

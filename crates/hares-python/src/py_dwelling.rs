@@ -1417,8 +1417,10 @@ impl PyDwelling {
     /// coefficients genuinely govern their real power (scheduled and event
     /// loads, and the typed physics equipment whose rows scale their
     /// physics-computed draws). The weights are the moment's raw draws when
-    /// the dwelling has stepped (each equipment's last electric draw,
-    /// un-scaled through its assembled deep-sag response at the bus voltage
+    /// the dwelling has stepped (each equipment's last electric draw: a
+    /// consumed value, a bidirectional flow's positive part, or zero for a
+    /// generation report, un-scaled through its assembled deep-sag response
+    /// at the bus voltage
     /// (the equipment's own nominal draw when it reports one: a
     /// multi-component unit, or a state its row does not scale such as a
     /// commanded power override; the resolved row's un-scale otherwise, the
