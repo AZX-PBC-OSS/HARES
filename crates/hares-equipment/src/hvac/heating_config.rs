@@ -35,10 +35,16 @@ pub struct GasFurnaceConfig {
     pub fan_power_w: Option<f64>,
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
-    /// Per-stage heating capacities (W). Overrides `capacity_w` when present.
+    /// Per-stage heating capacities (W): the stage ladder the control's
+    /// staging reads, beside [`Self::capacity_w`], the capacity the step
+    /// delivers scaled by the duty cycle (the ladder shapes which stages
+    /// cycle, not the delivered total). Both fields are live, so an
+    /// override of either applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_capacities_w: Option<Vec<f64>>,
-    /// Per-stage energy input ratios (EIR = 1/AFUE per stage). Overrides `afue` when present.
+    /// Per-stage energy input ratios (EIR = 1/AFUE per stage): the
+    /// ladder's efficiency column, beside [`Self::afue`], the fuel
+    /// efficiency the step's fuel input divides by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_eirs: Option<Vec<f64>>,
     #[serde(default)]
