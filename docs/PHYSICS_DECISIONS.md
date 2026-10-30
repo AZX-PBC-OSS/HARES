@@ -1573,13 +1573,26 @@ to 20.09 C in one step, 4.35 C below the 24.44 C setpoint, then a
 six-step rebound; the fixed release delivers 3.37 MJ (0.72x the
 correction) and lands the zone from above with no rebound.
 
-The solve's own gate read the published operating mode, which is the
-idle resolution's: an off step with no flow publishes Standby
-(`resolve_idle`), so a cooling call that delivered nothing last step
-starved every later solve - the solver never saw the call, the step
-never delivered, the mode published Standby again. The gate now reads
-the thermostat FSM's latched call (`thermostat_fsm.mode`), which holds
-Cooling through the call independent of what the last step delivered.
+The duration is the steps the event covers, so the boundary is a
+contract too: a zero-second event is legal (`duration_s` is validated to
+a finite value of at least zero) and names no step, so it resolves to no
+event at all and sheds nothing; the classes apply that boundary through
+one resolver, `demand_response_command`. A later command supersedes a
+running one: its level applies and the countdown restarts from its own
+duration.
+
+The solve's own gate read the step's dispatch mode. `update_control`
+assigns it before the solver-feedback phase, and its forced-off branches
+(a de-energized bus, a DR shed, an explicit Off) return before the
+thermostat re-reads, so the solve saw Off while the thermostat's call
+still stood. A control signal landing at the dispatch (a DR cancel, a
+setpoint override) then flipped the second control pass back to Cooling,
+and the step dispatched a call the solve never saw: the raw duty,
+unmetered to the zone's need. The gate now reads the thermostat FSM's
+latched call (`thermostat_fsm.mode`), which the forced-off branches leave
+intact, so the solve runs for the call the dispatch may honor; the idle
+mode a step publishes never reaches the read, because every control pass
+re-derives the mode from the same latch.
 
 A step whose solve the pipeline still starves (a thermal-setpoint
 override lands with the control dispatch, after the solver-feedback
