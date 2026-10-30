@@ -386,6 +386,15 @@ pub(super) fn resolve_water_heaters(
                 // EF-sourced inputs use the legacy 0.92 default.
                 let default_perf_adj = if energy_factor.is_none() { 0.94 } else { 0.92 };
                 let perf_adj = child_f64(wh, &PERFORMANCE_ADJUSTMENT).unwrap_or(default_perf_adj);
+                // Each efficiency field is written as its own HPXML
+                // element declares, and a declared element is never
+                // dropped: the two fields are the two test procedures'
+                // values, the performance-adjustment default above keys
+                // on which procedure declared, and the init reads the EF
+                // ahead of the UEF when both stand (the config fields'
+                // docs). The override channel keeps the precedence
+                // honest: an override of the shadowed UEF is refused at
+                // the merge naming the EF, never accepted and ignored.
                 let cfg = TanklessWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
