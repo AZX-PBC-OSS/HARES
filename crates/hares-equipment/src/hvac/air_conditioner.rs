@@ -3202,9 +3202,9 @@ mod tests {
     /// checkpoint round trip restores exactly the continuously-run twin's
     /// telemetry key set. The checkpoint's telemetry face is the step's
     /// five carried keys and the next step rewrites the rest, so the pin is
-    /// the key set: the restore's unconditional `tk::SHR` insert grew the
-    /// map to 50 keys against the twin's 49, a `shr` cell the continuous
-    /// unit never publishes.
+    /// the key set: the restore's unconditional `tk::SHR` insert added a
+    /// key the continuous twin never holds, a `shr` cell the unit never
+    /// publishes.
     #[test]
     fn restored_never_cooled_map_matches_the_never_restored_twin() {
         let cfg = ac_config();
@@ -3360,6 +3360,43 @@ mod tests {
         assert!(
             !target.telemetry().0.keys().any(|key| key == tk::SHR),
             "the restored key set must not carry the pre-restore shr key"
+        );
+    }
+
+    /// The checkpoint gate refuses the previous schema by name and by both
+    /// versions. A version-4 blob (the schema before `shr` became
+    /// `Option<f64>`) cannot be decoded as v5: postcard's `Option` tag
+    /// would be read from the first byte of the old `f64`, so the gate,
+    /// not a decode attempt, is the answer. There is no v4 migration.
+    #[test]
+    fn checkpoint_gate_refuses_the_version_4_blob_naming_both_versions() {
+        let cfg = ac_config();
+        let environment = env(20.0, 0.008, 15.0, 20.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        let mut blob = eq.save_state().unwrap();
+        assert_eq!(
+            u32::from_le_bytes(blob[..4].try_into().unwrap()),
+            super::AC_CHECKPOINT_VERSION,
+            "the saved blob carries the current schema token"
+        );
+
+        // The blob below is otherwise the valid v5 payload; only the token
+        // claims the previous schema, so a refusal must come from the gate.
+        blob[..4].copy_from_slice(&4u32.to_le_bytes());
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        let err = restored
+            .load_state(&blob)
+            .expect_err("a version-4 blob must be refused by the version-5 gate");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AirConditioner") && msg.contains("blob=4") && msg.contains("expected=5"),
+            "the refusal must name the equipment and both versions; got: {msg}"
+        );
+        assert!(
+            !msg.contains("postcard") && !msg.contains("deserialization failed"),
+            "the refusal must come from the version gate, not a postcard decode; got: {msg}"
         );
     }
 
