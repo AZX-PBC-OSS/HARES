@@ -115,15 +115,18 @@ fn spec_error(err: hares_types::HaresError) -> PyErr {
 /// `(master_seed, scenario_id, bldg_id)` into each home's parameter set.
 ///
 /// The spec is declared as a dict, the Rust schema's serde shape: for
-/// example ``{"name": "study", "parameters": [{"name": "occupants",
-/// "unit": "count", "target": {"override": {"equipment": "Occupancy",
-/// "field": "number_of_occupants"}}, "distribution": {"uniform":
-/// {"low": 1.0, "high": 5.0}}}]}``. The target is either
+/// example ``{"name": "study", "parameters": [{"name": "wh_setpoint",
+/// "unit": "C", "target": {"override": {"equipment": "Electric
+/// Resistance Water Heater", "field": "setpoint_c"}}, "distribution":
+/// {"uniform": {"low": 45.0, "high": 60.0}}}]}``. The target is either
 /// ``{"override": {"equipment": ..., "field": ...}}`` (the value lands
 /// in the dwelling's overrides map, validated by the assembly's own
 /// unknown-field rejection) or ``{"patch": {"field": ...}}`` (the HPXML
-/// data patches). An optional ``"correlation": {"group": ..., "rho":
-/// ...}`` correlates the parameters sharing a group.
+/// data patches). The equipment must be one the assembly's override path
+/// accepts: the ``Occupancy`` spec is handled outside that path and its
+/// override is refused, so an occupancy count is not a target here. An
+/// optional ``"correlation": {"group": ..., "rho": ...}`` correlates the
+/// parameters sharing a group.
 ///
 /// The application surface: `sample_overrides` returns the form the
 /// dwelling constructor's `overrides=` accepts, so the override targets

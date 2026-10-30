@@ -19,16 +19,23 @@ from hares import ScenarioSpec
 
 
 def load_spec() -> ScenarioSpec:
-    """A two-parameter spec: one override target, one patch target."""
+    """A two-parameter spec: one overridable equipment target (the water
+    heater's setpoint, which the dwelling's override path accepts) and one
+    patch target."""
     return ScenarioSpec(
         {
             "name": "test-scenario",
             "parameters": [
                 {
-                    "name": "occupant_load_w",
-                    "unit": "W",
-                    "target": {"override": {"equipment": "Occupancy", "field": "number_of_occupants"}},
-                    "distribution": {"uniform": {"low": 1.0, "high": 5.0}},
+                    "name": "wh_setpoint",
+                    "unit": "C",
+                    "target": {
+                        "override": {
+                            "equipment": "Electric Resistance Water Heater",
+                            "field": "setpoint_c",
+                        }
+                    },
+                    "distribution": {"uniform": {"low": 45.0, "high": 60.0}},
                 },
                 {
                     "name": "bedrooms",
@@ -229,15 +236,18 @@ class TestOverridesRoundTrip:
         sample = spec.sample(master_seed=42, scenario_id=1, bldg_id=7)
         overrides = spec.sample_overrides(master_seed=42, scenario_id=1, bldg_id=7)
         # The overrides form: the equipment key with the field key.
-        assert "Occupancy" in overrides
-        assert "number_of_occupants" in overrides["Occupancy"]
+        assert "Electric Resistance Water Heater" in overrides
+        assert "setpoint_c" in overrides["Electric Resistance Water Heater"]
         sampled_value = {v["name"]: v["value"] for v in sample["values"]}
-        assert overrides["Occupancy"]["number_of_occupants"] == sampled_value["occupant_load_w"]
+        assert (
+            overrides["Electric Resistance Water Heater"]["setpoint_c"]
+            == sampled_value["wh_setpoint"]
+        )
         # The sample's record: the names, the values, the units.
         assert sample["scenario_id"] == 1
         assert sample["bldg_id"] == 7
-        assert {v["name"] for v in sample["values"]} == {"occupant_load_w", "bedrooms"}
-        assert {v["unit"] for v in sample["values"]} <= {"W", "count"}
+        assert {v["name"] for v in sample["values"]} == {"wh_setpoint", "bedrooms"}
+        assert {v["unit"] for v in sample["values"]} <= {"C", "count"}
 
     def test_sampled_override_reaches_the_typed_config(self):
         """The round-trip: sample, apply through the dwelling constructor's

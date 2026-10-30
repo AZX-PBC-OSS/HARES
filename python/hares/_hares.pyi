@@ -2465,8 +2465,11 @@ class ScenarioSpec:
     dwelling's overrides map, or ``{"patch": {"field": ...}}``, landing
     in the HPXML data patches), ``distribution`` (one of ``uniform``,
     ``normal``, ``lognormal``, ``triangular`` or ``discrete``), and an
-    optional ``correlation`` (``{"group": ..., "rho": ...}``). The same
-    (master seed, scenario id, building id) reproduces the same
+    optional ``correlation`` (``{"group": ..., "rho": ...}``). An
+    ``override`` target's equipment must be one the assembly's override
+    path accepts: the ``Occupancy`` spec is handled outside that path and
+    its override is refused, so an occupancy count is not a target. The
+    same (master seed, scenario id, building id) reproduces the same
     parameter set bitwise; a different scenario, building or master
     seed draws differently.
 

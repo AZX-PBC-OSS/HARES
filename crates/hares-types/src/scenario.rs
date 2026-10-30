@@ -1,7 +1,14 @@
 //! The scenario spec and the sampler: a declared, typed spec of
-//! per-parameter distributions over envelope, HVAC and occupancy
-//! parameters, and the deterministic sampler that turns
-//! `(master_seed, scenario_id, bldg_id)` into each home's parameter set.
+//! per-parameter distributions over the dwelling's overridable surfaces
+//! (the envelope scales, the equipment configs and the HPXML data
+//! patches) and the deterministic sampler that turns
+//! `(master_seed, scenario_id, bldg_id)` into each home's parameter set. A
+//! target must name a surface the assembly's override path accepts: the
+//! `Occupancy` spec is handled outside that path (its internal-gain load
+//! is applied directly in the simulation loop), and the assembly refuses
+//! an override of it exactly as it refuses a hand-written one, so an
+//! occupancy count is not a scenario target here; the behavioral
+//! occupancy is the generated schedule's own diversity dimension.
 //!
 //! The sampler composes the landed scenario-key algebra: its draws come
 //! from one `RngStream::scenario_sampler` stream under the
