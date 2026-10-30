@@ -350,11 +350,15 @@ class TestSpecSerializationRoundTrip:
         import json
 
         # Each family pairs with a target whose units and validated domain
-        # the family's draws carry: the capacities at the resistance
-        # element's kW band (W), the setpoint inside the typed config's
-        # [40, 85] C validation, the lognormal at the MELs usage multiplier
-        # it is the class of (fraction), the discrete at the integer
-        # bedroom counts its patch field holds (count).
+        # the family's draws carry: the capacity at the water heater's
+        # public capacity field (W), the setpoint inside the typed config's
+        # [40, 85] C validation, the lognormal and triangular members at
+        # the two loads' usage multipliers they are the class of
+        # (fraction), the discrete at the integer bedroom counts its patch
+        # field holds (count). The pair's two targets are distinct
+        # equipment: a wildcard on a field a named entry already writes
+        # would be shadowed by that entry at the only equipment reading
+        # it.
         override = {
             "override": {
                 "equipment": "Electric Resistance Water Heater",
@@ -370,7 +374,9 @@ class TestSpecSerializationRoundTrip:
         multiplier_override = {
             "override": {"equipment": "MELs", "field": "usage_multiplier"}
         }
-        wildcard_override = {"override": {"equipment": "all", "field": "heating_capacity_w"}}
+        tv_multiplier_override = {
+            "override": {"equipment": "TV", "field": "usage_multiplier"}
+        }
         patch = {"patch": {"field": "number_of_bedrooms"}}
         spec_dict = {
             "name": "round-trip",
@@ -396,9 +402,9 @@ class TestSpecSerializationRoundTrip:
                 },
                 {
                     "name": "t",
-                    "unit": "W",
-                    "target": wildcard_override,
-                    "distribution": {"triangular": {"min": 3000.0, "mode": 4500.0, "max": 6000.0}},
+                    "unit": "fraction",
+                    "target": tv_multiplier_override,
+                    "distribution": {"triangular": {"min": 0.5, "mode": 1.0, "max": 1.5}},
                     "correlation": {"group": "load", "rho": 0.9},
                 },
                 {

@@ -1000,9 +1000,17 @@ mod tests {
     }
 
     /// The moment witnesses: the sampled fleet's mean sits at the
-    /// analytical mean for every family within the sampling error of
-    /// N draws (the per-home draws are independent: one scenario id
-    /// each).
+    /// analytical mean for every family. The draws are the fixed seeds'
+    /// (one scenario id per home), so the band is a formula guard rather
+    /// than a sampling-error statement: six percent of the analytical
+    /// mean (at least 0.08) is ten to fifty of each family's standard
+    /// error at N = 4,000 (the normal's 1.2 is fifty of its 0.024; the
+    /// lognormal's 0.08 is nineteen of its 0.0041; the uniform's and
+    /// triangular's 0.18 and 0.144 are ten of their 0.018 and 0.015).
+    /// It sees the class the analytical mean got wrong: the triangular
+    /// mode is 1.2 from its mean, eight times the triangular's band. The
+    /// shape itself is pinned tighter by `sampled_cdf_conforms_to_the_spec`
+    /// beside this witness.
     #[test]
     fn sampled_moments_match_the_spec() {
         let n = 4000_u64;
@@ -1050,8 +1058,8 @@ mod tests {
             let expected = distribution
                 .mean()
                 .expect("the moment witness's distribution validates");
-            // The mean's standard error shrinks with N; the band is
-            // generous to the tails' skew (the lognormal's).
+            // Six percent of the analytical mean (at least 0.08): the
+            // formula guard the witness doc derives, not a sampling band.
             let tolerance = (expected.abs() * 0.06).max(0.08);
             assert!(
                 (mean - expected).abs() < tolerance,
@@ -1084,7 +1092,7 @@ mod tests {
         extended_parameters.push(ScenarioParameter {
             name: "c".to_string(),
             unit: "W".to_string(),
-            target: override_target("all", "tank_volume_m3"),
+            target: unique_target("c"),
             distribution: uniform(0.0, 1.0),
             correlation: None,
         });
@@ -1327,14 +1335,14 @@ mod tests {
                 ScenarioParameter {
                     name: "a".into(),
                     unit: "W".into(),
-                    target: override_target("all", "heating_capacity_w"),
+                    target: unique_target("a"),
                     distribution: uniform(0.0, 1.0),
                     correlation: corr.clone(),
                 },
                 ScenarioParameter {
                     name: "b".into(),
                     unit: "W".into(),
-                    target: override_target("all", "tank_volume_m3"),
+                    target: unique_target("b"),
                     distribution: uniform(0.0, 1.0),
                     correlation: corr,
                 },
@@ -1433,7 +1441,7 @@ mod tests {
             ScenarioParameter {
                 name: "a".into(),
                 unit: "W".into(),
-                target: override_target("all", "heating_capacity_w"),
+                target: unique_target("a"),
                 distribution: uniform(0.0, 1.0),
                 correlation: Some(ScenarioCorrelation {
                     group: "load".into(),
@@ -1443,7 +1451,7 @@ mod tests {
             ScenarioParameter {
                 name: "b".into(),
                 unit: "W".into(),
-                target: override_target("all", "tank_volume_m3"),
+                target: unique_target("b"),
                 distribution: uniform(0.0, 1.0),
                 correlation: Some(ScenarioCorrelation {
                     group: "load".into(),
