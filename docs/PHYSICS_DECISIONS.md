@@ -1662,10 +1662,13 @@ time), and the clearing time is a maximum: a step whose in-band time
 reaches it exactly is a tripped step (a disturbance held for exactly the
 window trips; it does not ride). The enter-service window's bounds are
 inside the window: a bus at 0.917 or 1.05 pu, at 59.5 or 60.1 Hz,
-accumulates the delay. The trip ends the ride-through measurement: the
-firing step reports the window it reached, the firing point's own window
-and never another band's timer that ran on the same step (a 0.4 pu sag
-fills both UV1's and UV2's timers and reports UV2's 0.16 s, not UV1's
+accumulates the delay. The delay is a minimum and the windows are the
+criterion, so a zero-length delay (the operator surface admits 0.0)
+still reconnects only on an in-window step: the windows gate the return
+to service whatever the wait. The trip ends the ride-through measurement:
+the firing step reports the window it reached, the firing point's own
+window and never another band's timer that ran on the same step (a 0.4 pu
+sag fills both UV1's and UV2's timers and reports UV2's 0.16 s, not UV1's
 10 s), and the latched inverter's per-disturbance timers are spent (the
 ride-through channel resets when the point trips), so a save taken while
 the latch holds carries no partial window.

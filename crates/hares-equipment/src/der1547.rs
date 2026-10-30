@@ -528,10 +528,12 @@ impl Der1547Controller {
 
         if self.state.tripped {
             // Return to service: accumulate inside the enter-service
-            // windows, reset outside them, re-energize on the first step
-            // whose accumulated time reaches the delay. The delay is a
-            // minimum, so the re-energized step produces the model's own
-            // output from that step on.
+            // windows, reset outside them, re-energize on the first
+            // in-window step whose accumulated time reaches the delay.
+            // The delay is a minimum, so the windows gate it even at
+            // zero: a zero-length wait still needs an in-window step. The
+            // re-energized step produces the model's own output from that
+            // step on.
             let in_window = v_pu >= self.tables.es_v_low
                 && v_pu <= self.tables.es_v_high
                 && f_hz >= self.tables.es_f_low
@@ -541,7 +543,7 @@ impl Der1547Controller {
             } else {
                 self.state.es_s = 0.0;
             }
-            let reconnected = self.state.es_s >= self.tables.es_delay_s;
+            let reconnected = in_window && self.state.es_s >= self.tables.es_delay_s;
             if reconnected {
                 self.state.tripped = false;
                 self.state.trip_reason = trip_reason::NONE;
@@ -1494,6 +1496,51 @@ mod tests {
         }
         assert!(!out.tripped, "300 s accumulated: reconnected");
         assert_eq!(out.p_ref_w, 2700.0, "the reconnected step produces");
+    }
+
+    /// The delay is a minimum, not the window's substitute: an operator
+    /// who sets it to zero (the surface admits 0.0) does not waive the
+    /// enter-service windows. A zero-length wait still needs an in-window
+    /// step, exactly as a zero clearing time still needs the trip point's
+    /// condition: a controller that reconnected on an out-of-window step
+    /// would energize the inverter's full output into the disturbance the
+    /// windows exist to keep it out of.
+    #[test]
+    fn a_zero_enter_service_delay_still_honours_the_windows() {
+        let settings = Der1547Settings {
+            category: Der1547Category::CatII,
+            overrides: Some(Der1547Overrides {
+                es_delay_s: Some(0.0),
+                ..Default::default()
+            }),
+        };
+        let mut ctrl = controller(&settings, 5000.0);
+        let trip = one_step(&mut ctrl, 0.4, 60.0, 900.0, 2700.0);
+        assert!(
+            trip.tripped,
+            "0.4 pu starts UV2's window: the same step trips"
+        );
+
+        // 0.3 pu is outside the enter-service windows (below 0.917 pu)
+        // and still a fault: the latch holds whatever the delay.
+        let out = one_step(&mut ctrl, 0.3, 60.0, 900.0, 2700.0);
+        assert!(
+            out.tripped,
+            "a zero delay does not waive the enter-service windows"
+        );
+        assert_eq!(out.p_ref_w, 0.0, "the latched inverter produces nothing");
+        assert_eq!(
+            out.enter_service_s, 0.0,
+            "an out-of-window step accrues nothing"
+        );
+
+        // The first in-window step completes the zero-length delay.
+        let out = one_step(&mut ctrl, 1.0, 60.0, 900.0, 2700.0);
+        assert!(
+            !out.tripped,
+            "inside the windows a zero delay completes on the first step"
+        );
+        assert_eq!(out.p_ref_w, 2700.0);
     }
 
     /// The enter-service windows gate the delay: a restored bus outside
