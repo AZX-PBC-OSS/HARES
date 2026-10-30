@@ -45,7 +45,8 @@ pub enum DRLevel {
 /// last. `Some(0.0)` is a legal signal (a finite duration of at least zero)
 /// whose window overlaps no step, so it resolves to no event at all (level
 /// `Normal`, no countdown) rather than to a one-step shed of the step it
-/// lands in. A negative duration cannot pass [`ControlSignal::validate`]
+/// lands in. A negative duration cannot pass
+/// [`ControlSignal::validate_numeric_bounds`]
 /// and resolves the same way, so an unvalidated path cannot shed a step for
 /// it either.
 #[must_use]
@@ -130,7 +131,7 @@ pub enum ControlSignal {
     },
     DemandResponse {
         level: DRLevel,
-        /// The event's window [s]. `None` holds until an explicit `Normal`
+        /// The event's window \[s\]. `None` holds until an explicit `Normal`
         /// arrives; a positive duration sheds every step its window
         /// overlaps, a partial final step included (see
         /// [`demand_response_command`]), so `Some(0.0)` is an event that
