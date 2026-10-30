@@ -1641,17 +1641,17 @@ impl Ev {
             // DER function. An unconfigured layer warns once on the first
             // excursion it declines to govern.
             // The availability input is the export the delivered power is
-            // already under: the live ceiling with the demand response
-            // fraction applied, and net of the pack heater's priority draw
-            // (the export passed as the model's own output is already DR
-            // scaled and heater budgeted, so the droop's up-ramp must stop
-            // at the same bound; the stationary battery's availability
-            // input carries the same deliverable-bound composition).
-            let export_budget_w = self.discharge_ceiling_w.min(self.leg_discharge_budget_w(
-                leg,
-                dt,
-                heater_desired_dc_w,
-            ));
+            // already under: the resolved leg's own budget (its rating,
+            // the pack's energy above the leg's floor, and the pack
+            // heater's priority draw) with the demand response fraction
+            // applied. The dispatch vote's pack-wide ceiling is the min
+            // across the enabled legs because a vote may resolve to
+            // either; the layer is stepped after the leg resolves, so the
+            // bound is that leg's, or a smaller sibling's rating would
+            // bind the droop below the export the model is delivering.
+            // The stationary battery's availability input carries the
+            // same deliverable-bound composition.
+            let export_budget_w = self.leg_discharge_budget_w(leg, dt, heater_desired_dc_w);
             let droop_availability_w = export_budget_w * self.dr_power_fraction();
             match &mut self.der1547 {
                 Some(controller) => {

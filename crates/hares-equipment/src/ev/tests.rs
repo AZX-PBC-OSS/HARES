@@ -6551,8 +6551,78 @@ fn an_unavailable_step_neither_trips_nor_advances_the_export_layer() {
     assert_eq!(ev.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
     assert_eq!(
         ev.telemetry().get(tk::DER1547_RIDE_THROUGH_S),
+        Some(5.0),
+        "the idle step freezes the window: not stepped, not reset"
+    );
+
+    // The export returns into the same disturbance: the window resumes
+    // from the frozen 5 s and its next 5 s completes UV1's 10 s.
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::from_secs(5), &mut ports)
+        .expect("step");
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_TRIPPED),
+        Some(1.0),
+        "the resumed window completes on the step that reaches 10 s"
+    );
+    assert_eq!(ev.telemetry().get(tk::DER1547_RIDE_THROUGH_S), Some(10.0));
+}
+
+/// An unavailable step clears the droop anchor as an idle export leg
+/// does: the layer is not stepped there, and an anchor held across a step
+/// the inverter did not conduct would let the next excursion ramp from an
+/// output the export no longer delivers. The control is the anchor the
+/// step before the idle one latched: a stale 0.6 pu against the 0.4 pu
+/// the returning export delivers.
+#[test]
+fn an_unavailable_step_clears_the_droop_anchor() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    // 60.536 Hz is 0.5 Hz beyond the deadband edge: the first excursion
+    // latches the anchor at the 0.6 pu the 3000 W export delivers and
+    // sheds 1/6 pu.
+    let mut hi_f = sample_env();
+    hi_f.grid.frequency_hz = 60.536;
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::from_secs(60), &mut ports)
+        .expect("step");
+    let mut ports = PortSlots::default();
+    ev.step(&hi_f, Duration::from_secs(60), &mut ports)
+        .expect("step");
+    let shed = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+    assert!(
+        (shed + 2166.6666667).abs() < 1e-6,
+        "the excursion sheds 1/6 pu from the 0.6 pu anchor, got {shed} W"
+    );
+
+    // The unavailable step at the same frequency: idle, no response, and
+    // the anchor does not survive a step the inverter did not conduct.
+    let mut idle = hi_f.clone();
+    idle.unavailable_periods.power_outage = true;
+    let mut ports = PortSlots::default();
+    ev.step(&idle, Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_FW_ADJ_PU),
         Some(0.0),
-        "no timer advances on an idle step"
+        "the idle step clears the droop adjustment"
+    );
+
+    // A 2 kW export on the same excursion afterwards ramps from its own
+    // 0.4 pu: 0.4 - 1/6 = 0.2333 pu = 1166.67 W. A held 0.6 pu anchor
+    // would command 2166.67 W, above the pre-disturbance output.
+    command_v2g_discharge(&mut ev, 2000.0);
+    let mut ports = PortSlots::default();
+    ev.step(&hi_f, Duration::from_secs(60), &mut ports)
+        .expect("step");
+    let p_w = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+    assert!(
+        (p_w + 1166.6666667).abs() < 1e-6,
+        "the re-latched anchor is the 0.4 pu the export delivers, got {p_w} W"
     );
 }
 
