@@ -847,25 +847,38 @@ fn dr_shed_during_island_keeps_the_bus_alive() {
     dwelling.step().expect("the island's formation step");
     assert!(dwelling.latest_env().grid.islanded(), "the island formed");
 
-    // The full shed, mid-island, for four steps.
+    // The full shed, mid-island: ten steps, so the event still runs when
+    // the utility returns and the resumed shed is observable.
     dwelling.apply_control(
         "Battery",
         ControlSignal::DemandResponse {
             level: DRLevel::GridEmergency,
-            duration_s: Some(4.0 * 60.0),
+            duration_s: Some(10.0 * 60.0),
         },
     );
-    for _ in 0..4 {
+    for step in 0..4 {
         dwelling.step().expect("the island's shed step");
         let grid = &dwelling.latest_env().grid;
         assert!(
             grid.islanded(),
-            "a DR shed must not collapse a formed island"
+            "step {step}: a DR shed must not collapse a formed island"
         );
         assert_eq!(
             grid.island_bus_voltage_pu,
             Some(1.0),
-            "the island's bus stays at nominal through the shed"
+            "step {step}: the island's bus stays at nominal through the shed"
+        );
+        let battery_dr = dwelling
+            .latest_env()
+            .equipment_telemetry
+            .get("Battery")
+            .and_then(|t| t.get(tk::DR_POWER_FRACTION))
+            .unwrap_or_else(|| panic!("step {step}: the battery publishes its DR fraction"));
+        assert_eq!(
+            battery_dr, 0.0,
+            "step {step}: the event is in force (the arrange must be \
+             load-bearing: a run without the signal would pass every other \
+             assertion in this test)"
         );
         let summary = dwelling
             .save_checkpoint()
@@ -873,22 +886,67 @@ fn dr_shed_during_island_keeps_the_bus_alive() {
             .prior_electrical_summary;
         assert!(
             summary.base_load_w > 1.0,
-            "the islanded home keeps its loads through a DR shed, got {} W",
+            "step {step}: the islanded home keeps its loads through a DR \
+             shed, got {} W",
             summary.base_load_w
         );
         assert!(
             summary.battery_power_w < 0.0,
-            "the battery keeps serving the islanded load through the shed, \
-             got {} W",
+            "step {step}: the battery keeps serving the islanded load through \
+             the shed, got {} W",
             summary.battery_power_w
         );
         let telem = dwelling.telemetry().expect("telemetry");
         assert!(
             telem.island_unserved_w <= 50.0,
-            "the island's dispatch is uncurtailed: any imbalance is the \
-             standby-draw accounting noise below the documented 0.05 kW \
+            "step {step}: the island's dispatch is uncurtailed: any imbalance \
+             is the standby-draw accounting noise below the documented 0.05 kW \
              warning threshold, got {} W",
             telem.island_unserved_w
         );
     }
+
+    // The utility returns while the event still runs: the island collapses,
+    // and the shed it exists to curtail resumes on the grid-connected
+    // dispatch. The battery's own control would serve the 1.5 kW base load;
+    // the event holds it at standby and the load imports instead.
+    dwelling
+        .set_grid_voltage(1.0)
+        .expect("the restoration override is in contract");
+    dwelling.step().expect("the restored step");
+    assert!(
+        !dwelling.latest_env().grid.islanded(),
+        "the restoration collapses the island"
+    );
+    let summary = dwelling
+        .save_checkpoint()
+        .expect("checkpoint")
+        .prior_electrical_summary;
+    assert!(
+        summary.battery_power_w.abs() <= 50.0,
+        "the DR shed resumes on the restored grid: the battery must not serve \
+         the load while the event holds it at standby, got {} W",
+        summary.battery_power_w
+    );
+    assert!(
+        summary.base_load_w > 1.0 && summary.net_grid_w > 1.0,
+        "the restored home draws its load from the grid while the battery is \
+         shed: base load {} W, meter {} W",
+        summary.base_load_w,
+        summary.net_grid_w
+    );
+
+    // The event ends; the battery's self-consumption resumes.
+    for _ in 0..7 {
+        dwelling.step().expect("the post-event step");
+    }
+    let summary = dwelling
+        .save_checkpoint()
+        .expect("checkpoint")
+        .prior_electrical_summary;
+    assert!(
+        summary.battery_power_w < 0.0,
+        "after the event the battery serves the load again, got {} W",
+        summary.battery_power_w
+    );
 }

@@ -193,6 +193,17 @@ fn starved_ideal_steps_are_counted_in_run_health() {
         cooling_setpoint_c: Some(21.0),
         deadband_c: None,
     };
+    // The warm-in must be clean: a plain ideal base run never starves the
+    // solve (the solve runs before the control dispatch, so its own
+    // capacity signal arrives every cooling step). A non-zero count here
+    // would make the delta below prove nothing.
+    let before = dwelling.health().ideal_capacity_unsolved_steps;
+    assert_eq!(
+        before, 0,
+        "the warm-in's ideal steps all ran on their own solve, got {before} \
+         starved steps"
+    );
+
     let mut delivered_any = false;
     for _ in 0..48 {
         dwelling.apply_control("ASHP Cooler", cool.clone());
@@ -203,12 +214,12 @@ fn starved_ideal_steps_are_counted_in_run_health() {
         }
     }
     assert!(delivered_any, "the override run must reach cooling");
-    let health = dwelling.health();
+    let after = dwelling.health().ideal_capacity_unsolved_steps;
     assert!(
-        health.ideal_capacity_unsolved_steps >= 1,
+        after > before,
         "the override's first cooling step lands after the solve: its \
-         fallback delivery must be counted in the run's health, got {}",
-        health.ideal_capacity_unsolved_steps
+         fallback delivery must be counted in the run's health, got {after} \
+         against the warm-in's {before}"
     );
 
     // The shed scenario: the release delivers the solved capacity (the
