@@ -15,6 +15,14 @@
 //! unknown field, or a settings override map (or one of its equipment
 //! entries) of another shape is refused naming the object, so a
 //! partially applicable record never lands half applied.
+//!
+//! The overrides land AFTER the assembler's autosizing: an omitted
+//! capacity is sized from the resolved inputs first, then the merged
+//! config carries the override, so a sampled capacity is the value the
+//! equipment initializes with (the autosized value stands only where no
+//! override names the field). The patch targets are the other order by
+//! design: the assembly reads them while it resolves, so a patched
+//! bedroom count feeds the water heater's sizing.
 
 use crate::dwelling::DwellingSettings;
 use hares_types::{HaresError, ScenarioSample};

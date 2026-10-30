@@ -260,6 +260,11 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub tank_height_m: Option<f64>,
     pub energy_factor: Option<f64>,
     pub uniform_energy_factor: Option<f64>,
+    /// The live capacity channel: the HPXML capacity and the field the
+    /// dwelling's capacity API takes. The init falls back to it when the
+    /// per-element override channel is absent, so the resolved element
+    /// power is this field's value; an override of it changes the element
+    /// power's source.
     pub heating_capacity_w: Option<f64>,
     pub ua_w_per_k: Option<f64>,
     pub setpoint_c: Option<f64>,
