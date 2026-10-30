@@ -3037,7 +3037,7 @@ fn snapshot_to_py(
                     let ed = PyDict::new(py);
                     ed.set_item("name", &obs.name)?;
                     ed.set_item("equipment_type", &obs.equipment_type)?;
-                    ed.set_item("end_use", format!("{:?}", obs.end_use))?;
+                    ed.set_item("end_use", obs.end_use.as_str())?;
                     let telem: Vec<(&String, &f64)> = obs.telemetry.0.iter().collect();
                     let td = PyDict::new(py);
                     for (k, v) in telem {
@@ -5124,6 +5124,94 @@ mod blueprint_readback_tests {
                 exposed_schedule.columns, built_schedule.columns,
                 "the exposed blueprint's generated schedule must be the one \
                  the dwelling runs"
+            );
+        });
+    }
+
+    /// The observer snapshot's equipment entry carries `end_use` in the
+    /// string vocabulary every other read-back uses (`EndUse::as_str`), the
+    /// one a consumer matches against the equipment and end-use names the
+    /// reports and the scene tables carry. Rust's `Debug` form
+    /// (`EndUse("hvac_heating")`) is a developer rendering of the newtype,
+    /// not an end-use name, and no consumer of the snapshot can read it.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn the_observer_snapshot_renders_end_use_as_its_read_back_string() {
+        use crate::py_dwelling::snapshot_to_py;
+        use chrono::FixedOffset;
+        use chrono::TimeZone;
+        use hares_core::observer::EquipmentObservation;
+        use hares_core::observer::EquipmentPhaseCapture;
+        use hares_core::observer::PhaseSnapshots;
+        use hares_core::observer::PortsCapture;
+        use hares_core::observer::StepSnapshot;
+        use hares_types::EndUse;
+        use pyo3::types::PyAnyMethods;
+        use pyo3::types::PyDict;
+        use pyo3::types::PyDictMethods;
+        use pyo3::types::PyList;
+        use pyo3::types::PyListMethods;
+
+        let snapshot = StepSnapshot {
+            step_index: 0,
+            timestamp: FixedOffset::east_opt(0)
+                .expect("UTC is a valid offset")
+                .with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+                .single()
+                .expect("the timestamp is unambiguous"),
+            phases: PhaseSnapshots {
+                post_thermal_equipment: Some(EquipmentPhaseCapture {
+                    equipment: vec![EquipmentObservation {
+                        name: "Heater".to_string(),
+                        equipment_type: "Gas Furnace".to_string(),
+                        end_use: EndUse::HVAC_HEATING,
+                        ..EquipmentObservation::default()
+                    }],
+                    ports: PortsCapture::default(),
+                }),
+                ..PhaseSnapshots::default()
+            },
+            actor_skips: 0,
+            actor_calls: 0,
+            actor_error_count: 0,
+            moisture_invariant: None,
+            time_sin: 0.0,
+            time_cos: 0.0,
+            actor_telemetry_keys: Vec::new(),
+        };
+
+        Python::attach(|py| {
+            let rendered = snapshot_to_py(py, &snapshot).expect("the snapshot renders");
+            let dict = rendered
+                .bind(py)
+                .cast::<PyDict>()
+                .expect("the snapshot is a dict");
+            let phase = dict
+                .get_item("post_thermal_equipment")
+                .expect("get_item must not raise")
+                .expect("the thermal phase is present")
+                .cast_into::<PyDict>()
+                .expect("the phase is a dict");
+            let entries = phase
+                .get_item("equipment")
+                .expect("get_item must not raise")
+                .expect("the phase carries its equipment")
+                .cast_into::<PyList>()
+                .expect("the equipment entries are a list");
+            let end_use: String = entries
+                .get_item(0)
+                .expect("the observation is listed")
+                .cast_into::<PyDict>()
+                .expect("an entry is a dict")
+                .get_item("end_use")
+                .expect("get_item must not raise")
+                .expect("the entry carries end_use")
+                .extract()
+                .expect("end_use is a str");
+            assert_eq!(
+                end_use,
+                EndUse::HVAC_HEATING.as_str(),
+                "the snapshot's end_use is the read-back string, not the Debug form"
             );
         });
     }
