@@ -449,9 +449,8 @@ mod tests {
             }))
             .expect("the record parses");
             let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
-            apply_sample(&sample, &mut settings).unwrap_or_else(|err| {
-                panic!("the patch field '{field}' must apply: {err}")
-            });
+            apply_sample(&sample, &mut settings)
+                .unwrap_or_else(|err| panic!("the patch field '{field}' must apply: {err}"));
             assert!(
                 settings.patches.is_some(),
                 "the patch field '{field}' must land in the settings"

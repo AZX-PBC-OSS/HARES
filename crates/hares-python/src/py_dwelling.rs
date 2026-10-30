@@ -5103,7 +5103,9 @@ mod blueprint_readback_tests {
                 .reset_with_seed(py, 7)
                 .expect("the seed reset must rebuild the dwelling");
             let built = {
-                let guard = dwelling.acquire().expect("the rebuilt dwelling is not poisoned");
+                let guard = dwelling
+                    .acquire()
+                    .expect("the rebuilt dwelling is not poisoned");
                 Arc::clone(guard.blueprint())
             };
             let built_schedule = built.inputs().schedule.schedule();
