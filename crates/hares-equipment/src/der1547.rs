@@ -1765,6 +1765,67 @@ mod tests {
         assert_eq!(latched.enter_service_s, 60.0);
     }
 
+    /// The fail-safe: a non-finite bus voltage or frequency de-energizes
+    /// the inverter for the step without latching it. A poisoned grid
+    /// state is not evidence about any table's condition, so the step
+    /// takes no trip reason, spends no ride-through window, and accrues
+    /// no enter-service time: the state carries unchanged and the next
+    /// finite step resumes exactly where it stood.
+    #[test]
+    fn a_non_finite_bus_reading_de_energizes_the_step_without_latching() {
+        // A latched controller with a part-spent enter-service wait: the
+        // poisoned step de-energizes, names no table, and carries the
+        // wait (60 s) unadvanced and unreset.
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let _ = one_step(&mut ctrl, 0.6, 60.0, 60.0, 2700.0);
+        let wait = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2700.0);
+        assert_eq!(wait.enter_service_s, 60.0);
+        let poisoned = ctrl
+            .step(1.0, f64::NAN, 60.0, true, 2700.0, 2700.0, 0.0)
+            .expect("the fail-safe is not an error");
+        assert!(poisoned.tripped, "the poisoned step is de-energized");
+        assert_eq!(
+            poisoned.trip_reason,
+            trip_reason::NONE,
+            "no table fired: the fail-safe names none"
+        );
+        assert_eq!(poisoned.p_ref_w, 0.0);
+        assert_eq!(poisoned.ride_through_s, 0.0);
+        assert_eq!(
+            poisoned.enter_service_s, 60.0,
+            "the wait neither advances (120) nor resets (0): it carries"
+        );
+        assert!(ctrl.state().tripped, "the fail-safe does not clear a latch");
+        assert_eq!(
+            ctrl.state().trip_reason,
+            trip_reason::UV1,
+            "the latch keeps its own reason; the step's outcome does not"
+        );
+
+        // A poisoned voltage on an untripped controller: the same
+        // per-step de-energization, and a part-spent ride-through window
+        // carried (not advanced into the trip, not spent by it).
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let _ = one_step(&mut ctrl, 0.6, 60.0, 5.0, 2700.0);
+        let poisoned = ctrl
+            .step(f64::NAN, 60.0, 60.0, true, 2700.0, 2700.0, 0.0)
+            .expect("the fail-safe is not an error");
+        assert!(poisoned.tripped);
+        assert_eq!(poisoned.trip_reason, trip_reason::NONE);
+        assert!(!ctrl.state().tripped, "no latch from a poisoned step");
+        assert_eq!(
+            ctrl.state().uv1_s,
+            5.0,
+            "the window carries: not advanced (10), not spent (0)"
+        );
+        let resume = one_step(&mut ctrl, 0.6, 60.0, 5.0, 2700.0);
+        assert!(
+            resume.tripped,
+            "the next in-band step completes the carried window"
+        );
+        assert_eq!(resume.ride_through_s, 10.0);
+    }
+
     // -- The state's checkpoint round trip. --
 
     #[test]

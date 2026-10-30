@@ -6644,6 +6644,62 @@ fn an_unavailable_step_clears_the_droop_anchor() {
     );
 }
 
+/// An unavailable step holds a latched trip and freezes its enter-service
+/// clock, as an idle export leg does: the layer is not stepped there, so
+/// the channels read the run state (the latch held, the clock where it
+/// stopped), and the clock resumes on the exporting step the period
+/// ends. The battery's twin runs its clock through the period: its
+/// inverter stays connected, so its layer steps for the trip tables and
+/// the return-to-service state machine.
+#[test]
+fn an_unavailable_step_holds_a_latched_trip_and_its_clock() {
+    let config = v2g_config_with_der1547(Some(cat2_settings()));
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 3000.0);
+
+    // The 10 s UV1 window is reached inside the 60 s sag step.
+    let mut sag = sample_env();
+    sag.grid.voltage_pu = 0.6;
+    let mut ports = PortSlots::default();
+    ev.step(&sag, Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+
+    // The unavailable step with the discharge command still standing:
+    // the vehicle's rows are zeroed, the export function does not
+    // conduct, and the layer is not stepped: the latch is what publishes
+    // and the clock does not accrue the step.
+    let mut idle = sag.clone();
+    idle.unavailable_periods.power_outage = true;
+    let mut ports = PortSlots::default();
+    ev.step(&idle, Duration::from_secs(900), &mut ports)
+        .expect("step");
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_TRIPPED),
+        Some(1.0),
+        "the unavailable step does not clear the latch"
+    );
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_ENTER_SERVICE_S),
+        Some(0.0),
+        "the layer is not stepped: no in-window time accrues"
+    );
+    assert_eq!(ev.telemetry().get(tk::ACTIVE_POWER_KW), Some(0.0));
+
+    // The period ends and the export conducts again on the restored bus:
+    // the latched inverter's clock accrues the step inside the windows.
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::from_secs(60), &mut ports)
+        .expect("step");
+    assert_eq!(ev.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_ENTER_SERVICE_S),
+        Some(60.0),
+        "the first exporting step after the period accrues one step"
+    );
+}
+
 /// The F7 guard on the EV's face: on a utility-outage step the export leg
 /// can be the island's source, so the layer is bypassed and the export
 /// flows; the layer is never tripped off its own island.

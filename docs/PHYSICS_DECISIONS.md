@@ -1798,17 +1798,33 @@ The step's own availability follows from that scope. The EV's export
 function conducts only on a commanded discharge step, so the steps it
 does not conduct (an idle export leg, an unavailable period) clear the
 droop anchor and do not advance a timer: the channels read the run state
-there, which keeps a latch already set reported. The battery's inverter
-stays connected and supplied across its dispatch-row zeroing (the HPXML
+there, which keeps a latch already set reported and holds its
+enter-service clock where it stopped. The battery's inverter stays
+connected and supplied across its dispatch-row zeroing (the HPXML
 unavailable-period convention zeroes the rows, not the connection: its
 standby draw continues), so its trip tables keep watching the bus and an
 excursion on such a step trips it as any other step's would. Its
 frequency-Watt response does not run there: the period, a dead bus and a
 disconnected pack all command zero interchange, so the layer steps for
-the trip tables alone, the step's published adjustment is zero, and the
-step clears the droop anchor (a step that conducted nothing cannot
-anchor the next ramp). The step the pack is dispatched on re-anchors on
-its own output.
+its trip tables and its return-to-service clock, the step's published
+adjustment is zero, and the step clears the droop anchor (a step that
+conducted nothing cannot anchor the next ramp). The step the pack is
+dispatched on re-anchors on its own output. The return-to-service clock
+is the latched inverter's own state machine, not the pack's dispatch:
+the battery's delay accrues on the period's in-window steps and the
+inverter can reconnect through the period, while the EV's unstepped
+layer holds its latch and its clock through it.
+
+The fail-safe is a per-step answer and never more: a non-finite bus
+voltage or frequency de-energizes the inverter for that step without
+latching it (a poisoned grid state is not evidence about any table's
+condition: no trip reason, no ride-through window spent, no
+enter-service time accrued), and the next finite step resumes the state
+exactly as it stood. The composition with the unavailable period follows
+from each class's scope: the battery's layer steps through the period,
+so the fail-safe fires on its unavailable steps too; the EV's layer does
+not step there, so the period's idleness cannot fire it (an unstepped
+layer sees no reading at all).
 
 Alternative rejected: defaults always on. The engine's existing
 scenarios (and their goldens and parity fixtures) were built against the

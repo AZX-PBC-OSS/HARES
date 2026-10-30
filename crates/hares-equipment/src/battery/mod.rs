@@ -3378,6 +3378,135 @@ mod tests {
         }
     }
 
+    /// The enter-service clock is the latched inverter's own state
+    /// machine, not the pack's dispatch: an unavailable period zeroes the
+    /// battery's dispatch rows, but its inverter stays connected and
+    /// supplied, so the return-to-service delay accrues on the period's
+    /// in-window steps and the inverter reconnects through the period.
+    /// Five 60 s steps complete the 300 s default delay; the zeroed rows
+    /// hold the port at the standby draw throughout, and the period's end
+    /// finds the pack dispatching on its command again.
+    #[test]
+    fn the_enter_service_delay_runs_through_an_unavailable_period() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -3000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .unwrap();
+
+        // The trip: 0.6 pu reaches UV1's 10 s window inside a 60 s step.
+        let mut sag = base_env();
+        sag.grid.voltage_pu = 0.6;
+        let mut ports = default_ports();
+        bat.step(&sag, Duration::from_secs(60), &mut ports).unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+
+        // The unavailable period at the nominal bus: the rows are zeroed
+        // and every step is in the enter-service windows, so the delay
+        // accrues 60 s per step (the inverter's connection and supply are
+        // unchanged; the period commands the interchange, not the return
+        // to service).
+        let mut idle = base_env();
+        idle.unavailable_periods.power_outage = true;
+        for step in 1..=4 {
+            let mut ports = default_ports();
+            bat.step(&idle, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(1.0));
+            assert_eq!(
+                bat.telemetry().get(tk::DER1547_ENTER_SERVICE_S),
+                Some(60.0 * step as f64),
+                "step {step}: the period does not stop the inverter's clock"
+            );
+            assert_eq!(
+                bat.telemetry().get(tk::ACTIVE_POWER_KW),
+                Some(10.0),
+                "the zeroed rows hold the port at the standby draw"
+            );
+        }
+
+        // The fifth in-window step completes the 300 s delay: reconnected
+        // through the period, still at the standby draw.
+        let mut ports = default_ports();
+        bat.step(&idle, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIPPED),
+            Some(0.0),
+            "the delay completed inside the period: reconnected"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(0.0));
+        assert_eq!(bat.telemetry().get(tk::ACTIVE_POWER_KW), Some(10.0));
+
+        // The period ends: the pack delivers its command again (the latch
+        // is gone and the nominal bus fires no fresh trip). The port is
+        // the commanded 3000 W of export less the 10 W standby draw.
+        let mut ports = default_ports();
+        bat.step(&base_env(), Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+        let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+        assert!(
+            (p + 2990.0).abs() < 1e-6,
+            "the post-period step discharges on its command, got {p} W"
+        );
+    }
+
+    /// The fail-safe fires on an unavailable step without latching: the
+    /// battery's layer steps through the period (its trip tables watch
+    /// the bus), so a non-finite grid reading on such a step reaches it
+    /// and the fail-safe's per-step de-energization is the step's
+    /// outcome. It names no table and never reaches the latch: the next
+    /// finite step resumes the period's idle with the trip state
+    /// released.
+    #[test]
+    fn a_non_finite_reading_on_an_unavailable_step_fires_the_failsafe_not_a_latch() {
+        let config = battery_config_with_der1547(Some(cat2_settings()));
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &base_env()).unwrap();
+
+        // The period is on in both steps; only the reading differs.
+        let mut poisoned = base_env();
+        poisoned.unavailable_periods.power_outage = true;
+        poisoned.grid.frequency_hz = f64::NAN;
+        let mut ports = default_ports();
+        bat.step(&poisoned, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIPPED),
+            Some(1.0),
+            "the poisoned reading de-energizes the step"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIP_REASON),
+            Some(0.0),
+            "the fail-safe names no table"
+        );
+        assert_eq!(
+            bat.telemetry().get(tk::ACTIVE_POWER_KW),
+            Some(10.0),
+            "the zeroed rows hold the port at the standby draw"
+        );
+
+        let mut idle = base_env();
+        idle.unavailable_periods.power_outage = true;
+        let mut ports = default_ports();
+        bat.step(&idle, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_TRIPPED),
+            Some(0.0),
+            "the fail-safe is the step's, not a latch: the finite step \
+             resumes the period's idle"
+        );
+        assert_eq!(bat.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(0.0));
+    }
+
     /// The 1547 run state survives a checkpoint round trip: a trip
     /// latched before the save still holds after the restore.
     #[test]
