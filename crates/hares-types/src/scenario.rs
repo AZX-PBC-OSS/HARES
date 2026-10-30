@@ -1418,10 +1418,15 @@ mod tests {
     /// Pearson correlation is the Gaussian copula's closed form for
     /// uniform marginals, (6/pi) asin(rho/2) = 0.891456 at rho 0.9
     /// (Kruskal 1958: for uniform marginals Pearson and Spearman
-    /// coincide), within 0.02 (the correlation's standard error is about
-    /// (1 - rho^2)/sqrt(N) = 0.0042). The latent factors correlate at
-    /// rho; the values correlate at the marginal transform of it, which
-    /// is what the sampled record carries.
+    /// coincide), within 0.02. The band's accounting is the sample
+    /// correlation's own spread at N = 2,000 with these marginals,
+    /// measured at 0.0049 over 8,000 resamples and therefore four
+    /// standard errors wide; the bivariate-normal formula
+    /// (1 - rho^2)/sqrt(N) = 0.0042 is the NORMAL marginals' spread and
+    /// understates this pair's (uniform marginals are not the normal
+    /// pair the formula describes). The latent factors correlate at rho;
+    /// the values correlate at the marginal transform of it, which is
+    /// what the sampled record carries.
     #[test]
     fn correlated_members_keep_their_declared_marginal() {
         let s = spec(vec![
@@ -1549,8 +1554,12 @@ mod tests {
         );
         // LogNormal(0, 0.25): mean exp(sigma^2/2) = 1.0317434074991028 and
         // sd exp(sigma^2/2)*sqrt(exp(sigma^2)-1) = 0.2620190721092012;
-        // the mean's standard error is 0.0041 (the 0.02 band is five) and
-        // the sd's about 0.006 at this kurtosis (the 0.04 band is six).
+        // the mean's standard error is sd/sqrt(N) = 0.0041 (the 0.02
+        // band is five) and the sd's is sqrt((mu4 - var^2) / (4 var N))
+        // = 0.0036, with the fourth central moment mu4 = e^(8t) - 4e^(5t)
+        // + 6e^(3t) - 3e^(2t) = 0.019306 at t = sigma^2 = 0.0625 and var
+        // = 0.068654 (the 0.04 band is eleven standard errors, not the six
+        // a normal marginal's sd estimator would need).
         let lognormal_mean = mean(&lognormal);
         assert!(
             (lognormal_mean - 1.031_743_407_499_102_8).abs() < 0.02,
