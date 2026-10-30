@@ -18,8 +18,8 @@ crate-type = ["cdylib", "rlib"]
 # lib dir for the test/dev rpath (see build.rs). Since pyo3-build-config 0.29
 # no longer inlines build configuration into itself, it resolves the config
 # through a direct pyo3 dependency in this build graph.
-pyo3-build-config = "0.29"
-pyo3 = "0.29"
+pyo3-build-config = "0.30"
+pyo3 = "0.30"
 
 [dependencies]
 hares-core = { workspace = true }
@@ -35,7 +35,7 @@ numpy = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 arrow = { workspace = true, features = ["ipc"] }
-pyo3-arrow = "0.19"
+pyo3-arrow = "0.20"
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 rayon = { workspace = true }

@@ -47,7 +47,7 @@ hares-fleet = { path = "crates/hares-fleet" }
 nalgebra = "0.35"
 arrow = "59"
 parquet = "59"
-pyo3 = "0.29"
+pyo3 = "0.30"
 uom = "0.38"
 rayon = "1.11"
 serde = { version = "1", features = ["derive", "rc"] }
@@ -71,7 +71,7 @@ tracing = { version = "0.1", features = ["release_max_level_info"] }
 thiserror = "2"
 bitflags = "2"
 toml = "1"
-numpy = "0.29"
+numpy = "0.30"
 # Default features pull `heapless` 0.7 (via `heapless-cas`) for no_std CAS
 # support; HARES only calls to_allocvec, to_allocvec_crc, from_bytes and
 # from_bytes_crc, which need nothing beyond `alloc` + `use-crc`.
