@@ -752,6 +752,90 @@ mod tests {
         );
     }
 
+    /// The reserved `envelope` target is part of the scenario's overridable
+    /// surface: it is not an equipment (the assembly's equipment-key walk
+    /// skips the reserved key), so the equipment round-trips above do not
+    /// cover it. A sampled `opaque_r_scale` of exactly 2.0 lands in the
+    /// settings' overrides under the reserved key and reaches the assembled
+    /// layers: an opaque layer's resistance doubles against the control
+    /// build's, which is the application's own proof.
+    #[test]
+    fn a_sampled_envelope_scale_reaches_the_assembled_layers() {
+        let spec = ScenarioSpec {
+            name: "envelope".to_string(),
+            parameters: vec![hares_types::ScenarioParameter {
+                name: "r_scale".to_string(),
+                unit: "fraction".to_string(),
+                target: hares_types::ScenarioTarget::Override {
+                    equipment: "envelope".to_string(),
+                    field: "opaque_r_scale".to_string(),
+                },
+                distribution: hares_types::ScenarioDistribution::Discrete {
+                    values: vec![2.0],
+                    weights: vec![1.0],
+                },
+                correlation: None,
+            }],
+        };
+        let sample = spec.sample(42, 1, 7).expect("the sample draws");
+        assert_eq!(
+            sample.values[0].value, 2.0,
+            "the discrete draw is the scale the layer comparison reads"
+        );
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        apply_sample(&sample, &mut settings).expect("the envelope sample applies");
+        let config_for = |settings: DwellingSettings| DwellingConfig {
+            hpxml: hares_io::InputSource::Path(
+                project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+            ),
+            schedule: Some(hares_io::InputSource::Path(
+                project_root().join("data/examples/BEopt_example_schedule.csv"),
+            )),
+            weather: hares_io::WeatherInput::Path(
+                project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: hares_io::DefaultsSource::directory(
+                project_root().join("python/hares/defaults"),
+            ),
+            settings,
+        };
+        let scaled =
+            Dwelling::from_config(config_for(settings)).expect("the scaled dwelling builds");
+        let control = Dwelling::from_config(config_for(DwellingSettings::new(
+            test_sim_config(),
+            None,
+            7,
+            None,
+        )))
+        .expect("the control dwelling builds");
+        // The first wall's first layer, in the fixture's own boundary order:
+        // the same layer on both builds, so the resistance ratio is the
+        // applied scale and nothing else.
+        let first_wall_layer_r = |dwelling: &Dwelling| -> f64 {
+            dwelling
+                .resolved_model()
+                .boundaries
+                .iter()
+                .filter(|boundary| boundary.kind == hares_io::hpxml::BoundaryType::Wall)
+                .flat_map(|boundary| boundary.layers.iter())
+                .map(|layer| layer.r_m2k_w)
+                .next()
+                .expect("the fixture's first wall carries a layer")
+        };
+        let control_r = first_wall_layer_r(&control);
+        let scaled_r = first_wall_layer_r(&scaled);
+        assert!(
+            scaled_r > control_r,
+            "the sampled envelope scale must reach the layer: {scaled_r} is not above \
+             the control's {control_r}"
+        );
+        assert!(
+            (scaled_r - 2.0 * control_r).abs() <= 1e-12 * control_r,
+            "the sampled scale 2.0 must double the layer's resistance: {scaled_r} \
+             against the control's {control_r}"
+        );
+    }
+
     /// The wildcard override's round-trip: a sampled value whose target
     /// is the wildcard (`all` or `*`, the overrides map's
     /// pattern-matching keys) lands in every equipment that reads the
