@@ -284,7 +284,7 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
-    /// The per-element power [W] override channel: the init prefers it
+    /// The per-element power \[W\] override channel: the init prefers it
     /// over [`Self::heating_capacity_w`] when both are set. The HPXML
     /// resolver leaves it absent so the capacity field stays the live
     /// capacity channel; an override of either field is applied.
