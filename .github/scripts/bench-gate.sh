@@ -64,7 +64,10 @@
 #       side's round-to-round spread (the sitting's noise, measured in
 #       the same rounds the ratio comes from; null on a one-round
 #       screen). A bench without a sample in every round is listed under
-#       "unpaired" and never gated.
+#       "unpaired" and never gated. A round whose two exports carry
+#       benchmark data but pair no benchmark with a readable estimate is
+#       an ERROR: an export the comparison cannot read refuses the
+#       verdict instead of reading as a clean comparison.
 #   flag <baseline.json> <current.json> [median|mean]
 #       The single-pair comparison (one base export against one current
 #       export): the same ratio and threshold without the pairing. Kept
@@ -138,11 +141,17 @@ run_flag() {
         --slurpfile base "$base" \
         --slurpfile curr "$curr" \
         "$JQ_RATIOS"'
-        {
+        ratios($base[0]; $curr[0]; $stat) as $rows
+        | if ($rows | length) == 0
+             and (((($base[0].benchmarks // {}) | length) > 0)
+                  or ((($curr[0].benchmarks // {}) | length) > 0))
+          then error("flag: the exports carry benchmark data but pair no benchmark with a readable \($stat) estimate: the comparison refuses the verdict instead of reading clean")
+          else . end
+        | {
           statistic: $stat,
           threshold_ratio: $ratio,
           regressions:
-            [ ratios($base[0]; $curr[0]; $stat)[] |
+            [ $rows[] |
               select(.ratio > $ratio) |
               . as $r |
               {
@@ -184,6 +193,14 @@ run_paired() {
             error("paired needs an even number of export documents, alternating base/head")
           else . end
         | [ range(0; $docs | length; 2) | ratios($docs[.]; $docs[. + 1]; $stat) ] as $rounds
+        | [ range(0; $rounds | length) as $k
+            | select(($rounds[$k] | length) == 0
+                     and (((($docs[$k * 2].benchmarks // {}) | length) > 0)
+                          or ((($docs[$k * 2 + 1].benchmarks // {}) | length) > 0)))
+            | $k + 1 ] as $unreadable
+        | if ($unreadable | length) > 0
+          then error("paired: round(s) \($unreadable | join(", ")) yield no benchmark with a readable \($stat) estimate although their exports carry data: the comparison refuses the verdict instead of reading clean")
+          else . end
         | ($rounds | length) as $n_rounds
         | [ ($rounds | map(map(.name)) | add | unique)[] as $name
             | [ $rounds[] | .[] | select(.name == $name) ] as $hits
@@ -612,6 +629,22 @@ cmd_test() {
         "$(grep -m1 '^== round 1 ' <<<"$flip_log")"
     check "an even round runs the head side first" "== round 2 head/$first_target" \
         "$(grep -m1 '^== round 2 ' <<<"$flip_log")"
+
+    # 12. The comparison's read: an export whose estimates it cannot read
+    #     (a criterion schema the critcmp export no longer carries under
+    #     criterion_estimates_v1) is refused, never reported as a clean
+    #     comparison: the gate's verdict on unreadable data must be an
+    #     error, or a schema drift reads as "no regressions".
+    jq '.benchmarks |= with_entries(.value |= (.criterion_estimates_v2 = .criterion_estimates_v1
+        | del(.criterion_estimates_v1)))' \
+        "$fx/clean-current.json" > "$scratch/drift-current.json"
+    local drift_rc
+    if run_paired "$fx/clean-baseline.json" "$scratch/drift-current.json" \
+        >/dev/null 2>&1; then drift_rc=0; else drift_rc=1; fi
+    check "the comparison refuses an export it cannot read" 1 "$drift_rc"
+    if run_flag "$fx/clean-baseline.json" "$scratch/drift-current.json" median \
+        >/dev/null 2>&1; then drift_rc=0; else drift_rc=1; fi
+    check "the single-pair comparison refuses it too" 1 "$drift_rc"
 
     echo ""
     if [ "$failures" -gt 0 ]; then
