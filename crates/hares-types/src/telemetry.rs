@@ -246,8 +246,10 @@ impl Telemetry {
     /// run's. A key not registered is a no-op.
     ///
     /// Intended for lazily registered channels on a map built without
-    /// declarations; a sealed map's declared keys are its contract, since a
-    /// later write to a removed declared key would latch as undeclared.
+    /// declarations. On a sealed map the declaration set is untouched: a
+    /// withdrawn declared key's `set` latches as unknown (the slot is
+    /// gone) until an `insert` or `set_or_register` re-registers it, which
+    /// the surviving declaration admits without an undeclared-key latch.
     pub fn unregister(&mut self, key: &str) {
         self.0.remove(key);
     }
@@ -412,6 +414,35 @@ mod tests {
         t.unregister("never");
         assert_eq!(t.len(), 1);
         assert_eq!(t.unknown_key_latch(), None);
+    }
+
+    #[test]
+    fn unregister_on_a_sealed_map_keeps_the_declaration() {
+        // The declaration set is unregister's untouched field: the
+        // withdrawn declared key's slot is gone (a plain `set` of it
+        // latches as unknown), while `insert` and `set_or_register`
+        // re-register it because the declaration still holds the name.
+        let fields = vec![TelemetryField::power_kw("charge_kw", "charging power")];
+        let mut t = Telemetry::from_fields(&fields);
+        t.set("charge_kw", 1.0);
+        t.unregister("charge_kw");
+        assert_eq!(t.get("charge_kw"), None);
+        assert!(
+            t.sealed_keys()
+                .is_some_and(|keys| keys.contains("charge_kw")),
+            "the declaration survives the removal"
+        );
+        // A registering write is admitted by the surviving declaration: no
+        // undeclared-key latch fires.
+        t.insert("charge_kw", 2.0);
+        assert_eq!(t.get("charge_kw"), Some(2.0));
+        assert_eq!(t.unknown_key_latch(), None);
+        // The plain `set` of a withdrawn declared key latches as unknown:
+        // the slot is gone until a registering write restores it.
+        t.unregister("charge_kw");
+        t.set("charge_kw", 3.0);
+        assert_eq!(t.get("charge_kw"), None);
+        assert_eq!(t.unknown_key_latch(), Some("charge_kw"));
     }
 
     #[test]
