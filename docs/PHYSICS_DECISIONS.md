@@ -1368,6 +1368,22 @@ would state a response the engine does not answer. At the reference
 voltage every multiplier is exactly 1.0, so the assembled response is
 the identity and no committed golden moves.
 
+Why the single-row bound is one ulp and not the generic two-rounding
+bound of two: the stepped draw is the reference draw scaled once
+(`fl(x*m)`, one rounding within the unit roundoff 2^-53 of the true
+product) and the un-scale divides the same multiplier out (a second
+rounding). The exact quotient `fl(x*m)/m = x*(1 + d)` with
+`|d| <= 2^-53` sits strictly inside one ulp of the reference draw
+(`x*2^-53 < ulp(x)` for x in its binade, since x < 2^(e+1) there), and
+rounding that quotient to nearest can only land on the reference draw
+or one of its immediate neighbours: the intermediate error is bounded
+by the product's half-ulp, not by a half-ulp of the result, so the two
+roundings cannot compose to two ulps of x. The preconditions are a
+normal product and quotient (subnormal rounding carries unbounded
+relative error): the stated draws and the band's multipliers (0.25 to
+2.25) keep every product and quotient between 0.125 W and 2.25e5 W,
+comfortably normal, which is what the range pin sweeps.
+
 The base the aggregate divides by is the reference-voltage draw of the
 operating state the step ran, so it carries the control composition the
 step applied: duty cycle, load fraction, the served space fraction, a
