@@ -83,13 +83,14 @@ fn schedule_rows(dwelling: &Dwelling) -> Vec<Vec<f64>> {
     schedule.columns.clone()
 }
 
-/// The acceptance witness: two homes under the same master seed, the same
-/// HPXML blueprint and no schedule source, must NOT run identical
-/// behavioral schedules. At the diversity layer's absence both homes run
-/// the same default-profile columns, and this assertion fails naming the
-/// first differing column's index (it cannot: there is none).
+/// The acceptance witness: two homes from the same HPXML document under
+/// one master seed and different building ids (two blueprints, since one
+/// blueprint carries one building id) must NOT run identical behavioral
+/// schedules. At the diversity layer's absence both homes run the same
+/// default-profile columns, and the first differing-column assertion
+/// cannot pass.
 #[test]
-fn two_homes_same_blueprint_draw_different_behavior() {
+fn two_homes_with_different_building_ids_draw_different_behavior() {
     let a = Dwelling::from_config(config(1, 42, None)).expect("home a builds");
     let b = Dwelling::from_config(config(2, 42, None)).expect("home b builds");
     let rows_a = schedule_rows(&a);
