@@ -1244,14 +1244,10 @@ impl Equipment for Battery {
             && self.max_discharge_w > 0.0
             && self.soc > soc_floor
             && self.discharge_derate_factor() > 0.0
-<<<<<<< HEAD
-            && self.dr_power_fraction() > 0.0
             && !self
                 .der1547
                 .as_ref()
                 .is_some_and(|controller| controller.state().tripped)
-=======
->>>>>>> 929867db (fix: the island forms one step after the outage and a DR shed cannot collapse it)
     }
 
     fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
