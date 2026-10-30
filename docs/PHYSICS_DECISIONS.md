@@ -1393,7 +1393,13 @@ no weight and the aggregate weights only loads whose response is a
 positive multiplier. A published `deep_sag_scale` is therefore always a
 positive, finite multiplier, and the near-dead bus (the 0.01 pu edge of
 the de-energized boundary) degrades to `None` exactly as the 0.0 pu
-outage does when no load keeps a positive response.
+outage does when no load keeps a positive response. A stepped report
+that is not a draw (a negative watt value, violating
+`ElectricPower::Consumption`'s non-negative invariant, or a non-finite
+one from a broken core state) is no evidence of an observed zero either:
+the roster publishes no weight for it (the unknown-mean semantics) and
+no expected mean stands in for a stepped moment, so a broken report
+never fabricates an "inspected and empty" zero.
 
 ## The pf = 0.0 sentinel is a reactive-only switch (the secondary real response keeps its row)
 
