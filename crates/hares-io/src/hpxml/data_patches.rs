@@ -38,6 +38,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_scenario_patch_fields_are_this_structs_fields() {
+        // The scenario spec's patch-target table (hares_types::PATCH_FIELDS)
+        // claims to name the fields this struct carries. The serde shape is
+        // the struct's field list, so a field added here without the
+        // scenario table (or the reverse) fails: the spec would refuse a
+        // patch the assembly can carry, or admit one it cannot.
+        let serialized = serde_json::to_value(HpxmlDataPatches::default())
+            .expect("the patches serialize to their field map");
+        let mut names: Vec<&str> = serialized
+            .as_object()
+            .expect("the patches serialize to an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        let mut recorded = hares_types::PATCH_FIELDS.to_vec();
+        recorded.sort_unstable();
+        assert_eq!(
+            names, recorded,
+            "the scenario's patch-field table must name exactly this struct's fields"
+        );
+    }
+
+    #[test]
     fn from_resstock_characteristics_extracts_bedrooms() {
         let mut chars = HashMap::new();
         chars.insert("in.bedrooms".to_string(), "3".to_string());

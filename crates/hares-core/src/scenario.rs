@@ -430,6 +430,33 @@ mod tests {
         );
     }
 
+    /// Every patch field the record's table names applies: the table
+    /// (`hares_types::PATCH_FIELDS`) and this module's application match are
+    /// one contract, so a field the assembly can carry but this module
+    /// fails to write (or the reverse) fails here rather than at a user's
+    /// build. The struct's own field list is pinned against the table in
+    /// hares-io (`the_scenario_patch_fields_are_this_structs_fields`).
+    #[test]
+    fn every_recorded_patch_field_applies() {
+        for field in hares_types::PATCH_FIELDS {
+            let sample: ScenarioSample = serde_json::from_value(serde_json::json!({
+                "scenario_id": 1,
+                "bldg_id": 7,
+                "values": [{"name": "patch_value", "value": 3.0, "unit": "count"}],
+                "targets": {"patch_value": {"patch": {"field": field}}}
+            }))
+            .expect("the record parses");
+            let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+            apply_sample(&sample, &mut settings).unwrap_or_else(|err| {
+                panic!("the patch field '{field}' must apply: {err}")
+            });
+            assert!(
+                settings.patches.is_some(),
+                "the patch field '{field}' must land in the settings"
+            );
+        }
+    }
+
     /// The hand-written record's extra fault classes refuse at the
     /// application with the settings untouched: a repeated value name
     /// (the duplicates would apply last wins) and a target whose name
