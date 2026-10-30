@@ -1281,11 +1281,13 @@ impl CoolingCore {
         let dt_min = dt.as_secs_f64() / 60.0;
         if self.operating_mode == OperatingMode::Cooling {
             // The ideal path's starvation census: an ideal step with no
-            // capacity signal this step delivered nothing (the PLR arms
-            // below read zero). Counted, never silent: the starvation's
-            // cause is a mode flip downstream of the solver-feedback
-            // phase, and a rising count is the trace a dispatch-order
-            // regression leaves.
+            // capacity signal this step runs the raw thermostat duty (the
+            // PLR arms below fall through to the duty cycle, 1.0 on the
+            // ideal path), so the delivery is the unit's full rated
+            // capacity unmetered to the zone's need. Counted, never
+            // silent: the starvation's cause is a mode flip downstream of
+            // the solver-feedback phase, and a rising count is the trace a
+            // dispatch-order regression leaves.
             if self.use_ideal && !self.ideal_capacity_signal_arrived {
                 self.ideal_capacity_unsolved_steps += 1;
             }
@@ -3927,6 +3929,81 @@ mod tests {
         assert!(
             (rtf - 1.0).abs() < 1e-9,
             "an exact variable-speed stage match must run continuously, got runtime_fraction={rtf}"
+        );
+    }
+
+    /// The starved ideal step's fallback, pinned: an ideal Cooling step
+    /// with no solved capacity arriving runs the unit's raw thermostat
+    /// duty (the ideal path's PLR arm falls through to the duty cycle,
+    /// 1.0), so the step delivers the full rated capacity unmetered to
+    /// the zone's need; the health count records the starvation beside
+    /// it. The delivery is the unmetered fallback the count makes
+    /// visible, never nothing.
+    #[test]
+    fn a_starved_ideal_step_delivers_the_raw_duty_and_the_count_records_it() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        // The coarse timestep puts the unit on the ideal path.
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "the zone is past the cooling setpoint: the thermostat calls"
+        );
+
+        // No IdealCapacity this step: the solve never reached the unit.
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(f64::NAN);
+        assert!(
+            (rtf - 1.0).abs() < 1e-9,
+            "the starved ideal step runs the raw duty, not nothing: \
+             runtime_fraction {rtf}"
+        );
+        assert!(
+            ports.electrical.net_active_w() > 0.0,
+            "the fallback draws the unit's full rated power, got {} W",
+            ports.electrical.net_active_w()
+        );
+        let counts = eq.take_health_counts();
+        assert_eq!(
+            counts.ideal_capacity_unsolved_steps, 1,
+            "the starvation is counted, never silent"
+        );
+
+        // The next step's solve arrives: the delivery is the solved
+        // capacity's share and nothing is counted.
+        eq.update_control(&environment);
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -2_000.0,
+            degraded: false,
+        })
+        .unwrap();
+        ports.zero();
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let solved_rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(f64::NAN);
+        assert!(
+            solved_rtf < 0.5,
+            "the solved capacity's share is well under the full duty, got \
+             runtime_fraction {solved_rtf}"
+        );
+        assert_eq!(
+            eq.take_health_counts().ideal_capacity_unsolved_steps,
+            0,
+            "a solved step is not a starvation"
         );
     }
 

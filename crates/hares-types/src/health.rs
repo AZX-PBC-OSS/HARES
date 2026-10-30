@@ -50,8 +50,12 @@ pub struct EquipmentHealthCounts {
     /// Total number of ideal-path steps the pipeline starved of a solved
     /// capacity: the equipment ran its ideal control with no capacity
     /// signal this step (the mode flipped after the solver-feedback
-    /// phase), so the delivery was nothing. The unmetered alternative is
-    /// the unit's full rated duty for the step.
+    /// phase), so the delivery was the raw thermostat duty, unmetered to
+    /// the zone's need (the full rated capacity on a single-speed ideal
+    /// path, the band estimate on a variable-speed one). The count is
+    /// that fallback's visibility: a rising count is the trace a dispatch
+    /// order regression leaves, and the fallback's energy is the unit's
+    /// own rated duty for the step.
     pub ideal_capacity_unsolved_steps: u64,
 }
 

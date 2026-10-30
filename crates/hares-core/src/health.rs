@@ -109,10 +109,10 @@ pub struct RunHealth {
     pub cross_tier_deadband_events: u64,
     /// Ideal-path HVAC steps the pipeline starved of a solved capacity
     /// (the equipment's mode flipped after the solver-feedback phase: a
-    /// post-event release, an override release). The step delivered
-    /// nothing; the count is the starvation's visibility, and the
-    /// unmetered full-duty delivery it replaces was the post-curtailment
-    /// rebound defect.
+    /// post-event release, an override release). The step ran the raw
+    /// thermostat duty instead, unmetered to the zone's need; the count
+    /// is that fallback's visibility, and its energy is the unit's own
+    /// rated duty for the step.
     pub ideal_capacity_unsolved_steps: u64,
     /// Energy the failed equipment's committed internal state kept from a
     /// rolled-back step [Wh, signed]: the state's energy delta across the
