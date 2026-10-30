@@ -6646,6 +6646,77 @@ mod tests {
         );
     }
 
+    /// The DR countdown is checkpoint state: the level and the remaining
+    /// duration ride `save_state`/`load_state` verbatim, so an event
+    /// spanning a checkpoint/restore boundary releases on the schedule
+    /// the duration named. A restore that dropped the countdown would
+    /// publish Normal on the first restored step; one that reset the
+    /// duration would release a step late.
+    #[test]
+    fn dr_event_countdown_survives_a_checkpoint_round_trip() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+
+        // The first of the event's three named steps runs, then the
+        // checkpoint is taken: one step of the duration is consumed.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let published = bat
+            .telemetry()
+            .get(tk::DR_POWER_FRACTION)
+            .expect("the battery publishes its DR fraction");
+        assert_eq!(published, 0.0, "the event's first named step sheds");
+        let state = bat.save_state().expect("checkpoint");
+
+        let mut restored = Battery::new(config.clone());
+        restored.init(&config, &env).expect("init");
+        restored.load_state(&state).expect("restore");
+
+        // The event's last two named steps shed on the restored unit.
+        for step in 0..2 {
+            restored.update_control(&env);
+            let mut ports = default_ports();
+            restored
+                .step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let published = restored
+                .telemetry()
+                .get(tk::DR_POWER_FRACTION)
+                .expect("the battery publishes its DR fraction");
+            assert_eq!(
+                published, 0.0,
+                "step {step}: the restored countdown keeps the event in \
+                 force through its named steps"
+            );
+        }
+
+        // The step after: the release, on the schedule the duration
+        // named (the restore consumed nothing and added nothing).
+        restored.update_control(&env);
+        let mut ports = default_ports();
+        restored
+            .step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let published = restored
+            .telemetry()
+            .get(tk::DR_POWER_FRACTION)
+            .expect("the battery publishes its DR fraction");
+        assert_eq!(
+            published, 1.0,
+            "the restored event ends on the schedule its duration named"
+        );
+    }
+
     // ---------------------------------------------------------------
     // 4D LUT and Equipment trait LUT method tests
     // ---------------------------------------------------------------
