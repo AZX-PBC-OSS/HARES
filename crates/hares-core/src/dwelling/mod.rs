@@ -17394,6 +17394,86 @@ occupancy = 1.0
         );
     }
 
+    /// The air conditioner's null-until-first-cooling telemetry timeline
+    /// (`ac_config.rs`'s `default_telemetry`: the SHR key registers at the
+    /// first cooling step) survives a dwelling checkpoint round trip: a
+    /// home whose cooling equipment never cooled restores with the
+    /// continuously-run twin's telemetry key set. The restore wrote
+    /// `tk::SHR` unconditionally, so the restored home's equipment map grew
+    /// an `shr` key (a 1.0 sentinel from the config fallback) the
+    /// continuous home never holds.
+    #[test]
+    fn restored_never_cooled_ac_telemetry_matches_the_continuous_twin() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let home = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
+        // Late February: the ASHP cooler sees no cooling call in five
+        // overnight steps.
+        let sim_config = SimulationConfig::from_toml(
+            r#"
+start_time = "2024-02-27T00:00:00-07:00"
+duration = 4500
+time_res = 900
+warmup = "disabled"
+master_seed = 0
+"#,
+        )
+        .expect("sim config parses");
+        let build = || {
+            Dwelling::from_config(DwellingConfig {
+                hpxml: InputSource::Path(home.join("building.xml")),
+                schedule: Some(InputSource::Path(home.join("schedule.csv"))),
+                weather: WeatherInput::Path(home.join("weather.epw")),
+                defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
+                settings: DwellingSettings::new(sim_config.clone(), None, 1, None),
+            })
+            .expect("dwelling builds")
+        };
+
+        let mut continuous = build();
+        for _ in 0..5 {
+            continuous.step().expect("step succeeds");
+        }
+
+        let mut saved = build();
+        for _ in 0..5 {
+            saved.step().expect("step succeeds");
+        }
+        let checkpoint = saved.save_checkpoint().expect("save checkpoint");
+        let mut restored = build();
+        restored
+            .load_checkpoint(checkpoint)
+            .expect("load checkpoint");
+
+        let cooler_keys = |dwelling: &Dwelling| {
+            let mut keys: Vec<String> = dwelling
+                .equipment
+                .iter()
+                .find(|eq| eq.descriptor().name == "ASHP Cooler")
+                .unwrap_or_else(|| panic!("the fixture home builds an ASHP cooler"))
+                .telemetry()
+                .0
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort_unstable();
+            keys
+        };
+        // The scenario's own pin: zero cooling steps on both sides, the
+        // continuous home's map without the key.
+        assert!(
+            !cooler_keys(&continuous).iter().any(|key| key == tk::SHR),
+            "the witness needs a never-cooled cooling unit"
+        );
+        assert_eq!(
+            cooler_keys(&restored),
+            cooler_keys(&continuous),
+            "the restored never-cooled cooling unit's telemetry map ({} keys) must \
+             carry exactly the continuous twin's keys ({} keys)",
+            cooler_keys(&restored).len(),
+            cooler_keys(&continuous).len()
+        );
+    }
+
     #[test]
     fn checkpoint_actor_state_round_trips_with_schema_version() {
         // An actor's mutable decision-state must survive a dwelling

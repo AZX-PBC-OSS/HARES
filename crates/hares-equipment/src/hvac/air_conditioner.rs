@@ -177,7 +177,12 @@ struct AirConditionerState {
     electric_w: f64,
     sensible_cooling_w: f64,
     latent_cooling_w: f64,
-    shr: f64,
+    /// The last cooling step's SHR, `None` while the unit has never cooled:
+    /// the telemetry map's null-until-first-cooling timeline (the step
+    /// registers the key at the first cooling step) survives the round
+    /// trip, so a restored never-cooled unit's map matches a
+    /// continuously-run one's.
+    shr: Option<f64>,
     // --- Sticky control signals ---
     ctrl_duty_cycle: f64,
     /// None means unlimited; f64::INFINITY does not serialize cleanly with postcard.
@@ -202,7 +207,11 @@ struct AirConditionerState {
 // code is now always recomputed from `operating_mode` via `OperatingMode::as_code`).
 // Version 3: added `min_on_time_s`/`min_off_time_s` for short-cycle protection persistence.
 // Version 4: added `startup_was_on` for edge-detection persistence across checkpoint restart.
-const AC_CHECKPOINT_VERSION: u32 = 4;
+// Version 5: `shr` became `Option<f64>`: `None` until the unit's first
+// cooling step, so the restore writes the telemetry key only when a cooled
+// step produced a value and a restored never-cooled unit's map matches a
+// continuously-run one's instead of gaining a 1.0 sentinel key.
+const AC_CHECKPOINT_VERSION: u32 = 5;
 
 #[derive(Clone, Copy)]
 struct PerformanceResult {
@@ -1992,7 +2001,10 @@ impl CoolingCore {
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
                 latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
-                shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.config.shr),
+                // The key's presence is the cooled marker: an absent key
+                // (the unit has never cooled) saves `None`, a present one
+                // the last cooling step's value.
+                shr: self.telemetry.get(tk::SHR),
                 ctrl_duty_cycle: self.ctrl_duty_cycle,
                 ctrl_power_limit_w: if self.ctrl_power_limit_w.is_finite() {
                     Some(self.ctrl_power_limit_w)
@@ -2040,7 +2052,13 @@ impl CoolingCore {
         self.hvac.runtime.plf_state = decoded.plf_state;
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
-        self.hvac.config.shr = decoded.shr;
+        // The restored state's SHR is `None` until the unit's first cooling
+        // step, as the continuous path's is: the last computed value rides
+        // only when a cooled step produced one, and a never-cooled unit
+        // keeps the init-time coil state.
+        if let Some(shr) = decoded.shr {
+            self.hvac.config.shr = shr;
+        }
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
         self.ctrl_power_limit_w = decoded.ctrl_power_limit_w.unwrap_or(f64::INFINITY);
         self.ctrl_mode_override = decoded.ctrl_mode_override;
@@ -2063,7 +2081,13 @@ impl CoolingCore {
             .insert(tk::SENSIBLE_COOLING_W, decoded.sensible_cooling_w);
         self.telemetry
             .insert(tk::LATENT_COOLING_W, decoded.latent_cooling_w);
-        self.telemetry.insert(tk::SHR, decoded.shr);
+        // The step's own write: registered at the first cooled restore,
+        // updated in place after, so the restored map carries the key only
+        // when a cooling step produced a value: the null-until-first-
+        // cooling timeline a continuously-run never-cooled unit holds.
+        if let Some(shr) = decoded.shr {
+            self.telemetry.set_or_register(tk::SHR, shr);
+        }
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         // Rebuild the restore-instant output from the persisted step
@@ -3155,6 +3179,132 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("an air conditioner checkpoint must restore a contract-valid output");
+    }
+
+    /// Three idle steps against the shared ports: the zone sits below the
+    /// cooling band, so the thermostat never calls and no step cools.
+    fn step_idle_windows(eq: &mut AirConditioner, ports: &mut PortSlots) {
+        for second in [0, 60, 120] {
+            let env = env_at_second(20.0, 20.0, second);
+            eq.update_control(&env);
+            eq.step(&env, Duration::from_secs(60), ports).unwrap();
+            ports.zero();
+        }
+    }
+
+    /// The null-until-first-cooling contract (`default_telemetry`: no SHR
+    /// insert, the step writes the key only when the step's sensible cooling
+    /// is above 0) holds on the restore path: a never-cooled unit's
+    /// checkpoint round trip restores exactly the continuously-run twin's
+    /// telemetry key set. The checkpoint's telemetry face is the step's
+    /// five carried keys and the next step rewrites the rest, so the pin is
+    /// the key set: the restore's unconditional `tk::SHR` insert grew the
+    /// map to 50 keys against the twin's 49, a `shr` cell the continuous
+    /// unit never publishes.
+    #[test]
+    fn restored_never_cooled_map_matches_the_never_restored_twin() {
+        let cfg = ac_config();
+        let environment = env(20.0, 0.008, 15.0, 20.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        step_idle_windows(&mut eq, &mut ports);
+        let state = eq.save_state().unwrap();
+
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        restored.load_state(&state).unwrap();
+
+        let mut twin = AirConditioner::new(cfg.clone());
+        twin.init(&cfg, &environment).unwrap();
+        step_idle_windows(&mut twin, &mut ports);
+
+        let mut restored_keys: Vec<&str> =
+            restored.telemetry().0.keys().map(String::as_str).collect();
+        restored_keys.sort_unstable();
+        let mut twin_keys: Vec<&str> = twin.telemetry().0.keys().map(String::as_str).collect();
+        twin_keys.sort_unstable();
+
+        assert!(
+            !restored_keys.contains(&tk::SHR),
+            "a restored never-cooled unit's map must not carry an shr key"
+        );
+        assert_eq!(
+            restored_keys,
+            twin_keys,
+            "the restored never-cooled map ({} keys) must carry exactly the \
+             continuously-run twin's keys ({} keys)",
+            restored_keys.len(),
+            twin_keys.len()
+        );
+    }
+
+    /// Once cooled, the key persists with the last cooling step's value: the
+    /// step's write is `set_or_register` (registered at the first cooling
+    /// step, updated in place after) and an idle step leaves it alone, so a
+    /// cooled-then-idle unit still carries the key at checkpoint time and
+    /// the restore brings it back with that value. Gating the restore's
+    /// write on the unit's activity at the checkpoint instant would lose the
+    /// key for exactly this idle-after-cooling unit.
+    #[test]
+    fn restored_cooled_then_idle_map_keeps_the_last_shr() {
+        let cfg = ac_config();
+        let cool_env = env_at_second(28.0, 35.0, 0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &cool_env).unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&cool_env);
+        eq.step(&cool_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        ports.zero();
+        let last_shr = eq
+            .telemetry()
+            .get(tk::SHR)
+            .expect("the cooling step registers the shr key");
+
+        step_idle_windows(&mut eq, &mut ports);
+        assert_eq!(
+            eq.telemetry().get(tk::SHR),
+            Some(last_shr),
+            "an idle step leaves the last cooling value in the map"
+        );
+        let state = eq.save_state().unwrap();
+
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &cool_env).unwrap();
+        restored.load_state(&state).unwrap();
+
+        let mut twin = AirConditioner::new(cfg.clone());
+        twin.init(&cfg, &cool_env).unwrap();
+        twin.update_control(&cool_env);
+        twin.step(&cool_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        ports.zero();
+        step_idle_windows(&mut twin, &mut ports);
+
+        assert_eq!(
+            restored.telemetry().get(tk::SHR),
+            Some(last_shr),
+            "the restored cooled-then-idle unit keeps the last cooling value"
+        );
+        let mut restored_keys: Vec<&str> =
+            restored.telemetry().0.keys().map(String::as_str).collect();
+        restored_keys.sort_unstable();
+        let mut twin_keys: Vec<&str> = twin.telemetry().0.keys().map(String::as_str).collect();
+        twin_keys.sort_unstable();
+        assert_eq!(
+            restored_keys, twin_keys,
+            "the restored cooled-then-idle map must carry exactly the \
+             continuously-run twin's keys"
+        );
     }
 
     #[test]
