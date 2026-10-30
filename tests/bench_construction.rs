@@ -120,62 +120,66 @@ fn bench_checkpoint_bench_is_registered() {
 }
 
 /// The CI bench job's gate set is the complete registered set: every
-/// `[[bench]]` entry across EVERY workspace member's manifest is named
-/// with `--bench <name>` on EVERY gated `cargo bench` command line the
-/// bench job runs: the baseline generation, the PR run, and the
-/// confirmation re-run of flagged benches (a bench missing from the
-/// confirmation line's flags could never be re-run, so a regression on
-/// it could never confirm and the job would pass it silently). The
-/// members are enumerated by `cargo metadata` at test time, the bench
-/// names parsed from each member's manifest, so a bench added to any
-/// crate's manifest (hares-fleet's or hares-io's included) without a CI
-/// flag fails this test the same way the five ungated benches this test
-/// was written against do.
+/// `[[bench]]` entry across EVERY workspace member's manifest is named in
+/// the gate script's `BENCH_TARGETS`, and the bench job runs the script's
+/// paired rounds over that array (the baseline build, the screen round and
+/// the confirmation rounds all take their set from it, so a bench the
+/// array omits is never built, never paired and never confirmable: a
+/// regression on it would pass the job silently). The members are
+/// enumerated by `cargo metadata` at test time and the bench names parsed
+/// from each member's manifest, so a bench added to any crate's manifest
+/// (hares-fleet's or hares-io's included) without an array entry fails
+/// this test the same way the five ungated benches this test was written
+/// against do.
 #[test]
 fn ci_bench_job_gates_every_registered_bench() {
     let registered = registered_bench_names();
-    let ci = include_str!("../.github/workflows/ci.yml");
-    let commands = bench_job_command_lines(ci);
+    let gated = gated_bench_names();
     assert!(
-        commands.len() >= 2,
-        "the bench job's baseline and PR command lines did not parse \
-         from ci.yml: {commands:?}"
+        gated.len() >= 10,
+        "the gate script's BENCH_TARGETS parsed to fewer than the ten \
+         registered benches: {gated:?}"
     );
-    for command in &commands {
-        let missing = ungated_benches(&registered, command);
-        assert!(
-            missing.is_empty(),
-            "a gated CI bench command line does not name every registered \
-             bench: missing {missing:?} on {command:?}"
-        );
-    }
+    let missing: Vec<&str> = registered
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !gated.iter().any(|target| target == name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the gate script's BENCH_TARGETS does not name every registered \
+         bench: missing {missing:?} from {gated:?}"
+    );
+    assert!(
+        bench_job_runs_the_gate(),
+        "the bench job no longer invokes the gate script's paired rounds: \
+         the BENCH_TARGETS array would then gate nothing"
+    );
 }
 
-/// The gate's teeth: a bench that is registered but named on no gated
-/// command line is refused. The fixture world is the real enumerated
-/// set plus one phantom bench no ci.yml line carries; the same refusal
-/// the coverage gate runs must name the phantom on every gated command
-/// line. A parser that refuses nothing fails here; a parser that
+/// The gate's teeth: a bench that is registered but absent from the gate
+/// script's `BENCH_TARGETS` is refused. The fixture world is the real
+/// enumerated set plus one phantom bench the array does not carry; the
+/// same refusal the coverage gate runs must name the phantom, and only
+/// the phantom (the real set is gated, or the coverage gate above fails
+/// first). A parser that refuses nothing fails here; a parser that
 /// refuses everything fails the coverage gate above.
 #[test]
 fn ci_bench_gate_refuses_a_registered_but_ungated_bench() {
     let mut registered = registered_bench_names();
     registered.push("phantom_ungated_bench".to_string());
-    let ci = include_str!("../.github/workflows/ci.yml");
-    let commands = bench_job_command_lines(ci);
-    assert!(
-        commands.len() >= 2,
-        "the bench job's baseline and PR command lines did not parse \
-         from ci.yml: {commands:?}"
+    let gated = gated_bench_names();
+    let missing: Vec<&str> = registered
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !gated.iter().any(|target| target == name))
+        .collect();
+    assert_eq!(
+        missing,
+        vec!["phantom_ungated_bench"],
+        "the gate did not refuse exactly the registered bench absent from \
+         BENCH_TARGETS: refused {missing:?} from {gated:?}"
     );
-    for command in &commands {
-        let missing = ungated_benches(&registered, command);
-        assert!(
-            missing.contains(&"phantom_ungated_bench"),
-            "the gate did not refuse a registered bench no gated command \
-             line names: refused only {missing:?} on {command:?}"
-        );
-    }
 }
 
 /// The `[[bench]]` names across every workspace member's manifest,
@@ -230,29 +234,41 @@ fn registered_bench_names() -> Vec<String> {
     registered
 }
 
-/// The bench job's gated `cargo bench` command lines: every workflow
-/// line that statically enumerates bench targets with `--bench` flags.
-/// The gate runs three of them (the baseline generation, the PR run,
-/// and the confirmation re-run of flagged benches, whose flags
-/// enumerate the search space its positional filter selects from); the
-/// step summary's echoed example command mentions `cargo bench` with no
-/// flag at all, so the `--bench ` requirement is what tells an
-/// invocation from prose.
-fn bench_job_command_lines(ci: &str) -> Vec<&str> {
-    ci.lines()
-        .filter(|line| line.contains("cargo bench") && line.contains("--bench "))
-        .collect()
+/// The gate script's bench set: the entries of its `BENCH_TARGETS` array,
+/// in declaration order. One array, one parser: `build-binaries` builds
+/// exactly these targets, `rounds` runs exactly them per side per round,
+/// and the confirmation's filter selects from their benchmark ids.
+fn gated_bench_names() -> Vec<String> {
+    let script = include_str!("../.github/scripts/bench-gate.sh");
+    let mut names: Vec<String> = Vec::new();
+    let mut in_array = false;
+    for line in script.lines() {
+        if !in_array {
+            in_array = line.trim_start().starts_with("BENCH_TARGETS=(");
+            continue;
+        }
+        let text = line.trim();
+        if text == ")" {
+            break;
+        }
+        names.extend(text.split_whitespace().map(str::to_string));
+    }
+    names
 }
 
-/// The registered benches one gated command line fails to name: the
-/// meta-gate's refusal list for that line. Empty means the line's gate
-/// set is the complete registered set.
-fn ungated_benches<'a>(registered: &'a [String], command: &str) -> Vec<&'a str> {
-    registered
+/// The bench job runs the gate script's own three stages: the binaries'
+/// build, the paired rounds, and the comparison that pairs them. The
+/// workflow names no bench itself, so the script's array is the only
+/// place a bench is gated.
+fn bench_job_runs_the_gate() -> bool {
+    let ci = include_str!("../.github/workflows/ci.yml");
+    let calls: Vec<&str> = ci
+        .lines()
+        .filter(|line| line.contains("bench-gate.sh"))
+        .collect();
+    ["build-binaries", "rounds", "paired"]
         .iter()
-        .map(String::as_str)
-        .filter(|name| !command.contains(&format!("--bench {name} ")))
-        .collect()
+        .all(|stage| calls.iter().any(|line| line.contains(stage)))
 }
 
 /// The `[[bench]]` entries' names in one manifest's text, in declaration

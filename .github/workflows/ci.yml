@@ -156,10 +156,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # jq and bash only: the gate's statistic (median) and its
-      # confirmation logic carry their own proof, including the recorded
-      # false positive (a runner stall poisoning a mean) and a real
-      # regression that reproduces on the confirmation input.
+      # jq and bash only: the gate's statistic (median), its interleaved
+      # pairing and its confirmation logic carry their own proof,
+      # including the recorded false positive (a runner stall poisoning a
+      # mean), the recorded within-job drift (a sequential base-then-head
+      # phase shift the paired rounds absorb), a real regression that
+      # reproduces on the confirmation rounds, and an unpaired new
+      # benchmark.
       - run: bash .github/scripts/bench-gate.sh test
 
   test:
@@ -401,106 +404,109 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
-      - name: Generate baseline
+      # The baseline's and the head's benchmark binaries are built once
+      # each, in this job, on this runner, in this sitting, and the rounds
+      # then ALTERNATE them per benchmark. The earlier design ran the whole
+      # base suite and then the whole head suite: any drift inside the job
+      # (CPU steal, page-fault behaviour, allocator state) landed after the
+      # base phase and was charged to the head. rl_step/dwelling_step_single
+      # measured 36.6us on the base and 3.5ms on the head of one job (a
+      # stable +9455 percent, 3.4 percent relative stddev) while the same
+      # two trees measure indistinguishable paired; the confirmation re-run
+      # reproduced it because it re-ran in the same shifted sitting. A base
+      # tree whose benches cannot build is unproducible: the step is
+      # tolerated, the comparison below notices the missing binaries and
+      # skips, and the PR's own benchmark run is still gated by the
+      # bench-check job.
+      - name: Build the baseline's benchmark binaries
         if: env.BASE_SHA != ''
-        # The baseline is generated IN THIS JOB, on THIS runner, in THIS
-        # sitting - every time. The earlier actions/cache step defeated
-        # the pairing: a cached baseline came from a different runner's
-        # sitting, and the cross-sitting variance (measured at up to 25
-        # percent) blew through the 20 percent gate as false positives.
-        # Same runner, same sitting: the comparison carries no machine
-        # variance, so the 20 percent threshold measures the change, not
-        # the runner. A baseline from a base whose benches cannot run (a
-        # construction guard the base's own fixtures predate) is
-        # unproducible: the step is tolerated, the comparison below
-        # notices the missing file and skips, and the PR's own benchmark
-        # run above still gates the job. The gate self-heals when a tree
-        # with runnable benches merges.
         continue-on-error: true
         run: |
+          # The gate script itself is the head's: the base tree predates
+          # the paired design, so its copy is not the one that runs.
+          cp .github/scripts/bench-gate.sh "$RUNNER_TEMP/bench-gate.sh"
           git checkout "$BASE_SHA"
-          cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver --bench metrics_request --bench rl_episode --bench output_row_plan --bench diagnostics_report --bench thermal_step --bench checkpoint -- --save-baseline baseline
-          critcmp --export baseline > baseline.json
+          bash "$RUNNER_TEMP/bench-gate.sh" build-binaries "$PWD/target/base-bench"
       - name: Restore PR branch
         if: env.BASE_SHA != ''
         run: git checkout ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Run PR benchmarks
-        run: cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver --bench metrics_request --bench rl_episode --bench output_row_plan --bench diagnostics_report --bench thermal_step --bench checkpoint -- --save-baseline pr
-      - name: Compare with baseline
+      - name: Build the PR's benchmark binaries
+        run: bash .github/scripts/bench-gate.sh build-binaries "$PWD/target/head-bench"
+      - name: Run the interleaved paired rounds
         run: |
-          if [ ! -f baseline.json ]; then
-            echo "::notice::No baseline data available — comparison skipped"
+          if [ -z "$(ls -A target/base-bench 2>/dev/null)" ]; then
+            echo "::notice::No baseline benchmark binaries could be built at the base commit: comparison skipped"
             exit 0
           fi
-          critcmp --export pr > current.json
 
-          echo '## Benchmark Comparison' >> "$GITHUB_STEP_SUMMARY"
-          critcmp baseline.json current.json >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          # One screen round: each benchmark runs base then head back to
+          # back (the order flips with the round number), so the same
+          # bench's two samples sit minutes apart in the same environment
+          # instead of one phase and one rebuild apart. One round over the
+          # whole suite is what the job's wall time affords; the median
+          # over repeated rounds belongs to the confirmation below, which
+          # only ever re-runs the flagged benchmarks.
+          bash .github/scripts/bench-gate.sh rounds 1 1
 
-          echo "::group::Benchmark Comparison"
-          critcmp baseline.json current.json 2>&1 | tee compare.txt
-          echo "::endgroup::"
+          echo '## Benchmark Comparison (the interleaved screen round)' >> "$GITHUB_STEP_SUMMARY"
+          PAIRED=$(bash .github/scripts/bench-gate.sh paired \
+            target/bench-rounds/base-r1.json target/bench-rounds/head-r1.json)
 
-          # The gate's statistic is criterion's MEDIAN point estimate,
-          # not the mean. A single runner stall drags a mean far past
-          # this gate (run 40633875876: 911.3 +/- 956.47us on
-          # rl_episode/batch_step/step_and_observe/16, +30.3%, while the
-          # identical per-element path at /64 and /256 measured 1.00
-          # exactly); the median of the same sample set barely moves.
-          # The threshold stays 20 percent and the paired base-then-head
-          # structure above stays as it was.
-          #
-          # A flag is real only if it reproduces: flagged benchmarks get
-          # exactly one confirmation re-run of ONLY the flagged benches
-          # (criterion's single positional FILTER argument, an anchored
-          # alternation of the flagged ids), re-exported and re-compared
-          # against the SAME baseline.json with the same median
-          # statistic. The job fails only when the flag reproduces.
-          FLAGGED=$(bash .github/scripts/bench-gate.sh flag baseline.json current.json)
-          FLAGGED_COUNT=$(jq '.regressions | length' <<<"$FLAGGED")
+          UNPAIRED=$(jq -r '.unpaired | join(", ")' <<<"$PAIRED")
+          if [ -n "$UNPAIRED" ]; then
+            echo "::notice::benchmarks without a sample in every round are not gated: $UNPAIRED"
+            echo "Unpaired (a new benchmark has no baseline; never gated): $UNPAIRED" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
+          FLAGGED_COUNT=$(jq '.regressions | length' <<<"$PAIRED")
           if [ "$FLAGGED_COUNT" -eq 0 ]; then
-            echo "No benchmark regressions exceed 20% threshold"
+            echo "No benchmark regressions exceed 20% threshold on the interleaved screen round"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "No benchmark's head/base ratio exceeds the 20% threshold on the interleaved screen round." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
           {
-            echo "## Benchmarks flagged by the median gate (>20% slower)"
-            bash .github/scripts/bench-gate.sh table "$FLAGGED"
             echo ""
-            echo "rel stddev and rel MAD are the current run's own uncertainty (criterion's std_dev and median_abs_dev over the current median, from the same JSON): a flagged delta far inside its run's uncertainty is a stall, not a regression."
+            echo "## Benchmarks flagged by the paired gate (>20% slower on the screen round)"
+            bash .github/scripts/bench-gate.sh table "$PAIRED"
             echo ""
-            echo "Re-running ONLY the flagged benchmarks once, against the same baseline:"
+            echo "per-round (head/base) is each round's own ratio; the screen is one round, so the spread columns read n/a and the confirmation rounds are what judge the flag. A genuine regression lands in every round; a sitting drift lands on both sides of the round it occupies."
+            echo ""
+            echo "Re-running ONLY the flagged benchmarks in three fresh interleaved rounds (order flipped each round):"
             echo ""
             echo '```'
-            echo "cargo bench ... -- --save-baseline pr \"\$(bash .github/scripts/bench-gate.sh filter <<< \$FLAGGED)\""
+            echo "bash .github/scripts/bench-gate.sh rounds 2 3 \"\$(bash .github/scripts/bench-gate.sh filter <<< \$PAIRED)\""
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "::group::Confirmation re-run of the flagged benchmarks"
-          BENCH_FILTER=$(bash .github/scripts/bench-gate.sh filter <<<"$FLAGGED")
-          echo "Re-running: $(jq -r '[.regressions[].name] | join(", ")' <<<"$FLAGGED")"
-          cargo bench --bench single_building --bench fleet --bench rl_step --bench rc_solver --bench metrics_request --bench rl_episode --bench output_row_plan --bench diagnostics_report --bench thermal_step --bench checkpoint -- --save-baseline pr "$BENCH_FILTER"
+          echo "::group::Confirmation rounds of the flagged benchmarks"
+          BENCH_FILTER=$(bash .github/scripts/bench-gate.sh filter <<<"$PAIRED")
+          echo "Re-running: $(jq -r '[.regressions[].name] | join(", ")' <<<"$PAIRED")"
+          bash .github/scripts/bench-gate.sh rounds 2 3 "$BENCH_FILTER"
           echo "::endgroup::"
 
-          critcmp --export pr > confirmed.json
-          CONFIRMED=$(bash .github/scripts/bench-gate.sh flag baseline.json confirmed.json)
+          CONFIRM_FILES=()
+          for r in 2 3 4; do
+            CONFIRM_FILES+=("target/bench-rounds/base-r$r.json" "target/bench-rounds/head-r$r.json")
+          done
+          CONFIRMED=$(bash .github/scripts/bench-gate.sh paired "${CONFIRM_FILES[@]}")
           CONFIRMED_COUNT=$(jq '.regressions | length' <<<"$CONFIRMED")
 
           if [ "$CONFIRMED_COUNT" -gt 0 ]; then
             {
               echo ""
-              echo "## Confirmed regressions (reproduced on the confirmation re-run)"
+              echo "## Confirmed regressions (the paired ratio holds in the confirmation rounds)"
               bash .github/scripts/bench-gate.sh table "$CONFIRMED"
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::${CONFIRMED_COUNT} benchmark(s) still regress more than 20% on the confirmation re-run"
+            echo "::error::${CONFIRMED_COUNT} benchmark(s) still regress more than 20% on the confirmation rounds"
             echo ""
             echo "Confirmed benchmarks:"
-            echo "$CONFIRMED" | jq -r '.regressions[] | "  \(.name): +\(.pct_slower)% (median \(.current_ns)ns vs baseline \(.baseline_ns)ns, rel stddev \(.rel_stddev_pct)%, rel MAD \(.rel_mad_pct)%)"'
+            echo "$CONFIRMED" | jq -r '.regressions[] | "  \(.name): +\(.pct_slower)% (median \(.current_ns)ns vs baseline \(.baseline_ns)ns, per-round \(.per_round_pct | map(tostring) | join(","))%, rel stddev \(.rel_stddev_pct)%, rel MAD \(.rel_mad_pct)%)"'
             exit 1
           fi
 
-          echo "::notice::${FLAGGED_COUNT} benchmark(s) were flagged on the first comparison and the flag did not reproduce on the confirmation re-run; treated as runner noise"
+          echo "::notice::${FLAGGED_COUNT} benchmark(s) were flagged on the screen round and the flag did not reproduce on the confirmation rounds; treated as sitting noise"
           echo ""
-          echo "Flagged on the first pass, not reproduced:"
-          echo "$FLAGGED" | jq -r '.regressions[] | "  \(.name): +\(.pct_slower)% (median \(.current_ns)ns vs baseline \(.baseline_ns)ns, rel stddev \(.rel_stddev_pct)%, rel MAD \(.rel_mad_pct)%)"'
+          echo "Flagged on the screen round, not reproduced:"
+          echo "$PAIRED" | jq -r '.regressions[] | "  \(.name): +\(.pct_slower)% (median \(.current_ns)ns vs baseline \(.baseline_ns)ns, per-round \(.per_round_pct | map(tostring) | join(","))%, rel stddev \(.rel_stddev_pct)%, rel MAD \(.rel_mad_pct)%)"'
