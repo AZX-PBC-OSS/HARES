@@ -478,12 +478,15 @@ impl Der1547Controller {
     /// injection the DER can deliver this step; `p_floor_w` the minimum
     /// injection the droop may drive toward (0 for a generation-only
     /// inverter, the negative charge limit for a battery). The droop's
-    /// reference stays inside [p_floor_w, p_avail_w] in both ramp
-    /// directions: the up-ramp caps at the available injection, and the
-    /// down-ramp floors at the injection floor and also caps at the
-    /// available injection, so a capability that tightened inside a held
-    /// excursion governs the reference the same way it governs the
-    /// model's own output.
+    /// reference composes as the floor-bounded ask capped at the available
+    /// injection, in both ramp directions: the up-ramp rises from the
+    /// anchor but never past the availability, and the down-ramp floors at
+    /// the injection floor and then caps at the availability, so a
+    /// capability that tightened inside a held excursion governs the
+    /// reference the same way it governs the model's own output. The cap
+    /// composes last, so an availability below the floor (a contradictory
+    /// pair: the DER cannot reach the floor's injection) leaves the
+    /// reference at the availability rather than at an unreachable floor.
     ///
     /// A non-finite bus voltage or frequency trips the layer for the step
     /// (fail-safe, matching `GridState::bus_energized`'s NaN robustness: a
@@ -1305,6 +1308,38 @@ mod tests {
         assert!((out.fw_adj_pu - (0.2 - 0.9)).abs() < 1e-12);
     }
 
+    /// The deliverable window's two ends compose in a fixed order: the
+    /// floor-bounded ask, capped at the available injection last. When a
+    /// caller's availability sits below its floor the pair is
+    /// contradictory in injection space (the DER cannot reach the floor's
+    /// injection), and the physical cap governs: the reference is the
+    /// availability, never the floor's unreachable ask. Both ramp
+    /// directions compose the same way.
+    #[test]
+    fn the_availability_caps_the_reference_below_the_floor() {
+        // Over-frequency: a 0.9 pu output asks 0.9 - 0.5/3 = 0.7333 pu;
+        // the floor is 0.2 pu (1000 W) and the availability 0.1 pu
+        // (500 W), below it.
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let _ = one_step(&mut ctrl, 1.0, 60.0, 900.0, 4500.0);
+        let down = ctrl
+            .step(1.0, 60.536, 900.0, true, 4500.0, 500.0, 1000.0)
+            .expect("valid step");
+        assert_eq!(
+            down.p_ref_w, 500.0,
+            "the availability composes last and caps the floor-bounded ask"
+        );
+
+        // Under-frequency: the up-ramp's ask (0.9 + 0.154667 pu) caps at
+        // the same availability.
+        let mut ctrl = controller(&cat2(), 5000.0);
+        let _ = one_step(&mut ctrl, 1.0, 60.0, 900.0, 4500.0);
+        let up = ctrl
+            .step(1.0, 59.5, 900.0, true, 4500.0, 500.0, 1000.0)
+            .expect("valid step");
+        assert_eq!(up.p_ref_w, 500.0);
+    }
+
     /// The pre-disturbance anchor is the model's undrooped output at the
     /// step the deadband is crossed. A controller whose very first step is
     /// the excursion has no earlier step to read, and that step's own
@@ -1471,6 +1506,19 @@ mod tests {
         }
         assert!(out.tripped, "the 300 s window completes on the fifth step");
         assert_eq!(out.trip_reason, trip_reason::OF1);
+        assert_eq!(
+            out.ride_through_s, 300.0,
+            "the firing step reports the window it reached"
+        );
+        // The trip and the droop engage on the same step: the trip wins
+        // and the step takes no frequency-Watt adjustment. The published
+        // adjustment is the step's outcome, not a value the spent anchor
+        // would compute.
+        assert_eq!(
+            out.fw_adj_pu, 0.0,
+            "a firing step takes no droop adjustment"
+        );
+        assert_eq!(ctrl.state().fw_p_pre_pu, None, "the trip clears the anchor");
     }
 
     // -- Return to service (the reconnection delay). --

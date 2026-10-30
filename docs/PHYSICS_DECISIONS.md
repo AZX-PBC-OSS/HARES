@@ -1707,8 +1707,10 @@ enter-service delay as any in-window bus does.
 
 A tripped inverter owes nothing to a demand-response event: its
 delivered interchange is zero while the latch holds (for the
-bidirectional battery inverter neither leg conducts, so only the
-standby draw remains on the port), and the DR level is the grid's
+bidirectional battery inverter neither leg conducts, so the inverter
+throughput is zero and the port carries the standby draw; a cold pack's
+cell heater is a bus load rather than inverter throughput and keeps its
+supply while the utility is up), and the DR level is the grid's
 command rather than the inverter's state, so the trip suspends the
 obligation without spending or clearing it: the DR-scaled discharge
 resumes on the step the latch clears. The same DR fraction bounds the
@@ -1719,8 +1721,9 @@ input carries the cap the delivered export was already under (the
 battery's is the deliverable discharge bound: the DR fraction with the
 export and external power limits, the same composition `clamp_power`
 applies to its own output; the EV's carries the fraction and the
-ceiling net of the pack heater's priority draw, its pre-disturbance
-output already the DR-scaled, heater-budgeted export). A full shed
+resolved leg's own budget, its rating and the pack heater's priority
+draw included, its pre-disturbance output already the DR-scaled,
+heater-budgeted export). A full shed
 (GridEmergency) therefore holds zero export through an under-frequency
 excursion, and a partial shed caps the ramp at the shed level.
 
@@ -1736,13 +1739,17 @@ limit or a full shed. The EV export's floor is zero (a
 generation-only inverter does not absorb), and an under-frequency
 excursion would export a near-reserve pack's heater headroom without
 the availability's heater budget, landing the pack's SOC below its
-reserve floor. Both ramps' references stay inside the deliverable
-window ([floor, available injection]): the up-ramp caps at the
-availability input, and the down-ramp - whose anchor is the crossing
-step's operating point - caps at it too, so a capability that tightened
-inside a held excursion (a falling irradiance, a deepening shed, a
-pack cooling toward its charge floor) governs the reference the same
-way it governs the model's own output.
+reserve floor. Both ramps' references compose as the floor-bounded ask
+capped at the available injection: the up-ramp rises from the anchor and
+caps at the availability input, and the down-ramp - whose anchor is the
+crossing step's operating point - floors at the injection floor and then
+caps at the availability, so a capability that tightened inside a held
+excursion (a falling irradiance, a deepening shed, a pack cooling toward
+its charge floor) governs the reference the same way it governs the
+model's own output. The cap composes last: an availability below the
+floor is a contradictory pair (the DER cannot reach the floor's
+injection), and the availability governs there, so the response never
+commands past what the DER can deliver and never invents the floor.
 
 The composed delivery's order, one table (each corner pinned by its
 named witness; the layer's inputs in parentheses):
@@ -1750,8 +1757,8 @@ named witness; the layer's inputs in parentheses):
 | Class | The delivered power's composition, in order | The corner pin |
 |---|---|---|
 | PV | the array's irradiance output (weather, soiling, shading), then the operator curtailment (fraction, then limit), then the layer's reference, then the DC follows the delivery. The availability input IS the irradiance-capped output, so the layer's window is the whole composition and no caller-side re-clamp exists | `pv::tests::witness_der1547_pv_droop_reference_never_exceeds_the_available_irradiance` (a falling sky inside a held excursion: the composed output is the dim sky's deliverable, not the stale anchor's ask) |
-| Battery | `determine_target_power` (whose `clamp_power` applies the temperature capability and a configured charging-curve LUT), then the layer's reference (the availability input = the deliverable discharge bound, the floor = the deliverable charge bound: the DR fraction, the import/export limits, the external power limit), then `clamp_power` again on the layered reference, then the pack's SOC and thermal machinery | `battery::tests::witness_der1547_battery_droop_absorption_obeys_the_charge_bound` (the import limit, the full shed) and `witness_der1547_layered_reference_delivery_obeys_the_charge_capability` (the cold pack's derate on the delivered charge) |
-| EV (export leg) | `compute_discharge` (the heater's priority budget), then the layer's reference (the availability input = the heater-budgeted ceiling times the DR fraction, the floor = 0) | `ev::tests::witness_der1547_ev_droop_export_obeys_the_heater_budgeted_ceiling` |
+| Battery | `determine_target_power` (whose `clamp_power` applies the temperature capability and a configured charging-curve LUT), then the layer's reference (the availability input = the deliverable discharge bound, the floor = the deliverable charge bound: the DR fraction, the import/export limits, the external power limit), then `clamp_power` again on the layered reference, then the pack's SOC and thermal machinery. The droop runs only on a step the pack is dispatched on: a zeroed row, a dead bus and a disconnected pack take no response (the trip tables still watch) | `battery::tests::witness_der1547_battery_droop_absorption_obeys_the_charge_bound` (the import limit, the full shed), `witness_der1547_layered_reference_delivery_obeys_the_charge_capability` (the cold pack's derate on the delivered charge) and `witness_der1547_an_unavailable_period_takes_no_droop_response` (the zeroed rows) |
+| EV (export leg) | `compute_discharge` (the heater's priority budget), then the layer's reference (the availability input = the resolved leg's own export budget times the DR fraction: its rating, the pack's energy above that leg's floor, and the heater's priority share, never the pack-wide dispatch ceiling that may be a smaller sibling leg's; the floor = 0) | `ev::tests::witness_der1547_ev_droop_export_obeys_the_heater_budgeted_ceiling` and `witness_der1547_ev_droop_availability_is_the_resolved_legs_budget` (both legs enabled: a smaller V2L rating does not bind the V2G leg's reference) |
 | EV (charge leg) | outside the layer entirely: the vehicle's load-side behavior (the charge leg is never the DER function), the droop anchor cleared on the steps it conducts | `ev::tests::witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_side` |
 
 The PV needs no caller-side re-clamp and the battery needs one because
@@ -1767,7 +1774,11 @@ v10 with the layer's state added, so a pre-1547 save (v4, v3, v9) is
 refused with the typed version-mismatch error rather than migrated or
 re-derived; a save taken mid-disturbance restores the exact 1547 state,
 the accumulator's window position included, into the controller the
-configuration built before the load.
+configuration built before the load. Only the layer's own state rides
+the checkpoint: the availability and floor inputs are per-step caller
+values (stateless), so nothing of a capability cap is carried, and a
+restored step recomposes them from its own weather, dispatch and limits
+as the live twin does.
 
 The layer's scope per DER class: the PV's inverter is governed at every
 step (a de-energized bus is the extreme under-voltage: the trip it
@@ -1791,7 +1802,13 @@ there, which keeps a latch already set reported. The battery's inverter
 stays connected and supplied across its dispatch-row zeroing (the HPXML
 unavailable-period convention zeroes the rows, not the connection: its
 standby draw continues), so its trip tables keep watching the bus and an
-excursion on such a step trips it as any other step's would.
+excursion on such a step trips it as any other step's would. Its
+frequency-Watt response does not run there: the period, a dead bus and a
+disconnected pack all command zero interchange, so the layer steps for
+the trip tables alone, the step's published adjustment is zero, and the
+step clears the droop anchor (a step that conducted nothing cannot
+anchor the next ramp). The step the pack is dispatched on re-anchors on
+its own output.
 
 Alternative rejected: defaults always on. The engine's existing
 scenarios (and their goldens and parity fixtures) were built against the

@@ -6528,20 +6528,38 @@ fn witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_si
 /// idle for the step, so an excursion there cannot trip the inverter and
 /// no timer advances; the channels read the run state (the unconfigured
 /// layer's contract is the same shape). The charge leg is load-side and
-/// zeroed with the rest of the vehicle's rows.
+/// zeroed with the rest of the vehicle's rows. The window carried into
+/// the idle step is part-spent, so the freeze is distinguishable from a
+/// reset (zero) and from a stepped advance (a trip): the export returns
+/// into the same disturbance and completes the window where it stopped.
 #[test]
 fn an_unavailable_step_neither_trips_nor_advances_the_export_layer() {
     let config = v2g_config_with_der1547(Some(cat2_settings()));
     let mut ev = Ev::new(config.clone());
-    let mut env = sample_env();
-    env.unavailable_periods.power_outage = true;
-    ev.init(&config, &env).expect("init");
+    ev.init(&config, &sample_env()).expect("init");
     command_v2g_discharge(&mut ev, 3000.0);
 
-    let mut sag = env.clone();
+    // Five seconds into UV1's 10 s window: the disturbance runs and the
+    // layer holds a part-spent window.
+    let mut sag = sample_env();
     sag.grid.voltage_pu = 0.6;
     let mut ports = PortSlots::default();
-    ev.step(&sag, Duration::from_secs(900), &mut ports)
+    ev.step(&sag, Duration::from_secs(5), &mut ports)
+        .expect("step");
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_TRIPPED),
+        Some(0.0),
+        "5 s is inside the 10 s window"
+    );
+    assert_eq!(ev.telemetry().get(tk::DER1547_RIDE_THROUGH_S), Some(5.0));
+
+    // The unavailable step: the sag still holds, but the vehicle's rows
+    // are zeroed and the export function does not conduct, so nothing
+    // trips and the part-spent window stands where it was.
+    let mut idle = sag.clone();
+    idle.unavailable_periods.power_outage = true;
+    let mut ports = PortSlots::default();
+    ev.step(&idle, Duration::from_secs(900), &mut ports)
         .expect("step");
     assert_eq!(
         ev.telemetry().get(tk::DER1547_TRIPPED),
@@ -6773,6 +6791,87 @@ fn witness_der1547_ev_droop_export_obeys_the_heater_budgeted_ceiling() {
         soc >= 0.2 - 1e-12,
         "the step must not spend the reserve the export ceiling protects, \
          got SOC {soc}"
+    );
+}
+
+/// The droop's availability input is the resolved leg's own deliverable
+/// export, not the pack-wide ceiling the dispatch vote reads. With both
+/// legs enabled that ceiling is the tighter of the two (a vote may
+/// resolve to either), but the layer is stepped after the leg resolves:
+/// the export the droop may not exceed is the conducting leg's budget.
+/// An availability borrowed from the smaller sibling binds below the
+/// model's own export and turns the frequency-Watt function into a
+/// curtailment: an under-frequency step cuts a 5000 W V2G export to the
+/// 3000 W V2L rating while the grid asks for more, and an over-frequency
+/// step sheds the whole 2000 W gap instead of the droop's share.
+#[test]
+fn witness_der1547_ev_droop_availability_is_the_resolved_legs_budget() {
+    let two_leg_config = || {
+        let cfg = EvConfig {
+            der_1547: Some(cat2_settings()),
+            v2g_enabled: Some(true),
+            v2l_enabled: Some(true),
+            v2g_soc_reserve: Some(0.2),
+            v2g_max_discharge_w: Some(5000.0),
+            v2l_max_discharge_w: Some(3000.0),
+            initial_soc: Some(0.8),
+            ..minimal_ev_config()
+        };
+        crate::EquipmentConfig::from_typed("EV #1".to_string(), "EV".to_string(), cfg).unwrap()
+    };
+
+    // Under-frequency: 59.5 Hz is 0.464 Hz below the 59.964 Hz edge, so
+    // the ramp asks 0.154667 pu above the 1.0 pu the V2G leg exports.
+    // The leg cannot deliver past its 5000 W rating: the cap binds and
+    // the export holds at 5000 W with no adjustment.
+    let config = two_leg_config();
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 5000.0);
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::from_secs(900), &mut ports)
+        .expect("step");
+    assert!(
+        (ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0) + 5000.0).abs() < 1e-6,
+        "the V2G leg exports its rating"
+    );
+    let mut low_f = sample_env();
+    low_f.grid.frequency_hz = 59.5;
+    let mut ports = PortSlots::default();
+    ev.step(&low_f, Duration::from_secs(900), &mut ports)
+        .expect("step");
+    let p_w = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+    assert!(
+        (p_w + 5000.0).abs() < 1e-6,
+        "the up-ramp caps at the V2G leg's 5000 W and never curtails the \
+         pre-disturbance export, got {p_w} W"
+    );
+    assert_eq!(
+        ev.telemetry().get(tk::DER1547_FW_ADJ_PU),
+        Some(0.0),
+        "the cap binds at the leg's own deliverable: no adjustment"
+    );
+
+    // Over-frequency: 60.3 Hz is 0.264 Hz beyond the 60.036 Hz edge, so
+    // the droop sheds 0.088 pu = 440 W from the 1.0 pu anchor: 4560 W.
+    // The 3000 W V2L rating must not bind the V2G leg's reference.
+    let config = two_leg_config();
+    let mut ev = Ev::new(config.clone());
+    ev.init(&config, &sample_env()).expect("init");
+    command_v2g_discharge(&mut ev, 5000.0);
+    let mut ports = PortSlots::default();
+    ev.step(&sample_env(), Duration::from_secs(900), &mut ports)
+        .expect("step");
+    let mut hi_f = sample_env();
+    hi_f.grid.frequency_hz = 60.3;
+    let mut ports = PortSlots::default();
+    ev.step(&hi_f, Duration::from_secs(900), &mut ports)
+        .expect("step");
+    let p_w = ev.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+    assert!(
+        (p_w + 4560.0).abs() < 1e-6,
+        "the droop sheds its own 440 W from the 1.0 pu anchor: expected \
+         -4560 W, got {p_w} W"
     );
 }
 
