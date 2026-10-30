@@ -31,6 +31,7 @@ fn dwelling(case: &Case) -> Dwelling {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: DateTime::parse_from_rfc3339(case.start_time).expect("start time"),
                 duration: Duration::days(7),
                 time_res: Duration::seconds(case.time_res_s),

@@ -32,6 +32,7 @@ fn project_root() -> PathBuf {
 fn sim_config(start: DateTime<FixedOffset>, duration_s: i64, step_s: i64) -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: start,
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(step_s),

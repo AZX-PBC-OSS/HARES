@@ -27,6 +27,7 @@ const BATTERY_OVERRIDE: &str =
 fn sim_config() -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: chrono::DateTime::parse_from_rfc3339("2023-06-01T00:00:00-07:00")
             .expect("the start time parses"),
         duration: Duration::seconds(604_800),

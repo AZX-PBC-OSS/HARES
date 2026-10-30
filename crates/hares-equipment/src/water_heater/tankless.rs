@@ -868,6 +868,7 @@ mod tests {
 
     use hares_physics::constants::CP_LIQUID_WATER_J_KG_K;
 
+    use super::DEFAULT_EF;
     use super::TanklessWH;
     use crate::water_heater::DHW_DEMAND_LOOP;
     use crate::{Equipment, EquipmentConfig, TanklessWaterHeaterConfig};
@@ -1017,6 +1018,41 @@ mod tests {
         assert!(
             (eq.efficiency_factor - 0.95).abs() < 1e-9,
             "a tankless unit's UEF is its EF (the OCHRE instantaneous branch), got {}",
+            eq.efficiency_factor
+        );
+    }
+
+    /// The init's efficiency chain is the EF, then the UEF, then the
+    /// 0.9 default: a config declaring both reads the EF (the field
+    /// docs' precedence, the shadowed-override reject's subject), and a
+    /// config declaring neither reads the default rather than
+    /// substituting a spread value for the missing declaration.
+    #[test]
+    fn the_efficiency_chain_is_ef_then_uef_then_the_default() {
+        let mut both = typed_config();
+        both.energy_factor = Some(0.8);
+        both.uniform_energy_factor = Some(0.95);
+        both.performance_adjustment = None;
+        let config = config_from_typed(both);
+        let mut eq = TanklessWH::new(config.clone());
+        eq.init(&config, &env()).unwrap();
+        assert!(
+            (eq.efficiency_factor - 0.8).abs() < 1e-9,
+            "the EF is read ahead of the UEF when both stand, got {}",
+            eq.efficiency_factor
+        );
+
+        let mut neither = typed_config();
+        neither.energy_factor = None;
+        neither.uniform_energy_factor = None;
+        neither.performance_adjustment = None;
+        let config = config_from_typed(neither);
+        let mut eq = TanklessWH::new(config.clone());
+        eq.init(&config, &env()).unwrap();
+        assert!(
+            (eq.efficiency_factor - DEFAULT_EF).abs() < 1e-9,
+            "neither procedure declared reads the {} default, got {}",
+            DEFAULT_EF,
             eq.efficiency_factor
         );
     }

@@ -439,10 +439,34 @@ impl Equipment for IdealHvac {
                 &format!("{}:cooling_setpoint_source", config.name),
             ));
         }
-        if let Some(fraction) = typed
-            .fraction_heating_load_served
-            .or(typed.fraction_cooling_load_served)
-        {
+        // The unit serves both modes with ONE load-fraction control; the
+        // config's two fraction fields are its channels, the heating field
+        // the resolution channel (the HPXML heating system's
+        // FractionHeatLoadServed lands there) and the cooling field the
+        // per-side override channel. A config carrying both with different
+        // values is an ambiguous input the model cannot honor: the control
+        // is one number, so the init refuses it naming both fields and
+        // values instead of silently preferring one. (The override merge
+        // removes the field an override shadows, so an override of either
+        // field reaches this read alone.)
+        let fraction = match (
+            typed.fraction_heating_load_served,
+            typed.fraction_cooling_load_served,
+        ) {
+            (Some(heating), Some(cooling)) if heating != cooling => {
+                return Err(HaresError::Equipment(format!(
+                    "{}: fraction_heating_load_served ({heating}) and \
+                     fraction_cooling_load_served ({cooling}) name one \
+                     load-fraction control and differ; the unit serves both \
+                     modes with one fraction, so set only the field the value \
+                     belongs to or make them equal",
+                    config.name
+                )));
+            }
+            (Some(heating), _) => Some(heating),
+            (None, cooling) => cooling,
+        };
+        if let Some(fraction) = fraction {
             self.load_fraction = fraction.clamp(0.0, 1.0);
         }
         if let Some(fp) = typed.rated_fan_power_w {
@@ -1827,6 +1851,81 @@ mod tests {
         assert!(
             (ports.thermal[0].sensible_gain_w - (-2500.0)).abs() < 1e-9,
             "capacity should be scaled by load fraction 0.5"
+        );
+    }
+
+    /// The load fraction the init reads from the config's two fraction
+    /// channels, observed through the delivered capacity it scales (a
+    /// 5,000 W ideal capacity at Heating in a cold zone).
+    fn delivered_share(
+        heating_fraction: Option<f64>,
+        cooling_fraction: Option<f64>,
+    ) -> crate::Result<f64> {
+        let typed = crate::IdealHvacConfig {
+            zone_id: Some(1),
+            setpoint: crate::hvac::heating_config::HvacSetpointConfig {
+                heating_setpoint_c: Some(20.0),
+                ..Default::default()
+            },
+            fraction_heating_load_served: heating_fraction,
+            fraction_cooling_load_served: cooling_fraction,
+            ..crate::IdealHvacConfig::default()
+        };
+        let cfg =
+            EquipmentConfig::from_typed("IH".to_string(), "Ideal HVAC".to_string(), typed).unwrap();
+        let mut eq = IdealHvac::new(cfg.clone());
+        let env = env(18.0, 300, 0);
+        eq.init(&cfg, &env)?;
+        eq.update_control(&env);
+        eq.ideal_capacity_w = 5000.0;
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env, Duration::from_secs(60), &mut ports)?;
+        Ok(ports.thermal[0].sensible_gain_w / 5000.0)
+    }
+
+    /// The ideal HVAC serves both modes with ONE load-fraction control; the
+    /// config's two fraction fields are its channels and the init reads the
+    /// heating field (the resolution channel the HPXML heating system's
+    /// FractionHeatLoadServed lands on) ahead of the cooling field. Each
+    /// single-field config applies its value, the resolver's both-equal
+    /// shape applies it once, and a config carrying the two fields with
+    /// different values is an ambiguous input the model cannot honor: the
+    /// init refuses it naming both fields and values instead of silently
+    /// preferring one.
+    #[test]
+    fn the_ideal_fractions_precedence_is_heating_first_and_a_differing_pair_is_refused() {
+        let share = |heating: Option<f64>, cooling: Option<f64>| {
+            delivered_share(heating, cooling).unwrap_or_else(|err| {
+                panic!("the fraction config ({heating:?}, {cooling:?}) inits: {err}")
+            })
+        };
+        assert!(
+            (share(Some(0.7), None) - 0.7).abs() < 1e-9,
+            "the heating field's value is the control's"
+        );
+        assert!(
+            (share(None, Some(0.7)) - 0.7).abs() < 1e-9,
+            "the cooling field carries the control when the heating field is absent"
+        );
+        assert!(
+            (share(Some(0.7), Some(0.7)) - 0.7).abs() < 1e-9,
+            "the resolver's both-equal shape applies the value once"
+        );
+
+        let err = delivered_share(Some(0.9), Some(0.5))
+            .expect_err("a differing fraction pair is an ambiguous input");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fraction_heating_load_served")
+                && msg.contains("fraction_cooling_load_served"),
+            "the error names both channels: {msg}"
+        );
+        assert!(
+            msg.contains("0.9") && msg.contains("0.5"),
+            "the error names both values: {msg}"
         );
     }
 

@@ -29,6 +29,7 @@ fn pv_dwelling() -> Dwelling {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)
                     .expect("UTC")
                     .with_ymd_and_hms(2019, 7, 15, 0, 0, 0)

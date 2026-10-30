@@ -573,6 +573,11 @@ fn weather_meta_from_lines(
 pub struct ParsedSchedule {
     schedule: Arc<ScheduleTimeSeries>,
     source: Option<InputSource>,
+    /// Whether this schedule was GENERATED from the default profiles (a
+    /// config with no schedule source): the behavioral diversity layer's
+    /// condition. A parsed CSV or a code-built series is never
+    /// diversified.
+    generated: bool,
 }
 
 impl ParsedSchedule {
@@ -611,6 +616,7 @@ impl ParsedSchedule {
         Ok(Self {
             schedule: Arc::new(schedule),
             source: Some(source.clone()),
+            generated: false,
         })
     }
 
@@ -635,6 +641,7 @@ impl ParsedSchedule {
         Ok(Self {
             schedule: Arc::new(schedule),
             source: None,
+            generated: true,
         })
     }
 
@@ -645,7 +652,16 @@ impl ParsedSchedule {
         Self {
             schedule: Arc::new(schedule),
             source: None,
+            generated: false,
         }
+    }
+
+    /// Whether this schedule was generated from the default profiles (a
+    /// config with no schedule source): the behavioral diversity layer's
+    /// condition. A parsed CSV or a code-built series is never diversified.
+    #[must_use]
+    pub fn was_generated(&self) -> bool {
+        self.generated
     }
 
     /// The parsed (generated) schedule, shared by reference.
@@ -1315,6 +1331,53 @@ impl ParsedInputs {
             climate_zone_warning: None,
             records: None,
         }
+    }
+
+    /// The generated schedule diversified under the dwelling's
+    /// per-dwelling key: the behavioral diversity layer's application
+    /// point. When this input set's schedule was GENERATED from the
+    /// default profiles (no schedule CSV) and `enabled`, the profiles are
+    /// redrawn under `dwelling_key`
+    /// (`hares_types::diversity::ScheduleDiversityDraws::draw` over the
+    /// caller's scenario-mixed key) and the schedule regenerates over the
+    /// same span from the diversified profiles; the schedule's own source
+    /// stays `None` (generated). A CSV schedule's or a code-built series'
+    /// inputs return unchanged: the diversity layer never touches
+    /// measured, upstream or hand-built schedules.
+    ///
+    /// The regenerated schedule is a pure function of (the profiles, the
+    /// span, the key): the same key rebuilds the same schedule bitwise,
+    /// two building ids under one master seed draw different behavior,
+    /// and a declared scenario moves the draws through the key's own
+    /// bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] when the diversified generation fails (a profile
+    /// the defaults lack, named the same way an undiversified run names
+    /// it).
+    pub fn diversify_generated_schedule(
+        self,
+        generation: ScheduleGeneration,
+        dwelling_key: [u8; 32],
+        enabled: bool,
+    ) -> Result<Self, HaresError> {
+        if !enabled || !self.schedule.was_generated() {
+            return Ok(self);
+        }
+        let draws = hares_types::diversity::ScheduleDiversityDraws::draw(dwelling_key);
+        let diversified =
+            crate::schedule_diversity::diversify_profiles(&self.defaults.profiles(), &draws);
+        let schedule = ParsedSchedule::generate(
+            generation.start,
+            generation.duration,
+            generation.interval,
+            &diversified,
+        )?;
+        Ok(Self {
+            schedule: Arc::new(schedule),
+            ..self
+        })
     }
 }
 

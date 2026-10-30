@@ -93,6 +93,7 @@ fn build(home: &Home) -> Dwelling {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(home.utc_offset_h * 3600)
                     .expect("offset")
                     .with_ymd_and_hms(year, month, day, hour, 0, 0)

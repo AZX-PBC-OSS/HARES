@@ -405,6 +405,7 @@ impl PySimulationConfig {
         setpoint_deadband_c = None,
         master_seed = 0,
         scenario_seed = None,
+        schedule_diversity = "on",
         civil_timezone = None,
         site_location = None,
         max_consecutive_step_failures = hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -427,6 +428,7 @@ impl PySimulationConfig {
         setpoint_deadband_c: Option<f64>,
         master_seed: u64,
         scenario_seed: Option<u64>,
+        schedule_diversity: &str,
         civil_timezone: Option<String>,
         site_location: Option<PySiteLocationOverride>,
         max_consecutive_step_failures: u32,
@@ -476,6 +478,16 @@ impl PySimulationConfig {
             }
         };
 
+        let schedule_diversity = match schedule_diversity {
+            "on" => hares_io::ScheduleDiversity::On,
+            "off" => hares_io::ScheduleDiversity::Off,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "schedule_diversity must be 'on' or 'off', got '{other}'"
+                )));
+            }
+        };
+
         let inner = SimulationConfig {
             start_time: start,
             duration: Duration::try_seconds(duration.0).ok_or_else(|| {
@@ -501,6 +513,7 @@ impl PySimulationConfig {
             setpoint_deadband_c,
             master_seed,
             scenario_seed,
+            schedule_diversity,
             civil_timezone,
             site_location: site_location.map(|s| s.0).unwrap_or_default(),
             max_consecutive_step_failures,
@@ -667,6 +680,32 @@ impl PySimulationConfig {
     #[setter]
     pub fn set_scenario_seed(&mut self, value: Option<u64>) -> PyResult<()> {
         self.assign(|cfg| cfg.scenario_seed = value)
+    }
+
+    /// The generated-schedule family's behavioral diversity: "on" (the
+    /// default, every no-CSV home draws its own behavioral schedule under
+    /// its scenario-mixed key) or "off" (every no-CSV home runs the same
+    /// default-profile columns). A schedule CSV is never diversified.
+    #[getter]
+    pub fn schedule_diversity(&self) -> String {
+        match self.0.schedule_diversity {
+            hares_io::ScheduleDiversity::On => "on".to_string(),
+            hares_io::ScheduleDiversity::Off => "off".to_string(),
+        }
+    }
+
+    #[setter]
+    pub fn set_schedule_diversity(&mut self, value: &str) -> PyResult<()> {
+        let mode = match value {
+            "on" => hares_io::ScheduleDiversity::On,
+            "off" => hares_io::ScheduleDiversity::Off,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "schedule_diversity must be 'on' or 'off', got '{other}'"
+                )));
+            }
+        };
+        self.assign(|cfg| cfg.schedule_diversity = mode)
     }
 
     #[getter]
@@ -1076,6 +1115,7 @@ mod tests {
             None,
             0,
             None,
+            "on",
             None,
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -1142,6 +1182,7 @@ mod tests {
                     None,
                     0,
                     None,
+                    "on",
                     None,
                     None,
                     hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -1175,6 +1216,7 @@ mod tests {
                 None,
                 0,
                 None,
+                "on",
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -1210,6 +1252,7 @@ mod tests {
                 None,
                 0,
                 None,
+                "on",
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,

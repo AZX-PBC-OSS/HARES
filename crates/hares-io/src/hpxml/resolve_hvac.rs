@@ -1161,6 +1161,11 @@ fn try_build_ideal_hvac_config(
         heating_capacity_w,
         cooling_capacity_w,
         shr: params.get("shr").and_then(Value::as_f64),
+        // The HPXML heating system's FractionHeatLoadServed is one
+        // quantity; the typed vocabulary carries it on both fraction
+        // channels and the init reads the heating field ahead of the
+        // cooling one. An override of either field is the value the
+        // control reads: the override merge removes the field it shadows.
         fraction_heating_load_served: fraction,
         fraction_cooling_load_served: fraction,
         rated_fan_power_w: None,

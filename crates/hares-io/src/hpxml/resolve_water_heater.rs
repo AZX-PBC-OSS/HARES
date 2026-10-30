@@ -341,6 +341,13 @@ pub(super) fn resolve_water_heaters(
                 typed_spec(name.clone(), fuel, cfg, defaults)?
             }
             "Electric Resistance Water Heater" => {
+                // `heating_capacity_w` is the HPXML capacity channel and
+                // the field the dwelling's own capacity API names;
+                // `element_power_w` is the per-element override channel,
+                // and the init falls back to `heating_capacity_w` when it
+                // is absent. Writing the HPXML value into both would give
+                // the alias precedence, so an accepted override of
+                // `heating_capacity_w` would be silently dropped.
                 let cfg = ElectricResistanceWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -364,7 +371,7 @@ pub(super) fn resolve_water_heaters(
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
-                    element_power_w: heating_capacity_w,
+                    element_power_w: None,
                     element_priority_mode: None,
                     max_setpoint_ramp_rate_c_per_min: None,
                     max_combined_power_w: None,
@@ -379,6 +386,15 @@ pub(super) fn resolve_water_heaters(
                 // EF-sourced inputs use the legacy 0.92 default.
                 let default_perf_adj = if energy_factor.is_none() { 0.94 } else { 0.92 };
                 let perf_adj = child_f64(wh, &PERFORMANCE_ADJUSTMENT).unwrap_or(default_perf_adj);
+                // Each efficiency field is written as its own HPXML
+                // element declares, and a declared element is never
+                // dropped: the two fields are the two test procedures'
+                // values, the performance-adjustment default above keys
+                // on which procedure declared, and the init reads the EF
+                // ahead of the UEF when both stand (the config fields'
+                // docs). The override channel keeps the precedence
+                // honest: an override of the shadowed UEF is refused at
+                // the merge naming the EF, never accepted and ignored.
                 let cfg = TanklessWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -1154,8 +1170,13 @@ fn try_build_elec_res_wh_config(
         performance_adjustment: param_f64(params, "performance_adjustment"),
         zone_type: param_str(params, "zone_type"),
         first_hour_rating_m3: param_f64(params, "first_hour_rating_m3"),
-        element_power_w: param_f64(params, "element_power_w")
-            .or_else(|| param_f64(params, "heating_capacity_w")),
+        // `element_power_w` is the per-element override channel and the
+        // init reads it ahead of `heating_capacity_w`; folding the
+        // capacity into it here would give the alias precedence and
+        // silently drop an override of the capacity field on every home
+        // this rebuild sizes. The init falls back to `heating_capacity_w`,
+        // which carries the sized value.
+        element_power_w: param_f64(params, "element_power_w"),
         max_setpoint_ramp_rate_c_per_min: param_f64(params, "max_setpoint_ramp_rate_c_per_min"),
         element_priority_mode: param_str(params, "element_priority_mode"),
         jacket_r_value_m2_k_w: param_f64(params, "jacket_r_value_m2_k_w"),
@@ -1589,6 +1610,52 @@ mod tests {
         assert!(
             err.to_string().contains("Not A Water Heater"),
             "the error names the water heater, got: {err}"
+        );
+    }
+
+    /// The post-autosize rebuild leaves the resistance water heater's
+    /// `element_power_w` absent when the parameters carry only the
+    /// capacity: the per-element channel is the override channel the init
+    /// reads ahead of `heating_capacity_w`, so folding the sized capacity
+    /// into it would give the alias precedence and silently drop an
+    /// override of the capacity field (the init falls back to
+    /// `heating_capacity_w`, which carries the same sized value). An
+    /// explicit `element_power_w` parameter is the override channel's own
+    /// entry and lands as itself.
+    #[test]
+    fn rebuild_leaves_the_element_channel_absent_for_the_capacity_to_carry() {
+        let mut params = Map::new();
+        params.insert("heating_capacity_w".to_string(), serde_json::json!(5_500.0));
+        let cfg = rebuild_wh_typed_config("Electric Resistance Water Heater", &params)
+            .expect("the resistance water heater rebuilds from params");
+        let typed = cfg
+            .typed::<ElectricResistanceWaterHeaterConfig>()
+            .expect("electric resistance wh config");
+        assert_eq!(
+            typed.element_power_w, None,
+            "the rebuild must not fold the capacity into the override channel"
+        );
+        assert_eq!(
+            typed.heating_capacity_w,
+            Some(5_500.0),
+            "the sized capacity stays the live channel the init falls back to"
+        );
+
+        let mut explicit = Map::new();
+        explicit.insert("element_power_w".to_string(), serde_json::json!(4_200.0));
+        let cfg = rebuild_wh_typed_config("Electric Resistance Water Heater", &explicit)
+            .expect("the resistance water heater rebuilds from params");
+        let typed = cfg
+            .typed::<ElectricResistanceWaterHeaterConfig>()
+            .expect("electric resistance wh config");
+        assert_eq!(
+            typed.element_power_w,
+            Some(4_200.0),
+            "an explicit element_power_w parameter is the override channel's own entry"
+        );
+        assert_eq!(
+            typed.heating_capacity_w, None,
+            "the explicit element channel does not fabricate a capacity"
         );
     }
 

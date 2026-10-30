@@ -167,9 +167,13 @@ impl PyDwellingBlueprint {
 
     /// Run the assembly alone and read the resolved model back as a dict:
     /// every construction-time check `build` runs, with no warm-up and no
-    /// step. The same dict form `Dwelling.resolved_model()` returns. The
-    /// blueprint is not consumed: the builder is cloned, the frozen
-    /// blueprint the clone freezes is validated and dropped.
+    /// step. The dict carries the site with its per-field sources, the
+    /// clock, the boundaries' layers, each equipment's typed parameters
+    /// and the active setpoint sources; `Dwelling.resolved_model()` is the
+    /// fuller read-back (the equipment entries with their setpoint labels,
+    /// the windows and the infiltration block). The blueprint is not
+    /// consumed: the builder is cloned, the frozen blueprint the clone
+    /// freezes is validated and dropped.
     pub fn validate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let blueprint = self.frozen_for_readback(py, "validate")?;
         let model = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -395,9 +399,12 @@ fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<hares_io::Equipm
     ))
 }
 
-/// The resolved model as the dict the read-back surfaces return: the site
-/// with its per-field sources, the clock, and every boundary's layers.
-/// `Dwelling.resolved_model()` returns the same form.
+/// The resolved model as the dict `DwellingBlueprint.validate()` returns:
+/// the site with its per-field sources, the clock, every boundary's layers,
+/// each equipment's typed parameters and the active setpoint sources.
+/// `Dwelling.resolved_model()` is the fuller read-back: the same equipment
+/// names, ids, end uses and parameters, with each entry's setpoint labels,
+/// plus the windows and the infiltration block.
 pub(crate) fn resolved_model_to_py(
     py: Python<'_>,
     model: &hares_core::ResolvedModel,
@@ -500,10 +507,29 @@ pub(crate) fn resolved_model_to_py(
         }
     }
 
+    let equipment = PyList::empty(py);
+    for eq in &model.equipment {
+        let entry = PyDict::new(py);
+        entry.set_item("name", eq.name.clone())?;
+        entry.set_item("id", eq.id.0)?;
+        entry.set_item("end_use", eq.end_use.as_str())?;
+        let parameters = PyList::empty(py);
+        for p in &eq.parameters {
+            let parameter = PyDict::new(py);
+            parameter.set_item("name", p.name)?;
+            parameter.set_item("value", p.value)?;
+            parameter.set_item("unit", p.unit.symbol())?;
+            parameters.append(parameter)?;
+        }
+        entry.set_item("parameters", parameters)?;
+        equipment.append(entry)?;
+    }
+
     let out = PyDict::new(py);
     out.set_item("site", site)?;
     out.set_item("clock", clock)?;
     out.set_item("boundaries", boundaries)?;
+    out.set_item("equipment", equipment)?;
     out.set_item("setpoints", setpoints)?;
     Ok(out.into_any().unbind())
 }

@@ -2186,6 +2186,60 @@ mod tests {
         );
     }
 
+    /// The stage ladder is the control's channel, not the delivered
+    /// capacity: the step scales the unit's rated capacity (the config's
+    /// `capacity_w`) by the duty cycle and divides it by the config's
+    /// `afue` for the fuel, while the ladder feeds the staging. A ladder
+    /// whose top stage differs from the rated capacity therefore delivers
+    /// the rated capacity and burns `capacity_w / afue`, which is why both
+    /// fields are live overrides and neither shadows the other.
+    #[test]
+    fn a_gas_furnace_stage_ladder_does_not_replace_the_rated_capacity() {
+        const RATED_CAPACITY_W: f64 = 12_000.0;
+        const AFUE: f64 = 0.8;
+        let cfg = EquipmentConfig::from_typed(
+            "GF".to_string(),
+            "Gas Furnace".to_string(),
+            GasFurnaceConfig {
+                afue: AFUE,
+                capacity_w: RATED_CAPACITY_W,
+                fan_power_w: Some(0.0),
+                zone_id: Some(1),
+                number_of_speeds: 2,
+                stage_heating_capacities_w: Some(vec![6_500.0, 10_000.0]),
+                stage_heating_eirs: Some(vec![1.0 / 0.78, 1.0 / 0.80]),
+                ..GasFurnaceConfig::default()
+            },
+        )
+        .unwrap();
+        let mut eq = GasFurnace::new(cfg.clone());
+        let env = env(18.0);
+        eq.init(&cfg, &env).unwrap();
+        assert_eq!(
+            eq.hvac.config.heating_capacities_w,
+            vec![6_500.0, 10_000.0],
+            "the ladder is the stage table the control reads"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&env);
+        eq.step(&env, Duration::from_secs(60), &mut ports).unwrap();
+
+        assert!(
+            (ports.thermal[0].sensible_gain_w - RATED_CAPACITY_W).abs() < 1e-6,
+            "the delivered capacity is the rated scalar, not the ladder's top \
+             stage: got {} W",
+            ports.thermal[0].sensible_gain_w
+        );
+        assert!(
+            (ports.fuel.get(hares_types::FuelType::Gas) - RATED_CAPACITY_W / AFUE).abs() < 1e-6,
+            "the fuel input divides the rated capacity by the scalar AFUE"
+        );
+    }
+
     #[test]
     fn gas_furnace_two_speed_mismatched_stage_counts_are_rejected() {
         let cfg = EquipmentConfig::from_typed(

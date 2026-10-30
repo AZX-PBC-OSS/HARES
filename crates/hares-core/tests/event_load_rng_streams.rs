@@ -40,6 +40,7 @@ fn dwelling_config(hpxml: &Path) -> DwellingConfig {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: FixedOffset::west_opt(10 * 3600)
                     .expect("UTC-10 offset is valid")
                     .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
@@ -146,7 +147,8 @@ fn write_hpxml_with_microwaves(dir: &Path, microwave_ids: &[&str]) -> PathBuf {
     let marker = "</Appliances>";
     assert!(src.contains(marker), "fixture must contain {marker}");
     let microwaves: String = microwave_ids.iter().map(|id| hpxml_microwave(id)).collect();
-    let path = dir.join(format!("home_{}.xml", microwave_ids.join("_")));
+    let stem = microwave_ids.join("_").replace('/', "_");
+    let path = dir.join(format!("home_{stem}.xml"));
     std::fs::write(
         &path,
         src.replacen(marker, &format!("{microwaves}{marker}"), 1),
@@ -247,6 +249,34 @@ fn same_class_hpxml_load_keeps_its_draws_when_a_sibling_is_removed() {
         alone[0], both[1],
         "removing a same-class sibling must not change the survivor's draws"
     );
+}
+
+/// The reserved stream identities are this assembly's own derivations:
+/// the diversity dimensions' prefixed identities and the scenario
+/// sampler's. An event load whose identity (its HPXML SystemIdentifier
+/// id, else its instance name) names a reserved identity would share
+/// that stream's keystream silently, so the build refuses it, naming
+/// the identity.
+#[test]
+fn an_event_load_named_into_a_reserved_stream_identity_is_refused() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    for identity in [
+        "hares/schedule-diversity/v1/presence-timing",
+        "hares/scenario-sampler/v1",
+    ] {
+        let hpxml = write_hpxml_with_microwaves(tmp.path(), &[identity]);
+        let err = match try_build_from(&hpxml, Vec::new()) {
+            Ok(_) => panic!(
+                "an event load named '{identity}' must not build: the reserved \
+                 stream identity's keystream would be shared silently"
+            ),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains(identity),
+            "the error must name the reserved identity: {err}"
+        );
+    }
 }
 
 /// The blueprint counterpart: callers name same-class loads, instance

@@ -50,6 +50,7 @@ fn config_with_schedule_source(bldg_id: i64, schedule_path: Option<PathBuf>) -> 
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time,
                 duration: Duration::hours(24),
                 time_res: Duration::seconds(900),

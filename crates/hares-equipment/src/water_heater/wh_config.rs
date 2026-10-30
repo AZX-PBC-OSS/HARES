@@ -260,6 +260,11 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub tank_height_m: Option<f64>,
     pub energy_factor: Option<f64>,
     pub uniform_energy_factor: Option<f64>,
+    /// The live capacity channel: the HPXML capacity and the field the
+    /// dwelling's capacity API takes. The init falls back to it when the
+    /// per-element override channel is absent, so the resolved element
+    /// power is this field's value; an override of it changes the element
+    /// power's source.
     pub heating_capacity_w: Option<f64>,
     pub ua_w_per_k: Option<f64>,
     pub setpoint_c: Option<f64>,
@@ -279,6 +284,10 @@ pub struct ElectricResistanceWaterHeaterConfig {
     pub performance_adjustment: Option<f64>,
     pub zone_type: Option<String>,
     pub first_hour_rating_m3: Option<f64>,
+    /// The per-element power \[W\] override channel: the init prefers it
+    /// over [`Self::heating_capacity_w`] when both are set. The HPXML
+    /// resolver leaves it absent so the capacity field stays the live
+    /// capacity channel; an override of either field is applied.
     pub element_power_w: Option<f64>,
     pub max_setpoint_ramp_rate_c_per_min: Option<f64>,
     pub element_priority_mode: Option<String>,
@@ -428,7 +437,14 @@ pub struct TanklessWaterHeaterConfig {
     pub loop_id: Option<u16>,
     /// Required; resolver errors if absent.
     pub fuel_type: FuelType,
+    /// The storage-free heater's efficiency factor from the EF test
+    /// procedure, read ahead of [`Self::uniform_energy_factor`] when both
+    /// are present. An override of the shadowed UEF is refused at the
+    /// override merge naming this field, never accepted and silently
+    /// ignored.
     pub energy_factor: Option<f64>,
+    /// The post-2015 UEF test-procedure value, read only when
+    /// [`Self::energy_factor`] is absent.
     pub uniform_energy_factor: Option<f64>,
     pub heating_capacity_w: Option<f64>,
     pub setpoint_c: Option<f64>,

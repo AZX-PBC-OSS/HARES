@@ -36,6 +36,7 @@ fn sim_config(
 ) -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: start,
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(step_s),

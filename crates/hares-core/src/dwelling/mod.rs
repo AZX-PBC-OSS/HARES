@@ -3333,6 +3333,7 @@ impl Dwelling {
         } = inputs;
         let sim_config = SimulationConfig {
             scenario_seed: None,
+            schedule_diversity: Default::default(),
             start_time,
             duration,
             time_res,
@@ -4485,6 +4486,25 @@ fn assemble_from_blueprint_with_seed(
         }
         merged_cfg.zone_map = Some(zone_map.clone());
         if eq.uses_rng_stream() {
+            // The reserved stream identities are this assembly's own
+            // derivations: the diversity dimensions' prefixed identities
+            // and the scenario sampler's, consumed at the blueprint's
+            // profile transform and the spec's sampling. An equipment
+            // named into one would share that stream's keystream
+            // silently, so the build refuses it, naming the identity.
+            if rng_identity.starts_with(hares_types::rng::SCHEDULE_DIVERSITY_IDENTITY_PREFIX)
+                || rng_identity == hares_types::rng::SCENARIO_SAMPLER_IDENTITY
+            {
+                return Err(HaresError::Dwelling(format!(
+                    "event load '{}' (identity '{rng_identity}') carries a reserved \
+                     stream identity: the '{}'-prefixed and the '{}' identities are the \
+                     schedule diversity's and the scenario sampler's alone; give the \
+                     equipment a different HPXML SystemIdentifier id or instance name",
+                    merged_cfg.name,
+                    hares_types::rng::SCHEDULE_DIVERSITY_IDENTITY_PREFIX,
+                    hares_types::rng::SCENARIO_SAMPLER_IDENTITY,
+                )));
+            }
             let rng_stream = RngStream::event_load(rng.get_seed(), rng_identity);
             if let Some((other, other_identity)) = equipment_by_rng_stream
                 .insert(rng_stream.stream, (merged_cfg.name.clone(), rng_identity))
@@ -6254,8 +6274,12 @@ impl Dwelling {
     /// event-load equipment's stream (its identity nonce kept, the
     /// dwelling's generator key replaced) and every built-in EV driver
     /// actor's stream recorded at the roster's last commit. Nothing else
-    /// changes: the reset that restores a warmed-up snapshot is
-    /// `load_state` and then this, no re-construction, no second warm-up.
+    /// changes: the generated schedule's behavioral draws are build-time
+    /// constants, not runtime streams, so a reseed does not re-draw them
+    /// (the full rebuild under another seed is
+    /// `DwellingBlueprint::build_with_seed`), and the reset that restores
+    /// a warmed-up snapshot is `load_state` and then this, no
+    /// re-construction, no second warm-up.
     ///
     /// A component the dwelling seeded whose class does not implement the
     /// trait's `reseed` fails here naming it, instead of silently keeping
@@ -10853,6 +10877,7 @@ destination = "memory"
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: DateTime::parse_from_rfc3339("2023-06-01T00:00:00-07:00")
                         .expect("valid start time"),
                     duration: chrono::Duration::seconds(900 * steps as i64),
@@ -23245,6 +23270,7 @@ latent_gain_fraction = 0.08
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: DateTime::parse_from_rfc3339(start).expect("start time"),
                     duration: chrono::Duration::days(2),
                     time_res: chrono::Duration::seconds(step_s),

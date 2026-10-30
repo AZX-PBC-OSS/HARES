@@ -1519,3 +1519,37 @@ matrix-exchange and airflow terms it reads kW during transients on
 multi-node models, and integrating it would report wall-mass redistribution
 as a conservation violation. The system identity integrates the exact
 three-term balance instead.
+
+## The generated family's behavioral diversity is per-home draws on the 301 profiles
+
+A config with no schedule source runs the generated family, and the
+family no longer hands every home the same 301 columns: each home's
+schedule is generated from the ANSI/RESNET/ICC 301-2022 Addendum C default
+profiles after that home's own behavioral draws
+(`hares_types::diversity`). The draws are five dimensions, keyed on the
+scenario-mixed per-dwelling key: the presence timing (a discrete uniform
+hour shift over plus or minus 3), the occupancy level (a mean-one
+lognormal, sigma 0.15, clamped to [0.6, 1.6]), the appliance diversity
+factors (six appliances, each a mean-one lognormal, sigma 0.25, clamped to
+[0.5, 2.0]), the water-draw timing (plus or minus 2 hours) and the water
+level (a mean-one lognormal, sigma 0.30, clamped to [0.5, 2.0]).
+
+The source. The central profiles are the 301 Addendum C defaults the
+schedule-sources provenance contract pins. The SPREADS are this
+codebase's calibrated choice: neither the 301 addendum nor the NREL
+End-Use Load Profiles report publishes a per-home spread for these
+profiles, so the sigmas are stated here rather than borrowed. The clamp
+folds the fleet mean by at most 0.075 percent and the variance by up to
+4.71 percent below the unclamped lognormal at the widest spread; the
+closed forms and their quadrature-referenced pins are
+`hares_types::diversity::the_fleet_scale_moments_are_the_clamped_lognormals`.
+
+The alternative rejected is OS-HPXML v1.12.0's stochastic occupancy
+family (`BuildResidentialScheduleFile`: the Markov presence chains over
+seven ATUS activities, 2013-2017). The engine runs no ATUS chain and
+carries no activity model, so copying the chains would claim a
+calibration the vendored data does not support; varying the 301 profiles
+per home is the smaller claim. A schedule CSV is never diversified:
+measured, upstream and hand-built schedules pass through untouched whatever
+the knob says. The parameter table, the provenance tiers and the
+`SimulationConfig.schedule_diversity` knob are docs/schedule-sources.md.

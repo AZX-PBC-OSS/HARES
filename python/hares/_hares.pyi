@@ -2456,6 +2456,45 @@ class WarmupConfig:
     def __eq__(self, other: object) -> bool: ...
     def __repr__(self) -> str: ...
 
+class ScenarioSpec:
+    """The declared scenario: the parameters' distributions, units,
+    targets and correlation groups, and the deterministic sampler.
+    Declared as a dict (the Rust schema's serde shape): each parameter
+    carries its ``name``, ``unit``, ``target`` (either
+    ``{"override": {"equipment": ..., "field": ...}}``, landing in the
+    dwelling's overrides map, or ``{"patch": {"field": ...}}``, landing
+    in the HPXML data patches), ``distribution`` (one of ``uniform``,
+    ``normal``, ``lognormal``, ``triangular`` or ``discrete``), and an
+    optional ``correlation`` (``{"group": ..., "rho": ...}``). An
+    ``override`` target's equipment must be one the assembly's override
+    path accepts: the ``Occupancy`` spec is handled outside that path and
+    its override is refused, so an occupancy count is not a target. The
+    same (master seed, scenario id, building id) reproduces the same
+    parameter set bitwise; a different scenario, building or master
+    seed draws differently.
+
+    A home's scenario is named twice and the two names are one key: the
+    spec's ``scenario_id`` and the run's ``SimulationConfig.scenario_seed``
+    both fill the scenario bytes of the scenario-mixed per-dwelling key,
+    so a sample at ``(master_seed, scenario_id, bldg_id)`` and a dwelling
+    built with that ``master_seed``, ``scenario_seed = scenario_id`` and
+    ``bldg_id`` belong to one home. Nothing checks the pairing (the
+    sampler reads no config, the build reads no record).
+
+    The application surface: ``sample_overrides()`` returns the form the
+    dwelling constructor's ``overrides=`` accepts, so the override
+    targets apply on the Python surface. The patch targets' application
+    is the Rust surface's (``hares_core::scenario::apply_sample``): the
+    Python record carries the sampled patch values (``sample()``'s
+    ``values`` and ``targets``) and there is deliberately no Python
+    apply binding."""
+
+    def __init__(self, spec: dict[str, Any]) -> None: ...
+    @property
+    def name(self) -> str: ...
+    def sample(self, master_seed: int, scenario_id: int, bldg_id: int) -> dict[str, Any]: ...
+    def sample_overrides(self, master_seed: int, scenario_id: int, bldg_id: int) -> dict[str, Any]: ...
+
 class SimulationConfig:
     """The one simulation config. The `warmup` keyword has three cases:
     an omitted keyword warms up by the Rust default (the EnergyPlus
@@ -2477,6 +2516,7 @@ class SimulationConfig:
         setpoint_deadband_c: float | None = ...,
         master_seed: int = ...,
         scenario_seed: int | None = ...,
+        schedule_diversity: str = ...,
         civil_timezone: str | None = ...,
         site_location: SiteLocationOverride | None = ...,
         max_consecutive_step_failures: int = ...,
@@ -2526,6 +2566,10 @@ class SimulationConfig:
     def scenario_seed(self) -> int | None: ...
     @scenario_seed.setter
     def scenario_seed(self, value: int | None) -> None: ...
+    @property
+    def schedule_diversity(self) -> str: ...
+    @schedule_diversity.setter
+    def schedule_diversity(self, value: str) -> None: ...
     @property
     def civil_timezone(self) -> str | None: ...
     @civil_timezone.setter

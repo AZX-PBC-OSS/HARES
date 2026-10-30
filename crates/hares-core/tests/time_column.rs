@@ -38,6 +38,7 @@ fn cz2a_config(
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time: start,
                 duration: chrono::Duration::seconds(duration_s),
                 time_res: chrono::Duration::seconds(step_s),

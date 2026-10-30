@@ -66,6 +66,7 @@ impl BatchCallback for Collecting {
 fn config(retain_batches: bool, output_path: &std::path::Path) -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00").expect("start time"),
         duration: Duration::hours(24),
         time_res: Duration::seconds(900),

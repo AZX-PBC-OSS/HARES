@@ -85,6 +85,13 @@ replacement.
   `warmup` converges with the Rust defaults, `warmup=None` disables, a
   `WarmupConfig` sets the criteria; the removed `initialization_duration`
   keyword names `SimulationConfig.warmup`.
+- Added: `SimulationConfig.scenario_seed` (the run's scenario seed, mixed
+  into every per-dwelling stream key), `SimulationConfig.schedule_diversity`
+  (`"on"` by default, `"off"` restoring the shared generated-profile
+  columns) and `ScenarioSpec` (the declared scenario: the parameters'
+  distributions, units, targets and correlation groups, with
+  `sample(master_seed, scenario_id, bldg_id)` and the overrides form
+  `sample_overrides` the dwelling constructor's `overrides=` accepts).
 - Added: `Dwelling.finish()`, `Dwelling.health()`,
   `Dwelling.initialize()`, `Dwelling.attach_callback()`,
   `Dwelling.config()`, `Dwelling.dwelling_fatal`,

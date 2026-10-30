@@ -1,4 +1,26 @@
 //! Conversion helpers between I/O types and envelope/equipment types.
+//!
+//! The override merge's three-state semantics (absent, `null`, a value),
+//! one table for every reader in this module and the ones it calls:
+//!
+//! | the channel | absent | `null` | a value |
+//! |---|---|---|---|
+//! | The equipment-override layers on a typed config (the wildcard, the equipment's own entry, the spec's parameter bag) | falls through to the layer beneath, else the resolution's value | the field's unset: it lands as the JSON `null` the init's `Option` reads as absent; it never shadows another field and is never refused | the value, schema-validated at the merge that lands it |
+//! | The shadow readers (the setpoint-source removal, the ideal-fraction removal, the efficiency reject, the stage-scalar reject) | nothing to remove or refuse | removes nothing, refuses nothing: each reads the layers' effective value (the own layer's last word, a null included, then the wildcard's, then the resolution's value), not a layer's key presence or the walk's intermediate state | removes the shadowed channel, refuses the shadowed override naming both fields |
+//! | The same layers on a raw-parameter load | falls through | refused: a `null` holds no kind a load reads, and a mistyped value may not run the load's default silently | the value, kind-checked |
+//! | The reserved override objects (`zip`, `envelope`) | the base stands (the sidecar, the class defaults, the unit scales) | refused: a `null` is not a value those structs deserialize from | field-wise merged, bounds-validated |
+//! | The scenario record's two channels (the sampled overrides, the patches) | the settings pass through | unreachable: a sampled value is a finite f64 (the sampler refuses the rest) | the value |
+//!
+//! One representative per class is pinned:
+//!
+//! - the typed channel's unset: `a_null_constant_does_not_shadow_the_schedule_source`
+//!   and the UEF null probe in `a_shadowed_tankless_uef_override_is_rejected`;
+//! - the shadow readers: `a_null_constant_in_the_own_layer_unsets_the_wildcards_and_keeps_the_source`
+//!   and `a_null_ideal_fraction_does_not_remove_the_other_channel`;
+//! - the stage-scalar reader: `a_stage_table_override_lands_per_stage_and_a_null_table_frees_the_scalar`;
+//! - the raw channel: `a_parameter_value_no_config_holds_is_rejected`;
+//! - the reserved objects: `zip_override_non_numeric_value_is_hard_error`
+//!   and `envelope_scales_described_with_bounds`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -872,11 +894,16 @@ fn land_spec_parameters(
     type_name: &str,
 ) -> Result<()> {
     let display_name = spec.instance_name.as_ref().unwrap_or(&spec.name);
+    let bag_layers = hares_io::hpxml::OverrideLayers {
+        wildcard: None,
+        own: Some(&spec.typed_overrides),
+    };
     for (key, value) in &spec.typed_overrides {
         if key.as_str() == hares_equipment::config::KEY_EQUIPMENT_ID {
             continue;
         }
-        reject_shadowed_wh_efficiency(type_name, landed, key, display_name)?;
+        reject_shadowed_wh_efficiency(type_name, landed, bag_layers, key, value, display_name)?;
+        reject_shadowed_stage_scalar(type_name, landed, bag_layers, key, value, display_name)?;
         let reads =
             hares_equipment::typed_payload_reads(type_name, landed, key, value).map_err(|err| {
                 HaresError::Equipment(format!(
@@ -1571,7 +1598,8 @@ fn apply_typed_overrides(
     if let Some((source, wildcard)) = layers.wildcard {
         for (key, value) in wildcard {
             reject_reserved_key(source, key, equipment)?;
-            reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
+            reject_shadowed_wh_efficiency(type_name, merged, layers, key, value, equipment)?;
+            reject_shadowed_stage_scalar(type_name, merged, layers, key, value, equipment)?;
             if key == RESERVED_ZIP_OVERRIDE
                 || typed_reads(type_name, merged, key, value, equipment)?
             {
@@ -1581,11 +1609,66 @@ fn apply_typed_overrides(
     }
     for (key, value) in layers.own.into_iter().flatten() {
         reject_reserved_key(equipment, key, equipment)?;
-        reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
+        reject_shadowed_wh_efficiency(type_name, merged, layers, key, value, equipment)?;
+        reject_shadowed_stage_scalar(type_name, merged, layers, key, value, equipment)?;
         nested_insert(merged, key, value);
     }
+    remove_override_shadowed_ideal_fractions(merged, layers, type_name, equipment);
     remove_override_shadowed_setpoint_sources(merged, layers, equipment);
     Ok(())
+}
+
+/// The value a key's override layers give it, by the merge's own layer
+/// order: the equipment's own entry when it names the key, else the
+/// wildcard's. `None` when no layer names it. A layer that names the key
+/// with a `null` returns that null: the merge applies the own layer after
+/// the wildcard, so a null is the last word on the key (an unset), not a
+/// fall-through to the layer beneath.
+fn override_layer_value<'a>(
+    layers: hares_io::hpxml::OverrideLayers<'a>,
+    key: &str,
+) -> Option<&'a Value> {
+    layers
+        .own
+        .and_then(|own| own.get(key))
+        .or_else(|| layers.wildcard.and_then(|(_, wildcard)| wildcard.get(key)))
+}
+
+/// The ideal HVAC's fraction fields are two channels for ONE load-fraction
+/// control its init reads the heating field ahead of, so an override of one
+/// field could never apply while the resolution's value stood in the other.
+/// When the override layers set exactly one of the pair, the merge removes
+/// the other, making the overridden field the tier the init reads (the same
+/// shadow removal a constant setpoint's override applies to its schedule
+/// source). The layers naming both fields remove neither: the init refuses
+/// the differing pair that remains, naming both. A `null` names no value
+/// (the merge's own unset), so it sets neither field and removes neither:
+/// the resolution's value on the surviving channel stands.
+fn remove_override_shadowed_ideal_fractions(
+    merged: &mut Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    type_name: &str,
+    equipment: &str,
+) {
+    if type_name != "Ideal HVAC" {
+        return;
+    }
+    let set = |key: &str| override_layer_value(layers, key).is_some_and(|value| !value.is_null());
+    let heating_set = set("fraction_heating_load_served");
+    let cooling_set = set("fraction_cooling_load_served");
+    let removed = match (heating_set, cooling_set) {
+        (true, false) => "fraction_cooling_load_served",
+        (false, true) => "fraction_heating_load_served",
+        _ => return,
+    };
+    if merged.remove(removed).is_some() {
+        tracing::debug!(
+            equipment,
+            removed_field = removed,
+            "an override of the ideal HVAC's other fraction field replaces \
+             the resolution's value on the load-fraction control"
+        );
+    }
 }
 
 /// The `setpoint` block's sides and the config key each side's schedule
@@ -1602,25 +1685,29 @@ const SETPOINT_SOURCE_SHADOWS: [(&str, &str); 2] = [
 
 /// The constant setpoint, in Celsius, that the override layers set on one
 /// thermostat side, when they set one: the equipment's own entry's
-/// `setpoint` object first, then the wildcard's. A `null` value does not
-/// set a constant (it unsets one), and a non-numeric value fails the
-/// merged payload's schema at the validation that follows the merge.
+/// `setpoint` object first, then the wildcard's. The merge applies the own
+/// layer after the wildcard, so the own layer's entry is the last word on
+/// the key: a `null` there unsets the constant and does not re-expose the
+/// wildcard's replaced value, and a non-numeric value fails the merged
+/// payload's schema at the validation that follows the merge.
 pub(crate) fn override_constant_setpoint_value(
     layers: hares_io::hpxml::OverrideLayers<'_>,
     prefix: &str,
 ) -> Option<f64> {
     let key = format!("{prefix}_setpoint_c");
-    let constant = |layer: &Map<String, Value>| {
-        layer
-            .get("setpoint")
-            .and_then(Value::as_object)
-            .and_then(|sp| sp.get(&key))
-            .and_then(Value::as_f64)
-    };
-    layers
+    let value = layers
         .own
-        .and_then(constant)
-        .or_else(|| layers.wildcard.and_then(|(_, wildcard)| constant(wildcard)))
+        .and_then(|own| own.get("setpoint"))
+        .and_then(Value::as_object)
+        .and_then(|sp| sp.get(&key))
+        .or_else(|| {
+            layers
+                .wildcard
+                .and_then(|(_, wildcard)| wildcard.get("setpoint"))
+                .and_then(Value::as_object)
+                .and_then(|sp| sp.get(&key))
+        })?;
+    value.as_f64()
 }
 
 /// Remove the merged config's per-side schedule sources that a constant
@@ -1772,28 +1859,99 @@ pub(crate) fn cross_tier_setpoint_warnings(
     warnings
 }
 
-/// The gas water heater reads `conversion_efficiency` ahead of the EF/UEF
-/// test-procedure fields, so an override of those could never apply on a
-/// config that carries the conversion efficiency: it is rejected naming the
-/// field that shadows it instead of being accepted and silently ignored.
+/// The water heaters read one efficiency ahead of its alternative
+/// spelling: the gas tank reads `conversion_efficiency` ahead of the
+/// EF/UEF test-procedure fields, and the tankless reads `energy_factor`
+/// ahead of `uniform_energy_factor`. An override that sets the shadowed
+/// field to a value could never apply on a config that carries the
+/// winner: it is rejected naming the field that shadows it instead of
+/// being accepted and silently ignored. A `null` override names no value
+/// (it unsets the field), so it is never shadowed.
+///
+/// The winner's value is the layers' effective one, the read the shadow
+/// removals run: the own layer's last word (a null included), then the
+/// wildcard's, then the resolution's carried in the merged payload. An
+/// own-layer null on the winner unsets it, so the shadowed field's
+/// override beside it is the control's value and is not refused by the
+/// value the null replaced.
 fn reject_shadowed_wh_efficiency(
     type_name: &str,
     merged: &Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
     key: &str,
+    value: &Value,
     equipment: &str,
 ) -> Result<()> {
-    if type_name != "Gas Water Heater" || (key != "energy_factor" && key != "uniform_energy_factor")
-    {
+    if value.is_null() {
         return Ok(());
     }
-    if merged
-        .get("conversion_efficiency")
-        .is_some_and(|value| !value.is_null())
-    {
+    let shadowing = match type_name {
+        "Gas Water Heater" if key == "energy_factor" || key == "uniform_energy_factor" => {
+            "conversion_efficiency"
+        }
+        "Tankless Water Heater" if key == "uniform_energy_factor" => "energy_factor",
+        _ => return Ok(()),
+    };
+    if layered_value(merged, layers, shadowing).is_some_and(|value| !value.is_null()) {
         return Err(HaresError::Equipment(format!(
             "equipment '{equipment}': an override of '{key}' cannot apply while the \
-             config carries 'conversion_efficiency', which the gas water heater reads \
-             ahead of '{key}'; override 'conversion_efficiency' or remove it from the config"
+             config carries '{shadowing}', which the water heater reads ahead of \
+             '{key}'; override '{shadowing}' or remove it from the config"
+        )));
+    }
+    Ok(())
+}
+
+/// The per-stage table a multi-speed cooling or heating config's rated
+/// scalar is shadowed by, when the config's init reads the table ahead of
+/// the scalar: `None` for every other class and field.
+fn stage_table_for_scalar(type_name: &str, key: &str) -> Option<&'static str> {
+    match (type_name, key) {
+        ("Central AC", "capacity_w") => Some("stage_capacities_w"),
+        ("Central AC", "eir") => Some("stage_eirs"),
+        ("Central AC", "shr") => Some("stage_shrs"),
+        ("ASHP Heater", "heating_capacity_w") => Some("stage_heating_capacities_w"),
+        ("ASHP Heater", "heating_eir") => Some("stage_heating_eirs"),
+        ("ASHP Cooler", "cooling_capacity_w") => Some("stage_cooling_capacities_w"),
+        ("ASHP Cooler", "cooling_eir") => Some("stage_cooling_eirs"),
+        _ => None,
+    }
+}
+
+/// A multi-speed unit's stage table is the channel its init builds the
+/// capacity and efficiency ladder from, one entry per stage; the rated
+/// scalar beside it is the fallback a config WITHOUT the table reads (the
+/// init's `if let Some(stages) = ... else vec![scalar]`). An override that
+/// sets the scalar on a config carrying the table could never be the
+/// value the unit runs with: it is refused naming the table instead of
+/// being accepted and dropped, the water heater efficiency pair's rule one
+/// equipment family over. An override of the table itself is the live
+/// channel and applies per stage.
+///
+/// The table is read through the layers' effective value, so a layer that
+/// unsets it (a `null` beside the scalar in one entry, or a higher layer's
+/// `null`) leaves the scalar the control's value and is not refused; a
+/// `null` scalar names no value and is never refused.
+fn reject_shadowed_stage_scalar(
+    type_name: &str,
+    merged: &Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    key: &str,
+    value: &Value,
+    equipment: &str,
+) -> Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let Some(table) = stage_table_for_scalar(type_name, key) else {
+        return Ok(());
+    };
+    if layered_value(merged, layers, table).is_some_and(|value| !value.is_null()) {
+        return Err(HaresError::Equipment(format!(
+            "equipment '{equipment}': an override of '{key}' cannot apply while the \
+             config carries the stage table '{table}', which the unit reads ahead of \
+             '{key}'; override '{table}' (per stage) or unset it with a null to use \
+             '{key}' as the single-stage value"
         )));
     }
     Ok(())
@@ -2281,7 +2439,7 @@ mod tests {
 
     use hares_equipment::{
         ConfigPayload, SetpointReconciliation,
-        hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig},
+        hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig, IdealHvacConfig},
     };
     use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
     use hares_types::FuelType;
@@ -2499,6 +2657,142 @@ mod tests {
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
     }
 
+    fn ideal_hvac_spec() -> hares_io::EquipmentSpec {
+        let typed_cfg = IdealHvacConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            cooling_capacity_w: Some(10_000.0),
+            // The resolver's shape: the HPXML heating system's
+            // FractionHeatLoadServed lands on both fraction channels (the
+            // typed vocabulary carries the one quantity on both), and the
+            // init reads the heating field ahead of the cooling field.
+            fraction_heating_load_served: Some(0.9),
+            fraction_cooling_load_served: Some(0.9),
+            ..IdealHvacConfig::default()
+        };
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Ideal HVAC".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: serde_json::to_value(&typed_cfg)
+                .expect("serializable ideal config")
+                .as_object()
+                .cloned()
+                .expect("ideal config object"),
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "Ideal HVAC".to_string(),
+                    "Ideal HVAC".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: Some("heating".to_string()),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+        }
+    }
+
+    /// The ideal HVAC's fraction fields are two channels for ONE
+    /// load-fraction control the init reads the heating field ahead of, so
+    /// an override of the cooling field could never apply while the
+    /// resolution's heating value stood: the merge removes the field no
+    /// override named (the same shadow removal the setpoint's constant
+    /// over its schedule source applies), making the overridden field the
+    /// tier the init reads. The resolution's own value stays on both
+    /// channels when no override reaches either.
+    #[test]
+    fn an_ideal_fraction_override_removes_the_field_it_shadows() {
+        let spec = ideal_hvac_spec();
+        let overrides = json!({
+            "Ideal HVAC": {
+                "fraction_cooling_load_served": 0.5
+            }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<IdealHvacConfig>("Ideal HVAC")
+            .expect("the merged config decodes");
+
+        assert_eq!(
+            cfg.fraction_cooling_load_served,
+            Some(0.5),
+            "the override lands on the channel it names"
+        );
+        assert_eq!(
+            cfg.fraction_heating_load_served, None,
+            "the resolution's heating value shadows the override at the init: \
+             it must be removed so the override is the value the control reads"
+        );
+
+        // The heating field's own override shadows symmetrically.
+        let overrides = json!({
+            "Ideal HVAC": {
+                "fraction_heating_load_served": 0.7
+            }
+        });
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<IdealHvacConfig>("Ideal HVAC")
+            .expect("the merged config decodes");
+        assert_eq!(cfg.fraction_heating_load_served, Some(0.7));
+        assert_eq!(
+            cfg.fraction_cooling_load_served, None,
+            "the resolution's cooling value must not shadow the heating override"
+        );
+
+        // No override: the resolution's value stands on both channels.
+        let merged = merged_equipment_config(&spec, &json!({})).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<IdealHvacConfig>("Ideal HVAC")
+            .expect("the merged config decodes");
+        assert_eq!(
+            cfg.fraction_heating_load_served,
+            Some(0.9),
+            "the resolution's heating value stands"
+        );
+        assert_eq!(
+            cfg.fraction_cooling_load_served,
+            Some(0.9),
+            "the resolution's cooling value stands beside it"
+        );
+    }
+
+    /// An explicit null on one fraction channel unsets that channel; it
+    /// names no value, so it must not remove the other channel's resolved
+    /// value. The init then reads the surviving resolved value, exactly as
+    /// a null constant leaves the setpoint's schedule source governing.
+    #[test]
+    fn a_null_ideal_fraction_does_not_remove_the_other_channel() {
+        let spec = ideal_hvac_spec();
+        let overrides = json!({
+            "Ideal HVAC": {
+                "fraction_cooling_load_served": null
+            }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<IdealHvacConfig>("Ideal HVAC")
+            .expect("the merged config decodes");
+
+        assert_eq!(
+            cfg.fraction_cooling_load_served, None,
+            "the null unsets the channel it names"
+        );
+        assert_eq!(
+            cfg.fraction_heating_load_served,
+            Some(0.9),
+            "an unset channel names no value: the resolution's heating value \
+             must stand, not be removed as if the null set the other channel"
+        );
+    }
+
     /// A 24-hour constant daily profile, the shape the resolver stamps.
     fn constant_profile(value: f64) -> Value {
         Value::Array(vec![Value::from(value); 24])
@@ -2616,6 +2910,51 @@ mod tests {
 
         assert_eq!(cfg.setpoint.heating_setpoint_c, None);
         assert!(cfg.setpoint.heating_setpoint_source.is_some());
+    }
+
+    /// The highest-precedence layer that names a side's constant decides
+    /// it: the own layer lands after the wildcard, so an equipment-specific
+    /// null replaces the wildcard's constant with no constant at all, and
+    /// the resolution's schedule source must then stand. The shadow removal
+    /// reads the layers, so it must apply the same precedence: a null must
+    /// not let the wildcard's value remove the source the payload keeps.
+    #[test]
+    fn a_null_constant_in_the_own_layer_unsets_the_wildcards_and_keeps_the_source() {
+        let mut spec = gas_furnace_spec();
+        if let Some(typed) = spec.typed_config.as_mut()
+            && let ConfigPayload::Typed { data, .. } = &mut typed.payload
+        {
+            let obj = data.as_object_mut().expect("furnace payload object");
+            obj.insert(
+                "setpoint".to_string(),
+                json!({
+                    "heating_setpoint_source": {
+                        "kind": "daily_profile",
+                        "weekday": constant_profile(20.0),
+                        "weekend": constant_profile(20.0)
+                    }
+                }),
+            );
+        }
+        let overrides = json!({
+            "all": {"setpoint": {"heating_setpoint_c": 25.0}},
+            "Gas Furnace": {"setpoint": {"heating_setpoint_c": null}}
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<GasFurnaceConfig>("Gas Furnace")
+            .expect("the merged config decodes");
+
+        assert_eq!(
+            cfg.setpoint.heating_setpoint_c, None,
+            "the own layer's null is the last word: no constant governs"
+        );
+        assert!(
+            cfg.setpoint.heating_setpoint_source.is_some(),
+            "no constant governs, so the resolution's schedule source must stand; \
+             the wildcard's replaced 25.0 must not remove it"
+        );
     }
 
     // ── the spec's parameter bag as an override layer on typed specs ────
@@ -5759,6 +6098,576 @@ mod tests {
             err.to_string().contains("conversion_efficiency"),
             "the error names the field that shadows it, got: {err}"
         );
+    }
+
+    /// The tankless water heater reads `energy_factor` ahead of
+    /// `uniform_energy_factor` (OCHRE's instantaneous branch takes either
+    /// as the efficiency, EF first), so an override of the UEF could never
+    /// apply on a config that carries an EF: it is rejected naming the
+    /// field that shadows it, the gas tank's `conversion_efficiency` rule
+    /// one water heater over. An EF override is the live channel and
+    /// applies, and without an EF the UEF override applies.
+    #[test]
+    fn a_shadowed_tankless_uef_override_is_rejected() {
+        let spec = typed_tankless_water_heater_spec(Some(0.82), None);
+        for (layer, overrides) in [
+            (
+                "own",
+                json!({ "Tankless Water Heater": { "uniform_energy_factor": 0.95 } }),
+            ),
+            (
+                "wildcard",
+                json!({ "all": { "uniform_energy_factor": 0.95 } }),
+            ),
+        ] {
+            let err = merged_equipment_config(&spec, &overrides)
+                .expect_err("the shadowed UEF override is rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("energy_factor"),
+                "{layer}: the error names the field that shadows it, got: {msg}"
+            );
+            assert!(
+                msg.contains("uniform_energy_factor"),
+                "{layer}: the error names the field the override asked for, got: {msg}"
+            );
+        }
+
+        let payload_value =
+            |merged: &hares_equipment::EquipmentConfig, key: &str| match &merged.payload {
+                hares_equipment::ConfigPayload::Typed { data, .. } => data.get(key).cloned(),
+                other => panic!("typed payload expected, got {other:?}"),
+            };
+
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Tankless Water Heater": { "energy_factor": 0.95 } }),
+        )
+        .expect("an override of the live channel applies");
+        assert_eq!(
+            payload_value(&merged, "energy_factor"),
+            Some(json!(0.95)),
+            "the EF override landed on the payload"
+        );
+
+        let spec = typed_tankless_water_heater_spec(None, Some(0.95));
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Tankless Water Heater": { "uniform_energy_factor": 0.9 } }),
+        )
+        .expect("without an EF the UEF override applies");
+        assert_eq!(
+            payload_value(&merged, "uniform_energy_factor"),
+            Some(json!(0.9)),
+            "the UEF override landed on the payload"
+        );
+
+        // A null override names no value (it unsets the field), so it is
+        // never shadowed: the merge accepts it and the payload's field is
+        // null, which the init reads as absent.
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Tankless Water Heater": { "uniform_energy_factor": null } }),
+        )
+        .expect("a null unsets the field: it names no value to shadow");
+        assert_eq!(
+            payload_value(&merged, "uniform_energy_factor"),
+            Some(Value::Null),
+            "the null landed as the field's unset"
+        );
+
+        // The spec-level channel (a caller-built spec's typed_overrides)
+        // rejects the same shadow the same way.
+        let mut spec = typed_tankless_water_heater_spec(Some(0.82), None);
+        spec.typed_overrides
+            .insert("uniform_energy_factor".to_string(), json!(0.95));
+        let err = apply_spec_bag_to_typed_config(&mut spec)
+            .expect_err("the spec-level shadowed UEF override is rejected");
+        assert!(
+            err.to_string().contains("energy_factor"),
+            "the error names the field that shadows it, got: {err}"
+        );
+    }
+
+    /// The reject reads the shadowing field's value the way the shadow
+    /// removals read theirs: the layers' effective one, the own layer's
+    /// last word (a null included) ahead of the wildcard's, the
+    /// resolution's only where no layer names the field. An own-layer
+    /// null on the EF unsets it, so the wildcard's UEF override beside
+    /// it is the layered config's shape (no EF stands, the UEF the
+    /// control's value) and must apply, not be refused by the
+    /// resolution's EF that the null replaced.
+    #[test]
+    fn a_wildcard_uef_beside_an_own_layer_null_ef_applies() {
+        let spec = typed_tankless_water_heater_spec(Some(0.82), None);
+        let overrides = json!({
+            "all": { "uniform_energy_factor": 0.95 },
+            "Tankless Water Heater": { "energy_factor": null }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect(
+            "the own layer's null is the last word on the EF: the UEF override \
+             is not shadowed by the value the null unsets",
+        );
+        let payload = match &merged.payload {
+            hares_equipment::ConfigPayload::Typed { data, .. } => data.clone(),
+            other => panic!("typed payload expected, got {other:?}"),
+        };
+        assert_eq!(
+            payload.get("energy_factor"),
+            Some(&Value::Null),
+            "the own layer's null is the merged config's EF"
+        );
+        assert_eq!(
+            payload.get("uniform_energy_factor"),
+            Some(&json!(0.95)),
+            "the wildcard's UEF override landed"
+        );
+    }
+
+    /// The same composition inside one layer, and inside the spec's
+    /// parameter bag: the layer's final word on the EF is the null, so
+    /// the UEF override beside it applies whatever order the keys land
+    /// in, on both spec-level channels.
+    #[test]
+    fn a_null_ef_beside_a_uef_override_in_one_layer_applies() {
+        let payload_value =
+            |merged: &hares_equipment::EquipmentConfig, key: &str| match &merged.payload {
+                hares_equipment::ConfigPayload::Typed { data, .. } => data.get(key).cloned(),
+                other => panic!("typed payload expected, got {other:?}"),
+            };
+        let overrides = json!({
+            "Tankless Water Heater": {
+                "energy_factor": null,
+                "uniform_energy_factor": 0.95
+            }
+        });
+
+        let spec = typed_tankless_water_heater_spec(Some(0.82), None);
+        let merged = merged_equipment_config(&spec, &overrides)
+            .expect("the layer's EF is null: the UEF override is not shadowed");
+        assert_eq!(payload_value(&merged, "energy_factor"), Some(Value::Null));
+        assert_eq!(
+            payload_value(&merged, "uniform_energy_factor"),
+            Some(json!(0.95))
+        );
+
+        // The spec's parameter bag is the one layer the bag channel
+        // lands: the same composition through `typed_overrides`.
+        let mut spec = typed_tankless_water_heater_spec(Some(0.82), None);
+        spec.typed_overrides = overrides.as_object().expect("an object")["Tankless Water Heater"]
+            .as_object()
+            .expect("an object")
+            .clone();
+        apply_spec_bag_to_typed_config(&mut spec)
+            .expect("the bag's EF null is the field's final word: the UEF lands beside it");
+        let Some(typed) = &spec.typed_config else {
+            panic!("the typed config exists");
+        };
+        let data = match &typed.payload {
+            hares_equipment::ConfigPayload::Typed { data, .. } => data.clone(),
+            other => panic!("typed payload expected, got {other:?}"),
+        };
+        assert_eq!(data.get("energy_factor"), Some(&Value::Null));
+        assert_eq!(data.get("uniform_energy_factor"), Some(&json!(0.95)));
+    }
+
+    /// The efficiency chain's cross-layer shape: the rated field and its
+    /// shadowed alternative arriving through different layers, in both
+    /// arrangements. The layer maps sort their keys (the payload map is a
+    /// BTreeMap, so a JSON text's key order is not an input), which leaves
+    /// the layer walk as the one order the merge varies: the wildcard's
+    /// keys land before the own entry's. Putting the shadowed field's
+    /// override in the wildcard and the rated field in the own entry walks
+    /// the pair in the reverse of the single-layer order, and the verdict
+    /// is the single-layer verdict: the EF is the control's value wherever
+    /// its layer sits, so the UEF override beside it is refused naming the
+    /// EF. The mirror arrangement walks them in the natural order and is
+    /// refused the same way.
+    #[test]
+    fn a_cross_layer_ef_shadows_the_other_layers_uef_override() {
+        let spec = typed_tankless_water_heater_spec(Some(0.82), None);
+        for (shape, overrides) in [
+            (
+                "the wildcard's UEF walked before the own entry's EF",
+                json!({
+                    "all": { "uniform_energy_factor": 0.95 },
+                    "Tankless Water Heater": { "energy_factor": 0.9 }
+                }),
+            ),
+            (
+                "the wildcard's EF walked before the own entry's UEF",
+                json!({
+                    "all": { "energy_factor": 0.9 },
+                    "Tankless Water Heater": { "uniform_energy_factor": 0.95 }
+                }),
+            ),
+        ] {
+            let err = merged_equipment_config(&spec, &overrides).expect_err(
+                "the EF is the control's value in either layer order, so the UEF \
+                 override beside it cannot apply",
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("energy_factor") && msg.contains("uniform_energy_factor"),
+                "{shape}: the refusal names both fields, got: {msg}"
+            );
+        }
+
+        // The layers' other arrangement, the own entry's EF unset and the
+        // wildcard's UEF set, is the layered config's valid shape: pinned
+        // by `a_wildcard_uef_beside_an_own_layer_null_ef_applies`.
+    }
+
+    /// The gas tank's shadowing field is the resolver's derived
+    /// `conversion_efficiency`, and the reject reads it through the same
+    /// effective-layer read: an own-layer null on the derived value
+    /// unsets it, so the wildcard's EF override beside it applies and
+    /// the init falls through to the EF the override set.
+    #[test]
+    fn a_wildcard_ef_beside_an_own_layer_null_conversion_efficiency_applies() {
+        let spec = typed_gas_water_heater_spec(Some(0.78));
+        let overrides = json!({
+            "all": { "energy_factor": 0.95 },
+            "Gas Water Heater": { "conversion_efficiency": null }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect(
+            "the own layer's null is the last word on the derived conversion \
+             efficiency: the EF override is not shadowed by the value the null unsets",
+        );
+        let payload = match &merged.payload {
+            hares_equipment::ConfigPayload::Typed { data, .. } => data.clone(),
+            other => panic!("typed payload expected, got {other:?}"),
+        };
+        assert_eq!(
+            payload.get("conversion_efficiency"),
+            Some(&Value::Null),
+            "the own layer's null is the merged config's conversion efficiency"
+        );
+        assert_eq!(
+            payload.get("energy_factor"),
+            Some(&json!(0.95)),
+            "the wildcard's EF override landed"
+        );
+    }
+
+    /// A typed spec of `type_name` carrying `data` and no bag overrides:
+    /// the dwelling override channel is the only layer the merge tests
+    /// below add.
+    fn typed_payload_spec(type_name: &str, data: Map<String, Value>) -> hares_io::EquipmentSpec {
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: type_name.to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: data.clone(),
+            zip_params: None,
+            typed_overrides: Map::new(),
+            typed_config: Some(hares_equipment::EquipmentConfig::with_payload(
+                type_name.to_string(),
+                type_name.to_string(),
+                hares_equipment::ConfigPayload::Typed {
+                    type_name: type_name.to_string(),
+                    version: 1,
+                    data: Value::Object(data),
+                },
+            )),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+        }
+    }
+
+    /// A two-speed multi-speed config with its rated scalars and, when
+    /// `table` names one, that config's per-stage table. The central AC's
+    /// two required scalars are always present so a payload the merge lets
+    /// through is one the schema accepts: the refusal under test must be
+    /// the merge's, not the schema's.
+    fn multi_speed_spec(
+        type_name: &str,
+        scalars: &[(&str, f64)],
+        table: Option<(&str, Value)>,
+    ) -> hares_io::EquipmentSpec {
+        let mut data = Map::new();
+        data.insert("number_of_speeds".to_string(), json!(2));
+        if type_name == "Central AC" {
+            data.insert("capacity_w".to_string(), json!(8_000.0));
+            data.insert("eir".to_string(), json!(0.33));
+        }
+        for (key, value) in scalars {
+            data.insert(key.to_string(), json!(value));
+        }
+        if let Some((key, value)) = table {
+            data.insert(key.to_string(), value);
+        }
+        typed_payload_spec(type_name, data)
+    }
+
+    fn typed_payload(merged: &hares_equipment::EquipmentConfig) -> Value {
+        match &merged.payload {
+            ConfigPayload::Typed { data, .. } => data.clone(),
+            other => panic!("typed payload expected, got {other:?}"),
+        }
+    }
+
+    /// One rated-scalar/stage-table pair of a multi-speed config: the
+    /// scalar, its table, the resolved values of both, and the override's
+    /// plausible value for the scalar.
+    struct ScalarPair {
+        scalar: &'static str,
+        table: &'static str,
+        resolved: f64,
+        resolved_table: Value,
+        override_value: f64,
+    }
+
+    /// The stage tables a multi-speed config carries are the channel its
+    /// init builds the capacity and efficiency ladder from
+    /// (`AirConditioner::init` reads `stage_capacities_w` and falls back to
+    /// `capacity_w` only without it; `typed_stage_eir_overrides_base_eir`
+    /// pins the EIR arm, and the heat pump's heater and cooler inits read
+    /// their tables ahead of the scalars the same way). An override of the
+    /// rated scalar on a table-carrying config is therefore an accepted
+    /// value the unit never runs with: the merge refuses it naming the
+    /// table, in the own layer, the wildcard and the spec's parameter bag,
+    /// rather than accepting and dropping it.
+    #[test]
+    fn a_rated_scalar_override_beside_a_stage_table_is_refused() {
+        // The values are the classes' plausible ones so a payload the merge
+        // lets through at the parent is one the schema accepts: the red the
+        // witness records is the merge's acceptance, not a schema error.
+        let classes: [(&str, &[ScalarPair]); 3] = [
+            (
+                "Central AC",
+                &[
+                    ScalarPair {
+                        scalar: "capacity_w",
+                        table: "stage_capacities_w",
+                        resolved: 8_000.0,
+                        resolved_table: json!([4_000.0, 8_000.0]),
+                        override_value: 12_000.0,
+                    },
+                    ScalarPair {
+                        scalar: "eir",
+                        table: "stage_eirs",
+                        resolved: 0.33,
+                        resolved_table: json!([0.3, 0.33]),
+                        override_value: 0.4,
+                    },
+                    ScalarPair {
+                        scalar: "shr",
+                        table: "stage_shrs",
+                        resolved: 0.75,
+                        resolved_table: json!([0.7, 0.75]),
+                        override_value: 0.9,
+                    },
+                ],
+            ),
+            (
+                "ASHP Heater",
+                &[
+                    ScalarPair {
+                        scalar: "heating_capacity_w",
+                        table: "stage_heating_capacities_w",
+                        resolved: 8_000.0,
+                        resolved_table: json!([4_000.0, 8_000.0]),
+                        override_value: 12_000.0,
+                    },
+                    ScalarPair {
+                        scalar: "heating_eir",
+                        table: "stage_heating_eirs",
+                        resolved: 0.33,
+                        resolved_table: json!([0.3, 0.33]),
+                        override_value: 0.4,
+                    },
+                ],
+            ),
+            (
+                "ASHP Cooler",
+                &[
+                    ScalarPair {
+                        scalar: "cooling_capacity_w",
+                        table: "stage_cooling_capacities_w",
+                        resolved: 8_000.0,
+                        resolved_table: json!([4_000.0, 8_000.0]),
+                        override_value: 12_000.0,
+                    },
+                    ScalarPair {
+                        scalar: "cooling_eir",
+                        table: "stage_cooling_eirs",
+                        resolved: 0.33,
+                        resolved_table: json!([0.3, 0.33]),
+                        override_value: 0.4,
+                    },
+                ],
+            ),
+        ];
+        for (type_name, pairs) in classes {
+            for pair in pairs {
+                let scalar = pair.scalar;
+                let table = pair.table;
+                let override_value = json!(pair.override_value);
+                let spec = multi_speed_spec(
+                    type_name,
+                    &[(scalar, pair.resolved)],
+                    Some((table, pair.resolved_table.clone())),
+                );
+                for (layer, overrides) in [
+                    (
+                        "own",
+                        json!({ (spec.name.clone()): { (scalar): override_value } }),
+                    ),
+                    ("wildcard", json!({ "all": { (scalar): override_value } })),
+                ] {
+                    let err = merged_equipment_config(&spec, &overrides).expect_err(
+                        "the scalar is dead while the table stands: the merge must \
+                         refuse it, not accept and drop it",
+                    );
+                    let msg = err.to_string();
+                    assert!(
+                        msg.contains(table) && msg.contains(scalar),
+                        "{type_name} {layer}: the refusal names the scalar and the \
+                         table that shadows it, got: {msg}"
+                    );
+                }
+
+                // The spec's parameter bag is the other override channel:
+                // the same scalar beside the same table is refused there.
+                let mut bagged = multi_speed_spec(
+                    type_name,
+                    &[(scalar, pair.resolved)],
+                    Some((table, pair.resolved_table.clone())),
+                );
+                bagged
+                    .typed_overrides
+                    .insert(scalar.to_string(), override_value);
+                let err = apply_spec_bag_to_typed_config(&mut bagged)
+                    .expect_err("the bag's scalar is shadowed by the table too");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains(table) && msg.contains(scalar),
+                    "{type_name} bag: the refusal names the scalar and the table, \
+                     got: {msg}"
+                );
+            }
+        }
+    }
+
+    /// The stage arrays themselves are the live override channel: a table
+    /// override lands per stage, the rated scalar is not derived from it
+    /// (the init reads the table ahead of the scalar, so no second value is
+    /// invented), and a layer that unsets the table with a null beside the
+    /// scalar leaves the scalar the single-stage value the init's fallback
+    /// reads.
+    #[test]
+    fn a_stage_table_override_lands_per_stage_and_a_null_table_frees_the_scalar() {
+        let spec = multi_speed_spec(
+            "Central AC",
+            &[("capacity_w", 8_000.0), ("eir", 0.33)],
+            Some(("stage_capacities_w", json!([4_000.0, 8_000.0]))),
+        );
+
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Central AC": { "stage_capacities_w": [3_000.0, 6_000.0] } }),
+        )
+        .expect("a table override is the live channel");
+        let payload = typed_payload(&merged);
+        assert_eq!(
+            payload.get("stage_capacities_w"),
+            Some(&json!([3_000.0, 6_000.0])),
+            "the per-stage table is the overridden ladder"
+        );
+        assert_eq!(
+            payload.get("capacity_w"),
+            Some(&json!(8_000.0)),
+            "the rated scalar keeps the resolution's value: the table is not \
+             re-derived into it"
+        );
+
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({
+                "Central AC": { "stage_capacities_w": null, "capacity_w": 12_000.0 }
+            }),
+        )
+        .expect("the layer unsets the table: the scalar is the control's value");
+        let payload = typed_payload(&merged);
+        assert_eq!(
+            payload.get("stage_capacities_w"),
+            Some(&Value::Null),
+            "the layer's null is the table's last word"
+        );
+        assert_eq!(
+            payload.get("capacity_w"),
+            Some(&json!(12_000.0)),
+            "the scalar override landed beside the unset table"
+        );
+
+        // The higher layer's null is the last word too: the wildcard sets
+        // the table, the own layer unsets it, so the own layer's scalar
+        // override is not refused by the table the null replaces.
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({
+                "all": { "stage_capacities_w": [2_000.0, 7_000.0] },
+                "Central AC": { "stage_capacities_w": null, "capacity_w": 12_000.0 }
+            }),
+        )
+        .expect("the own layer's null is the table's last word");
+        assert_eq!(
+            typed_payload(&merged).get("capacity_w"),
+            Some(&json!(12_000.0))
+        );
+    }
+
+    fn typed_tankless_water_heater_spec(
+        energy_factor: Option<f64>,
+        uniform_energy_factor: Option<f64>,
+    ) -> hares_io::EquipmentSpec {
+        let cfg = hares_equipment::TanklessWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: None,
+            fuel_type: FuelType::Gas,
+            energy_factor,
+            uniform_energy_factor,
+            heating_capacity_w: Some(30_000.0),
+            setpoint_c: Some(52.0),
+            parasitic_power_w: None,
+            performance_adjustment: None,
+            inlet_temp_c: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
+            avg_water_draw_l_per_day: None,
+            zone_type: None,
+            min_flow_kg_s: None,
+            min_flow_gpm: None,
+        };
+        let typed = hares_equipment::EquipmentConfig::from_typed(
+            "Tankless Water Heater".to_string(),
+            "Tankless Water Heater".to_string(),
+            cfg,
+        )
+        .expect("the config is well-formed");
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Tankless Water Heater".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters: serde_json::Map::new(),
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(typed),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+        }
     }
 
     fn typed_gas_water_heater_spec(conversion_efficiency: Option<f64>) -> hares_io::EquipmentSpec {

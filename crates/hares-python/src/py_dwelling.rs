@@ -852,8 +852,11 @@ impl PyDwelling {
         })
     }
 
-    /// The blueprint the dwelling was built from: the shared parses (one
-    /// per unique input) and the state every build clones.
+    /// The blueprint the current dwelling was built from: the shared parses
+    /// (one per unique input) and the state every build clones. A
+    /// `reset_with_seed` rebuild reports the blueprint it re-froze (a
+    /// generated diversified schedule re-derives under the new seed), so
+    /// this accessor follows the dwelling the object currently carries.
     pub fn blueprint(&self) -> crate::py_blueprint::PyDwellingBlueprintRef {
         crate::py_blueprint::PyDwellingBlueprintRef {
             inner: Arc::clone(&self.blueprint),
@@ -1984,9 +1987,13 @@ impl PyDwelling {
     }
 
     pub fn reset_with_seed(&mut self, py: Python<'_>, seed: u64) -> PyResult<()> {
-        // The reset reuses the blueprint: the shared parses are the same
-        // `Arc`s, the rng derives from the seed, and the settings carry
-        // the seed the config reports.
+        // The reset reuses the blueprint's shared parses (the HPXML, the
+        // weather and the defaults are the same `Arc`s), the rng derives
+        // from the seed, and the generated schedule's diversity re-derives
+        // under the seed's key: that re-derivation re-freezes the
+        // blueprint, so the wrapper reports the rebuilt one (the one the
+        // dwelling actually runs) and the settings carry the seed the
+        // config reports.
         #[cfg(test)]
         TEST_BUILD_COUNT.fetch_add(1, Ordering::SeqCst);
         let mut config = self.config.clone();
@@ -1997,6 +2004,7 @@ impl PyDwelling {
             move || blueprint.build_with_seed(seed).map_err(to_py_err)
         })
         .map_err(|_| PyRuntimeError::new_err("reset_with_seed panicked"))?;
+        self.blueprint = Arc::clone(dwelling.blueprint());
         self.dwelling = Mutex::new(dwelling);
         self.poisoned.store(false, Ordering::SeqCst);
         self.mutex_poison_events.store(0, Ordering::SeqCst);
@@ -3029,7 +3037,7 @@ fn snapshot_to_py(
                     let ed = PyDict::new(py);
                     ed.set_item("name", &obs.name)?;
                     ed.set_item("equipment_type", &obs.equipment_type)?;
-                    ed.set_item("end_use", format!("{:?}", obs.end_use))?;
+                    ed.set_item("end_use", obs.end_use.as_str())?;
                     let telem: Vec<(&String, &f64)> = obs.telemetry.0.iter().collect();
                     let td = PyDict::new(py);
                     for (k, v) in telem {
@@ -4389,6 +4397,7 @@ mod profiling_summary_tests {
                 None,
                 0,
                 None,
+                "on",
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -4519,6 +4528,7 @@ mod profiling_summary_tests {
                 None,
                 0,
                 None,
+                "on",
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -4631,6 +4641,7 @@ mod construction_gil_tests {
             None,
             0,
             None,
+            "on",
             None,
             None,
             hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -4827,6 +4838,7 @@ mod construction_gil_tests {
                 None,
                 0,
                 None,
+                "on",
                 None,
                 None,
                 hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
@@ -4913,10 +4925,13 @@ mod construction_gil_tests {
         });
     }
 
-    /// The reset reuses the blueprint: the `Arc<DwellingBlueprint>` the
-    /// dwelling was built from is the same before and after
+    /// The reset reuses the blueprint's shared parses: a CSV-schedule
+    /// dwelling takes `build_with_seed`'s in-place path, so the
+    /// `Arc<DwellingBlueprint>` is the same before and after
     /// `reset_with_seed`, and the reset run's frame equals a fresh build
-    /// with that seed, so no input was re-parsed.
+    /// with that seed, so no input was re-parsed. A generated diversified
+    /// schedule re-freezes the blueprint under the seed's key
+    /// (`reset_with_seed_reports_the_blueprint_it_built_from`).
     #[test]
     fn reset_with_seed_reuses_blueprint() {
         let _test_count_exclusive = crate::py_dwelling::TEST_COUNT_EXCLUSIVITY
@@ -5006,6 +5021,198 @@ mod construction_gil_tests {
                     }
                 }
             }
+        });
+    }
+}
+
+/// The blueprint the dwelling reports is the one it currently runs:
+/// `reset_with_seed` re-freezes a generated diversified schedule under the
+/// new seed (the schedule is a build-time draw), so the wrapper's
+/// blueprint must move with the build rather than keep the construction
+/// seed's. The reset's shared parses (HPXML, weather, defaults) stay the
+/// same handles; the generated schedule is the re-derived one.
+#[cfg(test)]
+mod blueprint_readback_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use pyo3::Python;
+    use pyo3::types::PyString;
+
+    use crate::py_config::{PySimulationConfig, WholeSeconds};
+    use crate::py_dwelling::{PyDwelling, TEST_COUNT_EXCLUSIVITY};
+
+    fn fixture_paths() -> (PathBuf, PathBuf, PathBuf) {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
+        (
+            fixture.join("building.xml"),
+            fixture.join("weather.epw"),
+            root.join("python/hares/defaults"),
+        )
+    }
+
+    fn sim_config_1h_900s() -> PySimulationConfig {
+        PySimulationConfig::new(
+            "2023-01-01T00:00:00-07:00",
+            WholeSeconds(3600),
+            WholeSeconds(900),
+            None,
+            false,
+            false,
+            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            None,
+            0,
+            None,
+            "on",
+            None,
+            None,
+            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            None,
+            crate::py_config::PyWarmupArg::Absent,
+            "hour24",
+            "typical",
+            None,
+        )
+        .expect("the sim config builds")
+    }
+
+    #[test]
+    fn reset_with_seed_reports_the_blueprint_it_built_from() {
+        let _test_count_exclusive = TEST_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (hpxml, weather, defaults) = fixture_paths();
+        Python::attach(|py| {
+            let cls = py.get_type::<PyDwelling>();
+            let mut dwelling = PyDwelling::from_hpxml(
+                &cls,
+                PyString::new(py, hpxml.to_str().expect("utf8")).as_any(),
+                // No schedule source: the generated, diversified family.
+                None,
+                PyString::new(py, weather.to_str().expect("utf8")).as_any(),
+                sim_config_1h_900s(),
+                1,
+                Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
+                None,
+                None,
+            )
+            .expect("the generated-schedule fixture must construct");
+            let construction_schedule = dwelling.blueprint.inputs().schedule.schedule();
+            dwelling
+                .reset_with_seed(py, 7)
+                .expect("the seed reset must rebuild the dwelling");
+            let built = {
+                let guard = dwelling
+                    .acquire()
+                    .expect("the rebuilt dwelling is not poisoned");
+                Arc::clone(guard.blueprint())
+            };
+            let built_schedule = built.inputs().schedule.schedule();
+            assert_ne!(
+                construction_schedule.columns, built_schedule.columns,
+                "the seed swap must re-derive the schedule for the accessor's \
+                 equality below to mean anything"
+            );
+            assert!(
+                Arc::ptr_eq(&dwelling.blueprint, &built),
+                "the blueprint accessor must report the blueprint the current \
+                 dwelling was built from, not the construction seed's"
+            );
+            let exposed_schedule = dwelling.blueprint.inputs().schedule.schedule();
+            assert_eq!(
+                exposed_schedule.columns, built_schedule.columns,
+                "the exposed blueprint's generated schedule must be the one \
+                 the dwelling runs"
+            );
+        });
+    }
+
+    /// The observer snapshot's equipment entry carries `end_use` in the
+    /// string vocabulary every other read-back uses (`EndUse::as_str`), the
+    /// one a consumer matches against the equipment and end-use names the
+    /// reports and the scene tables carry. Rust's `Debug` form
+    /// (`EndUse("hvac_heating")`) is a developer rendering of the newtype,
+    /// not an end-use name, and no consumer of the snapshot can read it.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn the_observer_snapshot_renders_end_use_as_its_read_back_string() {
+        use crate::py_dwelling::snapshot_to_py;
+        use chrono::FixedOffset;
+        use chrono::TimeZone;
+        use hares_core::observer::EquipmentObservation;
+        use hares_core::observer::EquipmentPhaseCapture;
+        use hares_core::observer::PhaseSnapshots;
+        use hares_core::observer::PortsCapture;
+        use hares_core::observer::StepSnapshot;
+        use hares_types::EndUse;
+        use pyo3::types::PyAnyMethods;
+        use pyo3::types::PyDict;
+        use pyo3::types::PyDictMethods;
+        use pyo3::types::PyList;
+        use pyo3::types::PyListMethods;
+
+        let snapshot = StepSnapshot {
+            step_index: 0,
+            timestamp: FixedOffset::east_opt(0)
+                .expect("UTC is a valid offset")
+                .with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+                .single()
+                .expect("the timestamp is unambiguous"),
+            phases: PhaseSnapshots {
+                post_thermal_equipment: Some(EquipmentPhaseCapture {
+                    equipment: vec![EquipmentObservation {
+                        name: "Heater".to_string(),
+                        equipment_type: "Gas Furnace".to_string(),
+                        end_use: EndUse::HVAC_HEATING,
+                        ..EquipmentObservation::default()
+                    }],
+                    ports: PortsCapture::default(),
+                }),
+                ..PhaseSnapshots::default()
+            },
+            actor_skips: 0,
+            actor_calls: 0,
+            actor_error_count: 0,
+            moisture_invariant: None,
+            time_sin: 0.0,
+            time_cos: 0.0,
+            actor_telemetry_keys: Vec::new(),
+        };
+
+        Python::attach(|py| {
+            let rendered = snapshot_to_py(py, &snapshot).expect("the snapshot renders");
+            let dict = rendered
+                .bind(py)
+                .cast::<PyDict>()
+                .expect("the snapshot is a dict");
+            let phase = dict
+                .get_item("post_thermal_equipment")
+                .expect("get_item must not raise")
+                .expect("the thermal phase is present")
+                .cast_into::<PyDict>()
+                .expect("the phase is a dict");
+            let entries = phase
+                .get_item("equipment")
+                .expect("get_item must not raise")
+                .expect("the phase carries its equipment")
+                .cast_into::<PyList>()
+                .expect("the equipment entries are a list");
+            let end_use: String = entries
+                .get_item(0)
+                .expect("the observation is listed")
+                .cast_into::<PyDict>()
+                .expect("an entry is a dict")
+                .get_item("end_use")
+                .expect("get_item must not raise")
+                .expect("the entry carries end_use")
+                .extract()
+                .expect("end_use is a str");
+            assert_eq!(
+                end_use,
+                EndUse::HVAC_HEATING.as_str(),
+                "the snapshot's end_use is the read-back string, not the Debug form"
+            );
         });
     }
 }

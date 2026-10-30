@@ -27,7 +27,7 @@ fn project_root() -> PathBuf {
 
 /// The default generated schedule for `base.xml` over the Denver TMY3
 /// weather with the repo defaults: a 24 h run starting 2023-01-15 00:00
-/// UTC-7 at 900 s steps. The digest moved three times. Twice before the
+/// UTC-7 at 900 s steps. The digest moved four times. Twice before the
 /// calendar-anchor contract: once when the constant 1.0 `occupants`
 /// column in front of the `Occupancy` profile column was deleted and the
 /// last column survived the resample; once when the two constant setpoint
@@ -37,10 +37,20 @@ fn project_root() -> PathBuf {
 /// table spans Jan 1 of the start's year to the run's end instead of
 /// starting at the run's start date; a Jan 15 start's 24 h table now
 /// carries the Jan 1 to Jan 15 rows the addressing reads. On every
-/// column the index names the schedule is bitwise the earlier one's. The
-/// generation path must stay bitwise-equal to it.
+/// column the index names the schedule is bitwise the earlier one's.
+/// The fourth move is the behavioral diversity layer: the generated
+/// family is diversified under the home's scenario-mixed per-dwelling
+/// key (this config's bldg_id 1, master seed 0, no scenario), so the
+/// pinned digest is the diversified family's (the Off mode's digest is
+/// the third state's, and `diversity_off_generates_the_shared_profile`
+/// pins that escape hatch against the undiversified generator). The
+/// diversity layer's hour shifts draw from the unbiased bounded sampler
+/// rather than a modulo of a 32-bit word, so the digest was re-captured
+/// with the shift draws' move (the scales and factors are the same
+/// draws).
+/// The generation path must stay bitwise-equal to it.
 const GENERATED_SCHEDULE_DIGEST: &str =
-    "93d5024bda628a4d9235ee56e8306bee6dc961e3ced993375f5686072f8e0fae";
+    "94a57314971f937a69cfc004a954b244479a3afbb77929c68c99247383341853";
 
 fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
     let start_time = denver_offset::denver_offset()
@@ -59,6 +69,7 @@ fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time,
                 duration: Duration::hours(24),
                 time_res: Duration::seconds(900),
@@ -143,8 +154,12 @@ fn nonexistent_schedule_path_is_an_error() {
 }
 
 /// `None` generates the default schedule: bitwise-equal to the generator
-/// called directly on the same inputs, and to the digest pinned in
-/// `GENERATED_SCHEDULE_DIGEST` (see that constant's comment for its moves).
+/// called directly on the same inputs DIVERSIFIED under the home's own
+/// key (the build's transform, `hares_io::schedule_diversity`), and to
+/// the digest pinned in `GENERATED_SCHEDULE_DIGEST` (see that constant's
+/// comment for its moves). The undiversified generator is the Off mode's
+/// exact output; the escape-hatch pin is
+/// `diversity_off_generates_the_shared_profile`.
 #[test]
 fn no_schedule_generates_the_default_schedule() {
     let config = generated_schedule_config(None);
@@ -153,11 +168,18 @@ fn no_schedule_generates_the_default_schedule() {
 
     let profiles = hares_io::load_default_profiles(&config.defaults.base)
         .expect("the shipped defaults CSV loads");
+    let key = hares_types::rng::dwelling_seed_scenario(
+        config.settings.sim_config.master_seed,
+        config.settings.sim_config.scenario_seed,
+        config.settings.bldg_id,
+    );
+    let draws = hares_types::diversity::ScheduleDiversityDraws::draw(key);
+    let diversified = hares_io::schedule_diversity::diversify_profiles(&profiles, &draws);
     let generated = hares_io::hpxml_schedule::generate_default_schedule(
         config.settings.sim_config.start_time,
         config.settings.sim_config.duration,
         config.settings.sim_config.time_res,
-        &profiles,
+        &diversified,
     )
     .expect("the shipped profiles generate the schedule")
     .resample(config.settings.sim_config.time_res.num_seconds() as u32)
@@ -189,6 +211,36 @@ fn no_schedule_generates_the_default_schedule() {
     assert_eq!(
         built_digest, GENERATED_SCHEDULE_DIGEST,
         "the generated schedule must stay bitwise-equal to the pinned default schedule"
+    );
+}
+
+/// The escape hatch's own pin: with `schedule_diversity = "off"`, the
+/// generated schedule is bitwise the UNDIVERSIFIED generator's output
+/// (the pre-diversity family, the digest's third state).
+#[test]
+fn diversity_off_generates_the_shared_profile() {
+    let mut config = generated_schedule_config(None);
+    config.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    let blueprint = DwellingBlueprint::from_config(config.clone())
+        .expect("a None schedule requests the generated schedule");
+
+    let profiles = hares_io::load_default_profiles(&config.defaults.base)
+        .expect("the shipped defaults CSV loads");
+    let generated = hares_io::hpxml_schedule::generate_default_schedule(
+        config.settings.sim_config.start_time,
+        config.settings.sim_config.duration,
+        config.settings.sim_config.time_res,
+        &profiles,
+    )
+    .expect("the shipped profiles generate the schedule")
+    .resample(config.settings.sim_config.time_res.num_seconds() as u32)
+    .expect("the generated schedule resamples");
+
+    let built_digest = schedule_digest(blueprint.resampled_schedule().as_ref());
+    assert_eq!(
+        built_digest,
+        schedule_digest(&generated),
+        "the Off mode must run exactly the undiversified generator's schedule"
     );
 }
 

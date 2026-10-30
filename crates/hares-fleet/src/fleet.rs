@@ -2263,6 +2263,7 @@ fn resstock_sim_config(
 ) -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time,
         duration,
         time_res: Duration::minutes(1),
@@ -2669,6 +2670,7 @@ mod tests {
     fn simulation_config(csv_path: PathBuf) -> SimulationConfig {
         SimulationConfig {
             scenario_seed: None,
+            schedule_diversity: Default::default(),
             start_time: fixture_start::fixture_start(),
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
@@ -5054,6 +5056,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: FixedOffset::east_opt(-8 * 3600)
                         .expect("valid offset")
                         .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
@@ -5368,6 +5371,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
                     duration: Duration::hours(2),
                     time_res: Duration::minutes(1),
@@ -5662,6 +5666,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     reports: vec![hares_io::ReportSpec {
                         name: format!("report-{bldg_id}"),
                         selection: hares_io::Selection::Verbosity(0),
@@ -5799,6 +5804,7 @@ mod tests {
                 settings: DwellingSettings::new(
                     SimulationConfig {
                         scenario_seed: None,
+                        schedule_diversity: Default::default(),
                         start_time: start,
                         duration: Duration::hours(2),
                         time_res: Duration::seconds(900),
@@ -6052,6 +6058,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
                     duration: Duration::hours(24),
                     time_res: Duration::seconds(900),
@@ -6109,6 +6116,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
                     duration: Duration::hours(24),
                     time_res: Duration::seconds(900),
@@ -6418,6 +6426,7 @@ mod tests {
                 settings: DwellingSettings::new(
                     SimulationConfig {
                         scenario_seed: None,
+                        schedule_diversity: Default::default(),
                         start_time: fixture_start::fixture_start(),
                         duration: Duration::hours(24),
                         time_res: Duration::seconds(900),
@@ -6649,6 +6658,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
                     duration: Duration::hours(24),
                     time_res: Duration::seconds(900),
@@ -6872,6 +6882,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
                     duration: Duration::hours(24),
                     time_res: Duration::seconds(900),
@@ -6963,6 +6974,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: FixedOffset::east_opt(0)
                         .expect("valid offset")
                         .with_ymd_and_hms(2018, 1, 1, local_start_hour, 0, 0)
@@ -7448,6 +7460,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: FixedOffset::west_opt(5 * 3600)
                         .expect("valid offset")
                         .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
@@ -7644,6 +7657,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: start,
                     duration: Duration::hours(2),
                     time_res: Duration::seconds(900),
@@ -7805,6 +7819,7 @@ mod tests {
             settings: DwellingSettings::new(
                 SimulationConfig {
                     scenario_seed: None,
+                    schedule_diversity: Default::default(),
                     start_time: chrono::DateTime::parse_from_rfc3339("2018-01-01T00:00:00-08:00")
                         .expect("the manifest's start"),
                     duration: Duration::seconds(172800),

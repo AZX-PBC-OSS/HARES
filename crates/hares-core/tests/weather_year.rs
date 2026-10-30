@@ -31,6 +31,7 @@ fn weather_fixture(name: &str) -> PathBuf {
 fn config(time_res: i64, duration_secs: i64, start: &str) -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time: DateTime::parse_from_rfc3339(start).expect("valid start time"),
         duration: Duration::seconds(duration_secs),
         time_res: Duration::seconds(time_res),

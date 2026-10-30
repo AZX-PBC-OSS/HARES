@@ -1165,7 +1165,7 @@ mod tests {
         WeatherState, ZoneId, ZoneState, telemetry_keys as tk,
     };
 
-    use super::ResistanceWH;
+    use super::{DEFAULT_ELEMENT_POWER_W, ResistanceWH};
     use crate::water_heater::DHW_DEMAND_LOOP;
     use crate::{ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig};
 
@@ -1217,6 +1217,46 @@ mod tests {
     fn config_from_typed(cfg: ElectricResistanceWaterHeaterConfig) -> EquipmentConfig {
         EquipmentConfig::from_typed("WH".to_string(), "Resistance Water Heater".to_string(), cfg)
             .unwrap()
+    }
+
+    /// The capacity channels' full precedence, pinned at the init: the
+    /// per-element `element_power_w` (the override channel) wins when it is
+    /// set, alone or beside the capacity field; `heating_capacity_w` (the
+    /// HPXML capacity channel and the dwelling capacity API's field) is the
+    /// live channel the init falls back to when the element channel is
+    /// absent; and with both absent the element power is the model's 4,500 W
+    /// default, not a zero the tank would heat by.
+    #[test]
+    fn the_element_channels_precedence_is_element_then_capacity_then_default() {
+        let resolved_power = |element: Option<f64>, capacity: Option<f64>| {
+            let mut typed = typed_config();
+            typed.element_power_w = element;
+            typed.heating_capacity_w = capacity;
+            let cfg = config_from_typed(typed);
+            let mut wh = ResistanceWH::new(cfg.clone());
+            wh.init(&cfg, &env(21.0)).unwrap();
+            wh.upper_element_power_w
+        };
+        assert_eq!(
+            resolved_power(Some(4_200.0), Some(5_500.0)),
+            4_200.0,
+            "the element channel is the override the init prefers"
+        );
+        assert_eq!(
+            resolved_power(Some(4_200.0), None),
+            4_200.0,
+            "the element channel applies alone"
+        );
+        assert_eq!(
+            resolved_power(None, Some(5_500.0)),
+            5_500.0,
+            "the capacity channel carries the power when the element channel is absent"
+        );
+        assert_eq!(
+            resolved_power(None, None),
+            DEFAULT_ELEMENT_POWER_W,
+            "with both channels absent the default stands"
+        );
     }
 
     #[test]

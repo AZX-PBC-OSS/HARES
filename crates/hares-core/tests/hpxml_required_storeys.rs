@@ -40,6 +40,7 @@ fn ach50_infiltration_without_floors_above_grade_is_an_error() {
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
+                schedule_diversity: Default::default(),
                 start_time,
                 duration: Duration::hours(1),
                 time_res: Duration::seconds(3600),

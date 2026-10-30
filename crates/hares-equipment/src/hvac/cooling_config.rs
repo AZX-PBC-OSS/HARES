@@ -27,13 +27,21 @@ pub struct CentralAirConditionerConfig {
     /// Number of compressor speeds (1, 2, or 4 for variable-speed).
     #[serde(default = "default_one")]
     pub number_of_speeds: u8,
-    /// Per-stage cooling capacities (W).
+    /// Per-stage cooling capacities (W), the unit's capacity ladder when
+    /// present: the init builds the stage table from it and reads
+    /// [`Self::capacity_w`] only as the fallback a no-table config takes.
+    /// An override of the table applies per stage; an override of the
+    /// scalar beside a table the config carries is refused at the merge,
+    /// naming this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_capacities_w: Option<Vec<f64>>,
-    /// Per-stage energy input ratios (EIR = 1/COP).
+    /// Per-stage energy input ratios (EIR = 1/COP), read ahead of
+    /// [`Self::eir`] the same way [`Self::stage_capacities_w`] is read
+    /// ahead of [`Self::capacity_w`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_eirs: Option<Vec<f64>>,
-    /// Per-stage sensible heat ratios.
+    /// Per-stage sensible heat ratios: the last stage's value is the
+    /// unit's rated SHR when the table is present, ahead of [`Self::shr`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_shrs: Option<Vec<f64>>,
     /// Fan power in watts (constant).

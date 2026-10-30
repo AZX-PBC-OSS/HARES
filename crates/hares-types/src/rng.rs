@@ -14,6 +14,19 @@ use serde::{Deserialize, Serialize};
 /// the EV-driver streams counted up from 1).
 pub const EVENT_LOAD_STREAM_TAG: u64 = 1 << 63;
 
+/// The reserved identity prefix of the generated-schedule diversity
+/// streams. Each diversity dimension's full identity is this prefix plus
+/// the dimension's name, so the dimensions derive distinct streams under
+/// one dwelling key while every dimension's stream stays tagged out of the
+/// dwelling's and the EV drivers' stream space. The identities are
+/// reserved: no event load's name is ever prefixed with this.
+pub const SCHEDULE_DIVERSITY_IDENTITY_PREFIX: &str = "hares/schedule-diversity/v1/";
+
+/// The reserved identity of the scenario sampler's stream: one draw
+/// stream per (master seed, scenario id, building id), kept out of the
+/// dwelling's own stream space by the same top-bit tag.
+pub const SCENARIO_SAMPLER_IDENTITY: &str = "hares/scenario-sampler/v1";
+
 /// One ChaCha8 stream: the generator key and the stream nonce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RngStream {
@@ -43,6 +56,44 @@ impl RngStream {
             seed,
             stream: EVENT_LOAD_STREAM_TAG | (fnv1a_64(identity.as_bytes()) >> 1),
         }
+    }
+
+    /// The generated-schedule diversity stream of the diversity dimension
+    /// `dimension` (a `SCHEDULE_DIVERSITY_IDENTITY_PREFIX`-prefixed name)
+    /// under the per-dwelling key `dwelling_key`.
+    ///
+    /// The derivation composes the landed algebra with no new rule: the
+    /// key is the caller's scenario-mixed per-dwelling key
+    /// (`dwelling_seed_scenario`), whose byte layout is injective over
+    /// (master seed, scenario, building) with no hash, and the stream
+    /// nonce is the tagged identity hash over the dimension's reserved
+    /// identity, so one dimension's draws never move another's and the
+    /// scenario disjointness rides the key's own bytes. Two dimension
+    /// names derive distinct nonces unless their FNV-1a words collide
+    /// (the same residual probabilistic surface every identity-keyed
+    /// derivation here shares); the shipped dimensions' identities are
+    /// fixed constants whose distinctness the derivation tests pin.
+    #[must_use]
+    pub fn schedule_diversity(dwelling_key: [u8; 32], dimension: &str) -> Self {
+        Self::event_load(
+            dwelling_key,
+            &format!("{SCHEDULE_DIVERSITY_IDENTITY_PREFIX}{dimension}"),
+        )
+    }
+
+    /// The scenario sampler's draw stream for the per-dwelling key
+    /// `dwelling_key` (the caller's scenario-mixed key): one stream the
+    /// spec's parameters draw in declaration order.
+    ///
+    /// The sampler's stream is tagged (the event-load tag) and keyed on
+    /// the reserved [`SCENARIO_SAMPLER_IDENTITY`] identity, so the
+    /// sampler's draws never share a stream with the dwelling's own RNG
+    /// (stream 0), the EV drivers (the indexed range) or any event load
+    /// (whose identity is an equipment name, never the reserved
+    /// constant), and the same (master seed, scenario, building) reproduces.
+    #[must_use]
+    pub fn scenario_sampler(dwelling_key: [u8; 32]) -> Self {
+        Self::event_load(dwelling_key, SCENARIO_SAMPLER_IDENTITY)
     }
 
     /// A generator on this stream, `word_pos` 32-bit words from its start.
@@ -321,6 +372,63 @@ mod tests {
         // scenario's presence byte is what keeps the declared case off
         // it.
         assert_eq!(dwelling_seed(0, 0), [0_u8; 32]);
+    }
+
+    /// The diversity and sampler streams derive distinct, reproducible,
+    /// scenario-disjoint streams: the shipped dimensions' identities never
+    /// collide with each other or with the sampler's, two scenarios'
+    /// dimension streams differ at the key alone (the nonce unchanged),
+    /// and the same inputs reproduce.
+    #[test]
+    fn diversity_and_sampler_streams_are_disjoint_reproducible_and_scenario_keyed() {
+        let key = dwelling_seed_scenario(42, Some(1), 7);
+        let dimensions = [
+            "presence-timing",
+            "occupancy-level",
+            "appliance-factors",
+            "water-timing",
+            "water-level",
+        ];
+        let streams: Vec<RngStream> = dimensions
+            .iter()
+            .map(|d| RngStream::schedule_diversity(key, d))
+            .collect();
+        // The tagged nonce: every diversity stream is out of the dwelling's
+        // and the EV drivers' space, whatever the identity hashes to.
+        for stream in &streams {
+            assert!(
+                stream.stream & EVENT_LOAD_STREAM_TAG != 0,
+                "the diversity stream must carry the event-load tag"
+            );
+        }
+        // Distinct dimensions: distinct streams (fixed reserved identities).
+        for (i, a) in streams.iter().enumerate() {
+            for b in &streams[i + 1..] {
+                assert_ne!(a.stream, b.stream, "two dimensions share a nonce");
+            }
+        }
+        // The sampler's stream is distinct from every diversity dimension's.
+        let sampler = RngStream::scenario_sampler(key);
+        for stream in &streams {
+            assert_ne!(
+                sampler.stream, stream.stream,
+                "the sampler's nonce must not collide with a diversity dimension's"
+            );
+        }
+        // Two scenarios: the nonce stable, the key (and so the draws) moved.
+        let other_scenario_key = dwelling_seed_scenario(42, Some(2), 7);
+        let a = RngStream::schedule_diversity(key, "presence-timing");
+        let b = RngStream::schedule_diversity(other_scenario_key, "presence-timing");
+        assert_ne!(a.seed, b.seed, "two scenarios: distinct keys");
+        assert_eq!(a.stream, b.stream, "the nonce is the identity hash alone");
+        // The same inputs reproduce.
+        assert_eq!(
+            a,
+            RngStream::schedule_diversity(
+                dwelling_seed_scenario(42, Some(1), 7),
+                "presence-timing"
+            )
+        );
     }
 
     /// One identity under two scenario ids derives distinct dwelling keys

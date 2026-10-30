@@ -29,6 +29,7 @@ fn site_offset() -> FixedOffset {
 fn sim_config(start_time: DateTime<FixedOffset>, duration_s: i64, step_s: i64) -> SimulationConfig {
     SimulationConfig {
         scenario_seed: None,
+        schedule_diversity: Default::default(),
         start_time,
         duration: Duration::seconds(duration_s),
         time_res: Duration::seconds(step_s),
