@@ -663,11 +663,14 @@ mod tests {
     }
 
     /// The acceptance round-trip: the sampled values land in the typed
-    /// config each target NAMES. The override target's value is read
+    /// config each target NAMES. The override targets' values are read
     /// back from the built dwelling's resolved model (the water heater's
-    /// heating capacity resolves the sampled value bit for bit); the
-    /// patch target's value is read back from the settings the build
-    /// consumed (the patches the assembly's occupancy derivation feeds).
+    /// setpoint AND its heating capacity resolve the sampled values bit
+    /// for bit); the patch target's value is read back from the settings
+    /// the build consumed (the patches the assembly's occupancy
+    /// derivation feeds). The capacity channel is the field the
+    /// dwelling's own capacity API names, so an accepted override of it
+    /// must be the resolved element power, not a value an alias shadows.
     #[test]
     fn sampled_values_reach_the_typed_configs_they_name() {
         let spec = ScenarioSpec {
@@ -687,6 +690,23 @@ mod tests {
                     correlation: None,
                 },
                 hares_types::ScenarioParameter {
+                    name: "wh_capacity".to_string(),
+                    unit: "W".to_string(),
+                    target: hares_types::ScenarioTarget::Override {
+                        equipment: "Electric Resistance Water Heater".to_string(),
+                        field: "heating_capacity_w".to_string(),
+                    },
+                    // A one-value discrete makes the sampled capacity an
+                    // exact literal, so the bitwise comparison below can
+                    // never pass by the draw landing on the resolved
+                    // default by chance.
+                    distribution: hares_types::ScenarioDistribution::Discrete {
+                        values: vec![4_737.12],
+                        weights: vec![1.0],
+                    },
+                    correlation: None,
+                },
+                hares_types::ScenarioParameter {
                     name: "bedrooms".to_string(),
                     unit: "count".to_string(),
                     target: hares_types::ScenarioTarget::Patch {
@@ -701,9 +721,206 @@ mod tests {
             ],
         };
         let sample = spec.sample(42, 3, 7).expect("the sample draws");
-        let sampled_setpoint = sample.values[0].value;
-        let sampled_bedrooms = sample.values[1].value;
+        let sampled = |name: &str| {
+            sample
+                .values
+                .iter()
+                .find(|value| value.name == name)
+                .unwrap_or_else(|| panic!("the sample carries '{name}'"))
+                .value
+        };
+        let sampled_setpoint = sampled("wh_setpoint");
+        let sampled_capacity = sampled("wh_capacity");
+        let sampled_bedrooms = sampled("bedrooms");
 
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        apply_sample(&sample, &mut settings).expect("the sample applies");
+        let config = DwellingConfig {
+            hpxml: hares_io::InputSource::Path(
+                project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+            ),
+            schedule: Some(hares_io::InputSource::Path(
+                project_root().join("data/examples/BEopt_example_schedule.csv"),
+            )),
+            weather: hares_io::WeatherInput::Path(
+                project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: hares_io::DefaultsSource::directory(
+                project_root().join("python/hares/defaults"),
+            ),
+            settings,
+        };
+        let dwelling = Dwelling::from_config(config).expect("the scenario dwelling builds");
+        let resolved = dwelling.resolved_model();
+        let wh = resolved
+            .equipment
+            .iter()
+            .find(|eq| eq.name == "Electric Resistance Water Heater")
+            .expect("the water heater resolves");
+        let parameter = |name: &str| {
+            wh.parameters
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("the water heater resolves its {name}"))
+                .value
+        };
+        assert_eq!(
+            parameter("setpoint_c"),
+            sampled_setpoint,
+            "the sampled setpoint must reach the water heater's typed config \
+             bit for bit"
+        );
+        assert_eq!(
+            parameter("heating_capacity_w"),
+            sampled_capacity,
+            "the sampled capacity must reach the water heater's typed config \
+             bit for bit: the resolved element power is the accepted override"
+        );
+        // The patch target: the settings the build consumed carried the
+        // sampled bedroom count (the occupancy derivation's own input).
+        // The dwelling's own settings read-back is the build's record.
+        let built_settings = dwelling.blueprint().settings();
+        assert_eq!(
+            built_settings
+                .patches
+                .as_ref()
+                .and_then(|p| p.number_of_bedrooms),
+            Some(sampled_bedrooms),
+            "the sampled bedroom count must reach the patches the build consumed"
+        );
+    }
+
+    /// A correlated pair's two sampled values land on the two loads the
+    /// spec names, read back from the resolved model bit for bit: the
+    /// sampler's correlation is a statement about the values the
+    /// application must then carry, so the pair's joint effect is
+    /// witnessed on the built dwelling, not on the sample alone. The
+    /// members are the two loads' usage multipliers (the two loads the
+    /// wildcard witness beside this one proves read the field), and the
+    /// two values are distinct, so the pin cannot pass by both targets
+    /// resolving one value.
+    #[test]
+    fn a_correlated_pair_reaches_the_two_loads_it_names() {
+        let member = |name: &str, load: &str, distribution: hares_types::ScenarioDistribution| {
+            hares_types::ScenarioParameter {
+                name: name.to_string(),
+                unit: "fraction".to_string(),
+                target: hares_types::ScenarioTarget::Override {
+                    equipment: load.to_string(),
+                    field: "usage_multiplier".to_string(),
+                },
+                distribution,
+                correlation: Some(hares_types::ScenarioCorrelation {
+                    group: "load".to_string(),
+                    rho: 0.9,
+                }),
+            }
+        };
+        let spec = ScenarioSpec {
+            name: "correlated-pair".to_string(),
+            parameters: vec![
+                member(
+                    "mels",
+                    "MELs",
+                    hares_types::ScenarioDistribution::LogNormal {
+                        mu: 0.0,
+                        sigma: 0.25,
+                    },
+                ),
+                member(
+                    "tv",
+                    "TV",
+                    hares_types::ScenarioDistribution::Triangular {
+                        min: 0.5,
+                        mode: 1.0,
+                        max: 1.5,
+                    },
+                ),
+            ],
+        };
+        let sample = spec.sample(42, 5, 7).expect("the pair samples");
+        let sampled = |name: &str| {
+            sample
+                .values
+                .iter()
+                .find(|value| value.name == name)
+                .unwrap_or_else(|| panic!("the sample carries '{name}'"))
+                .value
+        };
+        let (mels, tv) = (sampled("mels"), sampled("tv"));
+        assert_ne!(
+            mels, tv,
+            "the copula draws two values: a pair that sampled one value \
+             twice would not exercise the two-load application"
+        );
+        let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
+        apply_sample(&sample, &mut settings).expect("the pair applies");
+        let config = DwellingConfig {
+            hpxml: hares_io::InputSource::Path(
+                project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
+            ),
+            schedule: Some(hares_io::InputSource::Path(
+                project_root().join("data/examples/BEopt_example_schedule.csv"),
+            )),
+            weather: hares_io::WeatherInput::Path(
+                project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
+            ),
+            defaults: hares_io::DefaultsSource::directory(
+                project_root().join("python/hares/defaults"),
+            ),
+            settings,
+        };
+        let dwelling = Dwelling::from_config(config).expect("the scenario dwelling builds");
+        let resolved = dwelling.resolved_model();
+        let multiplier = |load: &str| {
+            resolved
+                .equipment
+                .iter()
+                .find(|eq| eq.name == load)
+                .unwrap_or_else(|| panic!("the dwelling resolves its {load} load"))
+                .parameters
+                .iter()
+                .find(|p| p.name == "usage_multiplier")
+                .unwrap_or_else(|| panic!("the {load} load resolves its usage_multiplier"))
+                .value
+        };
+        assert_eq!(
+            multiplier("MELs"),
+            mels,
+            "the pair's MELs value must reach the MELs load bit for bit"
+        );
+        assert_eq!(
+            multiplier("TV"),
+            tv,
+            "the pair's TV value must reach the TV load bit for bit"
+        );
+    }
+
+    /// The wildcard spelling of a capacity reaches the equipment that
+    /// reads the field: the resistance water heater's config carries
+    /// `heating_capacity_w`, so the wildcard is admitted on this home and
+    /// its value must resolve on the water heater. Accepted and silently
+    /// dropped is the class the application refuses.
+    #[test]
+    fn a_wildcard_capacity_reaches_the_water_heater_that_reads_it() {
+        let spec = ScenarioSpec {
+            name: "wildcard-capacity".to_string(),
+            parameters: vec![hares_types::ScenarioParameter {
+                name: "capacity".to_string(),
+                unit: "W".to_string(),
+                target: hares_types::ScenarioTarget::Override {
+                    equipment: "all".to_string(),
+                    field: "heating_capacity_w".to_string(),
+                },
+                distribution: hares_types::ScenarioDistribution::Discrete {
+                    values: vec![3_000.0],
+                    weights: vec![1.0],
+                },
+                correlation: None,
+            }],
+        };
+        let sample = spec.sample(42, 1, 7).expect("the sample draws");
+        let sampled = sample.values[0].value;
         let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
         apply_sample(&sample, &mut settings).expect("the sample applies");
         let config = DwellingConfig {
@@ -731,24 +948,12 @@ mod tests {
         let capacity = wh
             .parameters
             .iter()
-            .find(|p| p.name == "setpoint_c")
-            .expect("the water heater resolves its setpoint");
+            .find(|p| p.name == "heating_capacity_w")
+            .expect("the water heater resolves its heating capacity");
         assert_eq!(
-            capacity.value, sampled_setpoint,
-            "the sampled setpoint must reach the water heater's typed config \
-             bit for bit"
-        );
-        // The patch target: the settings the build consumed carried the
-        // sampled bedroom count (the occupancy derivation's own input).
-        // The dwelling's own settings read-back is the build's record.
-        let built_settings = dwelling.blueprint().settings();
-        assert_eq!(
-            built_settings
-                .patches
-                .as_ref()
-                .and_then(|p| p.number_of_bedrooms),
-            Some(sampled_bedrooms),
-            "the sampled bedroom count must reach the patches the build consumed"
+            capacity.value, sampled,
+            "the wildcard's sampled capacity must reach the water heater that \
+             reads the field bit for bit"
         );
     }
 

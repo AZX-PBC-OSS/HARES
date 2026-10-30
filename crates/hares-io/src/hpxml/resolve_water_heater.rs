@@ -341,6 +341,13 @@ pub(super) fn resolve_water_heaters(
                 typed_spec(name.clone(), fuel, cfg, defaults)?
             }
             "Electric Resistance Water Heater" => {
+                // `heating_capacity_w` is the HPXML capacity channel and
+                // the field the dwelling's own capacity API names;
+                // `element_power_w` is the per-element override channel,
+                // and the init falls back to `heating_capacity_w` when it
+                // is absent. Writing the HPXML value into both would give
+                // the alias precedence, so an accepted override of
+                // `heating_capacity_w` would be silently dropped.
                 let cfg = ElectricResistanceWaterHeaterConfig {
                     equipment_id: None,
                     zone_id,
@@ -364,7 +371,7 @@ pub(super) fn resolve_water_heaters(
                     performance_adjustment,
                     zone_type: zone_name.clone(),
                     first_hour_rating_m3,
-                    element_power_w: heating_capacity_w,
+                    element_power_w: None,
                     element_priority_mode: None,
                     max_setpoint_ramp_rate_c_per_min: None,
                     max_combined_power_w: None,
