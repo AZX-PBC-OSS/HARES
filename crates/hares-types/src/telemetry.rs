@@ -22,6 +22,21 @@ use serde::{Deserialize, Serialize};
 /// owner's next step-end check fails the run. The seal is not serialised:
 /// a restored map's keys are the declarations' anyway.
 ///
+/// The registration lifecycle is the contract. Init registers the
+/// owner's config-determined keys (`insert`, or the declarations of
+/// [`Telemetry::from_fields`], which also seal the map); a channel whose
+/// registration is itself state is admitted lazily by its first
+/// registering write ([`Telemetry::set_or_register`]). A withdrawal
+/// either clears the value for the step and keeps the registration
+/// ([`Telemetry::remove`]'s NaN marker, the key set unchanged) or drops
+/// the registration itself ([`Telemetry::unregister`], the key set loses
+/// the name). A registering write re-admits a withdrawn registration: on
+/// a sealed map the surviving declaration admits it, and a plain `set`
+/// of a withdrawn declared key latches as unknown until it does. A
+/// checkpoint's telemetry face is the saved key set, so a restore
+/// reproduces the registration timeline rather than merging it with the
+/// target's.
+///
 /// The dwelling turns a latched telemetry into a run failure (a
 /// `HaresError` naming the owner and the key); that dwelling check is the
 /// only enforcement, and it is always on. The latches join the derived
@@ -237,6 +252,23 @@ impl Telemetry {
         }
     }
 
+    /// Withdraws a channel's registration: the key leaves the map, so
+    /// `get` reports `None` and the key set no longer contains it. This is
+    /// the restore path's write for a channel whose registration is itself
+    /// state (a lazily registered channel whose saved map omitted the key):
+    /// a checkpoint replaces the whole telemetry timeline, so the restored
+    /// map is the saved map's key set, never the union with the pre-restore
+    /// run's. A key not registered is a no-op.
+    ///
+    /// Intended for lazily registered channels on a map built without
+    /// declarations. On a sealed map the declaration set is untouched: a
+    /// withdrawn declared key's `set` latches as unknown (the slot is
+    /// gone) until an `insert` or `set_or_register` re-registers it, which
+    /// the surviving declaration admits without an undeclared-key latch.
+    pub fn unregister(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+
     #[inline]
     #[must_use]
     pub fn get(&self, key: &str) -> Option<f64> {
@@ -377,6 +409,55 @@ mod tests {
         t.insert("v", 1.0);
         t.set("v", 42.0);
         assert_eq!(t.get("v"), Some(42.0));
+    }
+
+    #[test]
+    fn unregister_drops_the_key_and_its_slot() {
+        // A lazily registered channel's registration is its timeline: the
+        // restore path removes the key when the saved map omitted it, so
+        // the key set (not only `get`) must lose it.
+        let mut t = Telemetry::new();
+        t.insert("kept", 1.0);
+        t.insert("lazy", 2.0);
+        t.unregister("lazy");
+        assert_eq!(t.get("lazy"), None);
+        assert!(!t.0.contains_key("lazy"));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.get("kept"), Some(1.0));
+        // An absent key is a no-op, not a latch: unregistering a channel
+        // the map never held is the "still never registered" state.
+        t.unregister("never");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.unknown_key_latch(), None);
+    }
+
+    #[test]
+    fn unregister_on_a_sealed_map_keeps_the_declaration() {
+        // The declaration set is unregister's untouched field: the
+        // withdrawn declared key's slot is gone (a plain `set` of it
+        // latches as unknown), while `insert` and `set_or_register`
+        // re-register it because the declaration still holds the name.
+        let fields = vec![TelemetryField::power_kw("charge_kw", "charging power")];
+        let mut t = Telemetry::from_fields(&fields);
+        t.set("charge_kw", 1.0);
+        t.unregister("charge_kw");
+        assert_eq!(t.get("charge_kw"), None);
+        assert!(
+            t.sealed_keys()
+                .is_some_and(|keys| keys.contains("charge_kw")),
+            "the declaration survives the removal"
+        );
+        // A registering write is admitted by the surviving declaration: no
+        // undeclared-key latch fires.
+        t.insert("charge_kw", 2.0);
+        assert_eq!(t.get("charge_kw"), Some(2.0));
+        assert_eq!(t.unknown_key_latch(), None);
+        // The plain `set` of a withdrawn declared key latches as unknown:
+        // the slot is gone until a registering write restores it.
+        t.unregister("charge_kw");
+        t.set("charge_kw", 3.0);
+        assert_eq!(t.get("charge_kw"), None);
+        assert_eq!(t.unknown_key_latch(), Some("charge_kw"));
     }
 
     #[test]

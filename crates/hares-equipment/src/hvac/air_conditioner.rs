@@ -177,7 +177,12 @@ struct AirConditionerState {
     electric_w: f64,
     sensible_cooling_w: f64,
     latent_cooling_w: f64,
-    shr: f64,
+    /// The last cooling step's SHR, `None` while the unit has never cooled:
+    /// the telemetry map's null-until-first-cooling timeline (the step
+    /// registers the key at the first cooling step) survives the round
+    /// trip, so a restored never-cooled unit's map matches a
+    /// continuously-run one's.
+    shr: Option<f64>,
     // --- Sticky control signals ---
     ctrl_duty_cycle: f64,
     /// None means unlimited; f64::INFINITY does not serialize cleanly with postcard.
@@ -202,7 +207,11 @@ struct AirConditionerState {
 // code is now always recomputed from `operating_mode` via `OperatingMode::as_code`).
 // Version 3: added `min_on_time_s`/`min_off_time_s` for short-cycle protection persistence.
 // Version 4: added `startup_was_on` for edge-detection persistence across checkpoint restart.
-const AC_CHECKPOINT_VERSION: u32 = 4;
+// Version 5: `shr` became `Option<f64>`: `None` until the unit's first
+// cooling step, so the restore writes the telemetry key only when a cooled
+// step produced a value and a restored never-cooled unit's map matches a
+// continuously-run one's instead of gaining a 1.0 sentinel key.
+const AC_CHECKPOINT_VERSION: u32 = 5;
 
 #[derive(Clone, Copy)]
 struct PerformanceResult {
@@ -1992,7 +2001,10 @@ impl CoolingCore {
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
                 sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
                 latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
-                shr: self.telemetry.get(tk::SHR).unwrap_or(self.hvac.config.shr),
+                // The key's presence is the cooled marker: an absent key
+                // (the unit has never cooled) saves `None`, a present one
+                // the last cooling step's value.
+                shr: self.telemetry.get(tk::SHR),
                 ctrl_duty_cycle: self.ctrl_duty_cycle,
                 ctrl_power_limit_w: if self.ctrl_power_limit_w.is_finite() {
                     Some(self.ctrl_power_limit_w)
@@ -2040,7 +2052,13 @@ impl CoolingCore {
         self.hvac.runtime.plf_state = decoded.plf_state;
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
-        self.hvac.config.shr = decoded.shr;
+        // The restored state's SHR is `None` until the unit's first cooling
+        // step, as the continuous path's is: the last computed value rides
+        // only when a cooled step produced one, and a never-cooled unit
+        // keeps the init-time coil state.
+        if let Some(shr) = decoded.shr {
+            self.hvac.config.shr = shr;
+        }
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
         self.ctrl_power_limit_w = decoded.ctrl_power_limit_w.unwrap_or(f64::INFINITY);
         self.ctrl_mode_override = decoded.ctrl_mode_override;
@@ -2063,7 +2081,17 @@ impl CoolingCore {
             .insert(tk::SENSIBLE_COOLING_W, decoded.sensible_cooling_w);
         self.telemetry
             .insert(tk::LATENT_COOLING_W, decoded.latent_cooling_w);
-        self.telemetry.insert(tk::SHR, decoded.shr);
+        // The step's own write: registered at the first cooled restore,
+        // updated in place after, so the restored map carries the key only
+        // when a cooling step produced a value: the null-until-first-
+        // cooling timeline a continuously-run never-cooled unit holds. An
+        // absent key leaves the map entirely: the checkpoint replaces the
+        // pre-restore timeline, so loading a never-cooled blob into a unit
+        // that cooled earlier must not keep the stale key.
+        match decoded.shr {
+            Some(shr) => self.telemetry.set_or_register(tk::SHR, shr),
+            None => self.telemetry.unregister(tk::SHR),
+        }
         self.telemetry
             .insert(tk::OPERATING_MODE, decoded.operating_mode.as_code());
         // Rebuild the restore-instant output from the persisted step
@@ -3155,6 +3183,264 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("an air conditioner checkpoint must restore a contract-valid output");
+    }
+
+    /// Three idle steps against the shared ports: the zone sits below the
+    /// cooling band, so the thermostat never calls and no step cools.
+    fn step_idle_windows(eq: &mut AirConditioner, ports: &mut PortSlots) {
+        for second in [0, 60, 120] {
+            let env = env_at_second(20.0, 20.0, second);
+            eq.update_control(&env);
+            eq.step(&env, Duration::from_secs(60), ports).unwrap();
+            ports.zero();
+        }
+    }
+
+    /// The null-until-first-cooling contract (`default_telemetry`: no SHR
+    /// insert, the step writes the key only when the step's sensible cooling
+    /// is above 0) holds on the restore path: a never-cooled unit's
+    /// checkpoint round trip restores exactly the continuously-run twin's
+    /// telemetry key set. The checkpoint's blob carries the step's five
+    /// telemetry values; the SHR value's presence among them is the
+    /// registration state of the one channel whose registration is state,
+    /// and the rest of the map's registration set is not carried (the
+    /// target's init rebuilds it). The carried values are the checkpoint's;
+    /// every other key keeps the target's value until a step rewrites it,
+    /// and the last-cooling markers the observe feature writes, and the
+    /// high-side clamp marker, are written only by a cooling step, so an
+    /// idle step never rewrites them: the pin is the key set. The restore's
+    /// unconditional `tk::SHR` insert added a key the continuous twin never
+    /// holds, a `shr` cell the unit never publishes.
+    #[test]
+    fn restored_never_cooled_map_matches_the_never_restored_twin() {
+        let cfg = ac_config();
+        let environment = env(20.0, 0.008, 15.0, 20.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        step_idle_windows(&mut eq, &mut ports);
+        let state = eq.save_state().unwrap();
+
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        restored.load_state(&state).unwrap();
+
+        let mut twin = AirConditioner::new(cfg.clone());
+        twin.init(&cfg, &environment).unwrap();
+        step_idle_windows(&mut twin, &mut ports);
+
+        let mut restored_keys: Vec<&str> =
+            restored.telemetry().0.keys().map(String::as_str).collect();
+        restored_keys.sort_unstable();
+        let mut twin_keys: Vec<&str> = twin.telemetry().0.keys().map(String::as_str).collect();
+        twin_keys.sort_unstable();
+
+        assert!(
+            !restored_keys.contains(&tk::SHR),
+            "a restored never-cooled unit's map must not carry an shr key"
+        );
+        assert_eq!(
+            restored_keys,
+            twin_keys,
+            "the restored never-cooled map ({} keys) must carry exactly the \
+             continuously-run twin's keys ({} keys)",
+            restored_keys.len(),
+            twin_keys.len()
+        );
+    }
+
+    /// Once cooled, the key persists with the last cooling step's value: the
+    /// step's write is `set_or_register` (registered at the first cooling
+    /// step, updated in place after) and an idle step leaves it alone, so a
+    /// cooled-then-idle unit still carries the key at checkpoint time and
+    /// the restore brings it back with that value. Gating the restore's
+    /// write on the unit's activity at the checkpoint instant would lose the
+    /// key for exactly this idle-after-cooling unit.
+    #[test]
+    fn restored_cooled_then_idle_map_keeps_the_last_shr() {
+        let cfg = ac_config();
+        let cool_env = env_at_second(28.0, 35.0, 0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &cool_env).unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.update_control(&cool_env);
+        eq.step(&cool_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        ports.zero();
+        let last_shr = eq
+            .telemetry()
+            .get(tk::SHR)
+            .expect("the cooling step registers the shr key");
+
+        step_idle_windows(&mut eq, &mut ports);
+        assert_eq!(
+            eq.telemetry().get(tk::SHR),
+            Some(last_shr),
+            "an idle step leaves the last cooling value in the map"
+        );
+        let state = eq.save_state().unwrap();
+
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &cool_env).unwrap();
+        restored.load_state(&state).unwrap();
+
+        let mut twin = AirConditioner::new(cfg.clone());
+        twin.init(&cfg, &cool_env).unwrap();
+        twin.update_control(&cool_env);
+        twin.step(&cool_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        ports.zero();
+        step_idle_windows(&mut twin, &mut ports);
+
+        assert_eq!(
+            restored.telemetry().get(tk::SHR),
+            Some(last_shr),
+            "the restored cooled-then-idle unit keeps the last cooling value"
+        );
+        let mut restored_keys: Vec<&str> =
+            restored.telemetry().0.keys().map(String::as_str).collect();
+        restored_keys.sort_unstable();
+        let mut twin_keys: Vec<&str> = twin.telemetry().0.keys().map(String::as_str).collect();
+        twin_keys.sort_unstable();
+        assert_eq!(
+            restored_keys, twin_keys,
+            "the restored cooled-then-idle map must carry exactly the \
+             continuously-run twin's keys"
+        );
+    }
+
+    /// A checkpoint replaces the whole run state, the telemetry timeline
+    /// included: loading a never-cooled unit's blob (no `shr` key) into a
+    /// unit that cooled earlier must leave the never-cooled key set. The
+    /// saved map is the contract; a key the blob never registered must not
+    /// survive from the pre-restore run, or the same blob restores two
+    /// different maps depending on the target's history.
+    #[test]
+    fn restore_into_a_previously_cooled_unit_drops_the_stale_shr_key() {
+        let cfg = ac_config();
+        let cool_env = env_at_second(28.0, 35.0, 0);
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+
+        // The source: a never-cooled unit, its map without the key.
+        let mut source = AirConditioner::new(cfg.clone());
+        source.init(&cfg, &env(20.0, 0.008, 15.0, 20.0)).unwrap();
+        step_idle_windows(&mut source, &mut ports);
+        assert!(
+            source.telemetry().get(tk::SHR).is_none(),
+            "the source must never have cooled"
+        );
+        let state = source.save_state().unwrap();
+
+        // The target: it cooled before the restore, so its map holds the
+        // key the checkpoint's map does not.
+        let mut target = AirConditioner::new(cfg.clone());
+        target.init(&cfg, &cool_env).unwrap();
+        target.update_control(&cool_env);
+        target
+            .step(&cool_env, Duration::from_secs(60), &mut ports)
+            .unwrap();
+        ports.zero();
+        assert!(
+            target.telemetry().get(tk::SHR).is_some(),
+            "the target must hold the key before the restore"
+        );
+
+        target.load_state(&state).unwrap();
+        assert!(
+            target.telemetry().get(tk::SHR).is_none(),
+            "the restored map must be the checkpoint's: no shr key survives \
+             from the pre-restore run"
+        );
+        assert!(
+            !target.telemetry().0.keys().any(|key| key == tk::SHR),
+            "the restored key set must not carry the pre-restore shr key"
+        );
+    }
+
+    /// The checkpoint gate refuses the previous schema by name and by both
+    /// versions. A version-4 blob (the schema before `shr` became
+    /// `Option<f64>`) cannot be decoded as v5: postcard's `Option` tag
+    /// would be read from the first byte of the old `f64`, so the gate,
+    /// not a decode attempt, is the answer. There is no v4 migration.
+    #[test]
+    fn checkpoint_gate_refuses_the_version_4_blob_naming_both_versions() {
+        let cfg = ac_config();
+        let environment = env(20.0, 0.008, 15.0, 20.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        let mut blob = eq.save_state().unwrap();
+        assert_eq!(
+            u32::from_le_bytes(blob[..4].try_into().unwrap()),
+            super::AC_CHECKPOINT_VERSION,
+            "the saved blob carries the current schema token"
+        );
+
+        // The blob below is otherwise the valid v5 payload; only the token
+        // claims the previous schema, so a refusal must come from the gate.
+        blob[..4].copy_from_slice(&4u32.to_le_bytes());
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        let err = restored
+            .load_state(&blob)
+            .expect_err("a version-4 blob must be refused by the version-5 gate");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AirConditioner") && msg.contains("blob=4") && msg.contains("expected=5"),
+            "the refusal must name the equipment and both versions; got: {msg}"
+        );
+        assert!(
+            !msg.contains("postcard") && !msg.contains("deserialization failed"),
+            "the refusal must come from the version gate, not a postcard decode; got: {msg}"
+        );
+    }
+
+    /// The gate compares the token to this build's schema by inequality,
+    /// not by order: a token from a schema after this one is refused by
+    /// the same path, naming both versions. A checkpoint written by a
+    /// newer build must never be decoded by an older one, which would
+    /// read the newer payload's bytes as this schema's fields. Pinning
+    /// the upper direction keeps a future "accept anything at least this
+    /// version" relaxation of the gate failing here.
+    #[test]
+    fn checkpoint_gate_refuses_a_future_version_blob_naming_both_versions() {
+        let cfg = ac_config();
+        let environment = env(20.0, 0.008, 15.0, 20.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        let mut blob = eq.save_state().unwrap();
+        let future = super::AC_CHECKPOINT_VERSION + 1;
+        // The blob below is otherwise the valid current payload; only the
+        // token claims the future schema, so a refusal must come from the
+        // gate.
+        blob[..4].copy_from_slice(&future.to_le_bytes());
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        let err = restored
+            .load_state(&blob)
+            .expect_err("a blob from a future schema must be refused by the current gate");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AirConditioner")
+                && msg.contains(&format!("blob={future}"))
+                && msg.contains(&format!("expected={}", super::AC_CHECKPOINT_VERSION)),
+            "the refusal must name the equipment and both versions; got: {msg}"
+        );
+        assert!(
+            !msg.contains("postcard") && !msg.contains("deserialization failed"),
+            "the refusal must come from the version gate, not a postcard decode; got: {msg}"
+        );
     }
 
     #[test]
