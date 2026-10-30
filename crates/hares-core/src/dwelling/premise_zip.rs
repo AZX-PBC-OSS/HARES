@@ -153,10 +153,12 @@ enum MomentDraw {
 }
 
 /// Aggregate the premise-level ZIP over a dwelling's equipment. `None` when
-/// no ZIP-governing equipment has a computable, positive weight: an
+/// no ZIP-governing equipment has a computable, positive weight, or when the
+/// weighted sums are not finite (a report large enough to overflow them): an
 /// aggregate formed from no information would be indistinguishable from
 /// "the premise is constant power", the exact conflation the
-/// `real_power_zip_applies` flag exists to prevent.
+/// `real_power_zip_applies` flag exists to prevent, and a non-finite mean is
+/// no mean.
 pub(crate) fn aggregate_premise_zip(
     equipment: &[Box<dyn Equipment>],
     schedule: &ScheduleTimeSeries,
@@ -374,6 +376,33 @@ pub(crate) fn aggregate_premise_zip(
         total_weight.partial_cmp(&0.0),
         Some(std::cmp::Ordering::Greater)
     ) {
+        return None;
+    }
+
+    // A published aggregate is finite: the weights are finite positive
+    // draws and the responses finite positive multipliers, but a weighted
+    // product or a sum can still overflow (a huge draw times a legal large
+    // coefficient, or enough finite loads to overflow the total). A
+    // non-finite numerator divides into NaN or infinity inside a
+    // structurally normal struct whose fields claim a weighted mean and a
+    // positive finite scale. A non-finite mean is not a mean: refuse, the
+    // same no-computable-weight answer the total-weight guard gives,
+    // rather than publish garbage.
+    if ![
+        total_weight,
+        zp,
+        ip,
+        pp,
+        zq,
+        iq,
+        pq,
+        tan_phi_sum,
+        v0,
+        deep_sag_weighted,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+    {
         return None;
     }
 
@@ -1105,6 +1134,59 @@ mod tests {
                  report of {reported_w} W is a zero weight, never the report \
                  and never an expected mean"
             );
+        }
+    }
+
+    #[test]
+    fn a_weighted_sum_that_overflows_is_no_aggregate_not_a_non_finite_one() {
+        // The published aggregate must be finite by construction: every
+        // weight is a finite positive draw, every response a finite
+        // positive multiplier, and every coefficient legal (the loader
+        // admits magnitudes up to 100). The weighted PRODUCTS and the sums
+        // can still overflow: two finite draws of 1e308 W overflow the
+        // weight sum, and a legal zp = 100 row times a 1e307 W draw
+        // overflows a single product. The division then publishes NaN or
+        // infinity inside a structurally normal struct (the fields claim a
+        // weighted mean and a positive finite scale). A non-finite mean is
+        // not a mean: the honest answer is `None`, the same
+        // no-computable-weight answer the NaN-total guard gives.
+        let legal_large_row = ZipLoad {
+            zp: 100.0,
+            ip: -99.0,
+            pp: 0.0,
+            zq: 0.0,
+            iq: 0.0,
+            pq: 1.0,
+            pf: 0.0,
+            v0: 1.0,
+        };
+        let fixtures: [(&str, Vec<Box<dyn Equipment>>); 2] = [
+            (
+                "two finite draws that overflow the weight sum",
+                vec![
+                    governing_stepped_load("Huge A", ZipLoad::constant_power(), None, 1e308),
+                    governing_stepped_load("Huge B", ZipLoad::constant_power(), None, 1e308),
+                ],
+            ),
+            (
+                "a legal large coefficient that overflows one product",
+                vec![governing_stepped_load(
+                    "Huge Product",
+                    legal_large_row,
+                    None,
+                    1e307,
+                )],
+            ),
+        ];
+        for (label, equipment) in fixtures {
+            match aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0) {
+                None => {}
+                Some(premise) => panic!(
+                    "{label}: a non-finite aggregate was published \
+                     (zp {:?}, ip {:?}, pp {:?}, scale {:?})",
+                    premise.zip.zp, premise.zip.ip, premise.zip.pp, premise.deep_sag_scale
+                ),
+            }
         }
     }
 
