@@ -6505,6 +6505,93 @@ mod tests {
         );
     }
 
+    /// The countdown is a wall-clock contract: an outage does not pause
+    /// it. A dead-bus step (the outage's first step, before any island
+    /// forms) runs the battery's step to its end, where the timer
+    /// advances, so an event spanning the outage ends on the schedule its
+    /// duration named (docs/equipment/control-system.md: the timer
+    /// advances once per timestep, at the step's end). A countdown that
+    /// stalled on the dead-bus path would stretch the event by the
+    /// outage's length.
+    #[test]
+    fn dr_countdown_advances_through_a_dead_bus_step() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(4.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+
+        // Two of the event's four named steps fall in the outage: the bus
+        // is dead (no island forms in the unit fixture; the dwelling's
+        // formation lag is the islanding tests' surface), the battery's
+        // dispatch is zero, and the published fraction is the event's.
+        let mut dead = warm_env();
+        dead.grid.voltage_pu = 0.0;
+        dead.grid.island_bus_voltage_pu = None;
+        assert!(
+            !dead.grid.bus_energized(),
+            "fixture: the outage's bus is de-energized"
+        );
+        for step in 0..2 {
+            bat.update_control(&dead);
+            let mut ports = default_ports();
+            bat.step(&dead, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let published = bat
+                .telemetry()
+                .get(tk::DR_POWER_FRACTION)
+                .expect("the battery publishes its DR fraction");
+            assert_eq!(
+                published, 0.0,
+                "step {step}: the event is in force through the dead-bus step"
+            );
+            assert_eq!(
+                ports.electrical.net_active_w(),
+                0.0,
+                "step {step}: a dead bus means no dispatch"
+            );
+        }
+
+        // The grid returns for the event's last two named steps: still
+        // shed. The dead-bus steps consumed their share of the duration.
+        for step in 0..2 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let published = bat
+                .telemetry()
+                .get(tk::DR_POWER_FRACTION)
+                .expect("the battery publishes its DR fraction");
+            assert_eq!(
+                published, 0.0,
+                "step {step}: the event's remaining named steps shed after \
+                 the outage"
+            );
+        }
+
+        // The step after the event: Normal, the dead-bus steps counted
+        // toward the duration the signal named.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let published = bat
+            .telemetry()
+            .get(tk::DR_POWER_FRACTION)
+            .expect("the battery publishes its DR fraction");
+        assert_eq!(
+            published, 1.0,
+            "the event is over on schedule: the dead-bus steps counted \
+             toward the duration"
+        );
+    }
+
     // ---------------------------------------------------------------
     // 4D LUT and Equipment trait LUT method tests
     // ---------------------------------------------------------------
