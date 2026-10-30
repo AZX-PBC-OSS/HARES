@@ -465,10 +465,12 @@ cmd_test() {
     check "real regression: confirmation flags the same benches" \
         "$(names <<<"$real_paired")" "$(names <<<"$real_confirmed")"
 
-    # 5. A single shifted round (a co-tenant arriving and leaving) is not
-    #    a regression: it moved both sides of its own round, so the ratio
-    #    it carries is still 1.00, and the sequential view of the same
-    #    data (round 1's base against round 2's head) is +50 percent.
+    # 5. A shifted round is not a regression: it moved both sides of its
+    #    own round, so the ratio it carries is still 1.00. The round rides
+    #    on the drift scenario's files (round 3 still carries the 95/96
+    #    shift), and the median of the three per-round ratios is still
+    #    1.00; the sequential view of the same data (round 1's base
+    #    against round 2's head) is +50 percent.
     scale "$fx/clean-baseline.json" 1.5 "$scratch/base-r2.json"
     scale "$fx/clean-baseline.json" 1.5 "$scratch/head-r2.json"
     local one_round one_round_seq
@@ -477,8 +479,8 @@ cmd_test() {
         "$scratch/base-r3.json" "$scratch/head-r3.json")"
     one_round_seq="$(run_flag "$scratch/base-r1.json" "$scratch/head-r2.json" median)"
     check "one shifted round does not flag" 0 "$(count <<<"$one_round")"
-    check "one shifted round's ratio is 1.00 on the paired sample" 0 \
-        "$(jq -r '[.regressions[] | .per_round_pct[]] | length' <<<"$one_round")"
+    check "one shifted round leaves every bench paired" 0 \
+        "$(jq -r '.unpaired | length' <<<"$one_round")"
     check "the same shift through sequential phases reads +50%" "+50" \
         "$(jq -r '.regressions[0].pct_slower | "+\(.)"' <<<"$one_round_seq")"
 
