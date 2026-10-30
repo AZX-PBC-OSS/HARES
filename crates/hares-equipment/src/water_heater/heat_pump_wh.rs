@@ -12,7 +12,7 @@ use hares_types::{
     EquipmentDescriptor, EquipmentId, ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError,
     HeatTransferDirection, LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots,
     ScheduleSource, ScheduleSourceState, Telemetry, TelemetryField, ThermalCategory,
-    telemetry_keys as tk,
+    demand_response_command, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1501,8 +1501,9 @@ impl Equipment for HeatPumpWH {
                 }
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {}
         }

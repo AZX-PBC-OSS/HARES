@@ -31,6 +31,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory, Warning,
+    demand_response_command,
 };
 use serde::{Deserialize, Serialize};
 
@@ -134,9 +135,14 @@ pub(super) struct CoolingCore {
     /// deliver), so a zero reading cannot distinguish "the solve said
     /// nothing needed" from "the pipeline starved the solve"; this flag
     /// carries the distinction, and a starved step counts in the
-    /// equipment's health (`ideal_capacity_unsolved_steps`).
+    /// equipment's health (`ideal_capacity_unsolved_steps`). Per-step
+    /// bookkeeping, not checkpoint state: it clears at every step's end,
+    /// so a restore always finds it false.
     ideal_capacity_signal_arrived: bool,
-    /// The run-total starvation count (drained via `take_health_counts`).
+    /// The run-total starvation count, drained into the run's health at
+    /// every step (`take_health_counts`): always zero at a step boundary,
+    /// so it needs no checkpoint section. The run's own total rides the
+    /// checkpoint's health section.
     ideal_capacity_unsolved_steps: u64,
 
     // --- External control signals (sticky) ---
@@ -2203,8 +2209,9 @@ impl CoolingCore {
                 self.ctrl_mode_override = None;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             ControlSignal::IdealCapacity { capacity_w, .. } => {
                 // Solver-provided load: negative = cooling needed.
@@ -2232,16 +2239,17 @@ impl CoolingCore {
             return None;
         }
         // The solver's gate reads the thermostat's latched call, never the
-        // published operating mode. The published mode is the idle
-        // resolution's (an off step with no flow publishes Standby), so a
-        // cooling call that delivered nothing last step - a setpoint
-        // override landing after the solver-feedback phase, a DR shed's
-        // forced-off - would otherwise starve every later solve: the
-        // solver never sees the call, the step never delivers, the mode
-        // publishes Standby again. The FSM's latch is the thermostat's own
-        // state: it holds Cooling through the call, so the solve runs
-        // every step the zone is past the cooling setpoint, and the
-        // delivery stays metered to the solved capacity.
+        // step's dispatch mode. The forced-off branches of `update_control`
+        // (a de-energized bus, a DR shed, an explicit Off) return before the
+        // thermostat re-reads, so the mode the solver-feedback phase would
+        // find is Off while the thermostat's call still stands; a control
+        // signal landing at the dispatch (a DR cancel, a setpoint override)
+        // then flips the second control pass back to Cooling, and the step
+        // dispatches a call the solve never saw: the raw duty, unmetered to
+        // the zone's need. Reading the latch keeps the solve running for the
+        // call the dispatch may honor. The idle mode a step publishes never
+        // reaches this read: every control pass re-derives the mode from the
+        // same latch.
         if self.hvac.thermostat_fsm.mode != ThermostatMode::Cooling {
             return None;
         }
@@ -4008,6 +4016,98 @@ mod tests {
             eq.take_health_counts().ideal_capacity_unsolved_steps,
             0,
             "a solved step is not a starvation"
+        );
+    }
+
+    /// A zero-second event covers no step: the duration names the steps the
+    /// event sheds, and zero names none. The signal is legal (a finite
+    /// duration of at least zero), so it arrives as an event already over
+    /// rather than as a one-step shed of the step it lands in.
+    #[test]
+    fn a_zero_second_dr_event_sheds_no_step() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(0.0),
+        })
+        .unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "the zone is past the cooling setpoint and the zero-second event \
+             is over on arrival: the unit must call"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let compressor = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN);
+        assert!(
+            compressor > 0.0,
+            "a zero-second event must not shed the step it lands in: the \
+             cooling call delivers, got {compressor} kW"
+        );
+    }
+
+    /// An idle-resolved cooling step does not starve the next step's solve:
+    /// the control pass re-derives the thermostat's call from its latch, so
+    /// the mode the solver's gate reads is Cooling, never the Standby the
+    /// step published. The idle resolution is the step's publication, not
+    /// the solver's input.
+    #[test]
+    fn a_step_that_published_standby_still_requests_the_next_solve() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "fixture: the thermostat calls for cooling"
+        );
+        // A zero load fraction zeroes the step's delivery, so the step's
+        // publication resolves the active mode to Standby.
+        eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.0 })
+            .unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            eq.telemetry().get(tk::OPERATING_MODE),
+            Some(OperatingMode::Standby.as_code()),
+            "fixture: the zero-delivery step publishes Standby"
+        );
+
+        // The next control pass re-derives the call: the solver sees
+        // Cooling and requests the target, so the idle resolution cannot
+        // starve a later solve.
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "the thermostat's latch still calls after the idle step"
+        );
+        assert!(
+            eq.ideal_target().is_some(),
+            "the solve runs for the latched call the step published Standby for"
         );
     }
 

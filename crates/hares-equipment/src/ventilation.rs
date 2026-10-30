@@ -22,7 +22,7 @@ use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, OperatingMode, PortContribution, PortDeclaration,
-    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId,
+    PortSlots, ScheduleSource, Telemetry, TelemetryField, ZoneId, demand_response_command,
 };
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -1028,8 +1028,9 @@ impl Equipment for Ventilation {
                 self.mode = OperatingMode::Standby;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.dr_level = *level;
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.dr_level = level;
+                self.dr_duration_remaining_s = duration_s;
             }
             ControlSignal::LoadFraction { fraction } => {
                 if *fraction <= 0.0 {

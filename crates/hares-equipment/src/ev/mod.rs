@@ -11,7 +11,7 @@ use hares_types::{
     ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, DRLevel,
     ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, EvConnectionState,
     ExecutionStage, FuelType, HaresError, OperatingMode, PlugInPolicy, PortContribution,
-    PortDeclaration, PortSlots, Soc, Telemetry, Warning,
+    PortDeclaration, PortSlots, Soc, Telemetry, Warning, demand_response_command,
 };
 
 use crate::battery::ocv::{OcvTable, UNegTable};
@@ -2786,8 +2786,9 @@ impl Equipment for Ev {
                 self.ready_by_power_warned = false;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.dr_level = *level;
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.dr_level = level;
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {
                 return Err(HaresError::Control(format!(

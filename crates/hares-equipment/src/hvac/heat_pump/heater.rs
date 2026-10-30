@@ -10,7 +10,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
-    Warning,
+    Warning, demand_response_command,
 };
 use serde::{Deserialize, Serialize};
 
@@ -2967,8 +2967,9 @@ impl HeatPumpHeaterCore {
                 self.ctrl_mode_override = None;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             ControlSignal::IdealCapacity { capacity_w, .. } => {
                 self.ideal_capacity_w = *capacity_w;

@@ -9,7 +9,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, ScheduleSource, ScheduleSourceState, Telemetry, TelemetryField,
-    telemetry_keys as tk,
+    demand_response_command, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -777,8 +777,9 @@ impl Equipment for TanklessWH {
                 self.power_limit_w = Some(limit_w);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {}
         }

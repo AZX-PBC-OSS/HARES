@@ -19,7 +19,7 @@ use hares_types::{
     CoreState, DRLevel, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId, ExecutionStage,
     FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, ScheduleSource, ScheduleSourceState, Telemetry,
-    TelemetryField, ThermalCategory, telemetry_keys as tk,
+    TelemetryField, ThermalCategory, demand_response_command, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -824,8 +824,9 @@ impl Equipment for IndirectTank {
                 self.ctrl_load_fraction = fraction.clamp(0.0, 1.0);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {}
         }

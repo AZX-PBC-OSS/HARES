@@ -11,7 +11,8 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidNodeId, FluidType, FuelPower, FuelType, HaresError, HeatTransferDirection,
     LoopId, OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
-    ScheduleSourceState, Telemetry, TelemetryField, ThermalCategory, telemetry_keys as tk,
+    ScheduleSourceState, Telemetry, TelemetryField, ThermalCategory, demand_response_command,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1079,8 +1080,9 @@ impl Equipment for GasWH {
                 self.ctrl_load_fraction = self.ctrl_load_fraction.min(max_fraction);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {}
         }

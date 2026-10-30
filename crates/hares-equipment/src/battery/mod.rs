@@ -19,7 +19,7 @@ use hares_types::{
     CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Soc, Telemetry, TelemetryField,
-    ThermalCategory, Warning, ZoneId,
+    ThermalCategory, Warning, ZoneId, demand_response_command,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1277,13 +1277,14 @@ impl Equipment for Battery {
         let net_load_w = ports.electrical.net_active_w();
 
         // Grid outage with a de-energized bus: the battery can neither charge
-        // (nothing on the bus to charge from) nor dispatch — if it *could*
-        // discharge, it would be the island source and the bus would be
-        // energized (see `island_source_available`), so a dead bus implies
-        // this battery is empty/cold/disconnected. Standby electronics and
-        // the cell heater lose their supply too (gated below). During
-        // islanded operation the bus is energized and dispatch proceeds
-        // normally. See docs/outage-behavior.md.
+        // (nothing on the bus to charge from) nor dispatch (nothing to
+        // deliver into). A dead bus during an outage is either the island's
+        // formation lag (its first step, before the source holds the bus) or
+        // a battery that cannot serve (empty, cold, disconnected,
+        // grid-following); either way the dispatch is 0 W this step.
+        // Standby electronics and the cell heater lose their supply too
+        // (gated below). During islanded operation the bus is energized and
+        // dispatch proceeds normally. See docs/outage-behavior.md.
         let bus_dead = !env.grid.bus_energized();
 
         // An unavailable period zeroing the battery's rows (`Power Outage`:
@@ -2228,8 +2229,9 @@ impl Equipment for Battery {
                 self.q_setpoint_var = None;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.dr_level = *level;
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.dr_level = level;
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {
                 return Err(HaresError::Control(format!(
@@ -6643,6 +6645,104 @@ mod tests {
             published, 1.0,
             "the event is over on schedule: the dead-bus steps counted \
              toward the duration"
+        );
+    }
+
+    /// A zero-second event covers no step: the duration names the steps
+    /// the event sheds, and zero names none. The signal is legal (a finite
+    /// duration of at least zero), so it arrives as an event already over
+    /// rather than as a one-step shed of the step it lands in.
+    #[test]
+    fn a_zero_second_dr_event_sheds_no_step() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(0.0),
+        })
+        .expect("DR accepted");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+        assert!(
+            power < -1000.0,
+            "a zero-second event must not shed the step it lands in: the \
+             commanded 2 kW discharge must stand, got {power} W"
+        );
+    }
+
+    /// A second command supersedes the running one: its level applies and
+    /// its duration restarts from its arrival, so a resend extends the
+    /// event and a shorter command ends it early. The countdown is one
+    /// value, never a queue.
+    #[test]
+    fn a_second_dr_command_supersedes_the_running_countdown() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(2.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+
+        // One of the first command's two named steps runs.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+
+        // A second command supersedes it: four fresh named steps.
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(4.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+        for step in 0..4 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+            let standby = DEFAULT_STANDBY_POWER_W;
+            assert!(
+                (power - standby).abs() < 10.0,
+                "step {step}: the second command's four named steps shed, \
+                 got {power} W"
+            );
+        }
+
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power < -1000.0,
+            "the second command's duration governs: the discharge resumes \
+             after its four named steps, got {power} W"
         );
     }
 
