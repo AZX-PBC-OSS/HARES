@@ -128,6 +128,16 @@ fn spec_error(err: hares_types::HaresError) -> PyErr {
 /// optional ``"correlation": {"group": ..., "rho": ...}`` correlates the
 /// parameters sharing a group.
 ///
+/// A home's scenario is named twice and the two names are one key: the
+/// spec's ``scenario_id`` and the run's `SimulationConfig.scenario_seed`
+/// both fill the scenario bytes of the scenario-mixed per-dwelling key,
+/// so a sample at ``(master_seed, scenario_id, bldg_id)`` and a dwelling
+/// built with that ``master_seed``, ``scenario_seed = scenario_id`` and
+/// ``bldg_id`` belong to one home. Nothing checks the pairing (the
+/// sampler reads no config, the build reads no record): a study that
+/// samples under one scenario or building and builds under another applies
+/// the values to a home whose behavioral draws come from another key.
+///
 /// The application surface: `sample_overrides` returns the form the
 /// dwelling constructor's `overrides=` accepts, so the override targets
 /// apply on the Python surface. The patch targets' application is the
