@@ -20,7 +20,7 @@ fn repo_root() -> &'static Path {
 
 /// `base.xml` declares Latitude 40.01 / Longitude -105.27 and no
 /// `Site/TimeZone/UTCOffset`, and the ResStock CSV supplies no offset, so the
-/// tzf-rs lookup (data release 2026-d-fix1) supplies it: Boulder, Colorado
+/// tzf-rs lookup (data release 2026e) supplies it: Boulder, Colorado
 /// sits in America/Denver, whose standard time is MST (UTC-7).
 #[test]
 fn site_offset_from_the_time_zone_database_for_a_fixture_site() {
@@ -38,4 +38,15 @@ fn site_offset_from_the_time_zone_database_for_a_fixture_site() {
 
     assert_eq!(location.utc_offset_h, -7.0);
     assert_eq!(location.utc_offset_source, FieldSource::TimezoneLookup);
+}
+
+/// The embedded time-zone dataset the coordinate lookups read, pinned by
+/// release name. A dataset release can relocate a boundary, and a boundary
+/// move changes a site's civil offset and with it its DST schedule, so the
+/// release is a deliberate, recorded change rather than an incidental one
+/// (tzf-rs 2.1.3 carries timezone-boundary-builder 2026e).
+#[test]
+fn the_coordinate_lookup_dataset_release_is_pinned() {
+    let finder = tzf_rs::DefaultFinder::new();
+    assert_eq!(finder.data_version(), "2026e");
 }
