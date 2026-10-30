@@ -1733,7 +1733,31 @@ limit or a full shed. The EV export's floor is zero (a
 generation-only inverter does not absorb), and an under-frequency
 excursion would export a near-reserve pack's heater headroom without
 the availability's heater budget, landing the pack's SOC below its
-reserve floor.
+reserve floor. Both ramps' references stay inside the deliverable
+window ([floor, available injection]): the up-ramp caps at the
+availability input, and the down-ramp - whose anchor is the crossing
+step's operating point - caps at it too, so a capability that tightened
+inside a held excursion (a falling irradiance, a deepening shed, a
+pack cooling toward its charge floor) governs the reference the same
+way it governs the model's own output.
+
+The composed delivery's order, one table (each corner pinned by its
+named witness; the layer's inputs in parentheses):
+
+| Class | The delivered power's composition, in order | The corner pin |
+|---|---|---|
+| PV | the array's irradiance output (weather, soiling, shading), then the operator curtailment (fraction, then limit), then the layer's reference, then the DC follows the delivery. The availability input IS the irradiance-capped output, so the layer's window is the whole composition and no caller-side re-clamp exists | `pv::tests::witness_der1547_pv_droop_reference_never_exceeds_the_available_irradiance` (a falling sky inside a held excursion: the composed output is the dim sky's deliverable, not the stale anchor's ask) |
+| Battery | `determine_target_power` (whose `clamp_power` applies the temperature capability and a configured charging-curve LUT), then the layer's reference (the availability input = the deliverable discharge bound, the floor = the deliverable charge bound: the DR fraction, the import/export limits, the external power limit), then `clamp_power` again on the layered reference, then the pack's SOC and thermal machinery | `battery::tests::witness_der1547_battery_droop_absorption_obeys_the_charge_bound` (the import limit, the full shed) and `witness_der1547_layered_reference_delivery_obeys_the_charge_capability` (the cold pack's derate on the delivered charge) |
+| EV (export leg) | `compute_discharge` (the heater's priority budget), then the layer's reference (the availability input = the heater-budgeted ceiling times the DR fraction, the floor = 0) | `ev::tests::witness_der1547_ev_droop_export_obeys_the_heater_budgeted_ceiling` |
+| EV (charge leg) | outside the layer entirely: the vehicle's load-side behavior (the charge leg is never the DER function), the droop anchor cleared on the steps it conducts | `ev::tests::witness_der1547_ev_export_trips_on_a_sustained_06pu_sag_and_charge_is_load_side` |
+
+The PV needs no caller-side re-clamp and the battery needs one because
+of what each class's availability input can carry: the PV's input is
+the array's full capability (the irradiance-capped output itself), so
+the layer's window is the whole composition; the battery's inputs are
+the operator bounds only (the temperature capability and the LUT are
+invisible to them), so the caller re-clamps the layered reference with
+`clamp_power`, the same function that bounds the model's own target.
 
 The checkpoint answer: the PV, Battery and EV formats move to v5, v4 and
 v10 with the layer's state added, so a pre-1547 save (v4, v3, v9) is

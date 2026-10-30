@@ -1198,7 +1198,15 @@ impl Equipment for PV {
                     // adjustment is zero (a zero pre-disturbance anchor
                     // holds injection at zero). When the droop is inactive
                     // the layer returns the model's output bitwise, so this
-                    // comparison leaves the nominal path untouched.
+                    // comparison leaves the nominal path untouched. The
+                    // reference arrives inside the deliverable window (the
+                    // layer caps both ramp directions at the available
+                    // injection, which is this array's irradiance-capped
+                    // output), so no re-clamp applies here: the battery's
+                    // caller re-clamps because its temperature and
+                    // charging-curve capability is invisible to the
+                    // layer's operator-bound inputs, while this
+                    // availability input already is the full capability.
                     total_ac_power_w = outcome.p_ref_w;
                     total_dc_power_w = total_ac_power_w / self.inverter_efficiency;
                 }
@@ -2355,6 +2363,103 @@ mod tests {
         assert_eq!(
             -ports.electrical.generation_power_w, baseline_w,
             "60.036 Hz is the deadband edge: no droop"
+        );
+    }
+
+    /// The composed output's capability face: the droop's reference is a
+    /// power command, and the array's available output governs its
+    /// delivery the same way the pack's clamp governs the battery's. A
+    /// held over-frequency excursion latches its anchor at the crossing
+    /// step's output; when the irradiance falls inside the excursion, the
+    /// reference computed from the stale anchor exceeds what the array
+    /// can deliver, and the composed output must be the sky's
+    /// deliverable, not the stale ask. 60.536 Hz sheds 1/6 pu of the
+    /// 4800 W rating (800 W) from the anchor; the dimmed sky (a quarter
+    /// of the irradiance) delivers roughly a quarter of the sunny output,
+    /// far below the ask.
+    #[test]
+    fn witness_der1547_pv_droop_reference_never_exceeds_the_available_irradiance() {
+        let sid = surface_id_for_orientation(30.0, 180.0, 5.0).unwrap();
+        let sunny = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 800.0,
+            diffuse_w_m2: 100.0,
+            reflected_w_m2: 20.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let dim = vec![SurfaceIrradiance {
+            surface_id: sid,
+            direct_w_m2: 200.0,
+            diffuse_w_m2: 25.0,
+            reflected_w_m2: 5.0,
+            angle_of_incidence_rad: 0.0,
+        }];
+        let env_nominal = env_with_surfaces(sunny.clone(), 25.0);
+        let mut hi_f = env_with_surfaces(sunny, 25.0);
+        hi_f.grid.frequency_hz = 60.536;
+        let mut dim_hi_f = env_with_surfaces(dim, 25.0);
+        dim_hi_f.grid.frequency_hz = 60.536;
+
+        // The capability probe: the same model without the layer, ridden
+        // through the same weather, is the dim sky's own deliverable. The
+        // array's state is the weather's (the NOCT cell temperature and
+        // the shading are per-step computations from the environment),
+        // so the probe's dim step is the subject's dim-step availability.
+        let probe_config = config_single();
+        let mut probe = PV::new(probe_config.clone());
+        probe.init(&probe_config, &env_nominal).unwrap();
+        let mut ports = PortSlots::default();
+        probe
+            .step(&env_nominal, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        ports.zero();
+        probe
+            .step(&hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        ports.zero();
+        probe
+            .step(&dim_hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let sky_available_w = -ports.electrical.generation_power_w;
+        assert!(
+            sky_available_w > 0.0,
+            "precondition: the dim sky still delivers, got {sky_available_w} W"
+        );
+
+        // The subject: the same weather, the excursion held across the
+        // sky's fall. The crossing step's shed is the shape pin's 800 W.
+        let config = config_single_with_der1547(cat2_settings());
+        let mut pv = PV::new(config.clone());
+        pv.init(&config, &env_nominal).unwrap();
+        let mut ports = PortSlots::default();
+        pv.step(&env_nominal, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let baseline_w = -ports.electrical.generation_power_w;
+        ports.zero();
+        pv.step(&hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let held_w = -ports.electrical.generation_power_w;
+        assert!(
+            (held_w - (baseline_w - 800.0)).abs() < 1e-6,
+            "the crossing step sheds 1/6 pu of the 4800 W rating: expected \
+             {} W, got {held_w} W",
+            baseline_w - 800.0
+        );
+        assert!(
+            held_w > sky_available_w,
+            "precondition: the stale anchor's ask {held_w} W must exceed the \
+             dim sky's deliverable {sky_available_w} W for the capability \
+             face to bind"
+        );
+        ports.zero();
+        pv.step(&dim_hi_f, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let composed_w = -ports.electrical.generation_power_w;
+        assert!(
+            composed_w <= sky_available_w,
+            "the held excursion's composed output must not exceed the \
+             array's available output: composed {composed_w} W against \
+             {sky_available_w} W of available irradiance"
         );
     }
 

@@ -477,7 +477,13 @@ impl Der1547Controller {
     /// import for a bidirectional inverter); `p_avail_w` the maximum
     /// injection the DER can deliver this step; `p_floor_w` the minimum
     /// injection the droop may drive toward (0 for a generation-only
-    /// inverter, the negative charge limit for a battery).
+    /// inverter, the negative charge limit for a battery). The droop's
+    /// reference stays inside [p_floor_w, p_avail_w] in both ramp
+    /// directions: the up-ramp caps at the available injection, and the
+    /// down-ramp floors at the injection floor and also caps at the
+    /// available injection, so a capability that tightened inside a held
+    /// excursion governs the reference the same way it governs the
+    /// model's own output.
     ///
     /// A non-finite bus voltage or frequency trips the layer for the step
     /// (fail-safe, matching `GridState::bus_energized`'s NaN robustness: a
@@ -723,7 +729,15 @@ impl Der1547Controller {
                     } else {
                         let delta = (f_hz - IEEE1547_NOMINAL_FREQ_HZ - self.tables.fw_db_of)
                             / (IEEE1547_NOMINAL_FREQ_HZ * self.tables.fw_k_of);
-                        (p_pre - delta).max(p_floor_pu)
+                        // The down-ramp's reference stays inside the
+                        // deliverable window: the floor below, the
+                        // available injection above. The anchor is the
+                        // crossing step's operating point; a capability
+                        // that tightened since the crossing (a falling
+                        // irradiance, a deepening demand-response shed)
+                        // governs the reference the same way it governs
+                        // the model's own output.
+                        ((p_pre - delta).max(p_floor_pu)).min(p_avail_pu)
                     };
                     (p_ref, p_ref - p_pre)
                 };
@@ -1259,6 +1273,34 @@ mod tests {
         let expected_pu = 0.5 + (59.964 - 59.5) / 3.0;
         assert!((out.p_ref_w - expected_pu * 5000.0).abs() < 1e-9);
         assert!((out.p_ref_w - 2500.0).abs() > 1.0, "the ramp moved output");
+    }
+
+    /// The down-ramp's mirror of the up-ramp's availability cap: the
+    /// reference never leaves the deliverable window (the floor below,
+    /// the available injection above). The anchor is the crossing step's
+    /// operating point; a capability that tightened since the crossing (a
+    /// falling irradiance, a deepening demand-response shed) must govern
+    /// the reference the same way it governs the model's own output.
+    #[test]
+    fn over_frequency_reference_is_capped_at_the_available_injection() {
+        let mut ctrl = controller(&cat2(), 5000.0);
+        // The crossing step: the excursion begins at a 0.9 pu operating
+        // point (4500 W of 5000 W), so the anchor latches at 0.9 pu and
+        // 60.536 Hz's ask is 0.9 - 0.5/3 = 0.7333 pu.
+        let _ = one_step(&mut ctrl, 1.0, 60.0, 900.0, 4500.0);
+        let _ = one_step(&mut ctrl, 1.0, 60.536, 900.0, 4500.0);
+        // The capability tightened to 0.2 pu (1000 W) inside the held
+        // excursion: the stale anchor's ask (3666.67 W) exceeds the
+        // available injection and the cap binds at it.
+        let out = ctrl
+            .step(1.0, 60.536, 900.0, true, 1000.0, 1000.0, 0.0)
+            .expect("valid step");
+        assert!(!out.tripped);
+        assert_eq!(
+            out.p_ref_w, 1000.0,
+            "the down-ramp's reference is capped at the available injection"
+        );
+        assert!((out.fw_adj_pu - (0.2 - 0.9)).abs() < 1e-12);
     }
 
     /// The pre-disturbance anchor is the model's undrooped output at the
