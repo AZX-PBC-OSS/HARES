@@ -376,8 +376,17 @@ pub struct IdealHvacConfig {
     pub cooling_capacity_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shr: Option<f64>,
+    /// The load-fraction control's resolution channel: the HPXML heating
+    /// system's FractionHeatLoadServed lands here, and the init reads this
+    /// field ahead of [`Self::fraction_cooling_load_served`]. The unit
+    /// serves both modes with one fraction; a config carrying the two
+    /// fields with different values is refused at init naming both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_heating_load_served: Option<f64>,
+    /// The load-fraction control's per-side channel: read when the heating
+    /// field is absent, and the field an override of the fraction names.
+    /// See [`Self::fraction_heating_load_served`] for the one-control
+    /// contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fraction_cooling_load_served: Option<f64>,
     /// Rated fan power (W). When non-zero, fan electrical consumption is

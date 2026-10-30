@@ -1584,8 +1584,51 @@ fn apply_typed_overrides(
         reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
         nested_insert(merged, key, value);
     }
+    remove_override_shadowed_ideal_fractions(merged, layers, type_name, equipment);
     remove_override_shadowed_setpoint_sources(merged, layers, equipment);
     Ok(())
+}
+
+/// The ideal HVAC's fraction fields are two channels for ONE load-fraction
+/// control its init reads the heating field ahead of, so an override of one
+/// field could never apply while the resolution's value stood in the other.
+/// When the override layers set exactly one of the pair, the merge removes
+/// the other, making the overridden field the tier the init reads (the same
+/// shadow removal a constant setpoint's override applies to its schedule
+/// source). The layers naming both fields remove neither: the init refuses
+/// the differing pair that remains, naming both.
+fn remove_override_shadowed_ideal_fractions(
+    merged: &mut Map<String, Value>,
+    layers: hares_io::hpxml::OverrideLayers<'_>,
+    type_name: &str,
+    equipment: &str,
+) {
+    if type_name != "Ideal HVAC" {
+        return;
+    }
+    let set = |key: &str| {
+        layers
+            .own
+            .into_iter()
+            .flatten()
+            .chain(layers.wildcard.into_iter().flat_map(|(_, layer)| layer))
+            .any(|(key_set, _)| key_set.as_str() == key)
+    };
+    let heating_set = set("fraction_heating_load_served");
+    let cooling_set = set("fraction_cooling_load_served");
+    let removed = match (heating_set, cooling_set) {
+        (true, false) => "fraction_cooling_load_served",
+        (false, true) => "fraction_heating_load_served",
+        _ => return,
+    };
+    if merged.remove(removed).is_some() {
+        tracing::debug!(
+            equipment,
+            removed_field = removed,
+            "an override of the ideal HVAC's other fraction field replaces \
+             the resolution's value on the load-fraction control"
+        );
+    }
 }
 
 /// The `setpoint` block's sides and the config key each side's schedule
@@ -2281,7 +2324,7 @@ mod tests {
 
     use hares_equipment::{
         ConfigPayload, SetpointReconciliation,
-        hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig},
+        hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig, IdealHvacConfig},
     };
     use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
     use hares_types::FuelType;
@@ -2497,6 +2540,112 @@ mod tests {
 
         assert!((cfg.afue - 0.96).abs() < 1e-12);
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
+    }
+
+    fn ideal_hvac_spec() -> hares_io::EquipmentSpec {
+        let typed_cfg = IdealHvacConfig {
+            zone_id: Some(1),
+            heating_capacity_w: Some(10_000.0),
+            cooling_capacity_w: Some(10_000.0),
+            // The resolver's shape: the HPXML heating system's
+            // FractionHeatLoadServed lands on both fraction channels (the
+            // typed vocabulary carries the one quantity on both), and the
+            // init reads the heating field ahead of the cooling field.
+            fraction_heating_load_served: Some(0.9),
+            fraction_cooling_load_served: Some(0.9),
+            ..IdealHvacConfig::default()
+        };
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Ideal HVAC".to_string(),
+            fuel_type: FuelType::Electric,
+            parameters: serde_json::to_value(&typed_cfg)
+                .expect("serializable ideal config")
+                .as_object()
+                .cloned()
+                .expect("ideal config object"),
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(
+                hares_equipment::EquipmentConfig::from_typed(
+                    "Ideal HVAC".to_string(),
+                    "Ideal HVAC".to_string(),
+                    typed_cfg,
+                )
+                .unwrap(),
+            ),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: Some("heating".to_string()),
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+        }
+    }
+
+    /// The ideal HVAC's fraction fields are two channels for ONE
+    /// load-fraction control the init reads the heating field ahead of, so
+    /// an override of the cooling field could never apply while the
+    /// resolution's heating value stood: the merge removes the field no
+    /// override named (the same shadow removal the setpoint's constant
+    /// over its schedule source applies), making the overridden field the
+    /// tier the init reads. The resolution's own value stays on both
+    /// channels when no override reaches either.
+    #[test]
+    fn an_ideal_fraction_override_removes_the_field_it_shadows() {
+        let spec = ideal_hvac_spec();
+        let overrides = json!({
+            "Ideal HVAC": {
+                "fraction_cooling_load_served": 0.5
+            }
+        });
+
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<IdealHvacConfig>("Ideal HVAC")
+            .expect("the merged config decodes");
+
+        assert_eq!(
+            cfg.fraction_cooling_load_served,
+            Some(0.5),
+            "the override lands on the channel it names"
+        );
+        assert_eq!(
+            cfg.fraction_heating_load_served, None,
+            "the resolution's heating value shadows the override at the init: \
+             it must be removed so the override is the value the control reads"
+        );
+
+        // The heating field's own override shadows symmetrically.
+        let overrides = json!({
+            "Ideal HVAC": {
+                "fraction_heating_load_served": 0.7
+            }
+        });
+        let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<IdealHvacConfig>("Ideal HVAC")
+            .expect("the merged config decodes");
+        assert_eq!(cfg.fraction_heating_load_served, Some(0.7));
+        assert_eq!(
+            cfg.fraction_cooling_load_served, None,
+            "the resolution's cooling value must not shadow the heating override"
+        );
+
+        // No override: the resolution's value stands on both channels.
+        let merged = merged_equipment_config(&spec, &json!({})).expect("merge must succeed");
+        let cfg = merged
+            .require_typed::<IdealHvacConfig>("Ideal HVAC")
+            .expect("the merged config decodes");
+        assert_eq!(
+            cfg.fraction_heating_load_served,
+            Some(0.9),
+            "the resolution's heating value stands"
+        );
+        assert_eq!(
+            cfg.fraction_cooling_load_served,
+            Some(0.9),
+            "the resolution's cooling value stands beside it"
+        );
     }
 
     /// A 24-hour constant daily profile, the shape the resolver stamps.
