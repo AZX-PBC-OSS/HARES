@@ -138,6 +138,12 @@ use serde::{Deserialize, Serialize};
 /// the residual. Run bookkeeping again, but the schema rides the
 /// checkpoint, so the fingerprint moves. Checkpoints written by v23
 /// builds are rejected by the version gate.
+///
+/// v25: `EquipmentHealthCounts` carries `ideal_capacity_unsolved_steps`,
+/// the ideal-path HVAC steps the pipeline starved of a solved capacity.
+/// The counter is run bookkeeping, not physics state, but the type rides
+/// the checkpoint's schema, so the fingerprint moves. Checkpoints
+/// written by v24 builds are rejected by the version gate.
 pub const CHECKPOINT_VERSION: u32 = 25;
 
 /// One equipment's checkpointed state, identity-keyed.
