@@ -432,7 +432,14 @@ pub struct TanklessWaterHeaterConfig {
     pub loop_id: Option<u16>,
     /// Required; resolver errors if absent.
     pub fuel_type: FuelType,
+    /// The storage-free heater's efficiency factor from the EF test
+    /// procedure, read ahead of [`Self::uniform_energy_factor`] when both
+    /// are present. An override of the shadowed UEF is refused at the
+    /// override merge naming this field, never accepted and silently
+    /// ignored.
     pub energy_factor: Option<f64>,
+    /// The post-2015 UEF test-procedure value, read only when
+    /// [`Self::energy_factor`] is absent.
     pub uniform_energy_factor: Option<f64>,
     pub heating_capacity_w: Option<f64>,
     pub setpoint_c: Option<f64>,

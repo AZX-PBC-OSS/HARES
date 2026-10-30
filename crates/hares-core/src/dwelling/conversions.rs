@@ -876,7 +876,7 @@ fn land_spec_parameters(
         if key.as_str() == hares_equipment::config::KEY_EQUIPMENT_ID {
             continue;
         }
-        reject_shadowed_wh_efficiency(type_name, landed, key, display_name)?;
+        reject_shadowed_wh_efficiency(type_name, landed, key, value, display_name)?;
         let reads =
             hares_equipment::typed_payload_reads(type_name, landed, key, value).map_err(|err| {
                 HaresError::Equipment(format!(
@@ -1571,7 +1571,7 @@ fn apply_typed_overrides(
     if let Some((source, wildcard)) = layers.wildcard {
         for (key, value) in wildcard {
             reject_reserved_key(source, key, equipment)?;
-            reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
+            reject_shadowed_wh_efficiency(type_name, merged, key, value, equipment)?;
             if key == RESERVED_ZIP_OVERRIDE
                 || typed_reads(type_name, merged, key, value, equipment)?
             {
@@ -1581,7 +1581,7 @@ fn apply_typed_overrides(
     }
     for (key, value) in layers.own.into_iter().flatten() {
         reject_reserved_key(equipment, key, equipment)?;
-        reject_shadowed_wh_efficiency(type_name, merged, key, equipment)?;
+        reject_shadowed_wh_efficiency(type_name, merged, key, value, equipment)?;
         nested_insert(merged, key, value);
     }
     remove_override_shadowed_ideal_fractions(merged, layers, type_name, equipment);
@@ -1830,28 +1830,36 @@ pub(crate) fn cross_tier_setpoint_warnings(
     warnings
 }
 
-/// The gas water heater reads `conversion_efficiency` ahead of the EF/UEF
-/// test-procedure fields, so an override of those could never apply on a
-/// config that carries the conversion efficiency: it is rejected naming the
-/// field that shadows it instead of being accepted and silently ignored.
+/// The water heaters read one efficiency ahead of its alternative
+/// spelling: the gas tank reads `conversion_efficiency` ahead of the
+/// EF/UEF test-procedure fields, and the tankless reads `energy_factor`
+/// ahead of `uniform_energy_factor`. An override that sets the shadowed
+/// field to a value could never apply on a config that carries the
+/// winner: it is rejected naming the field that shadows it instead of
+/// being accepted and silently ignored. A `null` override names no value
+/// (it unsets the field), so it is never shadowed.
 fn reject_shadowed_wh_efficiency(
     type_name: &str,
     merged: &Map<String, Value>,
     key: &str,
+    value: &Value,
     equipment: &str,
 ) -> Result<()> {
-    if type_name != "Gas Water Heater" || (key != "energy_factor" && key != "uniform_energy_factor")
-    {
+    if value.is_null() {
         return Ok(());
     }
-    if merged
-        .get("conversion_efficiency")
-        .is_some_and(|value| !value.is_null())
-    {
+    let shadowing = match type_name {
+        "Gas Water Heater" if key == "energy_factor" || key == "uniform_energy_factor" => {
+            "conversion_efficiency"
+        }
+        "Tankless Water Heater" if key == "uniform_energy_factor" => "energy_factor",
+        _ => return Ok(()),
+    };
+    if merged.get(shadowing).is_some_and(|value| !value.is_null()) {
         return Err(HaresError::Equipment(format!(
             "equipment '{equipment}': an override of '{key}' cannot apply while the \
-             config carries 'conversion_efficiency', which the gas water heater reads \
-             ahead of '{key}'; override 'conversion_efficiency' or remove it from the config"
+             config carries '{shadowing}', which the water heater reads ahead of \
+             '{key}'; override '{shadowing}' or remove it from the config"
         )));
     }
     Ok(())
@@ -5998,6 +6006,142 @@ mod tests {
             err.to_string().contains("conversion_efficiency"),
             "the error names the field that shadows it, got: {err}"
         );
+    }
+
+    /// The tankless water heater reads `energy_factor` ahead of
+    /// `uniform_energy_factor` (OCHRE's instantaneous branch takes either
+    /// as the efficiency, EF first), so an override of the UEF could never
+    /// apply on a config that carries an EF: it is rejected naming the
+    /// field that shadows it, the gas tank's `conversion_efficiency` rule
+    /// one water heater over. An EF override is the live channel and
+    /// applies, and without an EF the UEF override applies.
+    #[test]
+    fn a_shadowed_tankless_uef_override_is_rejected() {
+        let spec = typed_tankless_water_heater_spec(Some(0.82), None);
+        for (layer, overrides) in [
+            (
+                "own",
+                json!({ "Tankless Water Heater": { "uniform_energy_factor": 0.95 } }),
+            ),
+            (
+                "wildcard",
+                json!({ "all": { "uniform_energy_factor": 0.95 } }),
+            ),
+        ] {
+            let err = merged_equipment_config(&spec, &overrides)
+                .expect_err("the shadowed UEF override is rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("energy_factor"),
+                "{layer}: the error names the field that shadows it, got: {msg}"
+            );
+            assert!(
+                msg.contains("uniform_energy_factor"),
+                "{layer}: the error names the field the override asked for, got: {msg}"
+            );
+        }
+
+        let payload_value =
+            |merged: &hares_equipment::EquipmentConfig, key: &str| match &merged.payload {
+                hares_equipment::ConfigPayload::Typed { data, .. } => data.get(key).cloned(),
+                other => panic!("typed payload expected, got {other:?}"),
+            };
+
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Tankless Water Heater": { "energy_factor": 0.95 } }),
+        )
+        .expect("an override of the live channel applies");
+        assert_eq!(
+            payload_value(&merged, "energy_factor"),
+            Some(json!(0.95)),
+            "the EF override landed on the payload"
+        );
+
+        let spec = typed_tankless_water_heater_spec(None, Some(0.95));
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Tankless Water Heater": { "uniform_energy_factor": 0.9 } }),
+        )
+        .expect("without an EF the UEF override applies");
+        assert_eq!(
+            payload_value(&merged, "uniform_energy_factor"),
+            Some(json!(0.9)),
+            "the UEF override landed on the payload"
+        );
+
+        // A null override names no value (it unsets the field), so it is
+        // never shadowed: the merge accepts it and the payload's field is
+        // null, which the init reads as absent.
+        let merged = merged_equipment_config(
+            &spec,
+            &json!({ "Tankless Water Heater": { "uniform_energy_factor": null } }),
+        )
+        .expect("a null unsets the field: it names no value to shadow");
+        assert_eq!(
+            payload_value(&merged, "uniform_energy_factor"),
+            Some(Value::Null),
+            "the null landed as the field's unset"
+        );
+
+        // The spec-level channel (a caller-built spec's typed_overrides)
+        // rejects the same shadow the same way.
+        let mut spec = typed_tankless_water_heater_spec(Some(0.82), None);
+        spec.typed_overrides
+            .insert("uniform_energy_factor".to_string(), json!(0.95));
+        let err = apply_spec_bag_to_typed_config(&mut spec)
+            .expect_err("the spec-level shadowed UEF override is rejected");
+        assert!(
+            err.to_string().contains("energy_factor"),
+            "the error names the field that shadows it, got: {err}"
+        );
+    }
+
+    fn typed_tankless_water_heater_spec(
+        energy_factor: Option<f64>,
+        uniform_energy_factor: Option<f64>,
+    ) -> hares_io::EquipmentSpec {
+        let cfg = hares_equipment::TanklessWaterHeaterConfig {
+            equipment_id: None,
+            zone_id: Some(1),
+            loop_id: None,
+            fuel_type: FuelType::Gas,
+            energy_factor,
+            uniform_energy_factor,
+            heating_capacity_w: Some(30_000.0),
+            setpoint_c: Some(52.0),
+            parasitic_power_w: None,
+            performance_adjustment: None,
+            inlet_temp_c: None,
+            draw_flow_rate_kg_s: None,
+            draw_flow_rate_source: None,
+            mains_temp_c_source: None,
+            appliance_draw_flow_rate_source: None,
+            avg_water_draw_l_per_day: None,
+            zone_type: None,
+            min_flow_kg_s: None,
+            min_flow_gpm: None,
+        };
+        let typed = hares_equipment::EquipmentConfig::from_typed(
+            "Tankless Water Heater".to_string(),
+            "Tankless Water Heater".to_string(),
+            cfg,
+        )
+        .expect("the config is well-formed");
+        hares_io::EquipmentSpec {
+            instance_name: None,
+            name: "Tankless Water Heater".to_string(),
+            fuel_type: FuelType::Gas,
+            parameters: serde_json::Map::new(),
+            zip_params: None,
+            typed_overrides: serde_json::Map::new(),
+            typed_config: Some(typed),
+            system_id: None,
+            related_hvac_idref: None,
+            primary_role: None,
+            heating_setpoint_source: None,
+            cooling_setpoint_source: None,
+        }
     }
 
     fn typed_gas_water_heater_spec(conversion_efficiency: Option<f64>) -> hares_io::EquipmentSpec {
