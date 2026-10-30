@@ -1046,7 +1046,7 @@ impl Equipment for PV {
     fn step(
         &mut self,
         env: &EnvironmentState,
-        _dt: Duration,
+        dt: Duration,
         ports: &mut PortSlots,
     ) -> std::result::Result<(), HaresError> {
         // Advance soiling model with current-timestep rainfall.
@@ -1182,7 +1182,7 @@ impl Equipment for PV {
                 let outcome = controller.step(
                     env.grid.bus_voltage_pu(),
                     env.grid.frequency_hz,
-                    _dt.as_secs_f64(),
+                    dt.as_secs_f64(),
                     true,
                     total_ac_power_w,
                     total_ac_power_w,
