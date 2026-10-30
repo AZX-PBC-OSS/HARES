@@ -3403,6 +3403,43 @@ mod tests {
         );
     }
 
+    /// The gate compares the token to this build's schema by inequality,
+    /// not by order: a token from a schema after this one is refused by
+    /// the same path, naming both versions. A checkpoint written by a
+    /// newer build must never be decoded by an older one, which would
+    /// read the newer payload's bytes as this schema's fields. Pinning
+    /// the upper direction keeps a future "accept anything at least this
+    /// version" relaxation of the gate failing here.
+    #[test]
+    fn checkpoint_gate_refuses_a_future_version_blob_naming_both_versions() {
+        let cfg = ac_config();
+        let environment = env(20.0, 0.008, 15.0, 20.0);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        let mut blob = eq.save_state().unwrap();
+        let future = super::AC_CHECKPOINT_VERSION + 1;
+        // The blob below is otherwise the valid current payload; only the
+        // token claims the future schema, so a refusal must come from the
+        // gate.
+        blob[..4].copy_from_slice(&future.to_le_bytes());
+        let mut restored = AirConditioner::new(cfg.clone());
+        restored.init(&cfg, &environment).unwrap();
+        let err = restored
+            .load_state(&blob)
+            .expect_err("a blob from a future schema must be refused by the current gate");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AirConditioner")
+                && msg.contains(&format!("blob={future}"))
+                && msg.contains(&format!("expected={}", super::AC_CHECKPOINT_VERSION)),
+            "the refusal must name the equipment and both versions; got: {msg}"
+        );
+        assert!(
+            !msg.contains("postcard") && !msg.contains("deserialization failed"),
+            "the refusal must come from the version gate, not a postcard decode; got: {msg}"
+        );
+    }
+
     #[test]
     fn room_ac_step_produces_cooling() {
         let cfg = room_ac_config();
