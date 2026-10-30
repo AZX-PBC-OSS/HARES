@@ -1346,6 +1346,14 @@ impl Equipment for Battery {
         // on this step: the reference is a power command like any other,
         // so the pack's clamp governs the delivered power below.
         let mut layered_reference = false;
+        // The step the battery is actually dispatched on: the layer steps
+        // on every step (the trip tables watch the bus, and a trip is a
+        // de-energization), but its frequency-Watt response may not create
+        // the interchange a zeroed row, a dead bus or a disconnected pack
+        // commands away. An unavailable period is an HPXML end-use
+        // convention that leaves the battery idle for the step whatever
+        // the bus.
+        let dispatch_live = self.grid_connected && !bus_dead && !period_idle;
         match &mut self.der1547 {
             Some(controller) => {
                 let outcome = controller.step(
@@ -1359,6 +1367,11 @@ impl Equipment for Battery {
                 )?;
                 if outcome.tripped {
                     target_power_w = 0.0;
+                } else if !dispatch_live {
+                    // The step conducted nothing: the droop's anchor does
+                    // not survive it, so an excursion that ran while the
+                    // inverter was idle cannot anchor the next ramp.
+                    controller.note_inactive_step();
                 } else if outcome.p_ref_w != -target_power_w {
                     // The reference governs whenever it differs from the
                     // model's own output, even when the droop's net
@@ -1373,7 +1386,15 @@ impl Equipment for Battery {
                 der1547_reason = outcome.trip_reason;
                 der1547_ride_through_s = outcome.ride_through_s;
                 der1547_enter_service_s = outcome.enter_service_s;
-                der1547_fw_adj_pu = outcome.fw_adj_pu;
+                // The step's published adjustment is the one the step
+                // delivered: a step that conducted nothing publishes no
+                // adjustment, whatever the excursion the trip tables
+                // watched.
+                der1547_fw_adj_pu = if dispatch_live {
+                    outcome.fw_adj_pu
+                } else {
+                    0.0
+                };
             }
             None => {
                 let v = env.grid.bus_voltage_pu();
@@ -3290,6 +3311,71 @@ mod tests {
             Some(10.0),
             "the dispatch rows are zeroed: the port carries the standby draw"
         );
+    }
+
+    /// An unavailable period zeroes the battery's dispatch rows, and the
+    /// zeroed rows leave the inverter idle for the step: the trip tables
+    /// still watch the bus, but the frequency-Watt function may not
+    /// create the interchange the period zeroed. An excursion inside the
+    /// ride-through window (61.5 Hz is inside OF1's band, 60 s inside its
+    /// 300 s window; 58.4 Hz likewise inside UF1's) commands a droop
+    /// charge or export from the zero the rows set; the period forbids
+    /// both. The step the inverter does conduct re-anchors on its own
+    /// output, so an excursion that ran while it was idle cannot anchor
+    /// the next ramp at zero.
+    #[test]
+    fn witness_der1547_an_unavailable_period_takes_no_droop_response() {
+        for (f_hz, leg) in [(61.5, "charge"), (58.4, "export")] {
+            let config = battery_config_with_der1547(Some(cat2_settings()));
+            let mut bat = Battery::new(config.clone());
+            let mut env = base_env();
+            env.unavailable_periods.power_outage = true;
+            bat.init(&config, &env).unwrap();
+            bat.apply_control(&ControlSignal::PowerSetpoint {
+                active_power_w: -3000.0,
+                reactive_power_var: None,
+                min_soc: None,
+                max_soc: None,
+            })
+            .unwrap();
+
+            let mut excursion = env.clone();
+            excursion.grid.frequency_hz = f_hz;
+            let mut ports = default_ports();
+            bat.step(&excursion, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+            assert!(
+                (p - 10.0).abs() < 1e-6,
+                "({leg} face) the zeroed rows leave only the standby draw, \
+                 got {p} W"
+            );
+            assert_eq!(bat.telemetry().get(tk::DER1547_TRIPPED), Some(0.0));
+            assert!(
+                (bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(1.0)).abs() < 1e-12,
+                "({leg} face) no adjustment is published for a response the \
+                 period forbids, got {}",
+                bat.telemetry().get(tk::DER1547_FW_ADJ_PU).unwrap_or(1.0)
+            );
+
+            // The same excursion on a conducting step: the droop ramps
+            // from the 0.6 pu this step exports (0.6 + 0.154667 pu at
+            // 59.5 Hz), not from an anchor the idle step latched at zero.
+            if f_hz < 60.0 {
+                let mut conducting = base_env();
+                conducting.grid.frequency_hz = 59.5;
+                let mut ports = default_ports();
+                bat.step(&conducting, Duration::from_secs(60), &mut ports)
+                    .unwrap();
+                let p = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap();
+                let expected = -(0.6 + (59.964 - 59.5) / 3.0) * 5000.0 + 10.0;
+                assert!(
+                    (p - expected).abs() < 1e-6,
+                    "({leg} face) the conducting step anchors on its own \
+                     0.6 pu export: expected {expected} W, got {p} W"
+                );
+            }
+        }
     }
 
     /// The 1547 run state survives a checkpoint round trip: a trip
