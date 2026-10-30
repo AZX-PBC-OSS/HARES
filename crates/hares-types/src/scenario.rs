@@ -2366,9 +2366,12 @@ mod tests {
             parameter("p", uniform(0.0, 1.0)),
             parameter("p", uniform(0.0, 2.0)),
         ]);
+        let err = dup
+            .validate()
+            .expect_err("a repeated name must fail validation");
         assert!(
-            dup.validate().is_err(),
-            "a repeated name must fail validation"
+            err.to_string().contains("'p'") && err.to_string().contains("unique"),
+            "a repeated name must name the parameter and state the uniqueness rule: {err}"
         );
         let bad_rho = spec(vec![ScenarioParameter {
             name: "p".into(),
@@ -2380,14 +2383,20 @@ mod tests {
                 rho: 1.0,
             }),
         }]);
+        let err = bad_rho
+            .validate()
+            .expect_err("a rho of 1.0 must fail validation");
         assert!(
-            bad_rho.validate().is_err(),
-            "a rho of 1.0 must fail validation"
+            err.to_string().contains("'p'") && err.to_string().contains("[0, 1)"),
+            "the rho refusal must name the parameter and its domain: {err}"
         );
         let bad_uniform = spec(vec![parameter("p", uniform(5.0, 1.0))]);
+        let err = bad_uniform
+            .validate()
+            .expect_err("an inverted uniform must fail validation");
         assert!(
-            bad_uniform.validate().is_err(),
-            "an inverted uniform must fail validation"
+            err.to_string().contains("'p'") && err.to_string().contains("uniform"),
+            "a malformed distribution must name its parameter and family: {err}"
         );
         let bad_patch = spec(vec![ScenarioParameter {
             name: "p".into(),
@@ -2398,9 +2407,12 @@ mod tests {
             distribution: uniform(0.0, 1.0),
             correlation: None,
         }]);
+        let err = bad_patch
+            .validate()
+            .expect_err("an unknown patch field must fail validation");
         assert!(
-            bad_patch.validate().is_err(),
-            "an unknown patch field must fail validation"
+            err.to_string().contains("'p'") && err.to_string().contains("not_a_field"),
+            "the patch refusal must name the parameter and the field: {err}"
         );
         // The sampler validates too: a bad spec's sample is an error.
         assert!(dup.sample(1, 1, 1).is_err());

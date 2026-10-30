@@ -409,7 +409,7 @@ class TestSpecValidation:
             )
 
     def test_duplicate_names_are_an_error(self):
-        with pytest.raises(ValueError, match="name"):
+        with pytest.raises(ValueError, match="repeats the parameter name 'p'.*unique"):
             ScenarioSpec(
                 {
                     "name": "dup",
@@ -431,7 +431,7 @@ class TestSpecValidation:
             )
 
     def test_unknown_patch_field_is_an_error(self):
-        with pytest.raises(ValueError, match="patch"):
+        with pytest.raises(ValueError, match="'p'.*not_a_patch_field"):
             ScenarioSpec(
                 {
                     "name": "bad-patch",
