@@ -25,8 +25,16 @@ pub struct HeatPumpCommonConfig {
     pub heating_capacity_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heating_eir: Option<f64>,
+    /// Per-stage heating capacities (W), the unit's capacity ladder when
+    /// present: the heater's init builds the stage table from it and reads
+    /// [`Self::heating_capacity_w`] only as the fallback a no-table config
+    /// takes. An override of the table applies per stage; an override of
+    /// the scalar beside a table the config carries is refused at the
+    /// merge, naming this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_capacities_w: Option<Vec<f64>>,
+    /// Per-stage heating EIRs, read ahead of [`Self::heating_eir`] on a
+    /// config carrying the table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_heating_eirs: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,8 +49,17 @@ pub struct HeatPumpCommonConfig {
     pub cooling_capacity_w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooling_eir: Option<f64>,
+    /// Per-stage cooling capacities (W), the cooler's ladder: the init
+    /// builds the stage table from it and reads [`Self::cooling_capacity_w`]
+    /// only as the fallback a no-table config takes (the cooler maps the
+    /// two onto the central AC config's `stage_capacities_w` and
+    /// `capacity_w`). An override of the table applies per stage; an
+    /// override of the scalar beside a table the config carries is refused
+    /// at the merge, naming this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_cooling_capacities_w: Option<Vec<f64>>,
+    /// Per-stage cooling EIRs, read ahead of [`Self::cooling_eir`] on a
+    /// config carrying the table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_cooling_eirs: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
