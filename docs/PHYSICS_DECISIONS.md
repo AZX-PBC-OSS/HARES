@@ -1551,7 +1551,7 @@ full-duty arm's 1.0. The countdown now advances once per step, in
 `step()` after the step's dispatch decision (at the step's end, or at
 the ventilation's on/off decision ahead of its early returns): the
 release lands on the next step's first control pass, ahead of the
-solve, and the event sheds exactly the steps its duration named. The
+solve, and the event sheds every step its window overlaps. The
 step's own interval is the last one the timer consumes, so the step
 that closes the event still dispatches under the event's level (a
 partial shed's last step keeps its load fraction, not a mid-dispatch

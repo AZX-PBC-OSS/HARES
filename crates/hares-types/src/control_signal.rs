@@ -39,13 +39,15 @@ pub enum DRLevel {
 /// The effective event a `DemandResponse` signal commands: the level and
 /// the duration that govern it, with the zero-length boundary resolved.
 ///
-/// A duration is the wall-clock window the event covers and the classes
-/// that keep a countdown shed exactly the steps it names. `Some(0.0)` is a
-/// legal signal (a finite duration of at least zero) that names no step, so
-/// it resolves to no event at all (level `Normal`, no countdown) rather than
-/// to a one-step shed of the step it lands in. A negative duration cannot
-/// pass [`ControlSignal::validate`] and resolves the same way, so an
-/// unvalidated path cannot shed a step for it either.
+/// A duration is the wall-clock window the event covers, and the classes
+/// that keep a countdown shed every step whose interval overlaps it, so a
+/// window that ends between two timesteps sheds the full step it touches
+/// last. `Some(0.0)` is a legal signal (a finite duration of at least zero)
+/// whose window overlaps no step, so it resolves to no event at all (level
+/// `Normal`, no countdown) rather than to a one-step shed of the step it
+/// lands in. A negative duration cannot pass [`ControlSignal::validate`]
+/// and resolves the same way, so an unvalidated path cannot shed a step for
+/// it either.
 #[must_use]
 pub fn demand_response_command(level: DRLevel, duration_s: Option<f64>) -> (DRLevel, Option<f64>) {
     match duration_s {
@@ -129,7 +131,8 @@ pub enum ControlSignal {
     DemandResponse {
         level: DRLevel,
         /// The event's window [s]. `None` holds until an explicit `Normal`
-        /// arrives; a duration names the steps the event sheds (see
+        /// arrives; a positive duration sheds every step its window
+        /// overlaps, a partial final step included (see
         /// [`demand_response_command`]), so `Some(0.0)` is an event that
         /// covers no step.
         duration_s: Option<f64>,

@@ -248,8 +248,9 @@ pub enum DrAction {
     /// Limit power draw to a maximum, in watts (SI).
     PowerLimit { max_w: f64 },
     /// Dispatch a demand-response signal with built-in auto-reversion.
-    /// Equipment applies DR setpoint/curtailment behaviour for `duration_s`
-    /// seconds, then automatically reverts to `DRLevel::Normal`.
+    /// Equipment applies DR setpoint/curtailment behaviour for every step
+    /// the `duration_s` window overlaps (a partial final step included),
+    /// then automatically reverts to `DRLevel::Normal`.
     /// `None` duration means indefinite — no auto-revert.
     DemandResponse {
         level: DRLevel,
@@ -346,8 +347,9 @@ impl DrAction {
 
     /// Creates a demand-response action with duration-based auto-reversion.
     ///
-    /// Equipment applies DR behaviour for the given duration, then
-    /// automatically reverts to `DRLevel::Normal` when the duration expires.
+    /// Equipment applies DR behaviour for every step the duration's window
+    /// overlaps (a partial final step included), then automatically reverts
+    /// to `DRLevel::Normal` when the window is behind.
     /// `None` duration means indefinite — no auto-revert.
     ///
     /// # Panics (debug only)
