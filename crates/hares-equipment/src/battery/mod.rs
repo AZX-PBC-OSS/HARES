@@ -1229,12 +1229,14 @@ impl Equipment for Battery {
         // by any SOC-target window), hardware discharge capability, cell
         // temperature above the discharge cutoff. `grid_forming` (default
         // true) gates grid-following-only inverters that cannot form an
-        // island bus even when dischargeable. A DR shed is deliberately not
-        // consulted: it is a grid-supporting curtailment of grid
-        // interchange, and the islanding function is grid-forming (IEEE
-        // 1547-2018 separates the two), so a grid operator's shed must not
-        // reach through the outage gate and remove the only source serving
-        // the home.
+        // island bus even when dischargeable. A latched IEEE 1547 trip
+        // means the inverter has ceased to energize: it cannot hold the bus
+        // up, so an island founded on it would run every load on phantom
+        // power. A DR shed is deliberately not consulted: it is a
+        // grid-supporting curtailment of grid interchange, and the
+        // islanding function is grid-forming (IEEE 1547-2018 separates the
+        // two), so a grid operator's shed must not reach through the outage
+        // gate and remove the only source serving the home.
         let soc_floor = self
             .soc_target_min
             .map(|v| v.max(self.min_soc))
@@ -1277,7 +1279,8 @@ impl Equipment for Battery {
         // deliver into). A dead bus during an outage is either the island's
         // formation lag (its first step, before the source holds the bus) or
         // a battery that cannot serve (empty, cold, disconnected,
-        // grid-following); either way the dispatch is 0 W this step.
+        // grid-following, or a latched IEEE 1547 trip); either way the
+        // dispatch is 0 W this step.
         // Standby electronics and the cell heater lose their supply too
         // (gated below). During islanded operation the bus is energized and
         // dispatch proceeds normally. See docs/outage-behavior.md.
