@@ -307,6 +307,44 @@ pub struct ThermalSolver {
     balance_u_zero: DVector<f64>,
     /// Zero vector for the state dimension (avoids per-step allocation).
     balance_x_zero: DVector<f64>,
+    /// The network solve's receipt of the thermal ports' delivery, in W,
+    /// from the most recent `integrate`: the port-only input vector's
+    /// capacitance-weighted account through the same `B_d` the balance
+    /// block applies to the full input vector. The meter-versus-network
+    /// reconciliation's read side: the ports' meters compare against this
+    /// receipt directly. Test and debug builds only: the release step
+    /// runs the identical integration without the instrument.
+    #[cfg(any(test, debug_assertions))]
+    port_receipt_w: f64,
+    /// The receipt's explained gap, in W, from the most recent
+    /// `integrate`: the port columns' own conservation deviation
+    /// `Σ_j u_port[j]·(1 − colgain[j])` against the step-invariant column
+    /// gains below, plus the short-wave pass's glazing back-out (the
+    /// visible gain's re-transmitted share that never enters `u`). A port
+    /// joule's `B_d` response is its stored share plus the conduction it
+    /// drives to the boundary within the step, so the gap is the exact
+    /// difference between the meters and the receipt, and the
+    /// reconciliation pins the residual against it. Test and debug builds
+    /// only.
+    #[cfg(any(test, debug_assertions))]
+    port_receipt_gap_w: f64,
+    /// The per-column conservation gains of the discrete input matrix,
+    /// `colgain[j] = Σ_i C_i·B_d[i][j]/dt` over the balance node list.
+    /// Step-invariant (`B_d`, the capacitances and the step length are),
+    /// so it is built once beside them; the per-step gap reads it. Test
+    /// and debug builds only.
+    #[cfg(any(test, debug_assertions))]
+    receipt_column_gains: DVector<f64>,
+    /// The receipt instrument's port-only input scratch, sized to the
+    /// input dimension at construction and zeroed in place per step, so
+    /// the instrument allocates nothing in steady state (the observe
+    /// build's step census pins that). Test and debug builds only.
+    #[cfg(any(test, debug_assertions))]
+    port_receipt_u_buf: DVector<f64>,
+    /// The receipt instrument's `B_d` product scratch, sized to the state
+    /// dimension at construction. Test and debug builds only.
+    #[cfg(any(test, debug_assertions))]
+    port_receipt_bd_buf: DVector<f64>,
     /// Per-zone consecutive failure counts for `solve_ideal_capacity_for_target`.
     /// Incremented on each solve failure, reset to 0 on success. Used to throttle
     /// warn-level diagnostic logs — only the first failure in a run emits `warn!`;
@@ -551,6 +589,44 @@ impl ThermalSolver {
             self.full_system_stored_energy_w,
             self.thermal_balance_q_loss,
         )
+    }
+
+    /// The network solve's receipt of the thermal ports' delivery, in W,
+    /// from the most recent `integrate`: the port-only input vector's
+    /// capacitance-weighted account through the same discrete `B_d` the
+    /// balance block applies to the full input vector. Linearity of the
+    /// step operator in `u` splits the production gains term into the
+    /// ports' receipt and the boundary and weather columns' share, so
+    /// this receipt is the network's own account of the joules the ports
+    /// metered: the meter-versus-network reconciliation compares the
+    /// ports' meters against it directly. Test and debug builds only
+    /// (the field does not exist in release).
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn port_receipt_w(&self) -> f64 {
+        self.port_receipt_w
+    }
+
+    /// The receipt's explained gap, in W, from the most recent
+    /// `integrate`: the port columns' own conservation deviation,
+    /// `Σ_j u_port[j]·(1 − colgain[j])`, with `colgain[j] =
+    /// Σ_i C_i·B_d[i][j]/dt` the capacitance-weighted column sums of the
+    /// discrete input matrix, plus the short-wave pass's glazing back-out
+    /// (the visible gain's re-transmitted share that never enters `u`).
+    /// A port joule's `B_d` response is its stored share plus the
+    /// conduction it drives to the boundary within the step (the boundary
+    /// temperatures are input columns, so `C·A_c`'s columns do not sum to
+    /// zero), which makes every `colgain[j]` the `(1 − e^{−x})/x` shape
+    /// below unity; the two parts together are the exact difference
+    /// between the meters and the receipt. The
+    /// meter-versus-network reconciliation pins the meters-minus-receipt
+    /// residual against this column, leaving no room for a dropped,
+    /// duplicated or garbled port column to hide inside a tolerance. Test
+    /// and debug builds only.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn port_receipt_gap_w(&self) -> f64 {
+        self.port_receipt_gap_w
     }
 
     /// Number of configured boundary diagnostic entries.
@@ -1169,6 +1245,20 @@ impl ThermalSolver {
             .collect();
         balance_node_terms.sort_unstable_by_key(|&(idx, _)| idx);
 
+        // The receipt's per-column conservation gains, built once beside
+        // the balance node list they share their weighting with (test and
+        // debug builds only).
+        #[cfg(any(test, debug_assertions))]
+        let receipt_column_gains = {
+            let mut gains = DVector::<f64>::zeros(n_inputs);
+            for &(idx, c_j_k) in &balance_node_terms {
+                for (j, gain) in gains.iter_mut().enumerate() {
+                    *gain += c_j_k * model.b_eff()[(idx, j)] / dt_s;
+                }
+            }
+            gains
+        };
+
         Ok(Self {
             model,
             wiring,
@@ -1255,6 +1345,16 @@ impl ThermalSolver {
             balance_d_agg: vec![0.0f64; n_states],
             balance_u_zero: DVector::<f64>::zeros(n_inputs),
             balance_x_zero: DVector::<f64>::zeros(n_states),
+            #[cfg(any(test, debug_assertions))]
+            port_receipt_w: 0.0,
+            #[cfg(any(test, debug_assertions))]
+            port_receipt_gap_w: 0.0,
+            #[cfg(any(test, debug_assertions))]
+            receipt_column_gains,
+            #[cfg(any(test, debug_assertions))]
+            port_receipt_u_buf: DVector::<f64>::zeros(n_inputs),
+            #[cfg(any(test, debug_assertions))]
+            port_receipt_bd_buf: DVector::<f64>::zeros(n_states),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]

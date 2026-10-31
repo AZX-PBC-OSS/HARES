@@ -144,22 +144,29 @@ impl ThermalSolver {
         u: &mut DVector<f64>,
         ports: &PortSlots,
         is_winter: bool,
-    ) {
+    ) -> f64 {
+        let mut injected_w = 0.0;
         for thermal in &ports.thermal {
             let shortwave_w = thermal.shortwave_gain_w;
             if shortwave_w <= 0.0 {
                 continue;
             }
             self.fill_window_diffuse_shares(thermal.zone, is_winter);
-            if self
-                .distribute_transmitted_solar(u, thermal.zone, 0.0, shortwave_w, 0.0, 0.0)
-                .is_none()
-                && let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
-                && idx < u.len()
-            {
-                u[idx] += shortwave_w;
+            let injected =
+                self.distribute_transmitted_solar(u, thermal.zone, 0.0, shortwave_w, 0.0, 0.0);
+            match injected {
+                Some(w) => injected_w += w,
+                None => {
+                    if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
+                        && idx < u.len()
+                    {
+                        u[idx] += shortwave_w;
+                    }
+                    injected_w += shortwave_w;
+                }
             }
         }
+        injected_w
     }
 }
 
