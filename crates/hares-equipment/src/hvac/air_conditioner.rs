@@ -3437,7 +3437,10 @@ mod tests {
     /// unit that cooled earlier must leave the never-cooled key set. The
     /// saved map is the contract; a key the blob never registered must not
     /// survive from the pre-restore run, or the same blob restores two
-    /// different maps depending on the target's history.
+    /// different maps depending on the target's history. The blob's
+    /// assembled base rides the same rule: the never-cooled source has
+    /// none, so the target's pre-restore base must not survive beside the
+    /// dropped key.
     #[test]
     fn restore_into_a_previously_cooled_unit_drops_the_stale_shr_key() {
         let cfg = ac_config();
@@ -3456,6 +3459,10 @@ mod tests {
             source.telemetry().get(tk::SHR).is_none(),
             "the source must never have cooled"
         );
+        assert!(
+            source.nominal_electric_draw_w().is_none(),
+            "fixture: the never-cooled source reports no assembled base"
+        );
         let state = source.save_state().unwrap();
 
         // The target: it cooled before the restore, so its map holds the
@@ -3471,6 +3478,10 @@ mod tests {
             target.telemetry().get(tk::SHR).is_some(),
             "the target must hold the key before the restore"
         );
+        assert!(
+            target.nominal_electric_draw_w().is_some(),
+            "fixture: the cooled target holds an assembled base before the restore"
+        );
 
         target.load_state(&state).unwrap();
         assert!(
@@ -3481,6 +3492,11 @@ mod tests {
         assert!(
             !target.telemetry().0.keys().any(|key| key == tk::SHR),
             "the restored key set must not carry the pre-restore shr key"
+        );
+        assert!(
+            target.nominal_electric_draw_w().is_none(),
+            "the restored base is the checkpoint's: the never-cooled blob \
+             carries none, so the pre-restore base must not survive"
         );
     }
 
@@ -4077,6 +4093,10 @@ mod tests {
             .nominal_electric_draw_w()
             .expect("the composed step reports its base");
         let half_draw = draw(&half);
+        let half_shr = half
+            .telemetry()
+            .get(tk::SHR)
+            .expect("the cooling step registers the shr key");
         let blob = half.save_state().expect("checkpoint");
 
         // A fresh instance restores the base with the draw the blob
@@ -4095,6 +4115,12 @@ mod tests {
             half_draw.to_bits(),
             "fixture: the restored draw is the checkpointed draw"
         );
+        assert_eq!(
+            fresh.telemetry().get(tk::SHR),
+            Some(half_shr),
+            "the restore carries the checkpointed shr beside the base: the \
+             two faces travel in the same blob"
+        );
 
         // A used instance's pre-restore base is not the checkpoint's: the
         // restore must replace it, never keep it.
@@ -4110,6 +4136,12 @@ mod tests {
             Some(half_base),
             "a restore replaces the base: the pre-restore step's base must \
              not survive"
+        );
+        assert_eq!(
+            used.telemetry().get(tk::SHR),
+            Some(half_shr),
+            "a restore replaces the shr too: the pre-restore step's value \
+             must not survive beside the replaced base"
         );
     }
 
