@@ -1850,3 +1850,135 @@ full dynamic chain (the low-pass filter, the reaction time, momentary
 cessation, the enter-service soft-start ramp), is deferred: none of it
 is observable at the engine's timestep resolution, and each piece would
 be untestable behavior at this resolution rather than pinned physics.
+
+## The DR release lands ahead of the solve, and the solve reads the thermostat's call
+
+A GridEmergency shed on an ideal-path HVAC unit must release into a
+metered recovery: the first post-curtailment step delivers the capacity
+the solver-feedback solve computed for it (OCHRE HVAC.py:424 "h_desired
+should be equal to self.delivered_heat"; EnergyPlus meters the DX coil's
+PLR to the zone's computed load), never the unit's raw full duty.
+
+Two defects in the release's timing produced the unmetered dump. The DR
+duration's countdown lived in `update_control`, which the thermal
+pipeline invokes twice per step (once before the solver-feedback phase,
+once after the control dispatch), so the event burned twice its wall
+time and the release landed on the second control pass - after the
+solve, which read the still-forced-off mode and solved nothing; the
+release step then ran the raw duty, which for the ideal path is the
+full-duty arm's 1.0. The countdown now advances once per step, in
+`step()` after the step's dispatch decision (at the step's end, or at
+the ventilation's on/off decision ahead of its early returns): the
+release lands on the next step's first control pass, ahead of the
+solve, and the event sheds every step its window overlaps. The
+step's own interval is the last one the timer consumes, so the step
+that closes the event still dispatches under the event's level (a
+partial shed's last step keeps its load fraction, not a mid-dispatch
+revert). The rule is the same for every DR-capable equipment, not the
+HVAC cores alone: the water heaters, the indirect tank and the tankless
+heater also advanced the timer in `update_control` (twice per step from
+the pipeline's two control passes, and a third time from their own
+`step`'s re-run), and the ventilation advanced there twice per step
+(its `step` does not re-run `update_control`); the water heaters
+therefore burned three timesteps of the event per step and the
+ventilation two. The battery and the EV (one control pass per step)
+decremented before the step's dispatch, releasing one named step early.
+All of them advance the timer in `step()` now. Measured on the
+`cz6b_pv_battery_ev` fixture at 900 s (the brownout attack's B3a
+scenario): the release step formerly delivered 14.06 MJ against a 3.48
+MJ correction need plus 0.34 MJ of gains offset (2.5x the
+computed-need bound; 4.05x the bare correction), driving the zone 25.63
+to 20.09 C in one step, 4.35 C below the 24.44 C setpoint, then a
+six-step rebound; the fixed release delivers 3.37 MJ (0.72x the
+correction) and lands the zone from above with no rebound.
+
+The duration is the steps the event covers, so the boundary is a
+contract too: a zero-second event is legal (`duration_s` is validated to
+a finite value of at least zero) and names no step, so it resolves to no
+event at all and sheds nothing; the classes apply that boundary through
+one resolver, `demand_response_command`. A duration that is not a whole
+number of timesteps covers every step whose interval overlaps the
+window, and a partial final overlap sheds the step in full: a 90 s event
+at 60 s steps sheds the step it lands in and the step after (the
+release's revert runs at the step's end, never mid-dispatch). A later
+command supersedes a
+running one: its level applies and the countdown restarts from its own
+duration.
+
+The solve's own gate read the step's dispatch mode. `update_control`
+assigns it before the solver-feedback phase, and its forced-off branches
+(a de-energized bus, a DR shed, an explicit Off) return before the
+thermostat re-reads, so the solve saw Off while the thermostat's call
+still stood. A control signal landing at the dispatch (a DR cancel, a
+setpoint override) then flipped the second control pass back to Cooling,
+and the step dispatched a call the solve never saw: the raw duty,
+unmetered to the zone's need. The gate now reads the thermostat FSM's
+latched call (`thermostat_fsm.mode`), which the forced-off branches leave
+intact, so the solve runs for the call the dispatch may honor; the idle
+mode a step publishes never reaches the read, because every control pass
+re-derives the mode from the same latch.
+
+A step whose solve the pipeline still starves (a thermal-setpoint
+override lands with the control dispatch, after the solver-feedback
+phase) falls back to the raw duty, and the fallback is counted, not
+silent: `ideal_capacity_unsolved_steps` in the equipment's health
+counts and the run's health.
+
+Alternative rejected: delivering nothing on an unsolved step. It is the
+purer reading of the OCHRE contract, but the pipeline's setpoint timing
+starves the override's first cooling step by construction, and
+delivering nothing there collapses the delivery for the run (the
+starved step publishes Standby, which starves the next solve): the
+raw-duty fallback is load-bearing, and the honest form is the countdown
+fix plus the count, not a delivery collapse.
+
+## The island forms one step after the outage, and a DR shed does not reach it
+
+Two rules complete the island's semantics
+(`docs/cosim.md`, `docs/outage-behavior.md`):
+
+The island's formation condition reads the previous step's utility
+outage and the source availability (both end-of-previous-step state)
+beside the step's own utility voltage. The outage signal's first step
+is therefore a dead-bus step (every load force-offs at the control
+level), and the island forms on the second step when an available
+source holds the bus; a source that dies inside a formed island still
+collapses it one step later (availability is end-of-previous-step
+state, unchanged). The former resolution read the outage fresh and the
+availability with a lag, so a battery-backed home islanded on the
+outage step itself - no transfer detection delay - contradicting the
+documented one-step lag. The restoration collapse is unchanged (a
+formed island collapses on the restoration step; the interchange is the
+meter's net flow again).
+
+A demand-response shed is a grid-supporting curtailment: it scales the
+battery's grid interchange (the dispatch limits, `clamp_power`). It is
+neither the grid-forming capability that islands a home nor a limit on
+the island's internal balance: `island_source_available` keys on
+capability (grid-forming hardware, dischargeable energy above the floor,
+the discharge derate) and drops the DR term, and while islanded the DR
+fraction does not scale the island's internal dispatch, because during a
+utility outage there is no interchange to curtail. The former rule let a
+grid operator's DR event reach through the outage gate and remove the
+only source serving the home: a full shed collapsed a formed island,
+blacked out a battery-backed home for the event's duration while the
+pack held usable charge, and re-formed the island at the event's end.
+
+Reference: IEEE 1547-2018's separation of grid-supporting from
+grid-forming functions (a curtailment command curtails grid support; the
+islanding function is the transfer switch and the grid-forming inverter,
+and its eligibility is capability, not dispatch); the island semantics
+`docs/cosim.md` states ("a battery with usable charge" is an available
+source; the islanding model is intentionally minimal, with the internal
+imbalance surfaced as `island_unserved_w`/`island_excess_w`, never
+enforced by load shedding). The alternative rejected: keeping the DR term
+in the availability and accepting the collapse as correct shed behaviour
+- the DR is a grid-connected control, and honoring it inside an outage
+removes the home's resilience function exactly when the DR event and the
+outage coincide, which is the resilience scenario the island exists for.
+The EV keeps its delivered-export form of the same capability pattern
+(its availability reads the previous step's delivered watts, so a
+shed EV delivers nothing and no island forms on it); the event's
+fraction scales the EV's islanded dispatch itself, the dispatch the
+island runs on, because lifting it would keep a fully shed EV
+delivering and the island alive through the event.

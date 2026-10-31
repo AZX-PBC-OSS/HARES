@@ -107,6 +107,14 @@ pub struct RunHealth {
     /// schedule tier, the collision the init's static check cannot see.
     /// The run's first collision also raises a run warning.
     pub cross_tier_deadband_events: u64,
+    /// Ideal-path HVAC steps the pipeline starved of a solved capacity
+    /// (the equipment's mode flipped after the solver-feedback phase: a
+    /// post-event release, an override release). The step ran the raw
+    /// thermostat duty instead, unmetered to the zone's need (the full
+    /// rated capacity on a single-speed ideal path, the band estimate on a
+    /// variable-speed one); the count is that fallback's visibility, and
+    /// its energy is that raw duty's delivery for the step.
+    pub ideal_capacity_unsolved_steps: u64,
     /// Energy the failed equipment's committed internal state kept from a
     /// rolled-back step [Wh, signed]: the state's energy delta across the
     /// failed step (the reading of `Equipment::stored_energy_j` before
@@ -136,6 +144,7 @@ impl Default for RunHealth {
             fluid_payload_absences: 0,
             evicted_actors: 0,
             cross_tier_deadband_events: 0,
+            ideal_capacity_unsolved_steps: 0,
             discarded_state_energy_wh: 0.0,
             warmup: WarmupOutcome::Disabled,
             energy_closure: EnergyClosureReport::default(),
@@ -493,6 +502,7 @@ mod tests {
             fluid_payload_absences: 6,
             evicted_actors: 5,
             cross_tier_deadband_events: 7,
+            ideal_capacity_unsolved_steps: 2,
             discarded_state_energy_wh: 8.5,
             warmup: WarmupOutcome::Ran {
                 days_run: 3,

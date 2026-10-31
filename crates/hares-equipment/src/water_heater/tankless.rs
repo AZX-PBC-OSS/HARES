@@ -9,7 +9,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidType, FuelPower, FuelType, HaresError, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, ScheduleSource, ScheduleSourceState, Telemetry, TelemetryField,
-    telemetry_keys as tk,
+    demand_response_command, telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 
@@ -388,18 +388,6 @@ impl Equipment for TanklessWH {
     }
 
     fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
-        // Advance DR duration; auto-revert to Normal when expired.
-        let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
-        if let Some(remaining) = self.dr_duration_remaining_s {
-            let next = remaining - dt_s;
-            if next <= 0.0 {
-                self.dr_duration_remaining_s = None;
-                self.apply_dr_level(DRLevel::Normal);
-            } else {
-                self.dr_duration_remaining_s = Some(next);
-            }
-        }
-
         // Grid outage (de-energized bus): an electric tankless heater has no supply
         // power and cannot fire — cold water passes through unheated. Gating
         // here (the root of dispatch) keeps the energy balance consistent:
@@ -595,6 +583,23 @@ impl Equipment for TanklessWH {
         self.power_limit_w = None;
         self.core_output = core_output;
 
+        // Advance the DR duration once per step, at the step's end: the
+        // thermal pipeline calls `update_control` before the control
+        // dispatch and again after it, and this unit's `step` re-runs it a
+        // third time, so a countdown that lived there burned several
+        // timesteps of the event per step. The step whose interval the
+        // event covers stays shed, and the release lands on the next
+        // step's control pass.
+        if let Some(remaining) = self.dr_duration_remaining_s {
+            let next = remaining - dt.as_secs_f64();
+            if next <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.apply_dr_level(DRLevel::Normal);
+            } else {
+                self.dr_duration_remaining_s = Some(next);
+            }
+        }
+
         Ok(())
     }
 
@@ -772,8 +777,9 @@ impl Equipment for TanklessWH {
                 self.power_limit_w = Some(limit_w);
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {}
         }
@@ -1439,6 +1445,47 @@ mod tests {
             p.fuel.get(hares_types::FuelType::Gas),
             0.0,
             "fuel port must report zero consumption during GridEmergency"
+        );
+    }
+
+    /// The DR duration is a timestep's clock, not a control pass's: the
+    /// thermal pipeline runs `update_control` twice per step, so a
+    /// countdown that lives there burns two timesteps of the event per
+    /// step. A 4-step (240 s at 60 s) GridEmergency must hold the burner
+    /// off for the four steps its duration names, and the step after must
+    /// fire on the standing draw.
+    #[test]
+    fn dr_duration_advances_once_per_timestep_not_per_control_pass() {
+        let cfg = config();
+        let mut eq = TanklessWH::new(cfg.clone());
+        eq.init(&cfg, &env()).unwrap();
+        eq.apply_control(&hares_types::ControlSignal::DemandResponse {
+            level: hares_types::DRLevel::GridEmergency,
+            duration_s: Some(240.0),
+        })
+        .unwrap();
+
+        for step in 0..4 {
+            eq.update_control(&env());
+            eq.update_control(&env());
+            let mut p = PortSlots::default();
+            eq.step(&env(), Duration::from_secs(60), &mut p).unwrap();
+            let heat_w = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(f64::NAN);
+            assert_eq!(
+                heat_w, 0.0,
+                "step {step}: the event's four named steps must all hold the \
+                 burner off, got {heat_w} W"
+            );
+        }
+
+        eq.update_control(&env());
+        eq.update_control(&env());
+        let mut p = PortSlots::default();
+        eq.step(&env(), Duration::from_secs(60), &mut p).unwrap();
+        let heat_w = eq.telemetry().get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0);
+        assert!(
+            heat_w > 0.0,
+            "the event is over: the standing draw must fire the burner, got {heat_w} W"
         );
     }
 

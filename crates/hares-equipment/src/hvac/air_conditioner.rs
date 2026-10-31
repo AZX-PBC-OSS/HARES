@@ -31,6 +31,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
     PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory, Warning,
+    demand_response_command,
 };
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +130,20 @@ pub(super) struct CoolingCore {
     use_ideal: bool,
     /// Solver-provided ideal capacity [W]; set via IdealCapacity signal.
     ideal_capacity_w: f64,
+    /// Whether an IdealCapacity signal arrived this step. The capacity's
+    /// own field clears at each step's end (a stale capacity must never
+    /// deliver), so a zero reading cannot distinguish "the solve said
+    /// nothing needed" from "the pipeline starved the solve"; this flag
+    /// carries the distinction, and a starved step counts in the
+    /// equipment's health (`ideal_capacity_unsolved_steps`). Per-step
+    /// bookkeeping, not checkpoint state: it clears at every step's end,
+    /// so a restore always finds it false.
+    ideal_capacity_signal_arrived: bool,
+    /// The run-total starvation count, drained into the run's health at
+    /// every step (`take_health_counts`): always zero at a step boundary,
+    /// so it needs no checkpoint section. The run's own total rides the
+    /// checkpoint's health section.
+    ideal_capacity_unsolved_steps: u64,
 
     // --- External control signals (sticky) ---
     ctrl_duty_cycle: f64,
@@ -392,9 +407,12 @@ impl Equipment for AirConditioner {
     }
 
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        let ideal_capacity_unsolved_steps =
+            std::mem::take(&mut self.core.ideal_capacity_unsolved_steps);
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
             cross_tier_deadband_events: self.core.hvac.take_cross_tier_deadband_count(),
+            ideal_capacity_unsolved_steps,
             ..Default::default()
         }
     }
@@ -494,9 +512,12 @@ impl Equipment for RoomAC {
     }
 
     fn take_health_counts(&mut self) -> EquipmentHealthCounts {
+        let ideal_capacity_unsolved_steps =
+            std::mem::take(&mut self.core.ideal_capacity_unsolved_steps);
         EquipmentHealthCounts {
             curve_index_clamps: self.core.hvac.take_biquadratic_clamp_count(),
             cross_tier_deadband_events: self.core.hvac.take_cross_tier_deadband_count(),
+            ideal_capacity_unsolved_steps,
             ..Default::default()
         }
     }
@@ -680,6 +701,8 @@ impl CoolingCore {
             cooling_oat_locked_out: false,
             use_ideal: false,
             ideal_capacity_w: 0.0,
+            ideal_capacity_signal_arrived: false,
+            ideal_capacity_unsolved_steps: 0,
             ctrl_duty_cycle: 1.0,
             ctrl_power_limit_w: f64::INFINITY,
             ctrl_mode_override: None,
@@ -1090,19 +1113,6 @@ impl CoolingCore {
         self.cooling_oat_locked_out = false;
         self.use_ideal = self.hvac.use_ideal_capacity(env);
 
-        // Advance DR duration; auto-revert to Normal when expired.
-        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
-            let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
-            *remaining -= dt_s;
-            if *remaining <= 0.0 {
-                self.dr_duration_remaining_s = None;
-                self.dr_level = DRLevel::Normal;
-                self.dr_setpoint_offset_c = 0.0;
-                self.dr_load_fraction = 1.0;
-                self.dr_duty_cycle = 1.0;
-            }
-        }
-
         // Grid outage: a de-energized bus removes supply power for the
         // compressor and blower — force off before any override handling
         // (WH precedent). Islanded (battery/generator-backed) homes keep an
@@ -1257,6 +1267,17 @@ impl CoolingCore {
 
         let dt_min = dt.as_secs_f64() / 60.0;
         if self.operating_mode == OperatingMode::Cooling {
+            // The ideal path's starvation census: an ideal step with no
+            // capacity signal this step runs the raw thermostat duty (the
+            // PLR arms below fall through to the duty cycle: 1.0 on a
+            // single-speed ideal path, the band estimate on a variable-speed
+            // one), so the delivery is unmetered to the zone's need. Counted,
+            // never silent: the starvation's cause is a mode flip downstream
+            // of the solver-feedback phase, and a rising count is the trace a
+            // dispatch-order regression leaves.
+            if self.use_ideal && !self.ideal_capacity_signal_arrived {
+                self.ideal_capacity_unsolved_steps += 1;
+            }
             let perf = self.calculate_performance(env, dt_min)?;
             compressor_w = perf.compressor_w;
             fan_w = perf.fan_w;
@@ -1590,10 +1611,36 @@ impl CoolingCore {
             },
         };
 
-        // Clear solver-provided capacity so next step starts fresh.
+        // Clear solver-provided capacity so next step starts fresh. The
+        // arrival flag clears with it: both carry this step's solve, and
+        // a stale one must neither deliver nor mask a starvation.
         self.ideal_capacity_w = 0.0;
+        self.ideal_capacity_signal_arrived = false;
         // LoadFraction is a one-step post-thermostat multiplier.
         self.ctrl_load_fraction = 1.0;
+
+        // Advance the DR duration once per step, at the step's end. The
+        // thermal pipeline runs `update_control` twice per step (before the
+        // solver-feedback phase and again after the control dispatch), so
+        // the countdown lived there it burned twice the event's wall time
+        // and the post-event release landed after the solve, which read the
+        // still-forced-off mode and solved nothing; the release step then
+        // ran the unit's raw full duty, unmetered. Advancing here puts the
+        // release on the next step's first control pass, ahead of the
+        // solve, so the release step delivers the solved capacity; the
+        // step whose interval the event covers keeps the event's own
+        // dispatch level (the partial sheds included), and the timer
+        // reverts after it.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= dt.as_secs_f64();
+            if *remaining <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.dr_level = DRLevel::Normal;
+                self.dr_setpoint_offset_c = 0.0;
+                self.dr_load_fraction = 1.0;
+                self.dr_duty_cycle = 1.0;
+            }
+        }
 
         #[cfg(feature = "observe")]
         {
@@ -2162,12 +2209,14 @@ impl CoolingCore {
                 self.ctrl_mode_override = None;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             ControlSignal::IdealCapacity { capacity_w, .. } => {
                 // Solver-provided load: negative = cooling needed.
                 self.ideal_capacity_w = *capacity_w;
+                self.ideal_capacity_signal_arrived = true;
             }
             ControlSignal::MaxCapacityFraction { fraction } => {
                 self.hvac.control.max_capacity_fraction = *fraction;
@@ -2189,8 +2238,19 @@ impl CoolingCore {
         if !self.use_ideal {
             return None;
         }
-        // Only report when thermostat says we need cooling.
-        if self.operating_mode != OperatingMode::Cooling {
+        // The solver's gate reads the thermostat's latched call, never the
+        // step's dispatch mode. The forced-off branches of `update_control`
+        // (a de-energized bus, a DR shed, an explicit Off) return before the
+        // thermostat re-reads, so the mode the solver-feedback phase would
+        // find is Off while the thermostat's call still stands; a control
+        // signal landing at the dispatch (a DR cancel, a setpoint override)
+        // then flips the second control pass back to Cooling, and the step
+        // dispatches a call the solve never saw: the raw duty, unmetered to
+        // the zone's need. Reading the latch keeps the solve running for the
+        // call the dispatch may honor. The idle mode a step publishes never
+        // reaches this read: every control pass re-derives the mode from the
+        // same latch.
+        if self.hvac.thermostat_fsm.mode != ThermostatMode::Cooling {
             return None;
         }
         let setpoint = self.hvac.effective_setpoints().cooling_c + self.dr_setpoint_offset_c;
@@ -3843,12 +3903,24 @@ mod tests {
             typed.startup_cd = None;
         });
         // The load fraction 0.5 exactly: (24.23 - 23.98)/0.5, an exact match
-        // for the ladder's second stage (half of the 8 000 W max).
+        // for the ladder's second stage (half of the 8 000 W max). The
+        // capacity arrives as the solver's IdealCapacity signal: the ideal
+        // path's delivery is this step's solved capacity, never the raw
+        // thermostat duty (OCHRE HVAC.py:424, h_desired should be equal to
+        // self.delivered_heat).
         let environment = env(24.23, 0.010, 18.0, 35.0);
 
         let mut eq = AirConditioner::new(cfg.clone());
         eq.init(&cfg, &environment).unwrap();
+        // The neutral biquadratic: the capacity ratio is 1.0 at every
+        // condition, so the driven capacity's load fraction is exact.
+        eq.core.hvac.config.biquadratic_coeffs = vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 4];
         eq.update_control(&environment);
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -4000.0,
+            degraded: false,
+        })
+        .unwrap();
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             humidity: vec![HumidityAccumulator::new(ZoneId(1))],
@@ -3869,6 +3941,342 @@ mod tests {
         assert!(
             (rtf - 1.0).abs() < 1e-9,
             "an exact variable-speed stage match must run continuously, got runtime_fraction={rtf}"
+        );
+    }
+
+    /// The starved ideal step's fallback, pinned: an ideal Cooling step
+    /// with no solved capacity arriving runs the unit's raw thermostat
+    /// duty (the ideal path's PLR arm falls through to the duty cycle,
+    /// 1.0), so the step delivers the full rated capacity unmetered to
+    /// the zone's need; the health count records the starvation beside
+    /// it. The delivery is the unmetered fallback the count makes
+    /// visible, never nothing.
+    #[test]
+    fn a_starved_ideal_step_delivers_the_raw_duty_and_the_count_records_it() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        // The coarse timestep puts the unit on the ideal path.
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "the zone is past the cooling setpoint: the thermostat calls"
+        );
+
+        // No IdealCapacity this step: the solve never reached the unit.
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(f64::NAN);
+        assert!(
+            (rtf - 1.0).abs() < 1e-9,
+            "the starved ideal step runs the raw duty, not nothing: \
+             runtime_fraction {rtf}"
+        );
+        assert!(
+            ports.electrical.net_active_w() > 0.0,
+            "the fallback draws the unit's full rated power, got {} W",
+            ports.electrical.net_active_w()
+        );
+        let counts = eq.take_health_counts();
+        assert_eq!(
+            counts.ideal_capacity_unsolved_steps, 1,
+            "the starvation is counted, never silent"
+        );
+
+        // The next step's solve arrives: the delivery is the solved
+        // capacity's share and nothing is counted.
+        eq.update_control(&environment);
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -2_000.0,
+            degraded: false,
+        })
+        .unwrap();
+        ports.zero();
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let solved_rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(f64::NAN);
+        assert!(
+            solved_rtf < 0.5,
+            "the solved capacity's share is well under the full duty, got \
+             runtime_fraction {solved_rtf}"
+        );
+        assert_eq!(
+            eq.take_health_counts().ideal_capacity_unsolved_steps,
+            0,
+            "a solved step is not a starvation"
+        );
+    }
+
+    /// A zero-second event covers no step: the duration names the steps the
+    /// event sheds, and zero names none. The signal is legal (a finite
+    /// duration of at least zero), so it arrives as an event already over
+    /// rather than as a one-step shed of the step it lands in.
+    #[test]
+    fn a_zero_second_dr_event_sheds_no_step() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(0.0),
+        })
+        .unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "the zone is past the cooling setpoint and the zero-second event \
+             is over on arrival: the unit must call"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let compressor = eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN);
+        assert!(
+            compressor > 0.0,
+            "a zero-second event must not shed the step it lands in: the \
+             cooling call delivers, got {compressor} kW"
+        );
+    }
+
+    /// An idle-resolved cooling step does not starve the next step's solve:
+    /// the control pass re-derives the thermostat's call from its latch, so
+    /// the mode the solver's gate reads is Cooling, never the Standby the
+    /// step published. The idle resolution is the step's publication, not
+    /// the solver's input.
+    #[test]
+    fn a_step_that_published_standby_still_requests_the_next_solve() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "fixture: the thermostat calls for cooling"
+        );
+        // A zero load fraction zeroes the step's delivery, so the step's
+        // publication resolves the active mode to Standby.
+        eq.apply_control(&ControlSignal::LoadFraction { fraction: 0.0 })
+            .unwrap();
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        assert_eq!(
+            eq.telemetry().get(tk::OPERATING_MODE),
+            Some(OperatingMode::Standby.as_code()),
+            "fixture: the zero-delivery step publishes Standby"
+        );
+
+        // The next control pass re-derives the call: the solver sees
+        // Cooling and requests the target, so the idle resolution cannot
+        // starve a later solve.
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "the thermostat's latch still calls after the idle step"
+        );
+        assert!(
+            eq.ideal_target().is_some(),
+            "the solve runs for the latched call the step published Standby for"
+        );
+    }
+
+    /// A forced-off control pass does not starve the step's solve: the
+    /// shed's forced-off branch returns before the thermostat re-reads, so
+    /// the pass publishes Off while the call stands, and the solver's gate
+    /// reads the latch, not the publication. A signal landing at the
+    /// dispatch (the operator's cancel) re-derives Cooling, and the step
+    /// delivers the solve's capacity, never the raw duty the solve never
+    /// saw.
+    #[test]
+    fn a_dispatch_time_cancel_after_a_forced_off_pass_delivers_the_solved_capacity() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        // The coarse timestep puts the unit on the ideal path.
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        // The event's shed forces the first control pass off before the
+        // thermostat re-reads: the publication is Off, the latch still
+        // calls.
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(900.0),
+        })
+        .unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Off,
+            "fixture: the event's shed forces the first control pass off"
+        );
+        assert!(
+            eq.ideal_target().is_some(),
+            "the solve runs for the latched call the forced-off pass \
+             published Off for"
+        );
+        // The solver's request reaches the unit with the dispatch's
+        // signals (the solver-feedback actor queues it at Step 1f).
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -2_000.0,
+            degraded: false,
+        })
+        .unwrap();
+        // The operator rescinds the shed at the dispatch: the second
+        // control pass re-derives Cooling and the step dispatches the
+        // call.
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::Normal,
+            duration_s: Some(900.0),
+        })
+        .unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "the cancel re-derives the thermostat's call at the dispatch"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(f64::NAN);
+        assert!(
+            rtf < 1.0,
+            "the dispatched call delivers the solve's capacity, never the \
+             raw duty: the starved arm runs the full duty at 1.0, got \
+             runtime_fraction {rtf}"
+        );
+        assert_eq!(
+            eq.take_health_counts().ideal_capacity_unsolved_steps,
+            0,
+            "the solve reached the unit: the dispatched call is not a \
+             starvation"
+        );
+    }
+
+    /// The event's LAST named step keeps the event's dispatch level: a
+    /// partial shed (High, load fraction 0.8) over two named steps
+    /// delivers the same reduced draw on both. The timer advances after
+    /// the step's dispatch, so the level's end is the release, never the
+    /// last step's own interval reverting mid-dispatch.
+    #[test]
+    fn the_last_named_dr_step_keeps_the_events_dispatch_level() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::High,
+            duration_s: Some(1800.0),
+        })
+        .unwrap();
+
+        let mut delivered = Vec::new();
+        for step in 0..2 {
+            assert_eq!(
+                eq.update_control(&environment),
+                OperatingMode::Cooling,
+                "step {step}: the zone is past the DR-adjusted setpoint"
+            );
+            eq.apply_control(&ControlSignal::IdealCapacity {
+                capacity_w: -4_000.0,
+                degraded: false,
+            })
+            .unwrap();
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&environment, Duration::from_secs(900), &mut ports)
+                .unwrap();
+            delivered.push(eq.telemetry().get(tk::COMPRESSOR_KW).unwrap_or(f64::NAN));
+        }
+
+        assert!(delivered[0] > 0.0, "fixture: the driven capacity runs");
+
+        // The event's 0.8 load fraction must be load-bearing: an identical
+        // unit without the event runs the same first step and delivers the
+        // unshed level. The two steps share every input but the multiplier,
+        // so the event step is the single product `0.8 * unshed` (one f64
+        // multiplication on each side, commutative and therefore exact).
+        let mut baseline = AirConditioner::new(cfg.clone());
+        baseline.init(&cfg, &environment).unwrap();
+        baseline.update_control(&environment);
+        baseline
+            .apply_control(&ControlSignal::IdealCapacity {
+                capacity_w: -4_000.0,
+                degraded: false,
+            })
+            .unwrap();
+        let mut baseline_ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        baseline
+            .step(&environment, Duration::from_secs(900), &mut baseline_ports)
+            .unwrap();
+        let unshed = baseline
+            .telemetry()
+            .get(tk::COMPRESSOR_KW)
+            .unwrap_or(f64::NAN);
+        assert!(unshed > 0.0, "fixture: the unshed capacity runs");
+        assert_eq!(
+            delivered[0],
+            0.8 * unshed,
+            "the High event's 0.8 load fraction must scale the unshed step: \
+             {} kW against the unshed {} kW",
+            delivered[0],
+            unshed
+        );
+        assert!(
+            (delivered[1] - delivered[0]).abs() < 1e-9,
+            "the event's second named step keeps the 0.8 level: {} kW against \
+             the first step's {} kW",
+            delivered[1],
+            delivered[0]
         );
     }
 
@@ -6101,23 +6509,34 @@ mod dr_tests {
         eq.init(&cfg, &env_t0).unwrap();
 
         // GridEmergency for 120 s (two 60-s steps); time_res = 1 min = 60 s.
-        // First update_control at t=0 decrements by 60 s → remaining = 60 s > 0 → still active.
-        // Second update_control at t=60 decrements by 60 s → remaining = 0 s → reverts to Normal.
+        // The countdown advances once per step, in step(): the event sheds
+        // exactly its two named steps and the unit recovers on the third.
         eq.apply_control(&ControlSignal::DemandResponse {
             level: DRLevel::GridEmergency,
             duration_s: Some(120.0),
         })
         .unwrap();
 
-        // Step at t=0: remaining decrements 60→60 s (still active) → must be off.
+        // Step at t=0: the countdown advances 120→60 s (still active) → off.
         let kw_during = step_once(&mut eq, &env_t0);
         assert_eq!(
             kw_during, 0.0,
             "GridEmergency must shed load while duration active"
         );
 
-        // Step at t=60: remaining decrements 60→0 s → auto-reverts → AC can cool.
-        let kw_after = step_once(&mut eq, &env_t60);
+        // Step at t=60: the countdown advances 60→0 s and reverts, but the
+        // step's control already ran with the event active → off. The shed
+        // covers the event's second named step.
+        let kw_during_second = step_once(&mut eq, &env_t60);
+        assert_eq!(
+            kw_during_second, 0.0,
+            "the event's second named step stays shed: the duration is the \
+             duration the signal named"
+        );
+
+        // Step at t=120: the event is over → AC can cool.
+        let env_t120 = hot_env_at_time(28.0, 120);
+        let kw_after = step_once(&mut eq, &env_t120);
         assert!(
             kw_after > 0.0,
             "After DR duration expires, AC must recover; kw_after={kw_after}"

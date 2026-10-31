@@ -138,7 +138,16 @@ use serde::{Deserialize, Serialize};
 /// the residual. Run bookkeeping again, but the schema rides the
 /// checkpoint, so the fingerprint moves. Checkpoints written by v23
 /// builds are rejected by the version gate.
-pub const CHECKPOINT_VERSION: u32 = 24;
+///
+/// v25: `RunHealth` carries `ideal_capacity_unsolved_steps`, the
+/// ideal-path HVAC steps the pipeline starved of a solved capacity. The
+/// counter is run bookkeeping, not physics state, but the checkpoint
+/// carries the run's health totals, so the field's type rides the
+/// checkpoint's schema and the fingerprint moves. (`EquipmentHealthCounts`
+/// carries the same name as its per-step drain into that total; it is not
+/// checkpointed itself.) Checkpoints written by v24 builds are rejected by
+/// the version gate.
+pub const CHECKPOINT_VERSION: u32 = 25;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -563,6 +572,7 @@ mod tests {
                 fluid_payload_absences: 5,
                 evicted_actors: 6,
                 cross_tier_deadband_events: 7,
+                ideal_capacity_unsolved_steps: 1,
                 discarded_state_energy_wh: 0.0,
                 warmup: crate::health::WarmupOutcome::Disabled,
                 energy_closure: crate::health::EnergyClosureReport {
@@ -621,9 +631,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 24;
+    const PINNED_VERSION: u32 = 25;
     const PINNED_SCHEMA_SHA256: &str =
-        "d4d215a7a15e768b6b83510e88c5378d1b9bf78e859bb1eb30df521ed9c00632";
+        "f2d24fa4d59aed5bf8aafed7723128f55ae2d55750935cf1e8f43d608946a740";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the

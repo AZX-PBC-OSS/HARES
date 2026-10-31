@@ -47,6 +47,16 @@ pub struct EquipmentHealthCounts {
     /// surviving schedule tier, the collision the init's static check
     /// cannot see. The run's first collision also raises a run warning.
     pub cross_tier_deadband_events: u64,
+    /// Total number of ideal-path steps the pipeline starved of a solved
+    /// capacity: the equipment ran its ideal control with no capacity
+    /// signal this step (the mode flipped after the solver-feedback
+    /// phase), so the delivery was the raw thermostat duty, unmetered to
+    /// the zone's need (the full rated capacity on a single-speed ideal
+    /// path, the band estimate on a variable-speed one). The count is
+    /// that fallback's visibility: a rising count is the trace a dispatch
+    /// order regression leaves, and the fallback's energy is that raw
+    /// duty's delivery for the step.
+    pub ideal_capacity_unsolved_steps: u64,
 }
 
 #[cfg(test)]
@@ -82,6 +92,7 @@ mod tests {
         assert_eq!(counts.curve_index_clamps, 0);
         assert_eq!(counts.fluid_payload_absences, 0);
         assert_eq!(counts.cross_tier_deadband_events, 0);
+        assert_eq!(counts.ideal_capacity_unsolved_steps, 0);
     }
 
     #[test]
@@ -90,6 +101,7 @@ mod tests {
             curve_index_clamps: 3,
             fluid_payload_absences: 2,
             cross_tier_deadband_events: 1,
+            ideal_capacity_unsolved_steps: 4,
         };
         let json = serde_json::to_string(&counts).expect("serialize EquipmentHealthCounts");
         let decoded: EquipmentHealthCounts =

@@ -10,7 +10,8 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FluidNodeId, FluidType, FuelType, HaresError, HeatTransferDirection, LoopId,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
-    ScheduleSourceState, Telemetry, TelemetryField, ThermalCategory, telemetry_keys as tk,
+    ScheduleSourceState, Telemetry, TelemetryField, ThermalCategory, demand_response_command,
+    telemetry_keys as tk,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -529,17 +530,6 @@ impl Equipment for ResistanceWH {
                 super::ramp_limited_setpoint(self.setpoint_c, self.target_setpoint_c, rate, dt_s);
         }
 
-        // Advance DR duration; auto-revert to Normal when expired.
-        if let Some(remaining) = self.dr_duration_remaining_s {
-            let next = remaining - dt_s;
-            if next <= 0.0 {
-                self.dr_duration_remaining_s = None;
-                self.apply_dr_level(DRLevel::Normal);
-            } else {
-                self.dr_duration_remaining_s = Some(next);
-            }
-        }
-
         // Safety cutout: force off if ANY node exceeds max tank temperature.
         // A high-limit aquastat/thermal fuse responds to the hottest point in the tank.
         let max_node_temp = self
@@ -848,6 +838,23 @@ impl Equipment for ResistanceWH {
         self.ctrl_load_fraction = 1.0;
         self.core_output = core_output;
 
+        // Advance the DR duration once per step, at the step's end: the
+        // thermal pipeline calls `update_control` before the control
+        // dispatch and again after it, and this unit's `step` re-runs it a
+        // third time, so a countdown that lived there burned several
+        // timesteps of the event per step. The step whose interval the
+        // event covers stays shed, and the release lands on the next
+        // step's control pass.
+        if let Some(remaining) = self.dr_duration_remaining_s {
+            let next = remaining - dt.as_secs_f64();
+            if next <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.apply_dr_level(DRLevel::Normal);
+            } else {
+                self.dr_duration_remaining_s = Some(next);
+            }
+        }
+
         Ok(())
     }
 
@@ -1044,8 +1051,9 @@ impl Equipment for ResistanceWH {
                 }
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {}
         }
@@ -2009,6 +2017,53 @@ mod tests {
         assert!(
             (ratio - 0.5).abs() < 0.05,
             "DR Critical load_fraction=0.5 must halve element power; ratio={ratio:.3}"
+        );
+    }
+
+    /// The DR duration is a timestep's clock, not a control pass's: the
+    /// thermal pipeline runs `update_control` twice per step (Step 1c
+    /// ahead of the solver feedback, Step 2a after the control dispatch),
+    /// so a countdown that lives there burns two timesteps of the event
+    /// per step. A 4-step (240 s at 60 s) GridEmergency must shed the
+    /// four steps its duration names, and the step after must recover.
+    #[test]
+    fn dr_duration_advances_once_per_timestep_not_per_control_pass() {
+        let cfg = config();
+        let e = env(21.0);
+        let mut eq = ResistanceWH::new(cfg.clone());
+        eq.init(&cfg, &e).unwrap();
+        // Tank at 40 C against a 52 C setpoint: the element would fire
+        // every step were the event not in force.
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: hares_types::DRLevel::GridEmergency,
+            duration_s: Some(240.0),
+        })
+        .unwrap();
+
+        for step in 0..4 {
+            eq.update_control(&e);
+            eq.update_control(&e);
+            let mut p = ports();
+            eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+            let w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(f64::NAN);
+            assert_eq!(
+                w, 0.0,
+                "step {step}: the event's four named steps must all shed the \
+                 element, got {w} W"
+            );
+        }
+
+        // The timestep after the event: the four named steps are exactly
+        // the four shed.
+        eq.update_control(&e);
+        eq.update_control(&e);
+        let mut p = ports();
+        eq.step(&e, Duration::from_secs(60), &mut p).unwrap();
+        let w = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
+        assert!(
+            w > 0.0,
+            "the event is over: the 40 C tank must call and the element fire, \
+             got {w} W"
         );
     }
 

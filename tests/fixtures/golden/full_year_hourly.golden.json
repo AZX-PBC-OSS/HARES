@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "82c34e4ec7909ab34fbd2e7185e5a0be4176de28abd5b5813489d3a1a4b46d57",
-  "git_head": "2afe24dfad6890d4954f629363d2f5ee0acd0cd6",
+  "git_head": "f98671762fcfdc93aa131cf8b2f04c73bde22ef4",
   "git_dirty": false,
   "metrics": [
     {
@@ -3606,6 +3606,7 @@
     },
     "evicted_actors": 0,
     "fluid_payload_absences": 0,
+    "ideal_capacity_unsolved_steps": 0,
     "port_rollbacks": 0,
     "rejected_control_signals": 0,
     "warmup": {

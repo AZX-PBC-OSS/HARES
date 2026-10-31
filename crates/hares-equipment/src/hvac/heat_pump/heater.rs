@@ -10,7 +10,7 @@ use hares_types::{
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor,
     EquipmentHealthCounts, EquipmentId, ExecutionStage, FuelPower, FuelType, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Telemetry, ThermalCategory,
-    Warning,
+    Warning, demand_response_command,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1287,18 +1287,6 @@ impl HeatPumpHeaterCore {
         self.ctrl_load_fraction = 1.0;
         self.use_ideal = self.hvac.use_ideal_capacity(env);
 
-        // Decrement DR duration and auto-revert to Normal when expired.
-        let dt_s = env.time_res.num_milliseconds().max(0) as f64 / 1000.0;
-        if let Some(remaining) = self.dr_duration_remaining_s {
-            let next = remaining - dt_s;
-            if next <= 0.0 {
-                self.dr_duration_remaining_s = None;
-                self.apply_dr_level(DRLevel::Normal);
-            } else {
-                self.dr_duration_remaining_s = Some(next);
-            }
-        }
-
         // Grid outage: a de-energized bus removes supply power for the
         // compressor, ER backup elements, and blower — force off before any
         // override handling (WH precedent). The ER off-timer bookkeeping
@@ -1743,6 +1731,24 @@ impl HeatPumpHeaterCore {
 
         // Clear solver-provided capacity so next step starts fresh.
         self.ideal_capacity_w = 0.0;
+
+        // Advance the DR duration once per step, at the step's end. The
+        // thermal pipeline runs `update_control` twice per step, so the
+        // countdown lived there it burned twice the event's wall time and
+        // the post-event release landed after the solver-feedback phase.
+        // Advancing here puts the release on the next step's first control
+        // pass, ahead of the solve, and the step whose interval the event
+        // covers keeps the event's own dispatch level. (Mirrors the
+        // cooling core's step.)
+        if let Some(remaining) = self.dr_duration_remaining_s {
+            let next = remaining - dt.as_secs_f64();
+            if next <= 0.0 {
+                self.dr_duration_remaining_s = None;
+                self.apply_dr_level(DRLevel::Normal);
+            } else {
+                self.dr_duration_remaining_s = Some(next);
+            }
+        }
 
         #[cfg(feature = "observe")]
         {
@@ -2961,8 +2967,9 @@ impl HeatPumpHeaterCore {
                 self.ctrl_mode_override = None;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.apply_dr_level(*level);
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.apply_dr_level(level);
+                self.dr_duration_remaining_s = duration_s;
             }
             ControlSignal::IdealCapacity { capacity_w, .. } => {
                 self.ideal_capacity_w = *capacity_w;
@@ -5717,9 +5724,11 @@ mod tests {
         assert_eq!(kw, 0.0, "GridEmergency must force zero output; got {kw}");
     }
 
-    // DR with duration_s: auto-reverts to Normal after the duration elapses.
-    // update_control decrements dr_duration_remaining_s by time_res (1 min = 60 s)
-    // each call. DR persists while remaining > 0 and auto-reverts when it reaches <= 0.
+    // DR with duration_s: the duration names the steps it covers, and the
+    // timer advances once per step, at the step's end (the thermal
+    // pipeline runs update_control twice per step, so a countdown that
+    // lived there burned two timesteps per step). The release lands on
+    // the next step's control pass.
     #[test]
     fn dr_duration_auto_reverts() {
         let cfg = heater_config();
@@ -5728,42 +5737,39 @@ mod tests {
         let mut eq = ASHPHeater::new(cfg.clone());
         eq.init(&cfg, &e).unwrap();
 
-        // High DR for 120 s (two 60-s steps); time_res = 1 min = 60 s.
-        // First update_control decrements by 60 s → remaining = 60 s > 0 → still active.
-        // Second update_control decrements by 60 s → remaining = 0 s → reverts to Normal.
+        // High DR for 120 s: the two 60-s steps it names both run at the
+        // event's 0.8 load fraction.
         eq.apply_control(&ControlSignal::DemandResponse {
             level: DRLevel::High,
             duration_s: Some(120.0),
         })
         .unwrap();
 
-        // Step 1: DR active → load_fraction=0.8, setpoint offset=-2°C → reduced output.
-        eq.update_control(&e);
-        let mut ports1 = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
+        let step_kw = |eq: &mut ASHPHeater| {
+            eq.update_control(&e);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&e, Duration::from_secs(60), &mut ports).unwrap();
+            eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0)
         };
-        eq.step(&e, Duration::from_secs(60), &mut ports1).unwrap();
-        let kw_dr = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-
-        // After one step, dr_duration_remaining_s must have decremented to 60 s.
+        let kw_dr = step_kw(&mut eq);
         assert_eq!(
             eq.core.dr_duration_remaining_s,
             Some(60.0),
-            "dr_duration_remaining_s must be 60 s after one step; got {:?}",
+            "dr_duration_remaining_s must be 60 s after the first of the two \
+             named steps; got {:?}",
             eq.core.dr_duration_remaining_s,
         );
+        let kw_second = step_kw(&mut eq);
+        assert_eq!(
+            kw_second, kw_dr,
+            "the event's second named step keeps its dispatch level"
+        );
 
-        // Step 2: remaining decrements from 60 → 0 s → auto-revert to Normal → full output.
-        eq.update_control(&e);
-        let mut ports2 = PortSlots {
-            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
-            ..PortSlots::default()
-        };
-        eq.step(&e, Duration::from_secs(60), &mut ports2).unwrap();
-        let kw_after = eq.telemetry().get(tk::ELECTRIC_KW).unwrap_or(0.0);
-
-        // Auto-revert must clear the duration and restore Normal.
+        // Auto-revert must clear the duration and restore Normal; the next
+        // step runs at full output.
         assert!(
             eq.core.dr_duration_remaining_s.is_none(),
             "dr_duration_remaining_s must be None after auto-revert; got {:?}",
@@ -5775,6 +5781,11 @@ mod tests {
             "dr_level must revert to Normal after duration expires; got {:?}",
             eq.core.dr_level,
         );
+        assert_eq!(
+            eq.core.dr_load_fraction, 1.0,
+            "the release clears the event's load fraction"
+        );
+        let kw_after = step_kw(&mut eq);
         assert!(
             kw_after > kw_dr,
             "Output must recover after DR duration expires; \

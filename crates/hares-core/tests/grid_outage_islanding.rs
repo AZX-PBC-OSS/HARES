@@ -106,9 +106,9 @@ fn v2g_driver() -> EvDriverActor {
     )
 }
 
-/// One dwelling run's island-unserved warnings: built once, stepped once,
-/// islanded with `set_grid_voltage(0.0)` and stepped three more times, the
-/// finished run's `RunResult.warnings`.
+/// One dwelling run's island-unserved warnings: built once, stepped once
+/// (nominal), taken through the outage (the dead-bus step and two islanded
+/// steps), the finished run's `RunResult.warnings`.
 fn islanded_run_warnings(tag: &str) -> usize {
     let mut dwelling = build_dwelling_with_base_load(tag);
     add_battery_with_discharge_limit(&mut dwelling, 0.6, 0.5);
@@ -117,9 +117,9 @@ fn islanded_run_warnings(tag: &str) -> usize {
     dwelling
         .set_grid_voltage(0.0)
         .expect("the override is in contract");
+    dwelling.step().expect("the outage's dead-bus step");
     dwelling.step().expect("islanded step");
     dwelling.step().expect("second islanded step");
-    dwelling.step().expect("third islanded step");
 
     let result = dwelling.finish().expect("the run finishes");
     result
@@ -396,8 +396,10 @@ fn outage_without_backup_deenergizes_bus_and_drops_loads() {
     );
 }
 
-/// Utility outage with a charged battery: the dwelling islands (bus held at
-/// nominal), loads keep running, and the battery discharges to serve them.
+/// Utility outage with a charged battery: the dwelling islands one step
+/// after the outage (the formation condition is end-of-previous-step
+/// state, the documented lag), loads keep running from then on, and the
+/// battery discharges to serve them.
 #[test]
 fn outage_with_battery_islands_and_keeps_loads_running() {
     let mut dwelling = build_dwelling_with_base_load("battery-backup");
@@ -405,10 +407,18 @@ fn outage_with_battery_islands_and_keeps_loads_running() {
 
     dwelling.step().expect("nominal step");
 
-    // Utility outage: the battery islands the home.
+    // Utility outage: the battery islands the home one step later.
     dwelling
         .set_grid_voltage(0.0)
         .expect("the override is in contract");
+    dwelling.step().expect("the outage's dead-bus step");
+    let grid = &dwelling.latest_env().grid;
+    assert!(grid.grid_outage());
+    assert!(
+        !grid.islanded(),
+        "the outage's first step is a dead-bus step (the documented \
+         formation lag)"
+    );
     dwelling.step().expect("islanded step");
 
     let grid = &dwelling.latest_env().grid;
@@ -459,15 +469,22 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
         "island_excess_w must be 0.0 during nominal (grid-connected) operation"
     );
 
-    // Utility outage: the battery islands the home but its 0.5 kW discharge
-    // limit leaves ~1 kW of the base load unserved.
+    // Utility outage: the battery islands the home one step later (the
+    // documented formation lag), but its 0.5 kW discharge limit leaves
+    // ~1 kW of the base load unserved.
     dwelling
         .set_grid_voltage(0.0)
         .expect("the override is in contract");
+    dwelling.step().expect("the outage's dead-bus step");
+    assert!(
+        !dwelling.latest_env().grid.islanded(),
+        "the outage's first step is a dead-bus step"
+    );
+
     dwelling.step().expect("islanded step");
     assert!(
         dwelling.latest_env().grid.islanded(),
-        "battery with usable SOC must island the home"
+        "battery with usable SOC must island the home one step after the outage"
     );
 
     dwelling.step().expect("second islanded step");
@@ -756,4 +773,282 @@ fn islanded_pack_energy_is_bounded_by_island_sources() {
         energized_steps > 0,
         "the scenario must island: the full battery is available as the source"
     );
+}
+
+/// The island forms one step AFTER the outage begins: the formation
+/// condition reads the previous step's outage and the source
+/// availability (both end-of-previous-step state) beside the step's own
+/// utility voltage, so the outage's first step is a dead-bus step (every
+/// load force-offs) and the second step is islanded. The documented
+/// one-step lag (docs/cosim.md, docs/outage-behavior.md).
+#[test]
+fn island_forms_one_step_after_the_outage() {
+    let mut dwelling = build_dwelling_with_base_load("formation-lag");
+    add_battery(&mut dwelling, 0.6);
+
+    dwelling.step().expect("nominal step");
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
+
+    // The outage's first step: the island has not formed yet.
+    dwelling.step().expect("the outage's first step");
+    let grid = &dwelling.latest_env().grid;
+    assert!(grid.grid_outage());
+    assert!(
+        !grid.islanded(),
+        "the outage's first step is a dead-bus step: the island's \
+         formation takes effect with a one-step lag"
+    );
+    assert_eq!(grid.island_bus_voltage_pu, None);
+    let summary = dwelling
+        .save_checkpoint()
+        .expect("checkpoint")
+        .prior_electrical_summary;
+    assert_eq!(
+        summary.base_load_w, 0.0,
+        "the dead-bus step force-offs every load"
+    );
+
+    // The second step: the island forms and the loads return.
+    dwelling.step().expect("the island's formation step");
+    let grid = &dwelling.latest_env().grid;
+    assert!(
+        grid.islanded(),
+        "an available battery islands the home one step after the outage"
+    );
+    assert_eq!(grid.island_bus_voltage_pu, Some(1.0));
+    let summary = dwelling
+        .save_checkpoint()
+        .expect("checkpoint")
+        .prior_electrical_summary;
+    assert!(
+        summary.base_load_w > 1.0,
+        "the islanded home runs its loads, got {} W",
+        summary.base_load_w
+    );
+}
+
+/// A full DR shed of the battery does not collapse a formed island: the
+/// DR is a grid-supporting curtailment of grid interchange, and an
+/// island has none. The island stays formed (capability, not dispatch,
+/// holds the bus), the battery keeps serving the home through the event,
+/// and the DR's shed resumes when the utility returns.
+#[test]
+fn dr_shed_during_island_keeps_the_bus_alive() {
+    let mut dwelling = build_dwelling_with_base_load("island-dr-shed");
+    add_battery(&mut dwelling, 0.6);
+
+    dwelling.step().expect("nominal step");
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
+    dwelling.step().expect("the outage's dead-bus step");
+    dwelling.step().expect("the island's formation step");
+    assert!(dwelling.latest_env().grid.islanded(), "the island formed");
+
+    // The full shed, mid-island: ten steps, so the event still runs when
+    // the utility returns and the resumed shed is observable.
+    dwelling.apply_control(
+        "Battery",
+        ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(10.0 * 60.0),
+        },
+    );
+    for step in 0..4 {
+        dwelling.step().expect("the island's shed step");
+        let grid = &dwelling.latest_env().grid;
+        assert!(
+            grid.islanded(),
+            "step {step}: a DR shed must not collapse a formed island"
+        );
+        assert_eq!(
+            grid.island_bus_voltage_pu,
+            Some(1.0),
+            "step {step}: the island's bus stays at nominal through the shed"
+        );
+        let battery_dr = dwelling
+            .latest_env()
+            .equipment_telemetry
+            .get("Battery")
+            .and_then(|t| t.get(tk::DR_POWER_FRACTION))
+            .unwrap_or_else(|| panic!("step {step}: the battery publishes its DR fraction"));
+        assert_eq!(
+            battery_dr, 0.0,
+            "step {step}: the event is in force (the arrange must be \
+             load-bearing: a run without the signal would pass every other \
+             assertion in this test)"
+        );
+        let summary = dwelling
+            .save_checkpoint()
+            .expect("checkpoint")
+            .prior_electrical_summary;
+        assert!(
+            summary.base_load_w > 1.0,
+            "step {step}: the islanded home keeps its loads through a DR \
+             shed, got {} W",
+            summary.base_load_w
+        );
+        assert!(
+            summary.battery_power_w < 0.0,
+            "step {step}: the battery keeps serving the islanded load through \
+             the shed, got {} W",
+            summary.battery_power_w
+        );
+        let telem = dwelling.telemetry().expect("telemetry");
+        assert!(
+            telem.island_unserved_w <= 50.0,
+            "step {step}: the island's dispatch is uncurtailed: any imbalance \
+             is the standby-draw accounting noise below the documented 0.05 kW \
+             warning threshold, got {} W",
+            telem.island_unserved_w
+        );
+    }
+
+    // The utility returns while the event still runs: the island collapses,
+    // and the shed it exists to curtail resumes on the grid-connected
+    // dispatch. The battery's own control would serve the 1.5 kW base load;
+    // the event holds it at standby and the load imports instead.
+    dwelling
+        .set_grid_voltage(1.0)
+        .expect("the restoration override is in contract");
+    dwelling.step().expect("the restored step");
+    assert!(
+        !dwelling.latest_env().grid.islanded(),
+        "the restoration collapses the island"
+    );
+    let summary = dwelling
+        .save_checkpoint()
+        .expect("checkpoint")
+        .prior_electrical_summary;
+    assert!(
+        summary.battery_power_w.abs() <= 50.0,
+        "the DR shed resumes on the restored grid: the battery must not serve \
+         the load while the event holds it at standby, got {} W",
+        summary.battery_power_w
+    );
+    assert!(
+        summary.base_load_w > 1.0 && summary.net_grid_w > 1.0,
+        "the restored home draws its load from the grid while the battery is \
+         shed: base load {} W, meter {} W",
+        summary.base_load_w,
+        summary.net_grid_w
+    );
+
+    // The event ends; the battery's self-consumption resumes.
+    for _ in 0..7 {
+        dwelling.step().expect("the post-event step");
+    }
+    let summary = dwelling
+        .save_checkpoint()
+        .expect("checkpoint")
+        .prior_electrical_summary;
+    assert!(
+        summary.battery_power_w < 0.0,
+        "after the event the battery serves the load again, got {} W",
+        summary.battery_power_w
+    );
+}
+
+/// The island's survival through a DR shed is a capability boundary, not
+/// a headroom one: a battery whose discharge limit exactly equals the
+/// island's load still holds the bus and serves the load while a full
+/// shed holds its grid-side dispatch at standby. Source availability keys
+/// on capacity (grid-forming, dischargeable above the floor), never on
+/// surplus over the load, and the islanded dispatch is uncurtailed.
+#[test]
+fn dr_shed_island_survives_at_the_source_capacity_edge() {
+    let mut dwelling = build_dwelling_with_base_load("island-dr-edge");
+    // The 1.5 kW base load exactly: zero discharge headroom.
+    add_battery_with_discharge_limit(&mut dwelling, 0.6, 1.5);
+
+    dwelling.step().expect("nominal step");
+    dwelling
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
+    dwelling.step().expect("the outage's dead-bus step");
+    dwelling.step().expect("the island's formation step");
+    assert!(dwelling.latest_env().grid.islanded(), "the island formed");
+
+    dwelling.apply_control(
+        "Battery",
+        ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            // Four steps at the fixture's 60 s timestep.
+            duration_s: Some(4.0 * 60.0),
+        },
+    );
+    for step in 0..4 {
+        dwelling.step().expect("the island's shed step");
+        assert!(
+            dwelling.latest_env().grid.islanded(),
+            "step {step}: the island survives at the source-capacity edge"
+        );
+        let battery_dr = dwelling
+            .latest_env()
+            .equipment_telemetry
+            .get("Battery")
+            .and_then(|t| t.get(tk::DR_POWER_FRACTION))
+            .unwrap_or_else(|| panic!("step {step}: the battery publishes its DR fraction"));
+        assert_eq!(
+            battery_dr, 0.0,
+            "step {step}: the event is in force (without it the battery \
+             would serve the load anyway and the edge would prove nothing)"
+        );
+        let summary = dwelling
+            .save_checkpoint()
+            .expect("checkpoint")
+            .prior_electrical_summary;
+        // The pack discharges at its 1.5 kW limit less its 5 W standby
+        // draw: the load equals the capability exactly, so the residual
+        // imbalance is the standby alone.
+        assert!(
+            summary.battery_power_w < -1_400.0,
+            "step {step}: the battery serves the 1.5 kW load at its rated \
+             discharge edge, got {} W",
+            summary.battery_power_w
+        );
+        let telem = dwelling.telemetry().expect("telemetry");
+        assert!(
+            telem.island_unserved_w <= 50.0,
+            "step {step}: the load exactly at the source's capacity is \
+             served (the only imbalance is the pack's standby draw), got \
+             {} W unserved",
+            telem.island_unserved_w
+        );
+    }
+
+    // The event ends while the island holds: the release is the island's
+    // own step. The bus stays formed (the shed never touched the
+    // capability), the pack keeps serving the load, and the published
+    // fraction returns to the released level.
+    for step in 0..2 {
+        dwelling.step().expect("the post-event islanded step");
+        assert!(
+            dwelling.latest_env().grid.islanded(),
+            "step {step}: the event's end leaves the island formed"
+        );
+        let battery_dr = dwelling
+            .latest_env()
+            .equipment_telemetry
+            .get("Battery")
+            .and_then(|t| t.get(tk::DR_POWER_FRACTION))
+            .unwrap_or_else(|| panic!("step {step}: the battery publishes its DR fraction"));
+        assert_eq!(
+            battery_dr, 1.0,
+            "step {step}: the event ended while islanded: the released \
+             level is the published fraction"
+        );
+        let summary = dwelling
+            .save_checkpoint()
+            .expect("checkpoint")
+            .prior_electrical_summary;
+        assert!(
+            summary.battery_power_w < -1_400.0,
+            "step {step}: the islanded load is still served after the \
+             event, got {} W",
+            summary.battery_power_w
+        );
+    }
 }

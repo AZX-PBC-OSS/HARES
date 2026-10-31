@@ -7523,6 +7523,16 @@ impl Dwelling {
         // Feed zone temperatures back first so the borrow on self.latest_env.zones
         // is released before we mutably borrow self.latest_env for update_in_place.
         self.environment.feed_zones(&self.latest_env.zones);
+        // The grid voltage the previous step resolved with: the update below
+        // overwrites it with this step's. The island's formation condition
+        // reads it beside the equipment state (which is likewise
+        // end-of-previous-step state), so island formation takes effect with
+        // the documented one-step lag: an outage's first step is a dead-bus
+        // step, and the island forms on the step after. The capture is a
+        // local over the environment, not checkpoint state: a checkpoint
+        // carries no grid input (the same external rule as the voltage), so
+        // a resumed run's first step reads the grid it is restored into.
+        let prior_step_outage = self.latest_env.grid.grid_outage();
         self.environment
             .update_in_place(&mut self.latest_env, &self.clock)?;
 
@@ -7545,10 +7555,15 @@ impl Dwelling {
         // charge, generator, discharging V2G EV) holds the home bus at
         // nominal voltage so loads keep running; otherwise the bus is dead
         // and every load force-offs at the control level (see
-        // `GridState::bus_energized`). Source availability is evaluated from
-        // end-of-previous-step equipment state, so island formation/collapse
-        // takes effect with a one-step lag.
-        self.latest_env.grid.island_bus_voltage_pu = if self.latest_env.grid.voltage_pu == 0.0
+        // `GridState::bus_energized`). The formation condition reads the
+        // previous step's outage (the capture above) and the source
+        // availability from the equipment state, both end-of-previous-step
+        // state, beside the step's own utility voltage. The two lagged terms
+        // give an outage's first step the dead bus and formation the step
+        // after; the step's own voltage collapses a formed island on the
+        // restoration step itself.
+        self.latest_env.grid.island_bus_voltage_pu = if prior_step_outage
+            && self.latest_env.grid.voltage_pu == 0.0
             && self.equipment.iter().any(|eq| eq.island_source_available())
         {
             Some(ISLAND_BUS_NOMINAL_VOLTAGE_PU)
@@ -8401,6 +8416,7 @@ impl Dwelling {
         // reset per take), and their step already failed the port contract.
         let mut step_fluid_payload_absences: u64 = 0;
         let mut step_cross_tier_deadband_events: u64 = 0;
+        let mut step_ideal_capacity_unsolved_steps: u64 = 0;
         // The equipment whose curve-index clamps drained this step, with
         // each one's count: the policy is evaluated per source, so a limit
         // set on the counter fails the run naming the equipment.
@@ -8414,6 +8430,7 @@ impl Dwelling {
                 }
                 step_fluid_payload_absences += counts.fluid_payload_absences;
                 step_cross_tier_deadband_events += counts.cross_tier_deadband_events;
+                step_ideal_capacity_unsolved_steps += counts.ideal_capacity_unsolved_steps;
             }
             // Warnings raised this step drain beside the health counts,
             // from failed-and-rolled-back equipment too (warnings only, no
@@ -8443,6 +8460,7 @@ impl Dwelling {
         // collision the run hit, with no policy limit (the event escalates
         // nothing: the warning is the signal).
         self.health.cross_tier_deadband_events += step_cross_tier_deadband_events;
+        self.health.ideal_capacity_unsolved_steps += step_ideal_capacity_unsolved_steps;
 
         // The clamp census: once per timestep, after the physics and
         // equipment steps complete, drain the recording thread's per-step

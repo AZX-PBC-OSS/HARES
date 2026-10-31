@@ -15,19 +15,30 @@ Two distinct concepts, both carried in `GridState` (`hares-types`):
 | Utility outage | `voltage_pu == 0.0` (`GridState::grid_outage()`) | The distribution feeder is dead. Set externally: scenario config, `Dwelling::set_grid_voltage(0.0)`, `Fleet::set_grid_voltage*`. (HELICS voltage subscriptions reject values outside [0.5, 1.5] pu and hold the last valid value, so co-simulation outages are signalled through the explicit setter, not through the voltage topic.) |
 | Bus energization | `GridState::bus_energized()` / `GridState::bus_voltage_pu()` | Whether the **home's bus** carries voltage. During an outage, an island-capable source holds the bus at nominal (`island_bus_voltage_pu == Some(1.0)`); otherwise the bus is dead. |
 
-The dwelling resolves bus energization at the start of every timestep: if the
-utility voltage is `0.0` and any equipment reports
-`Equipment::island_source_available()`, the bus is islanded at 1.0 pu.
-Availability is evaluated from end-of-previous-step equipment state, so
-island formation/collapse takes effect with a one-step lag.
+The dwelling resolves bus energization at the start of every timestep:
+during an outage, an island-capable source holds the bus at 1.0 pu (the
+formation condition and its one-step lag are below).
+The formation condition reads the previous step's outage and the source
+availability (both end-of-previous-step state) beside the step's own
+utility voltage, so island formation takes effect with a one-step lag:
+an outage's first step is a dead-bus step, and the island forms on the
+step after. A formed island collapses when its source dies, also one
+step after the availability ends (restoration collapses it on the
+restoration step itself).
 
 Island sources:
 
 - **Battery** — grid-connected and dischargeable: SOC above its effective
   floor (`min_soc`, narrowed by any SOC-target window), hardware discharge
-  capability, cell temperature above the discharge cutoff, DR not commanding
-  a full shed, AND grid-forming (`grid_forming` flag, default true; set
-  false for grid-following-only inverters).
+  capability, cell temperature above the discharge cutoff, AND grid-forming
+  (`grid_forming` flag, default true; set false for grid-following-only
+  inverters). A demand-response shed does not withdraw availability: it is
+  a grid-supporting curtailment of grid interchange, and the islanding
+  function is grid-forming (IEEE 1547-2018 separates the two), so a grid
+  operator's DR event must not reach through the outage gate and remove
+  the only source serving the home. For the same reason the DR fraction
+  does not scale the battery's dispatch while islanded: an island has no
+  interchange to curtail.
 - **Generator** — enabled (self-consumption control active, or an explicit
   positive setpoint) AND grid-forming (`grid_forming` flag, default true).
   Fuel is modeled as unlimited (no on-site tank model). In `standby_mode`
@@ -38,12 +49,24 @@ Island sources:
 - **EV** — plugged in at home **and actually delivering V2L/V2G export**:
   the previous step's delivered export is positive, the pack sits above
   the commanded leg's effective discharge floor, and DR is not commanding
-  a full shed, the same shape as the battery's check. A merely
-  plugged-in EV is not counted (most EVSEs cannot island a home), and
-  neither is a commanded discharge the floor or a DR shed curtailed to
-  zero watts: an island held by a source that delivers nothing runs every
-  load on phantom power. Islanding takes effect one step after export
-  begins and collapses the first step delivery stops.
+  a full shed. A merely plugged-in EV is not counted (most EVSEs cannot
+  island a home), and neither is a commanded discharge the floor or a DR
+  shed curtailed to zero watts: an island held by a source that delivers
+  nothing runs every load on phantom power. Islanding takes effect one
+  step after the export it reads, and the formation's own outage lag
+  applies on top: a home whose V2G export was already running at the
+  outage's start islands on the outage's second step. The first
+  (dead-bus) step still books the vehicle's export, because its discharge
+  is never gated on the bus, and that booking is what keeps the
+  delivery-keyed availability true across the transfer; gating it would
+  make an EV-held island unreachable. Once the delivery stops, the next
+  step's formation reads no source and the bus dies.
+  The event's fraction scales the EV's islanded dispatch itself (export
+  and charge), unlike the battery's: the EV's availability keys on the
+  delivery, so a delivery the shed could not touch would keep the island
+  alive through a full event. A partial event's shortfall therefore
+  surfaces as `island_unserved_w`, and a full event's zero delivery
+  collapses the island.
 - **PV is never an island source** — it is a grid-following inverter
   (IEEE 1547) and cannot form a bus on its own.
 
@@ -74,7 +97,9 @@ no-outage regression gate then catch it.
 
 ## Per-family behaviour
 
-During a **dead-bus outage** (utility out, no island source). During
+During a **dead-bus outage** (utility out, no island source; the outage's
+first step is also a dead-bus step when an island source exists, the
+formation lag above). During
 **islanded operation** every family below behaves exactly as in normal
 operation (the bus is at nominal voltage).
 
@@ -100,7 +125,7 @@ operation (the bus is at nominal voltage).
 | EV (V2L/V2G discharge) | **Not gated**: the EV is a source; while discharging it islands the home (one-step lag) | With a `der_1547` block on the EV the export leg answers the grid signals when **grid-connected** per IEEE 1547-2018; the layer is bypassed on outage steps, and the charge leg is the vehicle's load-side behavior, never the DER function |
 | PV | **Inverter trips** (IEEE 1547 anti-islanding): no AC, no DC extraction, no vars | Keeps producing when the home is islanded by a grid-forming source; panel thermal/soiling states evolve either way. With a `der_1547` block configured the inverter also answers the bus voltage and frequency per IEEE 1547-2018 (the trip tables, the ride-through windows, the enter-service reconnection delay; see `docs/PHYSICS_DECISIONS.md`) |
 | Battery (charge) | Blocked — nothing on a dead bus to charge from | Standby electronics and cell heater also 0 W (they are AC loads). While **islanded**, charging is clamped to the on-site generation surplus (see Meter behaviour) |
-| Battery (discharge) | Never blocked by the bus: discharge capability *is* what energizes it | A dead bus with a battery present implies the battery is empty/cold/disconnected. A battery with a `der_1547` block answers the grid signals when **grid-connected** per IEEE 1547-2018; the layer is bypassed on outage steps (an island source is never tripped off its own island) |
+| Battery (discharge) | Dispatching 0 W: a dead bus has nothing to deliver into; discharge capability *is* what energizes it, one step after the outage | A dead bus with a capable battery present is the island's formation lag (the outage's first step); otherwise the battery cannot serve (empty, cold, disconnected, grid-following, or a latched IEEE 1547 trip). A battery with a `der_1547` block answers the grid signals when **grid-connected** per IEEE 1547-2018; the layer is bypassed on outage steps (an island source is never tripped off its own island) |
 | Generator | **Runs** — an outage is precisely when it runs (self-consumption picks up the house load). In `standby_mode`, runs ONLY during an outage and stays off otherwise. | Never gated; `grid_forming` flag (default true) controls island-source eligibility |
 
 ## Meter behaviour

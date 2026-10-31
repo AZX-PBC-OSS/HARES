@@ -36,6 +36,27 @@ pub enum DRLevel {
     GridEmergency = 4,
 }
 
+/// The effective event a `DemandResponse` signal commands: the level and
+/// the duration that govern it, with the zero-length boundary resolved.
+///
+/// A duration is the wall-clock window the event covers, and the classes
+/// that keep a countdown shed every step whose interval overlaps it, so a
+/// window that ends between two timesteps sheds the full step it touches
+/// last. `Some(0.0)` is a legal signal (a finite duration of at least zero)
+/// whose window overlaps no step, so it resolves to no event at all (level
+/// `Normal`, no countdown) rather than to a one-step shed of the step it
+/// lands in. A negative duration cannot pass
+/// [`ControlSignal::validate_numeric_bounds`]
+/// and resolves the same way, so an unvalidated path cannot shed a step for
+/// it either.
+#[must_use]
+pub fn demand_response_command(level: DRLevel, duration_s: Option<f64>) -> (DRLevel, Option<f64>) {
+    match duration_s {
+        Some(duration) if duration <= 0.0 => (DRLevel::Normal, None),
+        _ => (level, duration_s),
+    }
+}
+
 /// Typed external control signals consumed by equipment models.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ControlSignal {
@@ -110,6 +131,11 @@ pub enum ControlSignal {
     },
     DemandResponse {
         level: DRLevel,
+        /// The event's window \[s\]. `None` holds until an explicit `Normal`
+        /// arrives; a positive duration sheds every step its window
+        /// overlaps, a partial final step included (see
+        /// [`demand_response_command`]), so `Some(0.0)` is an event that
+        /// covers no step.
         duration_s: Option<f64>,
     },
     ProtocolNative {
@@ -1554,6 +1580,35 @@ mod tests {
             level: DRLevel::Normal,
             duration_s: None,
         });
+    }
+
+    /// The duration is the wall-clock window the event covers, so the
+    /// boundary resolves to no event: zero names no step, a positive one
+    /// (shorter than any timestep included) names the step it lands in, and
+    /// `None` holds indefinitely. The level rides unchanged for every
+    /// duration that names a step.
+    #[test]
+    fn a_zero_length_demand_response_resolves_to_no_event() {
+        assert_eq!(
+            demand_response_command(DRLevel::GridEmergency, Some(0.0)),
+            (DRLevel::Normal, None),
+            "a zero-second event covers no step"
+        );
+        assert_eq!(
+            demand_response_command(DRLevel::GridEmergency, Some(-1.0)),
+            (DRLevel::Normal, None),
+            "an unvalidated negative duration cannot shed a step either"
+        );
+        assert_eq!(
+            demand_response_command(DRLevel::GridEmergency, Some(0.5)),
+            (DRLevel::GridEmergency, Some(0.5)),
+            "a positive duration keeps the event it names"
+        );
+        assert_eq!(
+            demand_response_command(DRLevel::High, None),
+            (DRLevel::High, None),
+            "an indefinite event holds its level"
+        );
     }
 
     #[test]

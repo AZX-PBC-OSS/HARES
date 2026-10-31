@@ -19,7 +19,7 @@ use hares_types::{
     CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, GridExportRule, HaresError,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, Soc, Telemetry, TelemetryField,
-    ThermalCategory, Warning, ZoneId,
+    ThermalCategory, Warning, ZoneId, demand_response_command,
 };
 use serde::{Deserialize, Serialize};
 
@@ -620,10 +620,18 @@ impl Battery {
 
     /// Determine the target charge/discharge power based on control state and
     /// Stage 1 accumulated electrical power.
-    fn determine_target_power(&mut self, net_load_w: f64, dt_hours: f64) -> crate::Result<f64> {
+    ///
+    /// `dr_fraction` is the resolved demand-response dispatch fraction
+    /// (1.0 while islanded; see `clamp_power`).
+    fn determine_target_power(
+        &mut self,
+        net_load_w: f64,
+        dt_hours: f64,
+        dr_fraction: f64,
+    ) -> crate::Result<f64> {
         // Priority 1: explicit power setpoint from external control
         if let Some(setpoint) = self.power_setpoint_w {
-            return self.clamp_power(setpoint);
+            return self.clamp_power(setpoint, dr_fraction);
         }
 
         // Priority 2: SOC target (simple proportional controller)
@@ -642,7 +650,7 @@ impl Battery {
             } else {
                 dc_power * self.discharge_efficiency
             };
-            return self.clamp_power(ac_power);
+            return self.clamp_power(ac_power, dr_fraction);
         }
 
         // Priority 3: self-consumption
@@ -654,12 +662,12 @@ impl Battery {
             if net_load_w > IDLE_POWER_THRESHOLD_W {
                 // Net load exceeds PV -- discharge to offset
                 let discharge = net_load_w.min(self.max_discharge_w);
-                return self.clamp_power(-discharge);
+                return self.clamp_power(-discharge, dr_fraction);
             } else if net_load_w < -IDLE_POWER_THRESHOLD_W {
                 // PV surplus -- charge from excess (regardless of solar_only flag,
                 // since we already know there's a PV surplus)
                 let charge = (-net_load_w).min(self.max_charge_w);
-                return self.clamp_power(charge);
+                return self.clamp_power(charge, dr_fraction);
             } else if self.solar_only_charging {
                 // No PV surplus and solar-only mode -- do not charge from grid
                 return Ok(0.0);
@@ -673,17 +681,20 @@ impl Battery {
     ///
     /// Positive = charging (grid import), negative = discharging (grid export).
     ///
+    /// `dr_fraction` is the demand-response dispatch fraction the caller
+    /// resolved: 1.0 while islanded (a DR shed curtails grid interchange,
+    /// and an island has none to curtail), `dr_power_fraction()` otherwise.
+    ///
     /// `import_limit_w` caps the charge power (grid → battery).
     /// `export_limit_w` caps the discharge power (battery → grid).
     ///
     /// OCHRE `Generator.get_power_limits` + Battery schedule inputs
     /// `Battery Max Import Limit (kW)` / `Battery Max Export Limit (kW)`.
-    fn clamp_power(&mut self, power_w: f64) -> crate::Result<f64> {
+    fn clamp_power(&mut self, power_w: f64, dr_fraction: f64) -> crate::Result<f64> {
         let temp_derate = self
             .capacity_derate_model
             .evaluate(self.cell_temp_c)
             .clamp(0.0, 1.0);
-        let dr_fraction = self.dr_power_fraction();
         if power_w > 0.0 {
             // One temperature-dependent effect on charge capability, applied
             // once: a configured charging-curve LUT's temperature axis IS the
@@ -1216,12 +1227,16 @@ impl Equipment for Battery {
         // The battery can island the home when it is grid-connected and able
         // to discharge: SOC above its effective floor (physical min narrowed
         // by any SOC-target window), hardware discharge capability, cell
-        // temperature above the discharge cutoff, and DR not commanding a
-        // full shed. `grid_forming` (default true) gates grid-following-only
-        // inverters that cannot form an island bus even when dischargeable.
-        // A latched IEEE 1547 trip means the inverter has ceased to
-        // energize: it cannot hold the bus up, so an island founded on it
-        // would run every load on phantom power.
+        // temperature above the discharge cutoff. `grid_forming` (default
+        // true) gates grid-following-only inverters that cannot form an
+        // island bus even when dischargeable. A latched IEEE 1547 trip
+        // means the inverter has ceased to energize: it cannot hold the bus
+        // up, so an island founded on it would run every load on phantom
+        // power. A DR shed is deliberately not consulted: it is a
+        // grid-supporting curtailment of grid interchange, and the
+        // islanding function is grid-forming (IEEE 1547-2018 separates the
+        // two), so a grid operator's shed must not reach through the outage
+        // gate and remove the only source serving the home.
         let soc_floor = self
             .soc_target_min
             .map(|v| v.max(self.min_soc))
@@ -1231,22 +1246,13 @@ impl Equipment for Battery {
             && self.max_discharge_w > 0.0
             && self.soc > soc_floor
             && self.discharge_derate_factor() > 0.0
-            && self.dr_power_fraction() > 0.0
             && !self
                 .der1547
                 .as_ref()
                 .is_some_and(|controller| controller.state().tripped)
     }
 
-    fn update_control(&mut self, env: &EnvironmentState) -> OperatingMode {
-        // DR duration countdown: auto-revert to Normal when timer expires.
-        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
-            *remaining -= env.time_res.num_seconds() as f64;
-            if *remaining <= 0.0 {
-                self.dr_level = DRLevel::Normal;
-                self.dr_duration_remaining_s = None;
-            }
-        }
+    fn update_control(&mut self, _env: &EnvironmentState) -> OperatingMode {
         self.mode
     }
 
@@ -1269,13 +1275,15 @@ impl Equipment for Battery {
         let net_load_w = ports.electrical.net_active_w();
 
         // Grid outage with a de-energized bus: the battery can neither charge
-        // (nothing on the bus to charge from) nor dispatch — if it *could*
-        // discharge, it would be the island source and the bus would be
-        // energized (see `island_source_available`), so a dead bus implies
-        // this battery is empty/cold/disconnected. Standby electronics and
-        // the cell heater lose their supply too (gated below). During
-        // islanded operation the bus is energized and dispatch proceeds
-        // normally. See docs/outage-behavior.md.
+        // (nothing on the bus to charge from) nor dispatch (nothing to
+        // deliver into). A dead bus during an outage is either the island's
+        // formation lag (its first step, before the source holds the bus) or
+        // a battery that cannot serve (empty, cold, disconnected,
+        // grid-following, or a latched IEEE 1547 trip); either way the
+        // dispatch is 0 W this step.
+        // Standby electronics and the cell heater lose their supply too
+        // (gated below). During islanded operation the bus is energized and
+        // dispatch proceeds normally. See docs/outage-behavior.md.
         let bus_dead = !env.grid.bus_energized();
 
         // An unavailable period zeroing the battery's rows (`Power Outage`:
@@ -1287,8 +1295,20 @@ impl Equipment for Battery {
         let period_idle = env.unavailable_periods.zeroes_battery();
 
         // -- Determine target power --
+        // While islanded (the utility out, the bus energized by an island
+        // source) the DR fraction does not scale the dispatch: a DR shed
+        // curtails grid interchange, and the island's internal balance is
+        // not grid interchange, the same separation that keeps a shed
+        // from withdrawing island availability
+        // (`island_source_available`).
+        let islanded = env.grid.grid_outage() && !bus_dead;
+        let dr_fraction = if islanded {
+            1.0
+        } else {
+            self.dr_power_fraction()
+        };
         let mut target_power_w = if self.grid_connected && !bus_dead && !period_idle {
-            self.determine_target_power(net_load_w, dt_hours)?
+            self.determine_target_power(net_load_w, dt_hours, dr_fraction)?
         } else {
             0.0
         };
@@ -1427,7 +1447,7 @@ impl Equipment for Battery {
             // the layer's inputs already carry) governs what is delivered,
             // exactly as it governs the model's own target, and exactly as
             // the discharge derate governs the export leg below.
-            target_power_w = self.clamp_power(target_power_w)?;
+            target_power_w = self.clamp_power(target_power_w, dr_fraction)?;
         }
 
         // -- Islanded charge clamp: no phantom grid import during an outage --
@@ -1837,6 +1857,18 @@ impl Equipment for Battery {
             performance: CorePerformance::default(),
         };
 
+        // Advance the DR duration once per step, at the step's end: the
+        // duration names the steps the event covers, so the step whose
+        // interval it covers stays curtailed and the release lands on the
+        // next step's control pass.
+        if let Some(remaining) = self.dr_duration_remaining_s.as_mut() {
+            *remaining -= dt_s;
+            if *remaining <= 0.0 {
+                self.dr_level = DRLevel::Normal;
+                self.dr_duration_remaining_s = None;
+            }
+        }
+
         Ok(())
     }
 
@@ -2196,8 +2228,9 @@ impl Equipment for Battery {
                 self.q_setpoint_var = None;
             }
             ControlSignal::DemandResponse { level, duration_s } => {
-                self.dr_level = *level;
-                self.dr_duration_remaining_s = *duration_s;
+                let (level, duration_s) = demand_response_command(*level, *duration_s);
+                self.dr_level = level;
+                self.dr_duration_remaining_s = duration_s;
             }
             _ => {
                 return Err(HaresError::Control(format!(
@@ -2436,7 +2469,9 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
         ),
         TelemetryField::ratio(
             tk::DR_POWER_FRACTION,
-            "Demand response power scaling factor [0..1]",
+            "The demand response level's power fraction [0..1]: the factor the \
+             event commands for grid interchange. While islanded the dispatch \
+             is not scaled by it (an island has no interchange to curtail)",
         ),
         TelemetryField::code_code(
             tk::DR_LEVEL,
@@ -4360,7 +4395,11 @@ mod tests {
     }
 
     /// `island_source_available` reflects dischargeability: SOC above the
-    /// floor and grid-connected → available; disconnected → not.
+    /// floor and grid-connected → available; disconnected → not. A DR
+    /// full shed does not withdraw availability: the shed is a
+    /// grid-supporting curtailment of grid interchange, and the
+    /// islanding function is grid-forming (IEEE 1547-2018 separates the
+    /// two).
     #[test]
     fn island_source_availability_tracks_soc_and_connection() {
         let config = battery_config(&[(KEY_MIN_SOC, 0.2), (KEY_INITIAL_SOC, 0.5)]);
@@ -4374,6 +4413,19 @@ mod tests {
         assert!(
             !bat.island_source_available(),
             "a disconnected battery cannot island the home"
+        );
+
+        bat.apply_control(&ControlSignal::GridConnect { connected: true })
+            .unwrap();
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3600.0),
+        })
+        .unwrap();
+        assert!(
+            bat.island_source_available(),
+            "a DR shed must not withdraw island availability: the shed is a \
+             grid-supporting curtailment and the pack still holds charge"
         );
     }
 
@@ -6405,6 +6457,431 @@ mod tests {
         );
     }
 
+    /// The DR duration is the timestep's clock: a four-step GridEmergency
+    /// sheds the four steps it names, not three. The timer advances once
+    /// per timestep at the step's end, so the step whose interval the
+    /// event covers is still shed; the step after recovers.
+    #[test]
+    fn dr_event_sheds_every_named_step() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(4.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        for step in 0..4 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+            let standby = DEFAULT_STANDBY_POWER_W;
+            assert!(
+                (power - standby).abs() < 10.0,
+                "step {step}: the event's four named steps must all hold the \
+                 commanded discharge at standby, got {power} W"
+            );
+        }
+
+        // The timestep after the event: the discharge resumes.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power < -1000.0,
+            "the event is over: the commanded 2 kW discharge must resume, \
+             got {power} W"
+        );
+    }
+
+    /// The countdown accumulates across a long event: a ten-step
+    /// GridEmergency sheds all ten steps its duration names, and the
+    /// eleventh releases. The four-step witness pins the one-step-early
+    /// boundary; this pins the accumulation over an event long enough for
+    /// a per-pass or per-dispatch drift to move the release off the named
+    /// step.
+    #[test]
+    fn dr_event_sheds_ten_named_steps_across_the_accumulated_countdown() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(10.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        for step in 0..10 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+            let standby = DEFAULT_STANDBY_POWER_W;
+            assert!(
+                (power - standby).abs() < 10.0,
+                "step {step}: the event's ten named steps must all hold the \
+                 commanded discharge at standby, got {power} W"
+            );
+        }
+
+        // The eleventh step releases the event: the discharge resumes with
+        // the ten dead steps counted toward the duration the signal named.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power < -1000.0,
+            "the event is over after its ten named steps: the commanded 2 kW \
+             discharge must resume, got {power} W"
+        );
+    }
+
+    /// A duration between two timesteps covers every step whose interval
+    /// overlaps the window, and a partial final overlap sheds the step in
+    /// full. The fixture's step is `step_s`, and the event lasts 1.25 of
+    /// them: the window overlaps the second step by a quarter step, which
+    /// is still an overlap, so the second step sheds and the release lands
+    /// on the third step's control pass. A quarter step, not a half: the
+    /// half-step alternative (rounding the duration to the nearest whole
+    /// number of timesteps) sheds two steps at 1.5 and one at 1.25, so only
+    /// a window strictly inside the second step's first half separates the
+    /// overlap rule from rounding. The step's dispatch reads the level at
+    /// its start; the timer reverts at the step's end, never mid-dispatch.
+    #[test]
+    fn a_duration_between_steps_sheds_every_step_it_overlaps() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(1.25 * step_s as f64),
+        })
+        .expect("DR accepted");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        // Both overlapped steps shed in full: the event's window overlaps
+        // the second step's first quarter, and a partial overlap is a shed
+        // step (the advance runs at the step's end).
+        for step in 0..2 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+            let standby = DEFAULT_STANDBY_POWER_W;
+            assert!(
+                (power - standby).abs() < 10.0,
+                "step {step}: the event's window overlaps this step, so the \
+                 step sheds in full, got {power} W"
+            );
+        }
+
+        // The third step: the window is behind, the discharge resumes.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power < -1000.0,
+            "the 1.25-timestep event ({} s at {} s steps) is over after the \
+             two overlapped steps: the commanded 2 kW discharge must resume, \
+             got {power} W",
+            1.25 * step_s as f64,
+            step_s,
+        );
+    }
+
+    /// The countdown is a wall-clock contract: an outage does not pause
+    /// it. A dead-bus step (the outage's first step, before any island
+    /// forms) runs the battery's step to its end, where the timer
+    /// advances, so an event spanning the outage ends on the schedule its
+    /// duration named (docs/equipment/control-system.md: the timer
+    /// advances once per timestep, at the step's end). A countdown that
+    /// stalled on the dead-bus path would stretch the event by the
+    /// outage's length.
+    #[test]
+    fn dr_countdown_advances_through_a_dead_bus_step() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(4.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+
+        // Two of the event's four named steps fall in the outage: the bus
+        // is dead (no island forms in the unit fixture; the dwelling's
+        // formation lag is the islanding tests' surface), the battery's
+        // dispatch is zero, and the published fraction is the event's.
+        let mut dead = warm_env();
+        dead.grid.voltage_pu = 0.0;
+        dead.grid.island_bus_voltage_pu = None;
+        assert!(
+            !dead.grid.bus_energized(),
+            "fixture: the outage's bus is de-energized"
+        );
+        for step in 0..2 {
+            bat.update_control(&dead);
+            let mut ports = default_ports();
+            bat.step(&dead, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let published = bat
+                .telemetry()
+                .get(tk::DR_POWER_FRACTION)
+                .expect("the battery publishes its DR fraction");
+            assert_eq!(
+                published, 0.0,
+                "step {step}: the event is in force through the dead-bus step"
+            );
+            assert_eq!(
+                ports.electrical.net_active_w(),
+                0.0,
+                "step {step}: a dead bus means no dispatch"
+            );
+        }
+
+        // The grid returns for the event's last two named steps: still
+        // shed. The dead-bus steps consumed their share of the duration.
+        for step in 0..2 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let published = bat
+                .telemetry()
+                .get(tk::DR_POWER_FRACTION)
+                .expect("the battery publishes its DR fraction");
+            assert_eq!(
+                published, 0.0,
+                "step {step}: the event's remaining named steps shed after \
+                 the outage"
+            );
+        }
+
+        // The step after the event: Normal, the dead-bus steps counted
+        // toward the duration the signal named.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let published = bat
+            .telemetry()
+            .get(tk::DR_POWER_FRACTION)
+            .expect("the battery publishes its DR fraction");
+        assert_eq!(
+            published, 1.0,
+            "the event is over on schedule: the dead-bus steps counted \
+             toward the duration"
+        );
+    }
+
+    /// A zero-second event covers no step: the duration names the steps
+    /// the event sheds, and zero names none. The signal is legal (a finite
+    /// duration of at least zero), so it arrives as an event already over
+    /// rather than as a one-step shed of the step it lands in.
+    #[test]
+    fn a_zero_second_dr_event_sheds_no_step() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(0.0),
+        })
+        .expect("DR accepted");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+        assert!(
+            power < -1000.0,
+            "a zero-second event must not shed the step it lands in: the \
+             commanded 2 kW discharge must stand, got {power} W"
+        );
+    }
+
+    /// A second command supersedes the running one: its level applies and
+    /// its duration restarts from its arrival, so a resend extends the
+    /// event and a shorter command ends it early. The countdown is one
+    /// value, never a queue.
+    #[test]
+    fn a_second_dr_command_supersedes_the_running_countdown() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::PowerSetpoint {
+            active_power_w: -2000.0,
+            reactive_power_var: None,
+            min_soc: None,
+            max_soc: None,
+        })
+        .expect("setpoint");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(2.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+
+        // One of the first command's two named steps runs.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+
+        // A second command supersedes it: four fresh named steps.
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(4.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+        for step in 0..4 {
+            bat.update_control(&env);
+            let mut ports = default_ports();
+            bat.step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(f64::NAN);
+            let standby = DEFAULT_STANDBY_POWER_W;
+            assert!(
+                (power - standby).abs() < 10.0,
+                "step {step}: the second command's four named steps shed, \
+                 got {power} W"
+            );
+        }
+
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let power = bat.telemetry().get(tk::ACTIVE_POWER_KW).unwrap_or(0.0);
+        assert!(
+            power < -1000.0,
+            "the second command's duration governs: the discharge resumes \
+             after its four named steps, got {power} W"
+        );
+    }
+
+    /// The DR countdown is checkpoint state: the level and the remaining
+    /// duration ride `save_state`/`load_state` verbatim, so an event
+    /// spanning a checkpoint/restore boundary releases on the schedule
+    /// the duration named. A restore that dropped the countdown would
+    /// publish Normal on the first restored step; one that reset the
+    /// duration would release a step late.
+    #[test]
+    fn dr_event_countdown_survives_a_checkpoint_round_trip() {
+        let env = warm_env();
+        let step_s = env.time_res.num_seconds().max(1) as u64;
+        let config = battery_config(&[(KEY_INITIAL_SOC, 0.8)]);
+        let mut bat = Battery::new(config.clone());
+        bat.init(&config, &env).expect("init");
+        bat.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(3.0 * step_s as f64),
+        })
+        .expect("DR accepted");
+
+        // The first of the event's three named steps runs, then the
+        // checkpoint is taken: one step of the duration is consumed.
+        bat.update_control(&env);
+        let mut ports = default_ports();
+        bat.step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let published = bat
+            .telemetry()
+            .get(tk::DR_POWER_FRACTION)
+            .expect("the battery publishes its DR fraction");
+        assert_eq!(published, 0.0, "the event's first named step sheds");
+        let state = bat.save_state().expect("checkpoint");
+
+        let mut restored = Battery::new(config.clone());
+        restored.init(&config, &env).expect("init");
+        restored.load_state(&state).expect("restore");
+
+        // The event's last two named steps shed on the restored unit.
+        for step in 0..2 {
+            restored.update_control(&env);
+            let mut ports = default_ports();
+            restored
+                .step(&env, Duration::from_secs(step_s), &mut ports)
+                .expect("step");
+            let published = restored
+                .telemetry()
+                .get(tk::DR_POWER_FRACTION)
+                .expect("the battery publishes its DR fraction");
+            assert_eq!(
+                published, 0.0,
+                "step {step}: the restored countdown keeps the event in \
+                 force through its named steps"
+            );
+        }
+
+        // The step after: the release, on the schedule the duration
+        // named (the restore consumed nothing and added nothing).
+        restored.update_control(&env);
+        let mut ports = default_ports();
+        restored
+            .step(&env, Duration::from_secs(step_s), &mut ports)
+            .expect("step");
+        let published = restored
+            .telemetry()
+            .get(tk::DR_POWER_FRACTION)
+            .expect("the battery publishes its DR fraction");
+        assert_eq!(
+            published, 1.0,
+            "the restored event ends on the schedule its duration named"
+        );
+    }
+
     // ---------------------------------------------------------------
     // 4D LUT and Equipment trait LUT method tests
     // ---------------------------------------------------------------
@@ -6451,7 +6928,7 @@ mod tests {
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
         bat.set_charging_curve_lut(Some(lut)).unwrap();
-        let clamped = bat.clamp_power(5000.0).unwrap();
+        let clamped = bat.clamp_power(5000.0, 1.0).unwrap();
         let expected = 5000.0_f64 * 0.68;
         assert!(
             (clamped - expected).abs() < 1e-3,
@@ -6497,7 +6974,7 @@ mod tests {
         bat.capacity_j = 9.0 * 3.6e6 * CapacityDerateModel::default().evaluate(5.0);
         bat.set_charging_curve_lut(Some(lut)).unwrap();
 
-        let clamped = bat.clamp_power(5000.0).unwrap();
+        let clamped = bat.clamp_power(5000.0, 1.0).unwrap();
         assert!(
             (clamped - 5000.0).abs() < 1e-3,
             "the c-rate axis must see the SOH-adjusted, temperature-independent \
@@ -6751,7 +7228,7 @@ mod tests {
         bat.set_charging_curve_lut(Some(lut)).unwrap();
         bat.soc = 0.9;
 
-        let clamped = bat.clamp_power(5000.0).unwrap();
+        let clamped = bat.clamp_power(5000.0, 1.0).unwrap();
         assert!(
             clamped < 2000.0,
             "charge should be tapered at high SOC with LUT, got {clamped}"
@@ -6764,7 +7241,7 @@ mod tests {
         let mut bat = Battery::new(config);
         bat.soc = 0.5;
         // Without LUT, charge power should be near max (5 kW)
-        let clamped = bat.clamp_power(5.0).unwrap();
+        let clamped = bat.clamp_power(5.0, 1.0).unwrap();
         assert!(
             clamped > 4.0,
             "without LUT, charge should be near max, got {clamped}"
@@ -6797,11 +7274,11 @@ mod tests {
 
         // At 25C → power fraction 1.0, full power
         bat.cell_temp_c = 25.0;
-        let warm = bat.clamp_power(5000.0).unwrap();
+        let warm = bat.clamp_power(5000.0, 1.0).unwrap();
 
         // At -10C → power fraction 0.5, half power
         bat.cell_temp_c = -10.0;
-        let cold = bat.clamp_power(5000.0).unwrap();
+        let cold = bat.clamp_power(5000.0, 1.0).unwrap();
 
         assert!(
             cold < warm,
@@ -6818,7 +7295,7 @@ mod tests {
         bat.soc = 0.5;
 
         // Discharge (negative power) should not be affected by charging LUT
-        let clamped = bat.clamp_power(-5.0).unwrap();
+        let clamped = bat.clamp_power(-5.0, 1.0).unwrap();
         assert!(
             clamped < -4.0,
             "discharge should not be limited by charging LUT, got {clamped}"
@@ -6837,14 +7314,14 @@ mod tests {
             points: vec![(-20.0, 0.2), (25.0, 0.5)],
         };
 
-        let clamped = bat.clamp_power(-5000.0).unwrap();
+        let clamped = bat.clamp_power(-5000.0, 1.0).unwrap();
         assert!(
             (clamped - (-5000.0)).abs() < 1e-9,
             "discharge clamp_power should not apply capacity_derate_model; expected -5000.0 W, got {clamped}"
         );
 
         // Charge branch still uses capacity_derate_model (interpolates ~0.41 at -10C → 5000.0 * 0.41 ≈ 2050)
-        let charge_clamped = bat.clamp_power(5000.0).unwrap();
+        let charge_clamped = bat.clamp_power(5000.0, 1.0).unwrap();
         assert!(
             charge_clamped < 3000.0,
             "charge clamp_power should still apply capacity_derate_model, got {charge_clamped}"
