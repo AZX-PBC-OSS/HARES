@@ -1333,6 +1333,127 @@ below nominal, and free of the extrapolated stall class. No load class
 outside the recorded families keeps a turn: a deeper sag can never
 draw more.
 
+## The premise aggregate's weights are the components' nominal draws (the assembled normalization)
+
+The premise aggregate's `deep_sag_scale` is the number the stepping
+engine answers for the moment's composition: the weighting-draw-weighted
+mean of each governing equipment's own deep-sag response. The weight is
+the moment's consumption: a bidirectional flow contributes its positive
+part, and a generation report contributes nothing (a load exporting
+draws no power). A report that violates its own flow's contract (a
+negative consumption, a generation value outside the non-negative export
+range, a non-finite value) is broken core state rather than a report of
+zero: its own `net_consumption_w` may read a negative export as a
+consumption, so it carries no weight and no expectation stands in for
+it. For an
+equipment whose draw is scaled through a single resolved row, that
+response is the row's evaluation and un-scaling the stepped draw through
+the same row recovers the reference draw to within the rounding of one
+division (the double round-trip is exact for many pairs but not for every
+one, so the aggregate's single-row weight carries a one-ulp bound, not a
+bit-for-bit identity). For a multi-component unit (an air conditioner's
+compressor, blower and crankcase heater; a heat-pump water heater's
+compressor, backup element and fan/parasitic; a dehumidifier's on-cycle
+draw and off-cycle parasitic; the electric furnace and
+boiler's element and blower/pump; the heat pump's compressor, fan, pump
+and resistive elements) each component evaluates its OWN row or its own
+flat response, so no single published row un-scales the blend: the unit's
+weight is the components' nominal draw (each final scaled component
+un-scaled through the row that scaled it) and its response is the
+components' actual evaluated draws over the components' nominal draws. The premise
+aggregate reads the unit's reported nominal draw
+(`Equipment::nominal_electric_draw_w`) and answers the assembled ratio.
+The form, the source: the units' own scaling sites (the deep-sag entry's
+completion, above); the alternative rejected: normalizing the blended
+draw by the primary row's polynomial, which published the compressor
+row's 1.145 for an air-conditioner moment whose assembled response is
+1.01333 (1000 W compressor at 1.145 plus 200 W blower at 0.355 over
+1200 W nominal, a 13 percent overstatement) and the heat-pump water
+heater row's 0.60125 for a backup-only moment whose response is the
+backup element's impedance share 0.25 (P = V²/R, a 2.4 times
+overstatement); a feeder study reading the aggregate at a deep sag
+would state a response the engine does not answer. At the reference
+voltage every multiplier is exactly 1.0, so the assembled response is
+the identity and no committed golden moves.
+
+Why the single-row bound is one ulp and not the generic two-rounding
+bound of two: the stepped draw is the reference draw scaled once
+(`fl(x*m)`, one rounding within the unit roundoff 2^-53 of the true
+product) and the un-scale divides the same multiplier out (a second
+rounding). The exact quotient `fl(x*m)/m = x*(1 + d)` with
+`|d| <= 2^-53` sits strictly inside one ulp of the reference draw
+(`x*2^-53 < ulp(x)` for x in its binade, since x < 2^(e+1) there), and
+rounding that quotient to nearest can only land on the reference draw
+or one of its immediate neighbours: the intermediate error is bounded
+by the product's half-ulp, not by a half-ulp of the result, so the two
+roundings cannot compose to two ulps of x. The preconditions are a
+normal product and quotient (subnormal rounding carries unbounded
+relative error): the stated draws and the band's multipliers (0.25 to
+2.25) keep every product and quotient between 0.125 W and 2.25e5 W,
+comfortably normal, which is what the range pin sweeps.
+
+The base the aggregate divides by is the reference-voltage draw of the
+operating state the step ran, so it carries the control composition the
+step applied: duty cycle, load fraction, the served space fraction, a
+commanded flat power, and an active power limit (the capped reference
+draw, not the nameplate rating). The base is what the same controls draw
+at the reference voltage whichever side of the voltage multiplier an
+implementation applies them: the air conditioner caps its rated draw
+before the voltage response, while the heat pump heater clamps its
+already-scaled draw (the cap holds the final watts), so its base replays
+the shed-then-cap composition on the nominal components and a cap that
+binds at every voltage reports the identity response, not the uncapped
+blend. A scheduled load's `PowerSetpoint` override commands real power
+and is not row-scaled, so its base is the commanded draw and its response
+is exactly 1.0. The aggregate accepts a base only when it is finite and
+positive; any other report falls back to the row's single-row
+evaluation.
+
+On an energized bus a row evaluation that is not finite and positive is
+also a draw the bus cannot supply: the classes that publish an
+expectation (the scheduled and event loads) scale their reference draw by
+the row and report the draw clamped at zero, so the expectation carries
+no weight and the aggregate weights only loads whose response is a
+positive multiplier. A published `deep_sag_scale` is therefore always a
+positive, finite multiplier, and the near-dead bus (the 0.01 pu edge of
+the de-energized boundary) degrades to `None` exactly as the 0.0 pu
+outage does when no load keeps a positive response. A stepped report
+that is not a draw (a negative watt value, violating
+`ElectricPower::Consumption`'s non-negative invariant, or a non-finite
+one from a broken core state) is no evidence of an observed zero either:
+the roster publishes no weight for it (the unknown-mean semantics) and
+no expected mean stands in for a stepped moment, so a broken report
+never fabricates an "inspected and empty" zero. The same holds for a
+positive report whose assembled response is not a finite positive ratio
+(a report that dwarfs its base, or a base that dwarfs the report): the
+base's acceptance rule bounds the base, not the ratio, and such a moment
+carries no weight rather than its expected mean.
+
+## The pf = 0.0 sentinel is a reactive-only switch (the secondary real response keeps its row)
+
+The `pf = 0.0` sentinel means "no reactive ZIP configured" and scopes
+to the reactive side of the whole unit: the primary component's Q (its
+row's own pf is the sentinel) and every secondary fan/pump component's
+Q (`secondary_motor_zip` substitutes the constant-power row into the
+reactive sums). Real power is outside the sentinel's meaning: a
+secondary fan/pump's real response evaluates its own physical
+component row (`FAN_MOTOR_ZIP` / `LOOP_PUMP_ZIP`, as fitted), the
+sentinel or not. The form, the source: the units' own scaling sites
+and the component-assignment contract in
+`docs/equipment/power-factor.md`; the alternative rejected: letting
+the sentinel's constant-power substitution reach the secondary real
+multiplier, which flattened the fan and pump real responses to the
+identity at every voltage (0.355 became 1.0 at 0.5 pu) while the
+unit's `resolved_zip` still declared a governing real response; a
+user disabling reactive power with the documented sentinel silently
+lost the blower's and loop pump's deep-sag response, a Q-only flag
+changing real power. A unit sidecar carrying the sentinel is validated
+on its real sum alone (the reactive sum is unconstrained when pf = 0),
+so the flattening was reachable by configuration. The sentinel or
+not, the secondary's row is unchanged whenever the unit's pf is
+nonzero, so no energized 1.0 pu fixture moves and no committed golden
+moves.
+
 ## The frequency channel is read by nothing (the named gap)
 
 The grid-signal channel's frequency input is accepted, validated and

@@ -1417,28 +1417,53 @@ impl PyDwelling {
     /// coefficients genuinely govern their real power (scheduled and event
     /// loads, and the typed physics equipment whose rows scale their
     /// physics-computed draws). The weights are the moment's raw draws when
-    /// the dwelling has stepped (each equipment's last electric draw,
-    /// un-scaled through its own row at the bus voltage (the moment's
-    /// composition), else the expected mean draw over the loaded schedule
-    /// data.
+    /// the dwelling has stepped (each equipment's last electric draw: a
+    /// consumed value, a bidirectional flow's positive part, or zero for a
+    /// valid generation report; a value outside its flow's contract is
+    /// broken and carries no weight; un-scaled through its assembled
+    /// deep-sag response at the bus voltage (the equipment's own nominal
+    /// draw when it reports one: a
+    /// multi-component unit, or a state its row does not scale such as a
+    /// commanded power override; the resolved row's un-scale otherwise, the
+    /// moment's composition)), else the expected mean draw over the loaded
+    /// schedule data.
     ///
     /// Returns a dict with keys ``zp``/``ip``/``pp``/``zq``/``iq``/``pq``/
     /// ``pf``/``v0`` (the aggregate coefficients; the real side sums to 1,
     /// the reactive side is a first-order aggregate),
     /// ``real_power_zip_applies`` (always ``True`` — the aggregate describes
     /// the governing mix), ``deep_sag_scale`` (the assembled governed
-    /// response at the current bus voltage: the weighting-draw-weighted
-    /// mean of the governing rows' deep-sag multipliers, each row evaluated
-    /// through its recorded deep-sag form: the number the stepping engine
-    /// answers for the moment's composition; ``None`` when no governing
-    /// equipment carried a positive weight),
+    /// response at the current bus voltage: the weighting-draw-weighted mean
+    /// of each governing equipment's own deep-sag response: the
+    /// components' actual evaluated draws over the components' nominal
+    /// draws for a stepped multi-component unit, the resolved row's
+    /// recorded deep-sag form for a row-scaled step, the flat identity for
+    /// a step the row does not scale (a commanded power override): the
+    /// number the stepping engine answers for the moment's composition;
+    /// ``None`` when no governing equipment carried a positive weight),
     /// ``governing_equipment`` (list of
     /// ``{"name": str, "mean_power_w": float | None}`` -- equipment
     /// included in the aggregate with its weighting draw in watts;
-    /// ``None`` marks equipment whose weight is not computable, which
-    /// contributes no weight), and ``constant_power_equipment`` (list of
+    /// ``0.0`` is an observed zero draw (the moment was inspected and the
+    /// load drew nothing, the de-energized boundary included); ``None``
+    /// marks equipment whose weight is not computable, which contributes
+    /// no weight), and ``constant_power_equipment`` (list of
     /// names whose real power is DER-controller-driven and therefore
     /// voltage-invariant by construction (battery, EV, PV).
+    ///
+    /// At the de-energized boundary (the admitted 0.0 pu outage value) the
+    /// aggregate reports the de-energized state: a load that stepped and
+    /// drew zero carries that zero weight, no expected mean stands in for
+    /// any load, and the aggregate is ``None``: the engine draws zero from
+    /// every load on a de-energized bus. On an energized bus whose voltage
+    /// a load's row cannot draw at (a non-positive evaluation, the
+    /// near-dead edge) that load's expectation carries no weight either,
+    /// and ``deep_sag_scale`` is always a positive finite multiplier when
+    /// reported. A stepped report whose assembled response is not a finite
+    /// positive ratio (a broken sensor value, or a report and base of
+    /// different magnitudes) carries no weight and never its expected
+    /// mean: an expectation is pre-step evidence and stands in only for a
+    /// load that reported no draw.
     ///
     /// ``None`` when no ZIP-governing equipment has a computable positive
     /// weight; never a silent constant-power answer. Pure

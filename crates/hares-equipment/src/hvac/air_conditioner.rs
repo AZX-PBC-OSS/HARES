@@ -105,6 +105,12 @@ pub(super) struct CoolingCore {
     /// for the borehole heat-rejection balance, which pairs it with the gross
     /// (unscaled) coil sensible/latent values.
     pub(super) last_compressor_w: f64,
+    /// The moment's nominal component draw of the most recent step (W, the
+    /// components' pre-scaling sum at the reference voltage, space fraction
+    /// included): the premise aggregate's weight for this unit, which
+    /// un-scales the stepped draw through the assembled response it
+    /// reports. `None` when the step drew nothing.
+    pub(super) last_nominal_draw_w: Option<f64>,
     flow_fraction_correction: f64,
     coil_ao_by_stage: Vec<f64>,
     is_room_ac: bool,
@@ -166,8 +172,11 @@ pub(super) struct CoolingCore {
     /// form (as fitted: the recorded Hajagos & Danai row); Q comes from
     /// `ZipLoad::reactive_var` per component (see `hvac::reactive`).
     zip: hares_types::zip::ResolvedZip,
-    /// Indoor blower / condenser fan motor component ZIP (pf 0.87), derived
-    /// at init via `hvac::reactive::secondary_motor_zip`.
+    /// The indoor blower / condenser fan motor component's REACTIVE row
+    /// (pf 0.87), derived at init via `hvac::reactive::secondary_motor_zip`:
+    /// the reactive sum's surface, the unit-level pf = 0.0 sentinel
+    /// included. The blower's REAL response never consults this row; it
+    /// evaluates the physical `hvac::reactive::FAN_MOTOR_ZIP` row.
     fan_zip: hares_types::zip::ZipLoad,
 }
 
@@ -190,6 +199,10 @@ struct AirConditionerState {
     last_speed_index: usize,
     last_speed_frac: f64,
     electric_w: f64,
+    /// The moment's assembled base (the components' pre-scaling draw), the
+    /// pair to `electric_w`: the premise aggregate un-scales the
+    /// checkpointed draw through it, so the two faces travel together.
+    last_nominal_draw_w: Option<f64>,
     sensible_cooling_w: f64,
     latent_cooling_w: f64,
     /// The last cooling step's SHR, `None` while the unit has never cooled:
@@ -225,7 +238,9 @@ struct AirConditionerState {
 // Version 5: `shr` became `Option<f64>`: `None` until the unit's first
 // cooling step, so the restore writes the telemetry key only when a cooled
 // step produced a value and a restored never-cooled unit's map matches a
-// continuously-run one's instead of gaining a 1.0 sentinel key.
+// continuously-run one's instead of gaining a 1.0 sentinel key. Also added
+// `last_nominal_draw_w`, the assembled base that un-scales the checkpointed
+// moment draw for the premise aggregate.
 const AC_CHECKPOINT_VERSION: u32 = 5;
 
 #[derive(Clone, Copy)]
@@ -386,6 +401,10 @@ impl Equipment for AirConditioner {
         Some(self.core.zip)
     }
 
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.core.last_nominal_draw_w
+    }
+
     fn save_state(&self) -> crate::Result<Vec<u8>> {
         self.core.save_state()
     }
@@ -489,6 +508,10 @@ impl Equipment for RoomAC {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
         Some(self.core.zip)
+    }
+
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.core.last_nominal_draw_w
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -689,6 +712,7 @@ impl CoolingCore {
             crankcase_capacity_curve: None,
             last_cooling_rtf: 0.0,
             last_compressor_w: 0.0,
+            last_nominal_draw_w: None,
             flow_fraction_correction: 1.0,
             coil_ao_by_stage: vec![10.0],
             is_room_ac,
@@ -1388,10 +1412,29 @@ impl CoolingCore {
         // result (the two multiplications commute).
         let bus_voltage_pu = env.grid.bus_voltage_pu();
         let motor_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
-        let fan_multiplier =
-            super::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
+        // The blower's real response evaluates the physical fan-motor row
+        // (the sentinel or not: pf = 0.0 is reactive-only and must never
+        // flatten it); the sentinel-substituted `fan_zip` row is the
+        // reactive sum's surface only.
+        let fan_multiplier = super::reactive::secondary_motor_real_multiplier(
+            &super::reactive::FAN_MOTOR_ZIP,
+            bus_voltage_pu,
+        );
         let v_norm = bus_voltage_pu / self.zip.v0;
         let resistive_multiplier = v_norm * v_norm;
+        // The moment's nominal component draw: the components' pre-scaling
+        // sum, the composition the scaled sum below evaluates through their
+        // own rows (the compressor and fan motors through their recorded
+        // rows, the crankcase heater through the impedance share). The
+        // premise aggregate weights this unit by it and answers the
+        // assembled response, the scaled sum over it. The state whose
+        // reference draw this is carries the control composition the step
+        // applied: duty cycle and load fraction, and an active power limit
+        // (the compressor and fan were scaled by `thermal_ratio` above), so
+        // under a limit the base is the capped reference draw, not the
+        // nameplate rating: the step's own reference-voltage draw.
+        let nominal_component_w = (compressor_w + fan_w + self.crankcase_heater_w) * sf;
+        let last_nominal_draw_w = (nominal_component_w > 0.0).then_some(nominal_component_w);
         let compressor_w = compressor_w * motor_multiplier;
         let fan_w = fan_w * fan_multiplier;
         let crankcase_w = self.crankcase_heater_w * resistive_multiplier;
@@ -1585,6 +1628,9 @@ impl CoolingCore {
             post_dse_sensible_w + post_dse_latent_w,
             &mut self.telemetry,
         )?;
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = last_nominal_draw_w;
         let active_setpoint_c = match original_mode {
             OperatingMode::Cooling => sp.cooling_c,
             OperatingMode::Heating => sp.heating_c,
@@ -2046,6 +2092,7 @@ impl CoolingCore {
                 last_speed_index: self.hvac.runtime.last_speed_index,
                 last_speed_frac: self.hvac.runtime.last_speed_frac,
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                last_nominal_draw_w: self.last_nominal_draw_w,
                 sensible_cooling_w: self.telemetry.get(tk::SENSIBLE_COOLING_W).unwrap_or(0.0),
                 latent_cooling_w: self.telemetry.get(tk::LATENT_COOLING_W).unwrap_or(0.0),
                 // The key's presence is the cooled marker: an absent key
@@ -2099,6 +2146,14 @@ impl CoolingCore {
         self.hvac.runtime.plf_state = decoded.plf_state;
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
+        // The moment's assembled base restores with the draw it un-scales:
+        // the checkpoint publishes that draw, so a restored read divides by
+        // the same composition the checkpoint ran. A non-finite or
+        // non-positive report is no base (the aggregate's own acceptance
+        // rule), never a division by a broken checkpoint value.
+        self.last_nominal_draw_w = decoded
+            .last_nominal_draw_w
+            .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0);
         // The restored state's SHR is `None` until the unit's first cooling
         // step, as the continuous path's is: the last computed value rides
         // only when a cooled step produced one, and a never-cooled unit
@@ -3382,7 +3437,10 @@ mod tests {
     /// unit that cooled earlier must leave the never-cooled key set. The
     /// saved map is the contract; a key the blob never registered must not
     /// survive from the pre-restore run, or the same blob restores two
-    /// different maps depending on the target's history.
+    /// different maps depending on the target's history. The blob's
+    /// assembled base rides the same rule: the never-cooled source has
+    /// none, so the target's pre-restore base must not survive beside the
+    /// dropped key.
     #[test]
     fn restore_into_a_previously_cooled_unit_drops_the_stale_shr_key() {
         let cfg = ac_config();
@@ -3401,6 +3459,10 @@ mod tests {
             source.telemetry().get(tk::SHR).is_none(),
             "the source must never have cooled"
         );
+        assert!(
+            source.nominal_electric_draw_w().is_none(),
+            "fixture: the never-cooled source reports no assembled base"
+        );
         let state = source.save_state().unwrap();
 
         // The target: it cooled before the restore, so its map holds the
@@ -3416,6 +3478,10 @@ mod tests {
             target.telemetry().get(tk::SHR).is_some(),
             "the target must hold the key before the restore"
         );
+        assert!(
+            target.nominal_electric_draw_w().is_some(),
+            "fixture: the cooled target holds an assembled base before the restore"
+        );
 
         target.load_state(&state).unwrap();
         assert!(
@@ -3426,6 +3492,11 @@ mod tests {
         assert!(
             !target.telemetry().0.keys().any(|key| key == tk::SHR),
             "the restored key set must not carry the pre-restore shr key"
+        );
+        assert!(
+            target.nominal_electric_draw_w().is_none(),
+            "the restored base is the checkpoint's: the never-cooled blob \
+             carries none, so the pre-restore base must not survive"
         );
     }
 
@@ -3888,6 +3959,269 @@ mod tests {
         assert!(
             (p_half - p_nominal).abs() > 0.05 * p_nominal,
             "the pinned flat line must be gone: {p_half} vs {p_nominal}"
+        );
+    }
+
+    /// Z2's witness: the unit's reported nominal draw is its components'
+    /// pre-scaling sum, so a multi-component moment's premise weight and
+    /// `deep_sag_scale` are the assembled ones. The nominal run's total
+    /// draw *is* the nominal (every multiplier is exactly 1.0 at the
+    /// reference voltage) and its telemetry components are the nominal
+    /// component draws; each component evaluates its own row at 0.5 pu
+    /// (the compressor row as fitted: 1.6 x 0.25 - 2.69 x 0.5 + 2.09 =
+    /// 1.145; the fan row: 0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.355; the
+    /// crankcase heater the impedance share, 0.25). The premise aggregate
+    /// that un-scales the unit's total through the compressor row alone
+    /// (the parent's normalization) would weight this composition
+    /// 1062 W against the true 1200 W-class nominal and publish 1.145
+    /// against the assembled response.
+    #[test]
+    fn reported_nominal_draw_is_the_components_pre_scaling_sum() {
+        let cfg = ac_config_with(|typed| {
+            typed.startup_cd = None;
+        });
+        let environment = env_at_second(27.0, 35.0, 0);
+
+        let run = |voltage_pu: f64| -> AirConditioner {
+            let mut env_run = env_at_second(27.0, 35.0, 0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let component_w = |eq: &AirConditioner, key: &str| {
+            let w = eq.telemetry().get(key).unwrap_or(f64::NAN);
+            assert!(w.is_finite(), "fixture: {key} must be finite");
+            w
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let nominal_total = component_w(&nominal_unit, tk::ELECTRIC_KW);
+        assert!(nominal_total > 0.0, "fixture: the unit must run");
+
+        // The reported nominal draw: the components' pre-scaling sum, the
+        // nominal run's own total draw.
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_total).abs() < 1e-6 * nominal_total,
+            "the reported nominal draw must be the components' pre-scaling \
+             sum ({nominal_total}), got {reported_nominal}"
+        );
+
+        // The assembled response: the hand computation over the components'
+        // own rows, and the stepped run's total must evaluate it.
+        let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
+        let fan_n = component_w(&nominal_unit, tk::FAN_KW);
+        let crank_n = component_w(&nominal_unit, tk::CRANKCASE_KW);
+        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let fan_row = hares_types::zip::zip_defaults_for_class("Ventilation Fan").expect("row");
+        let m_compressor = ac_row.zp * 0.25 + ac_row.ip * 0.5 + ac_row.pp;
+        let m_fan = fan_row.zp * 0.25 + fan_row.ip * 0.5 + fan_row.pp;
+        let m_resistive = 0.25; // the crankcase heater: P = V²/R
+        let nominal_component_w = compressor_n + fan_n + crank_n;
+        let expected_scaled = compressor_n * m_compressor + fan_n * m_fan + crank_n * m_resistive;
+        let expected_response = expected_scaled / nominal_component_w;
+        let sag_total = component_w(&sag_unit, tk::ELECTRIC_KW);
+        assert!(
+            (sag_total - expected_scaled).abs() < 1e-6 * expected_scaled,
+            "the 0.5 pu draw must be the components' own row evaluations \
+             ({expected_scaled}), got {sag_total}"
+        );
+        let reported_response = sag_total / reported_nominal;
+        assert!(
+            (reported_response - expected_response).abs() < 1e-9,
+            "the assembled response must be the hand computation \
+             {expected_response}, got {reported_response} (the compressor \
+             row alone evaluates {m_compressor})"
+        );
+    }
+
+    /// The assembled base is part of the moment a checkpoint restores: the
+    /// checkpointed step publishes its electric draw, so the base that
+    /// un-scales it must travel in the same blob. Without the base a
+    /// restored unit's premise read un-scales the checkpointed composition
+    /// through the compressor row (the parent's dishonest answer for a
+    /// multi-component moment) or, restored into a used instance, divides
+    /// the checkpointed draw by the pre-restore step's base: the published
+    /// response is then a function of the restore path, not of the state.
+    #[test]
+    fn checkpoint_restores_the_assembled_base_of_the_moment() {
+        let cfg = ac_config_with(|typed| {
+            typed.startup_cd = None;
+        });
+        let environment = env_at_second(27.0, 35.0, 0);
+
+        let run = |voltage_pu: f64, load_fraction: Option<f64>| -> AirConditioner {
+            let mut env_run = env_at_second(27.0, 35.0, 0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            if let Some(fraction) = load_fraction {
+                // A one-step control multiplier: the step composes it into
+                // the base and consumes it.
+                eq.apply_control(&ControlSignal::LoadFraction { fraction })
+                    .unwrap();
+            }
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &AirConditioner| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the unit must report its draw, got {other:?}"),
+        };
+
+        let half = run(0.5, Some(0.5));
+        let half_base = half
+            .nominal_electric_draw_w()
+            .expect("the composed step reports its base");
+        let half_draw = draw(&half);
+        let half_shr = half
+            .telemetry()
+            .get(tk::SHR)
+            .expect("the cooling step registers the shr key");
+        let blob = half.save_state().expect("checkpoint");
+
+        // A fresh instance restores the base with the draw the blob
+        // carries: one moment, one pair of faces.
+        let mut fresh = AirConditioner::new(cfg.clone());
+        fresh.init(&cfg, &environment).unwrap();
+        fresh.load_state(&blob).unwrap();
+        assert_eq!(
+            fresh.nominal_electric_draw_w(),
+            Some(half_base),
+            "the checkpoint publishes the moment's draw, so it must restore \
+             the base that un-scales it"
+        );
+        assert_eq!(
+            draw(&fresh).to_bits(),
+            half_draw.to_bits(),
+            "fixture: the restored draw is the checkpointed draw"
+        );
+        assert_eq!(
+            fresh.telemetry().get(tk::SHR),
+            Some(half_shr),
+            "the restore carries the checkpointed shr beside the base: the \
+             two faces travel in the same blob"
+        );
+
+        // A used instance's pre-restore base is not the checkpoint's: the
+        // restore must replace it, never keep it.
+        let mut used = run(0.5, None);
+        assert_ne!(
+            used.nominal_electric_draw_w(),
+            Some(half_base),
+            "fixture: the full-composition base differs from the half"
+        );
+        used.load_state(&blob).unwrap();
+        assert_eq!(
+            used.nominal_electric_draw_w(),
+            Some(half_base),
+            "a restore replaces the base: the pre-restore step's base must \
+             not survive"
+        );
+        assert_eq!(
+            used.telemetry().get(tk::SHR),
+            Some(half_shr),
+            "a restore replaces the shr too: the pre-restore step's value \
+             must not survive beside the replaced base"
+        );
+    }
+
+    /// Z4's witness: the `pf = 0.0` sentinel is a reactive-only switch.
+    /// The attack's scenario: a unit sidecar carrying the pump row's real
+    /// side with the sentinel (zp 0.72, ip -0.98, pp 1.26, pf 0.0) is
+    /// accepted by validate_zip_sums (the real sum is 1.0; the reactive
+    /// sum is unconstrained when pf = 0). At 0.5 pu the compressor follows
+    /// the sidecar row as fitted (0.72 x 0.25 - 0.98 x 0.5 + 1.26 = 0.95)
+    /// and the indoor blower follows the physical fan row (0.26 x 0.25 +
+    /// 0.9 x 0.5 - 0.16 = 0.355); at the parent the sentinel's
+    /// constant-power substitution flattened the blower to 1.0 while the
+    /// unit's resolved_zip still declared a governing real response. The
+    /// whole unit's Q is exactly zero: the sentinel's own meaning.
+    #[test]
+    fn pf_zero_sentinel_is_reactive_only_and_keeps_the_blower_row() {
+        let mut cfg = ac_config_with(|typed| {
+            typed.startup_cd = None;
+        });
+        cfg.zip = Some(hares_types::zip::ZipLoad {
+            zp: 0.72,
+            ip: -0.98,
+            pp: 1.26,
+            zq: 0.0,
+            iq: 0.0,
+            pq: 0.0,
+            pf: 0.0,
+            v0: 1.0,
+        });
+        let environment = env_at_second(27.0, 35.0, 0);
+
+        let run = |voltage_pu: f64| -> AirConditioner {
+            let mut env_run = env_at_second(27.0, 35.0, 0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let compressor_n = nominal_unit.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+        let fan_n = nominal_unit.telemetry().get(tk::FAN_KW).unwrap();
+        assert!(compressor_n > 0.0, "fixture: the compressor must run");
+        assert!(
+            fan_n > 0.0,
+            "fixture: the blower must draw: it is the witness's component"
+        );
+
+        // The sidecar row as fitted at 0.5 pu: the compressor's multiplier.
+        let m_sidecar: f64 = 0.72 * 0.25 - 0.98 * 0.5 + 1.26;
+        assert!((m_sidecar - 0.95).abs() < 1e-12, "hand: {m_sidecar}");
+        // The physical fan row as fitted at 0.5 pu: the blower's multiplier.
+        let m_fan: f64 = 0.26 * 0.25 + 0.9 * 0.5 - 0.16;
+        assert!((m_fan - 0.355).abs() < 1e-12, "hand: {m_fan}");
+
+        let compressor_half = sag_unit.telemetry().get(tk::COMPRESSOR_KW).unwrap();
+        assert!(
+            (compressor_half - compressor_n * m_sidecar).abs() < 1e-9,
+            "the compressor must follow the sidecar row ({compressor_n} x \
+             {m_sidecar}), got {compressor_half}"
+        );
+        let fan_half = sag_unit.telemetry().get(tk::FAN_KW).unwrap();
+        assert!(
+            (fan_half - fan_n * m_fan).abs() < 1e-9,
+            "the blower's real response must evaluate the physical fan row \
+             ({fan_n} x {m_fan}), got {fan_half}; the sentinel's \
+             constant-power substitution flattens it to 1.0"
+        );
+        let q = sag_unit.telemetry().get(tk::REACTIVE_POWER_KVAR).unwrap();
+        assert!(
+            q == 0.0,
+            "the sentinel zeroes the whole unit's reactive power, got {q}"
         );
     }
 
@@ -6659,6 +6993,203 @@ mod dr_tests {
         assert!(
             kw_limited > 0.0,
             "PowerLimit must not zero out the equipment"
+        );
+    }
+
+    /// The assembled base under an active power limit: the limit acts on the
+    /// rated composition before the voltage response multiplies it, so the
+    /// reference-voltage draw for that state is the capped draw, not the
+    /// nameplate rating. The aggregate's weight must be that capped base (the
+    /// draw the same limited unit takes at 1.0 pu) and its response the capped
+    /// composition's blend: a base of the uncapped rating would divide the
+    /// capped draw by a reference the limit never let the unit reach.
+    #[test]
+    fn power_limited_moment_reports_the_capped_reference_draw() {
+        let cfg = base_config();
+        let environment = hot_env(30.0);
+
+        let mut eq_unlimited = AirConditioner::new(cfg.clone());
+        eq_unlimited.init(&cfg, &environment).unwrap();
+        let unlimited_w = step_once(&mut eq_unlimited, &environment);
+        // Half the unlimited draw, in watts (the signal and the stored field
+        // are watts: `apply_signal` assigns `max_power_w` to
+        // `ctrl_power_limit_w`, which the step compares against the electric
+        // draw).
+        let limit_w = 0.5 * unlimited_w;
+
+        let run = |voltage_pu: f64| -> AirConditioner {
+            let mut env_run = hot_env(30.0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.apply_control(&ControlSignal::PowerLimit {
+                max_power_w: limit_w,
+                ramp_rate_w_per_s: None,
+            })
+            .unwrap();
+            let mut ports = make_ports();
+            eq.update_control(&env_run);
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &AirConditioner| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the unit must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let nominal_w = draw(&nominal_unit);
+        assert!(
+            unlimited_w > limit_w,
+            "fixture: the limit must bind ({unlimited_w} W unlimited)"
+        );
+        assert!(
+            (nominal_w - limit_w).abs() < 1e-9,
+            "fixture: at the reference voltage the capped draw is the limit \
+             ({limit_w} W), got {nominal_w}"
+        );
+
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_w).abs() < 1e-6 * nominal_w,
+            "the base must be the capped reference draw {nominal_w}, got \
+             {reported_nominal} (the uncapped rating is {unlimited_w})"
+        );
+
+        // The response: the capped composition's components evaluate their own
+        // rows (compressor 1.6 x 0.25 - 2.69 x 0.5 + 2.09 = 1.145, blower
+        // 0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.355).
+        let component_w = |eq: &AirConditioner, key: &str| {
+            let w = eq.telemetry().get(key).unwrap_or(f64::NAN);
+            assert!(w.is_finite(), "fixture: {key} must be finite");
+            w
+        };
+        let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
+        let fan_n = component_w(&nominal_unit, tk::FAN_KW);
+        assert!(compressor_n > 0.0 && fan_n > 0.0, "fixture: both run");
+        let m_compressor: f64 = 1.6 * 0.25 - 2.69 * 0.5 + 2.09;
+        let m_fan: f64 = 0.26 * 0.25 + 0.9 * 0.5 - 0.16;
+        let expected_response =
+            (compressor_n * m_compressor + fan_n * m_fan) / (compressor_n + fan_n);
+        let response = draw(&sag_unit) / reported_nominal;
+        assert!(
+            (response - expected_response).abs() < 1e-9,
+            "the response must be the capped composition's blend \
+             {expected_response}, got {response}"
+        );
+    }
+
+    /// A pin over the composed partial-load state (green at the parent and
+    /// the tip): the step's effective load (the duty cycle, load fraction
+    /// and DR factors composing one scalar) acts on the rated composition
+    /// before the voltage response multiplies it, so the reported base is
+    /// the duty-averaged reference draw -- the draw the same half-fractioned
+    /// state takes at 1.0 pu -- not the nameplate rating. A nameplate base
+    /// would publish duty x blend as the response, conflating the control
+    /// state with the voltage response; the row-scaled un-scale would
+    /// publish the compressor row alone. The load fraction is the one
+    /// driven here; the other factors flow through the same scalar.
+    #[test]
+    fn load_fractioned_moment_reports_the_duty_averaged_reference_draw() {
+        let cfg = base_config();
+        let environment = hot_env(30.0);
+
+        let mut eq_full = AirConditioner::new(cfg.clone());
+        eq_full.init(&cfg, &environment).unwrap();
+        let full_w = step_once(&mut eq_full, &environment);
+
+        let run = |voltage_pu: f64, fraction: f64| -> AirConditioner {
+            let mut env_run = hot_env(30.0);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = AirConditioner::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            // The load fraction is a one-step multiplier: applied before
+            // each run's step, consumed by it.
+            eq.apply_control(&ControlSignal::LoadFraction { fraction })
+                .unwrap();
+            let mut ports = make_ports();
+            eq.update_control(&env_run);
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &AirConditioner| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the unit must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0, 0.5);
+        let sag_unit = run(0.5, 0.5);
+        let nominal_w = draw(&nominal_unit);
+        // The fixture discriminates: the crankcase heater is off at 30 C, so
+        // the half-fractioned state's reference draw is exactly half the
+        // full composition's.
+        assert!(
+            (nominal_w - 0.5 * full_w).abs() < 1e-6 * full_w,
+            "fixture: the half-fractioned reference draw must be half the \
+             full draw ({}, half of {full_w}), got {nominal_w}",
+            0.5 * full_w
+        );
+
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_w).abs() < 1e-6 * nominal_w,
+            "the base must be the duty-averaged reference draw {nominal_w} \
+             (the half-fractioned state's own 1.0 pu draw), got \
+             {reported_nominal}; the nameplate rating is {full_w}"
+        );
+
+        // The response: the partial composition's components evaluate their
+        // own rows (compressor 1.6 x 0.25 - 2.69 x 0.5 + 2.09 = 1.145,
+        // blower 0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.355). A nameplate base
+        // would halve this blend; the row-scaled un-scale would answer the
+        // compressor row alone.
+        let component_w = |eq: &AirConditioner, key: &str| {
+            let w = eq.telemetry().get(key).unwrap_or(f64::NAN);
+            assert!(w.is_finite(), "fixture: {key} must be finite");
+            w
+        };
+        let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
+        let fan_n = component_w(&nominal_unit, tk::FAN_KW);
+        assert!(compressor_n > 0.0 && fan_n > 0.0, "fixture: both run");
+        let m_compressor: f64 = 1.6 * 0.25 - 2.69 * 0.5 + 2.09;
+        let m_fan: f64 = 0.26 * 0.25 + 0.9 * 0.5 - 0.16;
+        let expected_response =
+            (compressor_n * m_compressor + fan_n * m_fan) / (compressor_n + fan_n);
+        let response = draw(&sag_unit) / reported_nominal;
+        assert!(
+            (response - expected_response).abs() < 1e-9,
+            "the response must be the partial composition's blend \
+             {expected_response}, got {response}"
+        );
+        assert!(
+            (response - 0.5 * expected_response).abs() > 0.1,
+            "the response must not carry the duty factor ({response} is a \
+             nameplate base's duty-carrying answer; the base already holds \
+             the composition)"
+        );
+
+        // The composition's other edge: a fully-cycled-off fraction draws
+        // nothing, so the step reports no base at all. The aggregate then
+        // rosters the moment's zero weight (the P2 class), never a stale or
+        // nameplate base for a load the control turned off.
+        let off = run(0.5, 0.0);
+        assert_eq!(
+            draw(&off),
+            0.0,
+            "fixture: a zero load fraction draws nothing (the crankcase \
+             heater is off at 30 C)"
+        );
+        assert_eq!(
+            off.nominal_electric_draw_w(),
+            None,
+            "a step that drew nothing reports no assembled base"
         );
     }
 }

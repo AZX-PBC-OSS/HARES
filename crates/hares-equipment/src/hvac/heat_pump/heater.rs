@@ -216,13 +216,26 @@ struct HeatPumpHeaterCore {
     /// backup, pan heater, and resistive defrost elements are resistive
     /// (pf 1.0) and contribute Q ≡ 0.
     zip: hares_types::zip::ResolvedZip,
-    /// Indoor blower / outdoor fan motor component ZIP (pf 0.87), derived at
-    /// init via `hvac::reactive::secondary_motor_zip`.
+    /// The indoor blower / outdoor fan motor component's REACTIVE row (pf
+    /// 0.87), derived at init via `hvac::reactive::secondary_motor_zip`:
+    /// the reactive sum's surface, the unit-level pf = 0.0 sentinel
+    /// included. The fan's REAL response never consults this row; it
+    /// evaluates the physical `hvac::reactive::FAN_MOTOR_ZIP` row.
     fan_zip: hares_types::zip::ZipLoad,
-    /// Ground/water-loop circulation pump motor component ZIP (pf 0.84),
-    /// derived at init via `hvac::reactive::secondary_motor_zip`. Only GSHP
-    /// and WSHP variants draw pump power.
+    /// The ground/water-loop circulation pump motor component's REACTIVE
+    /// row (pf 0.84), derived at init via
+    /// `hvac::reactive::secondary_motor_zip`. Only GSHP and WSHP variants
+    /// draw pump power. The reactive sum's surface, the unit-level
+    /// pf = 0.0 sentinel included; the pump's REAL response never consults
+    /// this row (it evaluates the physical `LOOP_PUMP_ZIP` row).
     pump_zip: hares_types::zip::ZipLoad,
+    /// The moment's nominal component draw of the most recent step (W, the
+    /// final components' pre-scaling sum at the reference voltage, the
+    /// served space fraction included): the premise aggregate's weight for
+    /// this unit, which un-scales the stepped draw through the assembled
+    /// response it reports. `None` when the step drew nothing (or no finite
+    /// positive nominal exists, e.g. a de-energized bus).
+    last_nominal_draw_w: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -245,6 +258,9 @@ struct HeaterState {
     last_speed_index: usize,
     last_speed_frac: f64,
     electric_w: f64,
+    /// The moment's assembled base (the final components' pre-scaling sum,
+    /// the served space fraction included), the pair to `electric_w`.
+    last_nominal_draw_w: Option<f64>,
     thermal_output_w: f64,
     speed_index: f64,
     prev_base_setpoint: f64,
@@ -281,7 +297,9 @@ struct HeaterState {
 // Version 3: added `min_on_time_s`/`min_off_time_s` for short-cycle protection persistence.
 // Version 4: added `startup_c_d`, `startup_time_since_start_min`, `startup_was_on`
 // for startup ramp persistence across checkpoint restart.
-const HEATER_CHECKPOINT_VERSION: u32 = 4;
+// Version 5: added `last_nominal_draw_w`, the assembled base that un-scales the
+// checkpointed moment draw for the premise aggregate.
+const HEATER_CHECKPOINT_VERSION: u32 = 5;
 
 #[derive(Clone, Copy)]
 struct HeaterControl {
@@ -338,6 +356,10 @@ struct HeaterStep {
     /// Ground-loop circulation pump electrical power [kW]. GSHP only; zero
     /// for air-source equipment.
     pump_w: f64,
+    /// The moment's assembled base (the final components' pre-scaling sum,
+    /// the served space fraction included), committed by the outer step
+    /// once all its fallible work has succeeded.
+    nominal_draw_w: Option<f64>,
 }
 
 impl ASHPHeater {
@@ -452,6 +474,10 @@ impl Equipment for HeatPumpHeaterCore {
         // or a user "zip" override). Fan/loop-pump component ZIPs are
         // secondary; ER backup/defrost elements are resistive (Q ≡ 0).
         Some(self.zip)
+    }
+
+    fn nominal_electric_draw_w(&self) -> Option<f64> {
+        self.last_nominal_draw_w
     }
 
     fn save_state(&self) -> crate::Result<Vec<u8>> {
@@ -725,6 +751,7 @@ impl HeatPumpHeaterCore {
             ),
             fan_zip: hares_types::zip::ZipLoad::constant_power(),
             pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            last_nominal_draw_w: None,
         }
     }
 
@@ -1708,6 +1735,9 @@ impl HeatPumpHeaterCore {
             _ => sp.heating_c + self.dr_setpoint_offset_c,
         };
         write_ebm_telemetry(ebm_window, delivered_thermal_w, &mut self.telemetry)?;
+        // The base commits only after the step's fallible work: a failed
+        // step leaves the checkpointed state unchanged.
+        self.last_nominal_draw_w = step.nominal_draw_w;
         self.core_output = CoreOutput {
             flows: CoreFlows {
                 electric_w: Some(ElectricPower::Consumption(scaled_electric_w.max(0.0))),
@@ -2299,8 +2329,14 @@ impl HeatPumpHeaterCore {
         // the multiplicative parts commute with this response.
         let bus_voltage_pu = env.grid.bus_voltage_pu();
         let motor_multiplier = self.zip.deep_sag_real_multiplier(bus_voltage_pu);
-        let fan_multiplier =
-            crate::hvac::reactive::secondary_motor_real_multiplier(&self.fan_zip, bus_voltage_pu);
+        // The fan's real response evaluates the physical fan-motor row (the
+        // sentinel or not: pf = 0.0 is reactive-only and must never flatten
+        // it); the sentinel-substituted `fan_zip` row is the reactive sum's
+        // surface only.
+        let fan_multiplier = crate::hvac::reactive::secondary_motor_real_multiplier(
+            &crate::hvac::reactive::FAN_MOTOR_ZIP,
+            bus_voltage_pu,
+        );
         let v_norm = bus_voltage_pu / self.zip.v0;
         let resistive_multiplier = v_norm * v_norm;
         hp_electric_w *= motor_multiplier;
@@ -2354,6 +2390,20 @@ impl HeatPumpHeaterCore {
             // backup_er_w, fuel_w, step_er_capacity_w, and
             // defrost_resistive_electric_w are not scaled (on/off elements)
         }
+
+        // The moment's reference components: the same state's component
+        // draws at the reference voltage, captured before the power limit
+        // rewrites the scaled composition. This engine applies the limit to
+        // the SCALED draw (the cap clamps the final watts), so the cap's
+        // ratio is not a voltage response: the base must replay the limit's
+        // composition on these nominal components rather than divide the
+        // capped values back through their rows.
+        let compressor_nominal_w = compressor_w / motor_multiplier;
+        let fan_nominal_w = fan_w / fan_multiplier;
+        let pan_nominal_w = step_pan_heater_w / resistive_multiplier;
+        let backup_nominal_w = backup_er_w / resistive_multiplier;
+        let defrost_nominal_w = defrost_resistive_electric_w / resistive_multiplier;
+        let fuel_nominal_w = fuel_w;
 
         // Apply PowerLimit (sticky): shed ER first (it is on/off, not modulatable),
         // then scale HP+fan proportionally only if still over limit after shedding ER.
@@ -2430,14 +2480,59 @@ impl HeatPumpHeaterCore {
                 self.pump_efficiency,
                 self.pump_motor_efficiency,
                 self.pump_system_head_loss_m,
-            ) * crate::hvac::reactive::secondary_motor_real_multiplier(
-                &self.pump_zip,
+            )
+            // The pump's real response evaluates the physical pump-motor
+            // row (the sentinel or not: pf = 0.0 is reactive-only and must
+            // never flatten it).
+            * crate::hvac::reactive::secondary_motor_real_multiplier(
+                &crate::hvac::reactive::LOOP_PUMP_ZIP,
                 bus_voltage_pu,
             )
         } else {
             0.0
         };
         electric_w += pump_w;
+
+        // The moment's assembled base: the reference-voltage draw of the
+        // step's control composition. The limit's composition (shed the
+        // on/off backup first, then cap the modulated side) is replayed on
+        // the nominal components because this engine applies the limit to
+        // the scaled draw; the pump is outside the limit and always
+        // nominal. `space_fraction` multiplies the published draw in
+        // `step()`, so it belongs to the base as well. The uncapped replay
+        // is the components' pre-scaling sum.
+        let pump_multiplier = crate::hvac::reactive::secondary_motor_real_multiplier(
+            &crate::hvac::reactive::LOOP_PUMP_ZIP,
+            bus_voltage_pu,
+        );
+        let hp_only_nominal_w =
+            compressor_nominal_w + fan_nominal_w + pan_nominal_w + defrost_nominal_w;
+        let total_nominal_w = hp_only_nominal_w + backup_nominal_w;
+        let reference_electric_w = if self.ctrl_power_limit_w.is_finite()
+            && total_nominal_w + fuel_nominal_w > self.ctrl_power_limit_w
+        {
+            if hp_only_nominal_w <= self.ctrl_power_limit_w {
+                hp_only_nominal_w
+            } else {
+                self.ctrl_power_limit_w
+            }
+        } else {
+            // The uncapped reference in the draw's own summation order, so
+            // at the reference voltage it is the step's published draw
+            // bitwise and the response is exactly 1.0.
+            compressor_nominal_w
+                + backup_nominal_w
+                + fan_nominal_w
+                + pan_nominal_w
+                + defrost_nominal_w
+        };
+        let nominal_component_w =
+            (reference_electric_w + pump_w / pump_multiplier) * self.hvac.config.space_fraction;
+        let nominal_draw_w = if nominal_component_w.is_finite() && nominal_component_w > 0.0 {
+            Some(nominal_component_w)
+        } else {
+            None
+        };
 
         Ok(HeaterStep {
             thermal_output_w,
@@ -2460,6 +2555,7 @@ impl HeatPumpHeaterCore {
             eir_ratio,
             latent_gain_w,
             pump_w: pump_w.max(0.0),
+            nominal_draw_w,
         })
     }
 
@@ -2786,6 +2882,7 @@ impl HeatPumpHeaterCore {
                 last_speed_index: self.hvac.runtime.last_speed_index,
                 last_speed_frac: self.hvac.runtime.last_speed_frac,
                 electric_w: self.telemetry.get(tk::ELECTRIC_KW).unwrap_or(0.0),
+                last_nominal_draw_w: self.last_nominal_draw_w,
                 thermal_output_w: self.telemetry.get(tk::THERMAL_OUTPUT_W).unwrap_or(0.0),
                 speed_index: self.telemetry.get(tk::SPEED_INDEX).unwrap_or(0.0),
                 prev_base_setpoint: self.prev_base_setpoint,
@@ -2852,6 +2949,11 @@ impl HeatPumpHeaterCore {
         self.hvac.runtime.startup.was_on = decoded.startup_was_on;
         self.hvac.runtime.last_speed_index = decoded.last_speed_index;
         self.hvac.runtime.last_speed_frac = decoded.last_speed_frac;
+        // The moment's assembled base restores with the draw it un-scales;
+        // a non-finite or non-positive report is no base.
+        self.last_nominal_draw_w = decoded
+            .last_nominal_draw_w
+            .filter(|nominal_w| nominal_w.is_finite() && *nominal_w > 0.0);
         self.ctrl_duty_cycle = decoded.ctrl_duty_cycle;
         self.ctrl_power_limit_w = decoded.ctrl_power_limit_w.unwrap_or(f64::INFINITY);
         self.ctrl_mode_override = decoded.ctrl_mode_override;
@@ -4188,6 +4290,170 @@ mod tests {
         assert!(
             (eir - 0.401).abs() < 0.01,
             "typed heating_eir=0.401 must be used directly, got {eir}"
+        );
+    }
+
+    /// The reported nominal draw is the reference-voltage draw the stepping
+    /// engine takes for the same operating state: the components' pre-scaling
+    /// sum with `space_fraction` applied, exactly as `step()` applies it to
+    /// the combined electric draw. A heater serving half the conditioned
+    /// space draws half the component watts on the meter; a base that skipped
+    /// the fraction would make the premise aggregate divide the metered draw
+    /// by twice its reference value and publish a scale doubled by 1 / sf.
+    /// The hand computation: the compressor follows the unit row
+    /// (0.72 x 0.25 - 0.98 x 0.5 + 1.26 = 0.95 at 0.5 pu), the blower the
+    /// fan row (0.26 x 0.25 + 0.9 x 0.5 - 0.16 = 0.355), and both take
+    /// exactly their nominal draw at the reference voltage.
+    #[test]
+    fn reported_nominal_draw_includes_the_space_fraction_the_step_applies() {
+        let cfg = heater_config_with(|typed| {
+            typed.common.fraction_heating_load_served = Some(0.5);
+        });
+        let environment = env(18.0, 10.0, 0.005);
+
+        let run = |voltage_pu: f64| -> ASHPHeater {
+            let mut env_run = env(18.0, 10.0, 0.005);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = ASHPHeater::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &ASHPHeater| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the heater must report its draw, got {other:?}"),
+        };
+
+        let nominal_unit = run(1.0);
+        let sag_unit = run(0.5);
+        let nominal_step_w = draw(&nominal_unit);
+        assert!(nominal_step_w > 0.0, "fixture: the heater must run");
+        assert_eq!(
+            nominal_unit.core.hvac.config.space_fraction, 0.5,
+            "fixture: the served fraction must reach the stepping config"
+        );
+
+        // The reference voltage evaluates every component multiplier at
+        // exactly 1.0, so the step's own draw IS the reference draw (with
+        // the served fraction applied), and the reported base must be it.
+        let reported_nominal = sag_unit
+            .nominal_electric_draw_w()
+            .expect("the stepped unit drew power");
+        assert!(
+            (reported_nominal - nominal_step_w).abs() < 1e-6 * nominal_step_w,
+            "the reported nominal draw must be the metered reference draw \
+             {nominal_step_w} (the components' pre-scaling sum times the \
+             served fraction), got {reported_nominal}"
+        );
+
+        // The assembled response: the components' own row evaluations over
+        // their nominal draws, space fraction cancelled.
+        let component_w = |eq: &ASHPHeater, key: &str| {
+            let w = eq.telemetry().get(key).unwrap_or(f64::NAN);
+            assert!(w.is_finite(), "fixture: {key} must be finite");
+            w
+        };
+        let hp_row = hares_types::zip::zip_defaults_for_class("ASHP Heater").expect("row");
+        let fan_row = hares_types::zip::zip_defaults_for_class("Ventilation Fan").expect("row");
+        let m_hp = hp_row.zp * 0.25 + hp_row.ip * 0.5 + hp_row.pp;
+        let m_fan = fan_row.zp * 0.25 + fan_row.ip * 0.5 + fan_row.pp;
+        assert!((m_hp - 0.95).abs() < 1e-12, "hand: {m_hp}");
+        assert!((m_fan - 0.355).abs() < 1e-12, "hand: {m_fan}");
+        let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
+        let fan_n = component_w(&nominal_unit, tk::FAN_KW);
+        assert!(compressor_n > 0.0, "fixture: the compressor must run");
+        assert!(fan_n > 0.0, "fixture: the blower must draw");
+        let expected_response = (compressor_n * m_hp + fan_n * m_fan) / (compressor_n + fan_n);
+        let response = draw(&sag_unit) / reported_nominal;
+        assert!(
+            (response - expected_response).abs() < 1e-9,
+            "the assembled response must be the components' own evaluations \
+             over their nominal draws ({expected_response}), got {response}"
+        );
+    }
+
+    /// A binding power limit is part of the control composition the base
+    /// carries: the base is what the same limited state draws at the
+    /// reference voltage. The heater applies its limit to the voltage-scaled
+    /// draw (the cap clamps the final watts), so at a sag the capped draw is
+    /// flat at the limit and the response is the identity; a base built by
+    /// un-scaling the capped components through their rows answers the
+    /// uncapped blend instead (the limit's ratio divided back out), a
+    /// response the engine never takes.
+    #[test]
+    fn power_limited_moment_reports_the_capped_reference_draw() {
+        let cfg = heater_config_with(|typed| {
+            // The HP side alone, so the cap composition is the compressor
+            // and blower: no on/off backup to shed.
+            typed.common.backup_capacity_w = Some(0.0);
+            typed.common.fan_power_w = Some(300.0);
+        });
+        let environment = env(18.0, 10.0, 0.005);
+
+        let run = |voltage_pu: f64, limit_w: Option<f64>| -> ASHPHeater {
+            let mut env_run = env(18.0, 10.0, 0.005);
+            env_run.grid.voltage_pu = voltage_pu;
+            let mut eq = ASHPHeater::new(cfg.clone());
+            eq.init(&cfg, &environment).unwrap();
+            if let Some(max_power_w) = limit_w {
+                eq.apply_control(&ControlSignal::PowerLimit {
+                    max_power_w,
+                    ramp_rate_w_per_s: None,
+                })
+                .unwrap();
+            }
+            eq.update_control(&env_run);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..PortSlots::default()
+            };
+            eq.step(&env_run, Duration::from_secs(60), &mut ports)
+                .unwrap();
+            eq
+        };
+        let draw = |eq: &ASHPHeater| match eq.core_output().flows.electric_w {
+            Some(hares_types::ElectricPower::Consumption(w)) => w,
+            other => panic!("fixture: the heater must report its draw, got {other:?}"),
+        };
+
+        let full_w = draw(&run(1.0, None));
+        assert!(full_w > 0.0, "fixture: the heater must run");
+        let limit_w = 0.5 * full_w;
+        let capped_reference_w = draw(&run(1.0, Some(limit_w)));
+        assert!(
+            (capped_reference_w - limit_w).abs() < 1e-9,
+            "fixture: the cap must bind at the reference voltage \
+             ({limit_w} W of {full_w} W), got {capped_reference_w}"
+        );
+
+        let sag = run(0.5, Some(limit_w));
+        let sag_draw = draw(&sag);
+        assert!(
+            (sag_draw - limit_w).abs() < 1e-9,
+            "fixture: the cap clamps the scaled draw, so the limited draw is \
+             the same at 0.5 pu ({limit_w} W), got {sag_draw}"
+        );
+
+        let base = sag
+            .nominal_electric_draw_w()
+            .expect("the limited step reports its base");
+        assert!(
+            (base - capped_reference_w).abs() < 1e-6 * capped_reference_w,
+            "the base must be the same limited state's reference draw \
+             {capped_reference_w}, got {base} (the uncapped composition's \
+             un-scaled blend)"
+        );
+        let response = sag_draw / base;
+        assert!(
+            (response - 1.0).abs() < 1e-9,
+            "a draw the cap holds flat at the limit has the identity \
+             response, got {response}"
         );
     }
 

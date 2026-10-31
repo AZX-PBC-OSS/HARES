@@ -23,9 +23,12 @@
 //!   class defaults). A user `"zip"`/`pf` override therefore retargets the
 //!   *primary* component, not the whole blend.
 //! - **Secondary fan/pump motors** use the fixed physical component ZIPs
-//!   below ([`FAN_MOTOR_ZIP`], [`LOOP_PUMP_ZIP`]) via
-//!   [`secondary_motor_zip`], which honours the unit-level `pf = 0.0`
-//!   "no reactive" sentinel.
+//!   below ([`FAN_MOTOR_ZIP`], [`LOOP_PUMP_ZIP`]). Their REAL response
+//!   always evaluates the physical component row
+//!   ([`secondary_motor_real_multiplier`]); the unit-level `pf = 0.0`
+//!   sentinel disables only the reactive side, secondary components
+//!   included ([`secondary_motor_zip`] resolves the row the reactive sum
+//!   reads).
 //! - **Resistive components** (ER backup elements, crankcase / base-pan
 //!   heaters, resistive defrost elements) have pf = 1.0 exactly and
 //!   contribute `Q ≡ 0` by construction — they appear in no sum term.
@@ -72,15 +75,24 @@ pub(crate) const LOOP_PUMP_ZIP: ZipLoad = ZipLoad {
     v0: 1.0,
 };
 
-/// Resolve a secondary motor component's ZIP from the unit-level ZIP.
+/// Resolve a secondary motor component's REACTIVE row from the unit-level
+/// ZIP.
 ///
 /// Returns `component` unless the unit ZIP carries the `pf = 0.0` "no
 /// reactive configured" sentinel (e.g. a `ZipLoad::constant_power()`
 /// sidecar override), in which case reactive power is disabled for the
 /// whole unit — secondary components included — and
-/// [`ZipLoad::constant_power`] is returned. This keeps the sentinel a
-/// unit-wide off switch while nonzero-pf overrides retarget only the
+/// [`ZipLoad::constant_power`] is returned (its pf is the sentinel, so
+/// `reactive_var` is exactly zero). This keeps the sentinel a unit-wide
+/// reactive off switch while nonzero-pf overrides retarget only the
 /// primary component.
+///
+/// The sentinel is reactive-only: it must never reach a real-power
+/// evaluation. The secondary's real response is
+/// [`secondary_motor_real_multiplier`] on the physical component row (the
+/// [`FAN_MOTOR_ZIP`] / [`LOOP_PUMP_ZIP`] constants), never on the row this
+/// function returns: the substituted constant-power row's real side would
+/// flatten the secondary's deep-sag response to the identity.
 pub(crate) fn secondary_motor_zip(unit_zip: &ZipLoad, component: ZipLoad) -> ZipLoad {
     // Same sentinel test as `ZipLoad::tan_phi`.
     if unit_zip.pf.abs() < 1e-9 {
@@ -95,6 +107,12 @@ pub(crate) fn secondary_motor_zip(unit_zip: &ZipLoad, component: ZipLoad) -> Zip
 /// fan and pump rows are recorded motor families whose deep-sag shape the
 /// record licenses; the fan row has no in-band stationary point and the
 /// pump row's is the recorded measured draw).
+///
+/// Call with the PHYSICAL component row (the [`FAN_MOTOR_ZIP`] /
+/// [`LOOP_PUMP_ZIP`] constants), never with a unit-level resolution: the
+/// `pf = 0.0` sentinel is reactive-only, and the substituted
+/// constant-power row would answer 1.0 at every voltage where the fan row
+/// answers 0.355 at 0.5 pu.
 pub(crate) fn secondary_motor_real_multiplier(component: &ZipLoad, voltage_pu: f64) -> f64 {
     component.deep_sag_real_multiplier(voltage_pu, true)
 }
@@ -130,6 +148,23 @@ mod tests {
         let disabled = secondary_motor_zip(&ZipLoad::constant_power(), FAN_MOTOR_ZIP);
         assert_eq!(disabled, ZipLoad::constant_power());
         assert_eq!(disabled.reactive_var(1.0, 1.0), 0.0);
+    }
+
+    /// The sentinel is reactive-only: the secondary's REAL response is the
+    /// physical component row's evaluation at every voltage, the sentinel
+    /// or not: the substituted constant-power row would answer 1.0 where
+    /// the fan row answers 0.355 at 0.5 pu (0.26 x 0.25 + 0.9 x 0.5 -
+    /// 0.16) and the pump row 0.95 (0.72 x 0.25 - 0.98 x 0.5 + 1.26).
+    #[test]
+    fn secondary_real_response_is_the_physical_row_the_sentinel_or_not() {
+        for (component, m_half) in [(&FAN_MOTOR_ZIP, 0.355), (&LOOP_PUMP_ZIP, 0.95)] {
+            let m = secondary_motor_real_multiplier(component, 0.5);
+            assert!(
+                (m - m_half).abs() < 1e-12,
+                "the secondary's real response must be its own row's \
+                 evaluation {m_half} at 0.5 pu, got {m}"
+            );
+        }
     }
 
     /// A nonzero-pf unit override leaves secondary components at their
