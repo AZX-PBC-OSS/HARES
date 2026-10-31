@@ -149,12 +149,102 @@ pub fn core_reference_bands(case_id: &str) -> Vec<ReferenceBand> {
             min: 2403.0,
             max: 2682.0,
         }],
+        // ANSI/ASHRAE 140-2023 Annex B8, Tables B8-1 and B8-2: Case 920
+        // (high-mass east/west windows) annual heating and annual sensible
+        // cooling loads (kWh, the report's MWh converted).
+        "920" => vec![
+            ReferenceBand {
+                case_id: "920",
+                metric: BestestMetric::AnnualHeatingLoadKwh,
+                min: 2956.0,
+                max: 3607.0,
+            },
+            ReferenceBand {
+                case_id: "920",
+                metric: BestestMetric::AnnualCoolingLoadKwh,
+                min: 2549.0,
+                max: 3128.0,
+            },
+        ],
+        // ANSI/ASHRAE 140-2023 Annex B8, Tables B8-1 and B8-2: the in-depth
+        // solid-conduction cases' annual heating and annual sensible cooling
+        // loads (kWh, the report's MWh converted). Case 195 runs the "20,20"
+        // thermostat, Case 395 the "20,27" deadband.
+        "195" => vec![
+            ReferenceBand {
+                case_id: "195",
+                metric: BestestMetric::AnnualHeatingLoadKwh,
+                min: 3951.0,
+                max: 4217.0,
+            },
+            ReferenceBand {
+                case_id: "195",
+                metric: BestestMetric::AnnualCoolingLoadKwh,
+                min: 592.0,
+                max: 712.0,
+            },
+        ],
+        "395" => vec![
+            ReferenceBand {
+                case_id: "395",
+                metric: BestestMetric::AnnualHeatingLoadKwh,
+                min: 4565.0,
+                max: 5145.0,
+            },
+            ReferenceBand {
+                case_id: "395",
+                metric: BestestMetric::AnnualCoolingLoadKwh,
+                min: 4.0,
+                max: 21.0,
+            },
+        ],
+        // ANSI/ASHRAE 140-2023 Annex B8, Tables B8-1 and B8-2: the
+        // night-ventilation cases' bands, pinned as the published oracles
+        // they are. Every example program reports zero annual heating for
+        // both (heating is always OFF per 5.2.2.1.5.1.1), so the heating
+        // band's edges coincide. NO CASE RUNS AGAINST THESE BANDS YET: the
+        // fan's configuration schedule (1703.16 m3/h, ON from 1800 to 0700
+        // per 5.2.2.1.5.1.1/5.2.2.1.5.2) needs a scheduled mechanical-
+        // ventilation surface the engine's fixture paths do not expose:
+        // the solver's ventilation flow is a constant set at build time,
+        // and no fixture schema carries an hourly fan schedule. Wiring the
+        // cases needs that surface first; widening or ignoring the bands
+        // for a constant-ventilation stand-in is forbidden.
+        "650" => vec![
+            ReferenceBand {
+                case_id: "650",
+                metric: BestestMetric::AnnualHeatingLoadKwh,
+                min: 0.0,
+                max: 0.0,
+            },
+            ReferenceBand {
+                case_id: "650",
+                metric: BestestMetric::AnnualCoolingLoadKwh,
+                min: 4186.0,
+                max: 4945.0,
+            },
+        ],
+        "950" => vec![
+            ReferenceBand {
+                case_id: "950",
+                metric: BestestMetric::AnnualHeatingLoadKwh,
+                min: 0.0,
+                max: 0.0,
+            },
+            ReferenceBand {
+                case_id: "950",
+                metric: BestestMetric::AnnualCoolingLoadKwh,
+                min: 586.0,
+                max: 707.0,
+            },
+        ],
         _ => Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::BestestMetric;
     use super::core_reference_bands;
 
     #[test]
@@ -164,5 +254,40 @@ mod tests {
             let mid = (band.min + band.max) * 0.5;
             assert!(band.contains(mid));
         }
+    }
+
+    /// The night-ventilation cases' bands are pinned as data even though no
+    /// case runs against them yet (the scheduled-ventilation-surface gap the
+    /// module comment names): the published oracles stay pinned so wiring
+    /// the cases later cannot silently widen them. The values are the
+    /// Std140_TF_Results.pdf Table B8-1/B8-2 rows, MWh converted to kWh.
+    #[test]
+    fn night_ventilation_bands_are_pinned() {
+        use BestestMetric::*;
+        let bands = core_reference_bands("650");
+        assert_eq!(bands.len(), 2);
+        let heating = bands
+            .iter()
+            .find(|b| b.metric == AnnualHeatingLoadKwh)
+            .expect("650 pins a heating band");
+        assert_eq!((heating.min, heating.max), (0.0, 0.0));
+        let cooling = bands
+            .iter()
+            .find(|b| b.metric == AnnualCoolingLoadKwh)
+            .expect("650 pins a cooling band");
+        assert_eq!((cooling.min, cooling.max), (4186.0, 4945.0));
+
+        let bands = core_reference_bands("950");
+        assert_eq!(bands.len(), 2);
+        let heating = bands
+            .iter()
+            .find(|b| b.metric == AnnualHeatingLoadKwh)
+            .expect("950 pins a heating band");
+        assert_eq!((heating.min, heating.max), (0.0, 0.0));
+        let cooling = bands
+            .iter()
+            .find(|b| b.metric == AnnualCoolingLoadKwh)
+            .expect("950 pins a cooling band");
+        assert_eq!((cooling.min, cooling.max), (586.0, 707.0));
     }
 }

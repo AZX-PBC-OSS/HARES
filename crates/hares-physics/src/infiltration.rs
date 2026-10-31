@@ -1051,6 +1051,62 @@ mod tests {
         approx_eq(N_I_DEFAULT, 0.65, 1e-15);
     }
 
+    /// AIM-2 against a worked example, hand-computed at full precision and
+    /// pinned as literals.
+    ///
+    /// The model is AIM-2's quadrature of the stack and wind driving terms
+    /// (Walker & Wilson, "Field Validation of Algebraic Equations for Stack
+    /// and Wind Driven Air Infiltration Calculations", HVAC&R Research 4(4),
+    /// 1998, Eqs. 1-3; ASHRAE HoF 2021 Ch. 16 "Infiltration model"):
+    ///
+    ///   Q = sqrt( (c_s * |dT|^n)^2 + (c_w * (sft * v)^(2n))^2 )
+    ///
+    /// Worked example, typical single-storey residential coefficients (the
+    /// OCHRE defaults the solver test harness also uses): c_s = 2.90e-4
+    /// m3/s/K^n, c_w = 1.50e-4 m3/s/(m/s)^(2n), n = 0.65, shelter 1.0.
+    /// At dT = 21 K, v = 3 m/s:
+    ///   stack term  = 2.90e-4 * 21^0.65 = 2.098169354341e-3
+    ///   wind term   = 1.50e-4 * 3^1.30  = 6.256751266422e-4
+    ///   Q           = sqrt(sum of squares) = 2.189471169848e-3 m3/s
+    /// The wind term's shelter scaling at sft = 0.5 (3 m/s reads as
+    /// 1.5 m/s): 1.5^1.3 = 1.694020403185, term 2.541030604778e-4,
+    /// Q = 2.113500178576e-3 m3/s. The single-driver limits (v = 0,
+    /// dT = 0) recover the stack and wind terms exactly.
+    ///
+    /// Tolerance 1e-12 relative: the literals carry 13 digits; anything
+    /// above the 12th digit is evaluation noise, below it is a changed
+    /// formula, exponent or quadrature.
+    #[test]
+    fn aim2_matches_the_walker_wilson_worked_example() {
+        let (c_s, c_w, n_i) = (0.000_290_f64, 0.000_150_f64, 0.65_f64);
+
+        let q = ashrae_wind_stack(c_s, c_w, 21.0, 3.0, 1.0, n_i);
+        assert!(
+            (q - 2.189_471_169_848e-3).abs() / 2.189_471_169_848e-3 < 1e-12,
+            "AIM-2 at dT=21 K, v=3 m/s: expected 2.189471169848e-3 m3/s, got {q:e}"
+        );
+
+        let q_sheltered = ashrae_wind_stack(c_s, c_w, 21.0, 3.0, 0.5, n_i);
+        assert!(
+            (q_sheltered - 2.113_500_178_576e-3).abs() / 2.113_500_178_576e-3 < 1e-12,
+            "AIM-2 at dT=21 K, v=3 m/s, shelter 0.5: expected \
+             2.113500178576e-3 m3/s, got {q_sheltered:e}"
+        );
+
+        // Single-driver limits: with no wind the stack term is the whole
+        // answer; with no temperature difference the wind term is.
+        let q_stack_only = ashrae_wind_stack(c_s, c_w, 21.0, 0.0, 1.0, n_i);
+        assert!(
+            (q_stack_only - 2.098_169_354_341e-3).abs() / 2.098_169_354_341e-3 < 1e-12,
+            "AIM-2 at v=0 must reduce to the stack term 2.098169354341e-3, got {q_stack_only:e}"
+        );
+        let q_wind_only = ashrae_wind_stack(c_s, c_w, 0.0, 3.0, 1.0, n_i);
+        assert!(
+            (q_wind_only - 6.256_751_266_422e-4).abs() / 6.256_751_266_422e-4 < 1e-12,
+            "AIM-2 at dT=0 must reduce to the wind term 6.256751266422e-4, got {q_wind_only:e}"
+        );
+    }
+
     #[test]
     fn natural_ventilation_cw_stays_in_plausible_range() {
         // Cw interpolates 0.55 (perpendicular) down to 0.0 (leeward); the

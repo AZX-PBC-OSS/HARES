@@ -1,10 +1,12 @@
 mod cases;
 mod material_check;
 mod reference_bands;
+mod timestep_sweep;
+mod window_iam;
 
 use std::collections::BTreeMap;
 
-use cases::{BestestCase, core_cases, extended_cases};
+use cases::{BestestCase, core_cases, extended_cases, in_depth_cases};
 use hares_core::Dwelling;
 use reference_bands::{BestestMetric, ReferenceBand, core_reference_bands};
 
@@ -308,6 +310,16 @@ fn bestest_case_640() {
     run_single_case(&case);
 }
 
+// Cases 920, 195 and 395: the fixtures and their ASHRAE 140-2023 Annex B8
+// bands are committed (`cases.rs`, `reference_bands.rs`, the tracked-build
+// tests below), and NO case runs against its bands: the engine's measured
+// annual loads sit outside them, the same documented under-heating the
+// 600/900 drift locks carry (heating 15 to 29 percent below the band
+// floors; 195's cooling 39 percent below, 395's cooling 86 percent above
+// the band's ceiling). The band tests stop until the physics fixes land;
+// widening the bands or drift-locking the divergences as if they were a
+// conformance state would both misstate the published oracles.
+
 #[test]
 fn bestest_extended_cases_are_tracked() {
     let cases = extended_cases();
@@ -326,6 +338,24 @@ fn bestest_extended_cases_are_tracked() {
         // conditioned zone with no measurement and no constant rate.
         Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
             .unwrap_or_else(|err| panic!("extended case {} builds: {err}", case.id));
+    }
+}
+
+#[test]
+fn bestest_in_depth_cases_are_tracked() {
+    let cases = in_depth_cases();
+    assert!(
+        !cases.is_empty(),
+        "expected non-empty in-depth BESTEST case set"
+    );
+    for case in cases {
+        assert!(
+            case.fixture_path().exists(),
+            "missing in-depth BESTEST fixture: {}",
+            case.fixture_path().display()
+        );
+        Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
+            .unwrap_or_else(|err| panic!("in-depth case {} builds: {err}", case.id));
     }
 }
 
