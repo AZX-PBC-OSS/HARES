@@ -4111,6 +4111,86 @@ mod tests {
         );
     }
 
+    /// A forced-off control pass does not starve the step's solve: the
+    /// shed's forced-off branch returns before the thermostat re-reads, so
+    /// the pass publishes Off while the call stands, and the solver's gate
+    /// reads the latch, not the publication. A signal landing at the
+    /// dispatch (the operator's cancel) re-derives Cooling, and the step
+    /// delivers the solve's capacity, never the raw duty the solve never
+    /// saw.
+    #[test]
+    fn a_dispatch_time_cancel_after_a_forced_off_pass_delivers_the_solved_capacity() {
+        let cfg = ac_config_with(|typed| {
+            typed.fan_power_w = Some(0.0);
+            typed.startup_cd = None;
+        });
+        // The coarse timestep puts the unit on the ideal path.
+        let mut environment = env(27.0, 0.010, 18.0, 35.0);
+        environment.time_res = ChronoDuration::seconds(900);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &environment).unwrap();
+
+        // The event's shed forces the first control pass off before the
+        // thermostat re-reads: the publication is Off, the latch still
+        // calls.
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::GridEmergency,
+            duration_s: Some(900.0),
+        })
+        .unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Off,
+            "fixture: the event's shed forces the first control pass off"
+        );
+        assert!(
+            eq.ideal_target().is_some(),
+            "the solve runs for the latched call the forced-off pass \
+             published Off for"
+        );
+        // The solver's request reaches the unit with the dispatch's
+        // signals (the solver-feedback actor queues it at Step 1f).
+        eq.apply_control(&ControlSignal::IdealCapacity {
+            capacity_w: -2_000.0,
+            degraded: false,
+        })
+        .unwrap();
+        // The operator rescinds the shed at the dispatch: the second
+        // control pass re-derives Cooling and the step dispatches the
+        // call.
+        eq.apply_control(&ControlSignal::DemandResponse {
+            level: DRLevel::Normal,
+            duration_s: Some(900.0),
+        })
+        .unwrap();
+        assert_eq!(
+            eq.update_control(&environment),
+            OperatingMode::Cooling,
+            "the cancel re-derives the thermostat's call at the dispatch"
+        );
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&environment, Duration::from_secs(900), &mut ports)
+            .unwrap();
+        let rtf = eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(f64::NAN);
+        assert!(
+            rtf < 1.0,
+            "the dispatched call delivers the solve's capacity, never the \
+             raw duty: the starved arm runs the full duty at 1.0, got \
+             runtime_fraction {rtf}"
+        );
+        assert_eq!(
+            eq.take_health_counts().ideal_capacity_unsolved_steps,
+            0,
+            "the solve reached the unit: the dispatched call is not a \
+             starvation"
+        );
+    }
+
     /// The event's LAST named step keeps the event's dispatch level: a
     /// partial shed (High, load fraction 0.8) over two named steps
     /// delivers the same reduced draw on both. The timer advances after
