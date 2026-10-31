@@ -135,17 +135,17 @@ fn schedule_column_mean_w(
 }
 
 /// The step's own report about its electric draw, as the aggregation sees
-/// it. `Stepped` records that the equipment published a consumption this
-/// step, even when the value is not a draw or its assembled response is not
-/// a usable ratio: the expected mean is pre-step evidence, so it may stand
-/// in only for a load that reported no consumption at all.
+/// it. `Stepped` records that the equipment published a flow this step (a
+/// consumption, a bidirectional draw or a generation report), even when the
+/// value is not a draw or its assembled response is not a usable ratio: the
+/// expected mean is pre-step evidence, so it may stand in only for a load
+/// that published no flow at all.
 #[derive(Clone, Copy)]
 enum MomentDraw {
-    /// The equipment published no consumption this step (it has not
-    /// stepped, or it reports another flow): the expectation route is the
-    /// only evidence.
+    /// The equipment published no flow this step (it has not stepped): the
+    /// expectation route is the only evidence.
     NotReported,
-    /// The equipment published a consumption: the moment's reference draw
+    /// The equipment published a flow: the moment's reference draw
     /// when it is usable, and the assembled response that weights it. Both
     /// are `None` when the report is not a draw (a negative watt value,
     /// NaN, an infinite draw) or its assembled response is not a finite
