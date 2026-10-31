@@ -1340,7 +1340,12 @@ engine answers for the moment's composition: the weighting-draw-weighted
 mean of each governing equipment's own deep-sag response. The weight is
 the moment's consumption: a bidirectional flow contributes its positive
 part, and a generation report contributes nothing (a load exporting
-draws no power). For an
+draws no power). A report that violates its own flow's contract (a
+negative consumption, a generation value outside the non-negative export
+range, a non-finite value) is broken core state rather than a report of
+zero: its own `net_consumption_w` may read a negative export as a
+consumption, so it carries no weight and no expectation stands in for
+it. For an
 equipment whose draw is scaled through a single resolved row, that
 response is the row's evaluation and un-scaling the stepped draw through
 the same row recovers the reference draw to within the rounding of one

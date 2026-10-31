@@ -13,13 +13,13 @@
 //! govern their real power, plus an explicit roster of what is and is not
 //! covered. The weights are the moment's raw draws when the dwelling has
 //! stepped (each equipment's last core-output electric draw: a consumed
-//! value, a bidirectional flow's positive part, or zero for a generation
-//! report, un-scaled through its assembled deep-sag response at the bus
-//! voltage (the
-//! equipment's own nominal draw when it reports one: a multi-component
-//! unit, or a state its row does not scale such as a commanded power
-//! override; the resolved row's un-scale otherwise, the moment's
-//! composition)),
+//! value, a bidirectional flow's positive part, or zero for a valid
+//! generation report; a value outside its own flow's contract is broken
+//! core state and carries no weight), un-scaled through the equipment's
+//! assembled deep-sag response at the bus voltage (the equipment's own
+//! nominal draw when it reports one: a multi-component unit, or a state
+//! its row does not scale such as a commanded power override; the
+//! resolved row's un-scale otherwise, the moment's composition)),
 //! falling back to the expected mean draw over the loaded schedule for a
 //! dwelling that has not stepped (the static route). The aggregate
 //! cannot know the *share* of total draw that physics-driven equipment
@@ -65,12 +65,12 @@ pub struct PremiseZip {
     /// `(equipment name, weighting draw [W])` for every ZIP-governing
     /// equipment. The weight is the moment's raw draw (the last step's
     /// core-output electric draw: a consumed value, a bidirectional flow's
-    /// positive part, or zero for a generation report, un-scaled through the
-    /// equipment's assembled deep-sag response at the bus voltage: the
-    /// equipment's own
-    /// nominal draw when it reports one (a multi-component unit, or a state
-    /// its row does not scale such as a commanded power override), the
-    /// resolved row's un-scale otherwise, which recovers the reference draw
+    /// positive part, or zero for a valid generation report, un-scaled
+    /// through the equipment's assembled deep-sag response at the bus
+    /// voltage: the equipment's own nominal draw when it reports one (a
+    /// multi-component unit, or a state its row does not scale such as a
+    /// commanded power override), the resolved row's un-scale otherwise,
+    /// which recovers the reference draw
     /// to within the rounding of one division) when the dwelling has
     /// stepped (a stepped zero draw is a zero weight, the 0.0 pu outage
     /// boundary included), else, on an energized bus only, the expected
@@ -223,14 +223,25 @@ pub(crate) fn aggregate_premise_zip(
         // moment that draws nothing), and a generation report is the load
         // exporting, so it consumed nothing either. Only an absent flow is
         // "not reported", the one state the expectation route may cover. A
-        // non-finite value stays non-finite (broken), so the roster's filter
-        // refuses it rather than laundering it into an observed zero.
+        // broken value (a non-finite one, a negative consumption, or a
+        // generation value outside its non-negative export contract) stays
+        // broken, so the roster's filter refuses it rather than laundering
+        // it into an observed zero.
         let reported_draw_w = match eq.core_output().flows.electric_w {
             Some(hares_types::ElectricPower::Consumption(w)) => Some(w),
             Some(hares_types::ElectricPower::Bidirectional(w)) => {
                 Some(if w.is_finite() { w.max(0.0) } else { w })
             }
-            Some(hares_types::ElectricPower::Generation(_)) => Some(0.0),
+            // A valid generation report is an observed zero consumption. A
+            // value that violates the type's non-negative export contract
+            // is broken core state, not a smaller export (the type's own
+            // `net_consumption_w` reads a negative export as a
+            // consumption): the report travels to the roster's
+            // finite-and-non-negative filter unchanged, so it publishes no
+            // weight rather than a fabricated observed zero.
+            Some(hares_types::ElectricPower::Generation(w)) => {
+                Some(if w.is_finite() && w >= 0.0 { 0.0 } else { w })
+            }
             None => None,
         };
         let moment = match reported_draw_w {
@@ -1262,6 +1273,67 @@ mod tests {
             ("Reported Moment".to_string(), Some(0.0)),
             "a generating moment drew nothing: its weight is the observed \
              zero, not the 500 W expectation"
+        );
+    }
+
+    #[test]
+    fn a_malformed_generation_report_is_no_weight_not_an_observed_zero() {
+        // A generation report's value is an export magnitude, and a valid
+        // one (finite, non-negative) means the load consumed exactly
+        // nothing: its weight is the observed zero. A value that violates
+        // the type's contract is broken core state, not a smaller export:
+        // the type's own `net_consumption_w` reads `Generation(-5.0)` as
+        // +5 W of consumption, so the report is no evidence that the load
+        // drew nothing, and folding it into a zero weight would tell the
+        // caller the moment was inspected and came up empty. The roster
+        // must publish no weight for it (the broken-draw semantics), and
+        // the expectation must not stand in for the moment either.
+        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let run = |power| {
+            let equipment: Vec<Box<dyn Equipment>> = vec![
+                Box::new(
+                    StubLoad::new(
+                        "Broken Export",
+                        Some(hares_types::zip::ResolvedZip::governing(lighting)),
+                        Some(ExpectedMeanPower::W(500.0)),
+                    )
+                    .with_last_flow(power),
+                ),
+                governing_stepped_load(
+                    "Always On",
+                    ZipLoad::constant_power(),
+                    Some(ExpectedMeanPower::W(300.0)),
+                    200.0,
+                ),
+            ];
+            aggregate_premise_zip(&equipment, &empty_schedule(), 1, 1.0)
+                .expect("the live load carries a positive weight")
+        };
+        for broken in [-5.0, f64::NAN, f64::INFINITY] {
+            let premise = run(hares_types::ElectricPower::Generation(broken));
+            assert_eq!(
+                premise.governing[0],
+                ("Broken Export".to_string(), None),
+                "a generation report of {broken} violates the type's \
+                 non-negative export contract: it is broken core state, not \
+                 an observed zero, so the roster must publish no weight and \
+                 the 500 W expectation must not stand in for it"
+            );
+            assert_eq!(
+                premise.governing[1],
+                ("Always On".to_string(), Some(200.0)),
+                "the live load's weight is untouched by the broken report"
+            );
+        }
+
+        // The valid export is the observed zero: the moment was inspected
+        // and the load drew nothing (its net flow is an injection).
+        let valid = run(hares_types::ElectricPower::Generation(200.0));
+        assert_eq!(
+            valid.governing[0],
+            ("Broken Export".to_string(), Some(0.0)),
+            "a valid generation report consumed nothing: its weight is the \
+             observed zero, never the 500 W expectation"
         );
     }
 

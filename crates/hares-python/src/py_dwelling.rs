@@ -1419,9 +1419,10 @@ impl PyDwelling {
     /// physics-computed draws). The weights are the moment's raw draws when
     /// the dwelling has stepped (each equipment's last electric draw: a
     /// consumed value, a bidirectional flow's positive part, or zero for a
-    /// generation report, un-scaled through its assembled deep-sag response
-    /// at the bus voltage
-    /// (the equipment's own nominal draw when it reports one: a
+    /// valid generation report; a value outside its flow's contract is
+    /// broken and carries no weight; un-scaled through its assembled
+    /// deep-sag response at the bus voltage (the equipment's own nominal
+    /// draw when it reports one: a
     /// multi-component unit, or a state its row does not scale such as a
     /// commanded power override; the resolved row's un-scale otherwise, the
     /// moment's composition)), else the expected mean draw over the loaded
