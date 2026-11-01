@@ -161,8 +161,14 @@ impl ThermalSolver {
                         && idx < u.len()
                     {
                         u[idx] += shortwave_w;
+                        injected_w += shortwave_w;
                     }
-                    injected_w += shortwave_w;
+                    // A joule whose injection failed (no sensible-input
+                    // index for the port's zone) is NOT counted as
+                    // injected: the count is the injection, so the
+                    // reconciliation's exact pin (meters minus receipt ==
+                    // the explained gap) goes red on any dropped joule
+                    // instead of letting it hide inside the explained gap.
                 }
             }
         }

@@ -6569,6 +6569,48 @@ mod tests {
         assert_shortwave_absorbed_like_diffuse_solar(&mut solver, &surfaces);
     }
 
+    /// The short-wave pass's returned injected count is the injection: the
+    /// returned total equals the input vector's actual deposit. A port
+    /// whose zone has no sensible-input index injects nothing, so the
+    /// count carries nothing for it — the meter-versus-network
+    /// reconciliation's exact pin (meters minus receipt == the explained
+    /// gap) then goes red on any dropped joule instead of the count
+    /// hiding the drop inside the explained gap.
+    #[test]
+    fn the_port_shortwave_injected_count_is_the_actual_deposit() {
+        let env = env_for_temp(20.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        // A zone the solver's wiring carries no sensible-input index for:
+        // the fallback arm's guard cannot hold, nothing enters u.
+        let orphan = ZoneId(9_999);
+        let mut accumulator = hares_types::ThermalAccumulator::new(orphan);
+        accumulator.shortwave_gain_w = 80.0;
+        let ports = PortSlots {
+            thermal: vec![accumulator],
+            ..Default::default()
+        };
+        assert!(
+            !solver
+                .wiring
+                .zone_sensible_input_indices
+                .contains_key(&orphan)
+        );
+
+        let mut u = DVector::zeros(3);
+        let before: f64 = u.iter().sum();
+        let returned = solver.apply_port_shortwave_inputs(&mut u, &ports, false);
+        let deposited: f64 = u.iter().sum::<f64>() - before;
+
+        assert!(
+            (returned - deposited).abs() < 1e-9,
+            "the injected count must be the actual deposit: returned {returned}, deposited {deposited}"
+        );
+        assert!(
+            deposited.abs() < 1e-9,
+            "an orphan zone's short-wave joule is dropped, not deposited: {deposited}"
+        );
+    }
+
     /// The same deposit in the default StarMesh mode, where the zone's
     /// surfaces reach the distribution through `interior_solar_zones` and
     /// `interior_lwr_zones` is empty.
