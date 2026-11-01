@@ -1615,7 +1615,7 @@ pub(crate) fn build_default_solvers(
     // The building's flow-schedule column is the synthetic builder's
     // emission: the fixture's `[ventilation] flow_schedule_m3_s` expanded
     // to per-step values. The solver reads the column's value from the
-    // schedule payload every step — the flow is a runtime input; the
+    // schedule payload every step, so the flow is a runtime input; the
     // equipment-spec constants above remain the default when no column is
     // declared.
     if let Some(col) = building.ventilation_flow_schedule_col {

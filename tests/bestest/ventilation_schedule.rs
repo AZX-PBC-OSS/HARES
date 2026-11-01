@@ -6,7 +6,7 @@
 //! (the same rule the event-load columns and the environment's schedule-row
 //! addressing follow: the row the step reads is the row of the hour its
 //! start falls in), so the fan's signal is the hour's value held across the
-//! hour's steps at any timestep — a zero-order hold whose boundaries are the
+//! hour's steps at any timestep: a zero-order hold whose boundaries are the
 //! step's own start-time hours.
 //!
 //! The distinguishing case is a step that STRADDLES an hour boundary: a
@@ -14,7 +14,7 @@
 //! start) reads the 17:00 hour's value (the fan OFF); sampling at the step's
 //! end would read the 18:00 hour's value (the fan ON). The 900 s run pins
 //! the start convention on exactly such a step, and the 3600 s and 900 s
-//! runs agree hour-bucket for hour-bucket — the invariance's form for the
+//! runs agree hour-bucket for hour-bucket, the invariance's form for the
 //! scheduled flow.
 //!
 //! Vehicle: Case 650's fixture over one simulated day starting 07:00. The
@@ -105,8 +105,8 @@ fn fan_on_at_start_hour(hour: usize) -> bool {
 
 /// The forced-ventilation gains follow the fan's configuration schedule
 /// hour-bucket for hour-bucket: an OFF step's gain is exactly zero (the
-/// flow is exactly zero), an ON step's is not. A phase slip — sampling at
-/// the step's end, or an off-by-one at an hour boundary — moves a step
+/// flow is exactly zero), an ON step's is not. A phase slip (sampling at
+/// the step's end, or an off-by-one at an hour boundary) moves a step
 /// across its bucket and fails the pattern.
 fn assert_fan_pattern(gains: &[f64], time_res_s: u64) {
     let steps_per_hour = 3600 / time_res_s;
@@ -143,7 +143,7 @@ fn the_scheduled_fan_follows_its_hours_at_the_hourly_timestep() {
 }
 
 /// The 900 s timestep: the same hour buckets, four steps each, and the
-/// boundary steps decide the contract — the step starting 17:45 ends at
+/// boundary steps decide the contract: the step starting 17:45 ends at
 /// 18:00 and must read OFF (the schedule samples at the step's time), the
 /// step starting 18:00 must read ON.
 #[test]

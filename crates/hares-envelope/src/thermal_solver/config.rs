@@ -158,7 +158,7 @@ pub struct MechanicalVentilationParams {
     /// schedule's own column list, read through
     /// [`hares_types::ScheduleSource::schedule_column_value`] (the wrap
     /// boundary, the finiteness guard) at every step. The schedule is the
-    /// flow's most specific input — an hour-resolved fan rate replaces the
+    /// flow's most specific input: an hour-resolved fan rate replaces the
     /// constants on the indoor zone; the constants (`zone_flow_m3_s`, and
     /// the solver's `ventilation_flow_m3_s` for the indoor zone) remain the
     /// default when no column is declared. `None` (the default) is the

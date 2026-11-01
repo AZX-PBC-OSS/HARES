@@ -110,7 +110,7 @@ pub(crate) fn apply_infiltration_and_ventilation(
     // The scheduled ventilation flow, read once per step: the config's
     // declared schedule column's value for this step's schedule row is the
     // indoor zone's forced ventilation flow (m³/s). `None` when the config
-    // declares no column — the constants govern.
+    // declares no column: the constants govern.
     let scheduled_flow_m3_s = match config.ventilation.flow_schedule_col {
         Some(col) => Some(ScheduleSource::schedule_column_value(
             env,
@@ -717,7 +717,7 @@ mod tests {
     /// column's payload value IS the indoor zone's forced ventilation flow.
     /// Hand-calculated: the payload carries 0.4731 m³/s (the BESTEST 650
     /// fan's 1703.16 m³/h), the constants carry a different rate, and the
-    /// coupling's forced flow must read the schedule's value — the
+    /// coupling's forced flow must read the schedule's value: the
     /// schedule is the flow's most specific input.
     #[test]
     fn scheduled_ventilation_flow_reads_the_schedule_payload() {
@@ -777,7 +777,7 @@ mod tests {
     }
 
     /// No schedule column declared: the constants govern, the payload (if
-    /// any) is unread — the constants remain the default configuration.
+    /// any) is unread; the constants remain the default configuration.
     #[test]
     fn unscheduled_ventilation_flow_keeps_the_constants() {
         let config = ThermalSolverConfig {
