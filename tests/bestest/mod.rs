@@ -312,13 +312,15 @@ fn bestest_case_640() {
 
 // Cases 920, 195 and 395: the fixtures and their ASHRAE 140-2023 Annex B8
 // bands are committed (`cases.rs`, `reference_bands.rs`, the tracked-build
-// tests below), and NO case runs against its bands: the engine's measured
-// annual loads sit outside them, the same documented under-heating the
-// 600/900 drift locks carry (heating 15 to 29 percent below the band
-// floors; 195's cooling 39 percent below, 395's cooling 86 percent above
-// the band's ceiling). The band tests stop until the physics fixes land;
-// widening the bands or drift-locking the divergences as if they were a
-// conformance state would both misstate the published oracles.
+// tests below), and NO case runs against its bands: the engine's annual
+// heating loads sit outside them, the same documented under-heating the
+// 600/900 drift locks carry (6 to 23 percent below the band floors: 920
+// 2779.6, 195 3024.0 and 395 3739.2 against the floors 2956, 3951 and
+// 4565). 195's cooling is 39 percent below its floor (359.6 against 592);
+// the 920 and 395 cooling loads (2745.6 and 10.9) land inside their bands.
+// The band tests stop until the physics fixes land; widening the bands or
+// drift-locking the divergences as if they were a conformance state would
+// both misstate the published oracles.
 
 #[test]
 fn bestest_extended_cases_are_tracked() {
@@ -357,6 +359,69 @@ fn bestest_in_depth_cases_are_tracked() {
         Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
             .unwrap_or_else(|err| panic!("in-depth case {} builds: {err}", case.id));
     }
+}
+
+/// ASHRAE 140-2017 Table B1-3 (carried by 140-2023 Section 7's case
+/// descriptions) gives the in-depth solid-conduction pair's opaque
+/// radiative properties: Case 195 is the "20,20" thermostat with interior
+/// and exterior IR emittance 0.1, Case 395 the "20,27" deadband with both
+/// at 0.9. The synthetic fixture's single `emittance` field feeds the
+/// assembly's interior and exterior faces, so the assembled network's
+/// exterior surfaces must carry the table's value. A fixture written to
+/// the wrong row would make the pinned band target a different
+/// construction.
+#[test]
+fn in_depth_fixtures_carry_the_standards_ir_emittance() {
+    for (id, expected) in [("195", 0.1), ("395", 0.9)] {
+        let case = in_depth_cases()
+            .into_iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("case {id} is in the in-depth set"));
+        let dwelling =
+            Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
+                .unwrap_or_else(|err| panic!("in-depth case {id} builds: {err}"));
+        let surfaces = &dwelling.thermal_solver().config().exterior_surfaces;
+        assert!(
+            !surfaces.is_empty(),
+            "case {id}: the envelope carries exterior surfaces"
+        );
+        for surface in surfaces {
+            assert_eq!(
+                surface.emissivity, expected,
+                "case {id}: ASHRAE 140 Table B1-3's opaque IR emittance is {expected} \
+                 on both faces; the assembled exterior surface carries {}",
+                surface.emissivity
+            );
+        }
+    }
+}
+
+/// ASHRAE 140's BESTEST cases carry no occupants: their internal gains are
+/// the declared 200 W (Case 920's Table B1-3 row), not an occupancy gain on
+/// top. The synthetic schedule defaults to one occupant when the
+/// `[schedule]` block is absent, which the builder turns into 75 W sensible
+/// (70 percent convective, 30 percent radiant) plus 55 W latent. Pin Case
+/// 920's first-step internal-gain category at the fixture's declared 200 W:
+/// a dropped `[schedule]` block is a 275 W sensible gain against the
+/// standard's 200 W and would silently move the pinned band's target.
+#[test]
+fn case_920_carries_no_occupancy_gain_above_its_declared_internal_gains() {
+    let case = extended_cases()
+        .into_iter()
+        .find(|c| c.id == "920")
+        .expect("case 920 is in the extended set");
+    let mut dwelling =
+        Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
+            .unwrap_or_else(|err| panic!("case 920 builds: {err}"));
+    dwelling.step().expect("case 920's first step runs");
+    let internal_gain_w = dwelling.thermal_solver().component_gains().internal_gain_w;
+    assert!(
+        (internal_gain_w - 200.0).abs() < 1.0,
+        "case 920's declared internal gains are 200 W; the first step's \
+         internal-gain category carries {internal_gain_w:.3} W: a fixture \
+         without `[schedule]` occupants_present = false adds an occupant's \
+         75 W"
+    );
 }
 
 fn run_case(case: &BestestCase) -> CaseObservation {

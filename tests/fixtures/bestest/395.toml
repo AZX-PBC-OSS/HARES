@@ -1,13 +1,14 @@
 building_id = 395
 
-# ASHRAE 140-2023 Section 5.2.3.16, Case 395: the solid-conduction in-depth
-# test under the "20,27" deadband thermostat (heating 20 C, cooling 27 C, the
-# Case 400 base's setpoints). Case 600's lightweight walls replace the 12 m2
-# of south windows (5.2.3.16); 0 infiltration, 0 internal gains, exterior
-# solar absorptance 0.1, IR emittance 0.1 interior and exterior, exactly as
-# Case 195. The deadband widens what the free response can do between the
-# setpoints: the case isolates conduction dynamics from the thermostat's
-# immediate correction.
+# ASHRAE 140-2023 Section 5.2.3.16, Case 395: the low-mass solid-conduction
+# in-depth test under the "20,27" deadband thermostat (heating 20 C, cooling
+# 27 C, the Case 400 base's setpoints). Case 600's lightweight walls replace
+# the 12 m2 of south windows (5.2.3.16); 0 infiltration, 0 internal gains,
+# exterior solar absorptance 0.1, and IR emittance 0.9 interior and exterior
+# (Table B1-3's 20,27 row; the 0.1 pair belongs to Case 195's 20,20 row). The
+# deadband widens what the free response can do between the setpoints: the
+# case isolates conduction dynamics from the thermostat's immediate
+# correction.
 
 # The warm-up: the [simulation] table's warmup field, the default
 # converging warm-up (the EnergyPlus criteria).
@@ -51,7 +52,7 @@ area_m2 = 9.6
 azimuth_deg = 180.0
 tilt_deg = 90.0
 solar_absorptance = 0.1
-emittance = 0.1
+emittance = 0.9
 interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 
@@ -81,7 +82,7 @@ area_m2 = 21.6
 azimuth_deg = 0.0
 tilt_deg = 90.0
 solar_absorptance = 0.1
-emittance = 0.1
+emittance = 0.9
 interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 
@@ -111,7 +112,7 @@ area_m2 = 16.2
 azimuth_deg = 90.0
 tilt_deg = 90.0
 solar_absorptance = 0.1
-emittance = 0.1
+emittance = 0.9
 interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 
@@ -141,7 +142,7 @@ area_m2 = 16.2
 azimuth_deg = 270.0
 tilt_deg = 90.0
 solar_absorptance = 0.1
-emittance = 0.1
+emittance = 0.9
 interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 
@@ -172,7 +173,7 @@ outside_material = "wood shingles or shakes"
 area_m2 = 48.0
 tilt_deg = 0.0
 solar_absorptance = 0.1
-emittance = 0.1
+emittance = 0.9
 interior_zone = "Conditioned"
 exterior_zone = "Outdoor"
 

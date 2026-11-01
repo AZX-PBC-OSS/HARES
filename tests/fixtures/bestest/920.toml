@@ -229,3 +229,9 @@ azimuth_deg = 270.0
 u_factor_w_m2_k = 3.0
 shgc = 0.769
 attached_to_wall_id = "west-wall"
+
+# ASHRAE 140's cases carry no occupants: the internal gains are the 200 W
+# other-equipment load, so the synthetic schedule's default occupant is off.
+[schedule]
+occupancy = 0.0
+occupants_present = false
