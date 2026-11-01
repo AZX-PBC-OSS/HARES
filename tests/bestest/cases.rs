@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 pub enum BestestTier {
     Core,
     Extended,
+    /// The in-depth solid-conduction series (ASHRAE 140-2023 Section 7.3 /
+    /// 140-2017 5.2.3): Case 600's construction with the windows removed,
+    /// zero internal gains and zero infiltration, under the in-depth
+    /// radiative properties. The `alignment_oracles_regressions` target
+    /// includes `cases.rs` without the BESTEST tests and never constructs
+    /// this tier, which is why the allowance is needed.
+    #[allow(dead_code)]
+    InDepth,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +86,13 @@ pub fn extended_cases() -> Vec<BestestCase> {
             timestep_seconds: 3600,
         },
         BestestCase {
+            id: "920",
+            description: "East/west windows, high mass",
+            tier: BestestTier::Extended,
+            fixture_file: "920.toml",
+            timestep_seconds: 3600,
+        },
+        BestestCase {
             id: "CE100",
             description: "DX cooling equipment case",
             tier: BestestTier::Extended,
@@ -96,6 +111,33 @@ pub fn extended_cases() -> Vec<BestestCase> {
             description: "Heat pump heating performance",
             tier: BestestTier::Extended,
             fixture_file: "s54_heat_pump.toml",
+            timestep_seconds: 3600,
+        },
+    ]
+}
+
+/// The in-depth solid-conduction cases (ASHRAE 140-2023 Section 7.3 /
+/// 140-2017 5.2.3): Case 600's envelope with no windows, zero internal gains
+/// and zero infiltration, under the in-depth radiative properties (exterior
+/// solar absorptance 0.1, IR emittance 0.1 interior and exterior). Consumed by
+/// the `bestest` target and the `regression` target's include of this
+/// module; the `alignment_oracles_regressions` target includes only
+/// `cases.rs`, which leaves the function unused there.
+#[allow(dead_code)]
+pub fn in_depth_cases() -> Vec<BestestCase> {
+    vec![
+        BestestCase {
+            id: "195",
+            description: "Solid conduction, 20/20 thermostat",
+            tier: BestestTier::InDepth,
+            fixture_file: "195.toml",
+            timestep_seconds: 3600,
+        },
+        BestestCase {
+            id: "395",
+            description: "Solid conduction, 20/27 deadband thermostat",
+            tier: BestestTier::InDepth,
+            fixture_file: "395.toml",
             timestep_seconds: 3600,
         },
     ]

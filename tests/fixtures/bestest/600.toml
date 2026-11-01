@@ -3,13 +3,11 @@ building_id = 600
 internal_gains_w = 200.0
 internal_gains_constant = true
 internal_gains_sensible_fraction = 1.0
-# EnergyPlus BESTEST IDF OtherEquipment Fraction Radiant = 0.3 (30% radiant, 70% convective).
-# Source: E+ I/O Reference §Group-InternalGains, OtherEquipment object; confirmed in
-# E+ IDD V9-6-0-Energy+.idd N5 field default=0 but BESTEST IDF overrides to 0.3.
-# This matches E+ v9.6 BESTEST test reference value. ASHRAE 140-2017 Addendum a
-# §5.2.1.7 describes 60% radiant, but that figure refers to occupant sensible gain
-# conventions, not OtherEquipment; the EnergyPlus implementation (which produced the
-# ASHRAE 140 reference bands) uses 0.3.
+# The radiant split is the family's 0.3: the I/O Reference's generic
+# OtherEquipment example, not a BESTEST case value. ASHRAE 140-2017 Addendum a
+# Section 5.2.1.7 specifies 200 W, 100% sensible, 60% radiative, 40%
+# convective; 920.toml's note gives the reason the 0.3 stays until the
+# family-wide correction (a Tier-1 physics re-pin).
 internal_gains_radiant_fraction = 0.3
 
 # The warm-up: the [simulation] table's warmup field, the default

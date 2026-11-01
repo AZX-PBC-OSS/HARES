@@ -323,3 +323,72 @@ fn reseed_composes_the_episode_seed_with_the_scenario() {
         "the reseeded driver draws from its start"
     );
 }
+
+/// The fixture's declared power reaches the equipment: the `[event_load]`
+/// table's `active_power_w` is the Cooking Range's configured parameter and
+/// the draw an active event delivers, not the 1000 W default the
+/// equipment's init falls back to when the declared key drops between the
+/// TOML and the resolver's extension passthrough. The synthetic builder once
+/// emitted the removed `active_power_kw` spelling; the in-memory synthetic
+/// tree never crosses the document scan that rejects that element, so the
+/// value sat in an extension child no reader named and every fixture event
+/// ran at the default. Probability 1.0 makes the draw deterministic: every
+/// open-window step starts an event, and the constant window never closes.
+#[test]
+fn the_event_loads_declared_power_reaches_its_draw() {
+    use hares_types::telemetry_keys as tk;
+
+    let toml =
+        scenario_toml(None, 42).replace("event_probability = 0.5", "event_probability = 1.0");
+    assert_ne!(
+        toml,
+        scenario_toml(None, 42),
+        "the fixture declares the event probability the witness makes \
+         deterministic"
+    );
+
+    let dir = tempfile::tempdir().expect("test temp dir");
+    let path = bench_common::numbered_path(dir.path(), "hares-event-load-power", "toml");
+    std::fs::write(&path, &toml).expect("the witness TOML writes");
+    let mut dwelling = Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
+        .expect("the witness dwelling builds");
+
+    // The declared parameter: the equipment's own record of its configured
+    // draw, in watts: the fixture's 1500 W, not the 1000 W default.
+    let event_load = dwelling
+        .equipment()
+        .iter()
+        .find(|eq| eq.descriptor().name == "Cooking Range")
+        .expect("the fixture's event load is in the dwelling's equipment");
+    let resolved = event_load.resolved_parameters();
+    let declared = resolved
+        .iter()
+        .find(|param| param.name == "active_power_w")
+        .expect("the event load resolves its active power");
+    assert_eq!(
+        declared.value, 1500.0,
+        "the fixture's declared active_power_w is the event load's \
+         configured parameter"
+    );
+
+    // The draw: an active event delivers the declared power to the port.
+    bench_common::step_n(&mut dwelling, 1, "the witness's active step");
+    let event_load = dwelling
+        .equipment()
+        .iter()
+        .find(|eq| eq.descriptor().name == "Cooking Range")
+        .expect("the event load stays in the dwelling's equipment");
+    let draw = event_load
+        .telemetry()
+        .get(tk::ACTIVE_POWER_KW)
+        .unwrap_or_else(|| panic!("the event load publishes its draw"));
+    assert_eq!(
+        event_load.telemetry().get(tk::STATE),
+        Some(1.0),
+        "the witness's step runs the event load in its active phase"
+    );
+    assert!(
+        (draw - declared.value).abs() < 1e-6,
+        "the active event's draw is the declared 1500 W, got {draw} W"
+    );
+}

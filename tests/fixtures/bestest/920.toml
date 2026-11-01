@@ -1,0 +1,244 @@
+building_id = 920
+
+internal_gains_w = 200.0
+internal_gains_constant = true
+internal_gains_sensible_fraction = 1.0
+# The gains' radiative split matches Case 900's fixture treatment: Case 920's
+# differential against Case 900 (the standard's east/west transmittance pair)
+# requires the pair's internal gains to match. The standard's own clause
+# (140-2017 Addendum a Section 5.2.1.7) specifies the 200 W load "100%
+# sensible, 60% radiative, 40% convective", and EnergyPlus's official BESTEST
+# report describes its runs the same way; the 0.3 below is the I/O Reference's
+# generic OtherEquipment example, not a BESTEST case value. The 0.3 is shared
+# by the 600/600FF/640/900/900FF/920 fixtures (620 carries no gains) and is an
+# open fixture-provenance finding against the family's gains treatment: a
+# family-wide correction moves the annual loads and re-pins the bands, the
+# Tier-1 physics lane's work.
+internal_gains_radiant_fraction = 0.3
+
+# The warm-up: the [simulation] table's warmup field, the default
+# converging warm-up (the EnergyPlus criteria).
+[simulation]
+start_time = "2024-01-01T00:00:00-07:00"
+time_res = 3600
+duration = 31536000
+output_chunk_size = 10000
+master_seed = 0
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+mass_multiplier = 1.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "IdealHVAC"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+deadband_c = 0.0
+
+[weather]
+epw_path = "../../../data/examples/USA_CO_Denver.epw"
+
+[setpoints]
+heating_c = 20.0
+cooling_c = 27.0
+setpoint_deadband_c = 0.0
+
+[infiltration]
+ach = 0.5
+
+[[boundaries]]
+id = "south-wall"
+boundary_type = "Wall"
+outside_material = "wood siding"
+area_m2 = 9.6
+azimuth_deg = 180.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.0615
+conductivity_w_m_k = 0.040
+density_kg_m3 = 10.0
+specific_heat_j_kg_k = 1400.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.100
+conductivity_w_m_k = 0.510
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
+
+[[boundaries]]
+id = "north-wall"
+boundary_type = "Wall"
+outside_material = "wood siding"
+area_m2 = 21.6
+azimuth_deg = 0.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.0615
+conductivity_w_m_k = 0.040
+density_kg_m3 = 10.0
+specific_heat_j_kg_k = 1400.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.100
+conductivity_w_m_k = 0.510
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
+
+[[boundaries]]
+id = "east-wall"
+boundary_type = "Wall"
+outside_material = "wood siding"
+area_m2 = 16.2
+azimuth_deg = 90.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.0615
+conductivity_w_m_k = 0.040
+density_kg_m3 = 10.0
+specific_heat_j_kg_k = 1400.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.100
+conductivity_w_m_k = 0.510
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
+
+[[boundaries]]
+id = "west-wall"
+boundary_type = "Wall"
+outside_material = "wood siding"
+area_m2 = 16.2
+azimuth_deg = 270.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.0615
+conductivity_w_m_k = 0.040
+density_kg_m3 = 10.0
+specific_heat_j_kg_k = 1400.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.100
+conductivity_w_m_k = 0.510
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
+
+[[boundaries]]
+id = "roof"
+boundary_type = "Roof"
+# ASHRAE 140 states no outside roughness; the roof deck is the walls' wood,
+# and HPXML's only wood roof material is wood shingles (register D-010).
+outside_material = "wood shingles or shakes"
+area_m2 = 48.0
+tilt_deg = 0.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.019
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.1118
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.010
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "floor"
+boundary_type = "Floor"
+area_m2 = 48.0
+tilt_deg = 180.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+
+[[boundaries.material_layers]]
+thickness_m = 1.007
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.080
+conductivity_w_m_k = 1.130
+density_kg_m3 = 1400.0
+specific_heat_j_kg_k = 1000.0
+
+[[windows]]
+id = "east-window"
+area_m2 = 6.0
+azimuth_deg = 90.0
+u_factor_w_m2_k = 3.0
+shgc = 0.769
+attached_to_wall_id = "east-wall"
+
+[[windows]]
+id = "west-window"
+area_m2 = 6.0
+azimuth_deg = 270.0
+u_factor_w_m2_k = 3.0
+shgc = 0.769
+attached_to_wall_id = "west-wall"
+
+# ASHRAE 140's cases carry no occupants: the internal gains are the 200 W
+# other-equipment load, so the synthetic schedule's default occupant is off.
+[schedule]
+occupancy = 0.0
+occupants_present = false

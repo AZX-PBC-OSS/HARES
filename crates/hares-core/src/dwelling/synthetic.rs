@@ -898,9 +898,15 @@ pub(crate) fn build_synthetic_building(
     // dwelling's hierarchical RNG stream: values in (0, 1) produce
     // seed-dependent event starts for reproducibility testing.
     if let Some(el) = &config.event_load {
+        // The extension children name the resolver's passthrough spellings
+        // exactly (the extension reader pushes each into the equipment's
+        // raw config): the SI `active_power_w`, not the removed
+        // `active_power_kw`: an in-memory tree never crosses the document
+        // scan that rejects the removed element, so a stale name here would
+        // drop the declared power onto the equipment's default silently.
         let mut extension_children: Vec<hares_io::hpxml::building::XmlNode> = vec![
             hares_io::hpxml::building::XmlNode {
-                name: "active_power_kw".to_string(),
+                name: "active_power_w".to_string(),
                 attrs: HashMap::new(),
                 text: el.active_power_w.to_string(),
                 children: Vec::new(),
