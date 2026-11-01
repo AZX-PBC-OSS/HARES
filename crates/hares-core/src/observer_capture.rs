@@ -425,8 +425,9 @@ pub(crate) fn capture_custom_solvers(solvers: &[Box<dyn DomainSolver>]) -> Custo
 mod tests {
     use super::*;
     use hares_types::{
-        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType, HaresError,
-        HeatTransferDirection, LoopId, PortSlots, ThermalAccumulator, ZoneId,
+        ElectricalAccumulator, FluidAccumulator, FluidType, FuelAccumulator, FuelType, GridState,
+        HaresError, HeatTransferDirection, LoopId, PortSlots, SurfaceIrradiance,
+        ThermalAccumulator, WeatherState, ZoneHeat, ZoneId, ZoneState,
     };
 
     fn approx_eq(left: f64, right: f64) {
@@ -681,38 +682,20 @@ mod tests {
         approx_eq(find(FuelType::Oil), 0.0);
     }
 
-    /// The in-place capture's overwrite completeness: a capture refilled
-    /// from a different source's state carries no stale value and no
-    /// stale Vec tail, so the recycled write is the fresh form on bits.
-    /// The debug format covers every field of the capture.
+    /// The in-place capture's overwrite-completeness pin: the destination
+    /// is made dirty field by field (independent of the fill function, so
+    /// an omitted write cannot hide behind a capture the same function
+    /// built), then refilled from a different source. The result must
+    /// equal the fresh form on every field: a stale scalar, a stale zone
+    /// or fuel row, or a stale fluid row means the in-place form skipped
+    /// a field. The literal is exhaustive, so a new field breaks it.
     #[test]
     fn capture_ports_into_overwrites_a_dirty_capture() {
-        let zone_a = ZoneId(1);
-        let zone_b = ZoneId(2);
-        let mut fuel = FuelAccumulator::default();
-        fuel.add(FuelType::Gas, 500.0).unwrap();
-        let dirty_source = PortSlots {
-            thermal: vec![
-                ThermalAccumulator {
-                    zone: zone_a,
-                    sensible_gain_w: 111.0,
-                    ..ThermalAccumulator::new(zone_a)
-                },
-                ThermalAccumulator {
-                    zone: zone_b,
-                    sensible_gain_w: 222.0,
-                    latent_gain_w: 3.0,
-                    ..ThermalAccumulator::new(zone_b)
-                },
-            ],
-            fuel,
-            ..Default::default()
-        };
         let mut clean_source = PortSlots {
             thermal: vec![ThermalAccumulator {
-                zone: zone_b,
+                zone: ZoneId(2),
                 sensible_gain_w: 7.0,
-                ..ThermalAccumulator::new(zone_b)
+                ..ThermalAccumulator::new(ZoneId(2))
             }],
             ..Default::default()
         };
@@ -720,18 +703,208 @@ mod tests {
             .fuel
             .add(FuelType::Wood, 42.0)
             .expect("wood registers");
-
         let fresh = capture_ports(&clean_source);
 
-        let mut recycled = capture_ports(&dirty_source);
+        let dirty = PortsCapture {
+            thermal: vec![
+                (
+                    ZoneId(1),
+                    ZoneHeat {
+                        convective_w: 1.0,
+                        radiant_w: 2.0,
+                        shortwave_w: 3.0,
+                        latent_w: 4.0,
+                    },
+                ),
+                (
+                    ZoneId(2),
+                    ZoneHeat {
+                        convective_w: 5.0,
+                        radiant_w: 6.0,
+                        shortwave_w: 7.0,
+                        latent_w: 8.0,
+                    },
+                ),
+            ],
+            electrical_load_w: 101.0,
+            electrical_gen_w: 102.0,
+            electrical_reactive_var: 103.0,
+            fuel_consumption_w: hares_types::ALL_FUEL_TYPES
+                .iter()
+                .map(|&fuel_type| (fuel_type, 200.0))
+                .collect(),
+            fluid: vec![FluidPortCapture {
+                loop_id: LoopId(3),
+                fluid_type: FluidType::Water,
+                total_flow_kg_s: 0.5,
+                mean_supply_temp_c: 40.0,
+                mean_return_temp_c: 30.0,
+                total_thermal_power_w: 1000.0,
+                direction: Some(HeatTransferDirection::Source),
+            }],
+        };
+
+        let mut recycled = dirty;
         capture_ports_into(&mut recycled, &clean_source);
 
         assert_eq!(
             format!("{recycled:?}"),
             format!("{fresh:?}"),
             "the recycled capture's refill must equal the fresh capture \
-             on every field: a stale zone row, fuel entry or scalar means \
-             the in-place form skipped a field"
+             on every field: a stale zone row, fuel entry, fluid row or \
+             scalar means the in-place form skipped a field"
+        );
+    }
+
+    /// An environment state whose every captured scalar is derived from
+    /// `base`, with one zone per entry and `surfaces` irradiance rows:
+    /// two states with different bases differ in every field the
+    /// environment capture reads, so a skipped in-place write cannot
+    /// read as a match.
+    fn environment_with_scalars(
+        base: f64,
+        zones: &[(u16, f64, f64)],
+        surfaces: u32,
+    ) -> EnvironmentState {
+        EnvironmentState {
+            ambient_other_space_c: hares_types::AmbientOtherSpaceTemps::default(),
+            zones: zones
+                .iter()
+                .map(|&(id, temperature_c, humidity_ratio)| {
+                    ZoneState::new(ZoneId(id), temperature_c, humidity_ratio, 120.0)
+                })
+                .collect(),
+            weather: WeatherState {
+                outdoor_temp_c: base + 1.0,
+                ghi_w_m2: base + 2.0,
+                dni_w_m2: base + 3.0,
+                dhi_w_m2: base + 4.0,
+                solar_altitude_deg: base + 5.0,
+                solar_azimuth_deg: base + 6.0,
+                wind_speed_m_s: base + 7.0,
+                mains_temp_c: base + 8.0,
+                ground_temp_c: base + 9.0,
+                sky_temp_c: base + 10.0,
+                solar_irradiance: (0..surfaces)
+                    .map(|surface_id| SurfaceIrradiance {
+                        surface_id,
+                        direct_w_m2: base + f64::from(surface_id) + 11.0,
+                        diffuse_w_m2: base + 12.0,
+                        reflected_w_m2: base + 13.0,
+                        angle_of_incidence_rad: 0.5,
+                    })
+                    .collect(),
+                ..WeatherState::default()
+            },
+            grid: GridState {
+                voltage_pu: 1.0,
+                frequency_hz: 60.0,
+                island_bus_voltage_pu: None,
+            },
+            schedule_row: None,
+            unavailable_periods: hares_types::UnavailablePeriodState::default(),
+            domains: hares_types::DomainSlots::default(),
+            equipment_telemetry: zones
+                .iter()
+                .map(|&(id, _, _)| (format!("equipment-{id}"), hares_types::Telemetry::default()))
+                .collect(),
+            equipment_core: Default::default(),
+            current_time: chrono::DateTime::parse_from_rfc3339("2024-06-15T12:00:00Z")
+                .expect("a valid timestamp"),
+            time_res: chrono::Duration::minutes(1),
+            price_signal: hares_types::PriceSignal::default(),
+            electrical: hares_types::ElectricalSummary {
+                pv_generation_w: base + 14.0,
+                actual_pv_w: base + 15.0,
+                net_grid_w: base + 16.0,
+                base_load_w: base + 17.0,
+                ..hares_types::ElectricalSummary::default()
+            },
+        }
+    }
+
+    /// The environment and zone-update captures' overwrite-completeness
+    /// pin: each destination is made dirty field by field (independent of
+    /// the fill function) and refilled from a different source; the
+    /// result must equal the fresh form on every field. A stale zone row,
+    /// irradiance row or scalar means the in-place form skipped a field.
+    /// Both literals are exhaustive, so a new field breaks them.
+    #[test]
+    fn environment_and_zone_update_into_overwrite_a_dirty_capture() {
+        let clean_source = environment_with_scalars(200.0, &[(2, 18.0, 0.006)], 1);
+
+        let mut recycled_environment = EnvironmentCapture {
+            outdoor_temp_c: 901.0,
+            ghi_w_m2: 902.0,
+            dni_w_m2: 903.0,
+            dhi_w_m2: 904.0,
+            solar_altitude_deg: 905.0,
+            solar_azimuth_deg: 906.0,
+            wind_speed_m_s: 907.0,
+            mains_temp_c: 908.0,
+            raw_water_mains_temp_f: 909.0,
+            clamped_water_mains_temp_f: 910.0,
+            ground_temp_c: 911.0,
+            sky_temp_c: 912.0,
+            zone_temps_c: vec![(ZoneId(1), 21.0), (ZoneId(2), 22.0), (ZoneId(3), 23.0)],
+            zone_humidity_ratios: vec![(ZoneId(1), 0.1), (ZoneId(2), 0.2), (ZoneId(3), 0.3)],
+            solar_irradiance: vec![
+                SurfaceIrradiance {
+                    surface_id: 0,
+                    direct_w_m2: 1.0,
+                    diffuse_w_m2: 2.0,
+                    reflected_w_m2: 3.0,
+                    angle_of_incidence_rad: 0.1,
+                },
+                SurfaceIrradiance {
+                    surface_id: 1,
+                    direct_w_m2: 4.0,
+                    diffuse_w_m2: 5.0,
+                    reflected_w_m2: 6.0,
+                    angle_of_incidence_rad: 0.2,
+                },
+            ],
+            wf_allows_leap_years: false,
+            pv_generation_w: 913.0,
+            pv_actual_w: 914.0,
+            net_grid_w: 915.0,
+            base_load_w: 916.0,
+            equipment_core_size: 7,
+            equipment_telemetry_size: 8,
+            raw_day_of_year: 9,
+            civil_day_of_year: 10,
+            utc_day_of_year: 11,
+        };
+        capture_environment_into(
+            &mut recycled_environment,
+            &clean_source,
+            true,
+            41.0,
+            12,
+            13,
+            14,
+        );
+        let fresh_environment = capture_environment(&clean_source, true, 41.0, 12, 13, 14);
+        assert_eq!(
+            format!("{recycled_environment:?}"),
+            format!("{fresh_environment:?}"),
+            "the recycled environment capture's refill must equal the fresh \
+             capture on every field: a stale zone row, irradiance row or \
+             scalar means the in-place form skipped a field"
+        );
+
+        let mut recycled_zone_update = ZoneUpdateCapture {
+            zone_temps_c: vec![(ZoneId(1), 90.0), (ZoneId(2), 91.0), (ZoneId(3), 92.0)],
+            zone_humidity_ratios: vec![(ZoneId(1), 0.9), (ZoneId(2), 0.8), (ZoneId(3), 0.7)],
+        };
+        capture_zone_update_into(&mut recycled_zone_update, &clean_source);
+        let fresh_zone_update = capture_zone_update(&clean_source);
+        assert_eq!(
+            format!("{recycled_zone_update:?}"),
+            format!("{fresh_zone_update:?}"),
+            "the recycled zone-update capture's refill must equal the fresh \
+             capture on every field: a stale zone row means the in-place \
+             form skipped a field"
         );
     }
 
