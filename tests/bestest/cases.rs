@@ -7,10 +7,9 @@ pub enum BestestTier {
     /// The in-depth solid-conduction series (ASHRAE 140-2023 Section 7.3 /
     /// 140-2017 5.2.3): Case 600's construction with the windows removed,
     /// zero internal gains and zero infiltration, under the in-depth
-    /// radiative properties.
-    /// This module is included by two test crates (`bestest` and
-    /// `alignment_oracles_regressions`); the tier is constructed only in
-    /// the former, which is why the allowance is needed.
+    /// radiative properties. The `alignment_oracles_regressions` target
+    /// includes `cases.rs` without the BESTEST tests and never constructs
+    /// this tier, which is why the allowance is needed.
     #[allow(dead_code)]
     InDepth,
 }
@@ -121,8 +120,9 @@ pub fn extended_cases() -> Vec<BestestCase> {
 /// Case 600's envelope with no windows, zero internal gains and zero
 /// infiltration, under the in-depth radiative properties (exterior solar
 /// absorptance 0.1, IR emittance 0.1 interior and exterior). Consumed by
-/// the `bestest` test crate; the `alignment_oracles_regressions` include
-/// of this module does not reach it.
+/// the `bestest` target and the `regression` target's include of this
+/// module; the `alignment_oracles_regressions` target includes only
+/// `cases.rs`, which leaves the function unused there.
 #[allow(dead_code)]
 pub fn in_depth_cases() -> Vec<BestestCase> {
     vec![

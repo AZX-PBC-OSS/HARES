@@ -326,7 +326,7 @@ fn reseed_composes_the_episode_seed_with_the_scenario() {
 
 /// The fixture's declared power reaches the equipment: the `[event_load]`
 /// table's `active_power_w` is the Cooking Range's configured parameter and
-/// the draw an active event delivers — not the 1000 W default the
+/// the draw an active event delivers, not the 1000 W default the
 /// equipment's init falls back to when the declared key drops between the
 /// TOML and the resolver's extension passthrough. The synthetic builder once
 /// emitted the removed `active_power_kw` spelling; the in-memory synthetic
@@ -354,7 +354,7 @@ fn the_event_loads_declared_power_reaches_its_draw() {
         .expect("the witness dwelling builds");
 
     // The declared parameter: the equipment's own record of its configured
-    // draw, in watts — the fixture's 1500 W, not the 1000 W default.
+    // draw, in watts: the fixture's 1500 W, not the 1000 W default.
     let event_load = dwelling
         .equipment()
         .iter()

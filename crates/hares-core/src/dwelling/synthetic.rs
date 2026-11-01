@@ -901,7 +901,7 @@ pub(crate) fn build_synthetic_building(
         // The extension children name the resolver's passthrough spellings
         // exactly (the extension reader pushes each into the equipment's
         // raw config): the SI `active_power_w`, not the removed
-        // `active_power_kw` — an in-memory tree never crosses the document
+        // `active_power_kw`: an in-memory tree never crosses the document
         // scan that rejects the removed element, so a stale name here would
         // drop the declared power onto the equipment's default silently.
         let mut extension_children: Vec<hares_io::hpxml::building::XmlNode> = vec![

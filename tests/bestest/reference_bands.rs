@@ -3,9 +3,9 @@
 //! Edition: ANSI/ASHRAE 140-2023, the current edition (the 140-2020 to
 //! 140-2023 revision is editorial renumbering; the fabric tests are
 //! Section 7 in this edition, Section 5.2 in 140-2017 and 140-2020). The
-//! nine bands are the current edition's Annex B8 example results, by
-//! table: B8-1 annual heating loads, B8-2 annual sensible cooling loads,
-//! B8-5 free-float temperature output. The values are converted from the
+//! bands are the current edition's Annex B8 example results, by table:
+//! B8-1 annual heating loads, B8-2 annual sensible cooling loads, B8-5
+//! free-float temperature output. The values are converted from the
 //! report's MWh to kWh.
 //!
 //! Provenance: the public example-results report Std140_TF_Results.pdf
