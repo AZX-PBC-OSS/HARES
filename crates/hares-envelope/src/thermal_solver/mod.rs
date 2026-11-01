@@ -307,6 +307,39 @@ pub struct ThermalSolver {
     balance_u_zero: DVector<f64>,
     /// Zero vector for the state dimension (avoids per-step allocation).
     balance_x_zero: DVector<f64>,
+    /// The network solve's receipt of the thermal ports' delivery, in W,
+    /// from the most recent `integrate`: the port-only input vector's
+    /// capacitance-weighted account through the operator the step actually
+    /// applies (`B_d` when uncoupled, `(I + D)⁻¹·B_d` on a coupled step).
+    /// The meter-versus-network reconciliation's read side: the ports'
+    /// meters compare against this receipt directly. Test and debug builds
+    /// only: the release step runs the identical integration without the
+    /// instrument.
+    #[cfg(any(test, debug_assertions))]
+    port_receipt_w: f64,
+    /// The receipt's explained gap, in W, from the most recent
+    /// `integrate`: the port input total minus the receipt, the within-step
+    /// conduction the applied input response carries (the boundary
+    /// temperatures are input columns, so the state matrix's columns do
+    /// not sum to zero through the capacitances), plus the short-wave
+    /// pass's glazing back-out (the visible gain's re-transmitted share
+    /// that never enters `u`). A dropped injection is deliberately not
+    /// part of either term. The gap is the exact difference between the
+    /// meters and the receipt, and the reconciliation pins the residual
+    /// against it. Test and debug builds only.
+    #[cfg(any(test, debug_assertions))]
+    port_receipt_gap_w: f64,
+    /// The receipt instrument's port-only input scratch, sized to the
+    /// input dimension at construction and zeroed in place per step, so
+    /// the instrument allocates nothing in steady state (the observe
+    /// build's step census pins that). Test and debug builds only.
+    #[cfg(any(test, debug_assertions))]
+    port_receipt_u_buf: DVector<f64>,
+    /// The receipt instrument's input-response scratch (the `B_d` or
+    /// coupled `(I + D)⁻¹·B_d` product), sized to the state dimension at
+    /// construction. Test and debug builds only.
+    #[cfg(any(test, debug_assertions))]
+    port_receipt_bd_buf: DVector<f64>,
     /// Per-zone consecutive failure counts for `solve_ideal_capacity_for_target`.
     /// Incremented on each solve failure, reset to 0 on success. Used to throttle
     /// warn-level diagnostic logs — only the first failure in a run emits `warn!`;
@@ -551,6 +584,44 @@ impl ThermalSolver {
             self.full_system_stored_energy_w,
             self.thermal_balance_q_loss,
         )
+    }
+
+    /// The network solve's receipt of the thermal ports' delivery, in W,
+    /// from the most recent `integrate`: the port-only input vector's
+    /// capacitance-weighted account through the same operator the balance
+    /// block applies to the full input vector (the discrete `B_d` when the
+    /// step is uncoupled, `(I + D)⁻¹·B_d` when it carries coupling
+    /// entries). Linearity of the step operator in `u` splits the
+    /// production gains term into the ports' receipt and the boundary and
+    /// weather columns' share, so this receipt is the network's own
+    /// account of the joules the ports metered: the meter-versus-network
+    /// reconciliation compares the ports' meters against it directly. Test
+    /// and debug builds only (the field does not exist in release).
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn port_receipt_w(&self) -> f64 {
+        self.port_receipt_w
+    }
+
+    /// The receipt's explained gap, in W, from the most recent
+    /// `integrate`: the port input total minus the receipt, the within-step
+    /// conduction the applied input response carries, plus the short-wave
+    /// pass's glazing back-out (the visible gain's re-transmitted share
+    /// that never enters `u`). A port joule's response is its stored share
+    /// plus the conduction it drives to the boundary within the step (the
+    /// boundary temperatures are input columns, so the state matrix's
+    /// columns do not sum to zero through the capacitances, which makes an
+    /// uncoupled column's storage share the `(1 − e^{−x})/x` shape below
+    /// unity; a coupled step damps it further by `(I + D)⁻¹`); the two
+    /// parts together are the exact difference between the meters and the
+    /// receipt. A dropped injection is not a glazing loss
+    /// and stays in the residual the reconciliation pins to zero, leaving
+    /// no room for it to hide inside a tolerance. Test and debug builds
+    /// only.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub fn port_receipt_gap_w(&self) -> f64 {
+        self.port_receipt_gap_w
     }
 
     /// Number of configured boundary diagnostic entries.
@@ -1255,6 +1326,14 @@ impl ThermalSolver {
             balance_d_agg: vec![0.0f64; n_states],
             balance_u_zero: DVector::<f64>::zeros(n_inputs),
             balance_x_zero: DVector::<f64>::zeros(n_states),
+            #[cfg(any(test, debug_assertions))]
+            port_receipt_w: 0.0,
+            #[cfg(any(test, debug_assertions))]
+            port_receipt_gap_w: 0.0,
+            #[cfg(any(test, debug_assertions))]
+            port_receipt_u_buf: DVector::<f64>::zeros(n_inputs),
+            #[cfg(any(test, debug_assertions))]
+            port_receipt_bd_buf: DVector::<f64>::zeros(n_states),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
             ext_surface_diag_buf: Vec::with_capacity(n_ext_surfaces),
             #[cfg(any(debug_assertions, feature = "observe_detailed"))]
@@ -6412,7 +6491,8 @@ mod tests {
         };
 
         let mut u = DVector::zeros(3);
-        solver.apply_port_shortwave_inputs(&mut u, &ports, false);
+        let (injected_w, _glazing_out_w) =
+            solver.apply_port_shortwave_inputs(&mut u, &ports, false);
 
         let total_weight: f64 = surfaces.iter().map(|&(_, a, abs, _)| a * abs).sum();
         assert!(total_weight > 0.0);
@@ -6433,6 +6513,14 @@ mod tests {
         assert!(
             (u.iter().sum::<f64>() - shortwave_w).abs() < 1e-9,
             "every short-wave watt is deposited"
+        );
+        assert!(
+            (injected_w - shortwave_w).abs() < 1e-9,
+            "the returned count is the deposit: {injected_w} against {shortwave_w}"
+        );
+        assert!(
+            _glazing_out_w.abs() < 1e-9,
+            "a zone without windows loses nothing back out through the glazing: {_glazing_out_w}"
         );
     }
 
@@ -6467,6 +6555,52 @@ mod tests {
             })
             .collect();
         assert_shortwave_absorbed_like_diffuse_solar(&mut solver, &surfaces);
+    }
+
+    /// The short-wave pass's returned injection is the deposit and its
+    /// glazing back-out is only the windows' re-transmitted share. A port
+    /// whose zone has no sensible-input index injects nothing and loses
+    /// nothing through a glazing: the count carries nothing and the
+    /// back-out carries nothing, so the dropped joule stays in the
+    /// meter-versus-network residual instead of hiding inside the explained
+    /// gap.
+    #[test]
+    fn the_port_shortwave_injected_count_is_the_actual_deposit() {
+        let env = env_for_temp(20.0, 10.0);
+        let mut solver = interior_lwr_solver(&env);
+        // A zone the solver's wiring carries no sensible-input index for:
+        // the fallback arm's guard cannot hold, nothing enters u.
+        let orphan = ZoneId(9_999);
+        let mut accumulator = hares_types::ThermalAccumulator::new(orphan);
+        accumulator.shortwave_gain_w = 80.0;
+        let ports = PortSlots {
+            thermal: vec![accumulator],
+            ..Default::default()
+        };
+        assert!(
+            !solver
+                .wiring
+                .zone_sensible_input_indices
+                .contains_key(&orphan)
+        );
+
+        let mut u = DVector::zeros(3);
+        let before: f64 = u.iter().sum();
+        let (returned, glazing_out) = solver.apply_port_shortwave_inputs(&mut u, &ports, false);
+        let deposited: f64 = u.iter().sum::<f64>() - before;
+
+        assert!(
+            (returned - deposited).abs() < 1e-9,
+            "the injected count must be the actual deposit: returned {returned}, deposited {deposited}"
+        );
+        assert!(
+            deposited.abs() < 1e-9,
+            "an orphan zone's short-wave joule is dropped, not deposited: {deposited}"
+        );
+        assert!(
+            glazing_out.abs() < 1e-9,
+            "an orphan zone has no glazing path, so the back-out must be zero: {glazing_out}"
+        );
     }
 
     /// The same deposit in the default StarMesh mode, where the zone's

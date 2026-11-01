@@ -130,7 +130,7 @@ impl ThermalSolver {
                 };
 
                 total_w += match injected_transmitted_w {
-                    Some(w) => w,
+                    Some((w, _glazing_out_w)) => w,
                     None => {
                         u[air_idx] += transmitted_total_w;
                         transmitted_total_w
@@ -159,8 +159,10 @@ impl ThermalSolver {
     }
 
     /// Distributes transmitted window solar to interior surfaces and zone air.
-    /// Returns `Some(total_injected_w)` — the exact watts added to `u` — when
-    /// a distribution ran, `None` when the zone has no distribution surfaces
+    /// Returns `Some((total_injected_w, glazing_out_w))` when a distribution
+    /// ran: `total_injected_w` is the exact watts added to `u`, and
+    /// `glazing_out_w` is the pool's watts lost back out through the
+    /// glazing. Returns `None` when the zone has no distribution surfaces
     /// (caller then injects the lump sum to zone air).
     ///
     /// The angles place the beam only; a diffuse-only call (short-wave
@@ -179,7 +181,7 @@ impl ThermalSolver {
         diffuse_w: f64,
         solar_altitude_deg: f64,
         solar_azimuth_deg: f64,
-    ) -> Option<f64> {
+    ) -> Option<(f64, f64)> {
         // Prefer interior_lwr_zones (populated in ScriptF mode, which has
         // full InteriorSurfaceInfo), fall back to interior_solar_zones
         // (populated in StarMesh mode).
@@ -210,7 +212,7 @@ impl ThermalSolver {
                     injected_w += air_total;
                 }
             }
-            return Some(injected_w);
+            return Some((injected_w, split.window_out_w));
         }
 
         // StarMesh mode: use interior_solar_zones for distribution.
@@ -243,7 +245,7 @@ impl ThermalSolver {
                 injected_w += air_total;
             }
         }
-        Some(injected_w)
+        Some((injected_w, split.window_out_w))
     }
 
     /// Fills `window_share_buf` with `zone_id`'s windows' shares of the
