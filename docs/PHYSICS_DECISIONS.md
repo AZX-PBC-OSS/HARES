@@ -2179,9 +2179,11 @@ disabled setpoint (`HEATING_DISABLED_SETPOINT_C` /
 The disabled value is the value the thermostat's own schedule-override
 path installs for a disabled side (`no_space_heating` /
 `no_space_cooling`), so the setpoint plausibility checks (the resolve's
-profile check and the FSM's init band) admit exactly those two values
-outside the [5, 40] degree C band: they are declared off-states, not
-misread temperatures, and every other out-of-band value keeps failing.
+profile check and the FSM's init band) admit each side's own disabled
+value outside the [5, 40] degree C band: they are declared off-states,
+not misread temperatures, and every other out-of-band value keeps
+failing (the other side's sentinel included, since a heating setpoint of
++999 degrees C drives heating at every hour rather than off).
 The zone's start-hour initialization treats a disabled hour as the
 side's absence (a zone initialized at -999 degrees C is the off-state
 leaking into the initial condition, not a comfort start).

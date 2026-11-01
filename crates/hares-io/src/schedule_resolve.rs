@@ -939,10 +939,11 @@ fn inject_default_setpoint(
     spec: &mut EquipmentSpec,
     prefix: &str,
     default_f: f64,
+    disabled_setpoint_c: f64,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), HaresError> {
     let setpoint_c = hares_physics::units::temperature_f_to_c(default_f);
-    if setpoint_value_is_implausible(setpoint_c) {
+    if setpoint_value_is_implausible(setpoint_c, disabled_setpoint_c) {
         return Err(HaresError::Equipment(format!(
             "the {prefix} setpoint default {default_f} °F resolves to {setpoint_c:.2} °C, \
              outside the plausible range \
@@ -1008,11 +1009,12 @@ fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Valu
 /// setpoints are the exception: a schedule hour carrying one declares the
 /// side off for that hour (the thermostat's own schedule-override path
 /// installs the same values for a disabled side), so they are declared
-/// inputs, not misread temperatures.
-pub(crate) fn setpoint_value_is_implausible(value: f64) -> bool {
+/// inputs, not misread temperatures. Each side admits only its own
+/// off-state: a heating value of the cooling sentinel is a value no
+/// setpoint path can produce, so it stays implausible.
+pub(crate) fn setpoint_value_is_implausible(value: f64, disabled_setpoint_c: f64) -> bool {
     !(SETPOINT_PLAUSIBILITY_MIN_C..=SETPOINT_PLAUSIBILITY_MAX_C).contains(&value)
-        && value != HEATING_DISABLED_SETPOINT_C
-        && value != COOLING_DISABLED_SETPOINT_C
+        && value != disabled_setpoint_c
 }
 
 /// The applied setpoint column's plausibility: the first value outside
@@ -1024,6 +1026,7 @@ fn validate_setpoint_column(
     schedule: &ScheduleTimeSeries,
     col_idx: usize,
     column: &str,
+    disabled_setpoint_c: f64,
 ) -> Result<(), HaresError> {
     let values = schedule.columns.get(col_idx).ok_or_else(|| {
         HaresError::Equipment(format!(
@@ -1033,7 +1036,7 @@ fn validate_setpoint_column(
     })?;
     if let Some(&value) = values
         .iter()
-        .find(|&value| setpoint_value_is_implausible(*value))
+        .find(|&value| setpoint_value_is_implausible(*value, disabled_setpoint_c))
     {
         return Err(HaresError::Equipment(format!(
             "schedule CSV column '{column}': the resolved setpoint {value:.2} °C is outside \
@@ -1049,9 +1052,14 @@ fn validate_setpoint_column(
 /// the plausible band fails the construction naming the side, the
 /// elements the profile came from and the value.
 pub(crate) fn validate_setpoint_profile(prefix: &str, values: &[f64]) -> Result<(), HaresError> {
+    let disabled_setpoint_c = if prefix == "heating" {
+        HEATING_DISABLED_SETPOINT_C
+    } else {
+        COOLING_DISABLED_SETPOINT_C
+    };
     if let Some(&value) = values
         .iter()
-        .find(|&value| setpoint_value_is_implausible(*value))
+        .find(|&value| setpoint_value_is_implausible(*value, disabled_setpoint_c))
     {
         return Err(HaresError::Equipment(format!(
             "the HPXML {prefix} setpoints (the HVACControl's SetpointTemp{side}Season element \
@@ -1133,14 +1141,24 @@ fn inject_setpoint_schedules(
             .iter()
             .any(|spec| HEATING_EQUIPMENT.contains(&spec.name.as_str()))
     {
-        validate_setpoint_column(schedule, col_idx, "heating_setpoint")?;
+        validate_setpoint_column(
+            schedule,
+            col_idx,
+            "heating_setpoint",
+            HEATING_DISABLED_SETPOINT_C,
+        )?;
     }
     if let Some(col_idx) = cooling_col
         && specs
             .iter()
             .any(|spec| COOLING_EQUIPMENT.contains(&spec.name.as_str()))
     {
-        validate_setpoint_column(schedule, col_idx, "cooling_setpoint")?;
+        validate_setpoint_column(
+            schedule,
+            col_idx,
+            "cooling_setpoint",
+            COOLING_DISABLED_SETPOINT_C,
+        )?;
     }
 
     // One warning per side when the column and the HPXML setpoints are
@@ -1223,6 +1241,7 @@ fn inject_setpoint_schedules(
                             spec,
                             "heating",
                             OS_HPXML_DEFAULT_HEATING_SETPOINT_F,
+                            HEATING_DISABLED_SETPOINT_C,
                             warnings,
                         )?;
                         let source = SetpointSource::DefaultProfile {
@@ -1276,6 +1295,7 @@ fn inject_setpoint_schedules(
                             spec,
                             "cooling",
                             OS_HPXML_DEFAULT_COOLING_SETPOINT_F,
+                            COOLING_DISABLED_SETPOINT_C,
                             warnings,
                         )?;
                         let source = SetpointSource::DefaultProfile {
@@ -2741,22 +2761,41 @@ mod tests {
 
     use super::find_unknown_schedule_columns;
 
-    /// The engine's disabled setpoints pass the plausibility check (the
+    /// Each side's disabled setpoint passes its own plausibility check (the
     /// off-state is a declared input, the value the thermostat's own
-    /// override path installs); every other out-of-band value — the
-    /// Fahrenheit misread the band exists to catch, NaN included — still
-    /// fails.
+    /// override path installs for that side); the other side's sentinel and
+    /// every other out-of-band value, the Fahrenheit misread the band
+    /// exists to catch and NaN included, still fail. A heating profile
+    /// carrying the cooling sentinel drives heating at all hours, not off,
+    /// so admitting it would be the wrong side of the off-state.
     #[test]
-    fn setpoint_plausibility_admits_only_the_disabled_sentinels() {
+    fn setpoint_plausibility_admits_only_the_sides_own_disabled_sentinel() {
         use super::setpoint_value_is_implausible;
         use hares_physics::constants::{COOLING_DISABLED_SETPOINT_C, HEATING_DISABLED_SETPOINT_C};
 
-        assert!(!setpoint_value_is_implausible(HEATING_DISABLED_SETPOINT_C));
-        assert!(!setpoint_value_is_implausible(COOLING_DISABLED_SETPOINT_C));
-        assert!(!setpoint_value_is_implausible(20.0));
+        assert!(!setpoint_value_is_implausible(
+            HEATING_DISABLED_SETPOINT_C,
+            HEATING_DISABLED_SETPOINT_C
+        ));
+        assert!(!setpoint_value_is_implausible(
+            COOLING_DISABLED_SETPOINT_C,
+            COOLING_DISABLED_SETPOINT_C
+        ));
+        assert!(!setpoint_value_is_implausible(
+            20.0,
+            HEATING_DISABLED_SETPOINT_C
+        ));
+        assert!(
+            setpoint_value_is_implausible(COOLING_DISABLED_SETPOINT_C, HEATING_DISABLED_SETPOINT_C),
+            "the cooling sentinel is not the heating side's off-state"
+        );
+        assert!(
+            setpoint_value_is_implausible(HEATING_DISABLED_SETPOINT_C, COOLING_DISABLED_SETPOINT_C),
+            "the heating sentinel is not the cooling side's off-state"
+        );
         for bad in [50.0, -10.0, 0.0, f64::NAN] {
             assert!(
-                setpoint_value_is_implausible(bad),
+                setpoint_value_is_implausible(bad, HEATING_DISABLED_SETPOINT_C),
                 "{bad} must stay implausible"
             );
         }
