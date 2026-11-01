@@ -738,37 +738,6 @@ impl Fleet {
     /// batch, so a home's result in the fold is its reduced period table,
     /// never its frame.
     ///
-    /// When `n_threads > 0`, a local Rayon pool is created for this call.
-    /// When `n_threads == 0`, the global Rayon pool is used.
-    ///
-    /// # Errors
-    ///
-    /// [`FleetError::ThreadPoolBuild`] when the local pool cannot be
-    /// built, [`FleetError::UnmatchedSelection`] when a selection name
-    /// matches no home's catalogue, [`FleetError::InvalidAggregationWeight`]
-    /// for a weight that is not finite and non-negative,
-    /// [`FleetError::NoCoveredWeight`] when the fleet's ok weight is
-    /// zero (every home failed, degraded, or carried no positive
-    /// weight), [`FleetError::AlignmentRequired`] when the
-    /// homes span more than one UTC offset and the fleet declares no
-    /// alignment, and [`FleetError::HeterogeneousTimeGrid`] when a home
-    /// breaks the declared alignment's time grid, the last two raised in
-    /// the pre-pass before any home runs.
-    /// Simulates the fleet through the streaming ordered fold: the homes
-    /// run in consecutive chunks of the fleet's entry order on the fleet's
-    /// pool, and each finished chunk's homes fold into the running
-    /// [`FleetResult`] one at a time in entry order before the next chunk
-    /// starts. The global fold order is the entry order for every chunk
-    /// size and thread count, and at most one chunk's home results are
-    /// alive at once.
-    ///
-    /// The fleet appends one report to every home, named `fleet`: the
-    /// report's selection restricted to the home's catalogue, at the
-    /// `Timestep` frequency, to a callback destination. The callback feeds
-    /// each batch into a period reducer the fleet owns and drops the
-    /// batch, so a home's result in the fold is its reduced period table,
-    /// never its frame.
-    ///
     /// When `n_threads > 0`, the run installs the cached pool built for
     /// that thread count (the pool's threads are process-global and reused
     /// across calls; `cached_fleet_pool` builds or returns it). When
