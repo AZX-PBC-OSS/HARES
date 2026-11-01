@@ -2103,3 +2103,41 @@ shed EV delivers nothing and no island forms on it); the event's
 fraction scales the EV's islanded dispatch itself, the dispatch the
 island runs on, because lifting it would keep a fully shed EV
 delivering and the island alive through the event.
+
+## The event dwell's coarse step carries its powered fraction
+
+An event load's dwell shorter than the simulation step powers its fraction
+of that step, not the whole step: the step's flows are the step's averages
+(the whole-step allocation convention), so a 30 s dwell inside a 3600 s
+step carries `P x 30/3600` watts and deposits `30 s x P` of energy,
+exactly the dwell's own. A dwell longer than the step spans steps whole
+and its tail step carries the remaining fraction. A wet appliance's cycle
+crossing several phases within one step blends their energies
+(`sum(phase_power x seconds_in_phase) / dt`). A forced Active mode owns
+the whole step at its pinned phase's power: the command pins the mode and
+the phase timer does not run under it.
+
+The alternative rejected is all-or-nothing step occupancy (the step that
+contains any of the dwell carries the full rated power): it overstates the
+event's energy by `dt/dwell` (120x for a 30 s dwell at 3600 s), and read
+off the power channel's rising edges it merged clustered starts - two
+starts in consecutive steps are one run of two powered steps - which read
+as a start-rate drift of -11 percent at 900 s and -47 percent at 3600 s
+(407 measured starts against the closed form's 458, 191 against 360,
+seed-independent). With the duty semantics the start rate's
+resolution-invariant observable is the integrated duty divided by the
+per-start energy: the number of successful draws, whose closed form
+(`p_step = 1 - (1 - p_hour)^(dt/h)`, the renewal count `N x p_step`) the
+rate pins hold at 60, 300, 900 and 3600 s; the rising edges are pinned
+separately as the run structure the Bernoulli draw sequence predicts.
+
+The start probability's own normalization (the per-hour basis compounded
+to the step) is unchanged, as is the draw sequence: the duty changes the
+power a short dwell carries within its step, nothing else. The replayed
+event path (a schedule kW series) is untouched: its occupancy is whole
+steps by construction.
+
+Hand-computed reference: a 1000 W load with a 30 s dwell at 3600 s steps
+carries 8 1/3 W for the step containing its start (energy 30 000 W·s, the
+dwell's exact energy); at 60 s steps a 90 s dwell carries 1000 W, 1000 W,
+500 W across its three steps (energy 90 000 W·s, again exact).

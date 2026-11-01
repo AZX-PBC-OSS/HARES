@@ -96,6 +96,15 @@ stateDiagram-v2
   100 percent at 3600 s - and below it for supra-hourly steps, since a
   step longer than the hour starts at most once - about 88 percent at
   a 6 h step.)
+- The dwell's step semantics count partial powered dwell-time (the
+  sub-step duty): a dwell shorter than the step powers its fraction of
+  the step (`P x dwell/dt`, the dwell's exact energy), a dwell longer
+  than the step spans steps whole and its tail step carries the
+  remaining fraction. The start rate's resolution-invariant observable
+  is the integrated duty divided by the per-start energy; rising edges
+  count runs, not starts, whenever starts can cluster in consecutive
+  steps (docs/PHYSICS_DECISIONS.md, "The event dwell's coarse step
+  carries its powered fraction").
 - `ForcedMode::Active` overrides stochastic draw; `ForcedMode::Idle` blocks start
 
 ### Wet Appliance Variant
@@ -103,6 +112,11 @@ stateDiagram-v2
 Multi-phase cycles (e.g., washer: fill -> wash -> spin), the powers in W (SI):
 - `phase_len` phases, each `phase_<n>_power_w` and `phase_<n>_duration_s`;
   with no `phase_len`, one phase of `active_power_w` for `active_duration_s`
+- A cycle shorter than the step blends its phases into the step's average
+  (`sum(phase_power x seconds_in_phase) / dt`, the cycle's exact energy);
+  a cycle longer than the step spans steps and its tail step carries the
+  remaining fraction, the same sub-step duty the event load's dwell
+  follows
 - The electric cycle replays the appliance's power column's events; the hot
   water is a separate schedule-driven draw: the `hot_water_clothes_washer`
   and `hot_water_dishwasher` columns normalized to the appliance's daily
