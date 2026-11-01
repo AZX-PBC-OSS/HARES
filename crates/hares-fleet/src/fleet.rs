@@ -5343,7 +5343,10 @@ mod tests {
     /// second call's cache hit pays none, and the runs themselves are
     /// the same work on the same fleet. At the parent (a pool built per
     /// call) the two windows were equal and this pin failed; the cache
-    /// is what makes the second window smaller.
+    /// is what makes the second window smaller. The count is one no
+    /// other test in this binary names, so the first call is the
+    /// cache's first fill even when the binary runs its tests in one
+    /// process.
     #[test]
     fn the_second_simulate_pays_no_pool_spawn() {
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
@@ -5355,13 +5358,13 @@ mod tests {
         let before = hares_types::alloc_count::thread_allocations()
             .expect("the fleet test binary installs the counting allocator");
         fleet
-            .simulate(&report, 4, chunk(64))
+            .simulate(&report, 7, chunk(64))
             .expect("the first run executes");
         let after_first = hares_types::alloc_count::thread_allocations()
             .expect("the counting allocator is installed");
 
         fleet
-            .simulate(&report, 4, chunk(64))
+            .simulate(&report, 7, chunk(64))
             .expect("the second run executes");
         let after_second = hares_types::alloc_count::thread_allocations()
             .expect("the counting allocator is installed");
