@@ -294,7 +294,8 @@ with a given `n_threads` builds the pool, every later call with the
 same count reuses it, so an RL harness calling `simulate` per episode
 pays the worker threads' spawn once, not per call (`n_threads=0` keeps
 the global Rayon pool). And the episode's reports are subject to the
-`max_memory_rows` soft cap above: a long training run whose memory
+`max_memory_rows` soft cap documented with the report destinations
+below: a long training run whose memory
 report would balloon past the cap is refused at the config with the
 remediation named, never left growing unbounded in the background. The
 RL-shaped fix is a callback destination or a streamed file, not a

@@ -18,7 +18,8 @@ replacement.
   report whose run projects more rows than the cap fails validation
   naming the report, the projection and the remediation (stream the
   report to a `Parquet` or `Csv` destination, attach a callback, or
-  raise the cap); the getter and setter carry the same check. Unset,
+  raise the cap); the setter re-runs the same check, so a config object
+  stays valid after every successful mutation. Unset,
   no run's behavior changes.
 
 - Added: the `Fleet.simulate` path's Rayon pool is cached per thread
