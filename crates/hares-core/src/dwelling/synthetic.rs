@@ -370,7 +370,7 @@ pub(crate) struct SyntheticSetpointConfig {
     /// When present, overrides `cooling_c` with an hourly schedule. An
     /// hour whose value is the engine's cooling-disabled setpoint
     /// (`hares_physics::constants::COOLING_DISABLED_SETPOINT_C`) declares
-    /// the cooling side off for that hour — the form Case 650/950's
+    /// the cooling side off for that hour, the form Case 650/950's
     /// "Cool = OFF 1800-0700" takes.
     #[serde(default)]
     pub(crate) cooling_schedule_c: Option<Vec<f64>>,
@@ -401,7 +401,7 @@ pub(crate) struct SyntheticVentilationConfig {
     /// `[h:00, h+1:00)` (the step-start convention the 640 fixture's
     /// `heating_schedule_c` uses). Expanded to per-step values at the
     /// schedule build, the fan's flow for every step the value of the hour
-    /// the step's start time falls in — the schedule samples at the step's
+    /// the step's start time falls in: the schedule samples at the step's
     /// time, a zero-order hold across the hour's steps. The thermal
     /// solver's configuration reads the column's value every step; the
     /// equipment-spec constants are the default when the table is absent.
@@ -463,6 +463,67 @@ fn parse_boundary_type(s: &str) -> hares_io::hpxml::BoundaryType {
     }
 }
 
+/// The synthetic fixture's hour-of-day tables: the two setpoint profiles and
+/// the mechanical-ventilation flow schedule. Each carries exactly 24 elements
+/// (one per hour of day), every element finite, and a fan rate non-negative.
+/// Validated before any consumer reads an hour index, so a malformed table
+/// fails the construction naming the TOML field instead of panicking past its
+/// end in the schedule expansion or the 24-element setpoint copy. The
+/// setpoint values' plausibility (the disabled off-states included) is the
+/// thermostat's band check at init, not this shape check.
+fn validate_hourly_schedules(config: &SyntheticTomlConfig) -> Result<()> {
+    for (field, schedule) in [
+        (
+            "setpoints.heating_schedule_c",
+            config
+                .setpoints
+                .as_ref()
+                .and_then(|sp| sp.heating_schedule_c.as_ref()),
+        ),
+        (
+            "setpoints.cooling_schedule_c",
+            config
+                .setpoints
+                .as_ref()
+                .and_then(|sp| sp.cooling_schedule_c.as_ref()),
+        ),
+        (
+            "ventilation.flow_schedule_m3_s",
+            config
+                .ventilation
+                .as_ref()
+                .map(|vent| &vent.flow_schedule_m3_s),
+        ),
+    ] {
+        let Some(schedule) = schedule else {
+            continue;
+        };
+        if schedule.len() != 24 {
+            return Err(HaresError::Dwelling(format!(
+                "{field} must have exactly 24 elements (one per hour of day), got {}",
+                schedule.len()
+            )));
+        }
+        if let Some(&value) = schedule.iter().find(|&v| !v.is_finite()) {
+            return Err(HaresError::Dwelling(format!(
+                "{field} must carry finite values, got {value}"
+            )));
+        }
+        // The flow schedule is a fan rate: a negative flow is not a state
+        // the fan has. (The setpoint schedules' values carry their own
+        // band's admission, which the thermostat's plausibility check
+        // governs at init.)
+        if field == "ventilation.flow_schedule_m3_s"
+            && let Some(&rate) = schedule.iter().find(|&v| *v < 0.0)
+        {
+            return Err(HaresError::Dwelling(format!(
+                "ventilation.flow_schedule_m3_s must carry non-negative flow rates, got {rate}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn build_synthetic_building(
     config: &SyntheticTomlConfig,
     event_window_schedule_col: Option<usize>,
@@ -506,60 +567,7 @@ pub(crate) fn build_synthetic_building(
         }
     }
 
-    // The hourly setpoint schedules and the ventilation flow schedule are
-    // hour-of-day data: exactly 24 elements, each finite, the flow rates
-    // non-negative. Checked at the build so a malformed profile fails the
-    // construction naming the TOML field and the count, instead of the
-    // 24-element slice copy panicking downstream.
-    for (field, schedule) in [
-        (
-            "setpoints.heating_schedule_c",
-            config
-                .setpoints
-                .as_ref()
-                .and_then(|sp| sp.heating_schedule_c.as_ref()),
-        ),
-        (
-            "setpoints.cooling_schedule_c",
-            config
-                .setpoints
-                .as_ref()
-                .and_then(|sp| sp.cooling_schedule_c.as_ref()),
-        ),
-        (
-            "ventilation.flow_schedule_m3_s",
-            config
-                .ventilation
-                .as_ref()
-                .map(|vent| &vent.flow_schedule_m3_s),
-        ),
-    ] {
-        let Some(schedule) = schedule else {
-            continue;
-        };
-        if schedule.len() != 24 {
-            return Err(HaresError::Dwelling(format!(
-                "{field} must have exactly 24 elements (one per hour of day), got {}",
-                schedule.len()
-            )));
-        }
-        if let Some(&value) = schedule.iter().find(|&v| !v.is_finite()) {
-            return Err(HaresError::Dwelling(format!(
-                "{field} must carry finite values, got {value}"
-            )));
-        }
-        // The flow schedule is a fan rate: a negative flow is not a state
-        // the fan has. (The setpoint schedules' values carry their own
-        // band's admission — the disabled setpoints and the thermostat's
-        // plausibility check govern them.)
-        if field == "ventilation.flow_schedule_m3_s"
-            && let Some(&rate) = schedule.iter().find(|&v| *v < 0.0)
-        {
-            return Err(HaresError::Dwelling(format!(
-                "ventilation.flow_schedule_m3_s must carry non-negative flow rates, got {rate}"
-            )));
-        }
-    }
+    validate_hourly_schedules(config)?;
 
     // Window validation: u_factor > 0.0, 0.0 <= SHGC <= 1.0
     if let Some(windows) = &config.windows {
@@ -2078,6 +2086,11 @@ pub(crate) fn build_synthetic_schedule(
 ) -> Result<SyntheticScheduleResult> {
     use chrono::TimeDelta;
 
+    // The schedule build is the fan table's first consumer (the building's
+    // column index comes from this result), so the hour-of-day tables are
+    // validated here, before any expansion indexes them.
+    validate_hourly_schedules(config)?;
+
     let step_secs = duration_to_u32_secs(config.simulation.time_res)?;
     let total_steps = (config.simulation.duration.num_seconds()
         / config.simulation.time_res.num_seconds())
@@ -3072,6 +3085,52 @@ flow_schedule_m3_s = {schedule}
                 "hour {hour} must read its own schedule entry"
             );
         }
+    }
+
+    /// The production ordering builds the schedule before the building (the
+    /// building's column index comes from the schedule), so the schedule
+    /// build is the fan table's first consumer: a table that is not 24
+    /// elements must fail there with a typed error naming the field, not
+    /// index past its end in the expansion loop.
+    #[test]
+    fn synthetic_schedule_rejects_a_malformed_fan_schedule_before_indexing() {
+        let schedule = format!(
+            "[{}]",
+            std::iter::repeat_n("0.5", 23)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let toml = format!(
+            r#"
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 3600
+duration = 86400
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[ventilation]
+flow_schedule_m3_s = {schedule}
+"#
+        );
+        let config: SyntheticTomlConfig = toml::from_str(&toml).expect("the config parses");
+        let err = match build_synthetic_schedule(&config) {
+            Ok(_) => panic!("a 23-element fan schedule must fail the schedule build"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("flow_schedule_m3_s"),
+            "the error must name the field, got: {err}"
+        );
     }
 
     #[test]
