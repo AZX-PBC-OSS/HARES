@@ -1,4 +1,10 @@
+#![cfg(debug_assertions)]
 //! The meter-versus-network reconciliation on the engine's own runs.
+//!
+//! The instrument's fields and accessors are `cfg(any(test, debug_assertions))`
+//! on the library: a release build carries no receipt. This integration test
+//! therefore compiles only when `debug_assertions` is on; a release clippy
+//! sees an empty target instead of a reference to an absent accessor.
 //!
 //! The fan-out's end-use reconciliation closed the OCHRE fixture corpus's
 //! meter columns three ways (the end-use aggregates against their
