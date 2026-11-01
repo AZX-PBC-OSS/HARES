@@ -11,6 +11,7 @@
 //! All methods operate on pre-allocated buffers owned by `ThermalSolver` -- zero per-step heap
 //! allocation.
 
+#[cfg(any(test, debug_assertions))]
 use chrono::Datelike as _;
 use hares_physics::film_coefficients::tarp_h_natural;
 use hares_physics::solar::{clear_sky_irradiance, perez_tilted_irradiance, solar_position};
@@ -21,6 +22,7 @@ use nalgebra::DVector;
 
 use super::ThermalSolver;
 use super::config::{FilmCoefficientModel, StateSpaceWiring, ThermalSolverError};
+#[cfg(any(test, debug_assertions))]
 use super::solar::resnet_is_winter;
 use crate::boundary_rc::depth_mm_key;
 use crate::state_space::{ScalarSolveTarget, SolveScratch};
@@ -1202,18 +1204,20 @@ impl ThermalSolver {
 
             // The meter-versus-network reconciliation's read side (test
             // and debug builds): the port-only input vector through the
-            // same discrete `B_d` the balance block just applied to the
-            // full vector. Linearity of the step operator in `u` makes
-            // this the ports' share of the gains term, the delivery the
-            // network actually receives, so the ports' meters compare
-            // against it directly (the delivered column of the run's
-            // energy-closure report is the meters' side of that
-            // comparison). The gap column beside it explains the
-            // meters-minus-receipt residual exactly: the port columns'
-            // own conservation deviation (the within-step boundary
-            // conduction the `B_d` response carries) plus the short-wave
-            // pass's glazing back-out (the visible gain's re-transmitted
-            // share that never enters `u`).
+            // same operator the balance block just applied to the full
+            // vector (`B_d` when uncoupled, `(I + D)⁻¹·B_d` on a coupled
+            // step). Linearity of the step operator in `u` makes this the
+            // ports' share of the gains term, the delivery the network
+            // actually receives, so the ports' meters compare against it
+            // directly (the delivered column of the run's energy-closure
+            // report is the meters' side of that comparison). The gap
+            // column beside it explains the meters-minus-receipt residual
+            // exactly: the port input total minus the receipt (the
+            // within-step boundary conduction and, on a coupled step, the
+            // semi-implicit damping the applied response carries) plus the
+            // short-wave pass's glazing back-out (the visible gain's
+            // re-transmitted share that never enters `u`). A dropped
+            // injection is in neither part.
             // The port passes are deterministic functions
             // of the ports, the wiring and the season flag, and the
             // scratch buffers they refill are already consumed this
@@ -1239,30 +1243,53 @@ impl ThermalSolver {
                 let receipt_is_winter = resnet_is_winter(env.current_time.month());
                 self.apply_port_convective_inputs(&mut u_port, ports);
                 self.apply_port_radiant_inputs(&mut u_port, ports);
-                let shortwave_injected_w =
+                let (_shortwave_injected_w, shortwave_glazing_out_w) =
                     self.apply_port_shortwave_inputs(&mut u_port, ports, receipt_is_winter);
                 let mut b_d_port = std::mem::take(&mut self.port_receipt_bd_buf);
                 b_d_port.fill(0.0);
-                self.model
-                    .step_into(&self.balance_x_zero, &u_port, &mut b_d_port);
+                if self.coupling_buf.is_empty() {
+                    self.model
+                        .step_into(&self.balance_x_zero, &u_port, &mut b_d_port);
+                } else {
+                    // The port-only response through the same coupled
+                    // operator the step applies: `(I + D)⁻¹·B_d·u`, the
+                    // `u`-dependent half of the balance block's `g_u`. The
+                    // affine term `h` is `u`-independent and is subtracted
+                    // so only the ports' share remains.
+                    self.model.build_coupled_rhs(
+                        &self.balance_x_zero,
+                        &u_port,
+                        &mut b_d_port,
+                        &self.coupling_buf,
+                    );
+                    for i in 0..b_d_port.len() {
+                        let d = self.balance_d_agg[i];
+                        if d != 0.0 {
+                            b_d_port[i] /= 1.0 + d;
+                        }
+                        b_d_port[i] -= self.balance_buf_a[i];
+                    }
+                }
                 let mut receipt_w = 0.0;
                 for &(idx, c_j_k) in &self.balance_node_terms {
                     receipt_w += c_j_k * b_d_port[idx] / self.dt_s;
                 }
-                let mut gap_w = 0.0;
-                for (j, u_j) in u_port.iter().enumerate() {
-                    gap_w += u_j * (1.0 - self.receipt_column_gains[j]);
-                }
+                // The within-step loss the receipt cannot store: the port
+                // input total minus the capacitance-weighted receipt. The
+                // column gains are the per-column form of the same identity,
+                // `Σ_j u_j·(1 − g_j)`, with `g_j` the column's storage share
+                // through the applied operator.
+                let u_port_total: f64 = u_port.iter().sum();
+                let mut gap_w = u_port_total - receipt_w;
                 // The short-wave pass's glazing back-out: the visible gain
                 // the meters carry whose re-transmitted share never enters
                 // `u` (the pass pools the port's short-wave with the
                 // transmitted diffuse solar, and the windows' transmittance
-                // share leaves back out through the glazing). The meters'
-                // short-wave minus the injected account: the second
-                // explained part of the meters-minus-receipt residual.
-                let shortwave_metered_w: f64 =
-                    ports.thermal.iter().map(|t| t.shortwave_gain_w).sum();
-                gap_w += shortwave_metered_w - shortwave_injected_w;
+                // share leaves back out through the glazing). A dropped
+                // injection is deliberately NOT part of this term: it is
+                // not a glazing loss, so it stays in the residual the
+                // reconciliation pins to zero.
+                gap_w += shortwave_glazing_out_w;
                 self.port_receipt_w = receipt_w;
                 self.port_receipt_gap_w = gap_w;
                 self.port_receipt_bd_buf = b_d_port;

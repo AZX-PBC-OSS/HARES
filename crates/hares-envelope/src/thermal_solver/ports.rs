@@ -139,23 +139,35 @@ impl ThermalSolver {
     /// the remainder to zone air. A zone with no interior surface list
     /// takes the gain at its air node. `is_winter` selects the season's
     /// window optics for the windows' shares.
+    ///
+    /// Returns `(injected_w, glazing_out_w)`. `injected_w` is the watts
+    /// actually added to `u`; `glazing_out_w` is the watts the distribution
+    /// legitimately lost back out through the zone's glazing (the windows'
+    /// transmittance-weighted share, which never enters `u`). A port whose
+    /// injection failed (no sensible-input index and no distribution)
+    /// contributes to neither: the drop is not a glazing loss, so the
+    /// reconciliation's exact pin keeps it in the unexplained residual.
     pub(super) fn apply_port_shortwave_inputs(
         &mut self,
         u: &mut DVector<f64>,
         ports: &PortSlots,
         is_winter: bool,
-    ) -> f64 {
+    ) -> (f64, f64) {
         let mut injected_w = 0.0;
+        let mut glazing_out_w = 0.0;
         for thermal in &ports.thermal {
             let shortwave_w = thermal.shortwave_gain_w;
             if shortwave_w <= 0.0 {
                 continue;
             }
             self.fill_window_diffuse_shares(thermal.zone, is_winter);
-            let injected =
+            let distributed =
                 self.distribute_transmitted_solar(u, thermal.zone, 0.0, shortwave_w, 0.0, 0.0);
-            match injected {
-                Some(w) => injected_w += w,
+            match distributed {
+                Some((injected, glazing_out)) => {
+                    injected_w += injected;
+                    glazing_out_w += glazing_out;
+                }
                 None => {
                     if let Some(&idx) = self.wiring.zone_sensible_input_indices.get(&thermal.zone)
                         && idx < u.len()
@@ -165,14 +177,15 @@ impl ThermalSolver {
                     }
                     // A joule whose injection failed (no sensible-input
                     // index for the port's zone) is NOT counted as
-                    // injected: the count is the injection, so the
-                    // reconciliation's exact pin (meters minus receipt ==
-                    // the explained gap) goes red on any dropped joule
-                    // instead of letting it hide inside the explained gap.
+                    // injected and is NOT a glazing loss: the account
+                    // carries only what happened, so the reconciliation's
+                    // exact pin (meters minus receipt == the explained
+                    // gap) goes red on the dropped joule instead of
+                    // letting it hide inside the glazing back-out.
                 }
             }
         }
-        injected_w
+        (injected_w, glazing_out_w)
     }
 }
 

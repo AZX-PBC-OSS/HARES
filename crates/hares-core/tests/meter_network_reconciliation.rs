@@ -12,37 +12,51 @@
 //! 2. the end-uses' assignment: the run's energy-closure report's
 //!    delivered column, on the system row and the per-zone rows;
 //! 3. the network solve's receipt: the port-only input vector's
-//!    capacitance-weighted account through the same discrete `B_d` the
-//!    balance block applies to the full input vector
-//!    (`ThermalSolver::port_receipt_w`).
+//!    capacitance-weighted account through the same operator the balance
+//!    block applies to the full input vector (the discrete `B_d` when the
+//!    step is uncoupled, its semi-implicit `(I + D)⁻¹·B_d` form when the
+//!    step carries coupling entries), `ThermalSolver::port_receipt_w`.
 //!
-//! The meters-minus-receipt residual is exact, explained, and bounded. The
-//! explanation is the receipt's own column account: a port joule's `B_d`
-//! response is its stored share plus the conduction it drives to the
-//! boundary within the step, because the outdoor and ground temperatures
-//! ride their own input columns and the state matrix's columns therefore
-//! do not sum to zero through the capacitances. Each port column's
-//! conservation gain `colgain[j] = Σ_i C_i·B_d[i][j]/dt` takes the
-//! `(1 − e^{−x})/x` shape below unity (`x` the column's boundary-conduction
-//! time-constant ratio), and the solver publishes the explained gap
-//! `Σ_j u_port[j]·(1 − colgain[j])` beside the receipt. The reconciliation
-//! pins the residual against that gap exactly, and against the physical
-//! scale the shape admits (at or below 5 percent of the metered delivery:
-//! `x` stays at or below 1e-2 for residential assemblies at the production
-//! timesteps). A dropped, duplicated or garbled port column moves the
-//! receipt by that column's whole share, orders beyond both pins.
+//! The meters-minus-receipt gap is exact, explained, and bounded. The
+//! explanation is the receipt's own account: a port joule's response is
+//! its stored share plus the conduction it drives to the boundary within
+//! the step, because the outdoor and ground temperatures ride their own
+//! input columns and the state matrix's columns therefore do not sum to
+//! zero through the capacitances. Each port column's storage share takes
+//! the `(1 − e^{−x})/x` shape below unity (`x` the column's
+//! boundary-conduction time-constant ratio), and the solver publishes the
+//! explained gap as the port input total minus the receipt, beside the
+//! receipt. The reconciliation pins the exact residual (meters minus
+//! receipt minus the gap) to zero, and bounds the gap itself at 5 percent
+//! of the metered delivery. A dropped or duplicated port entry in the
+//! input mapping moves the exact residual by its whole share and fails at
+//! once; a dropped or duplicated input-matrix column moves the gap by that
+//! column's whole share and fails the scale pin when the share exceeds the
+//! bound. A change smaller than the bound is indistinguishable from the
+//! physical within-step conduction the scale pin admits, by construction.
+//!
+//! The short-wave pass's glazing back-out is the second explained part.
+//! The pass pools the port's visible gain with the transmitted diffuse
+//! solar and the windows' transmittance share leaves back out through the
+//! glazing (`HeatBalanceSurfaceManager.cc:3693`, `:3749-3753`), so the
+//! meters carry joules the network legitimately never receives. The pass
+//! returns the injected total and the back-out separately; a joule that
+//! failed to inject is neither, so it stays in the exact residual instead
+//! of being explained away as a glazing loss.
 //!
 //! The faces that legitimately do not close are published, not asserted
 //! away. A storage buffer's state of charge absorbs the difference between
 //! its metered flow and everything else its port account shows: the
 //! reconciliation prints the flow integral beside the state-of-charge
 //! trajectory and pins only what the buffer's own contract gives (the
-//! channel is present, finite, in bounds, and moves with the flow's sign
-//! on material steps). The deferred and unserved class (the unmet HVAC
-//! load column, the ideal-capacity and rolled-back-step counters, the
-//! island imbalance) is read and printed beside the delivered account on
-//! every run: an unexplained gap is a reported column, never a suppressed
-//! one.
+//! channel is present, finite, in bounds, and moves in the flow's
+//! direction on at least one material step). The deferred and unserved
+//! class (the unmet HVAC load column, the ideal-capacity and rolled-back
+//! counters, the island imbalance) is read and printed beside the delivered
+//! account on every run, and its channels must be finite: an unexplained
+//! gap is a reported column, never a suppressed one. The fleet's gas
+//! fixture must burn gas, so a run that silently stopped writing the gas
+//! columns cannot pass as "no gas here".
 //!
 //! No OCHRE corpus fixture is mounted here: every run is the engine's own
 //! (two synthetic RC dwellings and four HPXML assemblies on the example
@@ -161,17 +175,19 @@ impl DeliveredBaseline {
 /// - the network's receipt against the meters: the closure report's
 ///   delivered delta (the ports' metered delivery, integrated) against the
 ///   solver's `port_receipt_w` (the network solve's own account of the
-///   same delivery through `B_d`). The residual is pinned twice: against
-///   the solver's own explained gap (the port columns' conservation
-///   deviation, the within-step boundary conduction the `B_d` response
-///   carries, exact to the products' float rounding), and against the
-///   physical scale that deviation can carry (the `(1 − e^{−x})/x` column
-///   shape bounds it at `x/2`, with `x` the column's boundary-conduction
-///   time-constant ratio, which stays at or below 1e-2 for residential
-///   assemblies at the production timesteps, so the shortfall stays at or
-///   below 5e-3 relative). A dropped, duplicated or garbled port column
-///   moves the receipt by that column's whole share, orders beyond both
-///   pins.
+///   same delivery through the operator the step applies). The account is
+///   pinned twice: the exact residual (meters minus receipt minus the
+///   explained gap, the port input total minus the receipt plus the
+///   short-wave glazing back-out) must be zero to the products' float
+///   rounding, and the explained gap itself must stay within the physical
+///   scale the column shape admits (the `(1 − e^{−x})/x` storage share
+///   bounds each column's within-step loss at `x/2`, plus the coupling
+///   damping on a coupled step; the bound here is 5 percent of the
+///   metered delivery, above the measured 2.1 percent). A dropped or
+///   duplicated port entry in the input mapping moves the exact residual
+///   by its whole share; a dropped or duplicated input-matrix column
+///   moves the gap by that column's whole share and fails the scale pin
+///   when the share exceeds the bound.
 /// - the end-uses' assignment: the per-zone rows' delivered deltas against
 ///   the system row's (the zones' own wiring closing on the system's).
 ///
@@ -195,12 +211,12 @@ fn step_and_reconcile(
     close_pair(
         metered_wh - receipt_wh,
         gap_wh,
-        &format!("step {step}: the receipt residual against its explained gap"),
+        &format!("step {step}: the meters-minus-receipt gap against its explained gap"),
         failures,
     );
     if (metered_wh - receipt_wh).abs() > 1e-9 + 0.05 * metered_wh.abs() {
         failures.push(format!(
-            "step {step}: the receipt residual {} Wh exceeds the physical \
+            "step {step}: the meters-minus-receipt gap {} Wh exceeds the physical \
              within-step conduction scale (5% of the metered {metered_wh} Wh)",
             metered_wh - receipt_wh
         ));
@@ -317,11 +333,12 @@ const SYNTHETIC_DT_S: f64 = 60.0;
 
 /// FACE: the network's receipt on the uncoupled assembly. Every step's
 /// port-only `B_d` account must equal the ports' metered delivery minus
-/// the columns' own explained conservation deviation, and the per-zone
+/// the columns' own explained within-step conduction, and the per-zone
 /// assignment must close on the system row. The derivation in the module
-/// comment is the proof the bounds ride; a dropped, duplicated or garbled
-/// port column in the discrete input mapping moves the receipt off the
-/// meters by that column's whole share and fails both pins.
+/// comment is the proof the bounds ride; a dropped or duplicated port
+/// entry in the discrete input mapping moves the exact residual by its
+/// whole share, and a dropped or duplicated input-matrix column moves the
+/// gap by that column's whole share.
 #[test]
 fn network_receipt_closes_against_the_port_meters_uncoupled() {
     let mut dwelling = synthetic_dwelling(0.0);
@@ -345,7 +362,7 @@ fn network_receipt_closes_against_the_port_meters_uncoupled() {
         SYNTHETIC_STEPS,
         "network-receipt:",
         format!(
-            "meters {metered_total} Wh, receipt {receipt_total} Wh, residual {} Wh",
+            "meters {metered_total} Wh, receipt {receipt_total} Wh, gap {} Wh",
             metered_total - receipt_total
         ),
     );
@@ -357,11 +374,12 @@ fn network_receipt_closes_against_the_port_meters_uncoupled() {
 }
 
 /// FACE: the network's receipt on the coupled assembly. The semi-implicit
-/// infiltration coupling changes the solution's operator, not the input
-/// mapping: `B_d` is fixed at construction, so the receipt's account and
-/// its explained gap hold the same way on this assembly. A receipt that
-/// only reconciled on uncoupled steps would be an artifact of the balance
-/// block's branch, not of the mapping.
+/// infiltration coupling changes the operator the step applies: the input
+/// response is `(I + D)⁻¹·B_d`, so the receipt is computed through the
+/// same damped operator the balance block uses and the damping joins the
+/// explained gap. A receipt that ignored the coupling would report the
+/// undamped `B_d` account and hide the damping; the differential witness
+/// below pins that distinction.
 #[test]
 fn network_receipt_closes_against_the_port_meters_on_the_coupled_assembly() {
     let mut dwelling = synthetic_dwelling(0.5);
@@ -385,7 +403,7 @@ fn network_receipt_closes_against_the_port_meters_on_the_coupled_assembly() {
         SYNTHETIC_STEPS,
         "network-receipt:",
         format!(
-            "meters {metered_total} Wh, receipt {receipt_total} Wh, residual {} Wh",
+            "meters {metered_total} Wh, receipt {receipt_total} Wh, gap {} Wh",
             metered_total - receipt_total
         ),
     );
@@ -393,6 +411,56 @@ fn network_receipt_closes_against_the_port_meters_on_the_coupled_assembly() {
         failures.is_empty(),
         "the coupled run's reconciliation violations:\n{}",
         failures.join("\n")
+    );
+}
+
+/// FACE: the receipt is damped on the coupled assembly. The two synthetic
+/// dwellings carry the same 200 W port input; the only difference is the
+/// 0.5 ACH infiltration, whose semi-implicit coupling divides the air
+/// node's input response by `1 + d` with `d = h_inf·dt/C_air` (about
+/// 8e-3 here: 0.5 ACH over 129.6 m3 against the 60 s step). The coupled
+/// receipt must therefore be strictly below the uncoupled `B_d` account.
+/// This is the witness the coupled face alone cannot give: without it a
+/// receipt that silently ran the uncoupled operator would pass every
+/// identity pin (the gap is built from the same operator either way).
+#[test]
+fn the_coupled_receipt_is_damped_below_the_uncoupled_account() {
+    let mut totals = Vec::new();
+    for ach in [0.0, 0.5] {
+        let mut dwelling = synthetic_dwelling(ach);
+        let mut baseline = DeliveredBaseline::new();
+        let mut failures: Vec<String> = Vec::new();
+        let mut metered_total = 0.0;
+        let mut receipt_total = 0.0;
+        for step in 0..SYNTHETIC_STEPS {
+            let (metered_wh, receipt_wh) = step_and_reconcile(
+                &mut dwelling,
+                &mut baseline,
+                SYNTHETIC_DT_S,
+                step,
+                &mut failures,
+            );
+            metered_total += metered_wh;
+            receipt_total += receipt_wh;
+        }
+        assert!(
+            failures.is_empty(),
+            "the ach {ach} run's reconciliation violations:\n{}",
+            failures.join("\n")
+        );
+        totals.push((metered_total, receipt_total));
+    }
+    let (uncoupled_metered, uncoupled_receipt) = totals[0];
+    let (coupled_metered, coupled_receipt) = totals[1];
+    assert!(
+        (uncoupled_metered - coupled_metered).abs() < 1e-9,
+        "the same 200 W input must meter the same on both assemblies: {uncoupled_metered} against {coupled_metered}"
+    );
+    let damping_share = (uncoupled_receipt - coupled_receipt) / uncoupled_receipt;
+    assert!(
+        damping_share > 1e-4,
+        "the coupled receipt must carry the coupling's damping: {coupled_receipt} against {uncoupled_receipt} \
+         (share {damping_share}, the derived d is about 8e-3, so a damped receipt sits about 1e-3 below)"
     );
 }
 
@@ -517,14 +585,16 @@ fn run_fleet_member(hpxml_name: &str, override_text: &str) -> FleetRun {
 /// - the gas meters close the same way where the run burns gas;
 /// - the storage buffer's state of charge is published beside its metered
 ///   flow integral (the buffer's own conversion account, never asserted
-///   to zero), and the channel is present, finite, in bounds, and moves
-///   with the flow's sign on material steps;
+///   to zero), and the channel is present, finite, in bounds, and moves in
+///   the flow's direction on at least one material step (a frozen state of
+///   charge under a live meter fails);
 /// - the unserved and deferred class is read and printed on every run:
 ///   the unmet HVAC load column, the ideal-capacity and rolled-back-step
 ///   counters, the island imbalance.
 #[test]
 fn engine_runs_reconcile_meters_end_uses_and_the_network_solve() {
     let mut all_failures: Vec<String> = Vec::new();
+    let mut gas_face_seen = false;
     for (hpxml_name, shape, override_text) in FLEET {
         let FleetRun {
             dwelling,
@@ -627,41 +697,54 @@ fn engine_runs_reconcile_meters_end_uses_and_the_network_solve() {
         );
 
         // FACE: the gas meters close the same way where the run burns gas.
+        // The fleet carries a gas fixture, so the face must be exercised by
+        // at least one member: a run that silently stopped writing the gas
+        // columns would otherwise pass every check as "no gas here".
         let gas_instances: Vec<&Instance> = instances
             .iter()
             .filter(|instance| {
                 columns.contains_key(&format!("{} Gas Power (therms/hour)", instance.name))
             })
             .collect();
-        if let Some(gas_total_column) = columns.get("Total Gas Power (therms/hour)") {
-            for row in 0..row_count {
-                let total = gas_total_column
-                    .get(row)
-                    .copied()
-                    .flatten()
-                    .unwrap_or_else(|| {
-                        failures.push(format!("row {row}: null total gas cell"));
-                        0.0
-                    });
-                let terms: Option<Vec<f64>> = gas_instances
-                    .iter()
-                    .map(|instance| {
-                        cell(
-                            &columns,
-                            &format!("{} Gas Power (therms/hour)", instance.name),
-                            row,
-                        )
-                    })
-                    .collect();
-                match terms {
-                    Some(terms) => close_sum(
-                        total,
-                        &terms,
-                        &format!("{hpxml_name}: row {row}: total gas"),
-                        &mut failures,
-                    ),
-                    None => failures.push(format!("{hpxml_name}: row {row}: null gas meter")),
+        if !gas_instances.is_empty() {
+            gas_face_seen = true;
+            match columns.get("Total Gas Power (therms/hour)") {
+                Some(gas_total_column) => {
+                    for row in 0..row_count {
+                        let total = gas_total_column
+                            .get(row)
+                            .copied()
+                            .flatten()
+                            .unwrap_or_else(|| {
+                                failures.push(format!("row {row}: null total gas cell"));
+                                0.0
+                            });
+                        let terms: Option<Vec<f64>> = gas_instances
+                            .iter()
+                            .map(|instance| {
+                                cell(
+                                    &columns,
+                                    &format!("{} Gas Power (therms/hour)", instance.name),
+                                    row,
+                                )
+                            })
+                            .collect();
+                        match terms {
+                            Some(terms) => close_sum(
+                                total,
+                                &terms,
+                                &format!("{hpxml_name}: row {row}: total gas"),
+                                &mut failures,
+                            ),
+                            None => {
+                                failures.push(format!("{hpxml_name}: row {row}: null gas meter"))
+                            }
+                        }
+                    }
                 }
+                None => failures.push(format!(
+                    "{hpxml_name}: gas-burning instances are present but the total gas column is missing"
+                )),
             }
         }
         print_account(
@@ -699,6 +782,8 @@ fn engine_runs_reconcile_meters_end_uses_and_the_network_solve() {
             let mut soc_last: Option<f64> = None;
             let mut previous_soc: Option<f64> = None;
             let mut sign_violations = 0;
+            let mut material_steps = 0;
+            let mut sign_matches = 0;
             for row in 0..row_count {
                 let soc = soc_column.get(row).copied().flatten();
                 match soc {
@@ -715,9 +800,12 @@ fn engine_runs_reconcile_meters_end_uses_and_the_network_solve() {
                         if power.abs() > 1e-3
                             && let Some(previous) = previous_soc
                         {
+                            material_steps += 1;
                             let stored_delta = value - previous;
                             if stored_delta * power < 0.0 {
                                 sign_violations += 1;
+                            } else if stored_delta * power > 0.0 {
+                                sign_matches += 1;
                             }
                         }
                         previous_soc = Some(value);
@@ -732,7 +820,8 @@ fn engine_runs_reconcile_meters_end_uses_and_the_network_solve() {
                 "storage:",
                 format!(
                     "'{}' metered flow {flow_kwh:.6} kWh, soc {:?} -> {:?}, \
-                     sign violations {sign_violations} (the state of charge is the \
+                     sign violations {sign_violations} on {material_steps} material step(s), \
+                     sign matches {sign_matches} (the state of charge is the \
                      buffer's own account of the flow's round trip)",
                     instance.name, soc_first, soc_last
                 ),
@@ -744,40 +833,66 @@ fn engine_runs_reconcile_meters_end_uses_and_the_network_solve() {
                     instance.name
                 ));
             }
+            if material_steps > 0 && sign_matches == 0 {
+                failures.push(format!(
+                    "'{}': the state of charge never moved with the flow on \
+                     {material_steps} material step(s)",
+                    instance.name
+                ));
+            }
         }
 
         // FACE: the unserved and deferred class, published on every run.
-        let unmet_max = columns
-            .get("Unmet HVAC Load (C)")
-            .map(|column| {
-                column.iter().flatten().fold(0.0_f64, |acc, value| {
-                    if value.is_finite() {
-                        acc.max(value.abs())
-                    } else {
-                        acc
+        // The column need not move (a served run legitimately reads zero),
+        // but it must be present and finite: a non-finite cell is a
+        // reported violation, never folded into a maximum.
+        let mut unmet_max = 0.0_f64;
+        match columns.get("Unmet HVAC Load (C)") {
+            Some(column) => {
+                for (row, value) in column.iter().enumerate() {
+                    if let Some(value) = value {
+                        if value.is_finite() {
+                            unmet_max = unmet_max.max(value.abs());
+                        } else {
+                            failures.push(format!(
+                                "row {row}: 'Unmet HVAC Load (C)' carried a non-finite value: {value}"
+                            ));
+                        }
                     }
-                })
-            })
-            .unwrap_or_else(|| {
+                }
+            }
+            None => {
                 failures.push("no 'Unmet HVAC Load (C)' column in the frame".to_string());
-                0.0
-            });
+            }
+        }
         let health = dwelling.health();
+        let island_unserved_w = dwelling.island_unserved_w();
+        let island_excess_w = dwelling.island_excess_w();
         print_account(
             hpxml_name,
             row_count,
             "unserved:",
             format!(
                 "unmet hvac load max {unmet_max:.6} C, ideal-capacity-unsolved steps {}, \
-                 discarded-state-energy {} Wh, island-unserved {} W, island-excess {} W",
-                health.ideal_capacity_unsolved_steps,
-                health.discarded_state_energy_wh,
-                dwelling.island_unserved_w(),
-                dwelling.island_excess_w(),
+                 discarded-state-energy {} Wh, island-unserved {island_unserved_w} W, island-excess {island_excess_w} W",
+                health.ideal_capacity_unsolved_steps, health.discarded_state_energy_wh,
             ),
         );
-        if !unmet_max.is_finite() {
-            failures.push("the unmet HVAC load column carried a non-finite value".to_string());
+        if !health.discarded_state_energy_wh.is_finite() {
+            failures.push(format!(
+                "'discarded-state-energy' carried a non-finite value: {}",
+                health.discarded_state_energy_wh
+            ));
+        }
+        if !island_unserved_w.is_finite() {
+            failures.push(format!(
+                "the island-unserved channel carried a non-finite value: {island_unserved_w}"
+            ));
+        }
+        if !island_excess_w.is_finite() {
+            failures.push(format!(
+                "the island-excess channel carried a non-finite value: {island_excess_w}"
+            ));
         }
 
         let receipt_wh_total: f64 = step_accounts.iter().map(|(_, r)| r).sum();
@@ -786,7 +901,7 @@ fn engine_runs_reconcile_meters_end_uses_and_the_network_solve() {
             row_count,
             "network-receipt:",
             format!(
-                "meters {:.6} Wh, receipt {receipt_wh_total:.6} Wh, residual {} Wh",
+                "meters {:.6} Wh, receipt {receipt_wh_total:.6} Wh, gap {} Wh",
                 metered_total_kwh * 1000.0,
                 metered_total_kwh * 1000.0 - receipt_wh_total
             ),
@@ -794,6 +909,10 @@ fn engine_runs_reconcile_meters_end_uses_and_the_network_solve() {
 
         all_failures.extend(failures);
     }
+    assert!(
+        gas_face_seen,
+        "the fleet's gas fixture never produced a gas-burning instance: the gas face was not exercised"
+    );
     assert!(
         all_failures.is_empty(),
         "the fleet's reconciliation violations:\n{}",
