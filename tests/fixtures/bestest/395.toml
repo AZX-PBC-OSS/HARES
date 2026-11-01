@@ -1,6 +1,7 @@
 building_id = 395
 
-# ASHRAE 140-2023 Section 5.2.3.16, Case 395: the low-mass solid-conduction
+# ASHRAE 140-2017 Section 5.2.3.16, Case 395 (the fabric cases sit in
+# Section 7 in 140-2023): the low-mass solid-conduction
 # in-depth test under the "20,27" deadband thermostat (heating 20 C, cooling
 # 27 C, the Case 400 base's setpoints). Case 600's lightweight walls replace
 # the 12 m2 of south windows (5.2.3.16); 0 infiltration, 0 internal gains,

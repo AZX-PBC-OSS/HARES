@@ -1,6 +1,7 @@
 building_id = 195
 
-# ASHRAE 140-2023 Section 5.2.3.5, Case 195: the solid-conduction in-depth
+# ASHRAE 140-2017 Section 5.2.3.5, Case 195 (the fabric cases sit in
+# Section 7 in 140-2023): the solid-conduction in-depth
 # test. Case 200's chain (Case 600's envelope with interior IR emittance 0.1
 # per 5.2.3.2.1, then exterior IR emittance 0.1 per 5.2.3.4.1) with the 12 m2
 # of south windows replaced by the lightweight exterior walls of Table 5-21
