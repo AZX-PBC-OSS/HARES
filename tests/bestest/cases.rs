@@ -116,10 +116,10 @@ pub fn extended_cases() -> Vec<BestestCase> {
     ]
 }
 
-/// The in-depth solid-conduction cases (ASHRAE 140-2023 Section 5.2.3):
-/// Case 600's envelope with no windows, zero internal gains and zero
-/// infiltration, under the in-depth radiative properties (exterior solar
-/// absorptance 0.1, IR emittance 0.1 interior and exterior). Consumed by
+/// The in-depth solid-conduction cases (ASHRAE 140-2023 Section 7.3 /
+/// 140-2017 5.2.3): Case 600's envelope with no windows, zero internal gains
+/// and zero infiltration, under the in-depth radiative properties (exterior
+/// solar absorptance 0.1, IR emittance 0.1 interior and exterior). Consumed by
 /// the `bestest` target and the `regression` target's include of this
 /// module; the `alignment_oracles_regressions` target includes only
 /// `cases.rs`, which leaves the function unused there.
