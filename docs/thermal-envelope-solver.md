@@ -363,6 +363,16 @@ These feed `EnvelopeComponentGains` but are summed for the u vector.
 - Balanced (ERV/HRV): `q_sens = (q_inf + q_nat) + q_forced·(1 − SRE)`
 - Unbalanced: `q = √[(q_inf + q_nat)² + q_forced²]`
 
+**Scheduled mechanical ventilation**: the forced flow is a runtime
+schedule input when the configuration declares
+`MechanicalVentilationParams::flow_schedule_col` (the synthetic
+fixture's `[ventilation] flow_schedule_m3_s` table, expanded to per-step
+schedule values): the schedule column's value for the step's schedule
+row IS the indoor zone's forced ventilation flow that step, so an
+hour-declared fan is the hour's value held across the hour's steps. The
+constants (`ventilation_flow_m3_s`, `zone_flow_m3_s`) remain the
+default when no column is declared.
+
 **Load calculation** (dry-air basis):
 - Density: `ρ = moist_air_density_kg_m3(P, T_out, w_out)` — inverts ASHRAE HOF
   2021 Ch.1 Eq.28 specific volume `v = R_da·T·(1+W/ε)/p`, yielding kg_da/m³

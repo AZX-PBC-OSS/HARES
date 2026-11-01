@@ -42,6 +42,13 @@ pub(crate) struct SyntheticTomlConfig {
     pub(crate) setpoints: Option<SyntheticSetpointConfig>,
     #[serde(default)]
     pub(crate) infiltration: Option<SyntheticInfiltrationConfig>,
+    /// Scheduled mechanical ventilation: the fixture's `[ventilation]`
+    /// table. The fan's hour-resolved flow schedule, the surface BESTEST's
+    /// night-ventilation cases (650/950) express their 1800-0700 purge fan
+    /// through. Absent: no mechanical ventilation beyond the equipment
+    /// spec's constants (the HPXML path's ventilation surface).
+    #[serde(default)]
+    pub(crate) ventilation: Option<SyntheticVentilationConfig>,
     #[serde(default)]
     pub(crate) internal_gains_w: Option<f64>,
     #[serde(default)]
@@ -350,6 +357,7 @@ pub(crate) struct SyntheticWindowConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticSetpointConfig {
     #[serde(default)]
     pub(crate) heating_c: Option<f64>,
@@ -358,6 +366,14 @@ pub(crate) struct SyntheticSetpointConfig {
     /// When present, overrides `heating_c` with an hourly schedule.
     #[serde(default)]
     pub(crate) heating_schedule_c: Option<Vec<f64>>,
+    /// Optional 24-element hourly cooling setpoint profile (°C).
+    /// When present, overrides `cooling_c` with an hourly schedule. An
+    /// hour whose value is the engine's cooling-disabled setpoint
+    /// (`hares_physics::constants::COOLING_DISABLED_SETPOINT_C`) declares
+    /// the cooling side off for that hour — the form Case 650/950's
+    /// "Cool = OFF 1800-0700" takes.
+    #[serde(default)]
+    pub(crate) cooling_schedule_c: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -374,6 +390,22 @@ pub(crate) struct SyntheticInfiltrationConfig {
     pub(crate) internal_gains_sensible_fraction: Option<f64>,
     #[serde(default)]
     pub(crate) internal_gains_radiant_fraction: Option<f64>,
+}
+
+/// The synthetic `[ventilation]` table: the mechanical ventilation fan's
+/// hour-resolved flow schedule.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SyntheticVentilationConfig {
+    /// The fan's flow schedule [m³/s], 24 elements: index h is the hour
+    /// `[h:00, h+1:00)` (the step-start convention the 640 fixture's
+    /// `heating_schedule_c` uses). Expanded to per-step values at the
+    /// schedule build, the fan's flow for every step the value of the hour
+    /// the step's start time falls in — the schedule samples at the step's
+    /// time, a zero-order hold across the hour's steps. The thermal
+    /// solver's configuration reads the column's value every step; the
+    /// equipment-spec constants are the default when the table is absent.
+    pub(crate) flow_schedule_m3_s: Vec<f64>,
 }
 
 fn default_interior_zone() -> String {
@@ -435,6 +467,7 @@ pub(crate) fn build_synthetic_building(
     config: &SyntheticTomlConfig,
     event_window_schedule_col: Option<usize>,
     event_probability_schedule_col: Option<usize>,
+    ventilation_flow_schedule_col: Option<usize>,
 ) -> Result<Building> {
     use hares_io::hpxml::{Boundary, BoundaryType, MaterialLayer, Site, Window, Zone, ZoneType};
     use hares_physics::units as conv;
@@ -469,6 +502,61 @@ pub(crate) fn build_synthetic_building(
             );
             return Err(HaresError::Dwelling(format!(
                 "wall_r_value_m2_k_w must be positive, got {r_value}"
+            )));
+        }
+    }
+
+    // The hourly setpoint schedules and the ventilation flow schedule are
+    // hour-of-day data: exactly 24 elements, each finite, the flow rates
+    // non-negative. Checked at the build so a malformed profile fails the
+    // construction naming the TOML field and the count, instead of the
+    // 24-element slice copy panicking downstream.
+    for (field, schedule) in [
+        (
+            "setpoints.heating_schedule_c",
+            config
+                .setpoints
+                .as_ref()
+                .and_then(|sp| sp.heating_schedule_c.as_ref()),
+        ),
+        (
+            "setpoints.cooling_schedule_c",
+            config
+                .setpoints
+                .as_ref()
+                .and_then(|sp| sp.cooling_schedule_c.as_ref()),
+        ),
+        (
+            "ventilation.flow_schedule_m3_s",
+            config
+                .ventilation
+                .as_ref()
+                .map(|vent| &vent.flow_schedule_m3_s),
+        ),
+    ] {
+        let Some(schedule) = schedule else {
+            continue;
+        };
+        if schedule.len() != 24 {
+            return Err(HaresError::Dwelling(format!(
+                "{field} must have exactly 24 elements (one per hour of day), got {}",
+                schedule.len()
+            )));
+        }
+        if let Some(&value) = schedule.iter().find(|&v| !v.is_finite()) {
+            return Err(HaresError::Dwelling(format!(
+                "{field} must carry finite values, got {value}"
+            )));
+        }
+        // The flow schedule is a fan rate: a negative flow is not a state
+        // the fan has. (The setpoint schedules' values carry their own
+        // band's admission — the disabled setpoints and the thermostat's
+        // plausibility check govern them.)
+        if field == "ventilation.flow_schedule_m3_s"
+            && let Some(&rate) = schedule.iter().find(|&v| *v < 0.0)
+        {
+            return Err(HaresError::Dwelling(format!(
+                "ventilation.flow_schedule_m3_s must carry non-negative flow rates, got {rate}"
             )));
         }
     }
@@ -1442,19 +1530,24 @@ pub(crate) fn build_synthetic_building(
         }
     }
 
-    // Build 24-hour setpoint vectors when setpoints are configured.
+    // Build 24-hour setpoint vectors when setpoints are configured. An
+    // hourly schedule overrides its side's constant; the constant stands
+    // when the schedule is absent. A schedule hour may carry its side's
+    // disabled setpoint (hares-physics::constants::{HEATING,
+    // COOLING}_DISABLED_SETPOINT_C): the off-state the thermostat's own
+    // schedule-override path installs, so the hour declares the side off.
     let (heating_weekday, cooling_weekday) = if let Some(sp) = &config.setpoints {
         let heating = if let Some(ref schedule) = sp.heating_schedule_c {
-            assert_eq!(
-                schedule.len(),
-                24,
-                "heating_schedule_c must have exactly 24 elements"
-            );
             Some(schedule.clone())
         } else {
             sp.heating_c.map(|t| vec![t; 24])
         };
-        (heating, Some(vec![sp.cooling_c; 24]))
+        let cooling = if let Some(ref schedule) = sp.cooling_schedule_c {
+            Some(schedule.clone())
+        } else {
+            Some(vec![sp.cooling_c; 24])
+        };
+        (heating, cooling)
     } else {
         (None, None)
     };
@@ -1516,6 +1609,11 @@ pub(crate) fn build_synthetic_building(
         conditioned_volume_m3: config.geometry.zone_volume_m3,
         // The synthetic house is one conditioned zone on one storey.
         ceiling_height_m: config.geometry.zone_volume_m3 / config.geometry.floor_area_m2,
+        // The fan's flow-schedule column: the schedule build expanded the
+        // fixture's `[ventilation] flow_schedule_m3_s` to per-step values
+        // and this index is the column's position, the one the thermal
+        // solver's configuration reads the per-step fan rate through.
+        ventilation_flow_schedule_col,
         infiltration_height_m: None,
         floors_above_grade: 1.0,
         has_flue_or_chimney: None,
@@ -1970,6 +2068,9 @@ pub(crate) struct SyntheticScheduleResult {
     /// Column index for the event probability schedule in the per-step columns,
     /// if `event_load.event_probability_schedule` was provided.
     pub(crate) event_probability_schedule_col: Option<usize>,
+    /// Column index for the mechanical ventilation fan's flow schedule in
+    /// the per-step columns, if the `[ventilation]` table was provided.
+    pub(crate) ventilation_flow_schedule_col: Option<usize>,
 }
 
 pub(crate) fn build_synthetic_schedule(
@@ -2007,6 +2108,7 @@ pub(crate) fn build_synthetic_schedule(
 
     let event_window_schedule_col: Option<usize>;
     let event_probability_schedule_col: Option<usize>;
+    let ventilation_flow_schedule_col: Option<usize>;
 
     if let Some(el) = &config.event_load {
         // Expand the 24-hour event window schedule to per-step values when
@@ -2050,6 +2152,28 @@ pub(crate) fn build_synthetic_schedule(
         event_probability_schedule_col = None;
     }
 
+    // The ventilation fan's flow schedule expands by the same rule the
+    // event columns expand: the step's hour-of-day index selects the
+    // schedule's value for the hour the step's start time falls in, so the
+    // fan's rate is the hour's value held across the hour's steps at any
+    // timestep.
+    if let Some(vent) = &config.ventilation {
+        let expanded: Vec<f64> = (0..total_steps)
+            .map(|i| {
+                let hour_of_day = ((i as u64 * u64::from(step_secs)) / 3600 % 24) as usize;
+                vent.flow_schedule_m3_s[hour_of_day]
+            })
+            .collect();
+        let col_idx = columns.len();
+        column_names.push("ventilation_flow_m3_s".to_string());
+        column_index.insert("ventilation_flow_m3_s".to_string(), col_idx);
+        columns.push(expanded);
+        column_aggregations.push(ColumnAggregation::Mean);
+        ventilation_flow_schedule_col = Some(col_idx);
+    } else {
+        ventilation_flow_schedule_col = None;
+    }
+
     Ok(SyntheticScheduleResult {
         schedule: ScheduleTimeSeries {
             timestamps,
@@ -2061,6 +2185,7 @@ pub(crate) fn build_synthetic_schedule(
         },
         event_window_schedule_col,
         event_probability_schedule_col,
+        ventilation_flow_schedule_col,
     })
 }
 
@@ -2807,6 +2932,148 @@ equipment_name = "None"
         );
     }
 
+    /// The `[ventilation]` table's unknown keys are typed errors: the
+    /// fan-schedule surface must not repeat the silent-drop class.
+    #[test]
+    fn synthetic_toml_rejects_unknown_ventilation_key() {
+        let toml = r#"
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[ventilation]
+flow_rate = 0.5
+"#;
+        let err = toml::from_str::<SyntheticTomlConfig>(toml)
+            .expect_err("an unknown [ventilation] key is a typed error");
+        assert!(
+            err.to_string().contains("flow_rate"),
+            "the error must name the unknown key, got: {err}"
+        );
+    }
+
+    /// The fan schedule's validation: exactly 24 hourly values, finite and
+    /// non-negative.
+    #[test]
+    fn synthetic_ventilation_flow_schedule_validates() {
+        let array = |count: usize, value: &str| {
+            format!(
+                "[{}]",
+                std::iter::repeat_n(value, count)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let base = |schedule: &str| {
+            format!(
+                r#"
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[ventilation]
+flow_schedule_m3_s = {schedule}
+"#
+            )
+        };
+        let config: SyntheticTomlConfig =
+            toml::from_str(&base(&array(24, "0.4731"))).expect("a 24-element schedule builds");
+        build_synthetic_building(&config, None, None, None)
+            .expect("a well-formed fan schedule builds");
+
+        for (bad, name) in [
+            (array(23, "0.0"), "23 elements"),
+            (array(25, "0.0"), "25 elements"),
+            (array(24, "-0.1"), "a negative flow"),
+        ] {
+            let config: SyntheticTomlConfig = toml::from_str(&base(&bad)).unwrap_or_else(|err| {
+                panic!("{name}: the TOML itself must parse before the build: {err}")
+            });
+            let err = build_synthetic_building(&config, None, None, None)
+                .expect_err(&format!("{name} must fail the build"));
+            assert!(
+                err.to_string().contains("flow_schedule_m3_s"),
+                "the error must name the field, got: {err}"
+            );
+        }
+    }
+
+    /// The fan schedule expands to per-step values by the step's start
+    /// hour: at a 3600 s step each hour's value is that hour's schedule
+    /// entry; the column is the one the building's schedule column index
+    /// names.
+    #[test]
+    fn synthetic_ventilation_flow_schedule_expands_by_the_step_start_hour() {
+        let schedule = "[0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]";
+        let toml = format!(
+            r#"
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 3600
+duration = 86400
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+[ventilation]
+flow_schedule_m3_s = {schedule}
+"#
+        );
+        let config: SyntheticTomlConfig = toml::from_str(&toml).expect("the config parses");
+        let result = build_synthetic_schedule(&config).expect("the schedule builds");
+        let col = result
+            .ventilation_flow_schedule_col
+            .expect("the fan schedule's column exists");
+        let columns = &result.schedule.columns;
+        let expanded = &columns[col];
+        assert_eq!(expanded.len(), 24);
+        for (hour, &value) in expanded.iter().enumerate() {
+            let expected = if (7..=17).contains(&hour) {
+                0.0
+            } else if hour < 7 {
+                0.5
+            } else {
+                0.4
+            };
+            assert_eq!(
+                value, expected,
+                "hour {hour} must read its own schedule entry"
+            );
+        }
+    }
+
     #[test]
     fn synthetic_output_table_names_reports() {
         use crate::dwelling::Dwelling;
@@ -3373,7 +3640,7 @@ attached_to_wall_id = "wall-1"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let wall = building
             .boundaries
@@ -3527,7 +3794,7 @@ attached_to_wall_id = "south-wall"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let south_wall = building
             .boundaries
@@ -3578,7 +3845,7 @@ attached_to_wall_id = "south-wall"
                  equipment_name = \"None\"\n"
             );
             let config: SyntheticTomlConfig = toml::from_str(&toml).expect("parse");
-            let err = build_synthetic_building(&config, None, None)
+            let err = build_synthetic_building(&config, None, None, None)
                 .expect_err("a zone with no floor area or volume has no ceiling height");
             assert!(err.to_string().contains(field), "{err}");
         }
@@ -3614,7 +3881,7 @@ density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         let err = result.expect_err("a one-wall zone with positive volume must be rejected");
         let message = err.to_string();
         assert!(
@@ -3672,7 +3939,7 @@ specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
         assert!(
             building
                 .boundaries
@@ -3737,7 +4004,7 @@ specific_heat_j_kg_k = 900.0
                 ("Roof", 10.0, "Conditioned", "Outdoor"),
             ],
         ] {
-            build_synthetic_building(&closure_test_config(&faces), None, None)
+            build_synthetic_building(&closure_test_config(&faces), None, None, None)
                 .unwrap_or_else(|err| panic!("{faces:?} is a closed envelope: {err}"));
         }
     }
@@ -3749,7 +4016,7 @@ specific_heat_j_kg_k = 900.0
             ("Wall", 10.0, "Conditioned", "Outdoor"),
             ("Roof", 0.0, "Conditioned", "Outdoor"),
         ];
-        build_synthetic_building(&closure_test_config(&faces), None, None)
+        build_synthetic_building(&closure_test_config(&faces), None, None, None)
             .expect_err("a zero-area roof must not close the envelope");
     }
 
@@ -3761,7 +4028,7 @@ specific_heat_j_kg_k = 900.0
             ("Wall", 10.0, "Conditioned", "Outdoor"),
             ("Roof", 10.0, "Attic", "Outdoor"),
         ];
-        build_synthetic_building(&closure_test_config(&faces), None, None)
+        build_synthetic_building(&closure_test_config(&faces), None, None, None)
             .expect_err("another zone's roof must not close the conditioned zone");
     }
 
@@ -3792,7 +4059,7 @@ equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         // Exclude windows from the face count (none configured here).
         let non_window: Vec<_> = building
@@ -3941,7 +4208,7 @@ specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         // The builder must use the explicit boundaries, not auto-generate.
         assert_eq!(
@@ -4005,7 +4272,7 @@ occupancy = 1.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let non_window: Vec<_> = building
             .boundaries
@@ -4095,7 +4362,7 @@ equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         // Verify each non-window boundary carries exactly one concrete
         // material layer with non-zero density and specific_heat.
@@ -4236,7 +4503,7 @@ equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let n_non_window = building
             .boundaries
@@ -4342,7 +4609,7 @@ occupancy = 1.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let store = hares_io::DefaultsStore::empty();
         let boundary_inputs = crate::dwelling::conversions::building_to_boundary_inputs(
@@ -4433,7 +4700,7 @@ occupancy = 1.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         assert!(
             building.hvac_capacity_w.is_none(),
@@ -4478,7 +4745,7 @@ occupancy = 1.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let expected_w = hares_physics::units::power_btu_h_to_w(25.0 * 1000.0);
         let actual_w = building
@@ -4528,7 +4795,7 @@ occupancy = 1.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let hvac = find_xml_child(&building.details_xml.children, "Systems")
             .and_then(|s| find_xml_child(&s.children, "HVAC"))
@@ -4580,7 +4847,7 @@ occupancy = 1.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let hvac = find_xml_child(&building.details_xml.children, "Systems")
             .and_then(|s| find_xml_child(&s.children, "HVAC"))
@@ -4636,7 +4903,7 @@ occupancy = 1.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         let building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
         let hvac = find_xml_child(&building.details_xml.children, "Systems")
             .and_then(|s| find_xml_child(&s.children, "HVAC"))
@@ -4681,7 +4948,7 @@ wall_r_value_m2_k_w = 0.0
 equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(result.is_err(), "should fail with zero wall_r_value");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -4717,7 +4984,7 @@ wall_r_value_m2_k_w = -1.0
 equipment_name = "None"
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(result.is_err(), "should fail with negative wall_r_value");
     }
 
@@ -4749,7 +5016,7 @@ u_factor_w_m2_k = 3.0
 shgc = 1.5
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(result.is_err(), "should fail with shgc = 1.5");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -4786,7 +5053,7 @@ u_factor_w_m2_k = 3.0
 shgc = 1.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(
             result.is_ok(),
             "shgc = 1.0 should be accepted as a boundary value"
@@ -4821,7 +5088,7 @@ u_factor_w_m2_k = 3.0
 shgc = 0.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(
             result.is_ok(),
             "shgc = 0.0 should be accepted as a boundary value"
@@ -4875,7 +5142,7 @@ density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(
             result.is_err(),
             "should fail with conductivity = 0.0 and thickness = 0.1 m"
@@ -4938,7 +5205,7 @@ density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(
             result.is_ok(),
             "zero density with positive thickness should succeed (warning emitted)"
@@ -4991,7 +5258,7 @@ density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(
             result.is_ok(),
             "zero specific_heat with positive thickness should succeed (warning emitted)"
@@ -5044,7 +5311,7 @@ density_kg_m3 = 500.0
 specific_heat_j_kg_k = 900.0
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(result.is_err(), "negative density should be rejected");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -5081,7 +5348,7 @@ u_factor_w_m2_k = -0.5
 shgc = 0.7
 "#;
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
-        let result = build_synthetic_building(&config, None, None);
+        let result = build_synthetic_building(&config, None, None, None);
         assert!(result.is_err(), "negative u_factor should be rejected");
         let err = result.unwrap_err().to_string();
         assert!(

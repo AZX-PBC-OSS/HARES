@@ -202,14 +202,13 @@ pub fn core_reference_bands(case_id: &str) -> Vec<ReferenceBand> {
         // night-ventilation cases' bands, pinned as the published oracles
         // they are. Every example program reports zero annual heating for
         // both (heating is always OFF per 5.2.2.1.5.1.1), so the heating
-        // band's edges coincide. NO CASE RUNS AGAINST THESE BANDS YET: the
-        // fan's configuration schedule (1703.16 m3/h, ON from 1800 to 0700
-        // per 5.2.2.1.5.1.1/5.2.2.1.5.2) needs a scheduled mechanical-
-        // ventilation surface the engine's fixture paths do not expose:
-        // the solver's ventilation flow is a constant set at build time,
-        // and no fixture schema carries an hourly fan schedule. Wiring the
-        // cases needs that surface first; widening or ignoring the bands
-        // for a constant-ventilation stand-in is forbidden.
+        // band's edges coincide. The scheduled mechanical-ventilation
+        // surface (the fixture's `[ventilation] flow_schedule_m3_s` table:
+        // the fan's 1703.16 m3/h = 0.4731 m3/s, ON from 1800 to 0700 per
+        // 5.2.2.1.5.1.1/5.2.2.1.5.2) carries Case 650 against its bands
+        // in-band. Case 950's annual test is stopped at the measured
+        // cooling divergence the bestest mod records; widening or ignoring
+        // the bands is forbidden either way.
         "650" => vec![
             ReferenceBand {
                 case_id: "650",
@@ -256,11 +255,11 @@ mod tests {
         }
     }
 
-    /// The night-ventilation cases' bands are pinned as data even though no
-    /// case runs against them yet (the scheduled-ventilation-surface gap the
-    /// module comment names): the published oracles stay pinned so wiring
-    /// the cases later cannot silently widen them. The values are the
-    /// Std140_TF_Results.pdf Table B8-1/B8-2 rows, MWh converted to kWh.
+    /// The night-ventilation cases' bands stay pinned as data: the
+    /// published oracles cannot silently widen when a case starts running
+    /// against them (Case 650 does; Case 950's annual test is stopped at
+    /// the recorded divergence). The values are the Std140_TF_Results.pdf
+    /// Table B8-1/B8-2 rows, MWh converted to kWh.
     #[test]
     fn night_ventilation_bands_are_pinned() {
         use BestestMetric::*;

@@ -13,7 +13,8 @@ use hares_equipment::{
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
 use hares_physics::constants::{
-    SECONDS_PER_YEAR, SETPOINT_PLAUSIBILITY_MAX_C, SETPOINT_PLAUSIBILITY_MIN_C,
+    COOLING_DISABLED_SETPOINT_C, HEATING_DISABLED_SETPOINT_C, SECONDS_PER_YEAR,
+    SETPOINT_PLAUSIBILITY_MAX_C, SETPOINT_PLAUSIBILITY_MIN_C,
 };
 use hares_physics::water_density_kg_m3;
 use hares_types::{
@@ -1003,9 +1004,15 @@ fn insert_setpoint_into_obj(obj: &mut Map<String, Value>, key: &str, value: Valu
 /// purpose is the unit-convention mistake (a Celsius file read under the
 /// OS-HPXML Fahrenheit convention lands an order of magnitude outside
 /// every habitable setpoint) and any corrupt value, not a style opinion:
-/// the OS-HPXML defaults sit far inside it.
+/// the OS-HPXML defaults sit far inside it. The engine's disabled
+/// setpoints are the exception: a schedule hour carrying one declares the
+/// side off for that hour (the thermostat's own schedule-override path
+/// installs the same values for a disabled side), so they are declared
+/// inputs, not misread temperatures.
 pub(crate) fn setpoint_value_is_implausible(value: f64) -> bool {
     !(SETPOINT_PLAUSIBILITY_MIN_C..=SETPOINT_PLAUSIBILITY_MAX_C).contains(&value)
+        && value != HEATING_DISABLED_SETPOINT_C
+        && value != COOLING_DISABLED_SETPOINT_C
 }
 
 /// The applied setpoint column's plausibility: the first value outside
@@ -2733,6 +2740,27 @@ mod tests {
     use tempfile::tempdir;
 
     use super::find_unknown_schedule_columns;
+
+    /// The engine's disabled setpoints pass the plausibility check (the
+    /// off-state is a declared input, the value the thermostat's own
+    /// override path installs); every other out-of-band value — the
+    /// Fahrenheit misread the band exists to catch, NaN included — still
+    /// fails.
+    #[test]
+    fn setpoint_plausibility_admits_only_the_disabled_sentinels() {
+        use super::setpoint_value_is_implausible;
+        use hares_physics::constants::{COOLING_DISABLED_SETPOINT_C, HEATING_DISABLED_SETPOINT_C};
+
+        assert!(!setpoint_value_is_implausible(HEATING_DISABLED_SETPOINT_C));
+        assert!(!setpoint_value_is_implausible(COOLING_DISABLED_SETPOINT_C));
+        assert!(!setpoint_value_is_implausible(20.0));
+        for bad in [50.0, -10.0, 0.0, f64::NAN] {
+            assert!(
+                setpoint_value_is_implausible(bad),
+                "{bad} must stay implausible"
+            );
+        }
+    }
 
     fn find_setpoint_in_json<'a>(
         data: &'a serde_json::Map<String, Value>,

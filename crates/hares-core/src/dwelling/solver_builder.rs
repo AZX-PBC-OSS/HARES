@@ -1611,6 +1611,17 @@ pub(crate) fn build_default_solvers(
         }
     }
 
+    // --- Scheduled mechanical ventilation (the synthetic fixture's fan schedule) ---
+    // The building's flow-schedule column is the synthetic builder's
+    // emission: the fixture's `[ventilation] flow_schedule_m3_s` expanded
+    // to per-step values. The solver reads the column's value from the
+    // schedule payload every step — the flow is a runtime input; the
+    // equipment-spec constants above remain the default when no column is
+    // declared.
+    if let Some(col) = building.ventilation_flow_schedule_col {
+        thermal_cfg.ventilation.flow_schedule_col = Some(col);
+    }
+
     // --- Duct leakage → infiltration adjustment (ASHRAE 152 §9.3) ---
     // Aggregate supply and return leakage fractions from all unconditioned zones,
     // then multiply by a rated fan flow estimate to get absolute leakage flows [m³/s].
@@ -2059,6 +2070,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         }
     }
 
@@ -3503,6 +3515,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         let boundary_inputs = vec![BoundaryInput {
@@ -3721,6 +3734,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         let boundary_inputs = vec![BoundaryInput {
@@ -3967,6 +3981,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         // Production resolves an attic exterior zone to ExteriorTarget::Zone
@@ -4214,6 +4229,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         let (r_glass, r_film_int, r_film_ext) =
@@ -4513,6 +4529,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         // r_glass and film resistances from the E+ Step 1 polynomial for U=1.8.
@@ -4790,6 +4807,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         // NFRC conditions: moderate wind (2 m/s), moderate ΔT.
@@ -5057,6 +5075,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         // High wind (15 m/s) — boundary_input still carries E+ polynomial values.

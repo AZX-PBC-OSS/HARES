@@ -560,9 +560,15 @@ fn energyplus_bestest_core_cases_keep_fixture_and_reference_band_coverage() {
                 case.id,
                 band.metric
             );
+            // min <= max, not min < max: the night-ventilation cases'
+            // heating bands are the published oracle's own degenerate
+            // [0, 0] (heating is always OFF per ASHRAE 140-2017
+            // 5.2.2.1.5.1.1; every example program reports zero annual
+            // heating, so the band's edges coincide and the pin holds the
+            // load to exactly zero). An inverted band still fails.
             assert!(
-                band.min < band.max,
-                "BESTEST reference band must have min < max for case {} metric {}",
+                band.min <= band.max,
+                "BESTEST reference band must have min <= max for case {} metric {}",
                 case.id,
                 band.metric
             );

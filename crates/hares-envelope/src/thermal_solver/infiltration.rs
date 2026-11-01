@@ -9,7 +9,7 @@ use hares_physics::infiltration::{
 };
 #[cfg(feature = "observe")]
 use hares_physics::infiltration::{compute_natural_ventilation_cw, wind_incidence_angle_deg};
-use hares_types::{EnvironmentState, HaresError, ZoneId};
+use hares_types::{EnvironmentState, HaresError, ScheduleSource, ZoneId};
 
 use super::H_FG_J_PER_KG;
 use super::config::{InfiltrationMethod, ThermalSolverConfig};
@@ -106,6 +106,19 @@ pub(crate) fn apply_infiltration_and_ventilation(
     // (v = R_da·T·(1+W/ε)/p [m³/kg_da]), so it already yields kg_da/m³.
     let rho = moist_air_density_kg_m3(p_pa, t_out, w_out);
     check_air_density_plausible(rho, "infiltration mass flow")?;
+
+    // The scheduled ventilation flow, read once per step: the config's
+    // declared schedule column's value for this step's schedule row is the
+    // indoor zone's forced ventilation flow (m³/s). `None` when the config
+    // declares no column — the constants govern.
+    let scheduled_flow_m3_s = match config.ventilation.flow_schedule_col {
+        Some(col) => Some(ScheduleSource::schedule_column_value(
+            env,
+            col,
+            hares_types::BoundaryPolicy::Wrap,
+        )?),
+        None => None,
+    };
 
     for zone in &env.zones {
         // Look up per-zone infiltration; default to zero ACH if not configured.
@@ -214,17 +227,31 @@ pub(crate) fn apply_infiltration_and_ventilation(
         let (_, q_stack_m3_s, q_wind_m3_s, cd_used) = nat_vent;
 
         // Forced mechanical ventilation flow -- only for zones with explicit flow
-        // or the indoor zone (which gets the global ventilation rate).
-        let forced_flow_m3_s = config
-            .ventilation
-            .zone_flow_m3_s
-            .get(&zone.id)
-            .copied()
-            .unwrap_or(if zone.id == config.indoor_zone_id {
-                config.ventilation_flow_m3_s
-            } else {
-                0.0
-            });
+        // or the indoor zone (which gets the global ventilation rate). The
+        // scheduled flow, when the config declares the schedule column, is the
+        // indoor zone's per-step fan rate (the schedule samples at the step's
+        // time: the row the environment publishes for this step's schedule
+        // address, so an hour-declared fan is the hour's value held across the
+        // hour's steps); the constants govern every zone the schedule does not
+        // cover and every configuration that declares no column.
+        let forced_flow_m3_s = if zone.id == config.indoor_zone_id {
+            match scheduled_flow_m3_s {
+                Some(flow) => flow,
+                None => config
+                    .ventilation
+                    .zone_flow_m3_s
+                    .get(&zone.id)
+                    .copied()
+                    .unwrap_or(config.ventilation_flow_m3_s),
+            }
+        } else {
+            config
+                .ventilation
+                .zone_flow_m3_s
+                .get(&zone.id)
+                .copied()
+                .unwrap_or(0.0)
+        };
 
         // Combine infiltration + natural ventilation + forced ventilation.
         // OCHRE Envelope.py:59-87:
@@ -686,6 +713,99 @@ mod tests {
         );
     }
 
+    /// The scheduled ventilation flow: the config's declared schedule
+    /// column's payload value IS the indoor zone's forced ventilation flow.
+    /// Hand-calculated: the payload carries 0.4731 m³/s (the BESTEST 650
+    /// fan's 1703.16 m³/h), the constants carry a different rate, and the
+    /// coupling's forced flow must read the schedule's value — the
+    /// schedule is the flow's most specific input.
+    #[test]
+    fn scheduled_ventilation_flow_reads_the_schedule_payload() {
+        let flow_m3_s = 1703.16_f64 / 3600.0;
+
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
+            ventilation_flow_m3_s: 0.1,
+            ventilation: crate::thermal_solver::config::MechanicalVentilationParams {
+                zone_flow_m3_s: HashMap::from([(ZoneId(1), 0.2)]),
+                flow_schedule_col: Some(0),
+                ..Default::default()
+            },
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+        let mut env = make_env(5.0, 3.0, 21.0, 300.0);
+        env.domains.schedule.payload_mut().push(flow_m3_s);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
+
+        assert!(
+            (couplings[0].forced_flow_m3_s - flow_m3_s).abs() < 1e-12,
+            "the scheduled flow must be the payload's value {flow_m3_s}, got {}",
+            couplings[0].forced_flow_m3_s
+        );
+    }
+
+    /// The schedule column declared but the environment's schedule slot
+    /// holding no payload: a typed error naming the read, never a silent
+    /// fall-back to the constants.
+    #[test]
+    fn scheduled_ventilation_flow_without_a_payload_is_a_typed_error() {
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
+            ventilation: crate::thermal_solver::config::MechanicalVentilationParams {
+                flow_schedule_col: Some(0),
+                ..Default::default()
+            },
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+        let env = make_env(5.0, 3.0, 21.0, 300.0);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        let err =
+            apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+                .expect_err("a declared schedule column with no payload must fail the step");
+        assert!(
+            err.to_string().contains("schedule payload"),
+            "the error must name the missing schedule payload: {err}"
+        );
+    }
+
+    /// No schedule column declared: the constants govern, the payload (if
+    /// any) is unread — the constants remain the default configuration.
+    #[test]
+    fn unscheduled_ventilation_flow_keeps_the_constants() {
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
+            ventilation_flow_m3_s: 0.1,
+            ventilation: crate::thermal_solver::config::MechanicalVentilationParams {
+                zone_flow_m3_s: HashMap::new(),
+                flow_schedule_col: None,
+                ..Default::default()
+            },
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+        let mut env = make_env(5.0, 3.0, 21.0, 300.0);
+        env.domains.schedule.payload_mut().push(999.0);
+        let mut latent: HashMap<ZoneId, f64> = HashMap::new();
+        let mut couplings: Vec<InfiltrationCoupling> = Vec::new();
+
+        apply_infiltration_and_ventilation(&config, &env, false, &mut latent, &mut couplings)
+            .unwrap();
+
+        assert!(
+            (couplings[0].forced_flow_m3_s - 0.1).abs() < 1e-12,
+            "the indoor zone's forced flow must be the global constant, got {}",
+            couplings[0].forced_flow_m3_s
+        );
+    }
+
     /// Natural ventilation open: zone is warm (26°C), outdoor is cool and dry (15°C, W=0.005).
     ///
     /// Hand-calculated from the EnergyPlus wind-and-stack formula with Cw = 0.55
@@ -915,6 +1035,7 @@ mod tests {
                 sensible_recovery_efficiency: sens_recovery,
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
+                flow_schedule_col: None,
             },
             ..ThermalSolverConfig::new(ZoneId(1))
         };
@@ -987,6 +1108,7 @@ mod tests {
                 sensible_recovery_efficiency: 0.0, // bypass: no recovery
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
+                flow_schedule_col: None,
             },
             ..ThermalSolverConfig::new(ZoneId(1))
         };
@@ -1045,6 +1167,7 @@ mod tests {
                 sensible_recovery_efficiency: eff,
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
+                flow_schedule_col: None,
             },
             ..ThermalSolverConfig::new(ZoneId(1))
         };

@@ -843,6 +843,47 @@ impl PartialEq for ScheduleSource {
 }
 
 impl ScheduleSource {
+    /// The schedule payload's value at a column index: the read every
+    /// per-step column consumer takes. The payload is the environment's
+    /// schedule slot's row values, one per column, so `col_idx` is the
+    /// column's position in the schedule's own column list; `boundary`
+    /// resolves an index past the row's width. A missing slot (an
+    /// environment built without a schedule) or a non-finite value is an
+    /// error naming the surface: a column a step cannot read is corrupt
+    /// input, not the absence of data.
+    ///
+    /// [`ScheduleSource::ColumnRef`]'s arm delegates here, and the
+    /// envelope's scheduled mechanical-ventilation flow reads its
+    /// per-step fan rate through the same function, so every column read
+    /// carries the same bounds and finiteness contract.
+    pub fn schedule_column_value(
+        env: &EnvironmentState,
+        col_idx: usize,
+        boundary: BoundaryPolicy,
+    ) -> Result<f64, HaresError> {
+        let payload = env
+            .domains
+            .schedule
+            .get()
+            .and_then(|d| d.custom_payload.as_ref())
+            .ok_or_else(|| {
+                HaresError::Equipment(
+                    "schedule column read needs the schedule payload, but the environment's \
+                     schedule slot holds none"
+                        .to_string(),
+                )
+            })?;
+        let idx = resolve_index(col_idx, payload.len(), boundary)?;
+        let value = payload[idx];
+        if !value.is_finite() {
+            return Err(HaresError::Equipment(format!(
+                "schedule column {col_idx} produced a non-finite value ({value}); \
+                 schedule data is corrupt"
+            )));
+        }
+        Ok(value)
+    }
+
     /// Resolve the current value from this source.
     ///
     /// Non-finite values (NaN/±inf) are rejected: every consumer of
@@ -883,19 +924,7 @@ impl ScheduleSource {
                 Ok(frac * month_multipliers[month_idx] * *max_value)
             }
             Self::ColumnRef { col_idx, boundary } => {
-                let payload = env
-                    .domains
-                    .schedule
-                    .get()
-                    .and_then(|d| d.custom_payload.as_ref())
-                    .ok_or_else(|| {
-                        HaresError::Equipment(
-                            "schedule domain payload not found in the environment's schedule slot"
-                                .to_string(),
-                        )
-                    })?;
-                let idx = resolve_index(*col_idx, payload.len(), *boundary)?;
-                Ok(payload[idx])
+                Self::schedule_column_value(env, *col_idx, *boundary)
             }
             Self::SolarAware {
                 daytime_fraction,

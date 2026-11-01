@@ -66,6 +66,20 @@ pub fn core_cases() -> Vec<BestestCase> {
             fixture_file: "640.toml",
             timestep_seconds: 3600,
         },
+        BestestCase {
+            id: "650",
+            description: "Night ventilation, annual cooling load",
+            tier: BestestTier::Core,
+            fixture_file: "650.toml",
+            timestep_seconds: 3600,
+        },
+        BestestCase {
+            id: "950",
+            description: "High-mass night ventilation, annual cooling load",
+            tier: BestestTier::Core,
+            fixture_file: "950.toml",
+            timestep_seconds: 3600,
+        },
     ]
 }
 

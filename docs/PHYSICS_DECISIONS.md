@@ -2142,3 +2142,59 @@ carries 8 1/3 W for the step containing its start (energy 30 000 W·s, the
 dwell's exact energy); at 60 s steps a 90 s dwell carries 1000 W for its
 first step and 500 W for its second (the 30 s tail over the step's 60 s),
 the energy 60 s x 1000 W + 60 s x 500 W = 90 000 W·s, again exact.
+
+## The scheduled mechanical-ventilation flow is a runtime schedule input
+
+The thermal solver's forced ventilation flow was a build-time constant
+(`ventilation_flow_m3_s`, or a per-zone entry in
+`MechanicalVentilationParams::zone_flow_m3_s`), so no fixture could
+express an hour-resolved fan - ASHRAE 140's night-ventilation cases
+(650/950) operate a 1703.16 standard m3/h fan (5.2.2.1.5.2.a) ON from
+1800 to 0700 and OFF from 0700 to 1800 (5.2.2.1.5.2.b), and a constant
+stand-in at that rate or a rate between the windows models a different
+case.
+
+The surface: the synthetic fixture's `[ventilation] flow_schedule_m3_s`
+table carries 24 hourly fan rates in m3/s (index h is the hour
+[h:00, h+1:00), the step-start convention the 640 fixture's
+`heating_schedule_c` uses). The schedule build expands the table to
+per-step values - each step reads the value of the hour its start time
+falls in, the same zero-order hold the event-load columns and the
+environment's schedule-row addressing follow - and the thermal solver's
+configuration reads the column's value from the schedule payload every
+step (`MechanicalVentilationParams::flow_schedule_col`). The schedule is
+the flow's most specific input: it replaces the constants on the indoor
+zone; the constants remain the default when no column is declared. The
+fan's mass flow is the volumetric rate times the step's own outdoor
+density at the station pressure, so the altitude correction Table 5-160
+asks of sea-level-fixed programs is inherent and the adjusted rate does
+not apply. Waste heat from the fan is zero (5.2.2.1.5.2.b): the surface
+carries no fan power.
+
+The cases' thermostat gating rides the setpoint profiles the profiles
+already ride: `cooling_schedule_c` joins `heating_schedule_c` in the
+synthetic `[setpoints]` table, and a profile hour may carry the engine's
+disabled setpoint (`HEATING_DISABLED_SETPOINT_C` /
+`COOLING_DISABLED_SETPOINT_C`) to declare that side off for the hour.
+The disabled value is the value the thermostat's own schedule-override
+path installs for a disabled side (`no_space_heating` /
+`no_space_cooling`), so the setpoint plausibility checks (the resolve's
+profile check and the FSM's init band) admit exactly those two values
+outside the [5, 40] degree C band: they are declared off-states, not
+misread temperatures, and every other out-of-band value keeps failing.
+The zone's start-hour initialization treats a disabled hour as the
+side's absence (a zone initialized at -999 degrees C is the off-state
+leaking into the initial condition, not a comfort start).
+
+The alternative rejected: expressing the night ventilation as a constant
+fan with an on-window multiplier, or gating the cooling with a high
+plausible setpoint (the zone temperatures the free-float cases reach
+exceed any sentinel inside the band on some hour of some year). The
+first models a different case; the second expresses the off-state as a
+temperature the case does not declare and silently changes behaviour
+when a case's zone exceeds it.
+
+Source: ANSI/ASHRAE 140-2017 (as amended) Sections 5.2.2.1.5.1.1,
+5.2.2.1.5.2 and Table 5-160; the engine's ventilation combination is
+unchanged (the OCHRE quadrature for an unbalanced fan,
+`docs/thermal-envelope-solver.md`).

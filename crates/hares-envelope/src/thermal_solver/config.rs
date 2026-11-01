@@ -153,6 +153,17 @@ impl Default for InfiltrationMethod {
 #[derive(Debug, Clone, Default)]
 pub struct MechanicalVentilationParams {
     pub zone_flow_m3_s: HashMap<ZoneId, f64>,
+    /// The schedule column whose per-step value is the forced ventilation
+    /// flow for the indoor zone, in m³/s: the column's position in the
+    /// schedule's own column list, read through
+    /// [`hares_types::ScheduleSource::schedule_column_value`] (the wrap
+    /// boundary, the finiteness guard) at every step. The schedule is the
+    /// flow's most specific input — an hour-resolved fan rate replaces the
+    /// constants on the indoor zone; the constants (`zone_flow_m3_s`, and
+    /// the solver's `ventilation_flow_m3_s` for the indoor zone) remain the
+    /// default when no column is declared. `None` (the default) is the
+    /// constant-driven configuration.
+    pub flow_schedule_col: Option<usize>,
     /// Whether the ventilation system is balanced (ERV, HRV, or balanced fan).
     /// Recovery efficiencies are only applied for balanced systems.
     /// Unbalanced fans use quadrature combination with infiltration.
@@ -1568,6 +1579,7 @@ mod tests {
     fn mechanical_ventilation_params_fields_accessible() {
         let params = MechanicalVentilationParams {
             zone_flow_m3_s: HashMap::from([(ZoneId(1), 0.035)]),
+            flow_schedule_col: None,
             balanced: true,
             sensible_recovery_efficiency: 0.75,
             latent_recovery_efficiency: 0.50,

@@ -103,6 +103,14 @@ Location: `tests/bestest/`
 | 600FF | Free-float (no HVAC, high solar) | Peak and minimum zone temperature |
 | 900FF | Free-float (no HVAC, low solar) | Peak and minimum zone temperature |
 | 640 | Heating-only with supplemental resistance | Annual heating energy |
+| 650 | Night ventilation (a 1703.16 m³/h fan, 1800–0700) | Annual heating and cooling loads |
+| 950 | Night ventilation, high mass | Annual heating and cooling loads |
+
+Case 650 runs against its bands. Case 950's annual test is stopped at a
+measured cooling divergence (the `tests/bestest` module comment records
+the numbers); the fan schedule both cases share is the
+`[ventilation] flow_schedule_m3_s` fixture table, expanded to per-step
+schedule values and read by the thermal solver at every step.
 
 ### Reference bands
 

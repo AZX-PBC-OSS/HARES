@@ -346,6 +346,16 @@ pub struct Building {
     /// (`crates/hares-io/src/hpxml/wet_appliance.rs`), `None` when the HPXML
     /// carries none (OpenStudio-HPXML then uses its latest equations).
     pub eri_calculation_version: Option<String>,
+    /// The schedule column carrying the mechanical ventilation fan's
+    /// per-step flow, in m³/s: the column's position in the schedule's own
+    /// column list. The synthetic builder's emission: the fixture's
+    /// `[ventilation] flow_schedule_m3_s` is expanded to per-step values
+    /// there and the column's index lands on the building, and the thermal
+    /// solver's configuration reads the flow from the schedule's payload at
+    /// that index every step. `None` (the HPXML document path's state, and
+    /// the state when a fixture declares no fan schedule) leaves the
+    /// ventilation flow with its equipment-spec constants.
+    pub ventilation_flow_schedule_col: Option<usize>,
     /// Schema warnings the parse raised (for example the HPXML 3.x
     /// deprecated-`EnergyFactor` notice), carried to the run instead of
     /// living only as `tracing` lines.
@@ -1436,6 +1446,10 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
             .path(&[&SOFTWARE_INFO, &EXTENSION, &ERI_CALCULATION, &VERSION])
             .map(|version| version.text.trim().to_string())
             .filter(|text| !text.is_empty()),
+        // The document path has no fan-schedule column: the field is the
+        // synthetic builder's emission, and an HPXML route to a fan
+        // schedule wires its own when that surface lands.
+        ventilation_flow_schedule_col: None,
         details_xml: details.clone(),
         parse_warnings,
     })
