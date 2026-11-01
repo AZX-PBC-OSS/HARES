@@ -135,7 +135,8 @@ fn derive_zone_capacitances_uses_altitude_corrected_density() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Verify that the 900FF concrete layer (0.100 m, k=0.51, ρ=1400, cp=1000)
-/// produces 2 sub-layers in the RC network at dt=3600 s (Fourier C=3).
+/// resolves at 3 sub-layers in the RC network (three per diurnal penetration
+/// depth).
 ///
 /// This was the prior analysis's "dominant cause" claim. Empirical measurement
 /// showed that increasing from 2 to 4 nodes moved min_zone_temp +0.029 °C
@@ -193,10 +194,12 @@ fn heavyweight_concrete_wall_produces_two_rc_sub_layers() {
         assemble_building_rc(&boundaries, 1, &zone_caps, InteriorLwrMethod::StarMesh).unwrap();
     let n_nodes = diag.boundaries[0].n_rc_nodes;
 
-    // Concrete is split into 2 sub-layers: total nodes = 1 (wood) + 1 (ins) + 2 (concrete) = 4
+    // The concrete resolves at 3 sub-layers (three per diurnal penetration
+    // depth: δ_p = √(α·86400/π) ≈ 0.100 m for k=0.51/ρ=1400/cp=1000, and
+    // ceil(3·0.100/0.100) = 3): total nodes = 1 (wood) + 1 (ins) + 3 (concrete) = 5
     assert_eq!(
-        n_nodes, 4,
-        "heavyweight wall produces {n_nodes} RC nodes (expected 4 = 1+1+2)"
+        n_nodes, 5,
+        "heavyweight wall produces {n_nodes} RC nodes (expected 5 = 1+1+3)"
     );
 
     // The concrete thermal mass greatly exceeds zone air, but this creates no

@@ -2200,3 +2200,60 @@ Source: ANSI/ASHRAE 140-2017 (as amended) Sections 5.2.2.1.5.1.1,
 5.2.2.1.5.2 and Table 5-160; the engine's ventilation combination is
 unchanged (the OCHRE quadrature for an unbalanced fan,
 `docs/thermal-envelope-solver.md`).
+
+## The envelope's RC split resolves every layer at three sub-layers per diurnal penetration depth
+
+The envelope discretization's split rule (`split_layer_count`,
+`crates/hares-envelope/src/boundary_rc.rs`) turns each material layer into
+n sub-layer RC nodes, each holding its capacitance at the sub-layer's
+center with half its resistance wired to each side (the node-centered
+finite-volume scheme; steady-state R and total capacitance are exact for
+any n). The rule formerly qualified layers on material class (density
+above 100 kg/m³ and conductivity above 0.1 W/(m·K)) and resolved at two
+sub-layers per penetration depth (sub-layer thickness δ_p/2, δ_p =
+√(αP/π) the 1/e diurnal penetration depth). Both halves under-resolved
+thick insulation: the BESTEST 900 floor slab's 1.007 m insulation layer
+(ρ=12, k=0.04) never split at all - one lumped node for a layer three
+penetration depths deep - and the ISO 13786 transfer-matrix witness
+(`crates/hares-envelope/tests/iso13786_periodic_response.rs`) measured the
+consequence: the slab's transmitted diurnal wave halved (decrement factor
+0.134 against the analytic 0.261) with the phase 3.6 h early and storage
+at −2 percent. The lumped chain's dispersion error is the resolution's
+governing budget: the discrete propagation constant errs by (γΔ)²/24
+(first order of the arccosh expansion of 1 + (γΔ)²/2, γ = (1+i)/δ_p the
+exact diurnal propagation constant, Δ the sub-layer thickness), so a
+layer N penetration depths deep carried by m sub-layers per depth
+transmits its wave with amplitude and phase error ≈ N/(12m²). Two per
+depth leaves 6 percent over three depths (measured −5.8 percent on the
+witness with the gates removed); three per depth bounds it near 3
+percent (measured −3.5 percent on the decrement factor, −0.10 h on the
+lag, −2.0 percent on the areal heat capacity).
+
+The fix: the diffusion-length criterion applies to every layer - n =
+ceil(3·thickness/δ_p), no material-class gate (a layer thin relative to
+δ_p/3 already returns one node, so thin insulation, sheathings and air
+gaps are untouched; the walls' own counts only rise where the layer is
+genuinely thick against its own diffusion length). The ISO witness's
+floor assertions moved from the drift lock (0.1343/8.73 h) to the
+analytic values in the same 5 percent tolerance class the 900 wall's
+pins use, and the 900 wall's own residuals improved (its concrete
+resolves 2 → 3 nodes: decrement −3.9 to −1.9 percent).
+
+Alternative rejected: keeping two sub-layers per depth and lifting the
+MIN_CAPACITANCE_J_K floor instead. Four sub-layers per depth drives the
+R25 slab's sub-node capacitance to 781 J/K, under the 1000 J/K floor,
+and the floor then lifts every sub-node's capacitance: the measured
+transmitted wave moved BACKWARD (0.192, lag +1.6 h) - inflated storage
+attenuates the wave. Raising the floor's threshold to admit finer
+discretizations would un-guard the precomputed path's zero-capacitance
+merges for no accuracy gain: three per depth keeps every witness
+sub-node above the floor and inside the tolerances.
+
+Reference: ISO 13786:2007 §6.2 (the transfer-matrix method the witness
+implements); Incropera & DeWitt §5.8 (the penetration depth); the
+measured residuals in the witness's tolerance comments and the BESTEST
+drift-lock re-measurement of 2026-11-01 (the resolved floor buffers the
+zone: 600 heating −2.1 percent, cooling −1.6 percent, 640 heating energy
+−3.2 percent, 600FF peak −1.3 K, 900FF min +0.06 K; the committed golden
+fixtures are bitwise unchanged - their homes route the envelope LUT and
+the slab F-factor path, neither of which the split rule touches).

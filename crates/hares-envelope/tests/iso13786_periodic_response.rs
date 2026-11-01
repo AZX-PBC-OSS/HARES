@@ -20,12 +20,7 @@
 //! frequency. The RC network is HARES's discretization of the same
 //! diffusion problem, so the two agree to the discretization's accuracy;
 //! the pinned tolerances are the discretization's measured residuals plus
-//! the ZOH drive's harmonic content, not free passes. The 900 floor slab's
-//! transmitted wave is the exception its test documents: the assembly's
-//! resolution rule leaves a three-penetration-depth insulation layer
-//! under-resolved, the transmitted amplitude halves against the analytic
-//! value, and the measured pair is drift-locked with the divergence named
-//! as a finding against the split rule.
+//! the ZOH drive's harmonic content, not free passes.
 //!
 //! Constructions: the committed BESTEST fixture walls (Case 600's
 //! wood-frame wall, Case 900's concrete wall and its concrete floor slab),
@@ -588,18 +583,16 @@ fn analytic_characteristics_match_hand_computed_u_values() {
 ///   decrement to 0.2 percent, the lag to 0.1 h and the areal capacity to
 ///   10 percent of the analytic value;
 /// - the 900 wall (the concrete layer resolved at the assembly's
-///   penetration-depth rule) holds all three to 5 percent;
-/// - the 900 floor slab's storage holds to 5 percent, but its transmitted
-///   wave does NOT: the 1.007 m insulation layer is three diurnal
-///   penetration depths deep and the assembly's split rule (at least two
-///   sub-layers per penetration depth) leaves the RC chain at 2.3 nodes
-///   per depth, where the transmitted amplitude halves (0.134 vs 0.261)
-///   and the phase advances 3.6 h. That residual is the assembly's
-///   resolution limit on this pathological layer, not agreement: the
-///   floor's decrement and lag are pinned at their measured values with
-///   the analytic value printed, the same drift-lock pattern the BESTEST
-///   band suite uses, and the divergence is a finding against the split
-///   rule, not a band to widen.
+///   penetration-depth rule, three nodes) holds all three to 5 percent;
+/// - the 900 floor slab (its 1.007 m insulation layer resolved at ten
+///   sub-layer nodes, three per diurnal penetration depth) holds all
+///   three to the same 5 percent class. The rule's resolution is the
+///   lumped chain's dispersion budget (see `split_layer_count`): three
+///   sub-layers per penetration depth bounds the transmitted wave's
+///   amplitude error near N/108 (N = the depth in penetration lengths,
+///   3.05 here), measured at 3.5 percent on the decrement factor; two per
+///   depth left 6 percent and the wave's amplitude halved entirely while
+///   the layer went unsplit under the old material-class gates.
 #[test]
 fn engine_periodic_response_matches_iso_13786() {
     for (name, layers) in [
@@ -669,32 +662,26 @@ fn engine_periodic_response_matches_iso_13786() {
                 );
             }
             "900 floor" => {
-                // The storage agrees; the transmitted wave's amplitude and
-                // phase do not (the assembly's resolution on the
-                // three-penetration-depth insulation layer, the test doc's
-                // finding). The measured values are drift-locked: a change
-                // in the split rule or the wiring moves them, and the move
-                // must be deliberate.
+                // The 1.007 m insulation layer resolves at ten sub-layer
+                // nodes (three per diurnal penetration depth); the same
+                // 5 percent class as the 900 wall applies to all three
+                // quantities. The residuals are the lumped chain's
+                // dispersion over three penetration depths, documented in
+                // the tolerance comment above.
+                assert!(
+                    (engine_f / a.decrement_factor - 1.0).abs() <= 0.05,
+                    "{name}: decrement factor {engine_f:.4} vs analytic {:.4}",
+                    a.decrement_factor
+                );
+                assert!(
+                    (engine_lag - a.lag_hours).abs() <= 0.2,
+                    "{name}: phase lag {engine_lag:.3} h vs analytic {:.3} h",
+                    a.lag_hours
+                );
                 assert!(
                     (engine_kappa / a.kappa_j_m2_k - 1.0).abs() <= 0.05,
                     "{name}: areal heat capacity {engine_kappa:.0} vs analytic {:.0}",
                     a.kappa_j_m2_k
-                );
-                let locked_f = 0.1343;
-                assert!(
-                    (engine_f - locked_f).abs() / locked_f <= 0.01,
-                    "{name}: the transmitted wave's attenuation sits at the \
-                     measured {locked_f} (drift lock, the resolution limit the \
-                     module doc documents), got {engine_f:.4} vs analytic {:.4}",
-                    a.decrement_factor
-                );
-                let locked_lag = 8.73;
-                assert!(
-                    (engine_lag - locked_lag).abs() <= 0.05,
-                    "{name}: the transmitted wave's phase sits at the measured \
-                     {locked_lag} h (drift lock), got {engine_lag:.3} h vs \
-                     analytic {:.3} h",
-                    a.lag_hours
                 );
             }
             _ => panic!("unknown construction {name}"),

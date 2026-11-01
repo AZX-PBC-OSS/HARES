@@ -1245,10 +1245,12 @@ pub(crate) fn build_synthetic_building(
         // (ASHRAE HoF 2021 Ch. 33, Table 1) giving thermal capacitance
         // C = ρ·c_p·d·A ≈ 317 kJ/(K·m²)·A.
         //
-        // A fixed thickness avoids the diurnal-criterion sub-layer
-        // explosion that d = R·k (with real concrete k = 1.4) would
-        // produce: 2.8 m / 0.068 m ≈ 42 sub-layers per boundary for a
-        // typical R = 2.0 wall.  The per-layer capacitance is identical
+        // A fixed thickness keeps the diurnal-criterion sub-layer count
+        // bounded: the split rule resolves every layer at three sub-layers
+        // per diurnal penetration depth, so this layer runs at 12 nodes per
+        // boundary at R = 2.0 (α = k/(ρ·c_p) with the derived k = 0.075
+        // gives δ_p ≈ 0.038 m), where the real-concrete thickness d = R·k
+        // (k = 1.4) would run at 51.  The per-layer capacitance is identical
         // regardless of k because only d, ρ, and c_p control C.
         const DEFAULT_LAYER_THICKNESS_M: f64 = 0.15;
         let safe_r_value = r_value.max(1e-6);
