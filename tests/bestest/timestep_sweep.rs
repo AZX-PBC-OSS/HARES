@@ -149,7 +149,7 @@ fn assert_converges(metric: &str, values: [f64; 4]) {
     assert!(
         strictly_monotone || drift_ok,
         "{metric} must converge over the timestep sweep (strictly monotone, \
-         or the 3600 s value within 5 percent of the 60 s limit): 3600 s {}, \
+         or every refinement within 5 percent of the 60 s limit): 3600 s {}, \
          900 s {}, 300 s {}, 60 s {}, drift {:.6}",
         values[0],
         values[1],
