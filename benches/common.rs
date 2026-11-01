@@ -137,6 +137,7 @@ pub fn build_dwelling_config(
         defaults: DefaultsSource::directory(defaults_path),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: fixture_start::fixture_start(),

@@ -50,6 +50,7 @@ fn config(bldg_id: i64, master_seed: u64, scenario_seed: Option<u64>) -> Dwellin
         defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed,
                 schedule_diversity: Default::default(),
                 start_time,

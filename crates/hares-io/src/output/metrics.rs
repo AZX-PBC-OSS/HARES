@@ -2173,6 +2173,7 @@ mod tests {
 
     fn test_config(deadband: Option<f64>) -> SimulationConfig {
         SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: FixedOffset::east_opt(0)
@@ -2207,6 +2208,7 @@ mod tests {
             HOURS_PER_YEAR as i64
         };
         SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: FixedOffset::east_opt(0)

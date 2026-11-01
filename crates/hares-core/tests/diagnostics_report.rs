@@ -38,6 +38,7 @@ fn cz4a_sim_config() -> SimulationConfig {
         .single()
         .expect("start");
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: start,

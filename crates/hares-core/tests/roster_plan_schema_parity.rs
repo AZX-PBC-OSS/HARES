@@ -22,6 +22,7 @@ fn project_root() -> PathBuf {
 
 fn sim_config(csv_path: PathBuf) -> SimulationConfig {
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: denver_offset::denver_offset()

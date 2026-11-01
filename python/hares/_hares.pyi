@@ -2516,6 +2516,7 @@ class SimulationConfig:
         diagnostics: bool = ...,
         metrics: bool = ...,
         output_chunk_size: int = ...,
+        max_memory_rows: int | None = ...,
         setpoint_deadband_c: float | None = ...,
         master_seed: int = ...,
         scenario_seed: int | None = ...,
@@ -2557,6 +2558,10 @@ class SimulationConfig:
     def output_chunk_size(self) -> int: ...
     @output_chunk_size.setter
     def output_chunk_size(self, value: int) -> None: ...
+    @property
+    def max_memory_rows(self) -> int | None: ...
+    @max_memory_rows.setter
+    def max_memory_rows(self, value: int | None) -> None: ...
     @property
     def setpoint_deadband_c(self) -> float | None: ...
     @setpoint_deadband_c.setter

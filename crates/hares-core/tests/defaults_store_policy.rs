@@ -29,6 +29,7 @@ fn config_with_defaults(defaults: PathBuf) -> DwellingConfig {
         defaults: DefaultsSource::directory(defaults),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 start_time: DateTime::<FixedOffset>::parse_from_rfc3339(
                     "2023-01-01T00:00:00-07:00",
                 )
@@ -166,6 +167,7 @@ fn dwelling_config(defaults: PathBuf) -> DwellingConfig {
                 diagnostics: false,
                 metrics: false,
                 output_chunk_size: 1024,
+                max_memory_rows: None,
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 scenario_seed: None,

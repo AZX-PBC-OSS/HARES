@@ -44,6 +44,7 @@ fn sim_config(
     verbosity: u8,
 ) -> hares_core::SimulationConfig {
     hares_core::SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::west_opt(10 * 3600)

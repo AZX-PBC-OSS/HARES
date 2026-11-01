@@ -50,6 +50,7 @@ fn sim_config(
     civil_timezone: Option<&str>,
 ) -> SimulationConfig {
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time,

@@ -43,6 +43,7 @@ fn cz5a_config(master_seed: u64, bldg_id: i64) -> DwellingConfig {
                 diagnostics: false,
                 metrics: false,
                 output_chunk_size: 1024,
+                max_memory_rows: None,
                 setpoint_deadband_c: None,
                 master_seed,
                 civil_timezone: None,

@@ -2120,6 +2120,7 @@ mod tests {
         let env = env_with_zone_temps(&[21.0]);
 
         let sim_config = hares_io::SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: chrono::FixedOffset::east_opt(0)
@@ -2192,6 +2193,7 @@ mod tests {
         let env = env_with_zone_temps(&[21.0]);
 
         let sim_config = hares_io::SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: chrono::FixedOffset::east_opt(0)

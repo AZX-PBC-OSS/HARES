@@ -39,6 +39,7 @@ fn ach50_infiltration_without_floors_above_grade_is_an_error() {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time,

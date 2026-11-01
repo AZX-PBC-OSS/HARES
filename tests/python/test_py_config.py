@@ -221,6 +221,66 @@ class TestSimulationConfig:
         cfg.max_consecutive_step_failures = 5
         assert cfg.max_consecutive_step_failures == 5
 
+    def test_max_memory_rows_cap_rejects_an_over_cap_memory_report(self):
+        """The memory reports' soft row cap: a Memory report whose run
+        projects more rows than `max_memory_rows` fails validation naming
+        the report, the projection and the remediation; under the cap
+        validates; the default (`None`) accepts any row count; a file
+        destination retains nothing and is never capped. The setter runs
+        the same check, so a config object is valid after every
+        successful mutation."""
+        reports = [ReportSpec("frame", Selection.verbosity(2), Destination.memory())]
+
+        # The constructor runs the same validation: the over-cap config
+        # is refused at construction, naming the report, the projection
+        # and the remediation.
+        with pytest.raises(ValueError) as exc:
+            SimulationConfig(
+                start_time=START, duration=3600, time_res=60, max_memory_rows=50, reports=reports
+            )
+        message = str(exc.value)
+        assert "frame" in message
+        assert "60" in message, "the error states the projected rows"
+        assert "50" in message, "the error states the cap"
+        assert "max_memory_rows" in message, "the error names the raising knob"
+
+        # The setter runs it too: a config object is valid after every
+        # successful mutation.
+        over = SimulationConfig(
+            start_time=START, duration=3600, time_res=60, max_memory_rows=100, reports=reports
+        )
+        with pytest.raises(ValueError, match="max_memory_rows"):
+            over.max_memory_rows = 50
+
+        under = SimulationConfig(
+            start_time=START, duration=3600, time_res=60, max_memory_rows=60, reports=reports
+        )
+        under.validate()
+
+        uncapped = SimulationConfig(
+            start_time=START, duration=864000, time_res=60, reports=reports
+        )
+        assert uncapped.max_memory_rows is None
+        uncapped.validate()
+
+        file_dest = SimulationConfig(
+            start_time=START,
+            duration=3600,
+            time_res=60,
+            max_memory_rows=100,
+            reports=[
+                ReportSpec(
+                    "frame", Selection.verbosity(2), Destination.parquet("/tmp/frame.parquet")
+                )
+            ],
+        )
+        file_dest.validate()
+
+        cfg = SimulationConfig(start_time=START, duration=3600, max_memory_rows=500)
+        assert cfg.max_memory_rows == 500
+        cfg.max_memory_rows = None
+        assert cfg.max_memory_rows is None
+
     def test_duration_above_chrono_bound_raises_value_error(self):
         # i64::MAX / 1_000 ~ 9.22e15; 10**18 exceeds it.
         with pytest.raises(ValueError, match="too large for chrono Duration"):
@@ -287,6 +347,7 @@ class TestSimulationConfig:
             reports=[ReportSpec("frame", Selection.verbosity(5), Destination.memory())],
             diagnostics=True,
             output_chunk_size=5000,
+            max_memory_rows=12345,
             setpoint_deadband_c=1.5,
             master_seed=42,
             scenario_seed=11,

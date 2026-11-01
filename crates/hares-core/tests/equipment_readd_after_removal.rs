@@ -51,6 +51,7 @@ fn build_dwelling() -> Dwelling {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: chrono::FixedOffset::west_opt(10 * 3600)

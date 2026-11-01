@@ -86,6 +86,7 @@ fn dwelling_config(run: &Run) -> DwellingConfig {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: DateTime::<FixedOffset>::parse_from_rfc3339(run.start)
@@ -645,6 +646,7 @@ fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time,

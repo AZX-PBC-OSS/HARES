@@ -33,6 +33,7 @@ fn config() -> DwellingConfig {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: denver_offset::denver_offset()

@@ -35,6 +35,7 @@ fn sim_config(
     verbosity: u8,
 ) -> SimulationConfig {
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: start,

@@ -261,6 +261,42 @@ pub enum SimError {
     Skipped { bldg_id: i64, message: String },
 }
 
+/// The process-global pool cache, keyed by thread count: a pool's
+/// threads are built once per distinct count and reused across every
+/// later call that asks for the same count. The fleet's `simulate`
+/// rebuilt a pool per call, paying the worker threads' spawn on every
+/// batch run; the cache pays it once. The pools live for the process's
+/// life (a handful of distinct counts at most), their threads parked
+/// while idle.
+static FLEET_POOLS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<rayon::ThreadPool>>>,
+> = std::sync::OnceLock::new();
+
+/// Returns the process's pool for `n_threads` worker threads, built on
+/// the first request for the count and shared after. The pool is
+/// shared read-only: `install` schedules work on it from any thread.
+///
+/// # Errors
+///
+/// [`FleetError::ThreadPoolBuild`] when the pool cannot be built.
+fn cached_fleet_pool(n_threads: usize) -> Result<std::sync::Arc<rayon::ThreadPool>> {
+    let cache = FLEET_POOLS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut pools = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(pool) = pools.get(&n_threads) {
+        return Ok(std::sync::Arc::clone(pool));
+    }
+    let pool = std::sync::Arc::new(
+        ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .map_err(|err| FleetError::ThreadPoolBuild(err.to_string()))?,
+    );
+    pools.insert(n_threads, std::sync::Arc::clone(&pool));
+    Ok(pool)
+}
+
 /// Fleet runner for parallel dwelling simulation.
 #[derive(Clone)]
 pub struct Fleet {
@@ -718,6 +754,39 @@ impl Fleet {
     /// alignment, and [`FleetError::HeterogeneousTimeGrid`] when a home
     /// breaks the declared alignment's time grid, the last two raised in
     /// the pre-pass before any home runs.
+    /// Simulates the fleet through the streaming ordered fold: the homes
+    /// run in consecutive chunks of the fleet's entry order on the fleet's
+    /// pool, and each finished chunk's homes fold into the running
+    /// [`FleetResult`] one at a time in entry order before the next chunk
+    /// starts. The global fold order is the entry order for every chunk
+    /// size and thread count, and at most one chunk's home results are
+    /// alive at once.
+    ///
+    /// The fleet appends one report to every home, named `fleet`: the
+    /// report's selection restricted to the home's catalogue, at the
+    /// `Timestep` frequency, to a callback destination. The callback feeds
+    /// each batch into a period reducer the fleet owns and drops the
+    /// batch, so a home's result in the fold is its reduced period table,
+    /// never its frame.
+    ///
+    /// When `n_threads > 0`, the run installs the cached pool built for
+    /// that thread count (the pool's threads are process-global and reused
+    /// across calls; `cached_fleet_pool` builds or returns it). When
+    /// `n_threads == 0`, the global Rayon pool is used.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::ThreadPoolBuild`] when the local pool cannot be
+    /// built, [`FleetError::UnmatchedSelection`] when a selection name
+    /// matches no home's catalogue, [`FleetError::InvalidAggregationWeight`]
+    /// for a weight that is not finite and non-negative,
+    /// [`FleetError::NoCoveredWeight`] when the fleet's ok weight is
+    /// zero (every home failed, degraded, or carried no positive
+    /// weight), [`FleetError::AlignmentRequired`] when the
+    /// homes span more than one UTC offset and the fleet declares no
+    /// alignment, and [`FleetError::HeterogeneousTimeGrid`] when a home
+    /// breaks the declared alignment's time grid, the last two raised in
+    /// the pre-pass before any home runs.
     pub fn simulate(
         &self,
         report: &FleetReport,
@@ -727,10 +796,7 @@ impl Fleet {
         if n_threads == 0 {
             return self.simulate_folded(report, chunk_size);
         }
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(n_threads)
-            .build()
-            .map_err(|err| FleetError::ThreadPoolBuild(err.to_string()))?;
+        let pool = cached_fleet_pool(n_threads)?;
         pool.install(|| self.simulate_folded(report, chunk_size))
     }
 
@@ -2262,6 +2328,7 @@ fn resstock_sim_config(
     master_seed: u64,
 ) -> SimulationConfig {
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time,
@@ -2669,6 +2736,7 @@ mod tests {
 
     fn simulation_config(csv_path: PathBuf) -> SimulationConfig {
         SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: fixture_start::fixture_start(),
@@ -5055,6 +5123,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: FixedOffset::east_opt(-8 * 3600)
@@ -5280,6 +5349,64 @@ mod tests {
         }
     }
 
+    /// The pool cache's identity contract: the same thread count returns
+    /// the same process-wide pool, a different count its own. A deleted
+    /// cache fails the pointer equality; a cache keyed by anything else
+    /// fails the second half.
+    #[test]
+    fn fleet_pools_are_cached_per_thread_count() {
+        let pool_a = cached_fleet_pool(2).expect("the two-thread pool builds");
+        let pool_b = cached_fleet_pool(2).expect("the cached two-thread pool returns");
+        assert!(
+            std::sync::Arc::ptr_eq(&pool_a, &pool_b),
+            "the same thread count must return the same pool"
+        );
+        let pool_c = cached_fleet_pool(3).expect("the three-thread pool builds");
+        assert!(
+            !std::sync::Arc::ptr_eq(&pool_a, &pool_c),
+            "a different thread count must build its own pool"
+        );
+    }
+
+    /// The cache is the simulate path's pool source: the first call with
+    /// a fresh thread count pays the worker threads' spawn allocations
+    /// on the calling thread (the counting allocator's counter), the
+    /// second call's cache hit pays none, and the runs themselves are
+    /// the same work on the same fleet. At the parent (a pool built per
+    /// call) the two windows were equal and this pin failed; the cache
+    /// is what makes the second window smaller.
+    #[test]
+    fn the_second_simulate_pays_no_pool_spawn() {
+        let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let fleet = golden_fleet();
+        let report = minutes_15();
+
+        let before = hares_types::alloc_count::thread_allocations()
+            .expect("the fleet test binary installs the counting allocator");
+        fleet
+            .simulate(&report, 4, chunk(64))
+            .expect("the first run executes");
+        let after_first = hares_types::alloc_count::thread_allocations()
+            .expect("the counting allocator is installed");
+
+        fleet
+            .simulate(&report, 4, chunk(64))
+            .expect("the second run executes");
+        let after_second = hares_types::alloc_count::thread_allocations()
+            .expect("the counting allocator is installed");
+
+        let first = after_first - before;
+        let second = after_second - after_first;
+        assert!(
+            second < first,
+            "the second simulate's calling-thread allocations ({second}) must be \
+             strictly below the first's ({first}): the first pays the pool's \
+             worker spawns, the second must hit the cache"
+        );
+    }
+
     /// The aggregate's columns are the first folded home's own report
     /// schema: every column after Time has the name and the unit metadata
     /// of the variable of that name in the first home's Timestep memory
@@ -5370,6 +5497,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
@@ -5665,6 +5793,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     reports: vec![hares_io::ReportSpec {
@@ -5803,6 +5932,7 @@ mod tests {
                 defaults: DefaultsSource::directory(repo_defaults_path()),
                 settings: DwellingSettings::new(
                     SimulationConfig {
+                        max_memory_rows: None,
                         scenario_seed: None,
                         schedule_diversity: Default::default(),
                         start_time: start,
@@ -6057,6 +6187,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
@@ -6115,6 +6246,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
@@ -6425,6 +6557,7 @@ mod tests {
                 defaults: DefaultsSource::directory(repo_defaults_path()),
                 settings: DwellingSettings::new(
                     SimulationConfig {
+                        max_memory_rows: None,
                         scenario_seed: None,
                         schedule_diversity: Default::default(),
                         start_time: fixture_start::fixture_start(),
@@ -6657,6 +6790,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
@@ -6881,6 +7015,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: fixture_start::fixture_start(),
@@ -6973,6 +7108,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: FixedOffset::east_opt(0)
@@ -7459,6 +7595,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: FixedOffset::west_opt(5 * 3600)
@@ -7656,6 +7793,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: start,
@@ -7818,6 +7956,7 @@ mod tests {
             defaults: DefaultsSource::directory(repo_defaults_path()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: chrono::DateTime::parse_from_rfc3339("2018-01-01T00:00:00-08:00")

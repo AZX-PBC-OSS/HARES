@@ -3423,6 +3423,7 @@ impl Dwelling {
             weather_path,
         } = inputs;
         let sim_config = SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time,
@@ -11130,6 +11131,7 @@ destination = "memory"
             defaults: DefaultsSource::directory(shipped_defaults_dir()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: DateTime::parse_from_rfc3339("2023-06-01T00:00:00-07:00")
@@ -23593,6 +23595,7 @@ latent_gain_fraction = 0.08
             ),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: DateTime::parse_from_rfc3339(start).expect("start time"),

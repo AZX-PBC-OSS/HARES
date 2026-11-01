@@ -34,6 +34,7 @@ fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
         defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: start,

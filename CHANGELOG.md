@@ -13,6 +13,19 @@ Every callable, class and keyword added to, changed in or removed from
 `hares._hares` since `ebdb1a17`, each removed or renamed one with its
 replacement.
 
+- Added: the `max_memory_rows` keyword on `SimulationConfig` (default
+  `None`): the memory reports' soft row cap. A `Memory`-destination
+  report whose run projects more rows than the cap fails validation
+  naming the report, the projection and the remediation (stream the
+  report to a `Parquet` or `Csv` destination, attach a callback, or
+  raise the cap); the getter and setter carry the same check. Unset,
+  no run's behavior changes.
+
+- Added: the `Fleet.simulate` path's Rayon pool is cached per thread
+  count: the first call with a given `n_threads` builds the pool and
+  every later call with the same count reuses it, instead of a fresh
+  pool per call. `n_threads=0` keeps the global Rayon pool.
+
 - Added: the `der_1547` keyword on the `PV`, `Battery` and `EV`
   constructors: the inverter's IEEE 1547-2018 response surface, a dict
   with `category` ("I", "II" or "III") selecting the standard's default

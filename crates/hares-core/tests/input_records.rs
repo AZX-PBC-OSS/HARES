@@ -38,6 +38,7 @@ fn config_for(
         defaults: hares_io::DefaultsSource::directory(defaults),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")

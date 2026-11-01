@@ -21,6 +21,7 @@ fn sim_config(
     step_s: i64,
 ) -> SimulationConfig {
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time,

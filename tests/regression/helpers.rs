@@ -81,6 +81,7 @@ pub fn build_beopt_dwelling_config(
         defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: fixture_start(),
@@ -140,6 +141,7 @@ pub fn build_resstock_dwelling_config(
         defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: fixture_start(),
@@ -292,6 +294,7 @@ pub fn build_dwelling_config(
         defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: fixture_start(),

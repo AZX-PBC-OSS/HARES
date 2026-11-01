@@ -623,6 +623,7 @@ mod tests {
     #[test]
     fn simulation_keys_match_the_struct() {
         let cfg = hares_io::SimulationConfig {
+            max_memory_rows: None,
             start_time: chrono::DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
                 .expect("parse start"),
             duration: chrono::Duration::seconds(86400),

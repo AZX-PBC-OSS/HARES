@@ -1392,6 +1392,7 @@ mod tests {
             false,
             hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
+            None,
             0,
             None,
             "on",
