@@ -13,8 +13,8 @@ use hares_types::{
 
 use crate::observer::{
     CustomSolverCapture, CustomSolverObservation, EnvironmentCapture, EquipmentContribution,
-    EquipmentObservation, EquipmentPhaseCapture, FluidContributionCapture, FluidPortCapture,
-    PortsCapture, SolverCapture, ZoneUpdateCapture,
+    EquipmentObservation, FluidContributionCapture, FluidPortCapture, PortsCapture, SolverCapture,
+    ZoneUpdateCapture,
 };
 
 /// Captures weather + zone state from the environment.
@@ -26,46 +26,95 @@ pub(crate) fn capture_environment(
     civil_day_of_year: u32,
     utc_day_of_year: u32,
 ) -> EnvironmentCapture {
-    use hares_physics::units::temperature_c_to_f;
-    let clamped_mains_f = temperature_c_to_f(env.weather.mains_temp_c);
-    EnvironmentCapture {
-        outdoor_temp_c: env.weather.outdoor_temp_c,
-        ghi_w_m2: env.weather.ghi_w_m2,
-        dni_w_m2: env.weather.dni_w_m2,
-        dhi_w_m2: env.weather.dhi_w_m2,
-        solar_altitude_deg: env.weather.solar_altitude_deg,
-        solar_azimuth_deg: env.weather.solar_azimuth_deg,
-        wind_speed_m_s: env.weather.wind_speed_m_s,
-        mains_temp_c: env.weather.mains_temp_c,
-        raw_water_mains_temp_f: raw_mains_temp_f,
-        clamped_water_mains_temp_f: clamped_mains_f,
-        ground_temp_c: env.weather.ground_temp_c,
-        sky_temp_c: env.weather.sky_temp_c,
-        zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
-        zone_humidity_ratios: env.zones.iter().map(|z| (z.id, z.humidity_ratio)).collect(),
-        solar_irradiance: env.weather.solar_irradiance.clone(),
+    let mut capture = EnvironmentCapture {
+        outdoor_temp_c: 0.0,
+        ghi_w_m2: 0.0,
+        dni_w_m2: 0.0,
+        dhi_w_m2: 0.0,
+        solar_altitude_deg: 0.0,
+        solar_azimuth_deg: 0.0,
+        wind_speed_m_s: 0.0,
+        mains_temp_c: 0.0,
+        raw_water_mains_temp_f: 0.0,
+        clamped_water_mains_temp_f: 0.0,
+        ground_temp_c: 0.0,
+        sky_temp_c: 0.0,
+        zone_temps_c: Vec::new(),
+        zone_humidity_ratios: Vec::new(),
+        solar_irradiance: Vec::new(),
+        wf_allows_leap_years: false,
+        pv_generation_w: 0.0,
+        pv_actual_w: 0.0,
+        net_grid_w: 0.0,
+        base_load_w: 0.0,
+        equipment_core_size: 0,
+        equipment_telemetry_size: 0,
+        raw_day_of_year: 0,
+        civil_day_of_year: 0,
+        utc_day_of_year: 0,
+    };
+    capture_environment_into(
+        &mut capture,
+        env,
         wf_allows_leap_years,
-        pv_generation_w: env.electrical.pv_generation_w,
-        pv_actual_w: env.electrical.actual_pv_w,
-        net_grid_w: env.electrical.net_grid_w,
-        base_load_w: env.electrical.base_load_w,
-        equipment_core_size: env.equipment_core.len(),
-        equipment_telemetry_size: env.equipment_telemetry.len(),
+        raw_mains_temp_f,
         raw_day_of_year,
         civil_day_of_year,
         utc_day_of_year,
-    }
+    );
+    capture
 }
 
-/// Builds an `EquipmentPhaseCapture` from pre-built per-equipment observations.
-pub(crate) fn capture_equipment_phase(
-    observations: Vec<EquipmentObservation>,
-    ports: &PortSlots,
-) -> EquipmentPhaseCapture {
-    EquipmentPhaseCapture {
-        equipment: observations,
-        ports: capture_ports(ports),
-    }
+/// The same capture, written into a recycled capture: the three Vecs
+/// (the zone temperatures, the humidity ratios, the solar irradiance)
+/// are cleared and refilled through `Vec::clone_from`'s capacity
+/// reuse, so the steady state overwrites them in place and allocates
+/// nothing. Every field is written: a stale value cannot survive the
+/// fill.
+pub(crate) fn capture_environment_into(
+    capture: &mut EnvironmentCapture,
+    env: &EnvironmentState,
+    wf_allows_leap_years: bool,
+    raw_mains_temp_f: f64,
+    raw_day_of_year: u32,
+    civil_day_of_year: u32,
+    utc_day_of_year: u32,
+) {
+    use hares_physics::units::temperature_c_to_f;
+    let clamped_mains_f = temperature_c_to_f(env.weather.mains_temp_c);
+    capture.outdoor_temp_c = env.weather.outdoor_temp_c;
+    capture.ghi_w_m2 = env.weather.ghi_w_m2;
+    capture.dni_w_m2 = env.weather.dni_w_m2;
+    capture.dhi_w_m2 = env.weather.dhi_w_m2;
+    capture.solar_altitude_deg = env.weather.solar_altitude_deg;
+    capture.solar_azimuth_deg = env.weather.solar_azimuth_deg;
+    capture.wind_speed_m_s = env.weather.wind_speed_m_s;
+    capture.mains_temp_c = env.weather.mains_temp_c;
+    capture.raw_water_mains_temp_f = raw_mains_temp_f;
+    capture.clamped_water_mains_temp_f = clamped_mains_f;
+    capture.ground_temp_c = env.weather.ground_temp_c;
+    capture.sky_temp_c = env.weather.sky_temp_c;
+    capture.zone_temps_c.clear();
+    capture
+        .zone_temps_c
+        .extend(env.zones.iter().map(|z| (z.id, z.temperature_c)));
+    capture.zone_humidity_ratios.clear();
+    capture
+        .zone_humidity_ratios
+        .extend(env.zones.iter().map(|z| (z.id, z.humidity_ratio)));
+    capture
+        .solar_irradiance
+        .clone_from(&env.weather.solar_irradiance);
+    capture.wf_allows_leap_years = wf_allows_leap_years;
+    capture.pv_generation_w = env.electrical.pv_generation_w;
+    capture.pv_actual_w = env.electrical.actual_pv_w;
+    capture.net_grid_w = env.electrical.net_grid_w;
+    capture.base_load_w = env.electrical.base_load_w;
+    capture.equipment_core_size = env.equipment_core.len();
+    capture.equipment_telemetry_size = env.equipment_telemetry.len();
+    capture.raw_day_of_year = raw_day_of_year;
+    capture.civil_day_of_year = civil_day_of_year;
+    capture.utc_day_of_year = utc_day_of_year;
 }
 
 /// Captures a single equipment's observation with contribution and pre-step port state.
@@ -79,7 +128,7 @@ pub(crate) fn capture_single_equipment(
     pre_step_ports: PortsCapture,
 ) -> EquipmentObservation {
     let mut obs = EquipmentObservation::default();
-    capture_single_equipment_into(&mut obs, eq, contribution, pre_step_ports);
+    capture_single_equipment_into(&mut obs, eq, contribution, Some(pre_step_ports));
     obs
 }
 
@@ -90,11 +139,17 @@ pub(crate) fn capture_single_equipment(
 /// The identity fields still build fresh Strings: their
 /// borrowed-or-shared descriptor form is the equipment capture's own
 /// remaining site, not this one.
+///
+/// `pre_step_ports` is `Some` for a fresh observation (the capture
+/// moves in) and `None` for a recycled one whose `pre_step_ports` was
+/// already written in place before the equipment stepped (the
+/// pre-step capture must precede the step, so the recycled path writes
+/// it through [`capture_ports_into`] at the pre-step site).
 pub(crate) fn capture_single_equipment_into(
     obs: &mut EquipmentObservation,
     eq: &dyn Equipment,
     contribution: EquipmentContribution,
-    pre_step_ports: PortsCapture,
+    pre_step_ports: Option<PortsCapture>,
 ) {
     let desc = eq.descriptor();
     obs.name = desc.name.clone();
@@ -107,7 +162,9 @@ pub(crate) fn capture_single_equipment_into(
     record_telemetry_site_allocations(before);
     obs.port_declarations = eq.ports().to_vec();
     obs.contribution = contribution;
-    obs.pre_step_ports = pre_step_ports;
+    if let Some(pre_step_ports) = pre_step_ports {
+        obs.pre_step_ports = pre_step_ports;
+    }
 }
 
 // The observation path's telemetry-write site's allocation bracket: the
@@ -205,8 +262,20 @@ pub(crate) fn diff_ports(before: &PortSlots, after: &PortSlots) -> EquipmentCont
 
 /// Captures a snapshot of all port accumulators.
 pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
-    let thermal: Vec<(ZoneId, ZoneHeat)> =
-        ports.thermal.iter().map(|t| (t.zone, t.heat())).collect();
+    let mut capture = PortsCapture::default();
+    capture_ports_into(&mut capture, ports);
+    capture
+}
+
+/// The same capture, written into a recycled capture: the three Vecs
+/// are cleared and refilled in place, so the steady state reuses their
+/// capacities and allocates nothing. Every field is written: a stale
+/// value cannot survive the fill.
+pub(crate) fn capture_ports_into(capture: &mut PortsCapture, ports: &PortSlots) {
+    capture.thermal.clear();
+    capture
+        .thermal
+        .extend(ports.thermal.iter().map(|t| (t.zone, t.heat())));
 
     let fuel_types = hares_types::ports::ALL_FUEL_TYPES;
 
@@ -216,15 +285,15 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
         "ALL_FUEL_TYPES length must match FUEL_TYPE_COUNT; ensure new FuelType variants are added to ALL_FUEL_TYPES"
     );
 
-    let fuel_consumption_w: Vec<(FuelType, f64)> = fuel_types
-        .iter()
-        .map(|&ft| (ft, ports.fuel.get(ft)))
-        .collect();
+    capture.fuel_consumption_w.clear();
+    capture
+        .fuel_consumption_w
+        .extend(fuel_types.iter().map(|&ft| (ft, ports.fuel.get(ft))));
 
-    let fluid: Vec<FluidPortCapture> = ports
+    capture.fluid.clear();
+    capture
         .fluid
-        .iter()
-        .map(|f| FluidPortCapture {
+        .extend(ports.fluid.iter().map(|f| FluidPortCapture {
             loop_id: f.loop_id,
             fluid_type: f.fluid_type,
             total_flow_kg_s: f.total_flow_kg_s,
@@ -232,17 +301,11 @@ pub(crate) fn capture_ports(ports: &PortSlots) -> PortsCapture {
             mean_return_temp_c: f.mean_return_temp_c,
             total_thermal_power_w: f.total_thermal_power_w,
             direction: f.direction,
-        })
-        .collect();
+        }));
 
-    PortsCapture {
-        thermal,
-        electrical_load_w: ports.electrical.load_power_w,
-        electrical_gen_w: ports.electrical.generation_power_w,
-        electrical_reactive_var: ports.electrical.reactive_power_var,
-        fuel_consumption_w,
-        fluid,
-    }
+    capture.electrical_load_w = ports.electrical.load_power_w;
+    capture.electrical_gen_w = ports.electrical.generation_power_w;
+    capture.electrical_reactive_var = ports.electrical.reactive_power_var;
 }
 
 /// Electrical port balance observability scalars for [`capture_solvers`],
@@ -264,31 +327,84 @@ pub(crate) fn capture_solvers(
     thermal_solver: &ThermalSolver,
     balance: PortBalance,
 ) -> SolverCapture {
+    let mut capture = SolverCapture {
+        thermal_update: thermal_update.clone(),
+        humidity_update: humidity_update.clone(),
+        electrical_update: electrical_update.clone(),
+        fluid_update: fluid_update.clone(),
+        envelope_gains: thermal_solver.component_gains().clone(),
+        zip_load_scale: balance.zip_load_scale,
+        port_load_raw_w: balance.port_load_raw_w,
+        port_load_adjusted_w: balance.port_load_adjusted_w,
+        residual_w: balance.residual_w,
+    };
+    capture_solvers_into(
+        &mut capture,
+        thermal_update,
+        humidity_update,
+        electrical_update,
+        fluid_update,
+        thermal_solver,
+        balance,
+    );
+    capture
+}
+
+/// The same capture, written into a recycled capture: the four domain
+/// updates go through `DomainUpdate`'s in-place `clone_from` and the
+/// envelope gains through `EnvelopeComponentGains::copy_in_place`, so
+/// the steady state overwrites them in place and allocates nothing.
+/// Every field is written: a stale value cannot survive the fill.
+pub(crate) fn capture_solvers_into(
+    capture: &mut SolverCapture,
+    thermal_update: &DomainUpdate,
+    humidity_update: &DomainUpdate,
+    electrical_update: &DomainUpdate,
+    fluid_update: &DomainUpdate,
+    thermal_solver: &ThermalSolver,
+    balance: PortBalance,
+) {
     let PortBalance {
         zip_load_scale,
         port_load_raw_w,
         port_load_adjusted_w,
         residual_w,
     } = balance;
-    SolverCapture {
-        thermal_update: thermal_update.clone(),
-        humidity_update: humidity_update.clone(),
-        electrical_update: electrical_update.clone(),
-        fluid_update: fluid_update.clone(),
-        envelope_gains: thermal_solver.component_gains().clone(),
-        zip_load_scale,
-        port_load_raw_w,
-        port_load_adjusted_w,
-        residual_w,
-    }
+    capture.thermal_update.clone_from(thermal_update);
+    capture.humidity_update.clone_from(humidity_update);
+    capture.electrical_update.clone_from(electrical_update);
+    capture.fluid_update.clone_from(fluid_update);
+    capture
+        .envelope_gains
+        .clone_from(thermal_solver.component_gains());
+    capture.zip_load_scale = zip_load_scale;
+    capture.port_load_raw_w = port_load_raw_w;
+    capture.port_load_adjusted_w = port_load_adjusted_w;
+    capture.residual_w = residual_w;
 }
 
 /// Captures final zone temperatures and humidity ratios after zone updates.
 pub(crate) fn capture_zone_update(env: &EnvironmentState) -> ZoneUpdateCapture {
-    ZoneUpdateCapture {
-        zone_temps_c: env.zones.iter().map(|z| (z.id, z.temperature_c)).collect(),
-        zone_humidity_ratios: env.zones.iter().map(|z| (z.id, z.humidity_ratio)).collect(),
-    }
+    let mut capture = ZoneUpdateCapture {
+        zone_temps_c: Vec::new(),
+        zone_humidity_ratios: Vec::new(),
+    };
+    capture_zone_update_into(&mut capture, env);
+    capture
+}
+
+/// The same capture, written into a recycled capture: the two Vecs are
+/// cleared and refilled in place, so the steady state reuses their
+/// capacities and allocates nothing.
+pub(crate) fn capture_zone_update_into(capture: &mut ZoneUpdateCapture, env: &EnvironmentState) {
+    capture.zone_temps_c.clear();
+    capture
+        .zone_temps_c
+        .extend(env.zones.iter().map(|z| (z.id, z.temperature_c)));
+    capture.zone_humidity_ratios.clear();
+    capture
+        .zone_humidity_ratios
+        .extend(env.zones.iter().map(|z| (z.id, z.humidity_ratio)));
 }
 
 /// Captures observation state from all custom domain solvers after their
@@ -565,6 +681,60 @@ mod tests {
         approx_eq(find(FuelType::Oil), 0.0);
     }
 
+    /// The in-place capture's overwrite completeness: a capture refilled
+    /// from a different source's state carries no stale value and no
+    /// stale Vec tail, so the recycled write is the fresh form on bits.
+    /// The debug format covers every field of the capture.
+    #[test]
+    fn capture_ports_into_overwrites_a_dirty_capture() {
+        let zone_a = ZoneId(1);
+        let zone_b = ZoneId(2);
+        let mut fuel = FuelAccumulator::default();
+        fuel.add(FuelType::Gas, 500.0).unwrap();
+        let dirty_source = PortSlots {
+            thermal: vec![
+                ThermalAccumulator {
+                    zone: zone_a,
+                    sensible_gain_w: 111.0,
+                    ..ThermalAccumulator::new(zone_a)
+                },
+                ThermalAccumulator {
+                    zone: zone_b,
+                    sensible_gain_w: 222.0,
+                    latent_gain_w: 3.0,
+                    ..ThermalAccumulator::new(zone_b)
+                },
+            ],
+            fuel,
+            ..Default::default()
+        };
+        let mut clean_source = PortSlots {
+            thermal: vec![ThermalAccumulator {
+                zone: zone_b,
+                sensible_gain_w: 7.0,
+                ..ThermalAccumulator::new(zone_b)
+            }],
+            ..Default::default()
+        };
+        clean_source
+            .fuel
+            .add(FuelType::Wood, 42.0)
+            .expect("wood registers");
+
+        let fresh = capture_ports(&clean_source);
+
+        let mut recycled = capture_ports(&dirty_source);
+        capture_ports_into(&mut recycled, &clean_source);
+
+        assert_eq!(
+            format!("{recycled:?}"),
+            format!("{fresh:?}"),
+            "the recycled capture's refill must equal the fresh capture \
+             on every field: a stale zone row, fuel entry or scalar means \
+             the in-place form skipped a field"
+        );
+    }
+
     #[test]
     fn diff_ports_detects_wood_coal_woodpellet() {
         let mut before_fuel = FuelAccumulator::default();
@@ -623,19 +793,17 @@ mod tests {
             ..Default::default()
         };
 
-        let observations: Vec<EquipmentObservation> = vec![];
-        let phase_capture = capture_equipment_phase(observations, &ports);
+        let mut phase_ports = PortsCapture::default();
+        capture_ports_into(&mut phase_ports, &ports);
 
         let find = |ft: FuelType| -> f64 {
-            phase_capture
-                .ports
+            phase_ports
                 .fuel_consumption_w
                 .iter()
                 .find(|(t, _)| *t == ft)
                 .map_or(0.0, |(_, v)| *v)
         };
 
-        assert_eq!(phase_capture.equipment.len(), 0);
         approx_eq(find(FuelType::Wood), 2000.0);
         approx_eq(find(FuelType::Coal), 500.0);
         approx_eq(find(FuelType::WoodPellet), 750.0);
