@@ -288,6 +288,19 @@ themselves under `"warnings"`, only when the count is non-zero), and a
 failed step's fatal flag is the dwelling's own state, never its message's
 wording.
 
+Two resource contracts the batch paths own. `Fleet.simulate` runs its
+homes on a process-wide pool cached per thread count: the first call
+with a given `n_threads` builds the pool, every later call with the
+same count reuses it, so an RL harness calling `simulate` per episode
+pays the worker threads' spawn once, not per call (`n_threads=0` keeps
+the global Rayon pool). And the episode's reports are subject to the
+`max_memory_rows` soft cap documented with the report destinations
+below: a long training run whose memory
+report would balloon past the cap is refused at the config with the
+remediation named, never left growing unbounded in the background. The
+RL-shaped fix is a callback destination or a streamed file, not a
+bigger frame.
+
 ## Warm-up
 
 Every dwelling warms up by default: the warm-up repeats the run's
@@ -433,6 +446,17 @@ buffers shared, so any Arrow consumer reads them zero-copy; a file
 destination's result is the published path (its `table()` and `arrow()`
 raise, naming the report and its destination); a run with no report
 carries no metrics.
+
+A `Memory` destination's retention is the run's own row stream: one row
+per step at the `Timestep` frequency (a period frequency reduces that
+stream, never multiplies it). `SimulationConfig(max_memory_rows=n)`
+caps it: a memory report whose run projects more rows than the cap
+fails validation, at the constructor and at every later mutation,
+naming the report, the projection, the cap and the remediation (stream
+the report to a file destination, attach a callback, or raise the
+cap). The default `max_memory_rows=None` keeps every run's behavior
+exactly as before the knob existed; the cap never clips data, it
+refuses the run that would pay the retention.
 
 Each column's Arrow type is the report's schema's type for that column,
 with units and enum labels read from the catalogue (polars drops Arrow

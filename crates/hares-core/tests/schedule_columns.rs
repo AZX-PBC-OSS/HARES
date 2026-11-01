@@ -96,6 +96,7 @@ fn sim_config_from_manifest(manifest: &toml::Value) -> SimulationConfig {
         .and_then(|v| v.as_integer())
         .expect("time_res seconds");
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: DateTime::parse_from_rfc3339(start).expect("start_time parses"),
@@ -300,6 +301,7 @@ fn a_microwave_column_on_an_os_hpxml_building_counts_only_the_residual_mels() {
 fn bldg0176775_dwelling(schedule_path: &Path) -> Dwelling {
     let bldg = project_root().join("tests/fixtures/resstock/2025.1/bldg0176775");
     let sim = SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::west_opt(5 * 3600)

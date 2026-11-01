@@ -20,6 +20,7 @@ fn fixture_dir() -> PathBuf {
 
 fn config(time_res: i64) -> SimulationConfig {
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")

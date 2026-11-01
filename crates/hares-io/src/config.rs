@@ -118,6 +118,16 @@ pub struct SimulationConfig {
     /// Rows per Arrow RecordBatch flush (default: 10 000).
     #[serde(default = "default_output_chunk_size")]
     pub output_chunk_size: usize,
+    /// The memory reports' soft row cap (default: none). When set, every
+    /// `Memory`-destination report whose run projects more rows than the
+    /// cap fails validation, naming the report, the projection and the
+    /// remediation: stream the report to a `Parquet` or `Csv`
+    /// destination, attach a callback, or raise the cap. A period
+    /// frequency's rows are a reduction of the same per-step stream, so
+    /// the run's own step count bounds the projection; the cap never
+    /// clips data, it refuses the run that would pay the retention.
+    #[serde(default)]
+    pub max_memory_rows: Option<usize>,
     /// Optional global thermostat deadband in Celsius for comfort metrics.
     #[serde(default)]
     pub setpoint_deadband_c: Option<f64>,
@@ -242,6 +252,7 @@ impl hares_types::DescribeFields for SimulationConfig {
             diagnostics: false,
             metrics: false,
             output_chunk_size: default_output_chunk_size(),
+            max_memory_rows: Some(2_880_000),
             setpoint_deadband_c: Some(1.0),
             master_seed: 0,
             scenario_seed: None,
@@ -303,6 +314,16 @@ impl hares_types::DescribeFields for SimulationConfig {
                     "output_chunk_size",
                     FieldMeta {
                         description: Some("rows per Arrow RecordBatch flush"),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "max_memory_rows",
+                    FieldMeta {
+                        description: Some(
+                            "the memory reports' soft row cap: a Memory report over it fails \
+                             validation with the remediation named",
+                        ),
                         ..Default::default()
                     },
                 ),
@@ -838,6 +859,31 @@ impl SimulationConfig {
             }
         }
 
+        // The memory reports' soft cap: the retention a Memory
+        // destination pays is the run's own row stream, projected here
+        // from the validated duration and resolution (a period
+        // frequency reduces that stream, never multiplies it). Over the
+        // cap, the run is refused with the remediation named; the cap
+        // never clips data.
+        if let Some(cap) = self.max_memory_rows {
+            let projected_rows = self.timestep_count();
+            for report in &self.reports {
+                if matches!(
+                    report.destination,
+                    crate::output::report::Destination::Memory
+                ) && projected_rows > cap
+                {
+                    return Err(ConfigError::Validation(format!(
+                        "report '{}' retains up to {projected_rows} rows in memory over this \
+                         run, above the max_memory_rows cap of {cap}: stream the report to a \
+                         Parquet or Csv destination, attach a callback, or raise \
+                         max_memory_rows",
+                        report.name
+                    )));
+                }
+            }
+        }
+
         if duration_secs % time_res_secs != 0 {
             return Err(ConfigError::Validation(format!(
                 "duration ({duration_secs}s) must be evenly divisible by time_res ({time_res_secs}s)"
@@ -983,6 +1029,107 @@ duration = 3600
             cfg.max_consecutive_step_failures,
             DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES
         );
+        assert_eq!(
+            cfg.max_memory_rows, None,
+            "the memory report's row cap is off by default: no run's \
+             behavior changes until the cap is set"
+        );
+    }
+
+    /// The memory report's soft cap: a `Memory` destination retains one
+    /// row per step in memory (a period frequency's rows are a
+    /// reduction of the same stream, never more), so a report over the
+    /// cap fails validation naming the report, the projected rows, the
+    /// cap and the remediation (stream it to a file, attach a callback,
+    /// or raise the cap). The projection is the run's own step count:
+    /// known exactly, before the run pays for anything.
+    #[test]
+    fn a_memory_report_over_the_max_memory_rows_cap_fails_with_the_remediation() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+time_res = 60
+max_memory_rows = 50
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 2 }
+destination = "memory"
+"#;
+        let err = SimulationConfig::from_toml(toml).expect_err("the report is over the cap");
+        let message = err.to_string();
+        assert!(
+            message.contains("frame"),
+            "the error names the report: {message}"
+        );
+        assert!(
+            message.contains("60"),
+            "the error states the projected rows (the run's 60 steps): {message}"
+        );
+        assert!(
+            message.contains("50"),
+            "the error states the cap: {message}"
+        );
+        assert!(
+            message.contains("max_memory_rows"),
+            "the error names the knob that raises the cap: {message}"
+        );
+    }
+
+    #[test]
+    fn a_memory_report_under_the_cap_validates() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+time_res = 60
+max_memory_rows = 60
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 2 }
+destination = "memory"
+"#;
+        SimulationConfig::from_toml(toml).expect("the report fits the cap exactly");
+    }
+
+    #[test]
+    fn the_cap_absent_accepts_any_row_count() {
+        let toml = r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 864000
+time_res = 60
+
+[[reports]]
+name = "frame"
+selection = { verbosity = 2 }
+destination = "memory"
+"#;
+        SimulationConfig::from_toml(toml)
+            .expect("no cap set: a year-long memory report validates as always");
+    }
+
+    #[test]
+    fn the_cap_gates_memory_destinations_only() {
+        let dir = std::env::temp_dir().join("hares_max_memory_rows_file_report");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir builds");
+        let toml = format!(
+            r#"
+start_time = "2024-01-01T00:00:00Z"
+duration = 3600
+time_res = 60
+max_memory_rows = 100
+
+[[reports]]
+name = "frame"
+selection = {{ verbosity = 2 }}
+destination = {{ parquet = {{ path = "{}" }} }}
+"#,
+            dir.join("frame.parquet").display()
+        );
+        SimulationConfig::from_toml(&toml)
+            .expect("a file destination streams and retains nothing: the cap does not apply");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1381,6 +1528,7 @@ max_evictions = 0
     #[test]
     fn time_res_beyond_u32_seconds_is_an_error() {
         let cfg = SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
@@ -1443,6 +1591,7 @@ destination = { csv = { path = "/tmp/sim_output.csv" } }
         let toml_err = SimulationConfig::from_toml(toml)
             .expect_err("a duplicate report path is a validate error on the TOML path too");
         let built = SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
@@ -1491,6 +1640,7 @@ latitude_deg = 95.0
         let toml_err = SimulationConfig::from_toml(toml)
             .expect_err("an out-of-range site coordinate is a validate error on the TOML path too");
         let built = SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: DateTime::<FixedOffset>::parse_from_rfc3339("2024-01-01T00:00:00Z")
@@ -1928,6 +2078,7 @@ utc_offset_h = -7.0
         };
         fn config_for_warmup(warmup: WarmupConfig) -> SimulationConfig {
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")

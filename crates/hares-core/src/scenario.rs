@@ -165,6 +165,7 @@ mod tests {
 
     fn test_sim_config() -> SimulationConfig {
         SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time: chrono::FixedOffset::east_opt(0)

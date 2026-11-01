@@ -186,6 +186,7 @@ fn dwelling_config(hpxml_xml: &str) -> (DwellingConfig, tempfile::TempDir) {
         defaults: DefaultsSource::directory(hares_core::shipped_defaults_dir()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: fixture_start::fixture_start(),

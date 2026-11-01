@@ -119,8 +119,8 @@ use crate::diagnostics::DiagnosticAccumulator;
 use crate::observer::MoistureZoneInvariant;
 #[cfg(feature = "observe")]
 use crate::observer::{
-    DispatchedSignal, EquipmentObservation, MoistureInvariantCapture, ObserverBuffer,
-    PhaseSnapshots, SameTierConflict, StepSnapshot,
+    DispatchedSignal, EquipmentObservation, EquipmentPhaseCapture, MoistureInvariantCapture,
+    ObserverBuffer, PhaseSnapshots, PortsCapture, SameTierConflict, StepSnapshot,
 };
 #[cfg(feature = "observe")]
 use crate::observer_capture;
@@ -1746,6 +1746,24 @@ struct ControlDispatcher {
     /// priority inversion cannot occur: once a tier has been seen for a target,
     /// strictly lower tiers are rejected even if they are queued later.
     seen_targets: Vec<(DispatchTarget, usize)>,
+    /// The observing conflict scan's own per-pass throwaway: the passes
+    /// whose conflicts the merged capture does not keep (the
+    /// post-decide pass's and the derived passes', by the merge's own
+    /// contract) record into this scratch. Cleared per pass, so the
+    /// steady state reuses its capacity.
+    #[cfg(feature = "observe")]
+    conflict_scratch: Vec<SameTierConflict>,
+    /// The observing conflict scan's rented inner signals buffers: a
+    /// record rents its `signals` Vec from here and the cleared
+    /// records' buffers return to the pool, so the steady state
+    /// allocates none.
+    #[cfg(feature = "observe")]
+    conflict_signal_pool: Vec<Vec<ControlSignal>>,
+    /// The observing conflict scan's recorded-from ledger: the indexes
+    /// whose conflict groups are already recorded, cleared per tier
+    /// scan, so the steady state reuses its capacity.
+    #[cfg(feature = "observe")]
+    recorded_from_scratch: Vec<usize>,
 }
 
 /// Returns true if two dispatch targets route to the same physical equipment,
@@ -1802,6 +1820,12 @@ impl Default for ControlDispatcher {
             // per queue, per process.
             by_tier: std::array::from_fn(|_| VecDeque::with_capacity(ACTOR_DISPATCH_BOUND)),
             seen_targets: Vec::with_capacity(16),
+            #[cfg(feature = "observe")]
+            conflict_scratch: Vec::new(),
+            #[cfg(feature = "observe")]
+            conflict_signal_pool: Vec::new(),
+            #[cfg(feature = "observe")]
+            recorded_from_scratch: Vec::new(),
         }
     }
 }
@@ -1839,46 +1863,17 @@ impl ControlDispatcher {
         warnings: &mut WarningLog,
         rejected_control_signals: &mut RejectionGate,
         signals: &mut Vec<DispatchedSignal>,
-        same_tier_conflicts: &mut Vec<SameTierConflict>,
+        conflicts: Option<&mut Vec<SameTierConflict>>,
     ) {
-        // The pass's conflict scan replaces the passed list's content;
-        // the signals append: the step's merge target (the holder's
-        // retained Vec, cleared once per step) concatenates every
-        // observing pass's signals in dispatch order, so the captured
-        // content is the pre-pass's conflicts plus every pass's signals,
-        // exactly what the per-pass-fresh + merge shape produced.
-        same_tier_conflicts.clear();
-        for (tier_idx, tier_que) in self.by_tier.iter().enumerate() {
-            let (head, tail) = tier_que.as_slices();
-            let requests: Vec<&DispatchRequest> = head.iter().chain(tail.iter()).collect();
-            let mut recorded_from: Vec<usize> = Vec::new();
-            for i in 0..requests.len() {
-                for j in (i + 1)..requests.len() {
-                    if targets_conflict(requests[i], requests[j], equipment) {
-                        let tier = PriorityTier::from_index(tier_idx);
-                        let already_recorded = recorded_from
-                            .iter()
-                            .any(|&k| targets_conflict(requests[k], requests[i], equipment));
-                        if !already_recorded {
-                            let signals: Vec<_> = requests
-                                .iter()
-                                .filter(|r| {
-                                    r.priority == tier
-                                        && targets_conflict(r, requests[i], equipment)
-                                })
-                                .map(|r| r.signal.clone())
-                                .collect();
-                            recorded_from.push(i);
-                            same_tier_conflicts.push(SameTierConflict {
-                                tier,
-                                target: requests[i].target.clone(),
-                                signals,
-                            });
-                        }
-                    }
-                }
-            }
-        }
+        // The pass's conflict scan replaces the passed list's content
+        // (`None`: the dispatcher's own scratch, the throwaway whose
+        // records the merged capture never keeps); the signals append:
+        // the step's merge target (the holder's retained Vec, cleared
+        // once per step) concatenates every observing pass's signals in
+        // dispatch order, so the captured content is the pre-pass's
+        // conflicts plus every pass's signals, exactly what the
+        // per-pass-fresh + merge shape produced.
+        self.scan_same_tier_conflicts(conflicts, equipment);
 
         self.drain_tiers(
             equipment,
@@ -1894,6 +1889,80 @@ impl ControlDispatcher {
                 });
             },
         );
+    }
+
+    /// One observing pass's same-tier conflict scan: every tier's
+    /// conflicting request groups, recorded once per group with the
+    /// group's signals in queue order, into the passed list (or the
+    /// dispatcher's own scratch when the caller passes `None`). The
+    /// scan's transients are persistent: the records' inner signals
+    /// buffers rent from the pool and return from the cleared records,
+    /// the recorded-from ledger clears per tier, and the requests are
+    /// addressed through the tier's two slices directly, so a
+    /// steady-state scan allocates nothing.
+    #[cfg(feature = "observe")]
+    fn scan_same_tier_conflicts(
+        &mut self,
+        conflicts: Option<&mut Vec<SameTierConflict>>,
+        equipment: &[Box<dyn Equipment>],
+    ) {
+        let list: &mut Vec<SameTierConflict> = match conflicts {
+            Some(list) => list,
+            None => &mut self.conflict_scratch,
+        };
+        // The pass's scan replaces the list's content: the cleared
+        // records' inner signals buffers return to the pool, the
+        // buffers the next scan's records rent.
+        for mut record in list.drain(..) {
+            record.signals.clear();
+            self.conflict_signal_pool.push(record.signals);
+        }
+        for (tier_idx, tier_que) in self.by_tier.iter().enumerate() {
+            let (head, tail) = tier_que.as_slices();
+            let count = head.len() + tail.len();
+            // The borrow-free index form: the scan addresses request i
+            // through the tier's two slices directly, with no collected
+            // Vec of references per tier.
+            let request = |i: usize| -> &DispatchRequest {
+                if i < head.len() {
+                    &head[i]
+                } else {
+                    &tail[i - head.len()]
+                }
+            };
+            self.recorded_from_scratch.clear();
+            for i in 0..count {
+                for j in (i + 1)..count {
+                    if !targets_conflict(request(i), request(j), equipment) {
+                        continue;
+                    }
+                    let tier = PriorityTier::from_index(tier_idx);
+                    let already_recorded = self
+                        .recorded_from_scratch
+                        .iter()
+                        .any(|&k| targets_conflict(request(k), request(i), equipment));
+                    if already_recorded {
+                        continue;
+                    }
+                    let mut record_signals = self.conflict_signal_pool.pop().unwrap_or_default();
+                    record_signals.clear();
+                    record_signals.extend(
+                        (0..count)
+                            .map(request)
+                            .filter(|r| {
+                                r.priority == tier && targets_conflict(r, request(i), equipment)
+                            })
+                            .map(|r| r.signal.clone()),
+                    );
+                    self.recorded_from_scratch.push(i);
+                    list.push(SameTierConflict {
+                        tier,
+                        target: request(i).target.clone(),
+                        signals: record_signals,
+                    });
+                }
+            }
+        }
     }
 
     fn drain_tiers(
@@ -2783,6 +2852,18 @@ struct ObserveAllocations {
     /// The actor telemetry keys' per-step collect into the recycled
     /// snapshot slot.
     actor_telemetry_keys: u64,
+    /// The per-equipment pre-step port captures written into the
+    /// recycled observations (the census's B2).
+    equipment_pre_ports: u64,
+    /// The two equipment-phase captures' port snapshots refilled at the
+    /// assembly (the census's B5).
+    phase_captures: u64,
+    /// The environment capture refilled in place (the census's B7).
+    environment_capture: u64,
+    /// The solver capture refilled in place (the census's B8).
+    solver_capture: u64,
+    /// The zone-update capture refilled in place (the census's B10).
+    zone_update_capture: u64,
 }
 
 #[cfg(all(test, feature = "observe"))]
@@ -2800,6 +2881,11 @@ impl ObserveAllocations {
                 ObserveAllocSite::PortSnapshotBuf => self.port_snapshot_buf += delta,
                 ObserveAllocSite::DispatchCaptureBuf => self.dispatch_capture_buf += delta,
                 ObserveAllocSite::ActorTelemetryKeys => self.actor_telemetry_keys += delta,
+                ObserveAllocSite::EquipmentPrePorts => self.equipment_pre_ports += delta,
+                ObserveAllocSite::PhaseCaptures => self.phase_captures += delta,
+                ObserveAllocSite::EnvironmentCapture => self.environment_capture += delta,
+                ObserveAllocSite::SolverCapture => self.solver_capture += delta,
+                ObserveAllocSite::ZoneUpdateCapture => self.zone_update_capture += delta,
             }
         }
     }
@@ -2812,6 +2898,11 @@ enum ObserveAllocSite {
     PortSnapshotBuf,
     DispatchCaptureBuf,
     ActorTelemetryKeys,
+    EquipmentPrePorts,
+    PhaseCaptures,
+    EnvironmentCapture,
+    SolverCapture,
+    ZoneUpdateCapture,
 }
 
 /// Top-level single-dwelling simulation orchestrator.
@@ -3332,6 +3423,7 @@ impl Dwelling {
             weather_path,
         } = inputs;
         let sim_config = SimulationConfig {
+            max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
             start_time,
@@ -6558,12 +6650,15 @@ impl Dwelling {
     /// One observed dispatch pass under the run's health policy: the
     /// dispatched signals append to `signals` (the step's merge target,
     /// cleared once per step by its holder) and the pass's own same-tier
-    /// conflicts replace `same_tier_conflicts`' content.
+    /// conflicts replace the passed list's content. `Some(list)` marks the
+    /// pass whose conflicts the merged capture keeps (the pre-pass's);
+    /// `None` marks the passes whose conflicts record to the scan's own
+    /// scratch and are discarded by the merge's own contract.
     #[cfg(feature = "observe")]
     fn dispatch_pass_observed_into(
         &mut self,
         signals: &mut Vec<DispatchedSignal>,
-        same_tier_conflicts: &mut Vec<SameTierConflict>,
+        conflicts: Option<&mut Vec<SameTierConflict>>,
     ) -> Result<()> {
         let mut gate = self.rejection_gate();
         self.control_dispatcher.dispatch_into_observed_into(
@@ -6571,7 +6666,7 @@ impl Dwelling {
             &mut self.warnings,
             &mut gate,
             signals,
-            same_tier_conflicts,
+            conflicts,
         );
         self.end_dispatch_pass(gate)
     }
@@ -7598,14 +7693,35 @@ impl Dwelling {
 
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
-            obs_phases.post_environment = Some(observer_capture::capture_environment(
-                &self.latest_env,
-                self.environment.weather_meta().wf_allows_leap_years,
-                self.environment.raw_mains_temp_f,
-                self.environment.obs_raw_day_of_year,
-                self.environment.obs_civil_day_of_year,
-                self.environment.obs_utc_day_of_year,
-            ));
+            // The recycled slot's own environment capture refilled in
+            // place (a fresh capture only before the slot first
+            // carries one): the three Vecs reuse their capacities.
+            #[cfg(test)]
+            let env_before = thread_allocations();
+            match obs_phases.post_environment.as_mut() {
+                Some(capture) => observer_capture::capture_environment_into(
+                    capture,
+                    &self.latest_env,
+                    self.environment.weather_meta().wf_allows_leap_years,
+                    self.environment.raw_mains_temp_f,
+                    self.environment.obs_raw_day_of_year,
+                    self.environment.obs_civil_day_of_year,
+                    self.environment.obs_utc_day_of_year,
+                ),
+                None => {
+                    obs_phases.post_environment = Some(observer_capture::capture_environment(
+                        &self.latest_env,
+                        self.environment.weather_meta().wf_allows_leap_years,
+                        self.environment.raw_mains_temp_f,
+                        self.environment.obs_raw_day_of_year,
+                        self.environment.obs_civil_day_of_year,
+                        self.environment.obs_utc_day_of_year,
+                    ));
+                }
+            }
+            #[cfg(test)]
+            self.observe_allocations
+                .record(env_before, ObserveAllocSite::EnvironmentCapture);
         }
 
         #[cfg(feature = "observe")]
@@ -7643,7 +7759,7 @@ impl Dwelling {
             let dc_before = thread_allocations();
             self.dispatch_pass_observed_into(
                 &mut dispatch_capture_buf.signals,
-                &mut dispatch_capture_buf.same_tier_conflicts,
+                Some(&mut dispatch_capture_buf.same_tier_conflicts),
             )?;
             #[cfg(test)]
             self.observe_allocations
@@ -7887,18 +8003,15 @@ impl Dwelling {
         // external signal already applied.
         #[cfg(feature = "observe")]
         if self.observer_buf.is_some() {
-            // The post-decide pass appends into the same buffers; its
-            // conflicts record into a throwaway (the merged capture keeps
-            // the pre-pass's, exactly as the old merge did), and the
-            // merged capture moves into the phase only after the
-            // derived-signal loop below has appended too.
-            let mut conflicts_scratch = Vec::new();
+            // The post-decide pass's conflicts record to the scan's own
+            // scratch (`None`): the merged capture keeps the pre-pass's,
+            // exactly as the old merge did. The pass appends into the
+            // same signals buffer, and the merged capture moves into the
+            // phase only after the derived-signal loop below has
+            // appended too.
             #[cfg(test)]
             let dc_before = thread_allocations();
-            self.dispatch_pass_observed_into(
-                &mut dispatch_capture_buf.signals,
-                &mut conflicts_scratch,
-            )?;
+            self.dispatch_pass_observed_into(&mut dispatch_capture_buf.signals, None)?;
             #[cfg(test)]
             self.observe_allocations
                 .record(dc_before, ObserveAllocSite::DispatchCaptureBuf);
@@ -7954,11 +8067,7 @@ impl Dwelling {
             }
             #[cfg(feature = "observe")]
             if self.observer_buf.is_some() {
-                let mut conflicts_scratch = Vec::new();
-                self.dispatch_pass_observed_into(
-                    &mut dispatch_capture_buf.signals,
-                    &mut conflicts_scratch,
-                )?;
+                self.dispatch_pass_observed_into(&mut dispatch_capture_buf.signals, None)?;
             } else {
                 self.dispatch_pass()?;
             }
@@ -8014,18 +8123,24 @@ impl Dwelling {
         // the equipment count matches, and a roster change falls back to
         // fresh captures beyond the recycled elements. The used counters
         // track this step's processed equipment per list; the stale tail
-        // (a roster shrink) truncates before the phase capture.
-        let mut thermal_obs: Vec<EquipmentObservation> =
-            match obs_phases.post_thermal_equipment.take() {
-                Some(capture) => capture.equipment,
-                None => Vec::new(),
-            };
+        // (a roster shrink) truncates before the phase capture. The
+        // phase captures' own port snapshots are kept beside the lists:
+        // their Vecs are the recycled buffers the assembly refills.
+        let (mut thermal_obs, mut thermal_phase_ports): (
+            Vec<EquipmentObservation>,
+            PortsCapture,
+        ) = match obs_phases.post_thermal_equipment.take() {
+            Some(capture) => (capture.equipment, capture.ports),
+            None => (Vec::new(), PortsCapture::default()),
+        };
         #[cfg(feature = "observe")]
-        let mut nonthermal_obs: Vec<EquipmentObservation> =
-            match obs_phases.post_nonthermal_equipment.take() {
-                Some(capture) => capture.equipment,
-                None => Vec::new(),
-            };
+        let (mut nonthermal_obs, mut nonthermal_phase_ports): (
+            Vec<EquipmentObservation>,
+            PortsCapture,
+        ) = match obs_phases.post_nonthermal_equipment.take() {
+            Some(capture) => (capture.equipment, capture.ports),
+            None => (Vec::new(), PortsCapture::default()),
+        };
         #[cfg(feature = "observe")]
         let mut thermal_obs_used: usize = 0;
         #[cfg(feature = "observe")]
@@ -8079,11 +8194,30 @@ impl Dwelling {
                 continue;
             }
             #[cfg(feature = "observe")]
+            #[cfg(test)]
+            let pp_before = thread_allocations();
+            #[cfg(feature = "observe")]
             let pre_ports = if observing {
-                Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+                // The recycled path writes the pre-step capture straight
+                // into the recycled observation's own port Vecs (the
+                // capture must precede the step); a fresh observation (a
+                // roster growth) builds its own capture to move in.
+                if nonthermal_obs_used < nonthermal_obs.len() {
+                    observer_capture::capture_ports_into(
+                        &mut nonthermal_obs[nonthermal_obs_used].pre_step_ports,
+                        &self.port_snapshot_buf,
+                    );
+                    None
+                } else {
+                    Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+                }
             } else {
                 None
             };
+            #[cfg(feature = "observe")]
+            #[cfg(test)]
+            self.observe_allocations
+                .record(pp_before, ObserveAllocSite::EquipmentPrePorts);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             self.rollback_ports.copy_into(&self.ports);
@@ -8116,19 +8250,18 @@ impl Dwelling {
                 if observing {
                     let contribution =
                         observer_capture::diff_ports(&self.port_snapshot_buf, &self.ports);
-                    let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
                     if nonthermal_obs_used < nonthermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
                             &mut nonthermal_obs[nonthermal_obs_used],
                             self.equipment[idx].as_ref(),
                             contribution,
-                            pre_ports,
+                            None,
                         );
                     } else {
                         nonthermal_obs.push(observer_capture::capture_single_equipment(
                             self.equipment[idx].as_ref(),
                             contribution,
-                            pre_ports,
+                            pre_ports.expect("a fresh observation carries its pre-step capture"),
                         ));
                     }
                     nonthermal_obs_used += 1;
@@ -8178,11 +8311,30 @@ impl Dwelling {
                 continue;
             }
             #[cfg(feature = "observe")]
+            #[cfg(test)]
+            let pp_before = thread_allocations();
+            #[cfg(feature = "observe")]
             let pre_ports = if observing {
-                Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+                // The recycled path writes the pre-step capture straight
+                // into the recycled observation's own port Vecs (the
+                // capture must precede the step); a fresh observation (a
+                // roster growth) builds its own capture to move in.
+                if nonthermal_obs_used < nonthermal_obs.len() {
+                    observer_capture::capture_ports_into(
+                        &mut nonthermal_obs[nonthermal_obs_used].pre_step_ports,
+                        &self.port_snapshot_buf,
+                    );
+                    None
+                } else {
+                    Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+                }
             } else {
                 None
             };
+            #[cfg(feature = "observe")]
+            #[cfg(test)]
+            self.observe_allocations
+                .record(pp_before, ObserveAllocSite::EquipmentPrePorts);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
             self.rollback_ports.copy_into(&self.ports);
@@ -8214,19 +8366,18 @@ impl Dwelling {
                 if observing {
                     let contribution =
                         observer_capture::diff_ports(&self.port_snapshot_buf, &self.ports);
-                    let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
                     if nonthermal_obs_used < nonthermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
                             &mut nonthermal_obs[nonthermal_obs_used],
                             self.equipment[idx].as_ref(),
                             contribution,
-                            pre_ports,
+                            None,
                         );
                     } else {
                         nonthermal_obs.push(observer_capture::capture_single_equipment(
                             self.equipment[idx].as_ref(),
                             contribution,
-                            pre_ports,
+                            pre_ports.expect("a fresh observation carries its pre-step capture"),
                         ));
                     }
                     nonthermal_obs_used += 1;
@@ -8251,11 +8402,30 @@ impl Dwelling {
                 continue;
             }
             #[cfg(feature = "observe")]
+            #[cfg(test)]
+            let pp_before = thread_allocations();
+            #[cfg(feature = "observe")]
             let pre_ports = if observing {
-                Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+                // The recycled path writes the pre-step capture straight
+                // into the recycled observation's own port Vecs (the
+                // capture must precede the step); a fresh observation (a
+                // roster growth) builds its own capture to move in.
+                if thermal_obs_used < thermal_obs.len() {
+                    observer_capture::capture_ports_into(
+                        &mut thermal_obs[thermal_obs_used].pre_step_ports,
+                        &self.port_snapshot_buf,
+                    );
+                    None
+                } else {
+                    Some(observer_capture::capture_ports(&self.port_snapshot_buf))
+                }
             } else {
                 None
             };
+            #[cfg(feature = "observe")]
+            #[cfg(test)]
+            self.observe_allocations
+                .record(pp_before, ObserveAllocSite::EquipmentPrePorts);
 
             self.rollback_ports.copy_into(&self.ports);
             // Snapshot the shared electrical bus so the post-step delta is
@@ -8287,19 +8457,18 @@ impl Dwelling {
                 if observing {
                     let contribution =
                         observer_capture::diff_ports(&self.port_snapshot_buf, &self.ports);
-                    let pre_ports = pre_ports.expect("pre_ports is Some when pre_snapshot is Some");
                     if thermal_obs_used < thermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
                             &mut thermal_obs[thermal_obs_used],
                             self.equipment[idx].as_ref(),
                             contribution,
-                            pre_ports,
+                            None,
                         );
                     } else {
                         thermal_obs.push(observer_capture::capture_single_equipment(
                             self.equipment[idx].as_ref(),
                             contribution,
-                            pre_ports,
+                            pre_ports.expect("a fresh observation carries its pre-step capture"),
                         ));
                     }
                     thermal_obs_used += 1;
@@ -8322,14 +8491,23 @@ impl Dwelling {
         if observing {
             nonthermal_obs.truncate(nonthermal_obs_used);
             thermal_obs.truncate(thermal_obs_used);
-            obs_phases.post_nonthermal_equipment = Some(observer_capture::capture_equipment_phase(
-                nonthermal_obs,
-                &self.ports,
-            ));
-            obs_phases.post_thermal_equipment = Some(observer_capture::capture_equipment_phase(
-                thermal_obs,
-                &self.ports,
-            ));
+            // The phase captures' port snapshots refill the recycled
+            // Vecs in place; the observation lists move in.
+            #[cfg(test)]
+            let phase_before = thread_allocations();
+            observer_capture::capture_ports_into(&mut nonthermal_phase_ports, &self.ports);
+            obs_phases.post_nonthermal_equipment = Some(EquipmentPhaseCapture {
+                equipment: nonthermal_obs,
+                ports: nonthermal_phase_ports,
+            });
+            observer_capture::capture_ports_into(&mut thermal_phase_ports, &self.ports);
+            obs_phases.post_thermal_equipment = Some(EquipmentPhaseCapture {
+                equipment: thermal_obs,
+                ports: thermal_phase_ports,
+            });
+            #[cfg(test)]
+            self.observe_allocations
+                .record(phase_before, ObserveAllocSite::PhaseCaptures);
         }
 
         // Stage-ordering invariant: verify that equipment step execution order
@@ -8627,20 +8805,49 @@ impl Dwelling {
             // humidity, electrical and fluid solves write their own
             // buffers), so the deferred clone carries the same values,
             // and a step whose observer is never enabled pays nothing.
-            let thermal_for_observer = self.thermal_update_buf.clone();
-            obs_phases.post_solvers = Some(observer_capture::capture_solvers(
-                &thermal_for_observer,
-                &self.humidity_update_buf,
-                &self.electrical_update_buf,
-                &self.fluid_update_buf,
-                &self.thermal_solver,
-                observer_capture::PortBalance {
-                    zip_load_scale: zip_scale,
-                    port_load_raw_w,
-                    port_load_adjusted_w: port_load_adj_w,
-                    residual_w: residual,
-                },
-            ));
+            // The recycled slot's own solver capture refilled in place
+            // (a fresh capture only before the slot first carries one):
+            // the four domain updates go through their in-place
+            // clone_from and the envelope gains through copy_in_place,
+            // so the fill allocates nothing.
+            #[cfg(test)]
+            let solver_before = thread_allocations();
+            match obs_phases.post_solvers.as_mut() {
+                Some(capture) => {
+                    observer_capture::capture_solvers_into(
+                        capture,
+                        &self.thermal_update_buf,
+                        &self.humidity_update_buf,
+                        &self.electrical_update_buf,
+                        &self.fluid_update_buf,
+                        &self.thermal_solver,
+                        observer_capture::PortBalance {
+                            zip_load_scale: zip_scale,
+                            port_load_raw_w,
+                            port_load_adjusted_w: port_load_adj_w,
+                            residual_w: residual,
+                        },
+                    );
+                }
+                None => {
+                    obs_phases.post_solvers = Some(observer_capture::capture_solvers(
+                        &self.thermal_update_buf,
+                        &self.humidity_update_buf,
+                        &self.electrical_update_buf,
+                        &self.fluid_update_buf,
+                        &self.thermal_solver,
+                        observer_capture::PortBalance {
+                            zip_load_scale: zip_scale,
+                            port_load_raw_w,
+                            port_load_adjusted_w: port_load_adj_w,
+                            residual_w: residual,
+                        },
+                    ));
+                }
+            }
+            #[cfg(test)]
+            self.observe_allocations
+                .record(solver_before, ObserveAllocSite::SolverCapture);
         }
 
         #[cfg(test)]
@@ -8838,8 +9045,23 @@ impl Dwelling {
         // capture data (populated in check_step_invariants) is available for the snapshot.
         #[cfg(feature = "observe")]
         if let Some(buf) = &mut self.observer_buf {
-            obs_phases.post_zone_update =
-                Some(observer_capture::capture_zone_update(&self.latest_env));
+            // The recycled slot's own zone-update capture refilled in
+            // place (a fresh capture only before the slot first carries
+            // one): the two Vecs reuse their capacities.
+            #[cfg(test)]
+            let zone_before = thread_allocations();
+            match obs_phases.post_zone_update.as_mut() {
+                Some(capture) => {
+                    observer_capture::capture_zone_update_into(capture, &self.latest_env)
+                }
+                None => {
+                    obs_phases.post_zone_update =
+                        Some(observer_capture::capture_zone_update(&self.latest_env));
+                }
+            }
+            #[cfg(test)]
+            self.observe_allocations
+                .record(zone_before, ObserveAllocSite::ZoneUpdateCapture);
             #[cfg(all(feature = "observe", debug_assertions))]
             let moisture_invariant = if self.invariant_moisture_capture.is_empty() {
                 None
@@ -10909,6 +11131,7 @@ destination = "memory"
             defaults: DefaultsSource::directory(shipped_defaults_dir()),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: DateTime::parse_from_rfc3339("2023-06-01T00:00:00-07:00")
@@ -10947,10 +11170,14 @@ destination = "memory"
     /// every step. The buffers are the recycled slot's own post-dispatch
     /// capture now: the signals Vec clears once per step and every pass
     /// appends; the merge is the concatenation itself. RED at the
-    /// parent: the capture's per-step growths. GREEN: the signals Vec
-    /// and the merge target allocate nothing; the site's residual is
-    /// the conflict scan's own transients (the census's remaining
-    /// dispatch-capture site), named in the pin below.
+    /// parent: the capture's per-step growths. GREEN once the retained
+    /// buffers landed, and the scan's own transients died in the second
+    /// row: the per-tier requests are addressed through the tier's
+    /// slices directly (no collected Vec of references), the
+    /// recorded-from ledger and the conflicts throwaway are persistent
+    /// scratch cleared per pass, and the conflict's inner signals Vec
+    /// rents from the pool the cleared records return their buffers to.
+    /// The site's steady state allocates nothing.
     #[cfg(feature = "observe")]
     #[test]
     fn dispatch_capture_buffers_reuse_their_allocations() {
@@ -10967,15 +11194,14 @@ destination = "memory"
         }
         let delta = dwelling.observe_allocations.dispatch_capture_buf;
         assert_eq!(
-            delta, 16,
+            delta, 0,
             "the observed dispatch captures allocated {} times over 4 \
              observed steps: the retained signals Vec and merge target \
-             must allocate nothing, leaving 4 per step: the per-tier \
-             requests collect and the same-tier conflict scan's own \
+             allocate nothing, and the same-tier conflict scan's own \
              transients (this fixture's steady step records one real \
-             same-tier conflict, the two ASHP-heater requests: the \
-             conflict's inner signals Vec, the scan's fresh recorded-from \
-             ledger and the conflicts throwaway's first push)",
+             same-tier conflict, the two ASHP-heater requests) run on \
+             the dispatcher's persistent scratch and the rented inner \
+             signals buffer",
             delta,
         );
 
@@ -10995,6 +11221,71 @@ destination = "memory"
             post.same_tier_conflicts.is_empty(),
             "the merged capture keeps the pre-pass's conflict list (empty here), \
              the post-decide pass's conflicts recording to the scan's own throwaway"
+        );
+    }
+
+    /// The observing capture sites' own brackets, the observe census's
+    /// second row: the per-equipment pre-step port captures (the
+    /// census's B2), the two equipment-phase captures' port snapshots
+    /// (B5), the environment capture (B7), the solver capture (B8, with
+    /// the pass-through thermal-update clone gone), and the zone-update
+    /// capture (B10) write through the recycled slot's own buffers, so
+    /// the steady state allocates nothing at any of them. RED at the
+    /// parent: the window pin carried the row's whole removal (12,937
+    /// to 5,736 over its 96-step window); each bracket here isolates
+    /// its site, and a site's fix reverted re-inflates its own
+    /// accumulator.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn the_recycled_capture_sites_allocate_nothing_after_the_first_steps() {
+        let mut dwelling = actor_bearing_dwelling(16);
+        dwelling.enable_observer(4);
+        for step in 0..8 {
+            dwelling
+                .run_timestep(false)
+                .unwrap_or_else(|err| panic!("warm-in step {step} must succeed: {err:?}"));
+        }
+        dwelling.observe_allocations = ObserveAllocations::default();
+        for _ in 0..4 {
+            dwelling.run_timestep(false).expect("measured step");
+        }
+        let allocations = dwelling.observe_allocations;
+        assert_eq!(
+            allocations.equipment_pre_ports, 0,
+            "the per-equipment pre-step port captures allocated {} times \
+             over 4 observed steps: the recycled path must write the \
+             capture into the recycled observation's own port Vecs before \
+             the equipment steps",
+            allocations.equipment_pre_ports,
+        );
+        assert_eq!(
+            allocations.phase_captures, 0,
+            "the equipment-phase captures' port snapshots allocated {} \
+             times over 4 observed steps: the assembly must refill the \
+             recycled phase captures' Vecs",
+            allocations.phase_captures,
+        );
+        assert_eq!(
+            allocations.environment_capture, 0,
+            "the environment capture allocated {} times over 4 observed \
+             steps: the fill must overwrite the recycled slot's own \
+             capture in place",
+            allocations.environment_capture,
+        );
+        assert_eq!(
+            allocations.solver_capture, 0,
+            "the solver capture allocated {} times over 4 observed steps: \
+             the fill must overwrite the recycled slot's own capture in \
+             place, the domain updates through their clone_from and the \
+             envelope gains through its own",
+            allocations.solver_capture,
+        );
+        assert_eq!(
+            allocations.zone_update_capture, 0,
+            "the zone-update capture allocated {} times over 4 observed \
+             steps: the fill must overwrite the recycled slot's own \
+             capture in place",
+            allocations.zone_update_capture,
         );
     }
 
@@ -14476,7 +14767,7 @@ occupancy = 1.0
             &mut warnings,
             &mut RejectionGate::new(0, None),
             &mut capture.signals,
-            &mut capture.same_tier_conflicts,
+            Some(&mut capture.same_tier_conflicts),
         );
 
         assert!(warnings.is_empty());
@@ -14531,7 +14822,7 @@ occupancy = 1.0
             &mut warnings,
             &mut RejectionGate::new(0, None),
             &mut capture.signals,
-            &mut capture.same_tier_conflicts,
+            Some(&mut capture.same_tier_conflicts),
         );
 
         assert!(warnings.is_empty());
@@ -14579,7 +14870,7 @@ occupancy = 1.0
             &mut warnings,
             &mut RejectionGate::new(0, None),
             &mut capture.signals,
-            &mut capture.same_tier_conflicts,
+            Some(&mut capture.same_tier_conflicts),
         );
 
         assert!(warnings.is_empty());
@@ -14718,7 +15009,7 @@ occupancy = 1.0
             &mut warnings,
             &mut RejectionGate::new(0, None),
             &mut capture.signals,
-            &mut capture.same_tier_conflicts,
+            Some(&mut capture.same_tier_conflicts),
         );
 
         assert!(warnings.is_empty());
@@ -14770,7 +15061,7 @@ occupancy = 1.0
             &mut warnings,
             &mut RejectionGate::new(0, None),
             &mut capture.signals,
-            &mut capture.same_tier_conflicts,
+            Some(&mut capture.same_tier_conflicts),
         );
 
         assert!(warnings.is_empty());
@@ -14829,7 +15120,7 @@ occupancy = 1.0
             &mut warnings,
             &mut RejectionGate::new(0, None),
             &mut capture.signals,
-            &mut capture.same_tier_conflicts,
+            Some(&mut capture.same_tier_conflicts),
         );
 
         assert!(warnings.is_empty());
@@ -23304,6 +23595,7 @@ latent_gain_fraction = 0.08
             ),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     start_time: DateTime::parse_from_rfc3339(start).expect("start time"),

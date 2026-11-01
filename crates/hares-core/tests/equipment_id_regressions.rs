@@ -92,6 +92,7 @@ fn write_fixture_hpxml(dir: &Path) -> PathBuf {
 
 fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> SimulationConfig {
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::west_opt(10 * 3600)

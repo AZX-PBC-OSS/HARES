@@ -384,6 +384,7 @@ fn nightly_strategy_keeps_ev_charged_through_a_sustained_cold_snap() {
     });
 
     let sim = SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::west_opt(10 * 3600)
@@ -468,6 +469,7 @@ fn override_keyed_by_unknown_equipment_name_errors_loudly() {
     });
 
     let sim = SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::west_opt(10 * 3600)
@@ -605,6 +607,7 @@ fn override_keyed_by_spec_handled_outside_registry_errors_loudly() {
     });
 
     let sim = SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::west_opt(10 * 3600)
@@ -679,6 +682,7 @@ fn non_object_overrides_payload_fails_the_build_loudly() {
     std::fs::write(&hpxml_path, inject_ev(&src)).expect("write injected HPXML");
 
     let sim = SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::west_opt(10 * 3600)

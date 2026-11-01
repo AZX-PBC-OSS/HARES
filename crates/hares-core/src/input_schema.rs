@@ -118,6 +118,7 @@ mod tests {
     #[test]
     fn input_schema_config_fields_equal_accepted_keys() {
         let config = hares_io::SimulationConfig {
+            max_memory_rows: Some(2_880_000),
             scenario_seed: Some(9),
             schedule_diversity: Default::default(),
             start_time: chrono::DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")

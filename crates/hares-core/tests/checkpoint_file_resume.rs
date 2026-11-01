@@ -30,6 +30,7 @@ fn dwelling(case: &Case) -> Dwelling {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: DateTime::parse_from_rfc3339(case.start_time).expect("start time"),

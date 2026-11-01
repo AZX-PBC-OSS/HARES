@@ -140,6 +140,7 @@ fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> Simulati
     }
     reports.push(csv_report("file", &csv_path, 0));
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::east_opt(0)
@@ -441,6 +442,7 @@ fn run_without_metrics_request_returns_none_metrics() {
         defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 reports: Vec::new(),

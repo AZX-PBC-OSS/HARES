@@ -10,6 +10,7 @@ use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 
 fn sim_config(duration_secs: i64, time_res_secs: i64) -> SimulationConfig {
     SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: FixedOffset::east_opt(0)

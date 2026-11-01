@@ -965,7 +965,10 @@ pub struct WindowSolarTotals {
 /// exchange activity metric. None of those are net zone loads; see their
 /// field docs.
 /// Populated after each `resolve()` call; read via [`crate::ThermalSolver::component_gains`].
-#[derive(Debug, Clone, Default)]
+/// `Clone` is a manual impl: `clone` builds the exhaustive literal and
+/// `clone_from` copies in place (the Vecs' capacities reused), the form
+/// the observer's recycled solver capture writes through.
+#[derive(Debug, Default)]
 pub struct EnvelopeComponentGains {
     /// Total window solar reaching the zone (W): the through-glass (transmitted)
     /// flux plus the inward-flowing share of the glass-absorbed flux. This is
@@ -1172,6 +1175,141 @@ pub struct EnvelopeComponentGains {
     pub int_surface_diag: Vec<IntSurfaceDiag>,
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     pub window_solar_diag: Vec<WindowSolarDiag>,
+}
+
+impl Clone for EnvelopeComponentGains {
+    /// The fresh form: every field cloned, the struct literal exhaustive
+    /// (a field added to this struct breaks this literal, and the
+    /// in-place `clone_from` extends in the same edit).
+    #[allow(clippy::too_many_lines)]
+    fn clone(&self) -> Self {
+        Self {
+            window_solar_w: self.window_solar_w,
+            window_through_glass_w: self.window_through_glass_w,
+            opaque_solar_lwr_w: self.opaque_solar_lwr_w,
+            interior_lwr_w: self.interior_lwr_w,
+            infiltration_w: self.infiltration_w,
+            ventilation_w: self.ventilation_w,
+            natural_ventilation_w: self.natural_ventilation_w,
+            combined_airflow_sensible_w: self.combined_airflow_sensible_w,
+            port_convective_w: self.port_convective_w,
+            port_radiant_w: self.port_radiant_w,
+            port_shortwave_w: self.port_shortwave_w,
+            hvac_heating_w: self.hvac_heating_w,
+            hvac_cooling_w: self.hvac_cooling_w,
+            internal_gain_w: self.internal_gain_w,
+            jacket_loss_w: self.jacket_loss_w,
+            #[cfg(feature = "observe")]
+            jacket_loss_by_zone: self.jacket_loss_by_zone.clone(),
+            duct_loss_w: self.duct_loss_w,
+            hvac_dehumidification_w: self.hvac_dehumidification_w,
+            infiltration_by_zone: self.infiltration_by_zone.clone(),
+            interior_lwr_by_zone: self.interior_lwr_by_zone.clone(),
+            wall_heat_gain_w: self.wall_heat_gain_w,
+            floor_heat_gain_w: self.floor_heat_gain_w,
+            roof_heat_gain_w: self.roof_heat_gain_w,
+            window_heat_gain_w: self.window_heat_gain_w,
+            internal_mass_heat_gain_w: self.internal_mass_heat_gain_w,
+            zone_air_balance_residual_w: self.zone_air_balance_residual_w,
+            opaque_solar_w: self.opaque_solar_w,
+            exterior_lwr_w: self.exterior_lwr_w,
+            window_exterior_lwr_w: self.window_exterior_lwr_w,
+            driving_outdoor_temp_c: self.driving_outdoor_temp_c,
+            driving_ground_temp_c: self.driving_ground_temp_c,
+            total_airflow_m3_s: self.total_airflow_m3_s,
+            raw_infiltration_m3_s: self.raw_infiltration_m3_s,
+            forced_vent_m3_s: self.forced_vent_m3_s,
+            natural_vent_m3_s: self.natural_vent_m3_s,
+            #[cfg(feature = "observe")]
+            natural_ventilation_q_stack_m3_s: self.natural_ventilation_q_stack_m3_s,
+            #[cfg(feature = "observe")]
+            natural_ventilation_q_wind_m3_s: self.natural_ventilation_q_wind_m3_s,
+            #[cfg(feature = "observe")]
+            natural_ventilation_cd_used: self.natural_ventilation_cd_used,
+            #[cfg(feature = "observe")]
+            natural_ventilation_cw: self.natural_ventilation_cw,
+            #[cfg(feature = "observe")]
+            natural_ventilation_wind_angle_deg: self.natural_ventilation_wind_angle_deg,
+            #[cfg(feature = "observe")]
+            skin_iteration_cap_exits: self.skin_iteration_cap_exits,
+            #[cfg(feature = "observe")]
+            max_skin_residual_k: self.max_skin_residual_k,
+            air_density_kg_m3: self.air_density_kg_m3,
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            ext_surface_diag: self.ext_surface_diag.clone(),
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            int_surface_diag: self.int_surface_diag.clone(),
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            window_solar_diag: self.window_solar_diag.clone(),
+        }
+    }
+
+    /// Copies `source` over `self` in place: the per-zone and per-surface
+    /// Vecs are reused (`Vec::clone_from` keeps their capacity when it
+    /// suffices) and the scalars are overwritten, so a steady-state copy
+    /// allocates nothing. The observer's solver capture is the consumer:
+    /// the capture's recycled slot writes through this instead of
+    /// replacing the struct, in the same discipline as `Telemetry`'s and
+    /// `DomainUpdate`'s in-place copies.
+    #[allow(clippy::too_many_lines)]
+    fn clone_from(&mut self, source: &Self) {
+        self.window_solar_w = source.window_solar_w;
+        self.window_through_glass_w = source.window_through_glass_w;
+        self.opaque_solar_lwr_w = source.opaque_solar_lwr_w;
+        self.interior_lwr_w = source.interior_lwr_w;
+        self.infiltration_w = source.infiltration_w;
+        self.ventilation_w = source.ventilation_w;
+        self.natural_ventilation_w = source.natural_ventilation_w;
+        self.combined_airflow_sensible_w = source.combined_airflow_sensible_w;
+        self.port_convective_w = source.port_convective_w;
+        self.port_radiant_w = source.port_radiant_w;
+        self.port_shortwave_w = source.port_shortwave_w;
+        self.hvac_heating_w = source.hvac_heating_w;
+        self.hvac_cooling_w = source.hvac_cooling_w;
+        self.internal_gain_w = source.internal_gain_w;
+        self.jacket_loss_w = source.jacket_loss_w;
+        #[cfg(feature = "observe")]
+        self.jacket_loss_by_zone
+            .clone_from(&source.jacket_loss_by_zone);
+        self.duct_loss_w = source.duct_loss_w;
+        self.hvac_dehumidification_w = source.hvac_dehumidification_w;
+        self.infiltration_by_zone
+            .clone_from(&source.infiltration_by_zone);
+        self.interior_lwr_by_zone
+            .clone_from(&source.interior_lwr_by_zone);
+        self.wall_heat_gain_w = source.wall_heat_gain_w;
+        self.floor_heat_gain_w = source.floor_heat_gain_w;
+        self.roof_heat_gain_w = source.roof_heat_gain_w;
+        self.window_heat_gain_w = source.window_heat_gain_w;
+        self.internal_mass_heat_gain_w = source.internal_mass_heat_gain_w;
+        self.zone_air_balance_residual_w = source.zone_air_balance_residual_w;
+        self.opaque_solar_w = source.opaque_solar_w;
+        self.exterior_lwr_w = source.exterior_lwr_w;
+        self.window_exterior_lwr_w = source.window_exterior_lwr_w;
+        self.driving_outdoor_temp_c = source.driving_outdoor_temp_c;
+        self.driving_ground_temp_c = source.driving_ground_temp_c;
+        self.total_airflow_m3_s = source.total_airflow_m3_s;
+        self.raw_infiltration_m3_s = source.raw_infiltration_m3_s;
+        self.forced_vent_m3_s = source.forced_vent_m3_s;
+        self.natural_vent_m3_s = source.natural_vent_m3_s;
+        #[cfg(feature = "observe")]
+        {
+            self.natural_ventilation_q_stack_m3_s = source.natural_ventilation_q_stack_m3_s;
+            self.natural_ventilation_q_wind_m3_s = source.natural_ventilation_q_wind_m3_s;
+            self.natural_ventilation_cd_used = source.natural_ventilation_cd_used;
+            self.natural_ventilation_cw = source.natural_ventilation_cw;
+            self.natural_ventilation_wind_angle_deg = source.natural_ventilation_wind_angle_deg;
+            self.skin_iteration_cap_exits = source.skin_iteration_cap_exits;
+            self.max_skin_residual_k = source.max_skin_residual_k;
+        }
+        self.air_density_kg_m3 = source.air_density_kg_m3;
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        {
+            self.ext_surface_diag.clone_from(&source.ext_surface_diag);
+            self.int_surface_diag.clone_from(&source.int_surface_diag);
+            self.window_solar_diag.clone_from(&source.window_solar_diag);
+        }
+    }
 }
 
 /// Per-exterior-surface energy diagnostic snapshot.

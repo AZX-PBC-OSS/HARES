@@ -42,6 +42,7 @@ fn base_xml_config(month: u32, time_res_s: i64) -> DwellingConfig {
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(offset_hours * 3600)

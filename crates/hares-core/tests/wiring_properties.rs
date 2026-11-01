@@ -124,6 +124,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
         defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)
@@ -166,6 +167,7 @@ fn assert_wiring_invariants(label: &str, config_path: &str) {
         defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)
@@ -306,6 +308,7 @@ fn indoor_zone_has_exactly_one_beam_receiving_floor_on_ochre_base() {
         defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)
@@ -442,6 +445,7 @@ fn attic_floor_never_takes_the_exterior_sky_exposed_path() {
         defaults: DefaultsSource::directory(repo_defaults_path()),
         settings: DwellingSettings::new(
             SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: FixedOffset::east_opt(0)

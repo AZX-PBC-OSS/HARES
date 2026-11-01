@@ -402,6 +402,7 @@ impl PySimulationConfig {
         diagnostics = false,
         metrics = false,
         output_chunk_size = hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+        max_memory_rows = None,
         setpoint_deadband_c = None,
         master_seed = 0,
         scenario_seed = None,
@@ -425,6 +426,7 @@ impl PySimulationConfig {
         diagnostics: bool,
         metrics: bool,
         output_chunk_size: usize,
+        max_memory_rows: Option<usize>,
         setpoint_deadband_c: Option<f64>,
         master_seed: u64,
         scenario_seed: Option<u64>,
@@ -510,6 +512,7 @@ impl PySimulationConfig {
             diagnostics,
             metrics,
             output_chunk_size,
+            max_memory_rows,
             setpoint_deadband_c,
             master_seed,
             scenario_seed,
@@ -647,6 +650,16 @@ impl PySimulationConfig {
     #[setter]
     pub fn set_output_chunk_size(&mut self, value: usize) -> PyResult<()> {
         self.assign(|cfg| cfg.output_chunk_size = value)
+    }
+
+    #[getter]
+    pub fn max_memory_rows(&self) -> Option<usize> {
+        self.0.max_memory_rows
+    }
+
+    #[setter]
+    pub fn set_max_memory_rows(&mut self, value: Option<usize>) -> PyResult<()> {
+        self.assign(|cfg| cfg.max_memory_rows = value)
     }
 
     #[getter]
@@ -1113,6 +1126,7 @@ mod tests {
             false,
             hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
+            None,
             0,
             None,
             "on",
@@ -1180,6 +1194,7 @@ mod tests {
                     false,
                     hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
                     None,
+                    None,
                     0,
                     None,
                     "on",
@@ -1213,6 +1228,7 @@ mod tests {
                 false,
                 false,
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
                 None,
                 0,
                 None,
@@ -1249,6 +1265,7 @@ mod tests {
                 false,
                 false,
                 hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
                 None,
                 0,
                 None,

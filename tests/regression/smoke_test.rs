@@ -239,6 +239,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     // Match OCHRE smoke: May 5, 2019, 12:00 PM Denver (UTC-7)
@@ -478,6 +479,7 @@ mod tests {
             defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
             settings: DwellingSettings::new(
                 SimulationConfig {
+                    max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
                     // Denver local noon (UTC-7) on May 5 2019 -- mild spring noon,

@@ -39,6 +39,7 @@ fn config(hpxml: &Path, overrides: Option<serde_json::Value>) -> DwellingConfig 
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
             hares_io::SimulationConfig {
+                max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time,

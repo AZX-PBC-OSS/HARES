@@ -45,6 +45,7 @@ fn dwelling() -> Dwelling {
     let root = project_root();
     let home = root.join("tests/fixtures/parity/cz2a_gas_furnace_ac_res_wh");
     let config = SimulationConfig {
+        max_memory_rows: None,
         scenario_seed: None,
         schedule_diversity: Default::default(),
         start_time: start(),

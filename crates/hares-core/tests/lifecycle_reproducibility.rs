@@ -451,6 +451,7 @@ fn dwelling_config_resstock(time_res_s: u64, days: u64) -> DwellingConfig {
                 diagnostics: false,
                 metrics: false,
                 output_chunk_size: 100000,
+                max_memory_rows: None,
                 setpoint_deadband_c: None,
                 master_seed: 7,
                 civil_timezone: None,
