@@ -138,7 +138,13 @@ fn assert_converges(metric: &str, values: [f64; 4]) {
     let dir_3 = values[3] - values[2];
     let strictly_monotone = dir_1 * dir_2 > 0.0 && dir_2 * dir_3 > 0.0;
     let limit = values[3].abs().max(1e-9);
-    let drift = (values[0] - values[3]).abs();
+    // The fallback bounds EVERY refinement against the 60 s limit, not just
+    // the coarse endpoint: a defect confined to one interior timestep must
+    // fail even when the two ends agree.
+    let drift = values[..3]
+        .iter()
+        .map(|v| (v - values[3]).abs())
+        .fold(0.0_f64, f64::max);
     let drift_ok = drift <= 0.05 * limit;
     assert!(
         strictly_monotone || drift_ok,
@@ -163,6 +169,17 @@ fn assert_converges(metric: &str, values: [f64; 4]) {
             format!("drift {drift:.6} within bound")
         }
     );
+}
+
+/// The convergence predicate bounds the WHOLE sweep, not just its two
+/// endpoints: a refinement whose interior value departs from the 60 s limit
+/// by more than the 5 percent bound must fail even when the coarse and fine
+/// endpoints agree. Otherwise a defect confined to one intermediate
+/// timestep (the class this suite exists to catch) would pass the fallback.
+#[test]
+#[should_panic(expected = "must converge over the timestep sweep")]
+fn an_interior_timestep_that_departs_from_the_fine_limit_breaks_the_predicate() {
+    assert_converges("witness", [10.0, 100.0, -100.0, 10.0]);
 }
 
 /// The winter fortnight's free-float response converges over the sweep,
