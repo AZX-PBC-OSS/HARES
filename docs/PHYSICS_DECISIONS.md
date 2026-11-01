@@ -2139,5 +2139,6 @@ steps by construction.
 
 Hand-computed reference: a 1000 W load with a 30 s dwell at 3600 s steps
 carries 8 1/3 W for the step containing its start (energy 30 000 W·s, the
-dwell's exact energy); at 60 s steps a 90 s dwell carries 1000 W, 1000 W,
-500 W across its three steps (energy 90 000 W·s, again exact).
+dwell's exact energy); at 60 s steps a 90 s dwell carries 1000 W for its
+first step and 500 W for its second (the 30 s tail over the step's 60 s),
+the energy 60 s x 1000 W + 60 s x 500 W = 90 000 W·s, again exact.

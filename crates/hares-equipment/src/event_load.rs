@@ -2399,6 +2399,148 @@ mod tests {
         assert_eq!(second, 0.0, "the cycle completes inside the first step");
     }
 
+    /// A cycle crossing a phase boundary mid-step carries each phase's
+    /// seconds within the step and no more: (500 W, 60 s) then (1200 W,
+    /// 120 s) inside 100 s steps carries 500x60 + 1200x40 over the first
+    /// step (780 W) and 1200x80 over the second (960 W), whose energies
+    /// 78 000 W·s + 96 000 W·s are exactly the cycle's 174 000 W·s.
+    /// Billing a whole phase at the boundary would double count or lose
+    /// the split.
+    #[test]
+    fn a_cycle_crossing_a_step_boundary_splits_its_phases() {
+        let config = {
+            let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+            raw.insert("zone_id".to_string(), 1.0.into());
+            raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+            raw.insert("event_probability_source".to_string(), "constant".into());
+            raw.insert("event_probability_constant".to_string(), 1.0.into());
+            raw.insert("phase_len".to_string(), 2.0.into());
+            raw.insert("phase_0_power_w".to_string(), 500.0.into());
+            raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+            raw.insert("phase_1_power_w".to_string(), 1200.0.into());
+            raw.insert("phase_1_duration_s".to_string(), 120.0.into());
+            raw.insert("n_units".to_string(), 1.0.into());
+            raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+            raw_config("split".to_string(), "Clothes Washer".to_string(), raw)
+        };
+        let mut env = base_env();
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+        let mut slots = PortSlots::from_declarations(eq.ports());
+
+        set_schedule_payload(&mut env, vec![1.0]);
+        eq.step(&env, Duration::from_secs(100), &mut slots).unwrap();
+        let first = slots.electrical.load_power_w;
+        env.current_time += ChronoDuration::seconds(100);
+        set_schedule_payload(&mut env, vec![0.0]);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(100), &mut slots).unwrap();
+        let second = slots.electrical.load_power_w;
+        env.current_time += ChronoDuration::seconds(100);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(100), &mut slots).unwrap();
+        let third = slots.electrical.load_power_w;
+
+        let expected_first = (500.0 * 60.0 + 1200.0 * 40.0) / 100.0;
+        let expected_second = 1200.0 * 80.0 / 100.0;
+        assert!(
+            (first - expected_first).abs() < 1e-9,
+            "the boundary step carries 60 s at 500 W and 40 s at 1200 W \
+             ({expected_first} W), got {first} W"
+        );
+        assert!(
+            (second - expected_second).abs() < 1e-9,
+            "the tail step carries the remaining 80 s at 1200 W \
+             ({expected_second} W), got {second} W"
+        );
+        assert_eq!(third, 0.0, "the cycle completes in the second step");
+    }
+
+    /// A forced Active mode owns the whole step: the command pins the mode
+    /// and the phase timer does not run, so a 30 s dwell under a 900 s step
+    /// draws its full rated 1000 W, not the dwell's 1/30 step average.
+    #[test]
+    fn a_forced_active_event_draws_the_whole_step() {
+        let config = {
+            let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+            raw.insert("zone_id".to_string(), 1.0.into());
+            raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+            raw.insert("event_probability_source".to_string(), "constant".into());
+            raw.insert("event_probability_constant".to_string(), 0.0.into());
+            raw.insert("active_power_w".to_string(), 1000.0.into());
+            raw.insert("active_duration_s".to_string(), 30.0.into());
+            raw.insert("cooldown_duration_s".to_string(), 0.0.into());
+            raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+            raw_config("forced".to_string(), "EventBasedLoad".to_string(), raw)
+        };
+        let mut env = base_env();
+        let mut eq = EventBasedLoad::new(config.clone());
+        eq.init(&config, &env).unwrap();
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+        let mut slots = PortSlots::from_declarations(eq.ports());
+
+        // The window stays closed: only the command can run the load.
+        set_schedule_payload(&mut env, vec![0.0]);
+        eq.step(&env, Duration::from_secs(900), &mut slots).unwrap();
+        let first = slots.electrical.load_power_w;
+        env.current_time += ChronoDuration::seconds(900);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(900), &mut slots).unwrap();
+        let second = slots.electrical.load_power_w;
+
+        assert_eq!(first, 1000.0, "the forced event's whole-step draw");
+        assert_eq!(second, 1000.0, "the forced mode keeps the whole step");
+    }
+
+    /// A forced Active wet appliance owns the whole step at its pinned
+    /// phase's power: the command pins the mode and the cycle timer does
+    /// not run, so a 60 s, 500 W phase under a 900 s step draws 500 W, not
+    /// the phase's 60/900 blend.
+    #[test]
+    fn a_forced_active_cycle_draws_the_whole_step_at_its_phase() {
+        let config = {
+            let mut raw: HashMap<String, crate::config::ConfigValue> = HashMap::new();
+            raw.insert("zone_id".to_string(), 1.0.into());
+            raw.insert("event_window_schedule_col".to_string(), 0.0.into());
+            raw.insert("event_probability_source".to_string(), "constant".into());
+            raw.insert("event_probability_constant".to_string(), 0.0.into());
+            raw.insert("phase_len".to_string(), 2.0.into());
+            raw.insert("phase_0_power_w".to_string(), 500.0.into());
+            raw.insert("phase_0_duration_s".to_string(), 60.0.into());
+            raw.insert("phase_1_power_w".to_string(), 1200.0.into());
+            raw.insert("phase_1_duration_s".to_string(), 120.0.into());
+            raw.insert("n_units".to_string(), 1.0.into());
+            raw.insert("sensible_gain_fraction".to_string(), 0.0.into());
+            raw_config(
+                "forced_cycle".to_string(),
+                "Clothes Washer".to_string(),
+                raw,
+            )
+        };
+        let mut env = base_env();
+        let mut eq = WetAppliance::new(config.clone(), "Clothes Washer");
+        eq.init(&config, &env).unwrap();
+        eq.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: hares_types::OperatingMode::Standby,
+        })
+        .unwrap();
+        let mut slots = PortSlots::from_declarations(eq.ports());
+
+        set_schedule_payload(&mut env, vec![0.0]);
+        eq.step(&env, Duration::from_secs(900), &mut slots).unwrap();
+        let first = slots.electrical.load_power_w;
+        env.current_time += ChronoDuration::seconds(900);
+        slots.zero();
+        eq.step(&env, Duration::from_secs(900), &mut slots).unwrap();
+        let second = slots.electrical.load_power_w;
+
+        assert_eq!(first, 500.0, "the forced cycle's whole-step phase draw");
+        assert_eq!(second, 500.0, "the forced mode keeps the whole step");
+    }
+
     #[test]
     fn wet_appliance_multi_phase_profile_sequence() {
         let mut env = base_env();
