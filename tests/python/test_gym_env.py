@@ -749,7 +749,7 @@ def test_normalize_observation_wrapper_no_crash_or_shape_mismatch():
     gymnasium.wrappers.NormalizeObservation is a documented Known Limitation:
     its obs_rms is contaminated by NaN reset observations. This test exercises
     the wrapper's reset()/step() protocol to catch regressions that would
-    produce shape mismatches, dtype errors, or exceptions — failures that
+    produce shape mismatches, dtype errors, or exceptions: failures that
     are silent because no other test touches NormalizeObservation.
     """
     import gymnasium as gym
