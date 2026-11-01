@@ -1,13 +1,13 @@
 #![cfg(feature = "observe")]
 //! The observing step's allocation census, the ring-enabled build's
-//! second row: after the recycled-slot machinery filled the capture
-//! buffers once, the observing step's remaining per-step allocations
-//! are the capture sites' owned Vecs and the conflict scan's own
-//! transients. This file pins the observing step at an exact named
-//! bound on the same January window the default build's whole-step
-//! assertion owns (the cz6b parity dwelling: heat pump both sides,
-//! battery, EV, PV, ventilation, water heater, the driver actor; the
-//! observer ring at 4).
+//! second row: every capture site writes through the recycled slot's
+//! buffers, so the observing step's remaining per-step allocations are
+//! the equipment identity Strings (three per equipment), the port-diff
+//! Vecs and the observation Vecs' growths. This file pins the observing
+//! step at an exact named bound on the same January window the default
+//! build's whole-step assertion owns (the cz6b parity dwelling: heat
+//! pump both sides, battery, EV, PV, ventilation, water heater, the
+//! driver actor; the observer ring at 4).
 //!
 //! The counter is the workspace's shared counting allocator (the
 //! per-thread call counter, deallocation does not decrement), installed
@@ -15,15 +15,11 @@
 //! step loop steps through. The window's bound is exact, not a
 //! threshold: a new per-step allocation site moves it and fails.
 //!
-//! The per-step census this bound pins (the observing path's steady
-//! state): the per-equipment pre-step port captures' three owned Vecs
-//! each step per equipment, the two phase captures' port Vecs, the
-//! environment capture's three Vecs, the solver capture's four
-//! domain-update payloads and three envelope-gain Vecs, the zone-update
-//! capture's two Vecs, and the dispatch conflict scan's transients (the
-//! per-tier requests collect, the recorded-from ledger, the conflict's
-//! inner signals Vec and the throwaway's first push). The recycled slot
-//! carries the capture buffers; the captures must write through them.
+//! The capture sites the row removed (the pre-step port captures, the
+//! phase captures' port snapshots, the environment, solver and
+//! zone-update captures and the dispatch conflict scan's transients)
+//! contribute zero; each site's own bracket pins that in the dwelling's
+//! test module.
 
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings, StepResult};
 use hares_io::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
