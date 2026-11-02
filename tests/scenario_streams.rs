@@ -326,7 +326,7 @@ fn reseed_composes_the_episode_seed_with_the_scenario() {
 
 /// The fixture's declared power reaches the equipment: the `[event_load]`
 /// table's `active_power_w` is the Cooking Range's configured parameter and
-/// the draw an active event delivers, not the 1000 W default the
+/// the draw an active event delivers carries it, not the 1000 W default the
 /// equipment's init falls back to when the declared key drops between the
 /// TOML and the resolver's extension passthrough. The synthetic builder once
 /// emitted the removed `active_power_kw` spelling; the in-memory synthetic
@@ -334,6 +334,13 @@ fn reseed_composes_the_episode_seed_with_the_scenario() {
 /// value sat in an extension child no reader named and every fixture event
 /// ran at the default. Probability 1.0 makes the draw deterministic: every
 /// open-window step starts an event, and the constant window never closes.
+///
+/// The draw is the step's average under the dwell's sub-step duty: the
+/// synthetic event load's 300 s dwell inside the scenario's 900 s step
+/// powers one third of the step, so the declared 1500 W draws
+/// 1500 x 300/900 = 500 W over the step (the dwell's exact 450 000 W·s
+/// energy). The dropped-key defect would read 1000 x 300/900 = 333 1/3 W:
+/// the declared power is distinguishable through the duty.
 #[test]
 fn the_event_loads_declared_power_reaches_its_draw() {
     use hares_types::telemetry_keys as tk;
@@ -365,13 +372,20 @@ fn the_event_loads_declared_power_reaches_its_draw() {
         .iter()
         .find(|param| param.name == "active_power_w")
         .expect("the event load resolves its active power");
+    let dwell_s = resolved
+        .iter()
+        .find(|param| param.name == "active_duration_s")
+        .expect("the event load resolves its dwell")
+        .value;
     assert_eq!(
         declared.value, 1500.0,
         "the fixture's declared active_power_w is the event load's \
          configured parameter"
     );
 
-    // The draw: an active event delivers the declared power to the port.
+    // The draw: an active event delivers the declared power as its step
+    // average, the dwell's sub-step duty over the 900 s step (300/900 with
+    // the synthetic default's 300 s dwell).
     bench_common::step_n(&mut dwelling, 1, "the witness's active step");
     let event_load = dwelling
         .equipment()
@@ -387,8 +401,10 @@ fn the_event_loads_declared_power_reaches_its_draw() {
         Some(1.0),
         "the witness's step runs the event load in its active phase"
     );
+    let expected = declared.value * dwell_s / 900.0;
     assert!(
-        (draw - declared.value).abs() < 1e-6,
-        "the active event's draw is the declared 1500 W, got {draw} W"
+        (draw - expected).abs() < 1e-6,
+        "the active event's draw is the declared 1500 W at its 300/900 duty \
+         ({expected} W), got {draw} W"
     );
 }

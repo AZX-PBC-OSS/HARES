@@ -12,9 +12,11 @@
 //!    reseed) continues bit-identically across a LogNormal day-roll draw:
 //!    the stream cursors the draw consumes are checkpoint state.
 //! 3. The event load's start rate follows the per-step probability
-//!    normalization (`p_step = 1 - (1 - p_hour)^(dt/h)`) at the
-//!    resolutions its dwell model holds (60, 300 s; the coarse arms'
-//!    divergence is the finding its test documents).
+//!    normalization (`p_step = 1 - (1 - p_hour)^(dt/h)`) at every
+//!    resolution: the dwell's step semantics count partial powered
+//!    dwell-time (the sub-step duty), so the integrated duty is the
+//!    successful-draw count the normalization's closed form pins at 60,
+//!    300, 900 and 3600 s.
 //!
 //! Fixtures: the synthetic single-zone TOML dwelling the
 //! `warmup_stochastic_neutrality` tests build carrying the EV equipment
@@ -323,32 +325,45 @@ fn checkpoint_roundtrip_continues_across_the_lognormal_day_roll() {
 }
 
 /// The event load's start rate follows the per-step probability
-/// normalization at the resolutions whose steps are coarse-grained enough
-/// for the dwell model: `p_step = 1 - (1 - p_hour)^(dt/h)`, the cycle the
-/// geometric idle run plus its own success step
+/// normalization at every resolution: `p_step = 1 - (1 - p_hour)^(dt/h)`,
+/// the cycle the geometric idle run plus its own success step
 /// (`E[cycle] = (1-p_step)/p_step + 1`, `var(idle) = (1-p_step)/p_step^2`),
 /// and the renewal count over N steps with mean `N/E[cycle]` and sd
-/// `sqrt(N * var_idle / E[cycle]^3)`. At 60 and 300 s the measured counts
-/// sit on that closed form (under 2 percent off), which is the
-/// normalization's composition identity made observable.
+/// `sqrt(N * var_idle / E[cycle]^3)`.
 ///
-/// The 900 and 3600 s arms are NOT pinned: at the coarse resolutions the
-/// measured rate falls systematically below the closed form (407 vs 458 at
-/// 900 s, 191 vs 360 at 3600 s, seed-independent) and the powered steps
-/// come in multi-step runs a 30 s dwell cannot produce: the event's dwell
-/// handling overruns its duration when the timestep exceeds it. That is a
-/// finding against the coarse-timestep dwell handling, recorded in the
-/// batch report; pinning its current numbers (a drift lock) or excluding
-/// the arms silently would both misstate the normalization's contract.
+/// The rate's observable at a coarse step is the step's integrated duty,
+/// not the power channel's rising edges. The dwell's step semantics count
+/// partial powered dwell-time (the sub-step duty): a 30 s dwell inside a
+/// 3600 s step carries 1000 W x 30/3600, so the energy integrated over the
+/// run, divided by the per-start energy (1000 W x 30 s), is exactly the
+/// number of successful draws, the renewal count the closed form pins, at
+/// every resolution. All-or-nothing step occupancy inflates that integral
+/// by dt/dwell (120x at 3600 s), and read off rising edges the clustered
+/// starts merge (two starts in consecutive steps are one run of two
+/// powered steps): the pre-fix channel measured 407 starts against 458 at
+/// 900 s and 191 against 360 at 3600 s, seed-independent, the drift the
+/// coarse arms pin against here.
+///
+/// The rising edges are pinned separately, against the run structure the
+/// draw sequence itself predicts: with every step drawing once (the 30 s
+/// dwell exhausts inside any step here and the cooldown is 0) the edges
+/// are the maximal consecutive-success blocks, `E[R] = p_step + (N-1) q`
+/// and `var(R) = p(1-p) + (N-1) q(1-q) - 2(N-2) q^2 - 2 p q` with
+/// `q = p_step (1 - p_step)` (the block-start indicator at step i needs a
+/// success at i and a failure before it; adjacent indicators are
+/// exclusive, so their covariance is minus the product of their means,
+/// and all other pairs are independent). The run pins hold before and
+/// after the duty fix: the fix changes no draw and no phase transition,
+/// only the power a short dwell carries within its step.
 #[test]
-fn event_start_rate_follows_the_normalization_at_fine_resolutions() {
+fn event_start_rate_follows_the_normalization_at_every_resolution() {
     use hares_io::EquipmentSpec;
     use hares_types::FuelType;
 
     let days = 30_u64;
     let p_hour = 0.5_f64;
 
-    for time_res_s in [60_u64, 300] {
+    for time_res_s in [60_u64, 300, 900, 3600] {
         let dt = time_res_s as f64;
         let p_step = 1.0 - (1.0 - p_hour).powf(dt / 3600.0);
         let mean_cycle = (1.0 - p_step) / p_step + 1.0;
@@ -357,6 +372,15 @@ fn event_start_rate_follows_the_normalization_at_fine_resolutions() {
         let expected = n_steps / mean_cycle;
         let sd = (n_steps * var_idle / mean_cycle.powi(3)).sqrt();
         let (low, high) = (expected - 3.0 * sd, expected + 3.0 * sd);
+
+        // The run structure's mean and spread, from the derivation above.
+        let q = p_step * (1.0 - p_step);
+        let run_mean = p_step + (n_steps - 1.0) * q;
+        let run_var = p_step * (1.0 - p_step) + (n_steps - 1.0) * q * (1.0 - q)
+            - 2.0 * (n_steps - 2.0) * q * q
+            - 2.0 * p_step * q;
+        let run_sd = run_var.max(0.0).sqrt();
+        let (run_low, run_high) = (run_mean - 3.0 * run_sd, run_mean + 3.0 * run_sd);
 
         // The probe: an EventBasedLoad with the parameters this test pins,
         // on the committed ResStock sample dwelling (the stream keyed on
@@ -394,30 +418,46 @@ fn event_start_rate_follows_the_normalization_at_fine_resolutions() {
             .expect("add the probe spec");
         let mut dwelling = blueprint.build().expect("build dwelling");
 
-        // A start is the probe's own power channel rising from zero; the
-        // 30 s dwell fits inside any step, so every start occupies exactly
-        // its own step.
-        let mut starts = 0_u64;
+        // The start count reads off the integrated duty: the step's average
+        // power times the step length, summed over the run, divided by the
+        // per-start energy (1000 W x 30 s). The dwell completes inside any
+        // step here (30 s against a 60 s floor), so each start contributes
+        // exactly its own dwell to the integral.
+        let per_start_energy_ws = 1000.0 * 30.0;
+        let mut duty_energy_ws = 0.0;
+        // The rising edges count the runs of consecutive powered steps.
+        let mut edges = 0_u64;
         let mut previous_drawing = false;
         for _ in 0..(n_steps as u64) {
             dwelling.step().expect("the step runs");
-            let drawing = probe_power(&dwelling) > 1e-9;
+            let power_w = probe_power(&dwelling);
+            duty_energy_ws += power_w * dt;
+            let drawing = power_w > 1e-9;
             if drawing && !previous_drawing {
-                starts += 1;
+                edges += 1;
             }
             previous_drawing = drawing;
         }
+        let duty_starts = duty_energy_ws / per_start_energy_ws;
 
         assert!(
-            starts as f64 >= low && starts as f64 <= high,
-            "time_res {time_res_s} s: {starts} event starts in {days} days \
-             outside the 3-sigma renewal band [{low:.1}, {high:.1}] (mean \
-             {expected:.1}, sd {sd:.2}, p_step {p_step:.6}): the per-step \
-             probability normalization drifted",
+            duty_starts >= low && duty_starts <= high,
+            "time_res {time_res_s} s: {duty_starts:.1} event starts by duty \
+             integral in {days} days outside the 3-sigma renewal band \
+             [{low:.1}, {high:.1}] (mean {expected:.1}, sd {sd:.2}, p_step \
+             {p_step:.6}): the per-step probability normalization drifted",
+        );
+        assert!(
+            edges as f64 >= run_low && edges as f64 <= run_high,
+            "time_res {time_res_s} s: {edges} powered runs in {days} days \
+             outside the 3-sigma run-structure band [{run_low:.1}, \
+             {run_high:.1}] (mean {run_mean:.1}, sd {run_sd:.2}, q {q:.6}): \
+             the draw sequence's clustering moved",
         );
         eprintln!(
-            "[lifecycle] time_res {time_res_s} s: {starts} starts in {days} \
-             days (band {low:.0}-{high:.0}, mean {expected:.0})"
+            "[lifecycle] time_res {time_res_s} s: {duty_starts:.0} starts by \
+             duty (band {low:.0}-{high:.0}, mean {expected:.0}), {edges} runs \
+             (band {run_low:.0}-{run_high:.0}, mean {run_mean:.0})"
         );
     }
 }
@@ -469,7 +509,9 @@ fn dwelling_config_resstock(time_res_s: u64, days: u64) -> DwellingConfig {
     }
 }
 
-/// The probe's own active power channel, in W (the telemetry carries kW).
+/// The probe's own active power channel, in W: the telemetry key keeps its
+/// kW reporting spelling and carries W (loads.md), as the equipment's own
+/// pins assert.
 fn probe_power(dwelling: &Dwelling) -> f64 {
     dwelling
         .latest_env()
@@ -477,5 +519,4 @@ fn probe_power(dwelling: &Dwelling) -> f64 {
         .get("EventBasedLoad")
         .and_then(|t| t.get(hares_types::telemetry_keys::ACTIVE_POWER_KW))
         .unwrap_or_else(|| panic!("the probe publishes its power"))
-        * 1000.0
 }
