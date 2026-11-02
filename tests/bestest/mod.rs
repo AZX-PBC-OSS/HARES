@@ -2,6 +2,7 @@ mod cases;
 mod material_check;
 mod reference_bands;
 mod timestep_sweep;
+mod ventilation_schedule;
 mod window_iam;
 
 use std::collections::BTreeMap;
@@ -322,6 +323,24 @@ fn bestest_case_640() {
 // drift-locking the divergences as if they were a conformance state would
 // both misstate the published oracles.
 
+// Case 950: the fixture is committed and build-tracked (below), and the
+// annual test STOPS at a measured divergence. The scheduled-ventilation
+// surface lands (Case 650 runs against its bands in-band, the surface's
+// proof), and Case 950 (Case 650 with the high-mass materials) runs its
+// annual cooling load 1859.901051 kWh against the band [586, 707]
+// (ASHRAE 140-2023 Annex B8 Table B8-2): 1152.901051 kWh above the ceiling,
+// 2.63x. The heating load is exactly zero, in band. The divergence is the
+// engine's high-mass night-purge coupling, not the fixture or the surface:
+// the fan schedule, the thermostat gating and the constructions are the
+// standard's, Case 650's purge lands in band on the same surface, and the
+// engine's own Case 900 cooling is in band (2546.2 against [2267, 2714]),
+// so the purge removes 27 percent of Case 900's cooling where the reference
+// range removes about 75 percent. The known neighbor is the RC-split rule's
+// under-resolution of the R25 floor slab (the transmitted wave halves, the
+// phase advances 3.6 h), the envelope-numerics class. The bands are the
+// standard's and are not widened; the annual test lands when the physics
+// does.
+
 #[test]
 fn bestest_extended_cases_are_tracked() {
     let cases = extended_cases();
@@ -359,6 +378,30 @@ fn bestest_in_depth_cases_are_tracked() {
         Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
             .unwrap_or_else(|err| panic!("in-depth case {} builds: {err}", case.id));
     }
+}
+
+/// Case 950's fixture builds and carries the scheduled-ventilation surface:
+/// the `[ventilation] flow_schedule_m3_s` column lands on the thermal
+/// solver's configuration as the fan's per-step schedule read. The annual
+/// band test for this case is stopped at the measured divergence the
+/// comment above records.
+#[test]
+fn bestest_high_mass_night_ventilation_case_is_tracked() {
+    let case = core_cases()
+        .into_iter()
+        .find(|c| c.id == "950")
+        .expect("case 950 is in the core set");
+    let dwelling = Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
+        .unwrap_or_else(|err| panic!("case 950 builds: {err}"));
+    let col = dwelling
+        .thermal_solver()
+        .config()
+        .ventilation
+        .flow_schedule_col;
+    assert!(
+        col.is_some(),
+        "case 950's fan schedule must reach the thermal solver's configuration"
+    );
 }
 
 /// ASHRAE 140-2017 Table B1-3 (carried by 140-2023 Section 7's case
@@ -423,6 +466,29 @@ fn case_920_carries_no_occupancy_gain_above_its_declared_internal_gains() {
          75 W"
     );
 }
+
+// BESTEST Case 650: night ventilation on the lightweight building.
+// Case 600's construction unchanged (the south window pair, 0.5 ach
+// infiltration, the 200 W gains); the vent fan adds 1703.16 standard m3/h
+// (0.4731 m3/s) ON 1800-0700 and OFF 0700-1800 (ASHRAE 140-2017
+// 5.2.2.1.5.2), and the configuration schedule (5.2.2.1.5.1.1) disables
+// heating entirely and cooling outside 0700-1800. The night purge is the
+// case's subject: a timestep-resolved mechanical-ventilation flow, the
+// surface the `[ventilation]` fixture table carries. The annual heating
+// load is exactly zero (heating is always OFF; every example program
+// reports zero), and the annual cooling load, with the fan's outdoor air
+// purging the day's stored heat every night, is the metric:
+// [4186, 4945] kWh (ASHRAE 140-2023 Annex B8 Table B8-2).
+#[test]
+fn bestest_case_650() {
+    let case = core_cases().into_iter().find(|c| c.id == "650").unwrap();
+    run_single_case(&case);
+}
+
+// BESTEST Case 950's annual band test is STOPPED at the measured divergence
+// the comment above records: the case is build-tracked
+// (`bestest_high_mass_night_ventilation_case_is_tracked`), the fan schedule's
+// surface is the one 650's landing proves, and the bands stay the standard's.
 
 fn run_case(case: &BestestCase) -> CaseObservation {
     let t0 = std::time::Instant::now();

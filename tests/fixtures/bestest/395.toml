@@ -19,6 +19,9 @@ time_res = 3600
 duration = 31536000
 output_chunk_size = 10000
 master_seed = 0
+# The comfort metrics' global thermostat deadband; the [setpoints] table
+# never read it (the field is the [simulation] table's).
+setpoint_deadband_c = 0.0
 [geometry]
 number_of_bedrooms = 3.0
 floor_area_m2 = 48.0
@@ -40,7 +43,6 @@ epw_path = "../../../data/examples/USA_CO_Denver.epw"
 [setpoints]
 heating_c = 20.0
 cooling_c = 27.0
-setpoint_deadband_c = 0.0
 
 [infiltration]
 ach = 0.0

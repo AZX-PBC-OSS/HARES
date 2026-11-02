@@ -8,8 +8,9 @@ use hares_types::{
 };
 use serde::{Deserialize, Serialize};
 
-pub(super) const HEATING_DISABLED_SETPOINT_C: f64 = -999.0;
-pub(super) const COOLING_DISABLED_SETPOINT_C: f64 = 999.0;
+pub(super) use hares_physics::constants::{
+    COOLING_DISABLED_SETPOINT_C, HEATING_DISABLED_SETPOINT_C,
+};
 const MAX_CYCLE_TIME_S: f64 = 3600.0;
 
 /// HVAC thermostat configuration shared across heating/cooling equipment.
@@ -433,7 +434,8 @@ impl ThermostatFsm {
     /// setpoint value the FSM carries must lie inside
     /// [`SETPOINT_PLAUSIBILITY_MIN_C`, `SETPOINT_PLAUSIBILITY_MAX_C`] C,
     /// the same band the schedule resolution enforces on the HPXML
-    /// profiles and the schedule columns. The FSM is the one choke point
+    /// profiles and the schedule columns, or be the side's own disabled
+    /// setpoint. The FSM is the one choke point
     /// every setpoint surface lands on (the HPXML resolution's profiles,
     /// the config's `*_setpoint_c` constants, the programmatic builders,
     /// a user-authored typed config's source), and every owner calls
@@ -450,17 +452,33 @@ impl ThermostatFsm {
     ///
     /// The first value outside the band, named with its side.
     fn validate_setpoint_band(&self) -> crate::Result<()> {
-        Self::validate_setpoint_value("heating", self.static_setpoints.heating_c)?;
-        Self::validate_setpoint_value("cooling", self.static_setpoints.cooling_c)?;
-        for (side, source) in [
-            ("heating", &self.heating_setpoint_source),
-            ("cooling", &self.cooling_setpoint_source),
+        Self::validate_setpoint_value(
+            "heating",
+            HEATING_DISABLED_SETPOINT_C,
+            self.static_setpoints.heating_c,
+        )?;
+        Self::validate_setpoint_value(
+            "cooling",
+            COOLING_DISABLED_SETPOINT_C,
+            self.static_setpoints.cooling_c,
+        )?;
+        for (side, disabled_c, source) in [
+            (
+                "heating",
+                HEATING_DISABLED_SETPOINT_C,
+                &self.heating_setpoint_source,
+            ),
+            (
+                "cooling",
+                COOLING_DISABLED_SETPOINT_C,
+                &self.cooling_setpoint_source,
+            ),
         ] {
             let Some(source) = source else {
                 continue;
             };
             for value in source.declared_literal_values() {
-                Self::validate_setpoint_value(side, value)?;
+                Self::validate_setpoint_value(side, disabled_c, value)?;
             }
         }
         Ok(())
@@ -469,9 +487,21 @@ impl ThermostatFsm {
     /// One setpoint value's plausibility: outside the band fails, naming
     /// the side, the value and the band, with the unit mistake the band
     /// exists to catch stated. A NaN fails the range check like any
-    /// other impossible value.
-    fn validate_setpoint_value(side: &str, value: f64) -> crate::Result<()> {
-        if (SETPOINT_PLAUSIBILITY_MIN_C..=SETPOINT_PLAUSIBILITY_MAX_C).contains(&value) {
+    /// other impossible value. The side's own disabled setpoint is the
+    /// exception: it is the off-state the thermostat's own
+    /// schedule-override path installs for a disabled side, so a schedule
+    /// hour carrying it declares the side off for that hour and is a
+    /// declared input, not a misread temperature. The other side's
+    /// sentinel is not an off-state here (a heating setpoint of +999 C
+    /// drives heating at every hour), so it keeps failing.
+    fn validate_setpoint_value(
+        side: &str,
+        disabled_setpoint_c: f64,
+        value: f64,
+    ) -> crate::Result<()> {
+        if (SETPOINT_PLAUSIBILITY_MIN_C..=SETPOINT_PLAUSIBILITY_MAX_C).contains(&value)
+            || value == disabled_setpoint_c
+        {
             return Ok(());
         }
         Err(HaresError::Equipment(format!(
@@ -922,6 +952,72 @@ pub(super) mod tests {
             Some(utc_time(15, 0)),
             utc_time(15, 1)
         ));
+    }
+
+    /// A schedule hour carrying the engine's disabled setpoint is the
+    /// off-state the thermostat's own override path installs (the
+    /// `no_space_*` arms), so the band check admits it: Case 650/950's
+    /// configuration schedule declares its disabled hours this way. Any
+    /// other out-of-band value still fails: the plausibility band's
+    /// purpose is the misread-unit catch.
+    #[test]
+    fn the_disabled_setpoints_admit_their_off_state_through_the_band() {
+        let mut fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: HEATING_DISABLED_SETPOINT_C,
+            cooling_c: 27.0,
+        });
+        fsm.heating_setpoint_source = Some(ScheduleSource::DailyProfile {
+            weekday: [HEATING_DISABLED_SETPOINT_C; 24],
+            weekend: [HEATING_DISABLED_SETPOINT_C; 24],
+            month_multipliers: [1.0; 12],
+            max_value: 1.0,
+        });
+        fsm.cooling_setpoint_source = Some(ScheduleSource::DailyProfile {
+            weekday: {
+                let mut hours = [COOLING_DISABLED_SETPOINT_C; 24];
+                hours[7..18].fill(27.0);
+                hours
+            },
+            weekend: {
+                let mut hours = [COOLING_DISABLED_SETPOINT_C; 24];
+                hours[7..18].fill(27.0);
+                hours
+            },
+            month_multipliers: [1.0; 12],
+            max_value: 1.0,
+        });
+        fsm.validate_setpoint_band()
+            .expect("the off-state hours are declared inputs, not misread temperatures");
+
+        // The other side's sentinel is not this side's off-state: a heating
+        // setpoint of +999 C would drive heating at every hour, so the band
+        // must keep failing it.
+        let cross = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: COOLING_DISABLED_SETPOINT_C,
+            cooling_c: 27.0,
+        });
+        let err = cross
+            .validate_setpoint_band()
+            .expect_err("the cooling sentinel is not a heating off-state");
+        assert!(
+            err.to_string().contains("heating"),
+            "the error names the side: {err}"
+        );
+    }
+
+    #[test]
+    fn a_misread_setpoint_outside_the_band_still_fails() {
+        let fsm = ThermostatFsm::new(ThermalSetpoints {
+            heating_c: 20.0,
+            cooling_c: 50.0,
+        });
+        let err = fsm
+            .validate_setpoint_band()
+            .expect_err("50 °C is outside the plausible setpoint band");
+        assert!(
+            err.to_string().contains("cooling"),
+            "the error names the side: {err}"
+        );
     }
 
     #[test]

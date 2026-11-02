@@ -14,6 +14,7 @@ use hares_io::{
 };
 use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
+    constants::{COOLING_DISABLED_SETPOINT_C, HEATING_DISABLED_SETPOINT_C},
     psychrometrics::{humidity_ratio_from_tdp, moist_air_enthalpy, wet_bulb_from_humidity_ratio},
     solar::{
         OMNI_AZIMUTH_SAMPLES, SkyIrradiance, SolarPosition, SunPosition, SurfaceOrientation,
@@ -2635,51 +2636,70 @@ fn determine_initial_indoor_temp_c(
     setpoint_deadband_c: Option<f64>,
 ) -> f64 {
     debug_assert!(start_hour <= 23, "start_hour out of range: {start_hour}");
+    // A profile hour carrying the engine's disabled setpoint declares that
+    // side off for the hour (the same value the thermostat's own
+    // schedule-override path installs), so the start-hour read treats it as
+    // the side's absence: an initialization at -999 °C or +999 °C is not a
+    // comfort start, it is the off-state leaking into the initial condition.
+    let comfort_setpoint =
+        |sp: Option<f64>, disabled: f64| -> Option<f64> { sp.filter(|&value| value != disabled) };
     let (heating_sp, cooling_sp) = if is_weekend {
         (
-            building
-                .heating_weekend_setpoints_c
-                .as_ref()
-                .and_then(|v| v.get(start_hour).copied())
-                .or_else(|| {
-                    building
-                        .heating_weekday_setpoints_c
-                        .as_ref()
-                        .and_then(|v| v.get(start_hour).copied())
-                }),
-            building
-                .cooling_weekend_setpoints_c
-                .as_ref()
-                .and_then(|v| v.get(start_hour).copied())
-                .or_else(|| {
-                    building
-                        .cooling_weekday_setpoints_c
-                        .as_ref()
-                        .and_then(|v| v.get(start_hour).copied())
-                }),
+            comfort_setpoint(
+                building
+                    .heating_weekend_setpoints_c
+                    .as_ref()
+                    .and_then(|v| v.get(start_hour).copied())
+                    .or_else(|| {
+                        building
+                            .heating_weekday_setpoints_c
+                            .as_ref()
+                            .and_then(|v| v.get(start_hour).copied())
+                    }),
+                HEATING_DISABLED_SETPOINT_C,
+            ),
+            comfort_setpoint(
+                building
+                    .cooling_weekend_setpoints_c
+                    .as_ref()
+                    .and_then(|v| v.get(start_hour).copied())
+                    .or_else(|| {
+                        building
+                            .cooling_weekday_setpoints_c
+                            .as_ref()
+                            .and_then(|v| v.get(start_hour).copied())
+                    }),
+                COOLING_DISABLED_SETPOINT_C,
+            ),
         )
     } else {
         (
-            building
-                .heating_weekday_setpoints_c
-                .as_ref()
-                .and_then(|v| v.get(start_hour).copied())
-                .or_else(|| {
-                    building
-                        .heating_weekend_setpoints_c
-                        .as_ref()
-                        .and_then(|v| v.get(start_hour).copied())
-                }),
-            building
-                .cooling_weekday_setpoints_c
-                .as_ref()
-                .and_then(|v| v.get(start_hour).copied())
-                .or_else(|| {
-                    building
-                        .cooling_weekend_setpoints_c
-                        .as_ref()
-                        .and_then(|v| v.get(start_hour).copied())
-                }),
+            comfort_setpoint(
+                building
+                    .heating_weekday_setpoints_c
+                    .as_ref()
+                    .and_then(|v| v.get(start_hour).copied())
+                    .or_else(|| {
+                        building
+                            .heating_weekend_setpoints_c
+                            .as_ref()
+                            .and_then(|v| v.get(start_hour).copied())
+                    }),
+                HEATING_DISABLED_SETPOINT_C,
+            ),
+            comfort_setpoint(
+                building
+                    .cooling_weekday_setpoints_c
+                    .as_ref()
+                    .and_then(|v| v.get(start_hour).copied())
+                    .or_else(|| {
+                        building
+                            .cooling_weekend_setpoints_c
+                            .as_ref()
+                            .and_then(|v| v.get(start_hour).copied())
+                    }),
+                COOLING_DISABLED_SETPOINT_C,
+            ),
         )
     };
 
@@ -3156,6 +3176,7 @@ mod tests {
             details_xml,
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         }
     }
 
@@ -3490,6 +3511,29 @@ mod tests {
         b.heating_weekend_setpoints_c = Some(vec![20.0; 24]);
         let result = determine_initial_indoor_temp_c(&b, 0.0, 0, false, None, None);
         assert!((result - 20.0).abs() < 1e-10, "expected 20.0, got {result}");
+    }
+
+    /// A profile hour carrying the engine's disabled setpoint declares that
+    /// side off for the hour (Case 650/950's "Heating = always OFF" takes
+    /// this form), so the start-hour read treats it as the side's absence:
+    /// the initialization falls to the free-float outdoor start, never to
+    /// the off-state value itself.
+    #[test]
+    fn disabled_setpoint_hours_do_not_initialize_the_zone_at_the_off_state() {
+        let mut b = building(None);
+        b.heating_weekday_setpoints_c = Some(vec![
+                hares_physics::constants::HEATING_DISABLED_SETPOINT_C;
+                24
+            ]);
+        b.heating_weekend_setpoints_c = Some(vec![
+                hares_physics::constants::HEATING_DISABLED_SETPOINT_C;
+                24
+            ]);
+        let result = determine_initial_indoor_temp_c(&b, 0.0, 0, false, None, None);
+        assert!(
+            (result - 0.0).abs() < 1e-10,
+            "the heating-disabled hour must start the zone at the outdoor temperature, got {result}"
+        );
     }
 
     #[test]

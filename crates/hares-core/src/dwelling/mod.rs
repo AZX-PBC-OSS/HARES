@@ -3543,6 +3543,7 @@ impl Dwelling {
             &config,
             schedule_result.event_window_schedule_col,
             schedule_result.event_probability_schedule_col,
+            schedule_result.ventilation_flow_schedule_col,
         )?;
         let weather = build_synthetic_weather(&config, path)?;
         let dwelling_config = DwellingConfig {
@@ -16657,7 +16658,7 @@ occupancy = 1.0
         );
 
         let mut building =
-            build_synthetic_building(&config, None, None).expect("build synthetic building");
+            build_synthetic_building(&config, None, None, None).expect("build synthetic building");
         let schedule_result = build_synthetic_schedule(&config).expect("build schedule");
         let weather = build_synthetic_weather(&config, &base_path).expect("build weather");
 
@@ -17200,6 +17201,7 @@ occupancy = 1.0
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         // Build ZoneMap from building zones (same logic as from_preparsed()).

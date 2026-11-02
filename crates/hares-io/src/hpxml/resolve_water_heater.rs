@@ -1482,6 +1482,7 @@ mod tests {
             details_xml: details,
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         }
     }
 
@@ -3315,6 +3316,7 @@ mod tests {
             },
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
+            ventilation_flow_schedule_col: None,
         };
 
         // Conditioned zone is at index 0 → zone_id 1

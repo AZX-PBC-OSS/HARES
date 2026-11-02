@@ -378,6 +378,23 @@ pub const SETPOINT_PLAUSIBILITY_MIN_C: f64 = 5.0;
 /// magnitude above the converted OS-HPXML defaults.
 pub const SETPOINT_PLAUSIBILITY_MAX_C: f64 = 40.0;
 
+/// The thermostat's heating-disabled setpoint, in °C.
+///
+/// The value a setpoint schedule hour carries to declare the heating side
+/// disabled for that hour, and the value the thermostat's own
+/// schedule-override path (`no_space_heating`) installs for a disabled
+/// side. The zone temperature never reaches it, so the mode logic never
+/// selects Heating and the ideal dispatch's comfort band never bounds the
+/// zone from below. A setpoint plausibility check admits exactly this
+/// value (and [`COOLING_DISABLED_SETPOINT_C`]) outside the
+/// [5, 40] °C band: it is the engine's off-state, not a misread
+/// temperature.
+pub const HEATING_DISABLED_SETPOINT_C: f64 = -999.0;
+
+/// The thermostat's cooling-disabled setpoint, in °C. The cooling-side
+/// half of [`HEATING_DISABLED_SETPOINT_C`]'s contract.
+pub const COOLING_DISABLED_SETPOINT_C: f64 = 999.0;
+
 // --- IEEE 1547-2018 DER abnormal-condition response ---
 
 /// Nominal frequency the IEEE 1547 tables are written against, in Hz. The

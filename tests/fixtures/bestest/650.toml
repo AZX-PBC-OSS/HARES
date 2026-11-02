@@ -1,0 +1,270 @@
+building_id = 650
+
+internal_gains_w = 200.0
+internal_gains_constant = true
+internal_gains_sensible_fraction = 1.0
+# The radiant split is the family's 0.3: the I/O Reference's generic
+# OtherEquipment example, not a BESTEST case value. ASHRAE 140-2017 Addendum a
+# Section 5.2.1.7 specifies 200 W, 100% sensible, 60% radiative, 40%
+# convective; 920.toml's note gives the reason the 0.3 stays until the
+# family-wide correction (a Tier-1 physics re-pin).
+internal_gains_radiant_fraction = 0.3
+
+# The warm-up: the [simulation] table's warmup field, the default
+# converging warm-up (the EnergyPlus criteria).
+[simulation]
+start_time = "2024-01-01T00:00:00-07:00"
+time_res = 3600
+duration = 31536000
+output_chunk_size = 10000
+master_seed = 0
+# The comfort metrics' global thermostat deadband (the [simulation] table's
+# field; the ideal HVAC's own deadband is [hvac] deadband_c above).
+setpoint_deadband_c = 0.0
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+mass_multiplier = 1.0
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "IdealHVAC"
+fuel = "electricity"
+heating_capacity_kbtu_h = 30.0
+deadband_c = 0.0
+
+[weather]
+epw_path = "../../../data/examples/USA_CO_Denver.epw"
+
+# ASHRAE 140-2017 5.2.2.1.5.1.1 (Case 650's configuration schedule), hours in
+# the fixture's step-start convention (index h is the hour [h:00, h+1:00)):
+# the standard's "Hour 19 through Hour 7" is the hour-ending convention, the
+# intervals [18:00, 19:00) through [06:00, 07:00), which is step-start hours
+# 18-23 and 0-6 here.
+#
+#   Heating = always OFF: every hour carries the engine's heating-disabled
+#     setpoint (hares-physics::constants::HEATING_DISABLED_SETPOINT_C), the
+#     value the thermostat's own schedule-override path installs for a
+#     disabled side; the zone temperature never reaches it (the free-float
+#     minimum the 900FF band pins is 3.26 degrees C), so no heating delivers
+#     and the annual heating load is exactly zero.
+#   Cool = OFF 1800-0700: those hours carry the cooling-disabled setpoint
+#     (COOLING_DISABLED_SETPOINT_C); Cool = ON IF Temperature > 27 degC
+#     0700-1800: those hours carry 27.0.
+[setpoints]
+# The daytime cooling setpoint: Cool = ON IF Temperature > 27 degC. The
+# hourly schedule below gates the hours and carries the off-state.
+cooling_c = 27.0
+cooling_schedule_c = [999.0, 999.0, 999.0, 999.0, 999.0, 999.0, 999.0, 27.0, 27.0, 27.0, 27.0, 27.0, 27.0, 27.0, 27.0, 27.0, 27.0, 27.0, 999.0, 999.0, 999.0, 999.0, 999.0, 999.0]
+heating_schedule_c = [-999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0, -999.0]
+
+# ASHRAE 140-2017 5.2.2.1.5 (Case 650: Night Ventilation): Case 600's
+# infiltration (0.5 ach, above) is kept and the vent fan adds 1703.16
+# standard m3/h = 0.4731 m3/s (5.2.2.1.5.2.a; 0.4731 x 3600 = 1703.16), ON
+# 1800-0700 and OFF 0700-1800 (5.2.2.1.5.2.b, the same hour intervals as the
+# configuration schedule above). Waste heat from the fan is zero
+# (5.2.2.1.5.2.b): the surface carries no fan power. The engine computes the
+# fan's mass flow from this volumetric rate with the step's own outdoor
+# density at the EPW's station pressure, so the mass flow corrects for
+# altitude and Table 5-160's sea-level-adjusted rate does not apply. The
+# schedule is hour-resolved and zero-order held at the schedule row's
+# resolution: every step reads the value of the hour its start time falls in.
+[ventilation]
+flow_schedule_m3_s = [0.4731, 0.4731, 0.4731, 0.4731, 0.4731, 0.4731, 0.4731, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4731, 0.4731, 0.4731, 0.4731, 0.4731, 0.4731]
+
+[infiltration]
+ach = 0.5
+
+[[boundaries]]
+id = "south-wall"
+boundary_type = "Wall"
+outside_material = "wood siding"
+area_m2 = 9.6
+azimuth_deg = 180.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.066
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.012
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "north-wall"
+boundary_type = "Wall"
+outside_material = "wood siding"
+area_m2 = 21.6
+azimuth_deg = 0.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.066
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.012
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "east-wall"
+boundary_type = "Wall"
+outside_material = "wood siding"
+area_m2 = 16.2
+azimuth_deg = 90.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.066
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.012
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "west-wall"
+boundary_type = "Wall"
+outside_material = "wood siding"
+area_m2 = 16.2
+azimuth_deg = 270.0
+tilt_deg = 90.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.009
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.066
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.012
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "roof"
+boundary_type = "Roof"
+# ASHRAE 140 states no outside roughness; the roof deck is the walls' wood,
+# and HPXML's only wood roof material is wood shingles (register D-010).
+outside_material = "wood shingles or shakes"
+area_m2 = 48.0
+tilt_deg = 0.0
+solar_absorptance = 0.6
+emittance = 0.9
+interior_zone = "Conditioned"
+exterior_zone = "Outdoor"
+
+[[boundaries.material_layers]]
+thickness_m = 0.019
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.1118
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.010
+conductivity_w_m_k = 0.160
+density_kg_m3 = 950.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries]]
+id = "floor"
+boundary_type = "Floor"
+area_m2 = 48.0
+tilt_deg = 180.0
+interior_zone = "Conditioned"
+exterior_zone = "Ground"
+
+[[boundaries.material_layers]]
+thickness_m = 1.003
+conductivity_w_m_k = 0.040
+density_kg_m3 = 12.0
+specific_heat_j_kg_k = 840.0
+
+[[boundaries.material_layers]]
+thickness_m = 0.025
+conductivity_w_m_k = 0.140
+density_kg_m3 = 530.0
+specific_heat_j_kg_k = 900.0
+
+[[windows]]
+id = "south-window-1"
+area_m2 = 6.0
+azimuth_deg = 180.0
+u_factor_w_m2_k = 3.0
+shgc = 0.769
+attached_to_wall_id = "south-wall"
+
+[[windows]]
+id = "south-window-2"
+area_m2 = 6.0
+azimuth_deg = 180.0
+u_factor_w_m2_k = 3.0
+shgc = 0.769
+attached_to_wall_id = "south-wall"
+
+[schedule]
+occupancy = 0.0
+occupants_present = false
