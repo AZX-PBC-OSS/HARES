@@ -142,7 +142,7 @@ fn derive_zone_capacitances_uses_altitude_corrected_density() {
 /// showed that increasing from 2 to 4 nodes moved min_zone_temp +0.029 °C
 /// (warmer, not colder). RC discretization is ruled out as a cause.
 #[test]
-fn heavyweight_concrete_wall_produces_two_rc_sub_layers() {
+fn heavyweight_concrete_wall_produces_three_rc_sub_layers() {
     let wall_area = 21.6_f64;
 
     let zones = vec![ZoneInput {
