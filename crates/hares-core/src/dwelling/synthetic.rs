@@ -17,6 +17,7 @@ use super::Result;
 use super::conversions::duration_to_u32_secs;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticTomlConfig {
     #[serde(default)]
     pub(crate) building_id: Option<i64>,
@@ -2980,6 +2981,91 @@ flow_rate = 0.5
             err.to_string().contains("flow_rate"),
             "the error must name the unknown key, got: {err}"
         );
+    }
+
+    /// The top level's unknown keys are typed errors: a misspelled table
+    /// (`[ventiliation]` for `[ventilation]`) or a stale flat key
+    /// (`eventload` for `event_load`) fails the parse naming itself, the
+    /// same message shape the sub-tables' `deny_unknown_fields` gives
+    /// their keys. A key the struct never read is a silent drop one level
+    /// up: the fixture builds without it and the run answers a question
+    /// the fixture never asked.
+    #[test]
+    fn synthetic_toml_rejects_unknown_toplevel_key() {
+        // A flat unknown key sits at the top only BEFORE the first table
+        // header: past `[hvac]` the same line becomes that table's key and
+        // answers to its struct, not this one.
+        for (unknown_key, unknown_toml, misspelled_table) in [
+            ("ventiliation", "", "[ventiliation]\nflow_rate = 0.5\n"),
+            ("eventload", "eventload = true\n", ""),
+        ] {
+            let toml = format!(
+                r#"
+building_id = 1
+{unknown_toml}
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+
+[materials]
+wall_r_value_m2_k_w = 2.0
+
+[hvac]
+equipment_name = "None"
+
+{misspelled_table}"#
+            );
+            let err = toml::from_str::<SyntheticTomlConfig>(&toml).expect_err(
+                "an unknown top-level key is a typed error, not a silently ignored one",
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains(unknown_key),
+                "the error must name the unknown key `{unknown_key}`, got: {message}"
+            );
+        }
+    }
+
+    /// The corpus's keys are the contract: every fixture TOML the synthetic
+    /// path parses (the BESTEST family, the only fixture files
+    /// `Dwelling::from_toml_config` reads) deserialises with unknown-key
+    /// rejection on, so a fixture key the struct never read fails here
+    /// naming the file instead of dropping silently. A fixture the schema
+    /// legitimately grew a key for declares it in the same change; a
+    /// fixture carrying a key nothing reads is a defect to honour or
+    /// remove, never to ignore. The golden fixtures are not this struct's
+    /// corpus: they are `GoldenManifest`s (the frame_golden tool's surface,
+    /// itself unknown-key strict, which declares their `defaults` and
+    /// `defaults_files` tables) and never parse as a synthetic dwelling.
+    #[test]
+    fn synthetic_corpus_fixtures_parse_with_every_key_declared() {
+        use std::path::PathBuf;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = root.join("tests/fixtures/bestest");
+        let mut fixtures: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("bestest: the corpus directory reads: {err}"))
+            .map(|entry| entry.expect("the corpus entry reads").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        fixtures.sort();
+        assert!(!fixtures.is_empty(), "bestest: the corpus is present");
+        for fixture in fixtures {
+            let toml = std::fs::read_to_string(&fixture)
+                .unwrap_or_else(|err| panic!("{}: reads: {err}", fixture.display()));
+            if let Err(err) = toml::from_str::<SyntheticTomlConfig>(&toml) {
+                panic!(
+                    "{}: parses with every key declared: {err}",
+                    fixture.display()
+                );
+            }
+        }
     }
 
     /// The fan schedule's validation: exactly 24 hourly values, finite and
