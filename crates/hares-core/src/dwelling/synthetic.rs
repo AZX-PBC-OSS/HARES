@@ -3052,12 +3052,10 @@ equipment_name = "None"
     fn synthetic_toml_rejects_unknown_subtable_key() {
         // (the table's name for the failure message, the appended TOML, the
         // unknown key, a declared field the error's expected-list must
-        // name). Every case's document is valid except for the misspelled
-        // key, so the parse's only possible complaint is that key: without
-        // the table's rejection the document parses and the key drops.
-        // The flat tables carry only the misspelled key; the sequence
-        // entries carry their required fields so the misspelled key is the
-        // entry's only defect.
+        // name). Every case's document carries its table's required fields
+        // and one misspelled key, so the only possible complaint is that
+        // key: without the table's rejection the document parses and the
+        // key drops.
         let base = r#"
 [simulation]
 start_time = "2024-01-01T00:00:00Z"
@@ -3075,13 +3073,15 @@ zone_volume_m3 = 129.6
         let cases: [(&str, String, &str, &str); 8] = [
             (
                 "[materials]",
-                format!("{hvac}[materials]\nwall_r_val_m2_k_w = 2.0\n"),
+                format!("{hvac}[materials]\nwall_r_value_m2_k_w = 2.0\nwall_r_val_m2_k_w = 2.0\n"),
                 "wall_r_val_m2_k_w",
                 "wall_r_value_m2_k_w",
             ),
             (
                 "[hvac]",
-                format!("{materials}[hvac]\nequpment_name = \"Furnace\"\n"),
+                format!(
+                    "{materials}[hvac]\nequipment_name = \"None\"\nequpment_name = \"Furnace\"\n"
+                ),
                 "equpment_name",
                 "deadband_c",
             ),
@@ -3099,7 +3099,7 @@ zone_volume_m3 = 129.6
             ),
             (
                 "[infiltration]",
-                with_required("[infiltration]\nach50 = 0.5\n"),
+                with_required("[infiltration]\nach = 0.5\nach50 = 0.5\n"),
                 "ach50",
                 "internal_gains_w",
             ),
@@ -3114,7 +3114,7 @@ zone_volume_m3 = 129.6
             (
                 "[[boundaries.material_layers]]",
                 with_required(
-                    "[[boundaries]]\nid = \"wall-1\"\nboundary_type = \"Wall\"\narea_m2 = 12.0\n\n[[boundaries.material_layers]]\nthickness_m = 0.1\nconductivity_w_mk = 0.5\n",
+                    "[[boundaries]]\nid = \"wall-1\"\nboundary_type = \"Wall\"\narea_m2 = 12.0\n\n[[boundaries.material_layers]]\nthickness_m = 0.1\nconductivity_w_m_k = 0.5\nconductivity_w_mk = 0.5\n",
                 ),
                 "conductivity_w_mk",
                 "specific_heat_j_kg_k",
