@@ -2270,7 +2270,8 @@ ladder (six resistances, five capacitances) that holds the layer's series
 resistance and total capacitance exactly and reproduces the layer's own
 ISO 13786 propagator response at the diurnal period - the periodic
 transmittance phasor (the decrement factor and the lag it defines) and
-the areal heat capacity - to the fit's residual, recorded per boundary in
+the areal heat capacity - to the fit's residual, recorded per reduced layer
+chain in
 `EnvelopeDiagnostics::reduction_fit_exceedance_count` past a 2 percent
 bound. The fit is a damped Gauss-Newton over the ladder's R/C splits,
 each split through a softmax so the two exact sums hold by construction,
@@ -2284,13 +2285,15 @@ Why five: the cap is the measured reach boundary of the pinned
 constructions' deepest layer, the R25 slab's 1.007 m insulation (3.05
 penetration depths). A brute reach study over each ladder family (tens of
 thousands of splits, then bounded local refinement) measured the family's
-closest approach to the layer's own propagator response: the 10-node
-chain's response is reproduced exactly at five nodes (the transmittance
-magnitude and the phase both under 1e-9), to 1.3 percent on the
-transmittance magnitude (the phase to 0.05 h) at four, and NOT AT ALL
-inside the witness's class below that (the lag residual 0.71 h at three,
-1.83 h at two, against the 0.2 h budget the chain's own -3.5 percent
-decrement residual leaves of the ±5 percent class). The 900 wall's
+closest approach to the layer's own propagator response: five nodes
+reproduce it to 1.3 percent on the transmittance magnitude (the phase to
+0.05 h, the areal capacity to 0.04 percent) and reproduce the 10-node
+chain's response exactly (the magnitude and the phase both under 1e-9),
+where four nodes miss the witness's lag budget (0.22 h against the 0.2 h
+class), and below that the family is not inside the witness's class at
+all (the lag residual 0.71 h at three, 1.83 h at two, against the 0.2 h
+budget the chain's own -3.5 percent decrement residual leaves of the ±5
+percent class). The 900 wall's
 concrete (one penetration depth) reproduces at two nodes to 0.3 percent
 but sits below the cap anyway (three sub-layer nodes), so the witness's
 600 and 900 wall pins hold bit for bit; only the R25 slab's floor
@@ -2335,3 +2338,34 @@ resolve 15 sub-layer nodes each and condense to 5 ladder nodes each:
 91 states to 31 (the checkpoint's `envelope_state` vector and the
 per-dwelling model storage with it). The precomputed LUT path, the
 fallback-R path and the solve loop are untouched.
+
+The fit's target is the single diurnal frequency the ISO 13786
+characteristics are defined at; the model's contract is the annual to
+diurnal band, not the broadband chain. Measured on the 900 floor's
+reduced layer, the transmittance phasor residual is 3.7 percent at a
+period three times the diurnal (1.8 percent on the magnitude, 0.41 h on
+the lag) and 0.04 percent at the annual period, and the assembled
+boundary holds the 5 percent witness class at the 3-day harmonic
+(`engine_periodic_response_matches_iso_13786`'s second-frequency arm).
+The 8-hour harmonic measures 40 percent on the reduced layer (the
+unreduced chain itself measures 12.6 percent there), so the shorter
+periods are outside the model's contract and carry the chain's own
+diurnal dispersion.
+
+The five-node reach was measured on the R25 slab's 3.05 penetration
+depths. A layer deeper than that lies outside the family's reach: the
+default synthetic building's six faces resolve 4.8 penetration depths,
+and their five-node fits carry a 24 percent diurnal transmittance phasor
+residual (0.94 h on the lag), past the 2 percent bound. The assembly
+keeps the fit and counts it in
+`EnvelopeDiagnostics::reduction_fit_exceedance_count` (six per
+auto-generated default building), pinned by
+`reduction_counts_a_fit_past_the_residual_bound`; a fit inside the bound
+stays uncounted (`reduction_does_not_count_a_fit_inside_the_bound`). The
+alternatives were measured: keeping the 15-node chains for layers past
+the reach forfeits the row's reclamation, and a depth-graded node count
+would need nine nodes for this face (its best fits at six, seven, eight
+and nine nodes measure 14, 7.2, 3.0 and 0.36 percent), carrying 55
+states for the default building. The row's budget is five nodes; the
+counter is its record, so the accuracy cost is counted rather than
+hidden.

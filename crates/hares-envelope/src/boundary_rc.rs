@@ -169,12 +169,15 @@ fn split_layer_count(
 // penetration depths): five nodes reproduce that layer's propagator
 // response to 1.3 percent on the transmittance (the phase to 0.05 h, the
 // areal capacity to 0.04 percent) where four nodes miss the witness's lag
-// budget (0.22 h against the 0.2 h class). Layers at five or fewer
-// sub-layer nodes -- every thin layer, and the witness's 600 wall
-// (three single-node layers) and 900 wall (its concrete at three) -- are
-// untouched bit for bit. A same-zone boundary's kept chain is a dead-end
-// fin whose cut surface is adiabatic, not a two-faced layer, so the
-// reduction does not apply there.
+// budget (0.22 h against the 0.2 h class). A layer deeper than the study's
+// lies outside the family's reach: the fit is kept and counted past the
+// bound (the default synthetic building's 4.8-depth faces measure 24
+// percent on the transmittance), the cost recorded rather than hidden.
+// Layers at five or fewer sub-layer nodes -- every thin layer, and the
+// witness's 600 wall (three single-node layers) and 900 wall (its concrete
+// at three) -- are untouched bit for bit. A same-zone boundary's kept
+// chain is a dead-end fin whose cut surface is adiabatic, not a two-faced
+// layer, so the reduction does not apply there.
 //
 // Cite: ISO 13786:2007 section 6.2 (the propagator the fit targets); the
 // reach study recorded in docs/PHYSICS_DECISIONS.md (the cap's derivation
@@ -192,7 +195,8 @@ const MAX_RESOLVED_SUBNODES: usize = 5;
 /// propagator response. A boundary whose best fit exceeds it keeps the fit
 /// and is counted in
 /// [`EnvelopeDiagnostics::reduction_fit_exceedance_count`] -- recorded,
-/// never silent. A tenth of the ISO tolerance class the reduction serves.
+/// never silent. Two fifths of the 5 percent ISO 13786 witness class the
+/// reduction serves.
 const REDUCTION_FIT_RESIDUAL_BOUND: f64 = 0.02;
 
 /// The fit's convergence bound on the relative response residuals.
@@ -880,10 +884,10 @@ pub struct EnvelopeDiagnostics {
     pub min_capacitance_clamp_count: usize,
     /// Number of material-layer chains whose fitted ladder's diurnal-response
     /// residual exceeded 2 percent (a fraction of the layer's own propagator
-    /// response; the bound is REDUCTION_FIT_RESIDUAL_BOUND, a tenth of the
-    /// ISO tolerance class the reduction serves). Counted in every build
-    /// profile: the reduction's accuracy cost is a physics record, not an
-    /// observation nicety.
+    /// response; the bound is REDUCTION_FIT_RESIDUAL_BOUND, two fifths of the
+    /// 5 percent ISO 13786 witness class the reduction serves). Counted in
+    /// every build profile: the reduction's accuracy cost is a physics
+    /// record, not an observation nicety.
     pub reduction_fit_exceedance_count: usize,
 }
 
@@ -5931,12 +5935,85 @@ mod tests {
                 1 + split_layer_count(t, k, rho, cp),
                 "a layer at the cap resolves its own sub-layers, no reduction"
             );
-            #[cfg(feature = "observe")]
             assert_eq!(
                 diag.reduction_fit_exceedance_count, 0,
                 "no reduction ran, none counted"
             );
-            let _ = diag;
+        }
+
+        #[test]
+        fn reduction_counts_a_fit_past_the_residual_bound() {
+            // The synthetic face's 4.8 diurnal penetration depths sit past
+            // the five-node ladder's reach (the reach study's layer is the
+            // R25 slab's 3.05 depths): the fit's best diurnal transmittance
+            // residual measures 24 percent (the lag 0.94 h), past the 2
+            // percent bound. The assembly keeps the fit and counts it, so
+            // the accuracy cost is recorded rather than silent.
+            let (t, k, rho, cp) = (0.15, 0.075, 2400.0, 880.0);
+            let (_, _, residual) = fit_band_limited_ladder(t, k, rho, cp, DIURNAL_OMEGA);
+            assert!(
+                residual > REDUCTION_FIT_RESIDUAL_BOUND,
+                "the synthetic face is the deliberately hard layer: its fit \
+                 residual {residual} must sit past the bound {}",
+                REDUCTION_FIT_RESIDUAL_BOUND
+            );
+            let caps = derive_zone_capacitances(
+                &[ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+                }],
+                SEA_LEVEL_PRESSURE_PA,
+            )
+            .unwrap();
+            let bd = make_boundary(
+                12.0,
+                0,
+                ExteriorTarget::Outdoor,
+                vec![make_layer(t, k, rho, cp, 12.0)],
+                0.0,
+            );
+            let (_, diag) =
+                assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+            assert_eq!(
+                diag.reduction_fit_exceedance_count, 1,
+                "the hard layer's past-bound fit is counted once"
+            );
+        }
+
+        #[test]
+        fn reduction_does_not_count_a_fit_inside_the_bound() {
+            // The R25 slab's 3.05 depths are the reach study's layer: the
+            // fit measures 1.3 percent on the transmittance, inside the 2
+            // percent bound, so the counter stays zero.
+            let (t, k, rho, cp) = SLAB_INSULATION;
+            let (_, _, residual) = fit_band_limited_ladder(t, k, rho, cp, DIURNAL_OMEGA);
+            assert!(
+                residual <= REDUCTION_FIT_RESIDUAL_BOUND,
+                "the reach study's layer fits inside the bound: {residual}"
+            );
+            let caps = derive_zone_capacitances(
+                &[ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+                }],
+                SEA_LEVEL_PRESSURE_PA,
+            )
+            .unwrap();
+            let bd = make_boundary(
+                12.0,
+                0,
+                ExteriorTarget::Outdoor,
+                vec![make_layer(t, k, rho, cp, 12.0)],
+                0.0,
+            );
+            let (_, diag) =
+                assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+            assert_eq!(
+                diag.reduction_fit_exceedance_count, 0,
+                "a fit inside the bound is not counted"
+            );
         }
 
         #[test]
@@ -5956,6 +6033,11 @@ mod tests {
             .unwrap();
             let (t, k, rho, cp) = (0.15, 0.075, 2400.0, 880.0);
             let area = 12.0;
+            // The synthetic face's own layer: 15 resolved sub-layer nodes
+            // condense to the 5-node ladder; the boundary diagnostic's series R
+            // and capacitance are the layer's own, exactly, and the fit's
+            // residual sits past the 2 percent bound (this layer is deeper
+            // than the reach study's), counted on the boundary.
             let bd = make_boundary(
                 area,
                 0,
@@ -5969,6 +6051,10 @@ mod tests {
                 rc.a_c.nrows(),
                 1 + MAX_RESOLVED_SUBNODES,
                 "a 15-node face condenses to the 5-node ladder plus the zone air"
+            );
+            assert_eq!(
+                diag.reduction_fit_exceedance_count, 1,
+                "this face's past-bound fit is counted"
             );
             let bd_diag = &diag.boundaries[0];
             assert_eq!(bd_diag.n_rc_nodes, MAX_RESOLVED_SUBNODES);

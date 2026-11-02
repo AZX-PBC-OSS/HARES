@@ -1260,8 +1260,10 @@ pub(crate) fn build_synthetic_building(
         // per boundary at R = 2.0 (α = k/(ρ·c_p) with the derived k = 0.075
         // and the concrete constants ρ = 2400 kg/m³, c_p = 880 J/(kg·K)
         // gives δ_p ≈ 0.031 m), and the assembly's band-limited reduction
-        // condenses the 15-node chain to the 5-node ladder that reproduces
-        // the layer's own diurnal response, where the real-concrete
+        // condenses the 15-node chain to the 5-node ladder fitted to the
+        // layer's own diurnal response. This face is deeper than the reach
+        // study's 3.05 penetration depths, so its fit's residual sits past
+        // the 2 percent bound and the assembly counts it. The real-concrete
         // thickness d = R·k (k = 1.4, α ≈ 6.6e-7 m²/s) would split to 63.
         // The per-layer capacitance is identical regardless of k because
         // only d, ρ, and c_p control C; the six faces' 5 ladder nodes each
@@ -4808,7 +4810,7 @@ equipment_name = "None"
         )
         .expect("derive_zone_capacitances");
 
-        let (rc, _diag) = hares_envelope::assemble_building_rc(
+        let (rc, diag) = hares_envelope::assemble_building_rc(
             &boundary_inputs,
             1,
             &zone_caps,
@@ -4828,6 +4830,16 @@ equipment_name = "None"
             n_states, 31,
             "the default synthetic building's six faces' reduced 5-node \
              ladders plus the zone air make 31 states; got {n_states}"
+        );
+
+        // The default face resolves 4.8 diurnal penetration depths, past
+        // the five-node ladder's 3.05-depth reach: each face's fit's
+        // diurnal transmittance residual measures 24 percent, past the 2
+        // percent bound, and the assembly counts it per face. The accuracy
+        // cost is recorded, never silent.
+        assert_eq!(
+            diag.reduction_fit_exceedance_count, n_non_window,
+            "each of the {n_non_window} default faces' past-bound fits is counted"
         );
 
         assert!(
