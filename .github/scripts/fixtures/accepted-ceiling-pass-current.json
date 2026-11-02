@@ -5,14 +5,12 @@
       "baseline": "pr",
       "fullname": "pr/rl_episode/batch_step/step_and_observe/16",
       "criterion_benchmark_v1": {
-        "group_id": "rl_episode",
-        "function_id": "batch_step",
+        "group_id": "rl_episode/batch_step",
+        "function_id": "step_and_observe",
         "value_str": "16",
-        "throughput": {
-          "elements": 16
-        },
+        "throughput": { "Bytes": null, "Elements": 16 },
         "full_id": "rl_episode/batch_step/step_and_observe/16",
-        "directory_name": "rl_episode_batch_step_step_and_observe_16"
+        "directory_name": "rl_episode_batch_step/step_and_observe/16"
       },
       "criterion_estimates_v1": {
         "mean": {
@@ -58,14 +56,12 @@
       "baseline": "pr",
       "fullname": "pr/rl_episode/batch_step/step_and_observe/64",
       "criterion_benchmark_v1": {
-        "group_id": "rl_episode",
-        "function_id": "batch_step",
+        "group_id": "rl_episode/batch_step",
+        "function_id": "step_and_observe",
         "value_str": "64",
-        "throughput": {
-          "elements": 64
-        },
+        "throughput": { "Bytes": null, "Elements": 64 },
         "full_id": "rl_episode/batch_step/step_and_observe/64",
-        "directory_name": "rl_episode_batch_step_step_and_observe_64"
+        "directory_name": "rl_episode_batch_step/step_and_observe/64"
       },
       "criterion_estimates_v1": {
         "mean": {
@@ -111,14 +107,12 @@
       "baseline": "pr",
       "fullname": "pr/rl_episode/batch_step/step_and_observe/256",
       "criterion_benchmark_v1": {
-        "group_id": "rl_episode",
-        "function_id": "batch_step",
+        "group_id": "rl_episode/batch_step",
+        "function_id": "step_and_observe",
         "value_str": "256",
-        "throughput": {
-          "elements": 256
-        },
+        "throughput": { "Bytes": null, "Elements": 256 },
         "full_id": "rl_episode/batch_step/step_and_observe/256",
-        "directory_name": "rl_episode_batch_step_step_and_observe_256"
+        "directory_name": "rl_episode_batch_step/step_and_observe/256"
       },
       "criterion_estimates_v1": {
         "mean": {

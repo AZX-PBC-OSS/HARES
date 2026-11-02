@@ -6,11 +6,11 @@
       "fullname": "pr/metrics_request/batch_step/step_and_observe/16",
       "criterion_benchmark_v1": {
         "group_id": "metrics_request",
-        "function_id": "batch_step",
+        "function_id": "batch_step/step_and_observe",
         "value_str": "16",
-        "throughput": { "elements": 16 },
+        "throughput": { "Bytes": null, "Elements": 16 },
         "full_id": "metrics_request/batch_step/step_and_observe/16",
-        "directory_name": "metrics_request_batch_step_step_and_observe_16"
+        "directory_name": "metrics_request/batch_step_step_and_observe/16"
       },
       "criterion_estimates_v1": {
         "mean": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 620000.0, "upper_bound": 1202600.0 }, "point_estimate": 911268.0, "standard_error": 956470.0 },
@@ -25,11 +25,11 @@
       "fullname": "pr/metrics_request/batch_step/step_and_observe/64",
       "criterion_benchmark_v1": {
         "group_id": "metrics_request",
-        "function_id": "batch_step",
+        "function_id": "batch_step/step_and_observe",
         "value_str": "64",
-        "throughput": { "elements": 64 },
+        "throughput": { "Bytes": null, "Elements": 64 },
         "full_id": "metrics_request/batch_step/step_and_observe/64",
-        "directory_name": "metrics_request_batch_step_step_and_observe_64"
+        "directory_name": "metrics_request/batch_step_step_and_observe/64"
       },
       "criterion_estimates_v1": {
         "mean": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 173200.0, "upper_bound": 174900.0 }, "point_estimate": 174050.0, "standard_error": 430.0 },
@@ -44,11 +44,11 @@
       "fullname": "pr/metrics_request/batch_step/step_and_observe/256",
       "criterion_benchmark_v1": {
         "group_id": "metrics_request",
-        "function_id": "batch_step",
+        "function_id": "batch_step/step_and_observe",
         "value_str": "256",
-        "throughput": { "elements": 256 },
+        "throughput": { "Bytes": null, "Elements": 256 },
         "full_id": "metrics_request/batch_step/step_and_observe/256",
-        "directory_name": "metrics_request_batch_step_step_and_observe_256"
+        "directory_name": "metrics_request/batch_step_step_and_observe/256"
       },
       "criterion_estimates_v1": {
         "mean": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 701300.0, "upper_bound": 700700.0 }, "point_estimate": 701000.0, "standard_error": 1500.0 },

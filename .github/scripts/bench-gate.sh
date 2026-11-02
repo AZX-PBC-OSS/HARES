@@ -135,10 +135,10 @@ threshold_for() {
     printf '%s' "${ACCEPTED_RATIOS[$target]:-$THRESHOLD_RATIO}"
 }
 
-# The ceilings as one JSON map (group_id -> ceiling), every target in
-# BENCH_TARGETS carrying an entry: its accepted ratio, or the default
-# filled from THRESHOLD_RATIO. The comparisons look a benchmark's group
-# up here.
+# The ceilings as one JSON map keyed by the bench TARGET's name, every
+# target in BENCH_TARGETS carrying an entry: its accepted ratio, or the
+# default filled from THRESHOLD_RATIO. The comparisons look the entry
+# key's first path component up here.
 ceiling_map() {
     local target
     for target in "${BENCH_TARGETS[@]}"; do
@@ -175,13 +175,20 @@ def ratios($base; $curr; $stat):
     { name: $entry.key, baseline_ns: $bns, current_ns: $cns, ratio: ($cns / $bns) } ];
 '
 
-# Single pair: every benchmark over its own group's ceiling, with the
+# Single pair: every benchmark over its own target's ceiling, with the
 # current run's own uncertainty (criterion's std_dev and median_abs_dev
 # over the current estimate, from the same JSON, so a verdict
-# attributes itself). A benchmark's group is its export's group_id, or
-# the bench name's prefix before the first slash when the export
-# carries no group_id; the group's ceiling comes from the accepted
-# ceilings' map, the default when the map holds none.
+# attributes itself). A benchmark's target is the entry key's first
+# path component (the key is the full bench id:
+# rl_episode/batch_step/step_and_observe/64). The export's
+# criterion group_id is criterion's own group label and is never
+# consulted: the live export carries the group PATH the bench declares
+# (measured rl_episode/batch_step, the group c.benchmark_group names),
+# which is not the target's name, so a lookup keyed on it misses every
+# per-target ceiling and falls back to the global threshold (the
+# accepted ceilings never applied on the live export's shape). The
+# target's ceiling comes from the accepted ceilings' map, the default
+# when the map holds none.
 run_flag() {
     local base="$1" curr="$2" stat="$3"
     jq -n \
@@ -203,9 +210,7 @@ run_flag() {
           regressions:
             [ $rows[] |
               . as $r |
-              ($curr[0].benchmarks[$r.name].criterion_benchmark_v1.group_id
-                // $base[0].benchmarks[$r.name].criterion_benchmark_v1.group_id
-                // ($r.name | split("/")[0])) as $group |
+              ($r.name | split("/")[0]) as $group |
               ($ceilings[$group] // $ratio) as $ceiling |
               select(.ratio > $ceiling) |
               {
@@ -225,9 +230,10 @@ run_flag() {
 # The paired comparison: the documents arrive alternating base/head, one
 # pair per round. The statistic is the median of the per-round ratios;
 # a benchmark missing from any round is reported, not gated. Each
-# benchmark is judged by its own group's ceiling (the group_id the
-# exports carry, or the bench name's prefix before the first slash),
-# the default when the ceilings' map holds none.
+# benchmark is judged by its own target's ceiling: the target is the
+# entry key's first path component (the export's criterion group_id is
+# the group PATH the bench declares, not the target's name, and never
+# keys the map), the default when the ceilings' map holds none.
 run_paired() {
     local stat="median"
     jq -s \
@@ -281,9 +287,7 @@ run_paired() {
             regressions:
               [ $scored[] |
                 . as $s |
-                ([ $docs[] | .benchmarks[$s.name].criterion_benchmark_v1.group_id
-                    | select(. != null) ][0]
-                  // ($s.name | split("/")[0])) as $group |
+                ($s.name | split("/")[0]) as $group |
                 ($ceilings[$group] // $ratio) as $ceiling |
                 select(.samples == $n_rounds and .ratio > $ceiling) |
                 { name: .name,
@@ -719,15 +723,18 @@ cmd_test() {
     check "the single-pair comparison refuses it too" 1 "$drift_rc"
 
     # 13. The per-target accepted ceilings: a benchmark is judged by its
-    #     OWN group's ceiling, not one global threshold. The rl_episode
-    #     group's accepted ceiling is 2.30 (the RC split rule's
+    #     OWN target's ceiling, not one global threshold. The rl_episode
+    #     target's accepted ceiling is 2.30 (the RC split rule's
     #     recorded cost, above the BENCH_TARGETS array); both cases
     #     scale the poisoned fixture's current side, and the fixtures
-    #     carry the rl_episode group the ceiling exempts. A pair whose
+    #     mirror the live export's shape: keys as the full bench id,
+    #     criterion's group_id carrying the group PATH the bench
+    #     declares (measured rl_episode/batch_step), so the lookup
+    #     under test is the one the exports exercise. A pair whose
     #     ratio exceeds the accepted ceiling still flags; the poisoned
     #     pair's shape at ~1.5x does not, where the same ~1.5x shape
-    #     under the default-ceiling groups flags (the screen case
-    #     above): the ceiling is the group's own, and the default
+    #     under the default-ceiling targets flags (the screen case
+    #     above): the ceiling is the target's own, and the default
     #     keeps its teeth.
     local ceiling_flag ceiling_pass
     ceiling_flag="$(run_flag "$fx/accepted-ceiling-baseline.json" \
