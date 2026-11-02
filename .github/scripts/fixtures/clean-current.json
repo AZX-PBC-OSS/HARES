@@ -1,16 +1,16 @@
 {
   "name": "pr",
   "benchmarks": {
-    "rl_episode/batch_step/step_and_observe/8": {
+    "metrics_request/batch_step/step_and_observe/8": {
       "baseline": "pr",
-      "fullname": "pr/rl_episode/batch_step/step_and_observe/8",
+      "fullname": "pr/metrics_request/batch_step/step_and_observe/8",
       "criterion_benchmark_v1": {
-        "group_id": "rl_episode",
+        "group_id": "metrics_request",
         "function_id": "batch_step",
         "value_str": "8",
         "throughput": { "elements": 8 },
-        "full_id": "rl_episode/batch_step/step_and_observe/8",
-        "directory_name": "rl_episode_batch_step_step_and_observe_8"
+        "full_id": "metrics_request/batch_step/step_and_observe/8",
+        "directory_name": "metrics_request_batch_step_step_and_observe_8"
       },
       "criterion_estimates_v1": {
         "mean": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 359600.0, "upper_bound": 362000.0 }, "point_estimate": 360800.0, "standard_error": 610.0 },
@@ -20,16 +20,16 @@
         "std_dev": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 3500.0, "upper_bound": 5300.0 }, "point_estimate": 4400.0, "standard_error": 450.0 }
       }
     },
-    "rl_episode/batch_step/step_and_observe/64": {
+    "metrics_request/batch_step/step_and_observe/64": {
       "baseline": "pr",
-      "fullname": "pr/rl_episode/batch_step/step_and_observe/64",
+      "fullname": "pr/metrics_request/batch_step/step_and_observe/64",
       "criterion_benchmark_v1": {
-        "group_id": "rl_episode",
+        "group_id": "metrics_request",
         "function_id": "batch_step",
         "value_str": "64",
         "throughput": { "elements": 64 },
-        "full_id": "rl_episode/batch_step/step_and_observe/64",
-        "directory_name": "rl_episode_batch_step_step_and_observe_64"
+        "full_id": "metrics_request/batch_step/step_and_observe/64",
+        "directory_name": "metrics_request_batch_step_step_and_observe_64"
       },
       "criterion_estimates_v1": {
         "mean": { "confidence_interval": { "confidence_level": 0.95, "lower_bound": 173200.0, "upper_bound": 174900.0 }, "point_estimate": 174050.0, "standard_error": 430.0 },
