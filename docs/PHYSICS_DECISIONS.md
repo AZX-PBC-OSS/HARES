@@ -2257,3 +2257,81 @@ zone: 600 heating −2.1 percent, cooling −1.6 percent, 640 heating energy
 −3.2 percent, 600FF peak −1.3 K, 900FF min +0.06 K; the committed golden
 fixtures are bitwise unchanged - their homes route the envelope LUT and
 the slab F-factor path, neither of which the split rule touches).
+
+## The envelope's resolved layer chains condense to five-node band-limited ladders
+
+The RC split rule's resolution (three sub-layers per diurnal penetration
+depth) took the synthetic path's state count from 6 to 91 per assembly and
+the episode benches with it (+74 to +116 percent). The reclamation is a
+model reduction on the assembled chain: a material layer resolving more
+than five sub-layer nodes (`MAX_RESOLVED_SUBNODES`,
+`crates/hares-envelope/src/boundary_rc.rs`) condenses to a five-node
+ladder (six resistances, five capacitances) that holds the layer's series
+resistance and total capacitance exactly and reproduces the layer's own
+ISO 13786 propagator response at the diurnal period - the periodic
+transmittance phasor (the decrement factor and the lag it defines) and
+the areal heat capacity - to the fit's residual, recorded per boundary in
+`EnvelopeDiagnostics::reduction_fit_exceedance_count` past a 2 percent
+bound. The fit is a damped Gauss-Newton over the ladder's R/C splits,
+each split through a softmax so the two exact sums hold by construction,
+started from the even placement with deterministic perturbation restarts.
+Layers at five or fewer sub-layer nodes are untouched bit for bit, and
+the reduction does not apply to a same-zone boundary's kept chain (a
+dead-end fin with an adiabatic cut surface is not a two-faced layer; the
+propagator's form does not describe it).
+
+Why five: the cap is the measured reach boundary of the pinned
+constructions' deepest layer, the R25 slab's 1.007 m insulation (3.05
+penetration depths). A brute reach study over each ladder family (tens of
+thousands of splits, then bounded local refinement) measured the family's
+closest approach to the layer's own propagator response: the 10-node
+chain's response is reproduced exactly at five nodes (the transmittance
+magnitude and the phase both under 1e-9), to 1.3 percent on the
+transmittance magnitude (the phase to 0.05 h) at four, and NOT AT ALL
+inside the witness's class below that (the lag residual 0.71 h at three,
+1.83 h at two, against the 0.2 h budget the chain's own -3.5 percent
+decrement residual leaves of the ±5 percent class). The 900 wall's
+concrete (one penetration depth) reproduces at two nodes to 0.3 percent
+but sits below the cap anyway (three sub-layer nodes), so the witness's
+600 and 900 wall pins hold bit for bit; only the R25 slab's floor
+condenses, and its witness residuals improve from the chain's own
+dispersion (-3.5 percent decrement) to the reduced form's (-2.1 percent).
+
+The alternatives, measured and rejected:
+- Two nodes per layer (the dispatch sketch): the reach study's own
+  baseline. The R25 slab's insulation misses the witness's lag budget by
+  an order of magnitude (1.8 h against 0.2 h); the synthetic face's
+  4.8-penetration-depth layer misses the ±5 percent class entirely (the
+  best two-node form reaches only -44 percent on the transmitted wave's
+  amplitude, +5.1 h on the lag). No free-parameter count in a 2-node
+  family (5 parameters) reaches a deep layer's response: the family's
+  transfer function has two real poles, the layer's has fifteen.
+- Matching the reduced ladder to the assembled chain's response instead
+  of the analytic propagator: works (the chain is one more rational
+  response the family can target) but pins the reduction to the chain's
+  own dispersion residuals; matching the propagator carries the ISO
+  class's full budget and improves the witness.
+- Whole-boundary reduction (one ladder per boundary, not per layer):
+  the same reach wall - a boundary's composite response is at least as
+  high-order as its deepest layer's - and it loses the per-layer
+  composition the same-zone halving and the surface-node wiring read
+  back.
+- Krylov or balanced truncation of the assembled state matrix: exact in
+  the reduced coordinates, but the projected state is no longer a vector
+  of node temperatures; the solver, the diagnostics and the observe path
+  read nodes by ID (the surface nodes, the zone airs), so projection is
+  state-space surgery the codebase's structure resists.
+- Depth-graded caps (reducing only thin layers, keeping deep ones
+  resolved): holds every pin but reclaims nothing - the synthetic path's
+  bench cost is exactly its 4.8-penetration-depth faces, and the same
+  dispersion scaling (three nodes per penetration depth) that makes them
+  expensive is what makes them accurate. The ISO tolerance and the state
+  count are one scaling law at the model level; the ladder's per-layer
+  fit is what breaks it (five nodes carry the exact diurnal response of
+  a layer the chain needed ten nodes to resolve to 3.5 percent).
+
+State counts: the default synthetic building's six material faces
+resolve 15 sub-layer nodes each and condense to 5 ladder nodes each:
+91 states to 31 (the checkpoint's `envelope_state` vector and the
+per-dwelling model storage with it). The precomputed LUT path, the
+fallback-R path and the solve loop are untouched.

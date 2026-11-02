@@ -584,15 +584,14 @@ fn analytic_characteristics_match_hand_computed_u_values() {
 ///   10 percent of the analytic value;
 /// - the 900 wall (the concrete layer resolved at the assembly's
 ///   penetration-depth rule, three nodes) holds all three to 5 percent;
-/// - the 900 floor slab (its 1.007 m insulation layer resolved at ten
-///   sub-layer nodes, three per diurnal penetration depth) holds all
-///   three to the same 5 percent class. The rule's resolution is the
-///   lumped chain's dispersion budget (see `split_layer_count`): three
-///   sub-layers per penetration depth bounds the transmitted wave's
-///   amplitude error near N/108 (N = the depth in penetration lengths,
-///   3.05 here), measured at 3.5 percent on the decrement factor; two per
-///   depth left 6 percent and the wave's amplitude halved entirely while
-///   the layer went unsplit under the old material-class gates.
+/// - the 900 floor slab (its 1.007 m insulation layer resolves at ten
+///   sub-layer nodes by the penetration-depth rule and condenses to the
+///   assembly's five-node band-limited ladder, matched to the layer's own
+///   propagator response) holds all three to the same 5 percent class.
+///   The reduction's own residual (the ladder's transmittance magnitude
+///   at 1.3 percent) is inside the chain's former dispersion (3.5
+///   percent), so the pin is tighter than the pre-reduction form's, not
+///   looser.
 #[test]
 fn engine_periodic_response_matches_iso_13786() {
     for (name, layers) in [
@@ -663,11 +662,13 @@ fn engine_periodic_response_matches_iso_13786() {
             }
             "900 floor" => {
                 // The 1.007 m insulation layer resolves at ten sub-layer
-                // nodes (three per diurnal penetration depth); the same
-                // 5 percent class as the 900 wall applies to all three
-                // quantities. The residuals are the lumped chain's
-                // dispersion over three penetration depths, documented in
-                // the tolerance comment above.
+                // nodes and the assembly condenses it to the five-node
+                // band-limited ladder matched to the layer's own
+                // propagator; the same 5 percent class as the 900 wall
+                // applies to all three quantities, and the measured
+                // residuals (the ladder's transmittance magnitude at
+                // 1.3 percent) are tighter than the unreduced chain's
+                // own dispersion (3.5 percent on the decrement factor).
                 assert!(
                     (engine_f / a.decrement_factor - 1.0).abs() <= 0.05,
                     "{name}: decrement factor {engine_f:.4} vs analytic {:.4}",
