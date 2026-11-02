@@ -149,11 +149,13 @@ pub(crate) struct SyntheticGeometryConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticMaterialsConfig {
     pub(crate) wall_r_value_m2_k_w: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticHvacConfig {
     pub(crate) equipment_name: String,
     #[serde(default)]
@@ -165,6 +167,7 @@ pub(crate) struct SyntheticHvacConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticWeatherConfig {
     #[serde(default = "default_outdoor_temp_c")]
     pub(crate) outdoor_temp_c: f64,
@@ -266,6 +269,7 @@ impl Default for SyntheticWeatherConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticScheduleConfig {
     #[serde(default = "default_schedule_value")]
     pub(crate) occupancy: f64,
@@ -291,6 +295,7 @@ impl Default for SyntheticScheduleConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticBoundaryConfig {
     pub(crate) id: String,
     pub(crate) boundary_type: String,
@@ -320,6 +325,7 @@ pub(crate) struct SyntheticBoundaryConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticMaterialLayer {
     pub(crate) thickness_m: f64,
     pub(crate) conductivity_w_m_k: f64,
@@ -346,6 +352,7 @@ pub(crate) struct SyntheticMaterialLayer {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticWindowConfig {
     pub(crate) id: String,
     pub(crate) area_m2: f64,
@@ -378,6 +385,7 @@ pub(crate) struct SyntheticSetpointConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SyntheticInfiltrationConfig {
     /// Continuous ACH (not ACH50).
     pub(crate) ach: f64,
@@ -3032,17 +3040,131 @@ equipment_name = "None"
         }
     }
 
+    /// Every synthetic sub-table rejects unknown keys: a misspelled key
+    /// inside any of the eight tables (`[materials]`, `[hvac]`, `[weather]`,
+    /// `[schedule]`, `[infiltration]`, a `[[boundaries]]` entry, a
+    /// `[[boundaries.material_layers]]` layer, a `[[windows]]` entry) fails
+    /// the parse naming the key and that table's declared fields, the same
+    /// message shape the top level's rejection gives. A key one of these
+    /// structs never read was a silent drop: the fixture built without it
+    /// and the run answered a question the fixture never asked.
+    #[test]
+    fn synthetic_toml_rejects_unknown_subtable_key() {
+        // (the table's name for the failure message, the appended TOML, the
+        // unknown key, a declared field the error's expected-list must
+        // name). Every case's document is valid except for the misspelled
+        // key, so the parse's only possible complaint is that key: without
+        // the table's rejection the document parses and the key drops.
+        // The flat tables carry only the misspelled key; the sequence
+        // entries carry their required fields so the misspelled key is the
+        // entry's only defect.
+        let base = r#"
+[simulation]
+start_time = "2024-01-01T00:00:00Z"
+time_res = 60
+duration = 3600
+
+[geometry]
+number_of_bedrooms = 3.0
+floor_area_m2 = 48.0
+zone_volume_m3 = 129.6
+"#;
+        let materials = "[materials]\nwall_r_value_m2_k_w = 2.0\n\n";
+        let hvac = "[hvac]\nequipment_name = \"None\"\n\n";
+        let with_required = |target: &str| format!("{materials}{hvac}{target}");
+        let cases: [(&str, String, &str, &str); 8] = [
+            (
+                "[materials]",
+                format!("{hvac}[materials]\nwall_r_val_m2_k_w = 2.0\n"),
+                "wall_r_val_m2_k_w",
+                "wall_r_value_m2_k_w",
+            ),
+            (
+                "[hvac]",
+                format!("{materials}[hvac]\nequpment_name = \"Furnace\"\n"),
+                "equpment_name",
+                "deadband_c",
+            ),
+            (
+                "[weather]",
+                with_required("[weather]\ndewpoint_c = 5.0\n"),
+                "dewpoint_c",
+                "thermal_lag_h",
+            ),
+            (
+                "[schedule]",
+                with_required("[schedule]\noccupency = 1.0\n"),
+                "occupency",
+                "occupants_present",
+            ),
+            (
+                "[infiltration]",
+                with_required("[infiltration]\nach50 = 0.5\n"),
+                "ach50",
+                "internal_gains_w",
+            ),
+            (
+                "[[boundaries]]",
+                with_required(
+                    "[[boundaries]]\nid = \"wall-1\"\nboundary_type = \"Wall\"\narea_m2 = 12.0\nsolar_absorbtance = 0.7\n",
+                ),
+                "solar_absorbtance",
+                "boundary_type",
+            ),
+            (
+                "[[boundaries.material_layers]]",
+                with_required(
+                    "[[boundaries]]\nid = \"wall-1\"\nboundary_type = \"Wall\"\narea_m2 = 12.0\n\n[[boundaries.material_layers]]\nthickness_m = 0.1\nconductivity_w_mk = 0.5\n",
+                ),
+                "conductivity_w_mk",
+                "specific_heat_j_kg_k",
+            ),
+            (
+                "[[windows]]",
+                with_required(
+                    "[[windows]]\nid = \"win-1\"\narea_m2 = 6.0\nu_factor_w_m2_k = 3.0\nshgc = 0.7\nu_factor = 3.0\n",
+                ),
+                "u_factor",
+                "shgc",
+            ),
+        ];
+        let mut silent: Vec<&str> = Vec::new();
+        for (table, suffix, unknown_key, declared) in cases {
+            let toml = format!("{base}\n{suffix}");
+            match toml::from_str::<SyntheticTomlConfig>(&toml) {
+                Ok(_) => silent.push(table),
+                Err(err) => {
+                    let message = err.to_string();
+                    assert!(
+                        message.contains(unknown_key),
+                        "the error must name the unknown key `{unknown_key}`, got: {message}"
+                    );
+                    assert!(
+                        message.contains(declared),
+                        "the error must name the declared field `{declared}`, got: {message}"
+                    );
+                }
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "the parse silently accepted an unknown key in: {}",
+            silent.join(", ")
+        );
+    }
+
     /// The corpus's keys are the contract: every fixture TOML the synthetic
     /// path parses (the BESTEST family, the only fixture files
     /// `Dwelling::from_toml_config` reads) deserialises with unknown-key
-    /// rejection on, so a fixture key the struct never read fails here
-    /// naming the file instead of dropping silently. A fixture the schema
-    /// legitimately grew a key for declares it in the same change; a
-    /// fixture carrying a key nothing reads is a defect to honour or
-    /// remove, never to ignore. The golden fixtures are not this struct's
-    /// corpus: they are `GoldenManifest`s (the frame_golden tool's surface,
-    /// itself unknown-key strict, which declares their `defaults` and
-    /// `defaults_files` tables) and never parse as a synthetic dwelling.
+    /// rejection on at every level, the top level's struct and each
+    /// sub-table's own rejection alike, so a fixture key no struct reads at
+    /// any depth fails here naming the file instead of dropping silently. A
+    /// fixture the schema legitimately grew a key for declares it in the
+    /// same change; a fixture carrying a key nothing reads is a defect to
+    /// honour or remove, never to ignore. The golden fixtures are not this
+    /// struct's corpus: they are `GoldenManifest`s (the frame_golden tool's
+    /// surface, itself unknown-key strict, which declares their `defaults`
+    /// and `defaults_files` tables) and never parse as a synthetic dwelling.
     #[test]
     fn synthetic_corpus_fixtures_parse_with_every_key_declared() {
         use std::path::PathBuf;
