@@ -7916,6 +7916,20 @@ mod tests {
     }
 
     #[test]
+    fn restore_state_rejects_an_envelope_state_of_the_wrong_length() {
+        // The assembled chain's state count is a model property (the
+        // band-limited reduction takes the default synthetic building from
+        // 91 states to 31), so a checkpoint written against a different
+        // model's count must be rejected before any mutation rather than
+        // restored into the shorter solver.
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let mut stale = solver.snapshot_state();
+        stale.x.push(0.0);
+        assert_restore_rejected_atomically(&mut solver, &stale, "x length");
+    }
+
+    #[test]
     fn restore_state_rejects_invalid_coupling_state_and_leaves_solver_unchanged() {
         let env = env_for_temp(22.0, 5.0);
         let ports = PortSlots {
