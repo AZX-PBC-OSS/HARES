@@ -1245,11 +1245,16 @@ pub(crate) fn build_synthetic_building(
         // (ASHRAE HoF 2021 Ch. 33, Table 1) giving thermal capacitance
         // C = ρ·c_p·d·A ≈ 317 kJ/(K·m²)·A.
         //
-        // A fixed thickness avoids the diurnal-criterion sub-layer
-        // explosion that d = R·k (with real concrete k = 1.4) would
-        // produce: 2.8 m / 0.068 m ≈ 42 sub-layers per boundary for a
-        // typical R = 2.0 wall.  The per-layer capacitance is identical
-        // regardless of k because only d, ρ, and c_p control C.
+        // A fixed thickness keeps the diurnal-criterion sub-layer count
+        // bounded: the split rule resolves every layer at three sub-layers
+        // per diurnal penetration depth, so this layer runs at 15 nodes per
+        // boundary at R = 2.0 (α = k/(ρ·c_p) with the derived k = 0.075 and
+        // the concrete constants ρ = 2400 kg/m³, c_p = 880 J/(kg·K) gives
+        // δ_p ≈ 0.031 m), where the real-concrete thickness d = R·k
+        // (k = 1.4, α ≈ 6.6e-7 m²/s) would run at 63.  The per-layer
+        // capacitance is identical regardless of k because only d, ρ, and
+        // c_p control C; the six faces' 90 layer nodes plus the zone air
+        // make 91 states.
         const DEFAULT_LAYER_THICKNESS_M: f64 = 0.15;
         let safe_r_value = r_value.max(1e-6);
         let effective_concrete_k = DEFAULT_LAYER_THICKNESS_M / safe_r_value;
@@ -4603,6 +4608,15 @@ equipment_name = "None"
 
         let n_zones = 1;
         let n_states = rc.a_c.nrows();
+
+        // Six material-layered faces at 15 sub-layer nodes each (δ_p ≈
+        // 0.031 m at R = 2.0, k = 0.075, ρ = 2400, c_p = 880) plus the
+        // zone air node: 91 states.
+        assert_eq!(
+            n_states, 91,
+            "the default synthetic building's six 15-node faces plus the zone \
+             air make 91 states; got {n_states}"
+        );
 
         assert!(
             n_states > n_zones,

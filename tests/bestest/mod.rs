@@ -106,66 +106,53 @@ fn run_single_case(case: &BestestCase) {
 /// These pins are NOT conformance claims: the ASHRAE 140 bands are the
 /// target and the signed distance prints on every run. Update a baseline
 /// only with a measured cause in the commit message.
+///
+/// Re-measured 2026-11-01 (the RC split rule's resolution fix): the split
+/// rule now resolves EVERY layer at three sub-layers per diurnal
+/// penetration depth instead of gating the resolution on material class,
+/// so the BESTEST floors' 1.003-1.007 m insulation layers (three
+/// penetration depths deep) resolve at ten nodes and the roofs'
+/// 0.1118 m layer at two, where they were single lumped nodes. The
+/// resolved floor stores the zone's swing into the ground-coupled slab
+/// (the ISO 13786 witness's transmitted wave doubles: 0.134 to 0.252
+/// against the analytic 0.261), buffering every free-float and load
+/// metric the same direction: 600 heating −2.1 %, 600 cooling −1.6 %
+/// (now 0.3 % below its band floor, joining the documented under-heating
+/// class), 640 heating energy −3.2 %, 600FF peak −1.3 K, 900FF min
+/// +0.06 K. The 900 heating (−0.3 %) and 900FF peak (−0.1 %) hold inside
+/// their ±1 % locks; 900 cooling and 600FF min stay in band.
 fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     use BestestMetric::*;
     Some(match (case_id, metric) {
-        // 600: heating 3090.7 vs band 3993–4504; cooling 5506.8 (inside
-        // the current band 5432–6162, the pin kept as the drift guard).
-        // Re-measured 2026-10-07 at the combined tip: the diffuse short-wave
-        // window loss (the zone's windows take their EnergyPlus share of the
-        // enclosure's diffuse pool back out through the glazing,
-        // HeatBalanceSurfaceManager.cc:4272, 4315) and the ideal dispatch's
-        // setpoint landing (the solve no longer subtracts the previous
-        // step's HVAC delivery) both move the fixed-accuracy cases; the
-        // out-of-band residual is the documented state this lock pins
-        // against silent drift. Re-measured 2026-10-15: the weather is
-        // addressed by calendar date (the EnergyPlus typical-year rule),
-        // so a 2024 run re-aligns at Feb 29 (the previous running-index
-        // read one day late from Mar 1 on) and the annual sums move with
-        // the re-aligned weather and solar phase. Re-measured 2026-10-15
-        // again: the warm-up converges by the EnergyPlus criteria, which
-        // run the lightweight cases' warm-up one day longer than the old
-        // last-step rule did (2 to 3 days), and the initial condition's
-        // residual moves the annual sums by under 0.01 percent.
-        ("600", AnnualHeatingLoadKwh) => 3090.700945,
-        ("600", AnnualCoolingLoadKwh) => 5506.835817,
+        // 600: heating 3027.1 vs band 3993–4504; cooling 5417.2 vs band
+        // 5432–6162 (the split rule's resolution fix, 2026-11-01: see the
+        // function doc's re-measurement note; the floor's and roof's
+        // resolved layers buffer the zone, both loads move down). The
+        // earlier re-measurements (the diffuse short-wave window loss, the
+        // dispatch's setpoint landing, the calendar-date weather
+        // addressing, the EnergyPlus warm-up criteria) carried the pins to
+        // 3090.7/5506.8 before this fix.
+        ("600", AnnualHeatingLoadKwh) => 3027.115238,
+        ("600", AnnualCoolingLoadKwh) => 5417.169282,
         // 640: heating energy vs band 2403–2682 (the dispatch
-        // landing dominates the diffuse loss here). Re-measured
-        // 2026-10-14: the weather reads follow the EnergyPlus rules (the
-        // record of the hour the step ends in; the previous read lagged
-        // one hour), moving the morning pick-up's phase. Re-measured
-        // 2026-10-15 with the same calendar-date addressing cause as
-        // 600's; re-measured again the same day for the EnergyPlus
-        // warm-up criteria (one more warm-up day than the old rule ran),
-        // the sum under 0.001 percent moved.
-        ("640", AnnualHeatingEnergyKwh) => 1995.574279,
-        // 900: heating vs band 1379–1814 (the heavy-mass case
-        // gains heating from the dispatch's setpoint landing: the old
-        // state-dependent offset under-delivered). Re-measured
-        // 2026-10-15: the calendar-date weather addressing re-aligns the
-        // leap-year run at Feb 29, the same cause as 600's; re-measured
-        // again the same day for the EnergyPlus warm-up criteria, which
-        // run this heavyweight case's warm-up 2 to 4 days: the annual
-        // heating load moves 0.06 percent.
+        // landing dominates the diffuse loss here). Moved by the same
+        // floor/roof resolution fix as 600's (the identical lightweight
+        // construction): 1995.6 → 1932.6.
+        ("640", AnnualHeatingEnergyKwh) => 1932.601984,
+        // 900: heating vs band 1379–1814. The floor resolution fix moves
+        // it under 1 percent (1068.7 → 1065.9, the lock holds); the
+        // baseline keeps the pre-fix pin.
         ("900", AnnualHeatingLoadKwh) => 1068.706087,
-        // 600FF: peak 74.01 vs band 62.4–68.4 (min in band: strict).
-        // Re-measured 2026-10-14: the weather reads follow the EnergyPlus
-        // rules (the record of the hour the step ends in; the previous
-        // read lagged one hour), one hour earlier solar on the peak.
-        // Re-measured 2026-10-15 again: the EnergyPlus warm-up criteria
-        // run this free-float case's warm-up 8 to 9 days (the old rule
-        // stopped at 8 on its last-step temperatures with the day-8
-        // daily-min residual 0.426 still open), and the warmer initial
-        // condition lifts the peak 0.36 K.
-        ("600FF", PeakZoneTempC) => 74.369992,
-        // 900FF: peak 46.15 vs 43.3–46.0; min 3.26 vs 0.6–2.2.
-        // Re-measured 2026-10-14 for the same weather-phase correction
-        // (the peak +0.19 K, the min +0.09 K against the 2026-10-07
-        // locks). Re-measured 2026-10-15 again: the EnergyPlus warm-up
-        // criteria move the peak +0.24 K (the same one-day-longer warm-up
-        // cause as 600FF's); the min is unchanged on bits.
+        // 600FF: peak vs band 62.4–68.4 (min in band: strict). The floor
+        // resolution fix moves the peak 74.37 → 73.02 (the resolved floor
+        // buffers the free-float swing).
+        ("600FF", PeakZoneTempC) => 73.024772,
+        // 900FF: peak vs 43.3–46.0; min vs 0.6–2.2. The peak holds its
+        // pre-fix pin (46.39, moved −0.1 percent, inside the lock); the
+        // min moved 3.26 → 3.33 (the resolved floor's buffering, +1.9
+        // percent, beyond the lock).
         ("900FF", PeakZoneTempC) => 46.391880,
-        ("900FF", MinZoneTempC) => 3.264846,
+        ("900FF", MinZoneTempC) => 3.326838,
         _ => return None,
     })
 }

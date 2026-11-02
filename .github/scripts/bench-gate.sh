@@ -35,6 +35,12 @@
 # one round wide, so its flag is a question; the confirmation's median is
 # the answer.
 #
+# The ratio a benchmark is judged against is the ceiling of its OWN
+# target, not one global threshold: the per-target accepted ceilings are
+# recorded in ACCEPTED_RATIOS, next to the BENCH_TARGETS array they
+# select from, and every target without an accepted ceiling gates at
+# THRESHOLD_RATIO.
+#
 # Subcommands:
 #   build-binaries <out-dir>
 #       Build every benchmark target and copy each executable into
@@ -103,6 +109,45 @@ BENCH_TARGETS=(
     rl_episode output_row_plan diagnostics_report thermal_step checkpoint
 )
 
+# The per-target accepted ceilings: the ratio a target's benchmarks may
+# hold before the gate calls it a regression. Every target absent from
+# this map gates at the default THRESHOLD_RATIO above.
+#
+# The two entries are row 83's acceptance, the operator's disposition of
+# the RC split rule's bench cost: the rule's diffusion-length resolution
+# takes every layer into the ISO 13786 thick-layer class it serves, and
+# the synthetic path's state count rises from 6 to 91 per assembly. The
+# measured medians ran up to 2.077x over three rounds at a rel stddev
+# under 1 percent; 2.30 records that measured cost as accepted. The
+# fleet's HPXML path is untouched (the LUT/F-factor routing carries no
+# new state) and keeps the default, as does every other target. The 4.4
+# model-reduction row targets these ceilings back toward the default:
+# tighten them when it lands.
+declare -A ACCEPTED_RATIOS=(
+    [rl_episode]="2.30"
+    [rl_step]="2.30"
+)
+
+# One target's ceiling: its accepted ratio from ACCEPTED_RATIOS, the
+# default THRESHOLD_RATIO when it carries none.
+threshold_for() {
+    local target="$1"
+    printf '%s' "${ACCEPTED_RATIOS[$target]:-$THRESHOLD_RATIO}"
+}
+
+# The ceilings as one JSON map keyed by the bench TARGET's name, every
+# target in BENCH_TARGETS carrying an entry: its accepted ratio, or the
+# default filled from THRESHOLD_RATIO. The comparisons look the entry
+# key's first path component up here.
+ceiling_map() {
+    local target
+    for target in "${BENCH_TARGETS[@]}"; do
+        printf '%s\t%s\n' "$target" "$(threshold_for "$target")"
+    done | jq -Rn '
+        [ inputs | split("\t") | { key: .[0], value: (.[1] | tonumber) } ]
+        | from_entries'
+}
+
 # The one ratio program both comparisons share. $stat selects the
 # estimate (median in the gate, mean only in the test matrix to show the
 # old false positive).
@@ -130,14 +175,26 @@ def ratios($base; $curr; $stat):
     { name: $entry.key, baseline_ns: $bns, current_ns: $cns, ratio: ($cns / $bns) } ];
 '
 
-# Single pair: every benchmark over the threshold, with the current run's
-# own uncertainty (criterion's std_dev and median_abs_dev over the
-# current estimate, from the same JSON, so a verdict attributes itself).
+# Single pair: every benchmark over its own target's ceiling, with the
+# current run's own uncertainty (criterion's std_dev and median_abs_dev
+# over the current estimate, from the same JSON, so a verdict
+# attributes itself). A benchmark's target is the entry key's first
+# path component (the key is the full bench id:
+# rl_episode/batch_step/step_and_observe/64). The export's
+# criterion group_id is criterion's own group label and is never
+# consulted: the live export carries the group PATH the bench declares
+# (measured rl_episode/batch_step, the group c.benchmark_group names),
+# which is not the target's name, so a lookup keyed on it misses every
+# per-target ceiling and falls back to the global threshold (the
+# accepted ceilings never applied on the live export's shape). The
+# target's ceiling comes from the accepted ceilings' map, the default
+# when the map holds none.
 run_flag() {
     local base="$1" curr="$2" stat="$3"
     jq -n \
         --arg stat "$stat" \
         --argjson ratio "$THRESHOLD_RATIO" \
+        --argjson ceilings "$(ceiling_map)" \
         --slurpfile base "$base" \
         --slurpfile curr "$curr" \
         "$JQ_RATIOS"'
@@ -152,10 +209,14 @@ run_flag() {
           threshold_ratio: $ratio,
           regressions:
             [ $rows[] |
-              select(.ratio > $ratio) |
               . as $r |
+              ($r.name | split("/")[0]) as $group |
+              ($ceilings[$group] // $ratio) as $ceiling |
+              select(.ratio > $ceiling) |
               {
                 name: $r.name,
+                group: $group,
+                ceiling: $ceiling,
                 baseline_ns: $r.baseline_ns,
                 current_ns: $r.current_ns,
                 pct_slower: (((($r.ratio - 1) * 1000) | round) / 10),
@@ -168,12 +229,17 @@ run_flag() {
 
 # The paired comparison: the documents arrive alternating base/head, one
 # pair per round. The statistic is the median of the per-round ratios;
-# a benchmark missing from any round is reported, not gated.
+# a benchmark missing from any round is reported, not gated. Each
+# benchmark is judged by its own target's ceiling: the target is the
+# entry key's first path component (the export's criterion group_id is
+# the group PATH the bench declares, not the target's name, and never
+# keys the map), the default when the ceilings' map holds none.
 run_paired() {
     local stat="median"
     jq -s \
         --arg stat "$stat" \
         --argjson ratio "$THRESHOLD_RATIO" \
+        --argjson ceilings "$(ceiling_map)" \
         "$JQ_RATIOS"'
         def rel_stddev_pct:
           length as $n
@@ -220,8 +286,13 @@ run_paired() {
             rounds: $n_rounds,
             regressions:
               [ $scored[] |
-                select(.samples == $n_rounds and .ratio > $ratio) |
+                . as $s |
+                ($s.name | split("/")[0]) as $group |
+                ($ceilings[$group] // $ratio) as $ceiling |
+                select(.samples == $n_rounds and .ratio > $ceiling) |
                 { name: .name,
+                  group: $group,
+                  ceiling: $ceiling,
                   baseline_ns: .baseline_ns,
                   current_ns: .current_ns,
                   pct_slower: ((((.ratio - 1) * 1000) | round) / 10),
@@ -418,11 +489,14 @@ cmd_test() {
     # 2. The recorded false positive: the current mean is poisoned by a
     #    runner stall, the median is fine, /64 and /256 are at 1.00
     #    exactly. The old mean gate flags +30.3%; the median gate must
-    #    pass.
+    #    pass. The fixtures carry the metrics_request group (a
+    #    default-ceiling target): the pair must prove the statistic
+    #    machinery at the DEFAULT threshold, not under any accepted
+    #    ceiling.
     check "poisoned mean fixture reproduces the old mean-gate false positive" 1 \
         "$(run_flag "$fx/poisoned-baseline.json" "$fx/poisoned-current.json" mean | count)"
     check "poisoned mean fixture: old gate flags the recorded bench" \
-        "rl_episode/batch_step/step_and_observe/16" \
+        "metrics_request/batch_step/step_and_observe/16" \
         "$(run_flag "$fx/poisoned-baseline.json" "$fx/poisoned-current.json" mean | names)"
     check "poisoned mean fixture: old gate records +30.3%" "30.3" \
         "$(run_flag "$fx/poisoned-baseline.json" "$fx/poisoned-current.json" mean | jq -r '.regressions[0].pct_slower')"
@@ -467,9 +541,11 @@ cmd_test() {
     check "one-round screen reports one round" 1 "$(jq -r '.rounds' <<<"$screen")"
 
     # 4. A real regression: the committed pair's two slower benches
-    #    (+27.7 percent by the fixture's own medians), repeated in every
-    #    round. All rounds agree, so the paired median
+    #    (+29.5 and +27.7 percent by the fixture's own medians),
+    #    repeated in every round. All rounds agree, so the paired median
     #    flags; the confirmation rounds (4-6) repeat it, and the job fails.
+    #    The renamed group sorts the batch_step bench first, so [0] is
+    #    its own delta, not the encode bench's.
     local r
     for r in 1 2 3 4 5 6; do
         cp "$fx/real-baseline.json" "$scratch/rbase-r$r.json"
@@ -483,9 +559,9 @@ cmd_test() {
         "$scratch/rbase-r5.json" "$scratch/rhead-r5.json" \
         "$scratch/rbase-r6.json" "$scratch/rhead-r6.json")"
     check "real regression: every paired round flags" 2 "$(count <<<"$real_paired")"
-    check "real regression: the ratio median records the fixture's delta" "27.7" \
+    check "real regression: the ratio median records the fixture's delta" "29.5" \
         "$(jq -r '.regressions[0].pct_slower' <<<"$real_paired")"
-    check "real regression: the per-round ratios agree" "27.7,27.7,27.7" \
+    check "real regression: the per-round ratios agree" "29.5,29.5,29.5" \
         "$(jq -r '.regressions[0].per_round_pct | map(tostring) | join(",")' <<<"$real_paired")"
     check "real regression: confirmation rounds still flag (job fails)" 2 \
         "$(count <<<"$real_confirmed")"
@@ -566,7 +642,7 @@ cmd_test() {
     local table_out
     table_out="$(cmd_table <<<"$real_confirmed")"
     check "table renders the flagged bench" 1 \
-        "$(grep -c 'rl_episode/batch_step/step_and_observe' <<<"$table_out")"
+        "$(grep -c 'metrics_request/batch_step/step_and_observe' <<<"$table_out")"
     check "table renders the baseline median" 1 \
         "$(grep -c '| 698900' <<<"$table_out")"
     check "table renders the per-round column" 1 \
@@ -645,6 +721,42 @@ cmd_test() {
     if run_flag "$fx/clean-baseline.json" "$scratch/drift-current.json" median \
         >/dev/null 2>&1; then drift_rc=0; else drift_rc=1; fi
     check "the single-pair comparison refuses it too" 1 "$drift_rc"
+
+    # 13. The per-target accepted ceilings: a benchmark is judged by its
+    #     OWN target's ceiling, not one global threshold. The rl_episode
+    #     target's accepted ceiling is 2.30 (the RC split rule's
+    #     recorded cost, above the BENCH_TARGETS array); both cases
+    #     scale the poisoned fixture's current side, and the fixtures
+    #     mirror the live export's shape: keys as the full bench id,
+    #     criterion's group_id carrying the group PATH the bench
+    #     declares (measured rl_episode/batch_step), so the lookup
+    #     under test is the one the exports exercise. A pair whose
+    #     ratio exceeds the accepted ceiling still flags; the poisoned
+    #     pair's shape at ~1.5x does not, where the same ~1.5x shape
+    #     under the default-ceiling targets flags (the screen case
+    #     above): the ceiling is the target's own, and the default
+    #     keeps its teeth.
+    local ceiling_flag ceiling_pass
+    ceiling_flag="$(run_flag "$fx/accepted-ceiling-baseline.json" \
+        "$fx/accepted-ceiling-flag-current.json" median)"
+    check "accepted ceiling: a pair past rl_episode's 2.30 flags" 3 \
+        "$(count <<<"$ceiling_flag")"
+    check "accepted ceiling: the flags are the rl_episode trio" \
+        "rl_episode/batch_step/step_and_observe/16,rl_episode/batch_step/step_and_observe/256,rl_episode/batch_step/step_and_observe/64" \
+        "$(names <<<"$ceiling_flag")"
+    check "accepted ceiling: the flag records the group's own ceiling" "2.30" \
+        "$(jq -r '.regressions[0].ceiling' <<<"$ceiling_flag")"
+    ceiling_pass="$(run_flag "$fx/accepted-ceiling-baseline.json" \
+        "$fx/accepted-ceiling-pass-current.json" median)"
+    check "accepted ceiling: the poisoned shape at ~1.5x under rl_episode passes" 0 \
+        "$(count <<<"$ceiling_pass")"
+    sed 's/rl_episode/metrics_request/g' "$fx/accepted-ceiling-baseline.json" \
+        > "$scratch/mr-ceiling-baseline.json"
+    sed 's/rl_episode/metrics_request/g' "$fx/accepted-ceiling-pass-current.json" \
+        > "$scratch/mr-ceiling-pass-current.json"
+    check "accepted ceiling: the same 1.5x shape under a default group flags" 3 \
+        "$(run_flag "$scratch/mr-ceiling-baseline.json" \
+            "$scratch/mr-ceiling-pass-current.json" median | count)"
 
     echo ""
     if [ "$failures" -gt 0 ]; then
