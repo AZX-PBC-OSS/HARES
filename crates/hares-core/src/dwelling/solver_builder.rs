@@ -3575,7 +3575,6 @@ mod tests {
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
-            #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
             reduction_fit_exceedance_count: 0,
         };
@@ -3787,7 +3786,6 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
-            #[cfg(feature = "observe")]
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
             reduction_fit_exceedance_count: 0,
@@ -4037,7 +4035,6 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
-            #[cfg(feature = "observe")]
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
             reduction_fit_exceedance_count: 0,
@@ -4289,7 +4286,6 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
-            #[cfg(feature = "observe")]
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
             reduction_fit_exceedance_count: 0,
@@ -4595,7 +4591,6 @@ mod tests {
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
-            #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
             reduction_fit_exceedance_count: 0,
         };
@@ -4879,7 +4874,6 @@ mod tests {
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
-            #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
             reduction_fit_exceedance_count: 0,
         };
@@ -5155,7 +5149,6 @@ mod tests {
             total_ua_w_per_k: 0.0,
             #[cfg(feature = "observe")]
             default_r_fallback_count: 0,
-            #[cfg(feature = "observe")]
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
             reduction_fit_exceedance_count: 0,

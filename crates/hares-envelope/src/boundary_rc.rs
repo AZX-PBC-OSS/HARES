@@ -435,16 +435,11 @@ fn fit_ladder_from(
                 rs: &mut [f64; LADDER_EDGE_COUNT],
                 cs: &mut [f64; MAX_RESOLVED_SUBNODES],
                 res: &mut [f64; 3]| {
-        softmax_split(
-            &z[..LADDER_EDGE_COUNT].try_into().expect("the edges' slice"),
-            total_r,
-            rs,
-        );
-        softmax_split(
-            &z[LADDER_EDGE_COUNT..].try_into().expect("the nodes' slice"),
-            total_c,
-            cs,
-        );
+        let r_logits: [f64; LADDER_EDGE_COUNT] = std::array::from_fn(|i| z[i]);
+        let c_logits: [f64; MAX_RESOLVED_SUBNODES] =
+            std::array::from_fn(|i| z[LADDER_EDGE_COUNT + i]);
+        softmax_split(&r_logits, total_r, rs);
+        softmax_split(&c_logits, total_c, cs);
         let (y12, kappa) = ladder_response(&ladder_propagator(rs, cs, omega), omega);
         res[0] = (y12.re - y12_t.re) / y12_t.norm();
         res[1] = (y12.im - y12_t.im) / y12_t.norm();
@@ -593,16 +588,10 @@ fn fit_band_limited_ladder(
     let (z, residual) = best.unwrap_or(([0.0; LADDER_PARAM_COUNT], f64::INFINITY));
     let mut rs = [0.0; LADDER_EDGE_COUNT];
     let mut cs = [0.0; MAX_RESOLVED_SUBNODES];
-    softmax_split(
-        &z[..LADDER_EDGE_COUNT].try_into().expect("the edges' slice"),
-        total_r,
-        &mut rs,
-    );
-    softmax_split(
-        &z[LADDER_EDGE_COUNT..].try_into().expect("the nodes' slice"),
-        total_c,
-        &mut cs,
-    );
+    let r_logits: [f64; LADDER_EDGE_COUNT] = std::array::from_fn(|i| z[i]);
+    let c_logits: [f64; MAX_RESOLVED_SUBNODES] = std::array::from_fn(|i| z[LADDER_EDGE_COUNT + i]);
+    softmax_split(&r_logits, total_r, &mut rs);
+    softmax_split(&c_logits, total_c, &mut cs);
     (rs, cs, residual)
 }
 
@@ -5816,7 +5805,6 @@ mod tests {
         validate_surface_layer_info(&layer_info, &capacitances, &node_index).unwrap();
     }
 
-    #[cfg(test)]
     mod reduction_tests {
         use super::*;
         use hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
