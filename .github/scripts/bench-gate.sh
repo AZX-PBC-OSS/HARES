@@ -113,20 +113,20 @@ BENCH_TARGETS=(
 # hold before the gate calls it a regression. Every target absent from
 # this map gates at the default THRESHOLD_RATIO above.
 #
-# The two entries are row 83's acceptance, the operator's disposition of
-# the RC split rule's bench cost: the rule's diffusion-length resolution
-# takes every layer into the ISO 13786 thick-layer class it serves, and
-# the synthetic path's state count rises from 6 to 91 per assembly. The
-# measured medians ran up to 2.077x over three rounds at a rel stddev
-# under 1 percent; 2.30 records that measured cost as accepted. The
-# fleet's HPXML path is untouched (the LUT/F-factor routing carries no
-# new state) and keeps the default, as does every other target. The 4.4
-# model-reduction row targets these ceilings back toward the default:
-# tighten them when it lands.
-declare -A ACCEPTED_RATIOS=(
-    [rl_episode]="2.30"
-    [rl_step]="2.30"
-)
+# The map holds no entries now. Row 83's acceptance recorded the RC split
+# rule's bench cost here (rl_episode and rl_step at 2.30: the rule's
+# diffusion-length resolution took the synthetic path's state count from
+# 6 to 91 per assembly, the measured medians up to 2.077x over three
+# rounds at a rel stddev under 1 percent), and the model-reduction row
+# reclaimed it: the assembled layer chains condense to five-node
+# band-limited ladders matched to their own ISO 13786 propagator
+# response, the state count falls to 31, and the paired medians measure
+# 0.64x to 1.00x against the accepted-cost base - every benchmark inside
+# the default the map's absence restores. The mechanism stays as the
+# operator's disposition path for a future hot-path cost: an entry
+# records the measured cost and the row that bought it, the way row
+# 83's did.
+declare -A ACCEPTED_RATIOS=()
 
 # One target's ceiling: its accepted ratio from ACCEPTED_RATIOS, the
 # default THRESHOLD_RATIO when it carries none.
@@ -723,20 +723,35 @@ cmd_test() {
     check "the single-pair comparison refuses it too" 1 "$drift_rc"
 
     # 13. The per-target accepted ceilings: a benchmark is judged by its
-    #     OWN target's ceiling, not one global threshold. The rl_episode
-    #     target's accepted ceiling is 2.30 (the RC split rule's
-    #     recorded cost, above the BENCH_TARGETS array); both cases
-    #     scale the poisoned fixture's current side, and the fixtures
-    #     mirror the live export's shape: keys as the full bench id,
-    #     criterion's group_id carrying the group PATH the bench
-    #     declares (measured rl_episode/batch_step), so the lookup
-    #     under test is the one the exports exercise. A pair whose
-    #     ratio exceeds the accepted ceiling still flags; the poisoned
-    #     pair's shape at ~1.5x does not, where the same ~1.5x shape
-    #     under the default-ceiling targets flags (the screen case
-    #     above): the ceiling is the target's own, and the default
-    #     keeps its teeth.
+    #     OWN target's ceiling, not one global threshold. The map holds
+    #     no entries now (the model-reduction row reclaimed the split
+    #     rule's accepted cost), so the default path pins with the
+    #     fixtures as they stand: the past-ceiling pair and the ~1.5x
+    #     pair both flag, and the flag records the default 1.20 it
+    #     judged by. The entry path pins under a test-scoped map
+    #     (bash's dynamic scope carries the local declaration into
+    #     run_flag); the fixtures mirror the live export's shape: keys
+    #     as the full bench id, criterion's group_id carrying the group
+    #     PATH the bench declares (measured rl_episode/batch_step), so
+    #     the lookup under test is the one the exports exercise. A pair
+    #     whose ratio exceeds the accepted ceiling still flags; the
+    #     poisoned pair's shape at ~1.5x does not, where the same
+    #     ~1.5x shape under the default-ceiling targets flags (the
+    #     screen case above): the ceiling is the target's own, and the
+    #     default keeps its teeth.
     local ceiling_flag ceiling_pass
+    ceiling_flag="$(run_flag "$fx/accepted-ceiling-baseline.json" \
+        "$fx/accepted-ceiling-flag-current.json" median)"
+    check "the default governs: the pair past the old ceiling flags" 3 \
+        "$(count <<<"$ceiling_flag")"
+    check "the flag records the default 1.20 it judged by" "1.20" \
+        "$(jq -r '.regressions[0].ceiling' <<<"$ceiling_flag")"
+    ceiling_pass="$(run_flag "$fx/accepted-ceiling-baseline.json" \
+        "$fx/accepted-ceiling-pass-current.json" median)"
+    check "the default governs: the ~1.5x pair flags too" 3 \
+        "$(count <<<"$ceiling_pass")"
+
+    local -A ACCEPTED_RATIOS=([rl_episode]="2.30")
     ceiling_flag="$(run_flag "$fx/accepted-ceiling-baseline.json" \
         "$fx/accepted-ceiling-flag-current.json" median)"
     check "accepted ceiling: a pair past rl_episode's 2.30 flags" 3 \
