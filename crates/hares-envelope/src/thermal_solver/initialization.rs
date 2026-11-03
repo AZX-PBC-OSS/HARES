@@ -625,6 +625,19 @@ mod tests {
         }
     }
 
+    /// Installs `counter` as this thread's subscriber and re-evaluates the
+    /// callsites' interest against it. The interest cache is global, so a
+    /// test that reached the warning callsite with no subscriber can leave
+    /// it disabled; the rebuild makes the capture independent of the test
+    /// schedule.
+    fn install_warn_counter(
+        counter: std::sync::Arc<WarnCounter>,
+    ) -> tracing::subscriber::DefaultGuard {
+        let guard = tracing::subscriber::set_default(counter);
+        tracing::callsite::rebuild_interest_cache();
+        guard
+    }
+
     /// The uniform-temperature fallback (a failed steady-state solve) must
     /// warn: the fallback is legitimate but silently initialising every
     /// state at the indoor temperature would hide a broken model.
@@ -659,7 +672,7 @@ mod tests {
             messages: std::sync::Mutex::new(Vec::new()),
         });
         let x = {
-            let _guard = tracing::subscriber::set_default(counter.clone());
+            let _guard = install_warn_counter(counter.clone());
             initialize_steady_state(&model, &wiring, &env, indoor, &[]).unwrap()
         };
         assert_eq!(x.len(), 2);
@@ -712,7 +725,7 @@ mod tests {
             messages: std::sync::Mutex::new(Vec::new()),
         });
         let x = {
-            let _guard = tracing::subscriber::set_default(counter.clone());
+            let _guard = install_warn_counter(counter.clone());
             initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]).unwrap()
         };
         // The fallback substitutes the uniform indoor temperature for every
@@ -775,7 +788,7 @@ mod tests {
             messages: std::sync::Mutex::new(Vec::new()),
         });
         let x = {
-            let _guard = tracing::subscriber::set_default(counter.clone());
+            let _guard = install_warn_counter(counter.clone());
             initialize_steady_state(&model, &wiring, &env, indoor, &[ZoneId(1)]).unwrap()
         };
         assert_eq!(x.as_slice(), &[21.0, 21.0]);

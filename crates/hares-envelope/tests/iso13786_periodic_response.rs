@@ -125,10 +125,16 @@ fn mat_mul(a: &Mat, b: &Mat) -> Mat {
 /// A solid layer's dynamic matrix at the diurnal frequency, per ISO 13786's
 /// propagator: [[D, -S], [-G, D]] with k = sqrt(i*w*rho*c/lambda),
 /// D = cosh(k*d), S = sinh(k*d)/(lambda*k), G = lambda*k*sinh(k*d).
-fn solid_layer_matrix(thickness_m: f64, conductivity: f64, density: f64, cp: f64) -> Mat {
+fn solid_layer_matrix(
+    thickness_m: f64,
+    conductivity: f64,
+    density: f64,
+    cp: f64,
+    omega: f64,
+) -> Mat {
     // k = (1 + i) * sqrt(w * rho * c / (2 * lambda)): the principal square
     // root of i*omega/alpha (alpha = lambda/(rho*cp)).
-    let diffusion = OMEGA * density * cp / (2.0 * conductivity);
+    let diffusion = omega * density * cp / (2.0 * conductivity);
     let root = diffusion.sqrt();
     let k = C(root, root);
     let kd = k.scale(thickness_m);
@@ -167,10 +173,10 @@ const FLOOR_900: Construction = &[
 ];
 
 /// The analytic chain: exterior film, the layers ext->int, interior film.
-fn analytic_chain(layers: Construction) -> Mat {
+fn analytic_chain(layers: Construction, omega: f64) -> Mat {
     let mut m = film_matrix(R_FILM_EXTERIOR);
     for &(t, k, rho, cp) in layers {
-        m = mat_mul(&solid_layer_matrix(t, k, rho, cp), &m);
+        m = mat_mul(&solid_layer_matrix(t, k, rho, cp, omega), &m);
     }
     mat_mul(&film_matrix(R_FILM_INTERIOR), &m)
 }
@@ -199,8 +205,8 @@ struct Analytic {
     kappa_j_m2_k: f64,
 }
 
-fn analytic_characteristics(layers: Construction) -> Analytic {
-    let m = analytic_chain(layers);
+fn analytic_characteristics(layers: Construction, omega: f64, period_s: f64) -> Analytic {
+    let m = analytic_chain(layers, omega);
 
     // Static U: the series resistance of films and layers (the dynamic
     // chain's Re(R_hat) carries the periodic wave's storage and sits a few
@@ -221,18 +227,18 @@ fn analytic_characteristics(layers: Construction) -> Analytic {
 
     // Phase lag: q_int(t) = |Y12| cos(w t + arg Y12) peaks at
     // w t = -arg(Y12); the lag is positive when arg(Y12) < 0.
-    let lag_s = -y12.arg() / OMEGA;
+    let lag_s = -y12.arg() / omega;
     let lag_hours = {
         let mut h = lag_s / 3600.0;
-        // Normalize into [0, 24): a lag past half a period is a lead.
-        h = h.rem_euclid(PERIOD_S / 3600.0);
+        // Normalize into [0, period): a lag past half a period is a lead.
+        h = h.rem_euclid(period_s / 3600.0);
         h
     };
 
     // Areal heat capacity: exterior held (theta_ext = 0): the storage rate
     // s = q_ext - q_int = ((1 - M22)/M12) * theta_int.
     let s_per_theta = m[1][1].scale(-1.0).add(C(1.0, 0.0)).div(m[0][1]);
-    let kappa = s_per_theta.abs() / OMEGA;
+    let kappa = s_per_theta.abs() / omega;
 
     Analytic {
         u_value: u,
@@ -355,14 +361,14 @@ fn assemble_fin(layers: Construction) -> Fin {
 
 /// The demodulated fundamental of a sampled series: (amplitude, phase
 /// [rad]) in `q = amplitude * cos(w t + phase)`.
-fn demodulate(samples: &[f64], dt_s: f64) -> (f64, f64) {
+fn demodulate(samples: &[f64], dt_s: f64, omega: f64) -> (f64, f64) {
     let n = samples.len();
     let mut a_cos = 0.0;
     let mut a_sin = 0.0;
     for (k, &q) in samples.iter().enumerate() {
         let t = k as f64 * dt_s;
-        a_cos += q * (OMEGA * t).cos();
-        a_sin += q * (OMEGA * t).sin();
+        a_cos += q * (omega * t).cos();
+        a_sin += q * (omega * t).sin();
     }
     a_cos *= 2.0 / n as f64;
     a_sin *= 2.0 / n as f64;
@@ -387,9 +393,11 @@ fn periodic_response(
     zone_swings: bool,
     drive_amplitude_k: f64,
     cycles: usize,
+    period_s: f64,
+    omega: f64,
 ) -> ((f64, f64), (f64, f64), f64) {
     let dt_s = 300.0;
-    let steps_per_cycle = (PERIOD_S / dt_s).round() as usize;
+    let steps_per_cycle = (period_s / dt_s).round() as usize;
     let b = DMatrix::from_columns(&[fin.b_zone.clone(), fin.b_out.clone()]);
     let mapping = OutputMapping {
         output_count: fin.n_nodes,
@@ -410,7 +418,7 @@ fn periodic_response(
         let mut outer_cycle: Vec<f64> = Vec::with_capacity(steps_per_cycle);
         for step in 0..steps_per_cycle {
             let t = (cycle * steps_per_cycle + step) as f64 * dt_s;
-            let drive = drive_amplitude_k * (OMEGA * t).cos();
+            let drive = drive_amplitude_k * (omega * t).cos();
             let (t_zone, t_out) = if zone_swings {
                 (drive, 0.0)
             } else {
@@ -436,16 +444,16 @@ fn periodic_response(
     }
 
     (
-        demodulate(&q_inner_last, dt_s),
-        demodulate(&q_outer_last, dt_s),
+        demodulate(&q_inner_last, dt_s, omega),
+        demodulate(&q_outer_last, dt_s, omega),
         residual,
     )
 }
 
 /// The phase lag in hours from a demodulated (amplitude, phase) of a flux
 /// against its drive (the drive's own phase is the time origin).
-fn lag_hours(phase_rad: f64) -> f64 {
-    (-phase_rad / OMEGA / 3600.0).rem_euclid(PERIOD_S / 3600.0)
+fn lag_hours(phase_rad: f64, omega: f64, period_s: f64) -> f64 {
+    (-phase_rad / omega / 3600.0).rem_euclid(period_s / 3600.0)
 }
 
 #[test]
@@ -454,7 +462,7 @@ fn analytic_chain_reproduces_the_pure_resistance_limits() {
     // (density 1e-6) behaves as its series resistance: decrement 1,
     // lag 0, kappa 0.
     let near_resistance: Construction = &[(0.05, 0.1, 1e-6, 1.0)];
-    let a = analytic_characteristics(near_resistance);
+    let a = analytic_characteristics(near_resistance, OMEGA, PERIOD_S);
     assert!(
         (a.decrement_factor - 1.0).abs() < 1e-6,
         "a pure resistance transmits the swing fully: decrement {}",
@@ -478,7 +486,7 @@ fn analytic_chain_reproduces_the_lumped_capacitor_limit() {
     // the storage swing dilutes by the film-divider factor the hand-derived
     // reference below carries, and the analytic chain must reproduce it.
     let lumped: Construction = &[(0.02, 100.0, 1000.0, 1000.0)];
-    let a = analytic_characteristics(lumped);
+    let a = analytic_characteristics(lumped, OMEGA, PERIOD_S);
     // Hand-derived: room(theta) - Ri - C - Re - outside(0) periodic at w.
     // The node's swing |theta_c/theta| = 1/sqrt((1+Ri/Re)^2 + (w*C*Ri)^2),
     // and kappa = |s|/(w*theta) = C * that factor.
@@ -509,7 +517,7 @@ fn analytic_chain_reproduces_the_lumped_capacitor_limit() {
 fn analytic_characteristics_match_hand_computed_u_values() {
     // 600 wall: R = 0.03 + 0.009/0.140 + 0.066/0.040 + 0.012/0.160 + 0.12
     let r600 = 0.03 + 0.009 / 0.140 + 0.066 / 0.040 + 0.012 / 0.160 + 0.12;
-    let a600 = analytic_characteristics(WALL_600);
+    let a600 = analytic_characteristics(WALL_600, OMEGA, PERIOD_S);
     assert!(
         (a600.u_value - 1.0 / r600).abs() / (1.0 / r600) < 1e-9,
         "600 wall U: analytic {} vs hand-computed {}",
@@ -529,7 +537,7 @@ fn analytic_characteristics_match_hand_computed_u_values() {
 
     // 900 wall: R = 0.03 + 0.009/0.140 + 0.0615/0.040 + 0.100/0.510 + 0.12
     let r900 = 0.03 + 0.009 / 0.140 + 0.0615 / 0.040 + 0.100 / 0.510 + 0.12;
-    let a900 = analytic_characteristics(WALL_900);
+    let a900 = analytic_characteristics(WALL_900, OMEGA, PERIOD_S);
     assert!(
         (a900.u_value - 1.0 / r900).abs() / (1.0 / r900) < 1e-9,
         "900 wall U: analytic {} vs hand-computed {}",
@@ -546,7 +554,7 @@ fn analytic_characteristics_match_hand_computed_u_values() {
 
     // 900 floor slab: R = 0.03 + 1.007/0.040 + 0.080/1.130 + 0.12
     let rfloor = 0.03 + 1.007 / 0.040 + 0.080 / 1.130 + 0.12;
-    let afloor = analytic_characteristics(FLOOR_900);
+    let afloor = analytic_characteristics(FLOOR_900, OMEGA, PERIOD_S);
     assert!(
         (afloor.u_value - 1.0 / rfloor).abs() / (1.0 / rfloor) < 1e-9,
         "900 floor U: analytic {} vs hand-computed {}",
@@ -584,15 +592,19 @@ fn analytic_characteristics_match_hand_computed_u_values() {
 ///   10 percent of the analytic value;
 /// - the 900 wall (the concrete layer resolved at the assembly's
 ///   penetration-depth rule, three nodes) holds all three to 5 percent;
-/// - the 900 floor slab (its 1.007 m insulation layer resolved at ten
-///   sub-layer nodes, three per diurnal penetration depth) holds all
-///   three to the same 5 percent class. The rule's resolution is the
-///   lumped chain's dispersion budget (see `split_layer_count`): three
-///   sub-layers per penetration depth bounds the transmitted wave's
-///   amplitude error near N/108 (N = the depth in penetration lengths,
-///   3.05 here), measured at 3.5 percent on the decrement factor; two per
-///   depth left 6 percent and the wave's amplitude halved entirely while
-///   the layer went unsplit under the old material-class gates.
+/// - the 900 floor slab (its 1.007 m insulation layer resolves at ten
+///   sub-layer nodes by the penetration-depth rule and condenses to the
+///   assembly's five-node band-limited ladder, matched to the layer's own
+///   propagator response) holds all three to the same 5 percent class.
+///   The reduction's own residual (the ladder's transmittance magnitude
+///   at 1.3 percent) is inside the chain's former dispersion (3.5
+///   percent), so the pin is tighter than the pre-reduction form's, not
+///   looser. The fit targets the diurnal period alone, so the reduced
+///   boundary is also witnessed at the harmonic three times the diurnal
+///   period: the ladder's layer residual there measures 3.7 percent on the
+///   transmittance and 2.5 percent on the areal capacity, inside the same
+///   5 percent class (the 8-hour harmonic is outside it: 40 percent, on a
+///   chain that itself measures 12.6 percent there).
 #[test]
 fn engine_periodic_response_matches_iso_13786() {
     for (name, layers) in [
@@ -600,22 +612,24 @@ fn engine_periodic_response_matches_iso_13786() {
         ("900 wall", WALL_900),
         ("900 floor", FLOOR_900),
     ] {
-        let a = analytic_characteristics(layers);
+        let a = analytic_characteristics(layers, OMEGA, PERIOD_S);
         let fin = assemble_fin(layers);
 
         // The decrement scenario: the exterior swings 10 K, the interior held.
-        let ((q_in, q_in_phase), _outer, residual) = periodic_response(&fin, false, 10.0, 40);
+        let ((q_in, q_in_phase), _outer, residual) =
+            periodic_response(&fin, false, 10.0, 40, PERIOD_S, OMEGA);
         assert!(
             residual < 1e-9,
             "{name}: the periodic response did not converge (residual {residual:.3e})"
         );
         let engine_f = q_in / 10.0 / a.u_value;
-        let engine_lag = lag_hours(q_in_phase);
+        let engine_lag = lag_hours(q_in_phase, OMEGA, PERIOD_S);
 
         // The admittance scenario: the interior swings 1 K, the exterior held.
         // The storage rate s = q_ext - q_int; its phasor is the complex
         // difference of the two demodulated fluxes.
-        let ((qi_amp, qi_phase), (qe_amp, qe_phase), _) = periodic_response(&fin, true, 1.0, 40);
+        let ((qi_amp, qi_phase), (qe_amp, qe_phase), _) =
+            periodic_response(&fin, true, 1.0, 40, PERIOD_S, OMEGA);
         let q_i = C(qi_amp * qi_phase.cos(), -qi_amp * qi_phase.sin());
         let q_e = C(qe_amp * qe_phase.cos(), -qe_amp * qe_phase.sin());
         let engine_kappa = q_e.sub(q_i).abs() / OMEGA;
@@ -663,11 +677,13 @@ fn engine_periodic_response_matches_iso_13786() {
             }
             "900 floor" => {
                 // The 1.007 m insulation layer resolves at ten sub-layer
-                // nodes (three per diurnal penetration depth); the same
-                // 5 percent class as the 900 wall applies to all three
-                // quantities. The residuals are the lumped chain's
-                // dispersion over three penetration depths, documented in
-                // the tolerance comment above.
+                // nodes and the assembly condenses it to the five-node
+                // band-limited ladder matched to the layer's own
+                // propagator; the same 5 percent class as the 900 wall
+                // applies to all three quantities, and the measured
+                // residuals (the ladder's transmittance magnitude at
+                // 1.3 percent) are tighter than the unreduced chain's
+                // own dispersion (3.5 percent on the decrement factor).
                 assert!(
                     (engine_f / a.decrement_factor - 1.0).abs() <= 0.05,
                     "{name}: decrement factor {engine_f:.4} vs analytic {:.4}",
@@ -682,6 +698,57 @@ fn engine_periodic_response_matches_iso_13786() {
                     (engine_kappa / a.kappa_j_m2_k - 1.0).abs() <= 0.05,
                     "{name}: areal heat capacity {engine_kappa:.0} vs analytic {:.0}",
                     a.kappa_j_m2_k
+                );
+
+                // The fit's target is the diurnal period; the band's
+                // breadth is pinned at the harmonic three times the diurnal
+                // period. The layer's transmittance phasor residual at that
+                // period measures 3.7 percent (1.8 percent on the
+                // magnitude) and the areal capacity 2.5 percent (the
+                // unreduced chain measures 0.6 and 0.2 percent), and the
+                // assembled boundary holds the same 5 percent class there.
+                // The reduction is a diurnal match, not a broadband one:
+                // the measured 8-hour residual is 40 percent (the chain
+                // itself 12.6), so the annual to 3-day band is the model's
+                // contract and the shorter periods carry the chain's own
+                // diurnal dispersion.
+                let harmonic_period_s = 3.0 * PERIOD_S;
+                let harmonic_omega = std::f64::consts::TAU / harmonic_period_s;
+                let ah = analytic_characteristics(layers, harmonic_omega, harmonic_period_s);
+                let ((qh_in, qh_phase), _, hres) =
+                    periodic_response(&fin, false, 10.0, 40, harmonic_period_s, harmonic_omega);
+                assert!(
+                    hres < 1e-9,
+                    "{name}: the harmonic response did not converge (residual {hres:.3e})"
+                );
+                let harmonic_f = qh_in / 10.0 / ah.u_value;
+                let harmonic_lag = lag_hours(qh_phase, harmonic_omega, harmonic_period_s);
+                let ((qi_h_amp, qi_h_phase), (qe_h_amp, qe_h_phase), _) =
+                    periodic_response(&fin, true, 1.0, 40, harmonic_period_s, harmonic_omega);
+                let q_i_h = C(qi_h_amp * qi_h_phase.cos(), -qi_h_amp * qi_h_phase.sin());
+                let q_e_h = C(qe_h_amp * qe_h_phase.cos(), -qe_h_amp * qe_h_phase.sin());
+                let harmonic_kappa = q_e_h.sub(q_i_h).abs() / harmonic_omega;
+                eprintln!(
+                    "[iso13786] {name} at 3x the diurnal period: engine \
+                     f={harmonic_f:.4} lag={harmonic_lag:.2}h kappa={harmonic_kappa:.0} \
+                     | analytic f={:.4} lag={:.2}h kappa={:.0}",
+                    ah.decrement_factor, ah.lag_hours, ah.kappa_j_m2_k
+                );
+                assert!(
+                    (harmonic_f / ah.decrement_factor - 1.0).abs() <= 0.05,
+                    "{name} at 3x the period: decrement factor {harmonic_f:.4} vs analytic {:.4}",
+                    ah.decrement_factor
+                );
+                assert!(
+                    (harmonic_lag - ah.lag_hours).abs() <= 0.05 * ah.lag_hours,
+                    "{name} at 3x the period: phase lag {harmonic_lag:.3} h vs analytic {:.3} h",
+                    ah.lag_hours
+                );
+                assert!(
+                    (harmonic_kappa / ah.kappa_j_m2_k - 1.0).abs() <= 0.05,
+                    "{name} at 3x the period: areal heat capacity \
+                     {harmonic_kappa:.0} vs analytic {:.0}",
+                    ah.kappa_j_m2_k
                 );
             }
             _ => panic!("unknown construction {name}"),

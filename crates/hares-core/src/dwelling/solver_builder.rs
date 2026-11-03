@@ -3576,6 +3576,7 @@ mod tests {
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
+            reduction_fit_exceedance_count: 0,
         };
 
         let rc = RCContext {
@@ -3787,6 +3788,7 @@ mod tests {
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
+            reduction_fit_exceedance_count: 0,
         };
 
         let rc = RCContext {
@@ -4035,6 +4037,7 @@ mod tests {
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
+            reduction_fit_exceedance_count: 0,
         };
 
         let rc = RCContext {
@@ -4285,6 +4288,7 @@ mod tests {
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
+            reduction_fit_exceedance_count: 0,
         };
 
         let rc = RCContext {
@@ -4588,6 +4592,7 @@ mod tests {
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
+            reduction_fit_exceedance_count: 0,
         };
 
         let rc = RCContext {
@@ -4870,6 +4875,7 @@ mod tests {
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
+            reduction_fit_exceedance_count: 0,
         };
 
         let rc = RCContext {
@@ -5145,6 +5151,7 @@ mod tests {
             default_r_fallback_count: 0,
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
+            reduction_fit_exceedance_count: 0,
         };
 
         let rc = RCContext {

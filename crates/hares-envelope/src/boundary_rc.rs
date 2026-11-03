@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nalgebra::DMatrix;
+use nalgebra::{Complex, DMatrix};
 use thiserror::Error;
 
 use hares_physics::air_properties::dry_air_density_kg_m3;
@@ -115,6 +115,13 @@ const DIURNAL_PERIOD_S: f64 = 86_400.0;
 /// low-density insulation layer resolves the same wave a concrete layer
 /// does, and a layer thin relative to δ_p/3 already returns n = 1.
 ///
+/// The count's consumer is the assembly's resolution choice: a layer at
+/// five or fewer sub-layer nodes carries its chain as resolved; a deeper
+/// resolution condenses to the band-limited ladder (the reduction below),
+/// whose fit reproduces the layer's own ISO 13786 propagator response
+/// directly, so the chain's dispersion budget no longer binds a reduced
+/// layer.
+///
 /// Cite:
 /// - Incropera & DeWitt, *Fundamentals of Heat and Mass Transfer* §5.8,
 ///   "Penetration depth" for semi-infinite solid with periodic surface
@@ -140,6 +147,452 @@ fn split_layer_count(
     let lambda = (alpha * DIURNAL_PERIOD_S / (9.0 * std::f64::consts::PI)).sqrt();
     let n = (thickness_m / lambda).ceil() as usize;
     n.max(1)
+}
+
+// ── The band-limited ladder reduction ───────────────────────────────────────
+//
+// A material layer resolving more than [`MAX_RESOLVED_SUBNODES`] sub-layer
+// nodes does not need them as states. Its sub-layer chain exists to carry
+// one thing the zone observes: the layer's diurnal response. The chain
+// condenses to a five-node ladder (six resistances, five capacitances)
+// that holds the layer's series resistance and total capacitance exactly
+// and reproduces the layer's ISO 13786 propagator response at the diurnal
+// period -- the transferred wave's amplitude and phase (the decrement
+// factor and the lag) and the areal heat capacity -- to the fit's recorded
+// residual. The fit is a damped Gauss-Newton (Levenberg-Marquardt) on the
+// response residuals over the ladder's R/C splits, each split through a
+// softmax so the two exact sums hold by construction; the starts are the
+// even placement plus deterministic perturbations of it.
+//
+// The cap's value is the measured reach boundary of the pinned
+// constructions' deepest layer (the R25 slab's 1.007 m insulation, 3.05
+// penetration depths): five nodes reproduce that layer's propagator
+// response to 1.3 percent on the transmittance (the phase to 0.05 h, the
+// areal capacity to 0.04 percent) where four nodes miss the witness's lag
+// budget (0.22 h against the 0.2 h class). A layer deeper than the study's
+// lies outside the family's reach: the fit is kept and counted past the
+// bound (the default synthetic building's 4.8-depth faces measure 24
+// percent on the transmittance), the cost recorded rather than hidden.
+// Layers at five or fewer sub-layer nodes -- every thin layer, and the
+// witness's 600 wall (three single-node layers) and 900 wall (its concrete
+// at three) -- are untouched bit for bit. A same-zone boundary's kept
+// chain is a dead-end fin whose cut surface is adiabatic, not a two-faced
+// layer, so the reduction does not apply there.
+//
+// Cite: ISO 13786:2007 section 6.2 (the propagator the fit targets); the
+// reach study recorded in docs/PHYSICS_DECISIONS.md (the cap's derivation
+// and the rejected forms).
+
+/// The angular frequency of the diurnal period.
+const DIURNAL_OMEGA: f64 = std::f64::consts::TAU / DIURNAL_PERIOD_S;
+
+/// The sub-layer-node count above which a layer's resolved chain condenses
+/// to the fitted ladder.
+const MAX_RESOLVED_SUBNODES: usize = 5;
+
+/// The fit's acceptance bound: the largest relative response residual a
+/// reduced ladder may carry uncounted, as a fraction of the layer's own
+/// propagator response. A boundary whose best fit exceeds it keeps the fit
+/// and is counted in
+/// [`EnvelopeDiagnostics::reduction_fit_exceedance_count`] -- recorded,
+/// never silent. Two fifths of the 5 percent ISO 13786 witness class the
+/// reduction serves.
+const REDUCTION_FIT_RESIDUAL_BOUND: f64 = 0.02;
+
+/// The fit's convergence bound on the relative response residuals.
+const REDUCTION_FIT_TOLERANCE: f64 = 1e-10;
+
+/// The fit's trust-region bounds (in the logits' space): the step's norm is
+/// clipped to the region, which grows on accepted steps and shrinks on
+/// rejected ones.
+const REDUCTION_FIT_TRUST_MAX: f64 = 4.0;
+const REDUCTION_FIT_TRUST_MIN: f64 = 1e-4;
+
+/// The reduced ladder's shape: [`MAX_RESOLVED_SUBNODES`] nodes carry
+/// LADDER_EDGE_COUNT resistances and the same number of capacitances; the
+/// fit's parameters are the two splits' logits (the R split's last logit
+/// is tied by the softmax's exact sum).
+const LADDER_EDGE_COUNT: usize = MAX_RESOLVED_SUBNODES + 1;
+const LADDER_PARAM_COUNT: usize = 2 * LADDER_EDGE_COUNT - 1;
+
+/// The fit's stagnation break: this many consecutive iterations whose
+/// accepted improvement is under 1e-6 of the value end the run (the
+/// underdetermined fit's plateau is not worth the assembly's time).
+const STALE_ITERATION_BREAK: usize = 8;
+
+/// One material layer's resolved RC chain, absolute values for one
+/// boundary: `caps[j]` in J/K and `edges[j]` in K/W, with
+/// `edges.len() == caps.len() + 1`. The end edges carry the layer's own
+/// half-resistances; the films and the neighbouring layers' halves merge
+/// with them at wiring.
+struct ResolvedLayerChain {
+    caps: Vec<f64>,
+    edges: Vec<f64>,
+    /// The chain's opening (exterior-side) edge per m²: the outermost
+    /// node's half-layer resistance, the value `r_outer_half` reports.
+    r_first_areal: f64,
+    /// The chain's closing (interior-side) edge per m²: the innermost
+    /// node's half-layer resistance, the value `r_inner_half` reports.
+    r_last_areal: f64,
+}
+
+/// The 2×2 complex heat-transfer matrix (the propagator convention:
+/// `[θ; q]` propagating exterior → interior, `q` positive toward the
+/// interior; a resistance is `[[1, -R], [0, 1]]`, a capacitance shunt
+/// `[[1, 0], [-iωC, 1]]`).
+type Propagator = [[Complex<f64>; 2]; 2];
+
+fn propagator_mul(a: &Propagator, b: &Propagator) -> Propagator {
+    [
+        [
+            a[0][0] * b[0][0] + a[0][1] * b[1][0],
+            a[0][0] * b[0][1] + a[0][1] * b[1][1],
+        ],
+        [
+            a[1][0] * b[0][0] + a[1][1] * b[1][0],
+            a[1][0] * b[0][1] + a[1][1] * b[1][1],
+        ],
+    ]
+}
+
+fn resistance_matrix(r: f64) -> Propagator {
+    [
+        [Complex::new(1.0, 0.0), Complex::new(-r, 0.0)],
+        [Complex::new(0.0, 0.0), Complex::new(1.0, 0.0)],
+    ]
+}
+
+fn shunt_matrix(c: f64, omega: f64) -> Propagator {
+    [
+        [Complex::new(1.0, 0.0), Complex::new(0.0, 0.0)],
+        [Complex::new(0.0, -omega * c), Complex::new(1.0, 0.0)],
+    ]
+}
+
+/// A solid layer's dynamic matrix at the diurnal frequency, per ISO 13786's
+/// propagator: [[D, -S], [-G, D]] with the propagation constant
+/// k = (1+i)·√(ω ρ c / (2λ)), D = cosh(k·d), S = sinh(k·d)/(λ·k),
+/// G = λ·k·sinh(k·d).
+fn solid_layer_propagator(
+    thickness_m: f64,
+    k_eff: f64,
+    density: f64,
+    specific_heat: f64,
+    omega: f64,
+) -> Propagator {
+    let diffusion = omega * density * specific_heat / (2.0 * k_eff);
+    let root = diffusion.sqrt();
+    let kc = Complex::new(root, root);
+    let kd = kc * thickness_m;
+    let d = kd.cosh();
+    let s = kd.sinh() / (kc * k_eff);
+    let g = kd.sinh() * (kc * k_eff);
+    [[d, -s], [-g, d]]
+}
+
+/// The lumped ladder's own propagator at `omega`: the resistance and shunt
+/// matrices composed along the chain, the first edge applied first (the
+/// exterior side).
+fn ladder_propagator(edges: &[f64], caps: &[f64], omega: f64) -> Propagator {
+    let mut m = resistance_matrix(edges[0]);
+    for (i, &c) in caps.iter().enumerate() {
+        m = propagator_mul(
+            &resistance_matrix(edges[i + 1]),
+            &propagator_mul(&shunt_matrix(c, omega), &m),
+        );
+    }
+    m
+}
+
+/// The layer response the reduction matches, read off a propagator: the
+/// periodic transmittance phasor `Y12 = M21 − M22·M11/M12` (the interior
+/// held; its magnitude over U is the decrement factor, its argument the
+/// lag) and the areal heat capacity `|(1 − M22)/M12|/ω`.
+fn ladder_response(m: &Propagator, omega: f64) -> (Complex<f64>, f64) {
+    let m11 = m[0][0];
+    let m12 = m[0][1];
+    let m21 = m[1][0];
+    let m22 = m[1][1];
+    let y12 = m21 - m22 * m11 / m12;
+    let kappa = ((Complex::new(1.0, 0.0) - m22) / m12).norm() / omega;
+    (y12, kappa)
+}
+
+/// One material layer's sub-layer chain (the node-centred scheme the
+/// boundary wiring carries): the layer split into `n` equal sub-layers,
+/// each node holding the sub-layer's capacitance with its half-resistance
+/// wired to each side. Absolute values for the boundary's area.
+fn sub_layer_chain(
+    thickness_m: f64,
+    k_eff: f64,
+    density: f64,
+    specific_heat: f64,
+    n: usize,
+    area: f64,
+) -> ResolvedLayerChain {
+    let d = thickness_m / n as f64;
+    let half = d / (2.0 * k_eff * area);
+    let cap = density * specific_heat * d * area;
+    ResolvedLayerChain {
+        caps: vec![cap; n],
+        edges: std::iter::once(half)
+            .chain(std::iter::repeat_n(half + half, n - 1))
+            .chain(std::iter::once(half))
+            .collect(),
+        r_first_areal: d / (2.0 * k_eff),
+        r_last_areal: d / (2.0 * k_eff),
+    }
+}
+
+/// The softmax split of a total into exactly `rs.len()` positive parts,
+/// written in place.
+fn softmax_split<const N: usize>(logits: &[f64; N], total: f64, out: &mut [f64; N]) {
+    let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let mut sum = 0.0;
+    for (o, &z) in out.iter_mut().zip(logits.iter()) {
+        let w = (z - max).exp();
+        *o = w;
+        sum += w;
+    }
+    for o in out.iter_mut() {
+        *o = *o / sum * total;
+    }
+}
+
+/// The reduction's per-assembly memo: the same layer material (to the
+/// bits) reduces to the same ladder. The splits are areal; the boundary's
+/// area scales them at its wiring.
+type LadderMemo =
+    HashMap<(u64, u64, u64, u64), ([f64; LADDER_EDGE_COUNT], [f64; MAX_RESOLVED_SUBNODES], f64)>;
+
+/// The 11×11 linear solve for the fit's step (Gaussian elimination with
+/// partial pivoting, in place). `a` is destroyed; `rhs` receives the
+/// solution. Returns None when a pivot vanishes (the direction is dead).
+fn solve_ladder_step<const N: usize>(
+    a: &mut [[f64; N]; N],
+    rhs: &mut [f64; N],
+) -> Option<[f64; N]> {
+    for col in 0..N {
+        let pivot = (col..N)
+            .map(|row| (a[row][col].abs(), row))
+            .fold((0.0, col), |(best_v, best_r), (v, row)| {
+                if v > best_v {
+                    (v, row)
+                } else {
+                    (best_v, best_r)
+                }
+            })
+            .1;
+        if a[pivot][col].abs() < 1e-14 {
+            return None;
+        }
+        a.swap(col, pivot);
+        rhs.swap(col, pivot);
+        let inv = 1.0 / a[col][col];
+        for row in (col + 1)..N {
+            let factor = a[row][col] * inv;
+            if factor == 0.0 {
+                continue;
+            }
+            let (above, current) = a.split_at_mut(row);
+            let (a_row, a_pivot) = (&mut current[0], &above[col]);
+            for (a_rj, a_cj) in a_row[col..N].iter_mut().zip(a_pivot[col..N].iter()) {
+                *a_rj -= factor * *a_cj;
+            }
+            rhs[row] -= factor * rhs[col];
+        }
+    }
+    let mut x = [0.0; N];
+    for row in (0..N).rev() {
+        let sum: f64 = ((row + 1)..N).map(|j| a[row][j] * x[j]).sum();
+        x[row] = (rhs[row] - sum) / a[row][row];
+    }
+    Some(x)
+}
+
+/// One damped Gauss-Newton run from a start. The parameters are the R/C
+/// splits' logits (the softmax holds the series-R and total-C sums exact by
+/// construction); the residuals are the transmittance phasor's real and
+/// imaginary parts relative to the target's magnitude (no phase wrapping)
+/// and the areal heat capacity relative to its value. Fixed-size scratch:
+/// the fit runs at every assembly of a reduced layer and pays no heap
+/// traffic per residual evaluation.
+fn fit_ladder_from(
+    z0: &[f64; LADDER_PARAM_COUNT],
+    total_r: f64,
+    total_c: f64,
+    y12_t: Complex<f64>,
+    kappa_t: f64,
+    omega: f64,
+) -> ([f64; LADDER_PARAM_COUNT], f64) {
+    let norm = |r: &[f64; 3]| r.iter().fold(0.0f64, |acc, v| acc.max(v.abs()));
+
+    let mut z = *z0;
+    let mut lambda = 1e-3;
+    let mut rs = [0.0; LADDER_EDGE_COUNT];
+    let mut cs = [0.0; MAX_RESOLVED_SUBNODES];
+    let eval = |z: &[f64; LADDER_PARAM_COUNT],
+                rs: &mut [f64; LADDER_EDGE_COUNT],
+                cs: &mut [f64; MAX_RESOLVED_SUBNODES],
+                res: &mut [f64; 3]| {
+        let r_logits: [f64; LADDER_EDGE_COUNT] = std::array::from_fn(|i| z[i]);
+        let c_logits: [f64; MAX_RESOLVED_SUBNODES] =
+            std::array::from_fn(|i| z[LADDER_EDGE_COUNT + i]);
+        softmax_split(&r_logits, total_r, rs);
+        softmax_split(&c_logits, total_c, cs);
+        let (y12, kappa) = ladder_response(&ladder_propagator(rs, cs, omega), omega);
+        res[0] = (y12.re - y12_t.re) / y12_t.norm();
+        res[1] = (y12.im - y12_t.im) / y12_t.norm();
+        res[2] = (kappa - kappa_t) / kappa_t;
+    };
+    let mut r = [0.0f64; 3];
+    eval(&z, &mut rs, &mut cs, &mut r);
+    let mut value = norm(&r);
+    let mut trust = 1.0;
+    let mut trust_set = false;
+    let mut stale = 0usize;
+    for _ in 0..60 {
+        if value < REDUCTION_FIT_TOLERANCE || stale >= STALE_ITERATION_BREAK {
+            break;
+        }
+        // Numerical Jacobian in the logits' space.
+        let mut jac = [[0.0f64; LADDER_PARAM_COUNT]; 3];
+        for j in 0..LADDER_PARAM_COUNT {
+            let eps = 1e-7 * (1.0 + z[j].abs());
+            let mut zp = z;
+            zp[j] += eps;
+            let mut rp = [0.0f64; 3];
+            eval(&zp, &mut rs, &mut cs, &mut rp);
+            for (i, row) in jac.iter_mut().enumerate() {
+                row[j] = (rp[i] - r[i]) / eps;
+            }
+        }
+        // (JᵀJ + λ·diag(JᵀJ)) δ = −Jᵀr: the Marquardt damping keeps the
+        // step inside the basin the diagonal's scale describes.
+        let mut a = [[0.0f64; LADDER_PARAM_COUNT]; LADDER_PARAM_COUNT];
+        let mut jtr = [0.0f64; LADDER_PARAM_COUNT];
+        for (i, a_row) in a.iter_mut().enumerate() {
+            for (j, a_ij) in a_row.iter_mut().enumerate() {
+                *a_ij = jac.iter().map(|row| row[i] * row[j]).sum();
+            }
+            jtr[i] = -jac
+                .iter()
+                .zip(r.iter())
+                .map(|(row, rv)| row[i] * rv)
+                .sum::<f64>();
+        }
+        for (i, a_ii) in a.iter_mut().enumerate() {
+            a_ii[i] += lambda * a_ii[i].abs().max(1e-12);
+        }
+        let Some(mut delta_vec) = solve_ladder_step(&mut a, &mut jtr) else {
+            break;
+        };
+        // Trust region: the response landscape is flat along most of the
+        // parameter manifold, so an undamped full step lands far outside
+        // the region its linear model describes. Clip the step to the
+        // region, growing it on accepted steps.
+        {
+            let dnorm = delta_vec.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if trust_set && dnorm > trust {
+                let scale = trust / dnorm;
+                for v in &mut delta_vec {
+                    *v *= scale;
+                }
+            }
+        }
+        let z_prev = z;
+        for (zv, dv) in z.iter_mut().zip(delta_vec.iter()) {
+            *zv += *dv;
+        }
+        let mut r_next = [0.0f64; 3];
+        eval(&z, &mut rs, &mut cs, &mut r_next);
+        let value_next = norm(&r_next);
+        if value_next < value {
+            r = r_next;
+            let improvement = value - value_next;
+            value = value_next;
+            lambda /= 2.0;
+            if trust_set {
+                trust = (trust * 2.0).min(REDUCTION_FIT_TRUST_MAX);
+            }
+            stale = if improvement < value * 1e-6 {
+                stale + 1
+            } else {
+                0
+            };
+        } else {
+            z = z_prev;
+            lambda *= 4.0;
+            if trust_set {
+                trust = (trust / 3.0).max(REDUCTION_FIT_TRUST_MIN);
+            } else {
+                // The first rejected step's own norm sets the region the
+                // linear model overreached.
+                let dnorm = delta_vec.iter().map(|v| v * v).sum::<f64>().sqrt();
+                trust = dnorm.max(REDUCTION_FIT_TRUST_MIN);
+                trust_set = true;
+            }
+            stale += 1;
+        }
+    }
+    (z, value)
+}
+
+/// The fitted band-limited ladder for one layer: the
+/// [`MAX_RESOLVED_SUBNODES`]-node ladder's areal edge and capacitance
+/// splits, holding the layer's series R and total C exactly and matching
+/// the layer's ISO 13786 propagator response at `omega` to the fit's
+/// residual. Deterministic restarts (the even placement plus fixed-seed
+/// perturbations of it, xorshift; no external randomness).
+fn fit_band_limited_ladder(
+    thickness_m: f64,
+    k_eff: f64,
+    density: f64,
+    specific_heat: f64,
+    omega: f64,
+) -> ([f64; LADDER_EDGE_COUNT], [f64; MAX_RESOLVED_SUBNODES], f64) {
+    let total_r = thickness_m / k_eff;
+    let total_c = density * specific_heat * thickness_m;
+    let target = solid_layer_propagator(thickness_m, k_eff, density, specific_heat, omega);
+    let (y12_t, kappa_t) = ladder_response(&target, omega);
+
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut perturb = |scale: f64| -> [f64; LADDER_PARAM_COUNT] {
+        let mut z = [0.0; LADDER_PARAM_COUNT];
+        for v in &mut z {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *v = scale * (((seed >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0);
+        }
+        z
+    };
+
+    let mut best: Option<([f64; LADDER_PARAM_COUNT], f64)> = None;
+    for z0 in [std::array::from_fn(|_| 0.0), perturb(1.5), perturb(0.75)] {
+        let (z, value) = fit_ladder_from(&z0, total_r, total_c, y12_t, kappa_t, omega);
+        if best.as_ref().is_none_or(|(_, v)| value < *v) {
+            best = Some((z, value));
+        }
+        if best
+            .as_ref()
+            .is_some_and(|(_, v)| *v < REDUCTION_FIT_TOLERANCE)
+        {
+            break;
+        }
+    }
+    // The starts list above is non-empty, so a best exists. The arm that
+    // keeps this total function should that ever change reports an infinite
+    // residual, which counts the boundary (never silent), on the even
+    // ladder.
+    let (z, residual) = best.unwrap_or(([0.0; LADDER_PARAM_COUNT], f64::INFINITY));
+    let mut rs = [0.0; LADDER_EDGE_COUNT];
+    let mut cs = [0.0; MAX_RESOLVED_SUBNODES];
+    let r_logits: [f64; LADDER_EDGE_COUNT] = std::array::from_fn(|i| z[i]);
+    let c_logits: [f64; MAX_RESOLVED_SUBNODES] = std::array::from_fn(|i| z[LADDER_EDGE_COUNT + i]);
+    softmax_split(&r_logits, total_r, &mut rs);
+    softmax_split(&c_logits, total_c, &mut cs);
+    (rs, cs, residual)
 }
 
 // ── Input types ─────────────────────────────────────────────────────────────
@@ -418,6 +871,13 @@ pub struct EnvelopeDiagnostics {
     /// layer's thermal mass, so every lift is counted here.
     #[cfg(feature = "observe")]
     pub min_capacitance_clamp_count: usize,
+    /// Number of material-layer chains whose fitted ladder's diurnal-response
+    /// residual exceeded 2 percent (a fraction of the layer's own propagator
+    /// response; the bound is REDUCTION_FIT_RESIDUAL_BOUND, two fifths of the
+    /// 5 percent ISO 13786 witness class the reduction serves). Counted in
+    /// every build profile: the reduction's accuracy cost is a physics
+    /// record, not an observation nicety.
+    pub reduction_fit_exceedance_count: usize,
 }
 
 // ── Output ──────────────────────────────────────────────────────────────────
@@ -757,6 +1217,11 @@ pub fn assemble_building_rc(
     }
 
     let mut graph = RcGraphState::with_capacity(initial_capacitances, est_edges);
+    // The reduction's per-assembly memo: the same layer material (to the
+    // bits) reduces to the same ladder, so repeated faces fit once. Local
+    // to this assembly; the ladder splits are areal, the area scales them
+    // at the boundary's wiring.
+    let mut ladder_cache: LadderMemo = HashMap::new();
     let mut layer_info: HashMap<usize, SurfaceLayerInfo> = HashMap::new();
     let mut outdoor_connected = false;
     let mut ground_connected = false;
@@ -921,7 +1386,7 @@ pub fn assemble_building_rc(
 
         if !valid_layers.is_empty() {
             let nodes_before = graph.next_layer_id;
-            let build_result = graph.build_layered_boundary(&valid_layers, &bp);
+            let build_result = graph.build_layered_boundary(&valid_layers, &bp, &mut ladder_cache);
             let (r_inner_half, r_outer_half, _surface_opt) =
                 if let Some((inner, outer, surf, r_ih, r_oh)) = build_result {
                     layer_info.insert(
@@ -1336,6 +1801,7 @@ pub fn assemble_building_rc(
     #[cfg(feature = "observe")]
     let min_capacitance_clamp_count =
         min_capacitance_clamp_count + graph.min_capacitance_clamp_count;
+    let reduction_fit_exceedance_count = graph.reduction_fit_exceedance_count;
     let (capacitances, resistances) = graph.into_elements();
 
     let rc = RCNetwork::from_elements(capacitances, resistances, external_nodes)
@@ -1586,6 +2052,7 @@ pub fn assemble_building_rc(
         default_r_fallback_count,
         #[cfg(feature = "observe")]
         min_capacitance_clamp_count,
+        reduction_fit_exceedance_count,
     };
 
     Ok((
@@ -1619,6 +2086,12 @@ struct RcGraphState {
     /// diagnostics so the floor's mass inflation is visible, not silent.
     #[cfg(feature = "observe")]
     min_capacitance_clamp_count: usize,
+    /// Count of layer chains whose fitted ladder's diurnal-response residual
+    /// exceeded [`REDUCTION_FIT_RESIDUAL_BOUND`], drained into the
+    /// diagnostics so the reduction's accuracy cost is visible, not silent.
+    /// Counted in every build profile: the accuracy cost is a physics
+    /// record, not an observation nicety.
+    reduction_fit_exceedance_count: usize,
 }
 
 impl RcGraphState {
@@ -1629,6 +2102,7 @@ impl RcGraphState {
             resistances: HashMap::with_capacity(est_edges),
             #[cfg(feature = "observe")]
             min_capacitance_clamp_count: 0,
+            reduction_fit_exceedance_count: 0,
         }
     }
 
@@ -1674,10 +2148,17 @@ impl RcGraphState {
 
     /// Build RC nodes and resistances for a boundary with valid material layers.
     ///
-    /// When `same_zone` is true (adjacent/party wall), keep only the inner half
-    /// of layers as a dead-end "fin" of thermal mass (matches OCHRE's halving).
-    /// For odd layer counts, the middle layer is kept with halved capacitance.
-    /// Returns `None` if no capacitor nodes remain, or `Some((inner, outer, surface_opt, r_inner_half, r_outer_half))`
+    /// Every layer resolves through the diffusion-length criterion
+    /// (`split_layer_count`); a layer resolving more than
+    /// [`MAX_RESOLVED_SUBNODES`] sub-layer nodes on a two-faced boundary
+    /// condenses to the fitted band-limited ladder (the reduction above).
+    /// When `same_zone` is true (adjacent/party wall), the reduction does not
+    /// apply -- the kept chain is a dead-end fin whose cut surface is
+    /// adiabatic, not a two-faced layer -- and only the inner half of the
+    /// resolved chain is kept as thermal mass (matches OCHRE's halving; for
+    /// odd node counts the middle node is kept with halved capacitance).
+    /// Returns `None` if no capacitor nodes remain, or
+    /// `Some((inner, outer, surface_opt, r_inner_half, r_outer_half))`
     /// where inner is closest to zone air and outer is closest to exterior.
     /// `surface_opt` is `Some(surface_node)` in StarMesh mode (floating node between
     /// R_film_conv and R_inner_half for proper radiation topology), `None` in ScriptF
@@ -1686,94 +2167,151 @@ impl RcGraphState {
         &mut self,
         layers: &[&LayerInput],
         params: &BoundaryParams,
+        ladder_cache: &mut LadderMemo,
     ) -> Option<(NodeId, NodeId, Option<NodeId>, f64, f64)> {
-        // Split thick layers into sub-layers for diurnal wave resolution.
-        // Every layer qualifies: the criterion is the layer's own diffusion
-        // length, not its material class -- a thick low-density insulation
-        // layer resolves the diurnal wave just as a concrete layer does, and
-        // `split_layer_count` already returns 1 for a layer thin relative to
-        // its penetration depth.
-        let split_layers: Vec<LayerInput> = layers
-            .iter()
-            .flat_map(|layer| {
-                let n = split_layer_count(
+        // Resolve every layer's chain: the sub-layer discretization, or the
+        // fitted ladder where the resolution exceeds the reduction's cap.
+        // The chains are absolute (per this boundary's per-layer areas) so
+        // the unwired chain's arithmetic is the pre-reduction form's, bit
+        // for bit.
+        let ff = params.framing_factor;
+        let mut resolved: Vec<ResolvedLayerChain> = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let k_eff = parallel_path_conductivity(layer.conductivity_w_m_k, ff);
+            let area = layer.effective_area(params.boundary_area);
+            let n = split_layer_count(
+                layer.thickness_m,
+                layer.conductivity_w_m_k,
+                layer.density_kg_m3,
+                layer.specific_heat_j_kg_k,
+            );
+            if n > MAX_RESOLVED_SUBNODES && !params.same_zone {
+                // The same layer material reduces to the same ladder: the
+                // memo keys the layer's own quantities to the bits (the
+                // conservative exact-match key), so repeated faces (the
+                // synthetic dwellings', a repeated wall's) fit once per
+                // assembly. The splits are areal; the area scales them
+                // here.
+                let key = (
+                    layer.thickness_m.to_bits(),
+                    k_eff.to_bits(),
+                    layer.density_kg_m3.to_bits(),
+                    layer.specific_heat_j_kg_k.to_bits(),
+                );
+                let (edges_areal, caps_areal, residual) = match ladder_cache.get(&key) {
+                    Some((edges, caps, residual)) => (*edges, *caps, *residual),
+                    None => {
+                        let fitted = fit_band_limited_ladder(
+                            layer.thickness_m,
+                            k_eff,
+                            layer.density_kg_m3,
+                            layer.specific_heat_j_kg_k,
+                            DIURNAL_OMEGA,
+                        );
+                        ladder_cache.insert(key, fitted);
+                        fitted
+                    }
+                };
+                if residual > REDUCTION_FIT_RESIDUAL_BOUND {
+                    self.reduction_fit_exceedance_count += 1;
+                }
+                // The fit works areal; the boundary's chain is absolute.
+                resolved.push(ResolvedLayerChain {
+                    caps: caps_areal.iter().map(|c| c * area).collect(),
+                    edges: edges_areal.iter().map(|r| r / area).collect(),
+                    r_first_areal: edges_areal[0],
+                    r_last_areal: edges_areal[LADDER_EDGE_COUNT - 1],
+                });
+            } else {
+                resolved.push(sub_layer_chain(
                     layer.thickness_m,
-                    layer.conductivity_w_m_k,
+                    k_eff,
                     layer.density_kg_m3,
                     layer.specific_heat_j_kg_k,
-                );
-                (0..n).map(move |_| LayerInput {
-                    thickness_m: layer.thickness_m / n as f64,
-                    conductivity_w_m_k: layer.conductivity_w_m_k,
-                    density_kg_m3: layer.density_kg_m3,
-                    specific_heat_j_kg_k: layer.specific_heat_j_kg_k,
-                    area_m2: layer.area_m2,
-                })
-            })
-            .collect();
+                    n,
+                    area,
+                ));
+            }
+        }
 
-        let effective_refs: Vec<&LayerInput> = split_layers.iter().collect();
-        let mut effective_layers = effective_refs;
-        let mut halve_last_cap = false;
-
+        // Flatten the layers' chains into the boundary's single chain,
+        // merging the touching edges at every layer junction (each edge is
+        // the series resistance between two adjacent nodes, so the last edge
+        // of one chain and the first edge of the next are one resistance).
+        let mut caps_abs: Vec<f64> = Vec::new();
+        let mut edges_abs: Vec<f64> = Vec::new();
+        let mut r_outer_half = 0.0;
+        let mut r_inner_half = 0.0;
+        for (i, chain) in resolved.iter().enumerate() {
+            if i == 0 {
+                r_outer_half = chain.r_first_areal;
+                // The first chain's opening edge opens the boundary's list;
+                // the exterior film merges with it at the wiring below.
+                edges_abs.push(chain.edges[0]);
+            } else {
+                match edges_abs.last_mut() {
+                    Some(last) => *last += chain.edges[0],
+                    None => edges_abs.push(chain.edges[0]),
+                }
+            }
+            let own_last = chain.edges.len() - 1;
+            caps_abs.extend_from_slice(&chain.caps);
+            edges_abs.extend_from_slice(&chain.edges[1..own_last]);
+            edges_abs.push(chain.edges[own_last]);
+            r_inner_half = chain.r_last_areal;
+        }
+        // The chains' end edges carry the outermost/innermost half-layers;
+        // the films join them at the wiring below.
+        let mut halve_first_cap = false;
         if params.same_zone {
-            let n = effective_layers.len();
+            let n = caps_abs.len();
             let even = n.is_multiple_of(2);
             let keep = if even { n / 2 } else { n / 2 + 1 };
-            halve_last_cap = !even;
+            halve_first_cap = !even;
             let start = n - keep;
-            effective_layers = effective_layers[start..].to_vec();
-            if effective_layers.is_empty() {
+            caps_abs.drain(..start);
+            // The kept chain's opening edge (the cut surface's edge) drops
+            // out of the wiring: the fin's cut is adiabatic. Its slot stays
+            // so the edge indices below are the same shape as the
+            // two-faced boundary's.
+            edges_abs.drain(..start);
+            if caps_abs.is_empty() {
                 return None;
             }
         }
 
-        let n_layers = effective_layers.len();
+        let n_layers = caps_abs.len();
         let mut layer_nodes: Vec<NodeId> = Vec::with_capacity(n_layers);
 
-        for (i, layer) in effective_layers.iter().enumerate() {
-            let layer_area = layer.effective_area(params.boundary_area);
-            let raw_cap =
-                layer.density_kg_m3 * layer.specific_heat_j_kg_k * layer.thickness_m * layer_area;
-            let halved = if halve_last_cap && i == 0 {
-                raw_cap / 2.0
+        for (i, cap) in caps_abs.iter().enumerate() {
+            let raw_cap = if halve_first_cap && i == 0 {
+                cap / 2.0
             } else {
-                raw_cap
+                *cap
             };
-            let cap = halved.max(MIN_CAPACITANCE_J_K);
+            let cap = raw_cap.max(MIN_CAPACITANCE_J_K);
             #[cfg(feature = "observe")]
-            if halved < MIN_CAPACITANCE_J_K {
+            if raw_cap < MIN_CAPACITANCE_J_K {
                 self.min_capacitance_clamp_count += 1;
             }
             layer_nodes.push(self.alloc_node(cap));
         }
 
-        // Outermost layer (exterior-facing) → exterior node (film R + half-layer R).
+        // Outermost node (exterior-facing) → exterior node (film R + half-layer R).
         // Film R folded into the edge, matching OCHRE's Boundary.__init__ which
         // prepends/appends film R to the resistance list.
-        let ff = params.framing_factor;
-        let outer = effective_layers[0];
-        let outer_area = outer.effective_area(params.boundary_area);
-        let k_outer = parallel_path_conductivity(outer.conductivity_w_m_k, ff);
-        let r_ext =
-            params.r_film_exterior / outer_area + outer.thickness_m / (2.0 * k_outer * outer_area);
+        let outer_area = layers[0].effective_area(params.boundary_area);
         if !params.same_zone {
+            let r_ext = params.r_film_exterior / outer_area + edges_abs[0];
             self.add_resistance(params.exterior_node, layer_nodes[0], r_ext);
         }
 
-        // Adjacent layer connections.
+        // Adjacent node connections.
         for i in 0..(n_layers - 1) {
-            let li = effective_layers[i];
-            let lj = effective_layers[i + 1];
-            let ai = li.effective_area(params.boundary_area);
-            let aj = lj.effective_area(params.boundary_area);
-            let ki = parallel_path_conductivity(li.conductivity_w_m_k, ff);
-            let kj = parallel_path_conductivity(lj.conductivity_w_m_k, ff);
-            let r = li.thickness_m / (2.0 * ki * ai) + lj.thickness_m / (2.0 * kj * aj);
-            self.add_resistance(layer_nodes[i], layer_nodes[i + 1], r);
+            self.add_resistance(layer_nodes[i], layer_nodes[i + 1], edges_abs[i + 1]);
         }
 
-        // Innermost layer (interior-facing) → interior zone.
+        // Innermost node (interior-facing) → interior zone.
         // In StarMesh mode: split into R_film_conv + R_inner_half with a floating
         // surface_node between them. The surface_node participates in the star-mesh
         // radiation network, giving the correct topology per E+ "Option 2", TRNSYS
@@ -1784,11 +2322,9 @@ impl RcGraphState {
         // radiation_frac voltage-divider handles surface temperature interpolation
         // for the iterative LWR solver.
         let mut surface_node: Option<NodeId> = None;
-        let inner = effective_layers[n_layers - 1];
-        let inner_area = inner.effective_area(params.boundary_area);
-        let k_inner = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
-        let r_inner_half_abs = inner.thickness_m / (2.0 * k_inner * inner_area);
+        let inner_area = layers[layers.len() - 1].effective_area(params.boundary_area);
         let r_conv_film_abs = params.r_film_interior / inner_area;
+        let r_inner_half_abs = edges_abs[n_layers];
 
         if params.interior_lwr_method == InteriorLwrMethod::StarMesh {
             // StarMesh: surface_node between R_film_conv and R_inner_half.
@@ -1806,11 +2342,6 @@ impl RcGraphState {
             let r_int = r_conv_film_abs + r_inner_half_abs;
             self.add_resistance(layer_nodes[n_layers - 1], params.interior_node, r_int);
         }
-
-        let r_outer_half = outer.thickness_m / (2.0 * k_outer);
-        let inner = effective_layers[n_layers - 1];
-        let k_inner_eff = parallel_path_conductivity(inner.conductivity_w_m_k, ff);
-        let r_inner_half = inner.thickness_m / (2.0 * k_inner_eff);
 
         Some((
             layer_nodes[n_layers - 1],
@@ -5272,5 +5803,263 @@ mod tests {
         let node_index: HashMap<NodeId, usize> = HashMap::new();
 
         validate_surface_layer_info(&layer_info, &capacitances, &node_index).unwrap();
+    }
+
+    mod reduction_tests {
+        use super::*;
+        use hares_physics::constants::SEA_LEVEL_PRESSURE_PA;
+
+        /// The R25 slab's insulation layer: the pinned constructions' deepest
+        /// resolved layer (the ISO witness's 900 floor, the BESTEST 900
+        /// fixture's floor). 3.05 diurnal penetration depths.
+        const SLAB_INSULATION: (f64, f64, f64, f64) = (1.007, 0.040, 12.0, 840.0);
+
+        #[test]
+        fn reduced_ladder_holds_series_r_and_total_c_exactly() {
+            let (t, k, rho, cp) = SLAB_INSULATION;
+            let (edges_areal, caps_areal, residual) =
+                fit_band_limited_ladder(t, k, rho, cp, DIURNAL_OMEGA);
+            let r_sum: f64 = edges_areal.iter().sum();
+            let c_sum: f64 = caps_areal.iter().sum();
+            assert!(
+                (r_sum - t / k).abs() <= 1e-9 * (t / k),
+                "series R {r_sum} vs {}",
+                t / k
+            );
+            assert!(
+                (c_sum - rho * cp * t).abs() <= 1e-9 * (rho * cp * t),
+                "total C {c_sum} vs {}",
+                rho * cp * t
+            );
+            assert!(
+                residual <= REDUCTION_FIT_RESIDUAL_BOUND,
+                "the fit's own residual {residual} must sit inside the recorded bound"
+            );
+        }
+
+        #[test]
+        fn reduced_ladder_reproduces_the_layer_propagator_response() {
+            // The fit's target, checked through the ladder's own propagator:
+            // the pinned constructions' deepest layer reaches its own ISO 13786
+            // response well inside the witness's 5 percent class (the
+            // fit's phasor residual bounds the lag error at
+            // residual·24/(2π) hours), and the one-penetration-depth
+            // concrete reaches it to the fit's own tolerance.
+            for (name, (t, k, rho, cp), reach_bound) in [
+                (
+                    "R25 slab insulation",
+                    SLAB_INSULATION,
+                    REDUCTION_FIT_RESIDUAL_BOUND,
+                ),
+                (
+                    "100 mm concrete",
+                    (0.100, 0.510, 1400.0, 1000.0),
+                    REDUCTION_FIT_TOLERANCE,
+                ),
+            ] {
+                let (edges_areal, caps_areal, residual) =
+                    fit_band_limited_ladder(t, k, rho, cp, DIURNAL_OMEGA);
+                let target = solid_layer_propagator(t, k, rho, cp, DIURNAL_OMEGA);
+                let (y12_t, kappa_t) = ladder_response(&target, DIURNAL_OMEGA);
+                let (y12, kappa) = ladder_response(
+                    &ladder_propagator(&edges_areal, &caps_areal, DIURNAL_OMEGA),
+                    DIURNAL_OMEGA,
+                );
+                let dy = (
+                    (y12 - y12_t).norm() / y12_t.norm(),
+                    (kappa - kappa_t) / kappa_t,
+                );
+                eprintln!(
+                    "[reduction] {name}: the fit's residual {residual:.5} \
+                     (transmittance rel {:.5}, areal capacity rel {:.5}); the bound {}",
+                    dy.0, dy.1, REDUCTION_FIT_RESIDUAL_BOUND
+                );
+                assert!(
+                    residual <= REDUCTION_FIT_RESIDUAL_BOUND,
+                    "{name}: the fit's residual {residual} over the recorded bound {}",
+                    REDUCTION_FIT_RESIDUAL_BOUND
+                );
+                assert!(
+                    dy.0 <= reach_bound,
+                    "{name}: the transmittance's relative error {}",
+                    dy.0
+                );
+                assert!(
+                    dy.1 <= reach_bound,
+                    "{name}: the areal capacity's relative error {}",
+                    dy.1
+                );
+            }
+        }
+
+        #[test]
+        fn reduction_does_not_fire_at_or_below_the_cap() {
+            let (t, k, rho, cp) = (0.100, 0.510, 1400.0, 1000.0);
+            assert_eq!(
+                split_layer_count(t, k, rho, cp),
+                3,
+                "the concrete's own resolution"
+            );
+            let caps = derive_zone_capacitances(
+                &[ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+                }],
+                SEA_LEVEL_PRESSURE_PA,
+            )
+            .unwrap();
+            let bd = make_boundary(
+                20.0,
+                0,
+                ExteriorTarget::Outdoor,
+                vec![make_layer(t, k, rho, cp, 20.0)],
+                0.0,
+            );
+            let (rc, diag) =
+                assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+            assert_eq!(
+                rc.a_c.nrows(),
+                1 + split_layer_count(t, k, rho, cp),
+                "a layer at the cap resolves its own sub-layers, no reduction"
+            );
+            assert_eq!(
+                diag.reduction_fit_exceedance_count, 0,
+                "no reduction ran, none counted"
+            );
+        }
+
+        #[test]
+        fn reduction_counts_a_fit_past_the_residual_bound() {
+            // The synthetic face's 4.8 diurnal penetration depths sit past
+            // the five-node ladder's reach (the reach study's layer is the
+            // R25 slab's 3.05 depths): the fit's best diurnal transmittance
+            // residual measures 24 percent (the lag 0.94 h), past the 2
+            // percent bound. The assembly keeps the fit and counts it, so
+            // the accuracy cost is recorded rather than silent.
+            let (t, k, rho, cp) = (0.15, 0.075, 2400.0, 880.0);
+            let (_, _, residual) = fit_band_limited_ladder(t, k, rho, cp, DIURNAL_OMEGA);
+            assert!(
+                residual > REDUCTION_FIT_RESIDUAL_BOUND,
+                "the synthetic face is the deliberately hard layer: its fit \
+                 residual {residual} must sit past the bound {}",
+                REDUCTION_FIT_RESIDUAL_BOUND
+            );
+            let caps = derive_zone_capacitances(
+                &[ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+                }],
+                SEA_LEVEL_PRESSURE_PA,
+            )
+            .unwrap();
+            let bd = make_boundary(
+                12.0,
+                0,
+                ExteriorTarget::Outdoor,
+                vec![make_layer(t, k, rho, cp, 12.0)],
+                0.0,
+            );
+            let (_, diag) =
+                assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+            assert_eq!(
+                diag.reduction_fit_exceedance_count, 1,
+                "the hard layer's past-bound fit is counted once"
+            );
+        }
+
+        #[test]
+        fn reduction_does_not_count_a_fit_inside_the_bound() {
+            // The R25 slab's 3.05 depths are the reach study's layer: the
+            // fit measures 1.3 percent on the transmittance, inside the 2
+            // percent bound, so the counter stays zero.
+            let (t, k, rho, cp) = SLAB_INSULATION;
+            let (_, _, residual) = fit_band_limited_ladder(t, k, rho, cp, DIURNAL_OMEGA);
+            assert!(
+                residual <= REDUCTION_FIT_RESIDUAL_BOUND,
+                "the reach study's layer fits inside the bound: {residual}"
+            );
+            let caps = derive_zone_capacitances(
+                &[ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+                }],
+                SEA_LEVEL_PRESSURE_PA,
+            )
+            .unwrap();
+            let bd = make_boundary(
+                12.0,
+                0,
+                ExteriorTarget::Outdoor,
+                vec![make_layer(t, k, rho, cp, 12.0)],
+                0.0,
+            );
+            let (_, diag) =
+                assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+            assert_eq!(
+                diag.reduction_fit_exceedance_count, 0,
+                "a fit inside the bound is not counted"
+            );
+        }
+
+        #[test]
+        #[cfg(feature = "observe")]
+        fn reduced_boundary_carries_the_ladder_node_count_and_the_exact_sums() {
+            // The synthetic face's own layer: 15 resolved sub-layer nodes
+            // condense to the 5-node ladder; the boundary diagnostic's series R
+            // and capacitance are the layer's own, exactly.
+            let caps = derive_zone_capacitances(
+                &[ZoneInput {
+                    floor_area_m2: Some(100.0),
+                    volume_m3: Some(250.0),
+                    temperature_capacitance_multiplier: TEMPERATURE_CAPACITANCE_MULTIPLIER_DEFAULT,
+                }],
+                SEA_LEVEL_PRESSURE_PA,
+            )
+            .unwrap();
+            let (t, k, rho, cp) = (0.15, 0.075, 2400.0, 880.0);
+            let area = 12.0;
+            // The synthetic face's own layer: 15 resolved sub-layer nodes
+            // condense to the 5-node ladder; the boundary diagnostic's series R
+            // and capacitance are the layer's own, exactly, and the fit's
+            // residual sits past the 2 percent bound (this layer is deeper
+            // than the reach study's), counted on the boundary.
+            let bd = make_boundary(
+                area,
+                0,
+                ExteriorTarget::Outdoor,
+                vec![make_layer(t, k, rho, cp, area)],
+                0.0,
+            );
+            let (rc, diag) =
+                assemble_building_rc(&[bd], 1, &caps, InteriorLwrMethod::ScriptF).unwrap();
+            assert_eq!(
+                rc.a_c.nrows(),
+                1 + MAX_RESOLVED_SUBNODES,
+                "a 15-node face condenses to the 5-node ladder plus the zone air"
+            );
+            assert_eq!(
+                diag.reduction_fit_exceedance_count, 1,
+                "this face's past-bound fit is counted"
+            );
+            let bd_diag = &diag.boundaries[0];
+            assert_eq!(bd_diag.n_rc_nodes, MAX_RESOLVED_SUBNODES);
+            assert!(
+                (bd_diag.capacitance_j_k - rho * cp * t * area).abs() <= 1e-6,
+                "the boundary's capacitance is the layer's own, {} vs {}",
+                bd_diag.capacitance_j_k,
+                rho * cp * t * area
+            );
+            let r_layers = t / k;
+            let r_total = r_layers + 0.12 + R_FILM_EXTERIOR_M2_K_W;
+            assert!(
+                (bd_diag.r_total_m2_k_w - r_total).abs() <= 1e-9,
+                "the boundary's series R is the layer's own plus the films, {} vs {}",
+                bd_diag.r_total_m2_k_w,
+                r_total
+            );
+        }
     }
 }
