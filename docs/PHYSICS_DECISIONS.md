@@ -2400,10 +2400,18 @@ the delivery drops it and the band's freedom to float (the deadband
 case's own subject: BESTEST 395's "20,27") is untouched. A degenerate
 band (the standard's "20,20 bang-bang" clamp, Case 195) has no outside
 direction: the solve's signed load delivers both ways, heating when the
-envelope loses and cooling when it gains. The solver feedback re-solves
-every step while the target is Some (it always is, in ideal mode), so
-the armed capacity is always the step's own solve; the equipment's
-control update never gates on the armed value.
+envelope loses and cooling when it gains. The sign filter follows the
+armed target's bound in EVERY thermostat mode: the FSM mode is an
+observability state in ideal mode, and a sticky Cooling mode inside its
+own hysteresis still carries the mid-band heating-bound target whose
+negative solve means the zone stays above the heating bound, never that
+the heating-bound capacity should be delivered as cooling. Without
+that reading a cooling-mode unit that settles below its setpoint
+delivers the heating bound's negative capacity as a large cooling load
+and drives the zone to the heating setpoint. The solver feedback
+re-solves every step while the target is Some (it always is, in ideal
+mode), so the armed capacity is always the step's own solve; the
+equipment's control update never gates on the armed value.
 
 The alternative rejected: keeping the strict pre-step gate (the
 original form) preserves a deadband's "freedom" only by construction;
@@ -2461,7 +2469,26 @@ tables carry the same zero). Measured on the BESTEST family: the
 ceiling's film resistance 1.0549 → 0.2475 m²·K/W moves 600 heating
 3027.1 → 3962.5 (the band floor 3993), 600FF peak 73.02 → 70.35 (the
 ceiling 68.4), 900FF min 3.33 → 2.49 (the ceiling 2.2): every
-free-float and conditioned metric toward its band. The alternatives
+free-float and conditioned metric toward its band. The tilt the frozen rule reads is the boundary's OUTWARD normal, and
+an HPXML Floor element's comes from its `FloorOrCeiling` field: a floor
+(the interior zone's floor over a garage, crawlspace, or another unit)
+faces down (180 degrees, the reduced branch); a ceiling (the attic
+floor above the zone) faces up (0, the enhanced one). The element's
+`tilt_deg` carries that outward tilt, so both the film and the
+interior beam distribution (which gives a floor `sin(altitude)` of the
+direct beam and a ceiling none) read the face the zone actually sees.
+Collapsing both to the ceiling's 0 froze the enhanced value on every
+floor, the regime the warm side above the face never takes, and
+deposited no direct beam on floors. Measured on the resstock
+single-family parity fixture (`resstock_bldg0112631_24h`, the
+crawlspace and garage floors): the zone temperature MAE against OCHRE
+moves 0.616 to 0.310 C. The alternatives rejected: re-keying only the
+film call on `FloorOrCeiling` (the solar path's geometry would stay
+wrong) and keeping the temperature-keyed branch, which flipped a
+garage floor's film with the garage's temperature and put the reduced
+branch on it only in winter.
+
+The alternatives
 rejected: the per-step TARP form (the registered production-disabled
 model, its own bench cost) and OCHRE's clamped-ΔT frozen form (the
 D-031 record).

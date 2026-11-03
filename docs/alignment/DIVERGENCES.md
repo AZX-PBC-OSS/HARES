@@ -1407,7 +1407,11 @@ the references' differing scopes.
   warm air) freezes the enhanced value, a floor-class surface the
   reduced one. (The earlier direction rule compared the two air sides'
   interpolated typical temperatures, which froze the winter ceiling in
-  the summer regime.) Production pins
+  the summer regime.) The tilt is the boundary's outward normal: an
+  HPXML Floor element takes it from `FloorOrCeiling` (a floor faces
+  down, 180; the attic ceiling faces up, 0), so a floor over a garage,
+  crawlspace, or another unit reaches the reduced branch and the
+  interior beam distribution. Production pins
   `FilmCoefficientModel::AshraeSimple`
   (`crates/hares-core/src/dwelling/solver_builder.rs:1248`), so the
   per-step TARP correction is wired but not enabled in production

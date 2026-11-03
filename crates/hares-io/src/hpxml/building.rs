@@ -2085,6 +2085,19 @@ fn parse_boundary(
     let interior_zone = parse_zone_ref(node.child(&INTERIOR_ADJACENT_TO));
     let exterior_zone = parse_zone_ref(node.child(&EXTERIOR_ADJACENT_TO))
         .or_else(|| infer_exterior_zone(&boundary_type));
+    let floor_or_ceiling = node.child(&FLOOR_OR_CEILING).and_then(|n| {
+        match n.text.trim().to_ascii_lowercase().as_str() {
+            "floor" => Some(FloorOrCeiling::Floor),
+            "ceiling" => Some(FloorOrCeiling::Ceiling),
+            other => {
+                tracing::warn!(
+                    floor_or_ceiling = other,
+                    "Unrecognized FloorOrCeiling value; defaulting to None"
+                );
+                None
+            }
+        }
+    });
 
     let tilt_deg = match boundary_type {
         BoundaryType::Roof => {
@@ -2130,7 +2143,24 @@ fn parse_boundary(
             Some(libm::atan(pitch_value / 12.0).to_degrees())
         }
         BoundaryType::Wall | BoundaryType::FoundationWall | BoundaryType::RimJoist => Some(90.0),
-        BoundaryType::Floor => Some(0.0),
+        // A Floor element is a floor or a ceiling per FloorOrCeiling, and
+        // the tilt is the OUTWARD normal's: a floor presents the face its
+        // interior zone stands on (the normal points down, 180), a ceiling
+        // under the attic presents the face overhead (the normal points up,
+        // 0). E+'s ASHRAE Simple interior correlation keys on
+        // cos(tilt_outward), so collapsing both to the ceiling's 0 freezes
+        // the enhanced coefficient on every floor, where the warm side above
+        // the face needs the reduced branch, and the interior beam
+        // distribution stops depositing direct beam on floors. An element
+        // without FloorOrCeiling takes the adjacency: an exterior attic is
+        // above the face (a ceiling), every other exterior zone sits below
+        // it (a floor).
+        BoundaryType::Floor => Some(match floor_or_ceiling {
+            Some(FloorOrCeiling::Ceiling) => 0.0,
+            Some(FloorOrCeiling::Floor) => 180.0,
+            None if exterior_zone == Some(ZoneType::Attic) => 0.0,
+            None => 180.0,
+        }),
         BoundaryType::Slab => Some(180.0),
         BoundaryType::Door => Some(90.0),
         BoundaryType::Window => Some(90.0),
@@ -2174,19 +2204,7 @@ fn parse_boundary(
         emittance,
         tilt_deg,
         lut_boundary_name: None,
-        floor_or_ceiling: node.child(&FLOOR_OR_CEILING).and_then(|n| {
-            match n.text.trim().to_ascii_lowercase().as_str() {
-                "floor" => Some(FloorOrCeiling::Floor),
-                "ceiling" => Some(FloorOrCeiling::Ceiling),
-                other => {
-                    tracing::warn!(
-                        floor_or_ceiling = other,
-                        "Unrecognized FloorOrCeiling value; defaulting to None"
-                    );
-                    None
-                }
-            }
-        }),
+        floor_or_ceiling,
         perimeter_m: None,
         perimeter_insulation_r_m2_k_w: None,
         foundation_depth_m: None,

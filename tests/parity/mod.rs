@@ -99,6 +99,9 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // too), and the appliance, plug-load and lighting radiant split
         // (D-005, D-006, D-007) enters with it: the residual moved 0.441 to
         // 0.616 C. The attic's non-gable roofs take OS-HPXML's square hip.
+        // The floor geometry's outward tilt (a FloorOrCeiling "floor" faces
+        // down, taking the reduced interior film and the beam distribution)
+        // re-measured the residual at 0.310 C; the band keeps its margin.
         ("resstock_bldg0112631_24h", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.63),
         _ => None,
     }

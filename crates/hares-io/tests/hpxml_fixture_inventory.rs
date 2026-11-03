@@ -129,6 +129,48 @@ fn curated_set_contains_der_and_end_use_coverage() {
     );
 }
 
+/// A `Floor` element presents the tilt of the face its interior zone sees:
+/// `FloorOrCeiling` "floor" is the conditioned space's floor (the outward
+/// normal points down, tilt 180), "ceiling" is the ceiling under the attic
+/// (the outward normal points up, tilt 0). The ASHRAE Simple interior
+/// correlation keys on the outward cosine
+/// (`(T_zone - T_surface) * cos(tilt_outward)`), so a floor left at the
+/// ceiling's 0 freezes the ceiling's enhanced coefficient on a floor whose
+/// warm side is above it and needs the reduced one.
+#[test]
+fn floor_boundaries_carry_the_outward_tilt_of_their_floor_or_ceiling() {
+    use hares_io::hpxml::building::{BoundaryType, FloorOrCeiling};
+
+    let root = fixture_root();
+    let xml = fs::read_to_string(root.join("base-foundation-basement-garage.xml"))
+        .expect("the foundation/garage fixture loads");
+    let building = parse_building(&xml).expect("the fixture parses");
+
+    let mut seen = 0_usize;
+    for bd in &building.boundaries {
+        if bd.boundary_type != BoundaryType::Floor {
+            continue;
+        }
+        let expected_tilt_deg = match bd.floor_or_ceiling {
+            Some(FloorOrCeiling::Floor) => 180.0,
+            Some(FloorOrCeiling::Ceiling) => 0.0,
+            None => continue,
+        };
+        assert_eq!(
+            bd.tilt_deg,
+            Some(expected_tilt_deg),
+            "boundary '{}' is a {:?}; its outward tilt must be {expected_tilt_deg} degrees",
+            bd.id,
+            bd.floor_or_ceiling
+        );
+        seen += 1;
+    }
+    assert_eq!(
+        seen, 2,
+        "the fixture carries the garage floor and the attic ceiling"
+    );
+}
+
 #[test]
 fn multifamily_fixtures_identify_as_apartment_unit() {
     let root = fixture_root();

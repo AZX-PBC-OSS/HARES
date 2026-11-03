@@ -766,40 +766,43 @@ impl Equipment for IdealHvac {
         };
 
         let mut capacity_w = if self.use_ideal_cached {
-            // Ideal capacity mode: solver-determined capacity drives directly.
-            // FSM mode provides sign clamping as a defensive guard (the solver
-            // can in principle produce wrong-direction capacity). In Deadband
-            // mode, where the FSM parks a zero-width band every step by
-            // construction, the sign filter is the cached target's bound: a
-            // heating-bound target delivers only a heating capacity (a
-            // negative solve means the uncontrolled step would land ABOVE the
-            // heating bound, where the band's freedom to float is the case's
-            // own subject), a cooling-bound target only a cooling one, and a
-            // degenerate band (the standard's "20,20" clamp: heating_c ==
-            // cooling_c) has no outside direction, so the solve's signed load
-            // delivers both ways. The solver feedback re-solves every step
-            // while the target is Some (it always is, in ideal mode), so the
-            // armed capacity is always this step's own solve.
-            let delivered = match self.thermostat_fsm.mode {
-                ThermostatMode::Heating => (self.ideal_capacity_w * self.load_fraction).max(0.0),
-                ThermostatMode::Cooling => (self.ideal_capacity_w * self.load_fraction).min(0.0),
-                ThermostatMode::Deadband => self.ideal_capacity_w * self.load_fraction,
-            };
-            if self.thermostat_fsm.mode == ThermostatMode::Deadband
-                && let Some((_, target_c)) = self.cached_ideal_target
-            {
-                let setpoints = self.thermostat_fsm.effective_setpoints();
-                if setpoints.heating_c < setpoints.cooling_c {
-                    if target_c == setpoints.heating_c {
-                        delivered.max(0.0)
+            // Ideal capacity mode: the solve's signed capacity drives
+            // directly, and the cached target's bound is the authority on
+            // the delivery's direction. A heating-bound target delivers only
+            // a heating capacity (a negative solve means the uncontrolled
+            // step would land ABOVE the heating bound, where the band's
+            // freedom to float is the case's own subject), a cooling-bound
+            // target only a cooling one, and a degenerate band (the
+            // standard's "20,20" clamp: heating_c == cooling_c) has no
+            // outside direction, so the solve's signed load delivers both
+            // ways. The FSM's mode is an observability state here: a sticky
+            // Cooling mode inside its hysteresis still carries the mid-band
+            // heating-bound target, and its negative solve means the zone
+            // stays above the heating bound, never that the heating bound's
+            // capacity should be delivered as cooling. The solver feedback
+            // re-solves every step while the target is Some (it always is,
+            // in ideal mode), so the armed capacity is always this step's
+            // own solve. With no target (the control error or outage path
+            // that clears it) the capacity is already zero.
+            let delivered = self.ideal_capacity_w * self.load_fraction;
+            match self.cached_ideal_target {
+                Some((_, target_c)) => {
+                    let setpoints = self.thermostat_fsm.effective_setpoints();
+                    if setpoints.heating_c < setpoints.cooling_c {
+                        if target_c == setpoints.heating_c {
+                            delivered.max(0.0)
+                        } else {
+                            delivered.min(0.0)
+                        }
                     } else {
-                        delivered.min(0.0)
+                        delivered
                     }
-                } else {
-                    delivered
                 }
-            } else {
-                delivered
+                None => match self.thermostat_fsm.mode {
+                    ThermostatMode::Heating => delivered.max(0.0),
+                    ThermostatMode::Cooling => delivered.min(0.0),
+                    ThermostatMode::Deadband => delivered,
+                },
             }
         } else {
             // Non-ideal mode: FSM-driven bang-bang cycling with rated capacity
@@ -3840,6 +3843,66 @@ mod tests {
             gain, 0.0,
             "the band's middle must not deliver a negative solve's \
              capacity (the zone floats); got {gain}W"
+        );
+    }
+
+    /// The delivery's direction follows the target bound, not the FSM mode.
+    /// A Cooling FSM that has settled inside its own hysteresis carries the
+    /// mid-band heating-bound target; the solve's capacity to reach that
+    /// bound from a temperature far above it is negative, and delivering it
+    /// as cooling would drive the zone down the whole band to the heating
+    /// setpoint. E+'s ideal-load form delivers the load that maintains the
+    /// bound (heat when the uncontrolled step would cross the heating bound,
+    /// cool only at the cooling bound); the heating-bound solve below the
+    /// cooling bound is the band's freedom to float on the cooling side.
+    #[test]
+    fn cooling_mode_drops_the_mid_band_heating_bound_solve() {
+        let cfg = ideal_config("IH-cooling-strip", 20.0, 26.0);
+        // Enter Cooling through the FSM's turn-on threshold
+        // (26 + 1.0 * (1 - 0.2) = 26.8 C).
+        let env_hot = env(27.5, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_hot).unwrap();
+        eq.update_control(&env_hot);
+        assert_eq!(
+            eq.thermostat_fsm.mode,
+            ThermostatMode::Cooling,
+            "a zone above the cooling turn-on enters Cooling"
+        );
+
+        // Just below the cooling bound but inside the Cooling hysteresis:
+        // the turn-off is 26 - 1.0 * 0.2 = 25.8 C, so 25.9 C stays Cooling,
+        // and the mid-band target is the heating bound (25.9 < 26).
+        let env_strip = env(25.9, 300, 60);
+        eq.update_control(&env_strip);
+        assert_eq!(
+            eq.thermostat_fsm.mode,
+            ThermostatMode::Cooling,
+            "25.9 C is above the 25.8 C turn-off"
+        );
+        let target = eq.ideal_target();
+        assert!(
+            target.is_some() && (target.unwrap().1 - 20.0).abs() < 1e-9,
+            "the hysteresis strip carries the heating bound; got {target:?}"
+        );
+
+        // The solve for the heating bound from 25.9 C is negative: the
+        // uncontrolled step ends far above the bound. This is what
+        // collect_and_solve arms from this target.
+        eq.ideal_capacity_w = -5_000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_strip, std::time::Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let gain = ports.thermal[0].sensible_gain_w;
+        assert_eq!(
+            gain, 0.0,
+            "a heating-bound target must not deliver its negative solve as \
+             cooling (the band's freedom to float); got {gain}W"
         );
     }
 
