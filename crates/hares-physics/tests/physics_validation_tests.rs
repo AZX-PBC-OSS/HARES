@@ -399,9 +399,9 @@ fn ashrae_simple_interior_h_conv_is_dt_independent() {
     use hares_physics::film_coefficients::ashrae_simple_interior_h_conv;
 
     // Vertical wall: ASHRAE Simple returns 3.076 regardless of ΔT.
-    let h_at_1c = ashrae_simple_interior_h_conv(90.0, 21.0, 20.0, true);
-    let h_at_11c = ashrae_simple_interior_h_conv(90.0, 31.0, 20.0, true);
-    let h_at_20c = ashrae_simple_interior_h_conv(90.0, 40.0, 20.0, true);
+    let h_at_1c = ashrae_simple_interior_h_conv(90.0);
+    let h_at_11c = ashrae_simple_interior_h_conv(90.0);
+    let h_at_20c = ashrae_simple_interior_h_conv(90.0);
 
     // BUG: all three return the same frozen value 3.076 W/(m²·K)
     // regardless of the surface-to-air ΔT.

@@ -58,10 +58,10 @@
       "name": "Attic Floor",
       "area_m2": 111.4836,
       "r_layer_m2_k_w": 5.31012,
-      "r_film_int_m2_k_w": 1.0549,
-      "r_film_ext_m2_k_w": 1.0549,
-      "r_total_m2_k_w": 7.4198,
-      "ua_w_k": 15.03,
+      "r_film_int_m2_k_w": 0.2475,
+      "r_film_ext_m2_k_w": 0.2475,
+      "r_total_m2_k_w": 5.8052,
+      "ua_w_k": 19.2,
       "capacitance_kj_k": 2470.67,
       "n_nodes": 3,
       "interior_zone": "LIV",
@@ -71,8 +71,8 @@
     {
       "name": "Floor",
       "area_m2": 111.4836,
-      "r_layer_m2_k_w": 1.82102,
-      "r_film_int_m2_k_w": 0.2475,
+      "r_layer_m2_k_w": 1.013692,
+      "r_film_int_m2_k_w": 1.0549,
       "r_film_ext_m2_k_w": 0.0,
       "r_total_m2_k_w": 2.0685,
       "ua_w_k": 53.89,
@@ -86,10 +86,10 @@
       "name": "Attic Roof",
       "area_m2": 124.6425,
       "r_layer_m2_k_w": 0.24564,
-      "r_film_int_m2_k_w": 0.4384,
+      "r_film_int_m2_k_w": 0.2584,
       "r_film_ext_m2_k_w": 0.1105,
-      "r_total_m2_k_w": 0.7946,
-      "ua_w_k": 156.87,
+      "r_total_m2_k_w": 0.6146,
+      "ua_w_k": 202.81,
       "capacitance_kj_k": 2289.35,
       "n_nodes": 6,
       "interior_zone": "ATC",
@@ -163,5 +163,5 @@
       "volume_m3": 204.2349
     }
   ],
-  "total_ua_w_k": 582.03
+  "total_ua_w_k": 632.14
 }

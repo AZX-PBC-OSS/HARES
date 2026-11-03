@@ -98,14 +98,19 @@ fn cooler_field(dwelling: &Dwelling, key: &str) -> f64 {
 
 /// The base cycle's first cooling step: `(delivered sensible W, the zone
 /// drop it bought, the setpoint)`. The delivery and the drop give the
-/// zone's effective capacitance.
+/// zone's effective capacitance. The first delivery sits wherever the
+/// fixture's weather first drives the zone past the cooling setpoint
+/// (measured: step 165 past the warm-in, the zone at 25.31 C against the
+/// 24.44 C setpoint; the ceiling film's corrected regime starts the base
+/// cycle below the setpoint, where the earlier film froze the cooler
+/// active).
 fn base_first_cooling_step() -> (f64, f64, f64) {
     let mut dwelling = build();
     for _ in 0..WARM_IN_STEPS {
         dwelling.step().expect("warm-in step");
     }
     let mut before = zone_temp(&dwelling);
-    for _ in 0..120 {
+    for _ in 0..399 {
         dwelling.step().expect("base-cycle step");
         let delivered = cooler_field(&dwelling, tk::SENSIBLE_COOLING_W);
         if delivered > 0.0 {
@@ -127,24 +132,30 @@ struct StepRecord {
 }
 
 /// The shed scenario: the GridEmergency armed on the ASHP Cooler at the
-/// 15:00 step, then every step through the release and the recovery,
-/// with the zone's temperature and the step's delivery. The dwelling
-/// comes back so the run's own health totals can be read.
+/// 15:00 step whose previous step still delivered (the shed's premise is
+/// interrupting an ACTIVE cooler; the fixture's June trajectory starts the
+/// base cycle below the cooling setpoint, so the first cooling-active
+/// 15:00 comes days into the run), then every step through the release
+/// and the recovery, with the zone's temperature and the step's delivery.
+/// The dwelling comes back so the run's own health totals can be read.
 fn shed_run() -> (Dwelling, Vec<StepRecord>, f64) {
     let mut dwelling = build();
     for _ in 0..WARM_IN_STEPS {
         dwelling.step().expect("warm-in step");
     }
-    // Arm at the 15:00 step (the state whose clock reads 15:00).
+    // Arm at the 15:00 step whose previous step delivered cooling.
     let mut armed = false;
-    for _ in 0..70 {
+    let mut prev_delivered = 0.0;
+    for _ in 0..399 {
         dwelling.step().expect("the run to the 15:00 step");
+        let delivered = cooler_field(&dwelling, tk::SENSIBLE_COOLING_W);
         if dwelling
             .latest_env()
             .current_time
             .format("%H:%M")
             .to_string()
             == "15:00"
+            && prev_delivered > 0.0
         {
             dwelling.apply_control(
                 "ASHP Cooler",
@@ -156,6 +167,7 @@ fn shed_run() -> (Dwelling, Vec<StepRecord>, f64) {
             armed = true;
             break;
         }
+        prev_delivered = delivered;
     }
     assert!(armed, "the warm-in never reached the 15:00 step");
 

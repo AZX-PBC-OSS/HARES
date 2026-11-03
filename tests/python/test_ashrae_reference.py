@@ -3,8 +3,8 @@
 Verifies that the Python ``ashrae_simple_interior_h_conv`` in
 ``scripts/gen_ashrae_reference.py`` returns the same fixed h_conv values
 as the Rust implementation in
-``crates/hares-physics/src/film_coefficients.rs:209-225``
-for all five orientation cases.
+``crates/hares-physics/src/film_coefficients.rs``
+for every orientation case.
 """
 
 from __future__ import annotations
@@ -41,55 +41,47 @@ from gen_ashrae_reference import (
 
 
 @pytest.mark.parametrize(
-    "tilt_deg,above_hotter,expected",
+    "tilt_deg,expected",
     [
         # Vertical surfaces: 67.5° < tilt <= 112.5°, h_conv = 3.076.
-        pytest.param(90.0, True, 3.076, id="vertical-wall"),
-        pytest.param(90.0, False, 3.076, id="vertical-wall-cooler-above"),
-        pytest.param(112.5, True, 3.076, id="vertical-boundary-upper"),
-        pytest.param(67.5, True, 3.076, id="vertical-boundary-lower"),
-        # Horizontal surfaces: 0° <= tilt < 22.5° or > 157.5°.
-        # Enhanced (heat flow up): warm surface below, h_conv = 4.040.
-        pytest.param(0.0, True, 4.040, id="horizontal-enhanced-ceiling"),
-        pytest.param(22.4, True, 4.040, id="horizontal-enhanced-near-boundary"),
-        pytest.param(180.0, True, 4.040, id="horizontal-enhanced-inverted"),
-        # Reduced (heat flow down): warm surface above, h_conv = 0.948.
-        pytest.param(0.0, False, 0.948, id="horizontal-reduced-floor"),
-        pytest.param(22.4, False, 0.948, id="horizontal-reduced-near-boundary"),
-        pytest.param(180.0, False, 0.948, id="horizontal-reduced-inverted"),
-        # Tilted surfaces: 22.5° <= tilt <= 67.5°.
-        # Enhanced, h_conv = 3.870.
-        pytest.param(45.0, True, 3.870, id="tilted-enhanced"),
-        pytest.param(22.5, True, 3.870, id="tilted-enhanced-lower-boundary"),
-        pytest.param(67.4, True, 3.870, id="tilted-enhanced-upper-boundary"),
-        # Reduced, h_conv = 2.281.
-        pytest.param(45.0, False, 2.281, id="tilted-reduced"),
-        pytest.param(22.5, False, 2.281, id="tilted-reduced-lower-boundary"),
-        pytest.param(67.4, False, 2.281, id="tilted-reduced-upper-boundary"),
+        pytest.param(90.0, 3.076, id="vertical-wall"),
+        pytest.param(112.5, 3.076, id="vertical-boundary-upper"),
+        pytest.param(67.5, 3.076, id="vertical-boundary-lower"),
+        # Horizontal surfaces: 0° <= tilt < 22.5° or > 157.5°. The frozen
+        # regime is geometric (E+'s per-step winter branch): the warm side
+        # BELOW the surface (the outward normal up: a roof-class ceiling)
+        # is the enhanced 4.040; the warm side ABOVE (the outward normal
+        # down: a floor-class slab) is the reduced 0.948.
+        pytest.param(0.0, 4.040, id="horizontal-roof-class-enhanced"),
+        pytest.param(22.4, 4.040, id="horizontal-roof-class-near-boundary"),
+        pytest.param(180.0, 0.948, id="horizontal-floor-class-reduced"),
+        # Tilted surfaces: 22.5° <= tilt <= 67.5° (warm side below: 3.870)
+        # and 112.5° <= tilt <= 157.5° (warm side above: 2.281).
+        pytest.param(45.0, 3.870, id="tilted-enhanced"),
+        pytest.param(22.5, 3.870, id="tilted-enhanced-lower-boundary"),
+        pytest.param(67.4, 3.870, id="tilted-enhanced-upper-boundary"),
+        pytest.param(135.0, 2.281, id="tilted-reduced"),
+        pytest.param(157.5, 2.281, id="tilted-reduced-lower-boundary"),
+        # 112.5°: cos = -0.38268, inside E+'s inclusive vertical range
+        # (-0.3827 to 0.3827) → the vertical value.
+        pytest.param(112.5, 3.076, id="vertical-boundary-inclusive"),
     ],
 )
 def test_ashrae_simple_interior_h_conv_returns_expected_value(
-    tilt_deg: float, above_hotter: bool, expected: float
+    tilt_deg: float, expected: float
 ) -> None:
-    """The five orientation categories map to the correct h_conv values."""
-    result = ashrae_simple_interior_h_conv(tilt_deg, above_hotter)
+    """The orientation categories map to the correct h_conv values."""
+    result = ashrae_simple_interior_h_conv(tilt_deg)
     assert result == pytest.approx(expected), (
-        f"tilt={tilt_deg}° above_hotter={above_hotter}: "
-        f"expected {expected}, got {result}"
+        f"tilt={tilt_deg}°: expected {expected}, got {result}"
     )
 
 
 @pytest.mark.parametrize("tilt_deg", [0.0, 45.0, 90.0, 135.0, 180.0])
-@pytest.mark.parametrize("above_hotter", [True, False])
-def test_ashrae_simple_interior_h_conv_positive_invariant(
-    tilt_deg: float, above_hotter: bool,
-) -> None:
+def test_ashrae_simple_interior_h_conv_positive_invariant(tilt_deg: float) -> None:
     """h_conv must be positive for all valid orientations (invariant check)."""
-    result = ashrae_simple_interior_h_conv(tilt_deg, above_hotter)
-    assert result > 0.0, (
-        f"invariant violated: h_conv={result} <= 0 for "
-        f"tilt={tilt_deg}° above_hotter={above_hotter}"
-    )
+    result = ashrae_simple_interior_h_conv(tilt_deg)
+    assert result > 0.0, f"invariant violated: h_conv={result} <= 0 for tilt={tilt_deg}°"
 
 
 # ---------------------------------------------------------------------------
@@ -110,62 +102,57 @@ def test_orientation_transitions(
     tilt_deg: float, expected: float, description: str
 ) -> None:
     """The boundary between orientation categories is at the correct angle."""
-    result = ashrae_simple_interior_h_conv(tilt_deg, above_hotter=True)
+    result = ashrae_simple_interior_h_conv(tilt_deg)
     assert result == pytest.approx(expected), (
         f"{description}: expected {expected}, got {result} at tilt={tilt_deg}°"
     )
 
 
 def test_solar_absorptance_above_0_9_does_not_affect_h_conv() -> None:
-    """Solar absorptance is not an input to ASHRAE Simple; only tilt and
-    above_hotter affect h_conv.  This guard document that h_conv is
+    """Solar absorptance is not an input to ASHRAE Simple; only the tilt's
+    geometry affects h_conv.  This guard documents that h_conv is
     independent of surface radiative properties."""
-    tilt_deg = 45.0
-    above = True
-    h_conv = ashrae_simple_interior_h_conv(tilt_deg, above)
+    h_conv = ashrae_simple_interior_h_conv(45.0)
     assert h_conv == 3.870, "h_conv should be independent of any radiative input"
 
 
 def test_h_conv_matches_rust_implementation_all_cases() -> None:
-    """Comprehensive parity check: every orientation × above_hotter combination
-    produces the exact value from film_coefficients.rs."""
+    """Comprehensive parity check: every orientation produces the exact
+    value from film_coefficients.rs."""
 
-    # Rust cases from film_coefficients.rs:209-225
-    # cos_tilt = cos(tilt).abs()
-    # if cos_tilt < 0.3827       → 3.076  (vertical)
-    # if cos_tilt >= 0.9239      → 4.040 (hotter) / 0.948 (reduced)  (horizontal)
-    # else                       → 3.870 (hotter) / 2.281 (reduced)  (tilted)
+    # Rust cases from film_coefficients.rs (the frozen geometric rule):
+    # cos_tilt = cos(tilt)                      (SIGNED: the outward normal)
+    # if abs(cos_tilt) < 0.3827  → 3.076                       (vertical)
+    # if abs(cos_tilt) >= 0.9239 → 4.040 (cos > 0) / 0.948     (horizontal)
+    # else                       → 3.870 (cos > 0) / 2.281     (tilted)
 
     cases = [
-        # (tilt_deg, above_hotter, expected_h_conv, expected_r_film)
-        # Vertical: abs(cos(tilt)) < 0.3827 for tilt > 67.5° OR tilt < 112.5°
-        (90.0, True, 3.076, 1.0 / 3.076),
-        (90.0, False, 3.076, 1.0 / 3.076),
-        (100.0, True, 3.076, 1.0 / 3.076),
+        # (tilt_deg, expected_h_conv, expected_r_film)
+        # Vertical: abs(cos(tilt)) < 0.3827 for 67.5° < tilt < 112.5°
+        (90.0, 3.076, 1.0 / 3.076),
+        (100.0, 3.076, 1.0 / 3.076),
+        (80.0, 3.076, 1.0 / 3.076),
         # Horizontal: abs(cos(tilt)) >= 0.9239 for tilt < 22.5° OR tilt > 157.5°
-        (0.0, True, 4.040, 1.0 / 4.040),
-        (0.0, False, 0.948, 1.0 / 0.948),
-        (10.0, True, 4.040, 1.0 / 4.040),
-        (10.0, False, 0.948, 1.0 / 0.948),
+        (0.0, 4.040, 1.0 / 4.040),
+        (10.0, 4.040, 1.0 / 4.040),
+        (180.0, 0.948, 1.0 / 0.948),
+        (170.0, 0.948, 1.0 / 0.948),
         # Tilted: all other angles
-        (45.0, True, 3.870, 1.0 / 3.870),
-        (45.0, False, 2.281, 1.0 / 2.281),
-        (30.0, True, 3.870, 1.0 / 3.870),
-        (30.0, False, 2.281, 1.0 / 2.281),
-        (60.0, True, 3.870, 1.0 / 3.870),
-        (60.0, False, 2.281, 1.0 / 2.281),
+        (45.0, 3.870, 1.0 / 3.870),
+        (30.0, 3.870, 1.0 / 3.870),
+        (60.0, 3.870, 1.0 / 3.870),
+        (135.0, 2.281, 1.0 / 2.281),
+        (150.0, 2.281, 1.0 / 2.281),
     ]
 
-    for tilt_deg, above_hotter, expected_h_conv, expected_r_film in cases:
-        h_conv = ashrae_simple_interior_h_conv(tilt_deg, above_hotter)
+    for tilt_deg, expected_h_conv, expected_r_film in cases:
+        h_conv = ashrae_simple_interior_h_conv(tilt_deg)
         r_film = 1.0 / h_conv
         assert h_conv == pytest.approx(expected_h_conv, abs=0.001), (
-            f"tilt={tilt_deg}° above_hotter={above_hotter}: "
-            f"h_conv mismatch: {h_conv} vs {expected_h_conv}"
+            f"tilt={tilt_deg}°: h_conv mismatch: {h_conv} vs {expected_h_conv}"
         )
         assert r_film == pytest.approx(expected_r_film, abs=0.001), (
-            f"tilt={tilt_deg}° above_hotter={above_hotter}: "
-            f"r_film mismatch: {r_film} vs {expected_r_film}"
+            f"tilt={tilt_deg}°: r_film mismatch: {r_film} vs {expected_r_film}"
         )
 
 
@@ -190,7 +177,7 @@ def test_tarp_at_12_9k_vertical_matches_ashrae_simple_within_1_pct() -> None:
     vertical h_conv = 3.076 to within 0.12%.  This accidental match was the
     reason the old 12.9 K floor masked the interior convection model mismatch."""
     h_tarp = tarp_h_natural(90.0, _TARP_12_9K, above_hotter=True)
-    h_ashrae = ashrae_simple_interior_h_conv(90.0, above_hotter=True)
+    h_ashrae = ashrae_simple_interior_h_conv(90.0)
     pct_diff = abs(h_tarp - h_ashrae) / h_ashrae * 100.0
     assert pct_diff < 1.0, (
         f"vertical TARP at ΔT={_TARP_12_9K}K: h={h_tarp:.4f} vs "
@@ -198,30 +185,32 @@ def test_tarp_at_12_9k_vertical_matches_ashrae_simple_within_1_pct() -> None:
     )
 
 
-def test_tarp_at_12_9k_does_not_match_ashrae_simple_horizontal_enhanced() -> None:
-    """TARP at 12.9 K diverges from ASHRAE Simple for horizontal enhanced
-    (heat flow up) — the clamp only accidentally converges on vertical."""
+def test_tarp_at_12_9k_does_not_match_ashrae_simple_roof_class() -> None:
+    """TARP at 12.9 K diverges from ASHRAE Simple for the roof-class
+    horizontal (the warm side below, the enhanced branch): the clamp only
+    accidentally converges on vertical."""
     h_tarp = tarp_h_natural(0.0, _TARP_12_9K, above_hotter=True)
-    h_ashrae = ashrae_simple_interior_h_conv(0.0, above_hotter=True)  # 4.040
+    h_ashrae = ashrae_simple_interior_h_conv(0.0)  # 4.040
     pct_diff = abs(h_tarp - h_ashrae) / h_ashrae * 100.0
     # Expected: TARP ≈ 3.567, ASHRAE Simple = 4.040 → ~11.7% divergence
     assert pct_diff > 1.0, (
-        f"horizontal enhanced TARP at ΔT={_TARP_12_9K}K: h={h_tarp:.4f} vs "
+        f"roof-class horizontal TARP at ΔT={_TARP_12_9K}K: h={h_tarp:.4f} vs "
         f"ASHRAE Simple h={h_ashrae:.4f} ({pct_diff:.2f}% diff) — "
         f"this documents that the 12.9 K clamp does NOT converge for "
         f"horizontal surfaces"
     )
 
 
-def test_tarp_at_12_9k_does_not_match_ashrae_simple_horizontal_reduced() -> None:
-    """TARP at 12.9 K diverges from ASHRAE Simple for horizontal reduced
-    (heat flow down) — the clamp only accidentally converges on vertical."""
+def test_tarp_at_12_9k_does_not_match_ashrae_simple_floor_class() -> None:
+    """TARP at 12.9 K diverges from ASHRAE Simple for the floor-class
+    horizontal (the warm side above, the reduced branch): the clamp only
+    accidentally converges on vertical."""
     h_tarp = tarp_h_natural(0.0, _TARP_12_9K, above_hotter=False)
-    h_ashrae = ashrae_simple_interior_h_conv(0.0, above_hotter=False)  # 0.948
+    h_ashrae = ashrae_simple_interior_h_conv(180.0)  # 0.948
     pct_diff = abs(h_tarp - h_ashrae) / h_ashrae * 100.0
     # Expected: TARP ≈ 1.783, ASHRAE Simple = 0.948 → ~88% divergence
     assert pct_diff > 1.0, (
-        f"horizontal reduced TARP at ΔT={_TARP_12_9K}K: h={h_tarp:.4f} vs "
+        f"floor-class horizontal TARP at ΔT={_TARP_12_9K}K: h={h_tarp:.4f} vs "
         f"ASHRAE Simple h={h_ashrae:.4f} ({pct_diff:.2f}% diff) — "
         f"this documents that the 12.9 K clamp does NOT converge for "
         f"horizontal surfaces"

@@ -657,22 +657,41 @@ impl Equipment for IdealHvac {
         self.route_end_use_by_mode(mode);
 
         // Compute the ideal solver target independently of FSM hysteresis.
-        // The FSM deadband is correct for physical equipment cycling; in ideal
-        // capacity mode the solver needs whichever comfort setpoint bounds the
-        // zone temperature (heating if below heating_c, cooling if above
-        // cooling_c, none if within the comfort band). A zone the
-        // environment does not carry sets no target; `step` reads the same
-        // zone and fails with the reason.
+        // The FSM deadband is correct for physical equipment cycling; in
+        // ideal capacity mode the solver needs whichever comfort setpoint
+        // bounds the zone temperature:
+        //
+        // - at or below heating_c: the heating bound (the hold/fill);
+        // - at or above cooling_c: the cooling bound (the hold/shave);
+        // - strictly inside a non-degenerate band: the heating bound, with
+        //   the delivery's sign filter deciding; the solve's capacity to
+        //   land at the heating bound is positive exactly when the
+        //   uncontrolled step would cross the bound (E+'s ideal-load
+        //   semantics: the load required to maintain the setpoint), and
+        //   negative exactly when the zone would stay above it, where the
+        //   band's freedom to float is the case's own subject. Gating the
+        //   target on the PRE-step temperature being strictly beyond the
+        //   bound instead leaves a delivered step (which lands the zone
+        //   exactly on, or a solve-mismatch hair above, the bound) with no
+        //   target, and the light zone air node then collapses onto the
+        //   surface cluster within the hour: the two-step limit cycle the
+        //   BESTEST cases ran as a 20-to-13 C sawtooth with heating
+        //   delivered on every other hour.
+        //
+        // A zone the environment does not carry sets no target; `step`
+        // reads the same zone and fails with the reason.
         let setpoints = self.thermostat_fsm.effective_setpoints();
         let zone_temp = self
             .zone_id
             .and_then(|zone| Some((zone, lookup_zone_temp(env, zone).ok()?)));
         self.cached_ideal_target = match zone_temp {
             Some((zone, temp_c)) if self.use_ideal_cached => {
-                if temp_c < setpoints.heating_c {
+                if temp_c <= setpoints.heating_c {
                     Some((zone, setpoints.heating_c))
-                } else if temp_c > setpoints.cooling_c {
+                } else if temp_c >= setpoints.cooling_c {
                     Some((zone, setpoints.cooling_c))
+                } else if setpoints.heating_c < setpoints.cooling_c {
+                    Some((zone, setpoints.heating_c))
                 } else {
                     None
                 }
@@ -747,16 +766,43 @@ impl Equipment for IdealHvac {
         };
 
         let mut capacity_w = if self.use_ideal_cached {
-            // Ideal capacity mode: solver-determined capacity drives directly.
-            // FSM mode provides sign clamping as a defensive guard (the solver
-            // can in principle produce wrong-direction capacity). Deadband mode
-            // does NOT gate delivery — the solver already knows the correct
-            // direction from cached_ideal_target, and stale capacity is
-            // cleared by update_control() when the zone enters comfort range.
-            match self.thermostat_fsm.mode {
-                ThermostatMode::Heating => (self.ideal_capacity_w * self.load_fraction).max(0.0),
-                ThermostatMode::Cooling => (self.ideal_capacity_w * self.load_fraction).min(0.0),
-                ThermostatMode::Deadband => self.ideal_capacity_w * self.load_fraction,
+            // Ideal capacity mode: the solve's signed capacity drives
+            // directly, and the cached target's bound is the authority on
+            // the delivery's direction. A heating-bound target delivers only
+            // a heating capacity (a negative solve means the uncontrolled
+            // step would land ABOVE the heating bound, where the band's
+            // freedom to float is the case's own subject), a cooling-bound
+            // target only a cooling one, and a degenerate band (the
+            // standard's "20,20" clamp: heating_c == cooling_c) has no
+            // outside direction, so the solve's signed load delivers both
+            // ways. The FSM's mode is an observability state here: a sticky
+            // Cooling mode inside its hysteresis still carries the mid-band
+            // heating-bound target, and its negative solve means the zone
+            // stays above the heating bound, never that the heating bound's
+            // capacity should be delivered as cooling. The solver feedback
+            // re-solves every step while the target is Some (it always is,
+            // in ideal mode), so the armed capacity is always this step's
+            // own solve. With no target (the control error or outage path
+            // that clears it) the capacity is already zero.
+            let delivered = self.ideal_capacity_w * self.load_fraction;
+            match self.cached_ideal_target {
+                Some((_, target_c)) => {
+                    let setpoints = self.thermostat_fsm.effective_setpoints();
+                    if setpoints.heating_c < setpoints.cooling_c {
+                        if target_c == setpoints.heating_c {
+                            delivered.max(0.0)
+                        } else {
+                            delivered.min(0.0)
+                        }
+                    } else {
+                        delivered
+                    }
+                }
+                None => match self.thermostat_fsm.mode {
+                    ThermostatMode::Heating => delivered.max(0.0),
+                    ThermostatMode::Cooling => delivered.min(0.0),
+                    ThermostatMode::Deadband => delivered,
+                },
             }
         } else {
             // Non-ideal mode: FSM-driven bang-bang cycling with rated capacity
@@ -2342,11 +2388,16 @@ mod tests {
         );
     }
 
-    // Bug 2: Deadband must produce 0W even when ideal_capacity_w was set while
-    // heating and the transition to Deadband did not clear it explicitly via the
-    // ControlSignal path.
+    // The Deadband's delivery is the freshest solve, sign-filtered by the
+    // cached target's bound: the dispatch REPLACES the armed capacity
+    // (the solver feedback re-solves every step while the target is Some;
+    // it always is, in ideal mode, so no stale capacity survives a step),
+    // and the mid-band's heating-bound target drops a negative solve (the
+    // zone floats). The old shape this test replaced stepped on an armed
+    // capacity with no re-solve: an ordering the real step never runs
+    // (the control update sits between the solve's dispatch and the step).
     #[test]
-    fn deadband_outputs_zero_despite_stale_ideal_capacity() {
+    fn deadband_delivers_freshest_solve_sign_filtered() {
         let mut cfg = config("IH");
         cfg.test_extras_mut().insert("zone_id".into(), 1.0.into());
         cfg.test_extras_mut()
@@ -2379,6 +2430,17 @@ mod tests {
             super::ThermostatMode::Deadband,
             "zone at 21°C should be in Deadband"
         );
+
+        // The next solve's product replaces the armed capacity: the zone
+        // at 21 sits in the band's middle, the solve lands negative (the
+        // uncontrolled step stays above the heating bound), and the
+        // delivery drops it.
+        let fresh = hares_types::ControlSignal::IdealCapacity {
+            capacity_w: -500.0,
+            degraded: false,
+        };
+        eq.apply_control_unchecked(&fresh).unwrap();
+        assert!((eq.ideal_capacity_w + 500.0).abs() < 1e-9);
 
         let mut ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
@@ -3654,13 +3716,24 @@ mod tests {
     }
 
     #[test]
-    fn ideal_target_returns_none_when_zone_in_comfort_range() {
-        // Zone at 23°C, between heating 20°C and cooling 26°C.
+    fn ideal_target_targets_the_heating_bound_from_the_band_middle() {
+        // Zone at 23°C, between heating 20°C and cooling 26°C: the target
+        // is the heating bound, the carrier of the hold prediction. The
+        // solve's capacity to land at the heating bound is positive
+        // exactly when the uncontrolled step would cross the bound, and
+        // the delivery's sign filter drops a negative solve so the band's
+        // freedom to float is untouched (E+'s ideal-load semantics).
         let eq = init_ideal("IH-comfort-zone", 20.0, 26.0, 23.0);
         let target = eq.ideal_target();
         assert!(
-            target.is_none(),
-            "ideal_target must return None in comfort range"
+            target.is_some(),
+            "ideal_target must carry the heating bound from the band middle"
+        );
+        let (zone, temp) = target.unwrap();
+        assert_eq!(zone, ZoneId(1));
+        assert!(
+            (temp - 20.0).abs() < 1e-9,
+            "target must be heating bound 20.0, got {temp}"
         );
     }
 
@@ -3727,10 +3800,15 @@ mod tests {
     }
 
     #[test]
-    fn stale_ideal_capacity_cleared_when_target_becomes_none() {
-        // When zone warms from cold (needs heat) into comfort range,
-        // cached_ideal_target becomes None and old ideal_capacity_w
-        // must be cleared so step() doesn't keep delivering stale heat.
+    fn stale_ideal_capacity_cleared_when_zone_reenters_band() {
+        // When zone warms from cold (needs heat) into the band's middle,
+        // the control update re-points the target at the heating bound
+        // (the hold prediction's carrier) and the solver feedback's
+        // re-solve retires the previous solve's capacity before the step
+        // delivers: the target is always Some in ideal mode, so no stale
+        // capacity survives a step. This pin keeps the observable: after
+        // the re-solve dispatches the fresh (negative; the zone floats)
+        // solve, the delivery is zero.
         let cfg = ideal_config("IH-stale", 20.0, 26.0);
 
         let env_cold = env(15.0, 300, 0);
@@ -3742,20 +3820,89 @@ mod tests {
             "cold zone must have ideal target"
         );
 
-        eq.ideal_capacity_w = 500.0;
-        assert!((eq.ideal_capacity_w - 500.0).abs() < 1e-9);
-
-        // Zone warms to comfort range → target becomes None, capacity cleared
+        // The zone warms to the band's middle; the re-solve's fresh value
+        // is negative (the uncontrolled landing stays above the bound).
         let env_warm = env(23.0, 300, 60);
         eq.update_control(&env_warm);
+        let target = eq.ideal_target();
         assert!(
-            eq.ideal_target().is_none(),
-            "comfort-range zone must have no target"
+            target.is_some() && (target.unwrap().1 - 20.0).abs() < 1e-9,
+            "band-middle zone targets the heating bound; got {target:?}"
         );
+        eq.ideal_capacity_w = -500.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_warm, std::time::Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let gain = ports.thermal[0].sensible_gain_w;
+        assert_eq!(
+            gain, 0.0,
+            "the band's middle must not deliver a negative solve's \
+             capacity (the zone floats); got {gain}W"
+        );
+    }
+
+    /// The delivery's direction follows the target bound, not the FSM mode.
+    /// A Cooling FSM that has settled inside its own hysteresis carries the
+    /// mid-band heating-bound target; the solve's capacity to reach that
+    /// bound from a temperature far above it is negative, and delivering it
+    /// as cooling would drive the zone down the whole band to the heating
+    /// setpoint. E+'s ideal-load form delivers the load that maintains the
+    /// bound (heat when the uncontrolled step would cross the heating bound,
+    /// cool only at the cooling bound); the heating-bound solve below the
+    /// cooling bound is the band's freedom to float on the cooling side.
+    #[test]
+    fn cooling_mode_drops_the_mid_band_heating_bound_solve() {
+        let cfg = ideal_config("IH-cooling-strip", 20.0, 26.0);
+        // Enter Cooling through the FSM's turn-on threshold
+        // (26 + 1.0 * (1 - 0.2) = 26.8 C).
+        let env_hot = env(27.5, 300, 0);
+        let mut eq = IdealHvac::new(cfg.clone());
+        eq.init(&cfg, &env_hot).unwrap();
+        eq.update_control(&env_hot);
+        assert_eq!(
+            eq.thermostat_fsm.mode,
+            ThermostatMode::Cooling,
+            "a zone above the cooling turn-on enters Cooling"
+        );
+
+        // Just below the cooling bound but inside the Cooling hysteresis:
+        // the turn-off is 26 - 1.0 * 0.2 = 25.8 C, so 25.9 C stays Cooling,
+        // and the mid-band target is the heating bound (25.9 < 26).
+        let env_strip = env(25.9, 300, 60);
+        eq.update_control(&env_strip);
+        assert_eq!(
+            eq.thermostat_fsm.mode,
+            ThermostatMode::Cooling,
+            "25.9 C is above the 25.8 C turn-off"
+        );
+        let target = eq.ideal_target();
         assert!(
-            eq.ideal_capacity_w.abs() < 1e-9,
-            "stale ideal_capacity_w must be cleared; got {}",
-            eq.ideal_capacity_w
+            target.is_some() && (target.unwrap().1 - 20.0).abs() < 1e-9,
+            "the hysteresis strip carries the heating bound; got {target:?}"
+        );
+
+        // The solve for the heating bound from 25.9 C is negative: the
+        // uncontrolled step ends far above the bound. This is what
+        // collect_and_solve arms from this target.
+        eq.ideal_capacity_w = -5_000.0;
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            humidity: vec![HumidityAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        eq.step(&env_strip, std::time::Duration::from_secs(300), &mut ports)
+            .unwrap();
+        let gain = ports.thermal[0].sensible_gain_w;
+        assert_eq!(
+            gain, 0.0,
+            "a heating-bound target must not deliver its negative solve as \
+             cooling (the band's freedom to float); got {gain}W"
         );
     }
 
@@ -3840,9 +3987,11 @@ mod tests {
 
         let env_comfort = env(23.0, 300, 60);
         eq.update_control(&env_comfort);
+        let target = eq.ideal_target();
         assert!(
-            eq.ideal_target().is_none(),
-            "comfort: should have no target"
+            target.is_some() && (target.unwrap().1 - 20.0).abs() < 1e-9,
+            "comfort: the target re-points at the heating bound (the hold \
+             prediction's carrier)"
         );
 
         let env_hot = env(28.0, 300, 120);

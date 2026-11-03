@@ -424,35 +424,42 @@ pub fn tarp_h_natural(tilt_deg: f64, delta_t_k: f64, above_hotter: bool) -> f64 
 /// component subtracted.  These are the default interior convection
 /// coefficients in EnergyPlus (`CalcASHRAESimpleIntConvCoeff`).
 ///
-/// For vertical surfaces, returns the fixed value 3.076 regardless of ΔT.
-/// For non-vertical surfaces, the buoyancy direction (enhanced vs reduced)
-/// depends on which side is warmer and the surface tilt — this is computed
-/// from the zone temperatures and the `above_hotter` flag.
+/// The value is a pure function of the boundary's tilt, frozen at the
+/// winter regime the comparative cases verify: the correlation's enhanced
+/// branch fires when the surface's warm side is BELOW it. For a
+/// roof-class surface (the outward normal up, the interior face pointing
+/// down at the zone's warm air) the buoyant rise into the cold face
+/// drives the strong coefficient; for a floor-class surface (the outward
+/// normal down) the warm zone air sits ABOVE the face, a stable
+/// stratification that reduces the coefficient. E+'s per-step form
+/// evaluates `(T_zone − T_surface) · cos(tilt_outward) > 0` for the same
+/// branches (ConvectionCoefficients.cc `CalcASHRAESimpleIntConvCoeff`);
+/// the frozen geometric rule evaluates the sign of the tilt factor alone,
+/// which is the per-step form's winter regime for every horizontal
+/// classification.
 ///
-/// | Orientation             | Condition      | h_conv [W/(m²·K)] |
-/// |-------------------------|----------------|--------------------|
-/// | Vertical (67.5–112.5°)  | —              | 3.076              |
-/// | Horizontal, enhanced    | heat flow up   | 4.040              |
-/// | Horizontal, reduced     | heat flow down | 0.948              |
-/// | Tilted, enhanced        | heat flow up   | 3.870              |
-/// | Tilted, reduced         | heat flow down | 2.281              |
+/// | Orientation                      | h_conv [W/(m²·K)] |
+/// |----------------------------------|-------------------|
+/// | Vertical (67.5–112.5°)           | 3.076             |
+/// | Horizontal, warm side below      | 4.040             |
+/// | Horizontal, warm side above      | 0.948             |
+/// | Tilted, warm side below          | 3.870             |
+/// | Tilted, warm side above          | 2.281             |
 ///
 /// # References
-/// - EnergyPlus ConvectionCoefficients.cc:1829-1885.
+/// - EnergyPlus ConvectionCoefficients.cc:1829-1885 (`DeltaTempCosTilt =
+///   (Tamb - Tsurf) * cosTilt`; enhanced > 0, reduced < 0; surface tilts
+///   are with respect to the OUTWARD normal).
 /// - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, p 79.
 /// - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.
-pub fn ashrae_simple_interior_h_conv(
-    tilt_deg: f64,
-    _t_ext_c: f64,
-    _t_int_c: f64,
-    above_hotter: bool,
-) -> f64 {
-    let cos_tilt = libm::cos(tilt_deg.to_radians()).abs();
-    if cos_tilt < 0.3827 {
+pub fn ashrae_simple_interior_h_conv(tilt_deg: f64) -> f64 {
+    let cos_tilt = libm::cos(tilt_deg.to_radians());
+    let abs_cos = cos_tilt.abs();
+    if abs_cos < 0.3827 {
         3.076
-    } else if cos_tilt >= 0.9239 {
-        if above_hotter { 4.040 } else { 0.948 }
-    } else if above_hotter {
+    } else if abs_cos >= 0.9239 {
+        if cos_tilt > 0.0 { 4.040 } else { 0.948 }
+    } else if cos_tilt > 0.0 {
         3.870
     } else {
         2.281
@@ -491,7 +498,10 @@ pub fn film_resistances(
 
     let ext_above = exterior_zone.height_order() > interior_zone.height_order();
     let t_ext_hotter = t_ext >= t_int;
-    let above_hotter = !(ext_above ^ t_ext_hotter);
+    // The TARP exterior natural convection's above/below flag (the warm
+    // side's position); the interior film's frozen regime does not read
+    // it: its horizontal branches key on the tilt's geometry.
+    let above_hotter_ext = !(ext_above ^ t_ext_hotter);
 
     // ASHRAE "Simple" interior convection algorithm — fixed h_conv [W/(m²·K)]
     // by surface orientation, with the radiative component already subtracted.
@@ -509,20 +519,20 @@ pub fn film_resistances(
     // divergence is registered in docs/alignment/DIVERGENCES.md. Combined
     // with h_rad ≈ 5.14 at ε = 0.9, T_ref = 293.15 K, the vertical total
     // h_si = 8.22 is consistent with ASHRAE 140-2017 Table 25 (h_si = 8.29).
+    // The frozen horizontal regime is the winter one, keyed on the tilt's
+    // geometry (see the function's doc): a roof-class boundary freezes the
+    // enhanced coefficient, a floor-class boundary the reduced one.
     //
     // References:
     // - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, p 79.
     // - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.
     // - EnergyPlus ConvectionCoefficients.cc:1829-1885.
     // - ASHRAE 140-2017 §5.3.1.9, Table 25.
-    let h_conv = ashrae_simple_interior_h_conv(tilt_deg, t_ext, t_int, above_hotter);
+    let h_conv = ashrae_simple_interior_h_conv(tilt_deg);
 
     let r_int = 1.0 / h_conv;
 
     let r_ext = if exterior_zone == ZoneLabel::Outdoor {
-        let ext_above = exterior_zone.height_order() > interior_zone.height_order();
-        let t_ext_hotter = t_ext >= t_int;
-        let above_hotter = !(ext_above ^ t_ext_hotter);
         let delta_t_unfloored = (t_ext - t_int).abs();
         // The ΔT floor's firing is counted, never silent: the TARP
         // natural-convection model evaluates at no less than 0.1 K, the
@@ -535,7 +545,7 @@ pub fn film_resistances(
             );
         }
         let delta_t = delta_t_unfloored.max(0.1);
-        let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter);
+        let h_natural = tarp_h_natural(tilt_deg, delta_t, above_hotter_ext);
         let h_glass =
             (h_natural.powi(2) + (3.40 * libm::pow(avg_wind_speed_m_s, 0.75)).powi(2)).sqrt();
         let h_forced = roughness.factor() * (h_glass - h_natural);
@@ -558,7 +568,11 @@ pub fn film_resistances(
         let h_ext = h_ext_unfloored.max(1.0);
         1.0 / h_ext
     } else if exterior_zone == ZoneLabel::Ground {
-        1.0 / h_conv
+        // The ground is a fixed-temperature node in solid contact with
+        // the face: no convective exterior film. The engine's own slab
+        // path (conversions.rs) and the ASHRAE/E+ reference tables carry
+        // the same zero.
+        0.0
     } else {
         r_int
     };
@@ -696,30 +710,37 @@ mod tests {
 
     #[test]
     fn ashrae_simple_vertical_returns_3_076() {
-        assert_approx(
-            ashrae_simple_interior_h_conv(90.0, 15.0, 20.0, true),
-            3.076,
-            1e-10,
-        );
+        assert_approx(ashrae_simple_interior_h_conv(90.0), 3.076, 1e-10);
     }
 
+    // The frozen horizontal regime is geometric: the enhanced coefficient
+    // belongs to the roof-class surface (the outward normal up, the
+    // interior face pointing down at the zone's warm air, E+'s winter
+    // branch) and the reduced coefficient to the floor-class surface (the
+    // warm zone air above a face pointing up, the stable stratification).
+    // Source: EnergyPlus ConvectionCoefficients.cc CalcASHRAESimpleIntConvCoeff,
+    // DeltaTempCosTilt = (Tamb - Tsurf) * cosTilt with the OUTWARD cosTilt.
     #[test]
-    fn ashrae_simple_horizontal_enhanced() {
-        let h = ashrae_simple_interior_h_conv(0.0, 15.0, 20.0, true);
+    fn ashrae_simple_horizontal_roof_class_freezes_enhanced() {
+        let h = ashrae_simple_interior_h_conv(0.0);
         assert_approx(h, 4.040, 1e-10);
     }
 
     #[test]
-    fn ashrae_simple_horizontal_reduced() {
-        let h = ashrae_simple_interior_h_conv(0.0, 25.0, 20.0, false);
+    fn ashrae_simple_horizontal_floor_class_freezes_reduced() {
+        let h = ashrae_simple_interior_h_conv(180.0);
         assert_approx(h, 0.948, 1e-10);
     }
 
-    /// The attic floor's frozen films (the ceiling under an attic, both
-    /// sides) are the ASHRAE Simple horizontal values at the typical zone
-    /// temperatures' direction. With the attic colder than the conditioned
-    /// space there (16.67 against 20 at the anchors), the direction is
-    /// reduced: h = 0.948 W/(m²·K), R ≈ 1.055 m²·K/W on both sides.
+    /// The ceiling under an attic freezes the ASHRAE Simple horizontal
+    /// values by its geometry: the boundary's outward normal points up
+    /// into the attic, so the interior face points down at the zone's warm
+    /// air: the correlation's enhanced winter branch,
+    /// h = 4.040 W/(m²·K), R ≈ 0.2475 m²·K/W on both faces. E+'s per-step
+    /// form (ConvectionCoefficients.cc CalcASHRAESimpleIntConvCoeff,
+    /// `DeltaTempCosTilt = (Tamb - Tsurf) * cosTilt` at the OUTWARD
+    /// cosTilt) evaluates enhanced whenever the zone air is warmer than
+    /// the face, the heating regime this frozen value carries.
     /// OCHRE's frozen film instead freezes the TARP model at the clamped
     /// ΔT of 12.9 K (h = 1.782, R ≈ 0.561, its committed winter oracle
     /// output's "Attic Floor ... Film Coefficient" columns), and
@@ -737,8 +758,29 @@ mod tests {
             10.0, // typical ambient: the attic interpolates to 16.67
             SurfaceRoughness::Rough,
         );
+        assert_approx(r_int, 1.0 / 4.040, 1e-9);
+        assert_approx(r_ext, 1.0 / 4.040, 1e-9);
+    }
+
+    /// The raised floor's frozen interior film is the ASHRAE Simple
+    /// horizontal reduced value: the boundary's outward normal points down
+    /// at the ground, so the interior face points up at the zone's warm
+    /// air: the stable stratification E+'s per-step form evaluates
+    /// reduced at (the zone air warmer than the face, `DeltaTempCosTilt =
+    /// (Tamb - Tsurf) * cosTilt < 0` at the outward cosTilt −1), winter
+    /// and summer alike.
+    #[test]
+    fn the_raised_floor_s_frozen_film_is_the_reduced_horizontal_value() {
+        let (r_int, _) = film_resistances(
+            180.0,
+            ZoneLabel::Conditioned,
+            ZoneLabel::Ground,
+            2.0,
+            10.0,
+            10.0,
+            SurfaceRoughness::Rough,
+        );
         assert_approx(r_int, 1.0 / 0.948, 1e-9);
-        assert_approx(r_ext, 1.0 / 0.948, 1e-9);
     }
 
     /// When delta_t=0, all TARP formulas produce h=0 (cbrt(0)=0).

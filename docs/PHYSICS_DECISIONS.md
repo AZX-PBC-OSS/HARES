@@ -2369,3 +2369,126 @@ and nine nodes measure 14, 7.2, 3.0 and 0.36 percent), carrying 55
 states for the default building. The row's budget is five nodes; the
 counter is its record, so the accuracy cost is counted rather than
 hidden.
+
+## The ideal controller targets the band's bounds inclusively, with the
+## sign filter carrying the band's freedom
+
+The ideal-capacity HVAC's per-step target is whichever comfort setpoint
+bounds the zone: the heating bound at or below `heating_c`, the cooling
+bound at or above `cooling_c`, and, strictly inside a non-degenerate
+band, still the heating bound, with the delivery's sign filter
+deciding. The bounds are inclusive and the middle targets the lower
+bound because a delivered step lands the zone exactly on (or, on a
+solve mismatch, a hair above) the bound it solved for: a strict,
+temperature-gated target then reads that landing as "in comfort",
+delivers nothing on the following step, and the zone air node, whose
+discharge time constant to the surface cluster is minutes against the
+hourly step, collapses onto the surfaces' colder temperature. The
+BESTEST conditioned cases ran exactly that two-step limit cycle
+(the 600's winter: the zone oscillating 20.0 → below 13 with heating on
+every other hour), an annual mean zone temperature 3-4 K under the
+declared setpoints, and heating loads 18-25 percent under the ASHRAE
+140 band floors: the ledger's under-heating class.
+
+The corrected form is EnergyPlus's ideal-load semantics
+(EnergyPlus Engineering Reference, "Zone HVAC Ideal Loads Air System":
+the system supplies the load required to maintain the setpoint): the
+solve's capacity to land at the heating bound is positive exactly when
+the uncontrolled step would cross the bound, so a positive capacity is
+the hold and a negative one means the zone stays in the band on its own;
+the delivery drops it and the band's freedom to float (the deadband
+case's own subject: BESTEST 395's "20,27") is untouched. A degenerate
+band (the standard's "20,20 bang-bang" clamp, Case 195) has no outside
+direction: the solve's signed load delivers both ways, heating when the
+envelope loses and cooling when it gains. The sign filter follows the
+armed target's bound in EVERY thermostat mode: the FSM mode is an
+observability state in ideal mode, and a sticky Cooling mode inside its
+own hysteresis still carries the mid-band heating-bound target whose
+negative solve means the zone stays above the heating bound, never that
+the heating-bound capacity should be delivered as cooling. Without
+that reading a cooling-mode unit that settles below its setpoint
+delivers the heating bound's negative capacity as a large cooling load
+and drives the zone to the heating setpoint. The solver feedback
+re-solves every step while the target is Some (it always is, in ideal
+mode), so the armed capacity is always the step's own solve; the
+equipment's control update never gates on the armed value.
+
+The alternative rejected: keeping the strict pre-step gate (the
+original form) preserves a deadband's "freedom" only by construction;
+its measured cost is the limit cycle above, and the 195/600/640/900
+heating floors it cannot reach. Source: EnergyPlus Engineering
+Reference "Zone HVAC Ideal Loads Air System"; ASHRAE 140-2017
+§5.2.3.1.2's "20,20 bang-bang" thermostat definition (Case 195),
+§5.2.3.16 (Case 395).
+
+## The synthetic fixture's declared setpoint pair reaches the thermostat
+## verbatim
+
+The HPXML residential setpoint reconciliation (the pair whose
+cooling-minus-heating gap is below the unit's own band re-centres on
+the midpoint, OCHRE schedule.py:617-625) applied the DEFAULT hysteresis
+(1.0 °C, a 2.0 °C gap) to every pair, including the synthetic
+fixtures'. ASHRAE 140's in-depth Case 195 declares the "20,20
+bang-bang" as the case definition itself; the reconciliation rewrote it
+to 19/21, the zone then floated 19-21 instead of clamping at 20, and
+the pinned band targeted a different thermostat than the standard's.
+The reconciliation's gap now follows the consuming unit's own band
+(`2 × deadband_c`): a fixture declaring `deadband_c = 0.0` satisfies
+`ThermalSetpoints::validate_for_deadband` at gap zero and the pair
+passes through verbatim; a unit declaring no band keeps the default's
+2.0 °C. The alternative rejected: a synthetic-path bypass flag. The
+band-derived gap is the same rule the downstream validator enforces, so
+the reconciliation cannot fire on a pair the validator accepts, and no
+new surface is needed.
+
+## The frozen interior horizontal film keys on the tilt's geometry
+
+The frozen interior convection's enhanced/reduced branches (the ASHRAE
+Simple table's 4.040/0.948 horizontal, 3.870/2.281 tilted) were taken
+from the interpolated typical zone temperatures' above/below comparison.
+EnergyPlus's per-step form evaluates
+`(T_zone − T_surface) · cos(tilt_outward) > 0` (ConvectionCoefficients.cc
+`CalcASHRAESimpleIntConvCoeff`; surface tilts are with respect to the
+OUTWARD normal): the comparison that decides the branch is the ZONE AIR
+against the SURFACE, not the two air sides against each other. The
+temperature-based proxy answered a different question and froze the
+roof-class ceiling in the summer regime (the reduced 0.948, the hot
+ceiling above cooler air) where the correlation's winter branch is the
+enhanced 4.040: the cold ceiling above the zone's warm air drives the
+strong coefficient. The floor-class froze in the enhanced where the
+physics is the reduced stable stratification, winter and summer alike.
+The frozen rule now evaluates the sign of the tilt factor alone: a
+roof-class surface (the outward normal up) freezes the enhanced value,
+a floor-class (the outward normal down) the reduced one. The roof-class
+choice is the winter regime the comparative cases verify (the summer
+per-step form runs reduced; the frozen model's compromise is the
+registered D-031's). The synthetic ground face now carries no
+convective exterior film (the ground is a fixed-temperature node in
+solid contact; the engine's own slab path and the ASHRAE reference
+tables carry the same zero). Measured on the BESTEST family: the
+ceiling's film resistance 1.0549 → 0.2475 m²·K/W moves 600 heating
+3027.1 → 3962.5 (the band floor 3993), 600FF peak 73.02 → 70.35 (the
+ceiling 68.4), 900FF min 3.33 → 2.49 (the ceiling 2.2): every
+free-float and conditioned metric toward its band. The tilt the frozen rule reads is the boundary's OUTWARD normal, and
+an HPXML Floor element's comes from its `FloorOrCeiling` field: a floor
+(the interior zone's floor over a garage, crawlspace, or another unit)
+faces down (180 degrees, the reduced branch); a ceiling (the attic
+floor above the zone) faces up (0, the enhanced one). The element's
+`tilt_deg` carries that outward tilt, so both the film and the
+interior beam distribution (which gives a floor `sin(altitude)` of the
+direct beam and a ceiling none) read the face the zone actually sees.
+Collapsing both to the ceiling's 0 froze the enhanced value on every
+floor, the regime the warm side above the face never takes, and
+deposited no direct beam on floors. Measured on the resstock
+single-family parity fixture (`resstock_bldg0112631_24h`, the
+crawlspace and garage floors): the zone temperature MAE against OCHRE
+moves 0.616 to 0.310 C. The alternatives rejected: re-keying only the
+film call on `FloorOrCeiling` (the solar path's geometry would stay
+wrong) and keeping the temperature-keyed branch, which flipped a
+garage floor's film with the garage's temperature and put the reduced
+branch on it only in winter.
+
+The alternatives
+rejected: the per-step TARP form (the registered production-disabled
+model, its own bench cost) and OCHRE's clamped-ΔT frozen form (the
+D-031 record).

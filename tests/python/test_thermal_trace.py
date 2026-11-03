@@ -333,8 +333,8 @@ def test_output_columns_present(
 # inclusive) hold each measured pair so the reasons cannot go stale.
 # ---------------------------------------------------------------------------
 
-TRACE_WORST_6H_C = 2.0590
-TRACE_MEAN_48H_C = 0.3971
+TRACE_WORST_6H_C = 1.7965
+TRACE_MEAN_48H_C = 0.3678
 TRACE_HEATING_OCHRE_KWH = 47.052
 # OVERNIGHT_WORST_C updated by the opaque-R precedence row (the
 # numeric-fixes ledger's opaque-R precedence entry, 2026-10-16): the declared assembly R now sets the
@@ -358,6 +358,14 @@ TRACE_HEATING_OCHRE_KWH = 47.052
 # with it: the 48 h heating 28.9580 to 29.1539 kWh, the worst-6 h
 # divergence 2.0090 to 2.0590 C, the 48 h mean 0.3940 to 0.3971 C
 # (OCHRE's own 47.052 kWh unchanged).
+# Re-captured 2026-11-02 for the envelope's under-heating class fixes (the
+# interior film's frozen regime keyed on the tilt's geometry: the
+# roof-class ceiling enhanced, the floor-class reduced): the zone's
+# overnight trace tracks OCHRE's differently (the HARES side's overnight
+# excursions sit inside its old bounds, the worst divergence 0.7800 to
+# 0.9723 C at a different step, the mean 0.3680 to 0.3202 C), the
+# worst-6 h divergence 2.0590 to 1.7965 C, the 48 h mean 0.3971 to
+# 0.3678 C.
 # Verified 2026-10-26 for the defrost discrete cycle's coarse-dt guard (the
 # defrost entry in docs/PHYSICS_DECISIONS.md): the guard selects the
 # continuous model at steps longer than the 210 s defrost event; this trace
@@ -365,9 +373,9 @@ TRACE_HEATING_OCHRE_KWH = 47.052
 # so the defrost-window records above hold re-verified and unchanged at
 # their 2026-10-19 values (the cause of this row's own movements lives at
 # 900 s and 3600 s steps: the ASHP-bearing goldens, not this trace).
-TRACE_HEATING_HARES_KWH = 29.1539
-OVERNIGHT_WORST_C = 0.7800
-OVERNIGHT_MEAN_C = 0.3680
+TRACE_HEATING_HARES_KWH = 38.0847
+OVERNIGHT_WORST_C = 0.9723
+OVERNIGHT_MEAN_C = 0.3202
 SOLAR_MEAN_RATIO = 0.9885
 SOLAR_WORST_REL_ERR = 0.0918
 

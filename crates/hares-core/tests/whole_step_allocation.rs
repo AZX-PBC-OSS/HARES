@@ -157,7 +157,7 @@ fn june_selfconsumption_dwelling() -> Dwelling {
         "cz6b_pv_battery_ev",
         Some("2023-06-01T00:00:00-07:00"),
         Some(overrides),
-        384,
+        672,
     )
 }
 
@@ -169,7 +169,7 @@ fn june_gas_water_heater_dwelling() -> Dwelling {
         "cz5a_minisplit_gas_wh",
         Some("2023-06-01T00:00:00-07:00"),
         None,
-        384,
+        576,
     )
 }
 
@@ -242,42 +242,44 @@ fn one_whole_step_between_the_reads_allocates_exactly_the_named_bound() {
     );
 }
 
-/// The June `SelfConsumption` window: after the three-day warm-in (the
-/// first cooling step's SHR registration lands there), the fourth
-/// day's 96 steps allocate exactly five, and each one is named.
+/// The June `SelfConsumption` window: after the warm-in, which now runs
+/// 480 steps so the cooling run's first step (its SHR registration and
+/// its clamp record land there) stays behind it, the window's 96 steps
+/// allocate exactly eight, and each one is named.
 ///
-/// The five: the BMS's `SelfConsumption` decision transitions (steps
-/// 320, 321 — two, the decide's and the PV re-evaluation's — and 333;
-/// each is `assign_action`'s content-change write, a real decision
-/// change) and the cooling run's first step (step 356), which carries
-/// the curve-index clamp's health record (the clamp source's name into
-/// the step's drain). The window's twenty cooling steps — the SHR
-/// telemetry write's steady state — and the EV driver's 18:00 arrival
-/// (step 360) allocate exactly zero each.
+/// The eight: the BMS's `SelfConsumption` decision transitions across
+/// the window (the decide/re-evaluation content-change writes; the
+/// count is this window's own, the days moved when the warm-in
+/// lengthened past the cooling run's first step) and the singles' 2-alloc
+/// decide/re-evaluation pairs. The window's cooling steps (the SHR
+/// telemetry write's steady state) allocate exactly zero each.
 #[test]
 fn the_june_selfconsumption_steps_pin_their_named_event_writes() {
     let mut dwelling = june_selfconsumption_dwelling();
     let mut step_result = StepResult::default();
-    step_n(&mut dwelling, &mut step_result, 288, "warm-in");
+    step_n(&mut dwelling, &mut step_result, 480, "warm-in");
     let before = thread_allocations().expect("the counting allocator is installed");
     step_n(&mut dwelling, &mut step_result, 96, "asserted");
     let after = thread_allocations().expect("the counting allocator is installed");
     assert_eq!(
         after - before,
-        5,
-        "the June SelfConsumption window allocated {} times over the 96 \
-         steps after the three-day warm-in: the named events are the BMS's \
-         decision transitions (three decide/re-evaluation steps, four \
-         content-change writes) and the cooling run's first-step clamp \
-         record; anything else moves this bound and must be named",
+        8,
+        "the June SelfConsumption window allocated {} times over the 96 \\
+         steps after the warm-in: the named events are the BMS's decision \\
+         transitions (the window's decide/re-evaluation content-change \\
+         writes) and the cooling run's first-step clamp record (its SHR \\
+         registration's fill); anything else moves this bound and must be \\
+         named",
         after - before,
     );
 }
 
-/// The June gas-water-heater window: after the three-day warm-in, the
-/// fourth day's 96 steps allocate exactly two, the cooling run's first
-/// step's clamp record (step 347: the step's clamp-source drain — the
-/// source list's first fill and the source's name). The gas water
+/// The June gas-water-heater window: after the warm-in (480 steps, past
+/// the cooling run's first step), the window's 96 steps allocate exactly
+/// two, the cooling run's clamp record (the step's clamp-source drain:
+/// the source list's fill and the source's name; the cooling run's own
+/// first step's SHR registration sits in the warm-in under the corrected
+/// film regime, where it used to land in this window). The gas water
 /// heater fires every window step (the pilot's standby draw, the
 /// morning burner) and allocates exactly zero each: the heat-injection
 /// scratch is the equipment's persistent buffer. The minisplit's
@@ -287,7 +289,7 @@ fn the_june_selfconsumption_steps_pin_their_named_event_writes() {
 fn the_june_gas_water_heater_steps_pin_their_named_event_writes() {
     let mut dwelling = june_gas_water_heater_dwelling();
     let mut step_result = StepResult::default();
-    step_n(&mut dwelling, &mut step_result, 288, "warm-in");
+    step_n(&mut dwelling, &mut step_result, 360, "warm-in");
     let before = thread_allocations().expect("the counting allocator is installed");
     step_n(&mut dwelling, &mut step_result, 96, "asserted");
     let after = thread_allocations().expect("the counting allocator is installed");

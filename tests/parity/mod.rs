@@ -99,6 +99,9 @@ fn fixture_override(fixture_id: &str, metric: &'static str) -> Option<f64> {
         // too), and the appliance, plug-load and lighting radiant split
         // (D-005, D-006, D-007) enters with it: the residual moved 0.441 to
         // 0.616 C. The attic's non-gable roofs take OS-HPXML's square hip.
+        // The floor geometry's outward tilt (a FloorOrCeiling "floor" faces
+        // down, taking the reduced interior film and the beam distribution)
+        // re-measured the residual at 0.310 C; the band keeps its margin.
         ("resstock_bldg0112631_24h", METRIC_ZONE_TEMP_CONDITIONED) => Some(0.63),
         _ => None,
     }
@@ -939,10 +942,12 @@ fn reconcile_fixture(fixture: &ParityFixture) -> Result<(), Vec<String>> {
     // standby: every below-threshold minute reads the 0.150 kW class
     // attribute (HVAC.py:1482) whether or not the compressor ran, and
     // the window's shape is part of the pin. Of cz5a's 60 minutes all
-    // 60 sit below the threshold and 42 of them at the heater's idle
-    // resolutions; both counts are asserted, not logged, so a window,
-    // weather or idle-classification change that empties the standby
-    // half fails the pin instead of passing it unexercised.
+    // 60 sit below the threshold and 41 of them at the heater's idle
+    // resolutions (42 before the ceiling film's frozen-regime
+    // correction; see the assert's note); both counts are asserted, not
+    // logged, so a window, weather or idle-classification change that
+    // empties the standby half fails the pin instead of passing it
+    // unexercised.
     if fixture.id == "cz5a_minisplit_gas_wh" {
         if hp_heaters.is_empty() {
             failures.push(format!(
@@ -1005,10 +1010,20 @@ fn reconcile_fixture(fixture: &ParityFixture) -> Result<(), Vec<String>> {
                         fixture.id
                     ));
                 }
-                if cold_standby_rows != 42 {
+                // The idle-resolution count re-measured at 41 (was 42):
+                // the ceiling film's frozen-regime correction (the
+                // enhanced winter branch, the under-heating class's fix)
+                // moves the zone's trajectory enough that one of the
+                // window's minutes' compressor start lands a
+                // non-idle-resolution mode. The pin's substance, that the
+                // standby half of the cold window is populated, holds at
+                // 41 of 60; the exact count is asserted so the
+                // trajectory's drift fails the pin instead of passing it
+                // unexercised.
+                if cold_standby_rows != 41 {
                     failures.push(format!(
                         "{}: {cold_standby_rows} of {cold_rows} below-threshold minutes at the \
-                         heater's idle resolutions, expected 42: the standby half of the \
+                         heater's idle resolutions, expected 41: the standby half of the \
                          pan-heater pin is empty",
                         fixture.id
                     ));
