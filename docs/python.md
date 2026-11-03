@@ -507,15 +507,17 @@ Maturin builds against the Python in the active virtualenv. Verify with
   ([43.3, 46.0]), 600FF min in band; the remainders (600 heating 0.8 %,
   395 heating 4.0 %, 900 heating 5.0 % under their floors; 600FF peak
   2.0 K over) pin on the drift baselines with their causes. The goldens
-  re-captured: all eleven; the movement is the film's corrected ceiling
-  and floor coupling from the first rows plus the ideal delivery's hold.
-  The HPXML `Floor` element's outward tilt follows its `FloorOrCeiling`
-  (a floor faces down, 180 degrees, and takes the reduced film branch
-  and the interior beam distribution; the attic ceiling faces up, 0),
-  so the floors over garages, crawlspaces and neighbouring units no
-  longer carry the ceiling's enhanced film; the resstock
-  single-family parity fixture's zone MAE against OCHRE moves 0.616 to
-  0.310 C.
+  re-captured: all eleven; none of them runs the ideal class, so their
+  movement is the interior film's ceiling regime alone (the roof-class
+  ceiling enhanced from the first rows), and the four fixtures that
+  carry true floors were re-captured again with the floor geometry's
+  outward tilt below. The HPXML `Floor` element's outward tilt follows
+  its `FloorOrCeiling` (a floor faces down, 180 degrees, and takes the
+  reduced film branch and the interior beam distribution; the attic
+  ceiling faces up, 0), so the floors over garages, crawlspaces and
+  neighbouring units no longer carry the ceiling's enhanced film; the
+  resstock single-family parity fixture's zone MAE against OCHRE moves
+  0.616 to 0.310 C.
   See `docs/PHYSICS_DECISIONS.md` ("The ideal controller targets the
   band's bounds inclusively", "The synthetic fixture's declared setpoint
   pair reaches the thermostat verbatim", "The frozen interior horizontal

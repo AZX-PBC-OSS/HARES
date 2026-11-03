@@ -154,6 +154,8 @@ pub struct Boundary {
     /// 0 = horizontal facing up (flat roof), 90 = vertical (wall),
     /// 180 = horizontal facing down (floor from above).
     /// For roofs, computed from `<Pitch>` as `atan(pitch / 12)` in degrees.
+    /// A `Floor` element takes 180 when its `FloorOrCeiling` is floor and 0
+    /// when it is ceiling; a slab faces down (180).
     /// Ref: OCHRE `hpxml.py` `pitch2deg()`.
     pub tilt_deg: Option<f64>,
     /// Framing factor [-] -- fraction of wall area occupied by structural framing.
