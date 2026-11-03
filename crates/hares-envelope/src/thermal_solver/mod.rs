@@ -534,10 +534,26 @@ impl ThermalSolver {
                 match idx {
                     Some(idx) => Some(idx),
                     None => {
+                        // Name the read and the built keys: the operator sees
+                        // which schedule value has no model and what the
+                        // solver actually discretized, not just that the step
+                        // failed.
+                        let built = if self.config.ventilation.flow_models.is_empty() {
+                            "none".to_string()
+                        } else {
+                            self.config
+                                .ventilation
+                                .flow_models
+                                .iter()
+                                .map(|variant| format!("{}", variant.flow_m3_s))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
                         return Err(HaresError::Envelope(format!(
                             "scheduled ventilation flow {flow} m3/s has no discretized \
-                             model variant: the flow schedule's distinct values must be \
-                             the variants the solver was built with"
+                             model variant: the variants the solver was built with are \
+                             [{built}] m3/s (the flow schedule's distinct values must be \
+                             exactly those)"
                         )));
                     }
                 }
@@ -2316,6 +2332,11 @@ mod tests {
         assert!(
             err.to_string().contains("no discretized model variant"),
             "the error must name the missing variant: {err}"
+        );
+        assert!(
+            err.to_string().contains("0.4731"),
+            "the error must list the variants the solver was built with (the read \
+             0.3 m3/s names none of them): {err}"
         );
     }
 
