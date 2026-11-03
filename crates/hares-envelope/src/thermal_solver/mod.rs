@@ -913,14 +913,18 @@ impl ThermalSolver {
                 }
                 if v.model.state_dim() != model.state_dim()
                     || v.model.input_dim() != model.input_dim()
+                    || v.model.output_dim() != model.output_dim()
                 {
                     return Err(ThermalSolverError::Configuration(format!(
-                        "ventilation flow model variant {i}: model dimensions ({}, {}) do \
-                         not match the base model's ({}, {})",
+                        "ventilation flow model variant {i}: model dimensions (state {}, \
+                         input {}, output {}) do not match the base model's (state {}, \
+                         input {}, output {})",
                         v.model.state_dim(),
                         v.model.input_dim(),
+                        v.model.output_dim(),
                         model.state_dim(),
-                        model.input_dim()
+                        model.input_dim(),
+                        model.output_dim()
                     )));
                 }
                 if let Some(j) = config
@@ -2428,6 +2432,35 @@ mod tests {
         assert!(
             err.to_string().contains("dimensions"),
             "the error must name the dimension mismatch: {err}"
+        );
+
+        // A variant whose output dimension differs from the base's: the step
+        // writes the model's output rows into the solver's base-sized output
+        // buffer, so a different row count cannot be a valid variant.
+        let mapping_wide = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+        let wide_model = StateSpaceModel::from_continuous(
+            &DMatrix::<f64>::zeros(2, 2),
+            &DMatrix::<f64>::zeros(2, 2),
+            60.0,
+            &mapping_wide,
+        )
+        .unwrap();
+        let err = build(
+            vec![VentilationFlowModel {
+                flow_m3_s,
+                forced_conductance_w_k: 470.0,
+                model: wide_model,
+            }],
+            true,
+        )
+        .expect_err("a variant's output dimension must match the base model's");
+        assert!(
+            err.to_string().contains("output"),
+            "the error must name the output dimension: {err}"
         );
 
         // A well-formed variant constructs.
