@@ -2075,12 +2075,13 @@ mod tests {
         }
     }
 
-    /// A two-state solver (zone air + mass node) with the scheduled flow's
-    /// model variant and the schedule column declared. The fan's conductance
-    /// and the variant's are the same arithmetic (the env's operating density
-    /// at the schedule's rate), so the coupling's residual is ~zero and the
-    /// step runs on the variant's discretization.
-    fn flow_variant_solver(env: &EnvironmentState, schedule_value: f64) -> ThermalSolver {
+    /// A two-state solver (zone air + mass node) with the scheduled flows'
+    /// model variants and the schedule column declared, one variant per rate
+    /// in `rates`, in that order. Each variant's conductance and the env's
+    /// coupling are the same arithmetic (the env's operating density at the
+    /// rate), so the coupling's residual is ~zero and the step runs on the
+    /// selected variant's discretization.
+    fn flow_variant_solver(env: &EnvironmentState, rates: &[f64]) -> ThermalSolver {
         let c_air = 129_262.0;
         let c_mass = 1.0e6;
         let g_film = 300.0;
@@ -2102,23 +2103,36 @@ mod tests {
         };
         let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
 
-        // The variant's conductance: the env's own operating density at the
+        // Each variant's conductance: the env's own operating density at the
         // schedule's rate, the same arithmetic the coupling's h_inf uses, so
         // the residual the per-step coupling carries is ~zero and the step is
-        // the variant's ZOH.
-        let flow_m3_s = schedule_value;
+        // the selected variant's ZOH.
         let density = hares_physics::air_properties::moist_air_density_kg_m3(
             101_325.0,
             env.weather.outdoor_temp_c,
             env.weather.outdoor_humidity_ratio,
         );
-        let g_fan = density * flow_m3_s * hares_physics::constants::CP_DRY_AIR_J_KG_K;
-        let mut a_c_variant = a_c;
-        a_c_variant[(0, 0)] -= g_fan / c_air;
-        let mut b_c_variant = b_c.clone();
-        b_c_variant[(0, 0)] += g_fan / c_air;
-        let variant_model =
-            StateSpaceModel::from_continuous(&a_c_variant, &b_c_variant, 60.0, &mapping).unwrap();
+        let flow_models: Vec<VentilationFlowModel> = rates
+            .iter()
+            .map(|&flow_m3_s| {
+                let g_fan = density * flow_m3_s * hares_physics::constants::CP_DRY_AIR_J_KG_K;
+                let mut a_c_variant = a_c.clone();
+                a_c_variant[(0, 0)] -= g_fan / c_air;
+                let mut b_c_variant = b_c.clone();
+                b_c_variant[(0, 0)] += g_fan / c_air;
+                VentilationFlowModel {
+                    flow_m3_s,
+                    forced_conductance_w_k: g_fan,
+                    model: StateSpaceModel::from_continuous(
+                        &a_c_variant,
+                        &b_c_variant,
+                        60.0,
+                        &mapping,
+                    )
+                    .unwrap(),
+                }
+            })
+            .collect();
 
         let wiring = StateSpaceWiring {
             zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
@@ -2144,11 +2158,7 @@ mod tests {
             ventilation_flow_m3_s: 0.0,
             ventilation: MechanicalVentilationParams {
                 flow_schedule_col: Some(0),
-                flow_models: vec![VentilationFlowModel {
-                    flow_m3_s,
-                    forced_conductance_w_k: g_fan,
-                    model: variant_model,
-                }],
+                flow_models,
                 ..MechanicalVentilationParams::default()
             },
             natural_ventilation: None,
@@ -2174,7 +2184,7 @@ mod tests {
         let flow_m3_s = 0.4731_f64;
         let mut env = env_for_temp(30.0, 10.0);
         env.domains.schedule.payload_mut().push(flow_m3_s);
-        let mut solver = flow_variant_solver(&env, flow_m3_s);
+        let mut solver = flow_variant_solver(&env, &[flow_m3_s]);
         solver.x[0] = 30.0;
         solver.x[1] = 30.0;
         let ports = PortSlots {
@@ -2209,7 +2219,7 @@ mod tests {
         // and the mass node's heat is conserved inside the discretization.
         let mut env_off = env_for_temp(30.0, 10.0);
         env_off.domains.schedule.payload_mut().push(0.0);
-        let mut solver_off = flow_variant_solver(&env_off, flow_m3_s);
+        let mut solver_off = flow_variant_solver(&env_off, &[flow_m3_s]);
         solver_off.x[0] = 30.0;
         solver_off.x[1] = 30.0;
         let _ = solver_off
@@ -2227,6 +2237,67 @@ mod tests {
         );
     }
 
+    /// The selection over a multi-rate schedule's assembled variants: each
+    /// read names its variant by exact bit match, independent of the order the
+    /// variants were assembled in, and the selected variant's own conductance
+    /// drives the step's within-step discharge (the higher rate discharges
+    /// the mass node further in the same step). The rates are assembled in
+    /// descending order so the second read proves the search, not an index
+    /// convention.
+    #[test]
+    fn multi_rate_schedule_selects_the_variant_named_by_its_read() {
+        let rates = [0.4731_f64, 0.4_f64];
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let step_with = |rate: f64| {
+            let mut env = env_for_temp(30.0, 10.0);
+            env.domains.schedule.payload_mut().push(rate);
+            let mut solver = flow_variant_solver(&env, &rates);
+            let keys: Vec<u64> = solver
+                .config()
+                .ventilation
+                .flow_models
+                .iter()
+                .map(|model| model.flow_m3_s.to_bits())
+                .collect();
+            assert_eq!(
+                keys,
+                rates.iter().map(|rate| rate.to_bits()).collect::<Vec<_>>(),
+                "the assembled variants must be the schedule's distinct rates in \
+                 assembly order"
+            );
+            solver.x[0] = 30.0;
+            solver.x[1] = 30.0;
+            solver
+                .resolve_new(&ports, &env, std::time::Duration::from_secs(60))
+                .unwrap();
+            solver
+        };
+
+        let high = step_with(rates[0]);
+        let low = step_with(rates[1]);
+        assert_eq!(
+            high.active_flow_model,
+            Some(0),
+            "the 0.4731 m3/s read must select the first assembled variant"
+        );
+        assert_eq!(
+            low.active_flow_model,
+            Some(1),
+            "the 0.4 m3/s read must select the second assembled variant"
+        );
+        assert!(
+            low.x[1] > high.x[1],
+            "the lower rate's variant must discharge the mass node less within \
+             the step: 0.4731 m3/s landed at {}, 0.4 m3/s at {}",
+            high.x[1],
+            low.x[1]
+        );
+    }
+
     /// A schedule read naming no variant: a typed error naming the flow, never
     /// a silent base-model step.
     #[test]
@@ -2234,7 +2305,7 @@ mod tests {
         let mut env = env_for_temp(30.0, 10.0);
         // The solver was built for 0.4731; the payload carries a different rate.
         env.domains.schedule.payload_mut().push(0.3);
-        let mut solver = flow_variant_solver(&env, 0.4731);
+        let mut solver = flow_variant_solver(&env, &[0.4731]);
         let ports = PortSlots {
             thermal: vec![ThermalAccumulator::new(ZoneId(1))],
             ..Default::default()

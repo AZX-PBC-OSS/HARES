@@ -40,9 +40,47 @@ use hares_core::Dwelling;
 /// and the warm-up is disabled (the sampling contract is the step's own
 /// read, not the converged annual state).
 fn day_toml(time_res_s: u64) -> tempfile::NamedTempFile {
+    day_toml_with_schedule(time_res_s, None)
+}
+
+/// `day_toml`, optionally with the fixture's fan schedule replaced by
+/// `schedule` (24 hour-of-day rates), the rewrite the multi-rate witness
+/// needs.
+fn day_toml_with_schedule(time_res_s: u64, schedule: Option<&[f64]>) -> tempfile::NamedTempFile {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let original = fs::read_to_string(root.join("tests/fixtures/bestest/650.toml"))
         .expect("650.toml must be readable");
+    let original = match schedule {
+        Some(rates) => {
+            assert_eq!(rates.len(), 24, "the schedule table is hour-resolved");
+            let line = format!(
+                "flow_schedule_m3_s = [{}]",
+                rates
+                    .iter()
+                    .map(|rate| format!("{rate:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let mut replaced = false;
+            let rewritten: Vec<String> = original
+                .lines()
+                .map(|existing| {
+                    if !replaced && existing.trim_start().starts_with("flow_schedule_m3_s =") {
+                        replaced = true;
+                        line.clone()
+                    } else {
+                        existing.to_string()
+                    }
+                })
+                .collect();
+            assert!(
+                replaced,
+                "650.toml must carry the fan schedule line to rewrite"
+            );
+            rewritten.join("\n")
+        }
+        None => original,
+    };
     let epw_abs = root
         .join("data/examples/USA_CO_Denver.epw")
         .canonicalize()
@@ -161,4 +199,61 @@ fn the_scheduled_fan_follows_its_hours_at_the_900s_timestep() {
         0.0,
         "the 18:00 step reads the 18:00 hour"
     );
+}
+
+/// A multi-rate fan schedule assembles one discretized model variant per
+/// distinct non-zero rate, once per dwelling, and every step's read names one
+/// of them: the day crosses both rates (0.2 m3/s in the morning, 0.5 m3/s in
+/// the evening), and an unmatched read would be the step's typed error. The
+/// higher rate's variant carries the larger folded conductance, so the two
+/// assembled models are distinct.
+#[test]
+fn a_multi_rate_fan_schedule_assembles_one_variant_per_distinct_rate() {
+    let schedule: Vec<f64> = (0..24)
+        .map(|hour| {
+            if (7..=17).contains(&hour) {
+                0.0
+            } else if hour < 7 {
+                0.2
+            } else {
+                0.5
+            }
+        })
+        .collect();
+    let toml = day_toml_with_schedule(3600, Some(&schedule));
+    let mut dwelling = Dwelling::from_toml_config_with_reports(toml.path(), Some(Vec::new()))
+        .unwrap_or_else(|err| panic!("the multi-rate day builds: {err}"));
+
+    {
+        let models = &dwelling.thermal_solver().config().ventilation.flow_models;
+        assert_eq!(
+            models.len(),
+            2,
+            "the schedule's two distinct non-zero rates must assemble two \
+             variants, got {}",
+            models.len()
+        );
+        let keys: Vec<u64> = models.iter().map(|m| m.flow_m3_s.to_bits()).collect();
+        assert_eq!(
+            keys,
+            vec![0.2_f64.to_bits(), 0.5_f64.to_bits()],
+            "the variants must be keyed by the sorted distinct rates"
+        );
+        assert!(
+            models[0].forced_conductance_w_k > 0.0
+                && models[1].forced_conductance_w_k > models[0].forced_conductance_w_k,
+            "each variant must carry its rate's folded conductance: {} at 0.2 \
+             m3/s, {} at 0.5 m3/s",
+            models[0].forced_conductance_w_k,
+            models[1].forced_conductance_w_k
+        );
+    }
+
+    // The 24-hour run: every hour's read (both rates and the OFF window)
+    // must match a variant, or the step returns the typed error.
+    for step in 0..24 {
+        dwelling.step().unwrap_or_else(|err| {
+            panic!("day step {step}'s scheduled flow must name a variant: {err}")
+        });
+    }
 }
