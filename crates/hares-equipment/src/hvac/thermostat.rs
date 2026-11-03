@@ -340,6 +340,11 @@ pub struct ThermostatFsm {
     /// in `update_mode()`. Gated on `observe` for diagnostic CSV output.
     #[cfg(feature = "observe")]
     pub deadband_collision_count: u64,
+    /// Whether the run's first deadband collision already raised its
+    /// warning: a zero-width band sits in the collision branch every step
+    /// by construction, so the warning is once-per-run and the count
+    /// carries the per-step record.
+    deadband_collision_warned: bool,
 }
 
 impl ThermostatFsm {
@@ -416,6 +421,7 @@ impl ThermostatFsm {
             pending_cross_tier_warning: None,
             #[cfg(feature = "observe")]
             deadband_collision_count: 0,
+            deadband_collision_warned: false,
         }
     }
 
@@ -726,12 +732,20 @@ impl ThermostatFsm {
                             self.deadband_collision_count =
                                 self.deadband_collision_count.saturating_add(1);
                         }
-                        tracing::warn!(
-                            heat_turn_on,
-                            cool_turn_on,
-                            zone_temp,
-                            "deadband collision: heat_turn_on >= cool_turn_on; returning Deadband as safe default"
-                        );
+                        // Warn once per run: a zero-width band (the ASHRAE
+                        // 140 cases' declared "20,20" clamp) sits in this
+                        // branch every step by construction, the ideal
+                        // delivery resolves the shared bound by the solve's
+                        // sign, and a per-step warn would flood the run log.
+                        if !self.deadband_collision_warned {
+                            self.deadband_collision_warned = true;
+                            tracing::warn!(
+                                heat_turn_on,
+                                cool_turn_on,
+                                zone_temp,
+                                "deadband collision: heat_turn_on >= cool_turn_on; returning Deadband as safe default"
+                            );
+                        }
                         ThermostatMode::Deadband
                     } else {
                         if zone_temp < heat_turn_on {
@@ -767,12 +781,20 @@ impl ThermostatFsm {
                             self.deadband_collision_count =
                                 self.deadband_collision_count.saturating_add(1);
                         }
-                        tracing::warn!(
-                            heat_turn_on,
-                            cool_turn_on,
-                            zone_temp,
-                            "deadband collision: heat_turn_on >= cool_turn_on; returning Deadband as safe default"
-                        );
+                        // Warn once per run: a zero-width band (the ASHRAE
+                        // 140 cases' declared "20,20" clamp) sits in this
+                        // branch every step by construction, the ideal
+                        // delivery resolves the shared bound by the solve's
+                        // sign, and a per-step warn would flood the run log.
+                        if !self.deadband_collision_warned {
+                            self.deadband_collision_warned = true;
+                            tracing::warn!(
+                                heat_turn_on,
+                                cool_turn_on,
+                                zone_temp,
+                                "deadband collision: heat_turn_on >= cool_turn_on; returning Deadband as safe default"
+                            );
+                        }
                         ThermostatMode::Deadband
                     } else {
                         if zone_temp < heat_turn_on {

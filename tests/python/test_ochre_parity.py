@@ -387,12 +387,18 @@ def test_parity(
 # continuous model at steps longer than the 210 s defrost event; this
 # parity run is 1-minute steps, inside the discrete regime the guard does
 # not touch, so the HARES records below hold re-verified and unchanged.
+# Re-captured 2026-11-02 for the envelope's under-heating class fixes (the
+# ideal controller's band-edge hold, the ceiling film's corrected winter
+# regime): the 24 h heating draw rose 28.0696 to 32.4336 kWh (the zone now
+# holds its declared setpoint through the record's cold snap, where the
+# pre-fix zone cycled 20-to-13 C and drew less; the OCHRE side is the
+# vendor's own, unmoved) and the total rose 50.6104 to 54.9743 kWh with it.
 PARITY_24H_HEATING_OCHRE_KWH = 30.9974
-PARITY_24H_HEATING_HARES_KWH = 28.0696
+PARITY_24H_HEATING_HARES_KWH = 32.4336
 PARITY_24H_WATER_HEATING_OCHRE_KWH = 1.0083
 PARITY_24H_WATER_HEATING_HARES_KWH = 11.5501
 PARITY_24H_TOTAL_OCHRE_KWH = 43.0500
-PARITY_24H_TOTAL_HARES_KWH = 50.6104
+PARITY_24H_TOTAL_HARES_KWH = 54.9743
 
 PARITY_24H_XFAILS: dict[str, str] = {
     "HVAC Heating Electric Power (kW)": (

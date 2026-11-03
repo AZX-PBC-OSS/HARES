@@ -1396,9 +1396,19 @@ the references' differing scopes.
 - **HARES behavior:** the A-matrix's static film is the ASHRAE "Simple"
   algorithm's convection-only values (E+ `ConvectionCoefficients.cc`
   `CalcASHRAESimpleIntConvCoeff`: vertical 3.076, horizontal 4.040
-  enhanced / 0.948 reduced, tilted 3.870 / 2.281), the direction taken
-  from the same interpolated typical zone temperatures OCHRE interpolates.
-  Production pins `FilmCoefficientModel::AshraeSimple`
+  enhanced / 0.948 reduced, tilted 3.870 / 2.281). The frozen direction
+  is geometric (2026-11-02, the under-heating class's fix): the
+  correlation's enhanced branch belongs to the surface whose warm side
+  is BELOW it (E+'s per-step form evaluates
+  `(T_zone − T_surface) · cos(tilt_outward) > 0` with surface tilts
+  given with respect to the OUTWARD normal), so the frozen rule
+  evaluates the sign of the tilt factor alone: a roof-class surface
+  (the outward normal up, the interior face pointing down at the zone's
+  warm air) freezes the enhanced value, a floor-class surface the
+  reduced one. (The earlier direction rule compared the two air sides'
+  interpolated typical temperatures, which froze the winter ceiling in
+  the summer regime.) Production pins
+  `FilmCoefficientModel::AshraeSimple`
   (`crates/hares-core/src/dwelling/solver_builder.rs:1248`), so the
   per-step TARP correction is wired but not enabled in production
   (`solver_builder.rs:1249-1252`, under T-0034/T-1922) and nothing adds
@@ -1420,18 +1430,16 @@ the references' differing scopes.
   (3.076 against TARP's 1.31·12.9^(1/3) = 3.0723, 0.12%), so the choice
   of baseline is invisible there. On horizontal and tilted surfaces the
   two frozen forms disagree by up to 2x (the reduced horizontal: 0.948
-  against 1.782), and the correction only ever adds conductance, so the
-  winter ceiling under an attic keeps the reduced static value where
-  OCHRE carries the larger frozen value. The static film is the
+  against 1.782), and the correction only ever adds conductance. The
+  geometric direction rule puts the winter ceiling in the enhanced
+  class, E+'s own per-step branch for the heating regime, where the
+  earlier rule kept the reduced value. The static film is the
   A-matrix's linearization baseline, and the ASHRAE Simple table is a
   defensible baseline: it is EnergyPlus's own default inside convection
   algorithm when none is set (`DataHeatBalance.hh:613`,
   `DataHeatBalance.hh:1842`, the vendored pin's lines, `f7c103167a`, the
   file unchanged from v26.2.0-IOFreeze; v24.2.0 has the
-  same defaults at `:588` and `:1780`), and with it the per-step correction
-  stays live on the horizontal surfaces (it fires above ΔT ≈ 1.6 K in the
-  reduced direction), where OCHRE's larger frozen value would suppress it
-  entirely at typical surface-air differences. Re-aligning the baseline to
+  same defaults at `:588` and `:1780`). Re-aligning the baseline to
   OCHRE's frozen form is the alternative reading; this entry keeps the
   choice recorded either way.
 - **Class:** (a) against OCHRE: the reference freezes the TARP model at
@@ -1439,31 +1447,40 @@ the references' differing scopes.
   model for interior surfaces, constant deltaT"), a constant-film form
   consistent with its A-matrix discretization; the 12.9 K clamp is
   OCHRE's own operating-point choice.
-- **Measured impact:** on the winter conditioned oracle
-  (`tests/conditioned_oracle.rs`, `beopt_winter_48h`), freezing OCHRE's
-  TARP form in place of the ASHRAE Simple values moves the attic mean
-  3.57 to 3.71 °C against OCHRE's 4.82 (the cold bias -1.25 to -1.11 °C),
-  the attic MAE 1.30 to 1.14 °C, and the winter roof heat gain -277.7 to
-  -221.1 W against OCHRE's -239.6 W; on the summer oracle the same move
-  is the attic mean 29.47 to 29.30 against OCHRE's 28.96 (the hot bias
-  +0.51 to +0.34 °C) with the MAE 0.899 to 0.563, and on the spring
-  oracle the MAE 0.791 to 0.589. Enabling the per-step TARP model
-  instead (the OS-HPXML-literal form, disabled in production) moves the
-  attic 0.03 °C and no further (the 2026-10-08 triage entry in
+- **Measured impact:** the direction rule's 2026-11-02 correction
+  re-baselines the horizontal films; the numbers below were measured
+  under the earlier temperature-keyed direction (the reduced winter
+  ceiling) and predate it: they establish the OCHRE-alternative's
+  scale, not the current baseline's position. On the winter conditioned
+  oracle (`tests/conditioned_oracle.rs`, `beopt_winter_48h`), freezing
+  OCHRE's TARP form in place of the ASHRAE Simple values moves the attic
+  mean 3.57 to 3.71 °C against OCHRE's 4.82 (the cold bias -1.25 to
+  -1.11 °C), the attic MAE 1.30 to 1.14 °C, and the winter roof heat
+  gain -277.7 to -221.1 W against OCHRE's -239.6 W; on the summer oracle
+  the same move is the attic mean 29.47 to 29.30 against OCHRE's 28.96
+  (the hot bias +0.51 to +0.34 °C) with the MAE 0.899 to 0.563, and on
+  the spring oracle the MAE 0.791 to 0.589. Enabling the per-step TARP
+  model instead (the OS-HPXML-literal form, disabled in production)
+  moves the attic 0.03 °C and no further (the 2026-10-08 triage entry in
   `.shipwright/initiatives/I-08/ledger/02-measurement.md`). The floor
   coupling's frozen films therefore contribute at most about 0.14 °C of
   the conditioned-attic winter cold bias on the two boundaries probed
   (the deck's attic face and the attic floor; the slab's conditioned
   face is in the same film class and was not probed) and do not
   establish it; the record's residual stays open with its cause
-  unestablished. The committed goldens carry the ASHRAE Simple baseline
-  unchanged.
+  unestablished. The BESTEST movement the geometric rule carries is
+  attributed in `tests/bestest/mod.rs`'s `drift_baseline` re-measurement
+  note (600 heating toward the band floor, 600FF peak and 900FF min
+  toward their ceilings).
 - **Pinning tests:**
   `crates/hares-physics/src/film_coefficients.rs`
   (`the_attic_floor_s_frozen_films_are_the_ashrae_simple_horizontal_values`
-  fails when the static films take OCHRE's frozen TARP values;
+  and `the_raised_floor_s_frozen_film_is_the_reduced_horizontal_value`
+  fail when the frozen films take OCHRE's values or the direction rule
+  reverts to the temperature-keyed one;
   `ashrae_simple_vertical_returns_3_076`,
-  `ashrae_simple_horizontal_enhanced`, `ashrae_simple_horizontal_reduced`
+  `ashrae_simple_horizontal_roof_class_freezes_enhanced`,
+  `ashrae_simple_horizontal_floor_class_freezes_reduced`
   fail when any frozen value moves), and `config.rs`'s
   `the_enum_default_is_the_production_pin` fails if the derive default
   re-points off the production pin.

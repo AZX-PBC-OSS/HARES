@@ -489,6 +489,31 @@ Maturin builds against the Python in the active virtualenv. Verify with
 
 ## Numeric changes
 
+- The engine's conditioned zone holds its setpoints: the ideal-capacity
+  controller targets the band's bounds inclusively (the mid-band carry
+  the heating bound with the delivery's bound-aware sign filter, the
+  E+ ideal-load semantics), the synthetic fixtures' declared setpoint
+  pairs reach the thermostat verbatim (the reconciliation's gap follows
+  the unit's own declared band), the frozen interior horizontal film
+  keys on the tilt's geometry (the roof-class ceiling enhanced
+  4.040 W/(m²·K), the floor-class reduced 0.948), and the synthetic
+  ground face carries no convective film. The BESTEST conditioned cases
+  ran a two-step 20-to-13 C limit cycle (heating delivered every other
+  hour) with loads 18-25 percent under the ASHRAE 140 band floors; they
+  now hold their bounds and the loads close: 195 heating 3974.9
+  (band [3951, 4217]) and cooling 601.9 ([592, 712]), 920 heating 3162.8
+  ([2956, 3607]) and cooling 2678.6 ([2549, 3128]), 640 heating 2485.5
+  ([2403, 2682]), 600 cooling 5469.3 ([5432, 6162]), 900FF peak 45.66
+  ([43.3, 46.0]), 600FF min in band; the remainders (600 heating 0.8 %,
+  395 heating 4.0 %, 900 heating 5.0 % under their floors; 600FF peak
+  2.0 K over) pin on the drift baselines with their causes. The goldens
+  re-captured: all eleven; the movement is the film's corrected ceiling
+  and floor coupling from the first rows plus the ideal delivery's hold.
+  See `docs/PHYSICS_DECISIONS.md` ("The ideal controller targets the
+  band's bounds inclusively", "The synthetic fixture's declared setpoint
+  pair reaches the thermostat verbatim", "The frozen interior horizontal
+  film keys on the tilt's geometry") and the D-031 direction-rule note.
+
 - The equipment configuration fields are stored in SI: the `Battery`, `PV`
   and `EV` constructors and the `BmsMode` / `ChargingStrategy` payloads
   take the SI names (`capacity_j`, `max_charge_w`, `capacity_w`,

@@ -121,38 +121,61 @@ fn run_single_case(case: &BestestCase) {
 /// class), 640 heating energy −3.2 %, 600FF peak −1.3 K, 900FF min
 /// +0.06 K. The 900 heating (−0.3 %) and 900FF peak (−0.1 %) hold inside
 /// their ±1 % locks; 900 cooling and 600FF min stay in band.
+///
+/// Re-measured 2026-11-02 (the ideal controller's band-edge semantics,
+/// the declared setpoint pair's verbatim reach, the interior film's
+/// frozen regime, and the ground face's filmless contact: the
+/// under-heating class's root causes). The ideal delivery's target now
+/// covers the band's middle with the bound-aware sign filter (the E+
+/// ideal-load prediction semantics: heat fires exactly when the
+/// uncontrolled step would land below the heating bound); the synthetic
+/// fixtures' declared setpoint pairs reach the thermostat verbatim (the
+/// reconciliation gap follows the unit's own declared band); the frozen
+/// interior horizontal film keys on the tilt's geometry: the roof-class
+/// ceiling freezes the enhanced coefficient the E+ correlation's winter
+/// branch gives (1.0549 → 0.2475 m²·K/W), the floor-class the reduced
+/// one; and the synthetic ground face carries no convective film (the
+/// engine's own slab path and the ASHRAE reference tables' zero). The
+/// zones hold their bounds (the 600's winter trace: 20.03-20.42 C
+/// through −6 C nights where the pre-fix state ran a 20-to-13 C
+/// two-step sawtooth with heating on every other hour), and every
+/// conditioned metric moves toward its band: 600 heating 3027.1 →
+/// 3962.5 (0.8 % under the floor now), 600 cooling 5417.2 → 5469.3 (IN
+/// BAND, baseline withdrawn), 640 heating energy 1932.6 → 2485.5 (IN
+/// BAND, baseline withdrawn), 900 heating 1068.7 → 1309.0 (5.0 % under),
+/// 600FF peak 73.02 → 70.35 (2.0 K over the ceiling), 900FF peak 46.39 →
+/// 45.66 (IN BAND, baseline withdrawn), 900FF min 3.33 → 2.49 (0.29 K
+/// over). The remainders are the modeling-choice aggregate the ledger's
+/// row carries: the star-mesh interior LWR form (OCHRE/TRNSYS/ESP-r's)
+/// against the E+ MRT form, and the Kusuda-Achenbach ground mean against
+/// the BESTEST's constant.
 fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     use BestestMetric::*;
     Some(match (case_id, metric) {
-        // 600: heating 3027.1 vs band 3993–4504; cooling 5417.2 vs band
-        // 5432–6162 (the split rule's resolution fix, 2026-11-01: see the
-        // function doc's re-measurement note; the floor's and roof's
-        // resolved layers buffer the zone, both loads move down). The
-        // earlier re-measurements (the diffuse short-wave window loss, the
-        // dispatch's setpoint landing, the calendar-date weather
-        // addressing, the EnergyPlus warm-up criteria) carried the pins to
-        // 3090.7/5506.8 before this fix.
-        ("600", AnnualHeatingLoadKwh) => 3027.115238,
-        ("600", AnnualCoolingLoadKwh) => 5417.169282,
-        // 640: heating energy vs band 2403–2682 (the dispatch
-        // landing dominates the diffuse loss here). Moved by the same
-        // floor/roof resolution fix as 600's (the identical lightweight
-        // construction): 1995.6 → 1932.6.
-        ("640", AnnualHeatingEnergyKwh) => 1932.601984,
-        // 900: heating vs band 1379–1814. The floor resolution fix moves
-        // it under 1 percent (1068.7 → 1065.9, the lock holds); the
-        // baseline keeps the pre-fix pin.
-        ("900", AnnualHeatingLoadKwh) => 1068.706087,
-        // 600FF: peak vs band 62.4–68.4 (min in band: strict). The floor
-        // resolution fix moves the peak 74.37 → 73.02 (the resolved floor
-        // buffers the free-float swing).
-        ("600FF", PeakZoneTempC) => 73.024772,
-        // 900FF: peak vs 43.3–46.0; min vs 0.6–2.2. The peak holds its
-        // pre-fix pin (46.39, moved −0.1 percent, inside the lock); the
-        // min moved 3.26 → 3.33 (the resolved floor's buffering, +1.9
-        // percent, beyond the lock).
-        ("900FF", PeakZoneTempC) => 46.391880,
-        ("900FF", MinZoneTempC) => 3.326838,
+        // 600: heating 3962.5 vs band 3993–4504; the cooling load landed
+        // in its band (5469.3 in [5432, 6162]) with the controller's hold.
+        ("600", AnnualHeatingLoadKwh) => 3962.481116,
+        // 640: heating energy IN BAND (2485.5 in [2403, 2682]) with the
+        // controller's hold; no baseline.
+        // 395: heating 4385.6 vs band 4565–5145 (4.0 % under the floor;
+        // cooling 12.3 in [4, 21]). The 195 twin (the same envelope at
+        // emittance 0.1) lands in band on the same physics; the 395's
+        // emittance-0.9 row carries the modeling-choice aggregate the
+        // function doc names.
+        ("395", AnnualHeatingLoadKwh) => 4385.626148,
+        // 900: heating 1309.0 vs band 1379–1814. The slab's seasonal
+        // memory is the reduction's diurnal-band fit residual (the fit
+        // serves the diurnal period the ISO witness pins; the exceedance
+        // counter is zero on these assemblies), the envelope-numerics
+        // row's neighbor.
+        ("900", AnnualHeatingLoadKwh) => 1308.992884,
+        // 600FF: peak vs band 62.4–68.4 (min in band: strict). The
+        // ceiling's enhanced film bleeds the free-float peak toward the
+        // attic: 70.35, 2.0 K over.
+        ("600FF", PeakZoneTempC) => 70.353152,
+        // 900FF: peak IN BAND (45.66 in [43.3, 46.0]); min vs 0.6–2.2 at
+        // 2.49.
+        ("900FF", MinZoneTempC) => 2.487962,
         _ => return None,
     })
 }
@@ -299,16 +322,103 @@ fn bestest_case_640() {
 }
 
 // Cases 920, 195 and 395: the fixtures and their ASHRAE 140-2023 Annex B8
-// bands are committed (`cases.rs`, `reference_bands.rs`, the tracked-build
-// tests below), and NO case runs against its bands: the engine's annual
-// heating loads sit outside them, the same documented under-heating the
-// 600/900 drift locks carry (6 to 23 percent below the band floors: 920
-// 2779.6, 195 3024.0 and 395 3739.2 against the floors 2956, 3951 and
-// 4565). 195's cooling is 39 percent below its floor (359.6 against 592);
-// the 920 and 395 cooling loads (2745.6 and 10.9) land inside their bands.
-// The band tests stop until the physics fixes land; widening the bands or
-// drift-locking the divergences as if they were a conformance state would
-// both misstate the published oracles.
+// bands are committed (`cases.rs`, `reference_bands.rs`), and the annual
+// band tests below run. The under-heating class's root causes landed with
+// their witnesses: the synthetic fixture's declared setpoint pair reaching
+// the thermostat verbatim (`synthetic_fixtures_declared_setpoints_reach_
+// the_equipment`), the ideal controller holding the declared bound
+// (`ideal_controller_holds_the_declared_heating_bound`), and the interior
+// film's frozen regime keyed on the tilt's geometry. Cases 195 (heating
+// 3974.9, cooling 601.9), 920 (heating 3162.8, cooling 2678.6) and 395's
+// cooling (12.3) land in band. Case 395's heating runs 4385.6 against the
+// floor 4565 (4.0 percent under, the signed distance prints on every run)
+// on a drift lock: the modeling-choice aggregate (the star-mesh interior
+// LWR form against E+'s MRT form, and the Kusuda-Achenbach ground mean)
+// whose disposition is the operator's. No band widened.
+
+/// The synthetic fixture's declared thermostat pair reaches the equipment
+/// verbatim. ASHRAE 140's in-depth cases pin their thermostat as part of the
+/// case definition: Case 195 the "20,20 bang-bang" clamp (heating and cooling
+/// setpoints both 20 C), Case 395 the "20,27" deadband. The residential
+/// setpoint reconciliation (the HPXML input's data-quality rule, OCHRE
+/// schedule.py:617-625) re-centres a pair whose gap is below the unit's own
+/// band onto the pair's midpoint; applied with the default hysteresis it
+/// rewrote the declared 20/20 pair to 19/21, and the pinned band then
+/// targeted a different thermostat than the standard's. The fixture declares
+/// `deadband_c = 0.0` with the setpoints, so the pair's own band is zero
+/// width and the pair is valid untouched
+/// (`ThermalSetpoints::validate_for_deadband` with hysteresis 0).
+#[test]
+fn synthetic_fixtures_declared_setpoints_reach_the_equipment() {
+    for (id, heating_c, cooling_c) in [("195", 20.0, 20.0), ("395", 20.0, 27.0)] {
+        let case = in_depth_cases()
+            .into_iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("case {id} is in the in-depth set"));
+        let mut dwelling =
+            Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
+                .unwrap_or_else(|err| panic!("in-depth case {id} builds: {err}"));
+        dwelling
+            .step()
+            .unwrap_or_else(|err| panic!("in-depth case {id} steps: {err}"));
+        let ideal = dwelling
+            .equipment()
+            .iter()
+            .find(|eq| eq.descriptor().name.contains("Ideal"))
+            .unwrap_or_else(|| panic!("case {id} registers its Ideal HVAC unit"));
+        let telemetry = ideal.telemetry();
+        let declared_heating = telemetry
+            .get("schedule_heating_setpoint_c")
+            .unwrap_or_else(|| panic!("case {id}: the ideal unit publishes its heating setpoint"));
+        let declared_cooling = telemetry
+            .get("schedule_cooling_setpoint_c")
+            .unwrap_or_else(|| panic!("case {id}: the ideal unit publishes its cooling setpoint"));
+        assert_eq!(
+            declared_heating, heating_c,
+            "case {id}: the fixture's declared heating setpoint must reach the \
+             thermostat verbatim"
+        );
+        assert_eq!(
+            declared_cooling, cooling_c,
+            "case {id}: the fixture's declared cooling setpoint must reach the \
+             thermostat verbatim"
+        );
+    }
+}
+
+/// The ideal controller holds the declared heating bound. The ideal-capacity
+/// delivery targets the comfort setpoint with the capacity the state-space
+/// solve returns for the zone to END the step at the setpoint, so a losing
+/// envelope is met with the load every step and the zone temperature never
+/// falls below the declared heating setpoint. Gating that delivery on the
+/// PRE-step temperature being strictly below the setpoint instead produces a
+/// two-step limit cycle: a delivered step lands the zone exactly on the
+/// bound, the next step's strict gate reads "in comfort" and delivers
+/// nothing, and the zone air node (time constant to the surface cluster
+/// under eight minutes at the hourly step) collapses toward the surfaces'
+/// temperature; Case 195's winter oscillated between 19.0 and below 13 with
+/// heating delivered on every other hour only, an annual zone minimum of
+/// 10.0 C against the declared 20 C bound. The 0.5 K allowance admits the
+/// discrete hold's landing jitter; it is two orders below the sawtooth's
+/// collapse depth it must catch.
+#[test]
+fn ideal_controller_holds_the_declared_heating_bound() {
+    let case = in_depth_cases()
+        .into_iter()
+        .find(|c| c.id == "195")
+        .expect("case 195 is in the in-depth set");
+    let observation = run_case(&case);
+    let min_temp = observation
+        .values
+        .get(&BestestMetric::MinZoneTempC)
+        .expect("the annual run records a zone minimum");
+    assert!(
+        *min_temp >= 19.5,
+        "the conditioned zone's annual minimum temperature {min_temp:.3} C fell \
+         below the declared 20 C heating bound by more than the discrete hold's \
+         0.5 K allowance: the ideal delivery is not holding the setpoint"
+    );
+}
 
 // Case 950: the fixture is committed and build-tracked (below), and the
 // annual test STOPS at a measured divergence. The scheduled-ventilation
@@ -476,6 +586,37 @@ fn bestest_case_650() {
 // the comment above records: the case is build-tracked
 // (`bestest_high_mass_night_ventilation_case_is_tracked`), the fan schedule's
 // surface is the one 650's landing proves, and the bands stay the standard's.
+
+// Cases 195, 395 and 920: the annual band tests, un-stopped. The bands
+// are the standard's Annex B8 rows, pinned un-widened; the drift-lock
+// harness below engages for a metric still outside its band (Case 395's
+// heating: the modeling-choice aggregate the comment above records).
+#[test]
+fn bestest_case_195() {
+    let case = in_depth_cases()
+        .into_iter()
+        .find(|c| c.id == "195")
+        .unwrap();
+    run_single_case(&case);
+}
+
+#[test]
+fn bestest_case_395() {
+    let case = in_depth_cases()
+        .into_iter()
+        .find(|c| c.id == "395")
+        .unwrap();
+    run_single_case(&case);
+}
+
+#[test]
+fn bestest_case_920() {
+    let case = extended_cases()
+        .into_iter()
+        .find(|c| c.id == "920")
+        .unwrap();
+    run_single_case(&case);
+}
 
 fn run_case(case: &BestestCase) -> CaseObservation {
     let t0 = std::time::Instant::now();

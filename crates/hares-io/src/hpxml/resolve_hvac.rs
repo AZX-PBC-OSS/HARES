@@ -2194,7 +2194,22 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
-        apply_building_setpoint_profiles(building, &mut params, true, name == "Ideal HVAC")?;
+        // The declared band is the unit's own: the Ideal HVAC's gap follows
+        // the fixture's `deadband_c` (the ASHRAE 140 cases declare 0.0 so
+        // the standard's "20,20 bang-bang" pair passes through verbatim);
+        // an undeclared band keeps the default hysteresis's 2 °C gap.
+        let required_gap_c = if name == "Ideal HVAC" {
+            2.0 * building.hvac_deadband_c.unwrap_or(1.0)
+        } else {
+            2.0
+        };
+        apply_building_setpoint_profiles(
+            building,
+            &mut params,
+            true,
+            name == "Ideal HVAC",
+            required_gap_c,
+        )?;
         if name == "Ideal HVAC"
             && let Some(deadband) = building.hvac_deadband_c
         {
@@ -2390,7 +2405,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
-        apply_building_setpoint_profiles(building, &mut params, false, true)?;
+        apply_building_setpoint_profiles(building, &mut params, false, true, 2.0)?;
         // Room AC and MSHP Cooler are ductless — skip duct params.
         if name != "Room AC" && name != "MSHP Cooler" {
             duct_params.insert_into_map(&mut params);
@@ -2701,7 +2716,7 @@ pub(super) fn resolve_hvac(
         for (k, v) in &setpoint_params {
             params.insert(k.clone(), v.clone());
         }
-        apply_building_setpoint_profiles(building, &mut params, true, true)?;
+        apply_building_setpoint_profiles(building, &mut params, true, true, 2.0)?;
         if heat_pump_type != "mini-split" {
             duct_params.insert_into_map(&mut params);
         }
@@ -3890,6 +3905,10 @@ fn parse_hvac_setpoint_params(
         return Ok(out);
     };
 
+    // The controls' consuming systems resolve without a declared band, so
+    // the default hysteresis's 2 °C gap governs the pair here.
+    let required_gap_c = 2.0;
+
     let mut heating: Option<([f64; 24], [f64; 24])> = None;
     let mut cooling: Option<([f64; 24], [f64; 24])> = None;
     for (hvac_type, slot) in [("Heating", &mut heating), ("Cooling", &mut cooling)] {
@@ -3907,10 +3926,10 @@ fn parse_hvac_setpoint_params(
 
     if let (Some((h_wd, h_we)), Some((c_wd, c_we))) = (heating.as_mut(), cooling.as_mut()) {
         let mut reconciliations = Vec::<SetpointReconciliation>::new();
-        if let Some(r) = reconcile_setpoint_pair(h_wd, c_wd, "weekday") {
+        if let Some(r) = reconcile_setpoint_pair(h_wd, c_wd, "weekday", required_gap_c) {
             reconciliations.push(r);
         }
-        if let Some(r) = reconcile_setpoint_pair(h_we, c_we, "weekend") {
+        if let Some(r) = reconcile_setpoint_pair(h_we, c_we, "weekend", required_gap_c) {
             reconciliations.push(r);
         }
         if !reconciliations.is_empty() {
@@ -3954,28 +3973,29 @@ fn parse_hvac_setpoint_params(
 /// midpoint with a symmetric offset, matching OCHRE's reconciliation
 /// (see `vendors/OCHRE/ochre/utils/schedule.py:617-625`).
 ///
-/// OCHRE enforces a 1 °C minimum separation. HARES's downstream thermostat
-/// validator (`ThermalSetpoints::validate_for_deadband`) requires
-/// `cooling - heating >= 2 * hysteresis_c`, and the default hysteresis is 1 °C,
-/// so the required gap is `max(1.0, 2 * hysteresis) = 2.0 °C`. We use that as
-/// the reconciliation gap and clip to `avg ± gap/2` so the post-clip pair
-/// always satisfies the thermostat invariant.
-const SETPOINT_RECONCILE_GAP_C: f64 = 2.0;
-
+/// The required gap is the consuming thermostat's own band:
+/// `cooling - heating >= 2 * hysteresis_c` (`ThermalSetpoints::validate_for_deadband`).
+/// A unit that declares no band runs the default hysteresis of 1 °C, so the
+/// default gap is 2.0 °C; a unit that declares a narrower band (the ASHRAE
+/// 140 cases' `deadband_c = 0.0` "20,20 bang-bang", the case definition
+/// itself) satisfies the invariant at gap 0 and the pair passes through
+/// verbatim. Clipping re-centres a violating pair on `avg ± gap/2` so the
+/// post-clip pair always satisfies the thermostat invariant.
 fn reconcile_setpoint_pair(
     heating: &mut [f64; 24],
     cooling: &mut [f64; 24],
     day_label: &str,
+    required_gap_c: f64,
 ) -> Option<SetpointReconciliation> {
     let original_heating = *heating;
     let original_cooling = *cooling;
 
-    let half_gap = 0.5 * SETPOINT_RECONCILE_GAP_C;
+    let half_gap = 0.5 * required_gap_c;
     let mut violated_hours = 0_u32;
     let mut worst_inversion_c = 0.0_f64;
     for h in 0..24 {
         let gap = cooling[h] - heating[h];
-        if gap < SETPOINT_RECONCILE_GAP_C {
+        if gap < required_gap_c {
             violated_hours += 1;
             worst_inversion_c = worst_inversion_c.max(-gap);
             let avg = 0.5 * (heating[h] + cooling[h]);
@@ -3988,8 +4008,9 @@ fn reconcile_setpoint_pair(
             day = day_label,
             violated_hours,
             worst_inversion_c,
-            gap_c = SETPOINT_RECONCILE_GAP_C,
-            "HPXML heating/cooling setpoints too close or inverted; clipped to midpoint with 2 °C separation"
+            gap_c = required_gap_c,
+            "heating/cooling setpoints too close or inverted for the unit's own \
+             band; clipped to midpoint with the band's separation"
         );
         Some(SetpointReconciliation {
             day: day_label.to_string(),
@@ -4008,6 +4029,7 @@ fn apply_building_setpoint_profiles(
     params: &mut Map<String, Value>,
     include_heating: bool,
     include_cooling: bool,
+    required_gap_c: f64,
 ) -> std::result::Result<(), HpxmlError> {
     let mut heating = building.heating_weekday_setpoints_c.as_ref().map(|wd| {
         let mut weekday = [0.0; 24];
@@ -4040,10 +4062,10 @@ fn apply_building_setpoint_profiles(
 
     if let (Some((h_wd, h_we)), Some((c_wd, c_we))) = (heating.as_mut(), cooling.as_mut()) {
         let mut reconciliations = Vec::<SetpointReconciliation>::new();
-        if let Some(r) = reconcile_setpoint_pair(h_wd, c_wd, "weekday") {
+        if let Some(r) = reconcile_setpoint_pair(h_wd, c_wd, "weekday", required_gap_c) {
             reconciliations.push(r);
         }
-        if let Some(r) = reconcile_setpoint_pair(h_we, c_we, "weekend") {
+        if let Some(r) = reconcile_setpoint_pair(h_we, c_we, "weekend", required_gap_c) {
             reconciliations.push(r);
         }
         if !reconciliations.is_empty() {
@@ -5328,7 +5350,7 @@ mod tests {
         );
 
         let mut params = Map::new();
-        apply_building_setpoint_profiles(&building, &mut params, true, true)
+        apply_building_setpoint_profiles(&building, &mut params, true, true, 2.0)
             .expect("the in-band profiles distribute");
 
         let heating_source: ScheduleSourceConfig = serde_json::from_value(
@@ -5395,7 +5417,7 @@ mod tests {
         );
 
         let mut params = Map::new();
-        apply_building_setpoint_profiles(&building, &mut params, true, true)
+        apply_building_setpoint_profiles(&building, &mut params, true, true, 2.0)
             .expect("the in-band profiles distribute");
 
         let heating_source: ScheduleSourceConfig = serde_json::from_value(
@@ -5647,7 +5669,7 @@ mod tests {
             building_with_setpoint_profiles([20.0; 24], [19.0; 24], [26.0; 24], [25.0; 24]);
         let mut params = Map::new();
         params.insert("heating_capacity_w".to_string(), json!(9_000.0));
-        apply_building_setpoint_profiles(&building, &mut params, true, true)
+        apply_building_setpoint_profiles(&building, &mut params, true, true, 2.0)
             .expect("the in-band profiles distribute");
         let ec = try_build_ideal_hvac_config("Ideal HVAC", &params)
             .expect("Ideal HVAC typed config should be built");
@@ -6071,7 +6093,7 @@ mod tests {
         );
 
         let mut params = Map::new();
-        apply_building_setpoint_profiles(&building, &mut params, true, true)
+        apply_building_setpoint_profiles(&building, &mut params, true, true, 2.0)
             .expect("the in-band profiles distribute");
 
         let reconciliations = params
@@ -6155,7 +6177,7 @@ mod tests {
         );
 
         let mut params = Map::new();
-        apply_building_setpoint_profiles(&building, &mut params, true, true)
+        apply_building_setpoint_profiles(&building, &mut params, true, true, 2.0)
             .expect("the in-band profiles distribute");
 
         assert!(

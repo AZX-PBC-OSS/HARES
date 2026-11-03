@@ -102,7 +102,7 @@ T_CONDITIONED_C: float = 20.0
 T_OUTDOOR_OFFSET_C: float = 5.0
 
 
-def ashrae_simple_interior_h_conv(tilt_deg: float, above_hotter: bool) -> float:
+def ashrae_simple_interior_h_conv(tilt_deg: float) -> float:
     """ASHRAE "Simple" interior convection coefficient h_conv [W/(m²·K)].
 
     Fixed convection-only values by surface orientation, derived from
@@ -112,26 +112,40 @@ def ashrae_simple_interior_h_conv(tilt_deg: float, above_hotter: bool) -> float:
     match the HARES Rust implementation in
     ``crates/hares-physics/src/film_coefficients.rs``.
 
-    | Orientation             | Condition      | h_conv [W/(m²·K)] |
-    |-------------------------|----------------|--------------------|
-    | Vertical (67.5–112.5°)  | —              | 3.076              |
-    | Horizontal, enhanced    | heat flow up   | 4.040              |
-    | Horizontal, reduced     | heat flow down | 0.948              |
-    | Tilted, enhanced        | heat flow up   | 3.870              |
-    | Tilted, reduced         | heat flow down | 2.281              |
+    The frozen regime is the winter one, keyed on the tilt's geometry:
+    the correlation's enhanced branch fires when the surface's warm side
+    is BELOW it (a roof-class surface: the outward normal up, the
+    interior face pointing down at the zone's warm air), the reduced
+    branch when the warm side is ABOVE (a floor-class surface, the stable
+    stratification).  E+'s per-step form evaluates
+    ``(T_zone − T_surface) · cos(tilt_outward) > 0`` for the same
+    branches (ConvectionCoefficients.cc ``CalcASHRAESimpleIntConvCoeff``);
+    the frozen geometric rule evaluates the sign of the tilt factor
+    alone.
+
+    | Orientation                      | h_conv [W/(m²·K)] |
+    |----------------------------------|-------------------|
+    | Vertical (67.5–112.5°)           | 3.076             |
+    | Horizontal, warm side below      | 4.040             |
+    | Horizontal, warm side above      | 0.948             |
+    | Tilted, warm side below          | 3.870             |
+    | Tilted, warm side above          | 2.281             |
 
     References:
-    - EnergyPlus ConvectionCoefficients.cc:1829-1885.
+    - EnergyPlus ConvectionCoefficients.cc:1829-1885 (``DeltaTempCosTilt =
+      (Tamb - Tsurf) * cosTilt``; enhanced > 0, reduced < 0; surface
+      tilts are with respect to the OUTWARD normal).
     - Walton, G. N. 1983. TARP Reference Manual, NBSSIR 83-2655, p 79.
     - ASHRAE Handbook of Fundamentals 1985, p. 23.2, Table 1.
     """
 
-    cos_tilt = abs(math.cos(math.radians(tilt_deg)))
-    if cos_tilt < 0.3827:
+    cos_tilt = math.cos(math.radians(tilt_deg))
+    abs_cos = abs(cos_tilt)
+    if abs_cos < 0.3827:
         result = 3.076
-    elif cos_tilt >= 0.9239:
-        result = 4.040 if above_hotter else 0.948
-    elif above_hotter:
+    elif abs_cos >= 0.9239:
+        result = 4.040 if cos_tilt > 0.0 else 0.948
+    elif cos_tilt > 0.0:
         result = 3.870
     else:
         result = 2.281
@@ -239,9 +253,10 @@ def film_resistances(inputs: FilmInputs) -> tuple[float, float]:
     )
     above_hotter = not (ext_above ^ (t_ext >= t_int))
 
-    # Interior film: ASHRAE Simple (fixed h_conv by orientation).
+    # Interior film: ASHRAE Simple (fixed h_conv by orientation, the
+    # frozen winter regime keyed on the tilt's geometry).
     # Matches HARES film_coefficients.rs:ashrae_simple_interior_h_conv.
-    h_conv_int = ashrae_simple_interior_h_conv(inputs.tilt_deg, above_hotter)
+    h_conv_int = ashrae_simple_interior_h_conv(inputs.tilt_deg)
     r_int = 1.0 / h_conv_int
 
     if inputs.exterior_zone == "EXT":
@@ -810,7 +825,7 @@ def build_reference(b: ParsedBuilding) -> dict[str, Any]:
     # build_precomputed_boundary adds film_int to the interior-side
     # resistor, so the layer resistance must be reduced by film_int
     # to keep total R from interior → ground = area / (F2 × P).
-    r_fi, r_fe = _film(0.0, "LIV", "GND")  # r_fe = 0.0 for Ground
+    r_fi, r_fe = _film(180.0, "LIV", "GND")  # r_fe = 0.0 for Ground
     assert r_fe == 0.0, (
         f"Floor exterior film must be zero for ground-contact boundary, "
         f"got {r_fe}. ASHRAE HoF 2021 Ch. 17: ground is a fixed-temperature "
