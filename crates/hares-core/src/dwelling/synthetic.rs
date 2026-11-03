@@ -578,6 +578,26 @@ pub(crate) fn build_synthetic_building(
 
     validate_hourly_schedules(config)?;
 
+    // The fan schedule's distinct non-zero rates, sorted: the discretized
+    // flow variants' set. The schedule's per-step reads take exactly these
+    // values (the expansion copies the hour's value verbatim), so a variant
+    // exists for every non-zero read.
+    let ventilation_flow_schedule_values: Vec<f64> = config
+        .ventilation
+        .as_ref()
+        .map(|vent| {
+            let mut rates: Vec<f64> = vent
+                .flow_schedule_m3_s
+                .iter()
+                .copied()
+                .filter(|rate| *rate != 0.0)
+                .collect();
+            rates.sort_by(f64::total_cmp);
+            rates.dedup_by(|a, b| a.to_bits() == b.to_bits());
+            rates
+        })
+        .unwrap_or_default();
+
     // Window validation: u_factor > 0.0, 0.0 <= SHGC <= 1.0
     if let Some(windows) = &config.windows {
         for wc in windows {
@@ -1640,6 +1660,10 @@ pub(crate) fn build_synthetic_building(
         // and this index is the column's position, the one the thermal
         // solver's configuration reads the per-step fan rate through.
         ventilation_flow_schedule_col,
+        // The schedule's distinct non-zero rates, sorted: the thermal
+        // solver's discretized flow variants are built from exactly this set,
+        // so a per-step schedule read always names a variant.
+        ventilation_flow_schedule_values,
         infiltration_height_m: None,
         floors_above_grade: 1.0,
         has_flue_or_chimney: None,

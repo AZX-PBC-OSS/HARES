@@ -116,6 +116,12 @@ pub struct ThermalSolver {
     solve_tail_calls: usize,
     /// Per-step coupling tuples: (state_idx, d_implicit, forcing). Reused each step.
     coupling_buf: Vec<(usize, f64, f64)>,
+    /// The step's active ventilation-flow model variant: `Some` when the
+    /// step's scheduled flow value matches one of the config's variants (the
+    /// discretization whose continuous matrices carry that flow's
+    /// conductance on the zone air node), `None` when the base model governs
+    /// (no declared schedule, a zero flow, or the constants' path).
+    active_flow_model: Option<usize>,
     /// Coupling tuples of the last prepared or integrated step, read by
     /// `solve_ideal_capacity_for_target`: non-empty selects the
     /// identity-coupled solve, empty the uncoupled one.
@@ -483,6 +489,64 @@ impl ThermalSolver {
         &self.config
     }
 
+    /// The step's active model: the scheduled flow's variant when the step's
+    /// schedule read matched one, the base model otherwise. Every path that
+    /// steps the state or solves the ideal capacity against the step must use
+    /// this model, so the operator the ideal solve predicts is the operator
+    /// the step applies.
+    ///
+    /// Usable only where the borrow ends before a `&mut self` field access;
+    /// the step and solve sites bind the match locally instead so the field
+    /// borrows stay disjoint from the scratch buffers.
+    fn model_for_step(&self) -> &StateSpaceModel {
+        match self.active_flow_model {
+            Some(idx) => {
+                let v = &self.config.ventilation.flow_models;
+                &v[idx].model
+            }
+            None => &self.model,
+        }
+    }
+
+    /// The active variant's nominal forced conductance [W/K], `None` when the
+    /// base model governs (the whole airflow conductance rides the coupling).
+    fn active_forced_conductance_w_k(&self) -> Option<f64> {
+        self.active_flow_model
+            .map(|idx| self.config.ventilation.flow_models[idx].forced_conductance_w_k)
+    }
+
+    /// Selects the step's model variant from the indoor zone's scheduled flow.
+    /// The schedule read is the same one the coupling consumed, so a declared
+    /// column's non-zero value always names a variant the builder built;
+    /// a value without one is a typed error, never a silent base-model step.
+    fn select_flow_model(
+        &mut self,
+        scheduled_flow_m3_s: Option<f64>,
+    ) -> std::result::Result<(), HaresError> {
+        self.active_flow_model = match scheduled_flow_m3_s {
+            Some(flow) if flow != 0.0 => {
+                let idx = self
+                    .config
+                    .ventilation
+                    .flow_models
+                    .iter()
+                    .position(|v| v.flow_m3_s.to_bits() == flow.to_bits());
+                match idx {
+                    Some(idx) => Some(idx),
+                    None => {
+                        return Err(HaresError::Envelope(format!(
+                            "scheduled ventilation flow {flow} m3/s has no discretized \
+                             model variant: the flow schedule's distinct values must be \
+                             the variants the solver was built with"
+                        )));
+                    }
+                }
+            }
+            _ => None,
+        };
+        Ok(())
+    }
+
     /// Sets the mechanical ventilation recovery effectiveness the next step
     /// reads (the ventilation equipment's effective values after bypass and
     /// defrost). The only part of the configuration that changes after
@@ -800,6 +864,64 @@ impl ThermalSolver {
         config
             .validate(model.state_dim(), model.input_dim())
             .map_err(ThermalSolverError::Configuration)?;
+
+        // The scheduled-flow variants' contract: every variant must match the
+        // base model's dimensions, carry a positive finite flow and conductance,
+        // and be distinct from every other variant (the per-step selection is an
+        // exact bit match against the schedule's value, so a duplicate would make
+        // the selection order-dependent). Variants without a declared schedule
+        // column could never be selected.
+        if !config.ventilation.flow_models.is_empty() {
+            if config.ventilation.flow_schedule_col.is_none() {
+                return Err(ThermalSolverError::Configuration(
+                    "ventilation flow model variants are configured but the ventilation \
+                     params declare no flow_schedule_col: a variant without the schedule \
+                     column that selects it can never run"
+                        .to_string(),
+                ));
+            }
+            for (i, v) in config.ventilation.flow_models.iter().enumerate() {
+                if !v.flow_m3_s.is_finite() || v.flow_m3_s <= 0.0 {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "ventilation flow model variant {i}: flow must be finite and \
+                         positive, got {}",
+                        v.flow_m3_s
+                    )));
+                }
+                if !v.forced_conductance_w_k.is_finite() || v.forced_conductance_w_k <= 0.0 {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "ventilation flow model variant {i}: forced conductance must be \
+                         finite and positive, got {}",
+                        v.forced_conductance_w_k
+                    )));
+                }
+                if v.model.state_dim() != model.state_dim()
+                    || v.model.input_dim() != model.input_dim()
+                {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "ventilation flow model variant {i}: model dimensions ({}, {}) do \
+                         not match the base model's ({}, {})",
+                        v.model.state_dim(),
+                        v.model.input_dim(),
+                        model.state_dim(),
+                        model.input_dim()
+                    )));
+                }
+                if let Some(j) = config
+                    .ventilation
+                    .flow_models
+                    .iter()
+                    .position(|other| other.flow_m3_s.to_bits() == v.flow_m3_s.to_bits())
+                    .filter(|&j| j != i)
+                {
+                    return Err(ThermalSolverError::Configuration(format!(
+                        "ventilation flow model variants {j} and {i} carry the same flow \
+                         {} m3/s: the per-step selection cannot distinguish them",
+                        v.flow_m3_s
+                    )));
+                }
+            }
+        }
 
         // Thermal port wiring: every env zone must own a sensible-heat input
         // column. Equipment may declare a thermal port on any env zone, and a
@@ -1258,6 +1380,7 @@ impl ThermalSolver {
             #[cfg(test)]
             solve_tail_calls: 0,
             coupling_buf,
+            active_flow_model: None,
             last_coupling,
             latent_buf,
             exterior_surface_temps,
@@ -1467,6 +1590,20 @@ impl ThermalSolver {
             &mut latent_by_zone,
             &mut self.infiltration_buf,
         )?;
+
+        // The step's model variant: the scheduled flow's read selects the
+        // discretization the surfaces' within-step dynamics discharge through
+        // (the conductance folded into the continuous matrices). The read is
+        // the coupling's own, so the selection and the load share one value.
+        let scheduled_flow_m3_s = if self.config.ventilation.flow_schedule_col.is_some() {
+            self.infiltration_buf
+                .iter()
+                .find(|c| c.zone == indoor_zone)
+                .map(|c| c.forced_flow_m3_s)
+        } else {
+            None
+        };
+        self.select_flow_model(scheduled_flow_m3_s)?;
 
         let indoor_inf = self.infiltration_buf.iter().find(|c| c.zone == indoor_zone);
         let infiltration_indoor_w = indoor_inf.map(|c| c.q_infiltration_w).unwrap_or(0.0);
@@ -1869,7 +2006,7 @@ mod tests {
     use crate::THERMAL_SNAPSHOT_SCHEMA_VERSION;
     use crate::ThermalSnapshot;
     use crate::longwave_radiation::{SOLAR_ABSORPTANCE_DEFAULT, beta_factor};
-    use crate::state_space::{OutputMapping, StateSpaceModel};
+    use crate::state_space::{OutputMapping, StateSpaceModel, VentilationFlowModel};
     use crate::thermal_solver::{
         BoundaryCategory, DrivingTemp, ExteriorSurfaceInfo, FilmCoefficientModel,
         InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
@@ -1936,6 +2073,273 @@ mod tests {
             price_signal: Default::default(),
             electrical: Default::default(),
         }
+    }
+
+    /// A two-state solver (zone air + mass node) with the scheduled flow's
+    /// model variant and the schedule column declared. The fan's conductance
+    /// and the variant's are the same arithmetic (the env's operating density
+    /// at the schedule's rate), so the coupling's residual is ~zero and the
+    /// step runs on the variant's discretization.
+    fn flow_variant_solver(env: &EnvironmentState, schedule_value: f64) -> ThermalSolver {
+        let c_air = 129_262.0;
+        let c_mass = 1.0e6;
+        let g_film = 300.0;
+        let a_c = DMatrix::from_row_slice(
+            2,
+            2,
+            &[
+                -g_film / c_air,
+                g_film / c_air,
+                g_film / c_mass,
+                -g_film / c_mass,
+            ],
+        );
+        let b_c = DMatrix::from_row_slice(2, 2, &[0.0, 1.0 / c_air, 0.0, 0.0]);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        // The variant's conductance: the env's own operating density at the
+        // schedule's rate, the same arithmetic the coupling's h_inf uses, so
+        // the residual the per-step coupling carries is ~zero and the step is
+        // the variant's ZOH.
+        let flow_m3_s = schedule_value;
+        let density = hares_physics::air_properties::moist_air_density_kg_m3(
+            101_325.0,
+            env.weather.outdoor_temp_c,
+            env.weather.outdoor_humidity_ratio,
+        );
+        let g_fan = density * flow_m3_s * hares_physics::constants::CP_DRY_AIR_J_KG_K;
+        let mut a_c_variant = a_c;
+        a_c_variant[(0, 0)] -= g_fan / c_air;
+        let mut b_c_variant = b_c.clone();
+        b_c_variant[(0, 0)] += g_fan / c_air;
+        let variant_model =
+            StateSpaceModel::from_continuous(&a_c_variant, &b_c_variant, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::from([(ZoneId(1), c_air)]),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![(ZoneId(1), InfiltrationMethod::Ach { ach: 0.0 })],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams {
+                flow_schedule_col: Some(0),
+                flow_models: vec![VentilationFlowModel {
+                    flow_m3_s,
+                    forced_conductance_w_k: g_fan,
+                    model: variant_model,
+                }],
+                ..MechanicalVentilationParams::default()
+            },
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: Vec::new(),
+            film_coefficient_model: FilmCoefficientModel::default(),
+            interior_convection_injections: Vec::new(),
+            ideal_capacity_degraded_threshold: 3,
+        };
+        ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c).unwrap()
+    }
+
+    /// The step's variant selection follows the schedule's payload: a non-zero
+    /// read selects the flow's variant, a zero read (the fan's OFF hour) drops
+    /// to the base model. The variant's step discharges the mass node toward
+    /// outdoor within the step; the base's step (the fan-free discretization)
+    /// cannot move it.
+    #[test]
+    fn scheduled_flow_variant_selection_follows_the_schedule_payload() {
+        let flow_m3_s = 0.4731_f64;
+        let mut env = env_for_temp(30.0, 10.0);
+        env.domains.schedule.payload_mut().push(flow_m3_s);
+        let mut solver = flow_variant_solver(&env, flow_m3_s);
+        solver.x[0] = 30.0;
+        solver.x[1] = 30.0;
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        let update = solver
+            .resolve_new(&ports, &env, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            solver.active_flow_model,
+            Some(0),
+            "a non-zero schedule read must select the flow's variant"
+        );
+        // One 60 s step discharges ~1 percent of the mass node's excess over
+        // the fan-pinned blend (tau = 5460 s); the base's step cannot move it
+        // at all, so four orders of magnitude separate the two operators.
+        assert!(
+            solver.x[1] < 29.99,
+            "the variant's step must discharge the mass node within the step: \
+             the mass node landed at {}",
+            solver.x[1]
+        );
+        assert!(
+            update.zone_temperatures_c[0].1 < 30.0,
+            "the fan-pinned zone air must pull toward outdoor: got {}",
+            update.zone_temperatures_c[0].1
+        );
+
+        // The fan's OFF hour: the payload reads zero, the base model governs,
+        // and the mass node's heat is conserved inside the discretization.
+        let mut env_off = env_for_temp(30.0, 10.0);
+        env_off.domains.schedule.payload_mut().push(0.0);
+        let mut solver_off = flow_variant_solver(&env_off, flow_m3_s);
+        solver_off.x[0] = 30.0;
+        solver_off.x[1] = 30.0;
+        let _ = solver_off
+            .resolve_new(&ports, &env_off, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            solver_off.active_flow_model, None,
+            "a zero schedule read must drop to the base model"
+        );
+        assert!(
+            (solver_off.x[1] - 30.0).abs() < 1e-6,
+            "the fan-free discretization's mass node cannot discharge within \
+             the step: got {}",
+            solver_off.x[1]
+        );
+    }
+
+    /// A schedule read naming no variant: a typed error naming the flow, never
+    /// a silent base-model step.
+    #[test]
+    fn scheduled_flow_without_a_matching_variant_is_a_typed_error() {
+        let mut env = env_for_temp(30.0, 10.0);
+        // The solver was built for 0.4731; the payload carries a different rate.
+        env.domains.schedule.payload_mut().push(0.3);
+        let mut solver = flow_variant_solver(&env, 0.4731);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let err = solver
+            .resolve_new(&ports, &env, std::time::Duration::from_secs(60))
+            .expect_err("a schedule read without a variant must fail the step");
+        assert!(
+            err.to_string().contains("no discretized model variant"),
+            "the error must name the missing variant: {err}"
+        );
+    }
+
+    /// The construction's validation of the flow variants: variants without a
+    /// declared schedule column, duplicate flows, and dimension mismatches are
+    /// construction-time errors.
+    #[test]
+    fn flow_variant_validation_rejects_malformed_variants() {
+        let env = env_for_temp(30.0, 10.0);
+        let flow_m3_s = 0.4731_f64;
+        let make_model = || {
+            let a_c = DMatrix::<f64>::zeros(2, 2);
+            let b_c = DMatrix::<f64>::zeros(2, 2);
+            let mapping = OutputMapping {
+                output_count: 1,
+                node_to_output: vec![(0, 0, 1.0)],
+                input_to_output: vec![],
+            };
+            StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap()
+        };
+
+        let build = |variants: Vec<VentilationFlowModel>, declare_col: bool| {
+            let wiring = StateSpaceWiring {
+                zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+                zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+                outdoor_temp_input_indices: vec![0],
+                ground_temp_input_indices: vec![],
+                ground_temp_input_depths_m: vec![],
+                indoor_temp_input_indices: vec![],
+                solar_input_indices: HashMap::new(),
+                c_zone_j_k: HashMap::new(),
+                node_capacitances: HashMap::new(),
+                node_index: HashMap::new(),
+            };
+            let config = ThermalSolverConfig {
+                indoor_zone_id: ZoneId(1),
+                ventilation: MechanicalVentilationParams {
+                    flow_schedule_col: declare_col.then_some(0),
+                    flow_models: variants,
+                    ..MechanicalVentilationParams::default()
+                },
+                ..ThermalSolverConfig::new(ZoneId(1))
+            };
+            ThermalSolver::new(make_model(), wiring, config, 60.0, &env, 20.0)
+        };
+
+        let variant = |flow_m3_s: f64| VentilationFlowModel {
+            flow_m3_s,
+            forced_conductance_w_k: 470.0,
+            model: make_model(),
+        };
+
+        // Variants without the column that selects them.
+        let err = build(vec![variant(flow_m3_s)], false)
+            .expect_err("variants without a declared schedule column cannot be selected");
+        assert!(
+            err.to_string().contains("flow_schedule_col"),
+            "the error must name the missing schedule column: {err}"
+        );
+
+        // Duplicate flows: the per-step selection cannot distinguish them.
+        let err = build(vec![variant(flow_m3_s), variant(flow_m3_s)], true)
+            .expect_err("duplicate flow variants make the selection order-dependent");
+        assert!(
+            err.to_string().contains("same flow"),
+            "the error must name the duplicate flow: {err}"
+        );
+
+        // A variant whose model does not match the base's dimensions.
+        let a_c_big = DMatrix::<f64>::zeros(3, 3);
+        let b_c_big = DMatrix::<f64>::zeros(3, 2);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let big_model =
+            StateSpaceModel::from_continuous(&a_c_big, &b_c_big, 60.0, &mapping).unwrap();
+        let err = build(
+            vec![VentilationFlowModel {
+                flow_m3_s,
+                forced_conductance_w_k: 470.0,
+                model: big_model,
+            }],
+            true,
+        )
+        .expect_err("a variant's model must match the base model's dimensions");
+        assert!(
+            err.to_string().contains("dimensions"),
+            "the error must name the dimension mismatch: {err}"
+        );
+
+        // A well-formed variant constructs.
+        build(vec![variant(flow_m3_s)], true).expect("a well-formed variant constructs");
     }
 
     fn one_zone_solver(env: &EnvironmentState) -> ThermalSolver {

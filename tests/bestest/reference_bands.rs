@@ -205,10 +205,11 @@ pub fn core_reference_bands(case_id: &str) -> Vec<ReferenceBand> {
         // band's edges coincide. The scheduled mechanical-ventilation
         // surface (the fixture's `[ventilation] flow_schedule_m3_s` table:
         // the fan's 1703.16 m3/h = 0.4731 m3/s, ON from 1800 to 0700 per
-        // 5.2.2.1.5.1.1/5.2.2.1.5.2) carries Case 650 against its bands
-        // in-band. Case 950's annual test is stopped at the measured
-        // cooling divergence the bestest mod records; widening or ignoring
-        // the bands is forbidden either way.
+        // 5.2.2.1.5.1.1/5.2.2.1.5.2) carries both cases against their bands
+        // in-band: Case 650 (cooling 4515.3 in [4186, 4945]) since the
+        // vent-surface PR, Case 950 (cooling 648.1 in [586, 707]) since the
+        // airflow coupling joined the discretized RC model. Widening or
+        // ignoring the bands is forbidden either way.
         "650" => vec![
             ReferenceBand {
                 case_id: "650",
@@ -257,9 +258,8 @@ mod tests {
 
     /// The night-ventilation cases' bands stay pinned as data: the
     /// published oracles cannot silently widen when a case starts running
-    /// against them (Case 650 does; Case 950's annual test is stopped at
-    /// the recorded divergence). The values are the Std140_TF_Results.pdf
-    /// Table B8-1/B8-2 rows, MWh converted to kWh.
+    /// against them. The values are the Std140_TF_Results.pdf Table
+    /// B8-1/B8-2 rows, MWh converted to kWh.
     #[test]
     fn night_ventilation_bands_are_pinned() {
         use BestestMetric::*;

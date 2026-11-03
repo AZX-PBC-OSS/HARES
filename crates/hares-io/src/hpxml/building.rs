@@ -358,6 +358,11 @@ pub struct Building {
     /// the state when a fixture declares no fan schedule) leaves the
     /// ventilation flow with its equipment-spec constants.
     pub ventilation_flow_schedule_col: Option<usize>,
+    /// The fan schedule's distinct non-zero flow values [m³/s], sorted, the
+    /// set the thermal solver's discretized flow variants are built from.
+    /// Empty on the HPXML document path and when the fixture's schedule
+    /// carries no non-zero rate.
+    pub ventilation_flow_schedule_values: Vec<f64>,
     /// Schema warnings the parse raised (for example the HPXML 3.x
     /// deprecated-`EnergyFactor` notice), carried to the run instead of
     /// living only as `tracing` lines.
@@ -1452,6 +1457,7 @@ pub fn parse_building_from_node(root: &XmlNode) -> Result<Building, HpxmlError> 
         // synthetic builder's emission, and an HPXML route to a fan
         // schedule wires its own when that surface lands.
         ventilation_flow_schedule_col: None,
+        ventilation_flow_schedule_values: Vec::new(),
         details_xml: details.clone(),
         parse_warnings,
     })

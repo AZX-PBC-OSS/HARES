@@ -67,6 +67,35 @@ pub struct OutputMapping {
     pub input_to_output: Vec<(usize, usize, f64)>,
 }
 
+/// One discretized model variant for a distinct scheduled ventilation flow.
+///
+/// The variant's continuous matrices carry the flow's sensible conductance on
+/// the zone air node before ZOH discretization, so the step's within-step
+/// dynamics move the surface nodes against the fan-pinned zone air (the exact
+/// zero-order hold of the linear airflow coupling). `forced_conductance_w_k`
+/// is that conductance at the construction-time operating density; the
+/// per-step semi-implicit coupling subtracts it from the step's total airflow
+/// conductance so only the residual (the density's ratio and the infiltration
+/// and natural-ventilation shares) rides the diagonal correction.
+///
+/// Precedent: OCHRE `Envelope.py add_infiltration_resistances` (the
+/// `linearize_infiltration` mode) puts the linearized infiltration and
+/// ventilation conductance into its RC network as an EXT-to-zone resistor;
+/// without it OCHRE injects the airflow as an explicit per-step gain.
+#[derive(Debug, Clone)]
+pub struct VentilationFlowModel {
+    /// The scheduled flow [m³/s] this variant discretizes. The per-step
+    /// schedule read selects a variant by exact bit equality with this value.
+    pub flow_m3_s: f64,
+    /// The flow's sensible conductance at the construction-time operating
+    /// density [W/K]: `ρ_nom · flow · cp` (times the balanced-recovery's
+    /// sensible factor when one is configured).
+    pub forced_conductance_w_k: f64,
+    /// The discretized model: the same state/input/output dimensions as the
+    /// base model, with the conductance folded into the zone air row.
+    pub model: StateSpaceModel,
+}
+
 /// Discrete-time state-space model (ZOH base step) with per-step diagonal couplings.
 ///
 /// The step is `x[k+1] = N·x[k] + B_eff·u[k]`. For `from_continuous`:
@@ -1706,6 +1735,87 @@ mod tests {
                 x_into[i]
             );
         }
+    }
+
+    /// The scheduled flow's variant discharges the mass node within the step.
+    ///
+    /// The night purge's mechanism at the operator level: the fan's conductance
+    /// between the zone air node and outdoor pins the air node near the
+    /// quasi-steady blend of outdoor and the surfaces, and the surfaces'
+    /// within-step dynamics discharge through the interior film into that
+    /// pinned air. A fan-free discretization conserves the air+surface pair's
+    /// heat inside the step (the air equilibrates with the mass, the pair's
+    /// mean is a near-null mode), so the mass node cannot discharge however the
+    /// zone row's post-step diagonal is damped: the failure mode that held
+    /// BESTEST 950's concrete at ~30 C through every purged night.
+    ///
+    /// Setup: two states, the zone air (C = 129 262 J/K, the BESTEST zone air
+    /// capacitance) and a mass node (C = 1.0e6 J/K), an interior film of
+    /// 300 W/K between them, the fan's 470 W/K (the 0.4731 m3/s BESTEST fan at
+    /// ~1 kg/m3) between the air node and 10 C outdoor, both nodes at 30 C,
+    /// dt = 3600 s. The series conductance of film and fan is 183 W/K, giving
+    /// tau = 5460 s, so the variant's mass node gives up about 48 percent of
+    /// its excess over outdoor within the hour; the fan-free
+    /// discretization's mass node must not move at all.
+    #[test]
+    fn flow_variant_discharges_the_mass_node_within_the_step() {
+        let c_air = 129_262.0;
+        let c_mass = 1.0e6;
+        let g_film = 300.0;
+        let g_fan = 470.0;
+        // States: [0] zone air, [1] mass node. Inputs: [0] outdoor temp.
+        let a_c_base = DMatrix::from_row_slice(
+            2,
+            2,
+            &[
+                -g_film / c_air,
+                g_film / c_air,
+                g_film / c_mass,
+                -g_film / c_mass,
+            ],
+        );
+        let b_c_base = DMatrix::from_row_slice(2, 1, &[0.0, 0.0]);
+        let mapping = OutputMapping {
+            output_count: 2,
+            node_to_output: vec![(0, 0, 1.0), (1, 1, 1.0)],
+            input_to_output: vec![],
+        };
+        let base = StateSpaceModel::from_continuous(&a_c_base, &b_c_base, 3600.0, &mapping)
+            .expect("the fan-free model builds");
+
+        let mut a_c_variant = a_c_base.clone();
+        a_c_variant[(0, 0)] -= g_fan / c_air;
+        let b_c_variant = DMatrix::from_row_slice(2, 1, &[g_fan / c_air, 0.0]);
+        let variant =
+            StateSpaceModel::from_continuous(&a_c_variant, &b_c_variant, 3600.0, &mapping)
+                .expect("the flow variant builds");
+
+        let x0 = DVector::from_row_slice(&[30.0, 30.0]);
+        let u = DVector::from_row_slice(&[10.0]);
+
+        let x_base = base.step(&x0, &u);
+        let x_variant = variant.step(&x0, &u);
+
+        assert!(
+            x_base[1] > 29.5,
+            "the fan-free discretization's mass node must stay put within the \
+             step (the air+mass pair's heat is conserved inside N): got {}",
+            x_base[1]
+        );
+        assert!(
+            x_variant[1] < 25.0,
+            "the flow variant's mass node must discharge into the fan-pinned \
+             air within the step (tau = 5460 s, 48 percent of the excess by \
+             3600 s): got {}",
+            x_variant[1]
+        );
+        assert!(
+            x_variant[0] > 10.0 && x_variant[0] < x_variant[1],
+            "the variant's air node sits on the film/fan blend between outdoor \
+             and the discharging mass: air {}, mass {}",
+            x_variant[0],
+            x_variant[1]
+        );
     }
 
     #[test]

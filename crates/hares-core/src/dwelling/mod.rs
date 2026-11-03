@@ -17202,6 +17202,7 @@ occupancy = 1.0
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         };
 
         // Build ZoneMap from building zones (same logic as from_preparsed()).

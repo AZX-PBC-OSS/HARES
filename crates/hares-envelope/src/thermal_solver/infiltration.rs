@@ -1036,6 +1036,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
                 flow_schedule_col: None,
+                flow_models: Vec::new(),
             },
             ..ThermalSolverConfig::new(ZoneId(1))
         };
@@ -1109,6 +1110,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
                 flow_schedule_col: None,
+                flow_models: Vec::new(),
             },
             ..ThermalSolverConfig::new(ZoneId(1))
         };
@@ -1168,6 +1170,7 @@ mod tests {
                 latent_recovery_efficiency: 0.0,
                 zone_flow_m3_s: HashMap::new(),
                 flow_schedule_col: None,
+                flow_models: Vec::new(),
             },
             ..ThermalSolverConfig::new(ZoneId(1))
         };
