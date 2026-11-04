@@ -147,7 +147,23 @@ use serde::{Deserialize, Serialize};
 /// carries the same name as its per-step drain into that total; it is not
 /// checkpointed itself.) Checkpoints written by v24 builds are rejected by
 /// the version gate.
-pub const CHECKPOINT_VERSION: u32 = 25;
+///
+/// v26: the between-steps state of the electrical and thermal solvers
+/// rides the checkpoint. The electrical domain carries the aggregate
+/// solver's last solve (the net active and reactive powers its
+/// `net_active_w`/`net_reactive_var` report) and the island imbalance
+/// accounting derived from that net (`island_unserved_w`/`island_excess_w`):
+/// the between-steps reads (the gym observation's
+/// `total_power_w`/`reactive_power_var`, the telemetry's totals and island
+/// fields, the Python env dict) read the solver's stale last solve and the
+/// step's imbalance, and a restore without the section handed them the
+/// rebuild's warm-up values. The thermal domain carries the last step's
+/// active ventilation-flow variant, which the first post-restore
+/// ideal-capacity solve reads before the envelope re-selects it: without
+/// it that solve ran on the rebuilding solver's model, not the written
+/// run's. Checkpoints written by v25 builds are rejected by the version
+/// gate.
+pub const CHECKPOINT_VERSION: u32 = 26;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -274,6 +290,10 @@ pub struct DwellingCheckpoint {
     pub reports: Vec<ReportSection>,
     /// The run's health totals: the counters continue across the restore.
     pub health: crate::health::RunHealth,
+    /// The electrical domain's between-steps state: the aggregate solver's
+    /// last solve and the island imbalance accounting derived from it, so
+    /// the restored dwelling's between-steps reads are the saved run's.
+    pub electrical: ElectricalCheckpoint,
     /// The warning record: both bounded buffers and their dropped counts,
     /// so the restored run's `RunResult.warnings` and its caller's next
     /// drain continue the written run's.
@@ -289,6 +309,22 @@ pub struct ReportSection {
     pub name: String,
     /// The recorder's row stream.
     pub rows: hares_io::ReportRowsSnapshot,
+}
+
+/// The electrical domain's between-steps state: the aggregate solver's
+/// last solve (the net powers the observation's power fields and the
+/// telemetry's totals report) and the island imbalance the step's own
+/// accounting derived from that net.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ElectricalCheckpoint {
+    pub net_active_w: f64,
+    pub net_reactive_var: f64,
+    /// The load the island sources failed to cover at the restored step
+    /// (would-be phantom import); 0.0 when not islanded.
+    pub island_unserved_w: f64,
+    /// The surplus generation the island could not absorb at the restored
+    /// step (would-be phantom export); 0.0 when not islanded.
+    pub island_excess_w: f64,
 }
 
 impl DwellingCheckpoint {
@@ -398,8 +434,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
-        ReportSection,
+        ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, ElectricalCheckpoint,
+        EquipmentStateCheckpoint, ReportSection,
     };
     use hares_envelope::{THERMAL_SNAPSHOT_SCHEMA_VERSION, ThermalSnapshot};
     use hares_types::{ElectricalSummary, ZoneId};
@@ -413,6 +449,7 @@ mod tests {
             interior_surface_temps: vec![],
             interior_surface_prev_temps: vec![],
             last_coupling: vec![],
+            active_flow_model: None,
             sensible_recovery_efficiency: 0.0,
             latent_recovery_efficiency: 0.0,
             ideal_capacity_failure_counts: vec![],
@@ -448,6 +485,7 @@ mod tests {
                 interior_surface_temps: vec![vec![20.0, 21.0], vec![22.0]],
                 interior_surface_prev_temps: vec![vec![19.5, 20.5], vec![21.5]],
                 last_coupling: vec![(0, 0.25, 3.5), (1, 0.0, -1.25)],
+                active_flow_model: Some(1),
                 sensible_recovery_efficiency: 0.34,
                 latent_recovery_efficiency: 0.12,
                 ideal_capacity_failure_counts: vec![(ZoneId(1), 2)],
@@ -564,6 +602,12 @@ mod tests {
                     chunk_size: 4,
                 },
             }],
+            electrical: ElectricalCheckpoint {
+                net_active_w: 4_250.5,
+                net_reactive_var: -12.25,
+                island_unserved_w: 850.0,
+                island_excess_w: 0.0,
+            },
             health: crate::health::RunHealth {
                 port_rollbacks: 1,
                 rejected_control_signals: 2,
@@ -631,9 +675,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 25;
+    const PINNED_VERSION: u32 = 26;
     const PINNED_SCHEMA_SHA256: &str =
-        "f2d24fa4d59aed5bf8aafed7723128f55ae2d55750935cf1e8f43d608946a740";
+        "0af082baf47cc3fc4548f7c57d69e6f9d22116981bbe355d05ff183b67d57e05";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the
@@ -767,6 +811,12 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical: ElectricalCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+                island_unserved_w: 0.0,
+                island_excess_w: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -802,6 +852,12 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical: ElectricalCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+                island_unserved_w: 0.0,
+                island_excess_w: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -1000,6 +1056,12 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical: ElectricalCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+                island_unserved_w: 0.0,
+                island_excess_w: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -1054,6 +1116,12 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical: ElectricalCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+                island_unserved_w: 0.0,
+                island_excess_w: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -1148,6 +1216,12 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical: ElectricalCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+                island_unserved_w: 0.0,
+                island_excess_w: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -1189,6 +1263,12 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical: ElectricalCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+                island_unserved_w: 0.0,
+                island_excess_w: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 

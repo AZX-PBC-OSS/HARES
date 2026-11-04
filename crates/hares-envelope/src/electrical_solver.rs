@@ -119,6 +119,14 @@ impl ElectricalSolver {
         self.net_reactive_var
     }
 
+    /// Restores the last solve's nets from a checkpoint: the between-steps
+    /// reads (the observation's power fields, the telemetry's totals)
+    /// continue the saved run's instead of the rebuild's warm-up's.
+    pub fn restore_net(&mut self, net_active_w: f64, net_reactive_var: f64) {
+        self.net_active_w = net_active_w;
+        self.net_reactive_var = net_reactive_var;
+    }
+
     /// Returns the ZIP load scale factor for the given per-unit voltage.
     ///
     /// Evaluates `Z·V² + I·V + P` where `V = voltage_pu / nominal_voltage_pu`

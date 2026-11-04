@@ -21,7 +21,13 @@ use crate::state_space::ZERO_GAIN_EPSILON;
 /// fallback reads, and this field itself joined the snapshot. A snapshot
 /// without this field is from before the versioning and fails to
 /// deserialize.
-pub const THERMAL_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+///
+/// v2: the step's active ventilation-flow variant, which the next step's
+/// ideal-capacity solve reads before the envelope re-selects it. The
+/// schedule-driven selection is mutable solver state the first post-restore
+/// solve depends on, so a snapshot without it handed that solve the
+/// rebuilding solver's selection instead of the written run's.
+pub const THERMAL_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Captured thermal state for checkpoint save/restore: every piece of
 /// mutable solver state that a step's or an ideal-capacity solve's result
@@ -50,6 +56,11 @@ pub struct ThermalSnapshot {
     /// Coupling tuples `(state_idx, d_implicit, forcing)` of the last
     /// prepared or integrated step.
     pub last_coupling: Vec<(usize, f64, f64)>,
+    /// The last step's active ventilation-flow model variant (an index into
+    /// the configured variants), or `None` when the base model governed.
+    /// The next step's ideal-capacity solve runs before the envelope
+    /// re-selects the variant, so this is the model that solve reads.
+    pub active_flow_model: Option<usize>,
     /// Mechanical ventilation sensible recovery effectiveness the next step
     /// reads, as last set by [`ThermalSolver::set_ventilation_recovery`].
     pub sensible_recovery_efficiency: f64,
@@ -135,6 +146,7 @@ impl ThermalSolver {
             interior_surface_temps: self.interior_surface_temps.clone(),
             interior_surface_prev_temps: self.interior_surface_prev_temps.clone(),
             last_coupling: self.last_coupling.clone(),
+            active_flow_model: self.active_flow_model,
             sensible_recovery_efficiency: self.config.ventilation.sensible_recovery_efficiency,
             latent_recovery_efficiency: self.config.ventilation.latent_recovery_efficiency,
             ideal_capacity_failure_counts: sorted_zone_pairs(&self.ideal_capacity_failure_counts),
@@ -148,13 +160,23 @@ impl ThermalSolver {
     /// dimensions and finite entries, every coupling keeps the coupled solve
     /// finite and leaves every zone's ideal-capacity gain as solvable as the
     /// uncoupled model makes it, the recovery efficiencies are in `[0, 1]`,
-    /// and the fallback state names only zones this solver solves, in zone
-    /// order. Reads the solver only.
+    /// the active flow variant names one of this solver's configured
+    /// variants, and the fallback state names only zones this solver
+    /// solves, in zone order. Reads the solver only.
     pub fn validate_snapshot(&self, snap: &ThermalSnapshot) -> Result<()> {
         if snap.schema_version != THERMAL_SNAPSHOT_SCHEMA_VERSION {
             return Err(invalid(format!(
                 "schema version: got {}, expected {}",
                 snap.schema_version, THERMAL_SNAPSHOT_SCHEMA_VERSION
+            )));
+        }
+        if let Some(idx) = snap.active_flow_model
+            && idx >= self.config.ventilation.flow_models.len()
+        {
+            return Err(invalid(format!(
+                "active flow model {idx} is not one of this solver's {} configured \
+                 ventilation-flow variants",
+                self.config.ventilation.flow_models.len()
             )));
         }
         check_len("x", snap.x.len(), self.x.len())?;
@@ -282,6 +304,7 @@ impl ThermalSolver {
         self.validate_snapshot(snap)?;
 
         self.invalidate_shared_prefix();
+        self.active_flow_model = snap.active_flow_model;
         self.x.copy_from_slice(&snap.x);
         self.last_u.copy_from_slice(&snap.last_u);
         self.last_coupling.clone_from(&snap.last_coupling);

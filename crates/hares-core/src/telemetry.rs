@@ -54,6 +54,16 @@ pub struct DwellingTelemetry {
     pub outdoor_temp_c: f64,
     /// Outdoor humidity ratio [kg water / kg dry air], typically 0.001–0.030.
     pub outdoor_humidity_ratio: f64,
+    /// The environment's published schedule row for the step: the row of
+    /// the step's calendar date and time. `None` when the state was built
+    /// without one.
+    pub schedule_row: Option<usize>,
+    /// The occupant count the occupancy gains read this step: the
+    /// schedule's occupancy column value times the resident scale. 0.0
+    /// when the dwelling carries no occupancy column (an intentionally
+    /// unoccupied dwelling); NaN before the first step, where no
+    /// schedule row has been read yet.
+    pub occupants_present: f64,
     /// Per-actor telemetry: actor_name → channel_name → value.
     ///
     /// `BTreeMap` (not `HashMap`) so iteration order is deterministic:
@@ -203,6 +213,8 @@ mod tests {
             island_excess_w: 0.0,
             outdoor_temp_c: 10.0,
             outdoor_humidity_ratio: 0.008,
+            schedule_row: Some(7),
+            occupants_present: 2.0,
             actor_telemetry: BTreeMap::new(),
             dwelling_failed: false,
             initialized: true,
@@ -570,6 +582,11 @@ mod tests {
         "grid_interchange_w",
         "islanded",
         "bus_voltage_pu",
+        "schedule_row",
+        "occupants_present",
+        "clock_hour",
+        "clock_day",
+        "clock_step",
     ];
 
     /// Bracket-based keys with a known zone.

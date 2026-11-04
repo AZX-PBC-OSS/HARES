@@ -16,6 +16,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use chrono::Datelike;
+
 use hares_types::{HaresError, ZoneId, normalize_ascii};
 
 use crate::telemetry::{DwellingTelemetry, ObservationWarnOnce};
@@ -68,6 +70,24 @@ pub(crate) enum ObservationKind {
     },
     TimeSin,
     TimeCos,
+    /// The environment's published schedule row for the step: the row of
+    /// the step's calendar date and time. NaN when the state carries no
+    /// schedule row.
+    ScheduleRow,
+    /// The occupant count the occupancy gains read this step: the
+    /// schedule's occupancy column value times the resident scale. 0.0
+    /// when the dwelling carries no occupancy column (an intentionally
+    /// unoccupied dwelling); NaN before the first step, where no
+    /// schedule row has been read yet.
+    OccupantsPresent,
+    /// The step's own start instant's fractional local hour, in [0, 24):
+    /// the same wall-clock the step dict's timestamp carries.
+    ClockHour,
+    /// The step's start instant's local date's day of year (1-based; the
+    /// clock's own date mapping carries the 365-day rule's Feb 29 skip).
+    ClockDay,
+    /// The dwelling's step index.
+    ClockStep,
     /// `<actor>.<channel>`: the actor found by name, the channel in its
     /// published telemetry.
     ActorDot {
@@ -277,6 +297,25 @@ fn resolve_field(
         return Ok(ObservationKind::TimeCos);
     }
 
+    // The schedule, occupancy and clock fields: the engine's own state at
+    // the step, ahead of the actor fallback so these names are never
+    // shadowed by an actor channel's.
+    if field == "schedule_row" {
+        return Ok(ObservationKind::ScheduleRow);
+    }
+    if field == "occupants_present" {
+        return Ok(ObservationKind::OccupantsPresent);
+    }
+    if field == "clock_hour" {
+        return Ok(ObservationKind::ClockHour);
+    }
+    if field == "clock_day" {
+        return Ok(ObservationKind::ClockDay);
+    }
+    if field == "clock_step" {
+        return Ok(ObservationKind::ClockStep);
+    }
+
     // Actor telemetry fallback: dot-separated <actor>.<channel>, then the
     // bare-name search in sorted-name order. A dot field whose channel the
     // actor does not publish falls through to the bare search of the whole
@@ -440,6 +479,11 @@ fn telemetry_read(
         ObservationKind::EquipmentPower { index } => telemetry.equipment_power_w[*index],
         ObservationKind::TimeSin => time_feature(telemetry, false),
         ObservationKind::TimeCos => time_feature(telemetry, true),
+        ObservationKind::ScheduleRow => telemetry.schedule_row.map_or(f64::NAN, |row| row as f64),
+        ObservationKind::OccupantsPresent => telemetry.occupants_present,
+        ObservationKind::ClockHour => fractional_hour(&telemetry.current_time),
+        ObservationKind::ClockDay => telemetry.current_time.ordinal() as f64,
+        ObservationKind::ClockStep => telemetry.timestep_index as f64,
         ObservationKind::ActorDot { actor, channel } => {
             // allowed: actor_telemetry keys are user-defined strings, not
             // static tk:: constants; the plan froze the field's own
@@ -487,12 +531,18 @@ fn bare_actor_value(
     )))
 }
 
+/// The fractional local hour `[0, 24)` of the step's wall-clock time: the
+/// hour, minute and second components' one sum, shared by the
+/// `time_sin`/`time_cos` phase and the `clock_hour` field.
+pub(crate) fn fractional_hour(t: &chrono::DateTime<chrono::FixedOffset>) -> f64 {
+    use chrono::Timelike;
+    t.hour() as f64 + t.minute() as f64 / 60.0 + t.second() as f64 / 3600.0
+}
+
 /// The `time_sin` / `time_cos` feature: the fractional hour's phase around
 /// the day, in the same arithmetic the string walk used.
 fn time_feature(telemetry: &DwellingTelemetry, cos: bool) -> f64 {
-    use chrono::Timelike;
-    let t = &telemetry.current_time;
-    let fhour = t.hour() as f64 + t.minute() as f64 / 60.0 + t.second() as f64 / 3600.0;
+    let fhour = fractional_hour(&telemetry.current_time);
     let phase = 2.0 * std::f64::consts::PI * fhour / 24.0;
     if cos {
         libm::cos(phase)

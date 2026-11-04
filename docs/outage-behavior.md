@@ -155,6 +155,9 @@ operation (the bus is at nominal voltage).
     `island_excess_w` (surplus generation the island could not absorb; the
     would-be phantom export) on `DwellingTelemetry` and in the Python
     telemetry/env dict. Both are 0.0 during normal grid-connected operation.
+    The two values ride the dwelling checkpoint (v26) beside the aggregate
+    electrical solver's last solve, so a restored run reads the written
+    run's imbalance between the restore and its next step.
     Unserved load above 0.05 kW while islanded emits a rate-limited
     `tracing` warning (once per process, debug-level thereafter). Enforcing
     hard island power balance (load shedding, source saturation physics)

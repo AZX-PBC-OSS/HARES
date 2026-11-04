@@ -18,6 +18,7 @@ use crate::schedule::ScheduleTimeSeries;
 use crate::schedule_resolve::{DEFAULT_SCHEDULES_CSV, DefaultProfiles};
 use crate::weather::{WeatherFormat, WeatherMeta, WeatherTimeSeries};
 use hares_types::HaresError;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 /// The document's record: where it came from and the SHA-256 of the bytes
@@ -51,7 +52,11 @@ fn weather_record(source: &WeatherInput) -> Result<InputRecord, HaresError> {
 /// Where one input document comes from: a path, in-memory UTF-8 text, or
 /// in-memory bytes. A path is read by the file's own reader (today's
 /// behavior, byte for byte); content is parsed from memory.
-#[derive(Debug, Clone)]
+///
+/// The sources serialize: a dwelling's pickle carries its config (the
+/// inputs and settings the dwelling rebuilds from), and the rebuild
+/// parses the sources exactly as a fresh construction does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InputSource {
     /// The document at this path.
     Path(PathBuf),
@@ -164,7 +169,7 @@ fn content_digest(content: &[u8]) -> u64 {
 /// behavior) or in-memory content with the format given, because a
 /// content source cannot be re-detected (the detection reads the path's
 /// extension and header lines).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WeatherInput {
     /// The weather file at this path; the format detected as today.
     Path(PathBuf),
@@ -230,7 +235,7 @@ impl WeatherInput {
 /// `files` names, which load from the given source instead. The base is
 /// required: no caller falls back to a working-directory `defaults`, so
 /// the numbers a run produces never depend on where it was started.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefaultsSource {
     /// The defaults directory tree: a missing, unreadable or incomplete
     /// tree is a construction error naming the path.

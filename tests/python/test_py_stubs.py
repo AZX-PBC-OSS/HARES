@@ -78,6 +78,8 @@ class TestDwellingInterface:
             "reset_with_seed",
             "save_state",
             "load_state",
+            "snapshot_state",
+            "restore_state",
             "surface_ids",
             "roof_planes",
             "pv_candidates",

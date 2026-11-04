@@ -278,6 +278,48 @@ the buffer set to NaN. And a Python actor's publication made outside
 `decide()` lands at the next drain (the next `decide()`'s return); one
 made after the last drain is dropped.
 
+The episode's lifecycle surface on the dwelling: `snapshot_state()` returns
+the episode's state as the checkpoint blob (the checkpoint's own versioned
+form), and `restore_state(state, seed=None)` restores it, optionally
+re-deriving every random stream for the seed after the restore (the gym
+reset's two calls in one). The pickle protocol rides the same blob: a
+pickled dwelling carries its config (the inputs and settings it rebuilds
+from) beside the checkpoint blob, and the unpickled dwelling resumes the
+episode (its next step is the uninterrupted run's next step, bitwise).
+The pickle does not carry actors added to the dwelling after
+construction: the unpickle refuses rather than resume without them.
+
+`VecDwellingGymEnv` carries two episode-lifecycle additions. `reset(mask=...)`
+resets only the masked envs (the default mask resets every env): an
+unmasked env's state, clock and random streams are untouched, so its next
+steps are bitwise the run's own. And with `auto_reset=True`, a step whose
+env ended (terminated or truncated) resets that env alone before the step
+returns: its observation is the new episode's first one, the ended
+episode's last observation rides `info["final_observation"]`, and its
+`info["seed"]` is the new episode's applied seed. Every step row carries
+the env's current episode seed (omitted before that env's first reset),
+the same field the single-dwelling environment reports. Each env's
+episode seeds derive from the constructor's `seed_sequence` (a
+`numpy.random.SeedSequence`): the sequence spawns one child per env and
+each of the env's episodes draws its seed from its child's next spawn, so
+the seeds are deterministic in (caller SeedSequence, env index, episode
+count) and independent across envs; with no SeedSequence the seeds draw
+from OS entropy, like `reset(seed=None)`. An explicit `reset(seed=int)`
+keeps the documented `seed + env index` form; a numpy integer is that
+same form, and any other seed type is refused naming the type before the
+reset touches a dwelling.
+
+The observation's schedule, occupancy and clock fields read the engine's
+own state at the step: `schedule_row` (the environment's published
+schedule row, NaN when the state carries none), `occupants_present` (the
+schedule's occupancy column value times the resident count, the product
+the occupancy gains read; 0.0 when the dwelling carries no occupancy
+column, NaN before the first step where no schedule row has been read
+yet), `clock_hour` (the step's own start instant's fractional local
+hour, in [0, 24), the same instant the step dict's `timestamp` carries),
+`clock_day` (that instant's local date's day of year) and `clock_step`
+(the dwelling's step index).
+
 The extension's `batch_step` takes the actions as a C-contiguous
 `(n_envs, n_actions)` float64 buffer (read in place, one row per dwelling;
 `None` steps every dwelling with no actions) and builds no step dicts

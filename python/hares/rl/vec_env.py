@@ -31,7 +31,10 @@ from .gym_env import (
     sorted_action_layout,
     telemetry_to_observation,
     validate_episode_length,
+    validated_auto_reset,
     validated_observation_fields,
+    validated_reset_seed,
+    validated_seed_sequence,
 )
 
 if TYPE_CHECKING:
@@ -83,6 +86,8 @@ class VecDwellingGymEnv:
         time_res_s: float | None = None,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
         copy: bool = True,
+        auto_reset: object = False,
+        seed_sequence: object = None,
     ) -> None:
         self._observation_fields = validated_observation_fields(observation_fields)
         if not callable(reward_fn):
@@ -90,6 +95,8 @@ class VecDwellingGymEnv:
                 f"reward_fn must be callable, got {type(reward_fn).__name__}"
             )
         validate_episode_length(episode_length)
+        self._auto_reset = validated_auto_reset(auto_reset)
+        seed_sequence = validated_seed_sequence(seed_sequence)
 
         start_method = multiprocessing.get_start_method(allow_none=True)
         if start_method == "fork":
@@ -108,6 +115,23 @@ class VecDwellingGymEnv:
 
         self._initial_snapshots = [bytes(dwelling.save_state()) for dwelling in self._dwellings]
         self.num_envs = len(self._dwellings)
+        # The two lifecycle arguments: `auto_reset` resets an env whose
+        # episode ended alone at the step's end (see step()), and
+        # `seed_sequence` is the caller SeedSequence the per-env episode
+        # seeds derive from -- one child per env, each of the env's
+        # episodes drawing its seed from its child's next spawn, so the
+        # seeds are deterministic in (caller SeedSequence, env index,
+        # episode count) and independent across envs. `None` draws each
+        # episode's seed from OS entropy instead, like reset(seed=None).
+        self._seed_children: list[np.random.SeedSequence] | None = (
+            list(seed_sequence.spawn(self.num_envs))
+            if seed_sequence is not None
+            else None
+        )
+        # Each env's current episode's applied seed, reported on every
+        # info row: an unmasked env keeps its running episode's seed, so
+        # the report is the seed the env's steps actually run under.
+        self._applied_seeds: list[int | None] = [None] * self.num_envs
 
         # The frozen observation plans, one per dwelling, built at reset()
         # against the built dwelling (lazily here for a step before any
@@ -254,21 +278,75 @@ class VecDwellingGymEnv:
         assert self._plans is not None
         return self._plans
 
-    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
+    def _next_episode_seed(self, idx: int) -> int:
+        """The next episode seed for env ``idx``: the caller SeedSequence's
+        child for this env spawns it, so the env's episodes seed
+        deterministically and independently of the other envs'; with no
+        caller SeedSequence the seed is OS entropy, like
+        ``reset(seed=None)``."""
+        if self._seed_children is not None:
+            child = self._seed_children[idx].spawn(1)[0]
+            return int(child.generate_state(1, dtype=np.uint64)[0])
+        return secrets.randbits(63)
+
+    def _apply_seed(self, seed: int | np.random.SeedSequence | None, idx: int) -> int:
+        """The applied seed for env ``idx``'s reset: an explicit int keeps
+        the documented ``seed + env index`` form; ``None`` draws from the
+        env's own stream (the caller SeedSequence's child for this env
+        when one was given, OS entropy otherwise)."""
+        if isinstance(seed, int):
+            return int(seed) + idx
+        return self._next_episode_seed(idx)
+
+    def reset(
+        self,
+        *,
+        seed: object = None,
+        options: dict[str, Any] | None = None,
+        mask: np.ndarray | None = None,
+    ):
+        """Reset the masked envs (every env by default) and return the batch's
+        observations.
+
+        ``seed`` is an integer (the documented ``seed + env index`` form), a
+        ``numpy.random.SeedSequence`` (the per-env children re-spawn from it),
+        or ``None`` (each env's own stream, OS entropy when the constructor
+        received no ``seed_sequence``). Any other type is refused naming it.
+        An unmasked env's state, clock, RNG and applied episode seed are left
+        untouched.
+        """
         del options
-        seeds: list[int] = []
+        seed = validated_reset_seed(seed)
+        if mask is None:
+            mask = np.ones(self.num_envs, dtype=bool)
+        else:
+            mask = np.asarray(mask, dtype=bool)
+            if mask.shape != (self.num_envs,):
+                raise ValueError(
+                    f"mask must hold one bool per env, shape {(self.num_envs,)}, got {mask.shape}"
+                )
+        if isinstance(seed, np.random.SeedSequence):
+            # The caller's SeedSequence (re)spawns this environment's
+            # per-env children: the envs' episode seeds derive from it
+            # from this reset on.
+            self._seed_children = list(seed.spawn(self.num_envs))
         for idx, dwelling in enumerate(self._dwellings):
-            dwelling.load_state(self._initial_snapshots[idx])
-            applied_seed = (int(seed) + idx) if seed is not None else secrets.randbits(63)
+            if not mask[idx]:
+                continue
+            applied = self._apply_seed(seed, idx)
+            dwelling.restore_state(self._initial_snapshots[idx], applied)
             # The reset restores the warmed-up state and reseeds the
             # streams, without rebuilding: the snapshot's converged
             # initial condition is kept, the episode's random streams are
             # the seed's, and no warm-up runs again. The explicit full
             # rebuild is `reset_with_seed`, which this path does not call.
-            dwelling.reseed(int(applied_seed))
-            seeds.append(int(applied_seed))
-        self._steps_elapsed[:] = 0
-        self._run_results = [None] * self.num_envs
+            # The mask leaves the unmasked envs' state, clock and RNG
+            # untouched: their next step is bitwise the run's own.
+            self._applied_seeds[idx] = applied
+        self._steps_elapsed = np.where(mask, 0, self._steps_elapsed)
+        self._run_results = [
+            None if mask[idx] else self._run_results[idx] for idx in range(self.num_envs)
+        ]
 
         # The plans are frozen at reset; the initial observation is read
         # through them into the buffer, then returned as a fresh copy.
@@ -288,7 +366,9 @@ class VecDwellingGymEnv:
                 stacklevel=2,
             )
 
-        infos: list[dict[str, Any]] = [{"seed": seeds[idx]} for idx in range(self.num_envs)]
+        infos: list[dict[str, Any]] = [
+            {"seed": self._applied_seeds[idx]} for idx in range(self.num_envs)
+        ]
         for idx in range(self.num_envs):
             infos[idx]["initial_observation_mask"] = ~np.isfinite(obs[idx])
         return obs.astype(np.float64, copy=False), infos
@@ -326,6 +406,16 @@ class VecDwellingGymEnv:
         paths clip actions to the declared bounds and call ``reward_fn``
         per environment on the same ``RewardContext`` built from the step
         dict and the dwelling's telemetry: one reward contract.
+
+        With ``auto_reset`` set, an env whose episode ended (terminated or
+        truncated) resets alone before the step returns: its observation
+        is the new episode's first one, the ended episode's last
+        observation rides ``info["final_observation"]``, and its
+        ``info["seed"]`` is the new episode's applied seed (drawn from the
+        env's own stream of the constructor's ``seed_sequence``, OS
+        entropy when none was given). The other envs' dwellings are not
+        touched by the masked reset: their next steps are bitwise the
+        un-reset run's.
         """
         arr = np.asarray(actions, dtype=np.float64)
         arr = np.ascontiguousarray(arr)
@@ -387,6 +477,14 @@ class VecDwellingGymEnv:
                     info["warnings"] = warning_messages
                 infos.append(info)
 
+        # Every step row reports the env's current episode seed, the same
+        # field (and the same omission before the env's first reset) the
+        # single-dwelling environment carries. The seed the row's step ran
+        # under is the one this env's state is seeded with.
+        for idx, info in enumerate(infos):
+            if self._applied_seeds[idx] is not None:
+                info["seed"] = self._applied_seeds[idx]
+
         # One contiguous n_envs x n_fields allocation per step by default:
         # an observation a caller keeps across steps is never overwritten.
         # copy=False returns the buffer itself, overwritten by the next
@@ -411,7 +509,41 @@ class VecDwellingGymEnv:
                 # finished RunResult is the episode's report surface.
                 self._run_results[idx] = self._dwellings[idx].finish()
 
+        if self._auto_reset:
+            self._auto_reset_ended(obs, done_arr, trunc_arr, infos)
+
         return obs, reward_arr, done_arr, trunc_arr, infos
+
+    def _auto_reset_ended(
+        self,
+        obs: np.ndarray,
+        done_arr: np.ndarray,
+        trunc_arr: np.ndarray,
+        infos: list[dict[str, Any]],
+    ) -> None:
+        """The masked auto-reset: every env whose episode ended
+        (terminated or truncated) resets alone, from the per-env seed its
+        stream spawns next; the other envs' dwellings are not touched, so
+        their next steps are bitwise the un-reset run's. The ended env's
+        returned observation is the new episode's first one, with the
+        ended episode's last observation under
+        ``info["final_observation"]``; its ``info["seed"]`` is the new
+        episode's applied seed, and the finished episode's ``RunResult``
+        stays on ``run_results`` until the next truncation replaces it."""
+        plans = self._env_plans()
+        for idx in range(self.num_envs):
+            if not (done_arr[idx] or trunc_arr[idx]):
+                continue
+            infos[idx]["final_observation"] = obs[idx].copy()
+            applied_seed = self._next_episode_seed(idx)
+            self._dwellings[idx].restore_state(
+                self._initial_snapshots[idx], applied_seed
+            )
+            self._applied_seeds[idx] = applied_seed
+            infos[idx]["seed"] = applied_seed
+            self._steps_elapsed[idx] = 0
+            self._dwellings[idx].observe_into(plans[idx], self._obs_buffer[idx])
+            obs[idx] = self._obs_buffer[idx].copy()
 
     @property
     def unwrapped(self) -> "VecDwellingGymEnv":

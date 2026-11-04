@@ -2257,6 +2257,46 @@ mod tests {
         );
     }
 
+    /// The snapshot carries the last step's active flow variant, the state
+    /// the FIRST post-restore ideal-capacity solve reads (the solve runs
+    /// before the envelope re-selects the variant for its own step). A
+    /// snapshot without it hands that solve the rebuilding solver's base
+    /// model, and the restored run's first capacity is not the written
+    /// run's.
+    #[test]
+    fn snapshot_carries_the_variant_the_first_post_restore_ideal_solve_reads() {
+        let flow_m3_s = 0.4731_f64;
+        let mut env = env_for_temp(30.0, 10.0);
+        env.domains.schedule.payload_mut().push(flow_m3_s);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mut written = flow_variant_solver(&env, &[flow_m3_s]);
+        written.x[0] = 30.0;
+        written.x[1] = 30.0;
+        written
+            .resolve_new(&ports, &env, std::time::Duration::from_secs(60))
+            .unwrap();
+        let written_capacity = written.solve_ideal_capacity_for_target(ZoneId(1), 21.0);
+        let snapshot = written.snapshot_state();
+
+        // A freshly built solver has not selected a variant: without the
+        // snapshot's field its ideal solve runs on the base model.
+        let mut restored = flow_variant_solver(&env, &[flow_m3_s]);
+        restored
+            .restore_state(&snapshot)
+            .expect("the snapshot restores");
+        let restored_capacity = restored.solve_ideal_capacity_for_target(ZoneId(1), 21.0);
+
+        assert_eq!(
+            restored_capacity.to_bits(),
+            written_capacity.to_bits(),
+            "the first post-restore ideal capacity must be the written run's: the \
+             restored solver's active flow variant is the last step's"
+        );
+    }
+
     /// The selection over a multi-rate schedule's assembled variants: each
     /// read names its variant by exact bit match, independent of the order the
     /// variants were assembled in, and the selected variant's own conductance
@@ -8531,6 +8571,22 @@ mod tests {
                 &format!("schema version: got {wrong}, expected {THERMAL_SNAPSHOT_SCHEMA_VERSION}"),
             );
         }
+    }
+
+    /// A snapshot whose active flow variant names a model this solver was
+    /// not configured with cannot be restored: the next ideal solve would
+    /// index past the variant list.
+    #[test]
+    fn restore_state_rejects_an_unknown_active_flow_variant() {
+        let env = env_for_temp(22.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        let mut bad_snap = solver.snapshot_state();
+        bad_snap.active_flow_model = Some(0);
+        assert_restore_rejected_atomically(
+            &mut solver,
+            &bad_snap,
+            "not one of this solver's 0 configured ventilation-flow variants",
+        );
     }
 
     #[test]
