@@ -1764,6 +1764,12 @@ def test_helics_publications_are_si_with_their_units(
                 f"equipment_{ei}/power_w is the telemetry's own float, on bits"
             )
             assert pub._info == "units=W"
+        # The end-to-end PV publication is the heuristic's own value for the
+        # real dwelling's telemetry, on bits - the docstring's fourth pin.
+        expected_pv = module.HELICSDwelling._compute_pv_generation(tel)
+        assert fed.publications["pv_generation_w"].published[-1] == expected_pv, (
+            "pv_generation_w is the PV heuristic's sum over this step's telemetry, on bits"
+        )
 
 
 def test_dwelling_publication_units_match_the_documented_table(

@@ -1646,3 +1646,192 @@ def test_the_fleets_drift_guard_raises_when_the_tolerance_is_exceeded() -> None:
         thread = federation.start(_run_federate, name="fleet-federate")
         with pytest.raises(RuntimeError, match="drift"):
             thread.result()
+
+
+def test_the_voltage_topics_zero_carries_the_outage_and_the_publications_witness_the_island() -> None:
+    """The contract end to end: the topic's 0.0 is the outage, the island
+    forms, and the published grid-facing topics witness it.
+
+    The aggregator publishes exactly 0.0 on ``grid/voltage`` (the outage
+    signal, docs/cosim.md's island semantics) for every step but the last
+    two, and 1.0 (restoration) there. The dwelling's island forms one step
+    after the outage's dead-bus step where an on-site battery holds the bus.
+    The states the contract pins, per published row:
+
+    - an islanded row's ``grid_interchange_w`` is exactly 0.0 (the breaker
+      is open) while the premise balance and the island channels continue;
+    - an outage row before the island forms is the dead-bus step: no
+      interchange, every load force-off (``total_power_w`` reads 0.0);
+    - a connected row's interchange is the meter's net flow, on bits with
+      ``total_power_w`` (one expression, one state);
+    - the restoration collapses the island: the final rows read islanded
+      0.0 and the meter's flow again.
+    """
+    with _Federation(n_federates=2) as federation:
+        dwelling = _new_dwelling()
+        dwelling.add_battery(
+            Battery("Battery", capacity_j=48600000, max_charge_w=5000, max_discharge_w=5000, initial_soc=0.4)
+        )
+
+        def _run_federate(ready: Callable[[], None]) -> None:
+            helics_dwelling = federation.helics_dwelling(dwelling, "house_1")
+            helics_dwelling.register_publications()
+            helics_dwelling.register_subscriptions(voltage_topic="grid/voltage")
+            ready()
+            helics_dwelling.run()
+
+        thread = federation.start(_run_federate, name="dwelling-federate")
+        thread.wait_ready()
+
+        aggregator = federation.value_federate("aggregator_1")
+        sub_interchange = aggregator.register_subscription("house_1/grid_interchange_w", "double")
+        sub_islanded = aggregator.register_subscription("house_1/islanded", "double")
+        sub_power = aggregator.register_subscription("house_1/total_power_w", "double")
+        sub_unserved = aggregator.register_subscription("house_1/island_unserved_w", "double")
+        sub_excess = aggregator.register_subscription("house_1/island_excess_w", "double")
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        steps = _TOTAL_STEPS
+        rows: list[dict[str, float | None]] = []
+        _enter_exec(aggregator)
+        for step_idx in range(steps):
+            restored = step_idx >= steps - 2
+            pub_voltage.publish(1.0 if restored else 0.0)
+            _request(aggregator, (step_idx + 1) * _TIME_RES_S)
+            if not sub_islanded.is_updated():
+                continue
+            rows.append({
+                "islanded": float(sub_islanded.double),
+                "interchange": float(sub_interchange.double) if sub_interchange.is_updated() else None,
+                "power": float(sub_power.double) if sub_power.is_updated() else None,
+                "unserved": float(sub_unserved.double) if sub_unserved.is_updated() else None,
+                "excess": float(sub_excess.double) if sub_excess.is_updated() else None,
+            })
+        aggregator.disconnect()
+
+        thread.result()
+        assert rows, "the aggregator should receive the island topics every step"
+
+        islanded_rows = [row for row in rows if row["islanded"] == 1.0]
+        assert islanded_rows, (
+            "the topic's 0.0 is the outage signal and an available battery forms an island: "
+            "islanded publishes exactly 1.0"
+        )
+        for row in islanded_rows:
+            assert row["interchange"] == 0.0, (
+                "from island formation the published interchange is exactly 0.0, on bits, "
+                f"got {row['interchange']!r}"
+            )
+            assert row["power"] is not None and row["unserved"] is not None and row["excess"] is not None, (
+                "the premise balance and the island channels continue through the outage"
+            )
+
+        dead_bus_rows = [row for row in rows if row["islanded"] == 0.0 and row["interchange"] == 0.0]
+        assert dead_bus_rows, (
+            "the outage's first step is a dead-bus step: no interchange, no island"
+        )
+
+        connected_rows = [row for row in rows if row["islanded"] == 0.0 and row["interchange"] != 0.0]
+        assert connected_rows, "a connected step's interchange is the meter's net flow"
+        for row in connected_rows:
+            assert row["interchange"] == row["power"], (
+                "a connected row's interchange is the meter's net flow, on bits with the "
+                f"premise balance: {row['interchange']!r} vs {row['power']!r}"
+            )
+
+        assert rows[-1]["islanded"] == 0.0, (
+            "the utility's restoration collapses the island: the final rows read islanded 0.0"
+        )
+
+
+def test_the_fleets_per_dwelling_interchange_reads_zero_through_an_outage() -> None:
+    """The fleet's per-dwelling grid-facing topics through a topic outage.
+
+    The aggregator publishes exactly 0.0 on ``grid/voltage`` for every step.
+    The states the contract pins, per published row:
+
+    - the aggregate grid interchange is the per-dwelling sum, on bits (a
+      sum of the per-breaker zeros once the outage enters: exactly 0.0);
+    - every islanded interchange row reads exactly 0.0 at the open breaker;
+    - the premise balances continue beside the demand channel;
+    - the roster carries no island source, so ``islanded`` reads exactly
+      0.0 on every row: no source, no island, a dead bus.
+    """
+    with _Federation(n_federates=2) as federation:
+        fleet = _new_fleet(n_dwellings=3)
+
+        def _run_federate(ready: Callable[[], None]) -> None:
+            helics_fleet = federation.helics_fleet(fleet, "fleet_1")
+            helics_fleet.register_publications()
+            helics_fleet.register_subscriptions(voltage_topic="grid/voltage")
+            ready()
+            helics_fleet.run()
+
+        thread = federation.start(_run_federate, name="fleet-federate")
+        thread.wait_ready()
+
+        aggregator = federation.value_federate("aggregator_1")
+        sub_interchange = [
+            aggregator.register_subscription(f"fleet_1/dwelling_{i}/grid_interchange_w", "double")
+            for i in range(3)
+        ]
+        sub_islanded = [
+            aggregator.register_subscription(f"fleet_1/dwelling_{i}/islanded", "double")
+            for i in range(3)
+        ]
+        sub_aggregate_interchange = aggregator.register_subscription(
+            "fleet_1/aggregate_grid_interchange_w", "double"
+        )
+        sub_aggregate_power = aggregator.register_subscription("fleet_1/aggregate_power_w", "double")
+        pub_voltage = aggregator.register_global_publication("grid/voltage", "double")
+
+        rows: list[dict[str, Any]] = []
+        _enter_exec(aggregator)
+        for step_idx in range(_TOTAL_STEPS):
+            pub_voltage.publish(0.0)
+            _request(aggregator, (step_idx + 1) * _TIME_RES_S)
+            if not sub_aggregate_interchange.is_updated():
+                continue
+            rows.append({
+                "interchange": [float(sub.double) if sub.is_updated() else None for sub in sub_interchange],
+                "islanded": [float(sub.double) if sub.is_updated() else None for sub in sub_islanded],
+                "aggregate_interchange": float(sub_aggregate_interchange.double),
+                "aggregate_power": float(sub_aggregate_power.double) if sub_aggregate_power.is_updated() else None,
+            })
+        aggregator.disconnect()
+
+        thread.result()
+        assert rows, "the aggregator should receive the fleet's demand topics every step"
+        for row in rows:
+            # The aggregate is the per-dwelling sum accumulated in dwelling
+            # order by plain addition (the orchestrator's loop); Python's
+            # sum() is Neumaier-compensated and one ULP off the same floats,
+            # so the pin replicates the accumulation itself.
+            received_sum = 0.0
+            for value in row["interchange"]:
+                if value is not None:
+                    received_sum += value
+            assert row["aggregate_interchange"] == received_sum, (
+                "the aggregate grid interchange is the per-dwelling sum, on bits"
+            )
+            for islanded in row["islanded"]:
+                if islanded is not None:
+                    assert islanded == 0.0, (
+                        "no island source in the roster: no island, a dead bus"
+                    )
+            assert row["aggregate_power"] is not None, (
+                "the premise balance continues beside the demand channel"
+            )
+
+        outage_rows = [row for row in rows if row["aggregate_interchange"] == 0.0]
+        assert outage_rows, (
+            "the topic's 0.0 is the outage signal: the fleet's demand channel reads "
+            "exactly 0.0 once it enters, never the islands' phantom imbalance"
+        )
+        for row in outage_rows:
+            for idx, interchange in enumerate(row["interchange"]):
+                if interchange is not None:
+                    assert interchange == 0.0, (
+                        f"dwelling {idx}'s interchange through the outage is exactly 0.0, "
+                        f"got {interchange!r}"
+                    )
