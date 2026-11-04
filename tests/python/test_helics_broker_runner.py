@@ -579,6 +579,73 @@ def test_the_emitted_dwelling_command_joins_the_federation() -> None:
         broker_module.destroy_broker(broker)
 
 
+@pytest.mark.timeout(60, method="thread")
+def test_the_dwelling_command_reports_its_input_errors_without_a_traceback() -> None:
+    """The command's input errors are the typed error's exit, not a traceback.
+
+    The entry point builds the dwelling before it joins anything, so a bad
+    HPXML path and a bad horizon are configuration errors: the child prints
+    the typed message (the file it could not read, the field it could not
+    parse) and exits nonzero, rather than dumping the interpreter's frames
+    at the runner's log. No broker is created: the failures are before
+    registration.
+    """
+    from conftest import ROOT, SCHEDULE, WEATHER
+
+    env = dict(os.environ)
+    env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
+    from offline_guard import SITE_DIR
+
+    env["HARES_TESTS_OFFLINE"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join([str(SITE_DIR), str(ROOT / "python")])
+
+    def _run(hpxml: Path, start: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "hares.helics.dwelling",
+                "--name=house_1",
+                f"--hpxml={hpxml}",
+                f"--weather={WEATHER}",
+                f"--schedule={SCHEDULE}",
+                f"--start={start}",
+                "--duration-s=900",
+                "--time-res-s=900",
+            ],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            timeout=45,
+        )
+
+    bad_hpxml = _run(
+        ROOT / "tests/fixtures/hpxml/ochre_samples/no_such_file.xml",
+        "2019-01-01T00:00:00",
+    )
+    assert bad_hpxml.returncode != 0, "a bad HPXML path must fail the launch"
+    assert "Traceback" not in bad_hpxml.stderr.decode(), (
+        "the typed configuration error is the exit's message, not a traceback:\n"
+        f"{bad_hpxml.stderr.decode()}"
+    )
+    assert "no_such_file.xml" in bad_hpxml.stderr.decode(), (
+        f"the refusal names the file it could not read:\n{bad_hpxml.stderr.decode()}"
+    )
+
+    bad_start = _run(
+        ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml",
+        "not-a-timestamp",
+    )
+    assert bad_start.returncode != 0, "an unparseable start must fail the launch"
+    assert "Traceback" not in bad_start.stderr.decode(), (
+        "the horizon's typed validation is the exit's message, not a traceback:\n"
+        f"{bad_start.stderr.decode()}"
+    )
+    assert "invalid start_time format" in bad_start.stderr.decode(), (
+        f"the refusal names the start it could not parse:\n{bad_start.stderr.decode()}"
+    )
+
+
 def _probe_fedinfo(core_type: str, core_name: str, core_init: str) -> Any:
     import helics
 

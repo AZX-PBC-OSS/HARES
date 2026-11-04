@@ -88,6 +88,7 @@ import json
 import logging
 import math
 from itertools import chain
+import sys
 from typing import Any, TypedDict
 
 try:
@@ -1373,20 +1374,29 @@ def main(argv: list[str] | None = None) -> int:
     federation, registers, and publishes until its run completes.
     """
     opts = _parse_args(argv)
-    config = SimulationConfig(
-        start_time=opts.start,
-        duration=opts.duration_s,
-        time_res=opts.time_res_s,
-        master_seed=opts.master_seed,
-    )
-    dwelling = PyDwelling.from_hpxml(
-        opts.hpxml,
-        opts.schedule,
-        opts.weather,
-        config=config,
-        bldg_id=opts.bldg_id,
-    )
-    dwelling.initialize()
+    try:
+        config = SimulationConfig(
+            start_time=opts.start,
+            duration=opts.duration_s,
+            time_res=opts.time_res_s,
+            master_seed=opts.master_seed,
+        )
+        dwelling = PyDwelling.from_hpxml(
+            opts.hpxml,
+            opts.schedule,
+            opts.weather,
+            config=config,
+            bldg_id=opts.bldg_id,
+        )
+        dwelling.initialize()
+    except ValueError as exc:
+        # A bad input is the operator's fix to make, not a stack trace to
+        # read: the typed error names the file or field, and the exit code
+        # keeps the runner from treating the launch as a success. The
+        # horizon's own validation (an unparseable start, a non-positive
+        # duration) is the same class of failure.
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
     orchestrator = HELICSDwelling(
         dwelling,
