@@ -106,11 +106,12 @@ Location: `tests/bestest/`
 | 650 | Night ventilation (a 1703.16 m³/h fan, 1800–0700) | Annual heating and cooling loads |
 | 950 | Night ventilation, high mass | Annual heating and cooling loads |
 
-Case 650 runs against its bands. Case 950's annual test is stopped at a
-measured cooling divergence (the `tests/bestest` module comment records
-the numbers); the fan schedule both cases share is the
-`[ventilation] flow_schedule_m3_s` fixture table, expanded to per-step
-schedule values and read by the thermal solver at every step.
+Case 650 and Case 950 both run against their bands. The fan schedule both
+cases share is the `[ventilation] flow_schedule_m3_s` fixture table, expanded
+to per-step schedule values and read by the thermal solver at every step;
+each distinct non-zero rate also gets a discretized model variant (the
+rate's conductance inside the discretization), the coupling the 950's
+high-mass night purge needed to close its band.
 
 ### Reference bands
 

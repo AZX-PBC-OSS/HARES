@@ -3177,6 +3177,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         }
     }
 

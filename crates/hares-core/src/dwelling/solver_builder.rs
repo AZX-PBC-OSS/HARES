@@ -9,10 +9,11 @@ use hares_envelope::{
     ExteriorTarget, FilmCoefficientModel, HumiditySolver, HumiditySolverConfig,
     INTERIOR_SOLAR_ABSORPTANCE_DEFAULT, InteriorConvectionInjection, InteriorSolarSurfaceInfo,
     InteriorSolarZoneConfig, NodeId, SOLAR_ABSORPTANCE_DEFAULT, SOLAR_ABSORPTANCE_RADIANT_BARRIER,
-    StateSpaceWiring, SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, WindowSolarProperties,
-    assemble_building_rc, derive_zone_capacitances, skin_rad_coupling,
+    StateSpaceWiring, SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, VentilationFlowModel,
+    WindowSolarProperties, assemble_building_rc, derive_zone_capacitances, skin_rad_coupling,
 };
 use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
+use hares_physics::constants::CP_DRY_AIR_J_KG_K;
 #[cfg(feature = "observe")]
 use hares_physics::film_coefficients::{SurfaceRoughness, film_resistances};
 use hares_physics::infiltration::{ShieldingClass, TerrainClass};
@@ -1620,6 +1621,88 @@ pub(crate) fn build_default_solvers(
     // declared.
     if let Some(col) = building.ventilation_flow_schedule_col {
         thermal_cfg.ventilation.flow_schedule_col = Some(col);
+
+        // The scheduled flow's discretized variants: each distinct non-zero
+        // rate's sensible conductance joins the continuous matrices on the
+        // indoor zone's air row (and its outdoor driving column) before the
+        // zero-order-hold discretization, so the step's within-step dynamics
+        // move the surface nodes against the fan-pinned zone air: the exact
+        // ZOH of the linear airflow coupling. Without a variant the surfaces
+        // integrate against a fan-free air node (they equilibrate with it,
+        // losing the purge's mass discharge) and the fan's conductance rides
+        // only the zone row's post-step diagonal. OCHRE's
+        // `linearize_infiltration` mode (Envelope.py
+        // `add_infiltration_resistances`) puts the same conductance in its RC
+        // network; the per-step semi-implicit coupling keeps the residual.
+        // The conductance uses the construction-time operating density (the
+        // ISA pressure at the site elevation, the annual-mean ambient, dry
+        // air); the per-step density's ratio and the infiltration and
+        // natural-ventilation shares stay on the coupling.
+        if !building.ventilation_flow_schedule_values.is_empty() {
+            let zone_idx = env
+                .zones
+                .iter()
+                .position(|z| z.id == indoor.id)
+                .ok_or_else(|| {
+                    HaresError::Envelope(format!(
+                        "the ventilation flow schedule's zone {} is not in the env's zones",
+                        indoor.id.0
+                    ))
+                })?;
+            let zone_row = zone_state_rows[zone_idx];
+            let c_zone_j_k =
+                zone_capacitances[zone_idx].max(hares_envelope::boundary_rc::MIN_CAPACITANCE_J_K);
+            let forced_sens_eff = if thermal_cfg.ventilation.balanced {
+                1.0 - thermal_cfg.ventilation.sensible_recovery_efficiency
+            } else {
+                1.0
+            };
+            let rho_nominal_kg_m3 = hares_physics::air_properties::moist_air_density_kg_m3(
+                site_pressure_pa,
+                weather_avgs.avg_ambient_c,
+                0.0,
+            );
+            // The fan's driving temperature is the outdoor dry bulb: the same
+            // external column the envelope's other outdoor couplings read. A
+            // building with no outdoor-facing boundary has no outdoor column
+            // and cannot declare a fan schedule (the envelope assembly would
+            // have nothing to ventilate against).
+            let outdoor_col_idx = outdoor_col.ok_or_else(|| {
+                HaresError::Envelope(
+                    "the building declares a ventilation flow schedule but the RC network \
+                     has no outdoor driving column"
+                        .to_string(),
+                )
+            })?;
+            for &flow_m3_s in &building.ventilation_flow_schedule_values {
+                let forced_conductance_w_k =
+                    rho_nominal_kg_m3 * flow_m3_s * CP_DRY_AIR_J_KG_K * forced_sens_eff;
+                let mut a_c_with_flow = a_c.clone();
+                let mut b_c_with_flow = b_c.clone();
+                a_c_with_flow[(zone_row, zone_row)] -= forced_conductance_w_k / c_zone_j_k;
+                b_c_with_flow[(zone_row, outdoor_col_idx)] += forced_conductance_w_k / c_zone_j_k;
+                let variant_model = StateSpaceModel::from_continuous(
+                    &a_c_with_flow,
+                    &b_c_with_flow,
+                    dt_s,
+                    &output_mapping,
+                )
+                .map_err(|err| {
+                    HaresError::Envelope(format!(
+                        "ventilation flow variant {flow_m3_s} m3/s discretization \
+                                 failed: {err}"
+                    ))
+                })?;
+                thermal_cfg
+                    .ventilation
+                    .flow_models
+                    .push(VentilationFlowModel {
+                        flow_m3_s,
+                        forced_conductance_w_k,
+                        model: variant_model,
+                    });
+            }
+        }
     }
 
     // --- Duct leakage → infiltration adjustment (ASHRAE 152 §9.3) ---
@@ -2071,6 +2154,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         }
     }
 
@@ -3516,6 +3600,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         };
 
         let boundary_inputs = vec![BoundaryInput {
@@ -3736,6 +3821,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         };
 
         let boundary_inputs = vec![BoundaryInput {
@@ -3984,6 +4070,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         };
 
         // Production resolves an attic exterior zone to ExteriorTarget::Zone
@@ -4233,6 +4320,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         };
 
         let (r_glass, r_film_int, r_film_ext) =
@@ -4534,6 +4622,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         };
 
         // r_glass and film resistances from the E+ Step 1 polynomial for U=1.8.
@@ -4813,6 +4902,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         };
 
         // NFRC conditions: moderate wind (2 m/s), moderate ΔT.
@@ -5082,6 +5172,7 @@ mod tests {
             parse_warnings: Vec::new(),
             eri_calculation_version: None,
             ventilation_flow_schedule_col: None,
+            ventilation_flow_schedule_values: Vec::new(),
         };
 
         // High wind (15 m/s) — boundary_input still carries E+ polynomial values.

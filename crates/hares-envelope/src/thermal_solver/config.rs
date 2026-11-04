@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::NodeId;
+use crate::state_space::VentilationFlowModel;
 pub use hares_physics::infiltration::OpeningType;
 use hares_physics::solar::GlazingCurve;
 use hares_types::ZoneId;
@@ -174,6 +175,16 @@ pub struct MechanicalVentilationParams {
     /// Latent heat recovery efficiency [0.0–1.0].
     /// Reduces the latent ventilation load for balanced systems.
     pub latent_recovery_efficiency: f64,
+    /// Discretized model variants for the scheduled flow's distinct values,
+    /// built by the solver builder when the configuration declares a
+    /// `flow_schedule_m3_s` column. Each variant's continuous matrices carry
+    /// that flow's sensible conductance on the zone air node before
+    /// discretization, so the step's within-step dynamics move the surface
+    /// nodes against the fan-pinned zone air; the per-step semi-implicit
+    /// coupling then carries only the residual. Empty (the default) on the
+    /// constants' path, where the whole airflow conductance rides the
+    /// per-step coupling.
+    pub flow_models: Vec<VentilationFlowModel>,
 }
 
 /// Configuration for natural ventilation through operable windows.
@@ -1580,6 +1591,7 @@ mod tests {
         let params = MechanicalVentilationParams {
             zone_flow_m3_s: HashMap::from([(ZoneId(1), 0.035)]),
             flow_schedule_col: None,
+            flow_models: Vec::new(),
             balanced: true,
             sensible_recovery_efficiency: 0.75,
             latent_recovery_efficiency: 0.50,

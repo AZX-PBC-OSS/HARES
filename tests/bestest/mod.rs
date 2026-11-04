@@ -420,23 +420,31 @@ fn ideal_controller_holds_the_declared_heating_bound() {
     );
 }
 
-// Case 950: the fixture is committed and build-tracked (below), and the
-// annual test STOPS at a measured divergence. The scheduled-ventilation
-// surface lands (Case 650 runs against its bands in-band, the surface's
-// proof), and Case 950 (Case 650 with the high-mass materials) runs its
-// annual cooling load 1859.901051 kWh against the band [586, 707]
-// (ASHRAE 140-2023 Annex B8 Table B8-2): 1152.901051 kWh above the ceiling,
-// 2.63x. The heating load is exactly zero, in band. The divergence is the
-// engine's high-mass night-purge coupling, not the fixture or the surface:
-// the fan schedule, the thermostat gating and the constructions are the
-// standard's, Case 650's purge lands in band on the same surface, and the
-// engine's own Case 900 cooling is in band (2546.2 against [2267, 2714]),
-// so the purge removes 27 percent of Case 900's cooling where the reference
-// range removes about 75 percent. The known neighbor is the RC-split rule's
-// under-resolution of the R25 floor slab (the transmitted wave halves, the
-// phase advances 3.6 h), the envelope-numerics class. The bands are the
-// standard's and are not widened; the annual test lands when the physics
-// does.
+// Case 950: the fixture is committed, build-tracked (below), and the annual
+// band test runs. The scheduled-ventilation surface lands (Case 650 runs
+// against its bands in-band, the surface's proof), and Case 950 (Case 650
+// with the high-mass materials) runs its annual cooling load in band
+// [586, 707] (ASHRAE 140-2023 Annex B8 Table B8-2) with the heating load
+// exactly zero. The case's divergence was the engine's airflow coupling
+// form: the mechanical ventilation's conductance rode only the zone air
+// row's post-step semi-implicit diagonal, so within the zero-order-hold step
+// the surface nodes integrated against a fan-free air node: the air
+// equilibrated with the surfaces and the pair's heat was conserved, and the
+// concrete walls ended every purged night at the temperature they would hold
+// without the fan (their stored heat never left through the interior films).
+// The purge removed 27 percent of Case 900's cooling where the reference
+// range removes about 75 percent. The coupling's loss is proven by the
+// timestep sweep it was diagnosed with: the annual cooling ran 1765.8 at the
+// 3600 s step, 1247.8 at 900 s, 923.2 at 300 s, converging toward the band
+// as the within-step coupling recovered. The fix puts each distinct
+// non-zero scheduled flow's sensible conductance into the continuous
+// matrices on the zone air row (and its outdoor driving column) before
+// discretization, the exact ZOH of the linear airflow coupling (OCHRE's
+// `linearize_infiltration` mode puts the same conductance in its RC
+// network); the per-step semi-implicit coupling keeps only the residual: the
+// operating density's ratio and the infiltration and natural-ventilation
+// shares. See docs/PHYSICS_DECISIONS.md, "Scheduled ventilation flow joins
+// the discretized RC model".
 
 #[test]
 fn bestest_extended_cases_are_tracked() {
@@ -479,9 +487,9 @@ fn bestest_in_depth_cases_are_tracked() {
 
 /// Case 950's fixture builds and carries the scheduled-ventilation surface:
 /// the `[ventilation] flow_schedule_m3_s` column lands on the thermal
-/// solver's configuration as the fan's per-step schedule read. The annual
-/// band test for this case is stopped at the measured divergence the
-/// comment above records.
+/// solver's configuration as the fan's per-step schedule read, and the
+/// schedule's distinct non-zero rates reach the solver as discretized flow
+/// variants (the fan's conductance inside the discretization).
 #[test]
 fn bestest_high_mass_night_ventilation_case_is_tracked() {
     let case = core_cases()
@@ -582,10 +590,16 @@ fn bestest_case_650() {
     run_single_case(&case);
 }
 
-// BESTEST Case 950's annual band test is STOPPED at the measured divergence
-// the comment above records: the case is build-tracked
-// (`bestest_high_mass_night_ventilation_case_is_tracked`), the fan schedule's
-// surface is the one 650's landing proves, and the bands stay the standard's.
+// BESTEST Case 950's annual band test runs against the standard's bands: the
+// build-track test (`bestest_high_mass_night_ventilation_case_is_tracked`)
+// pins the scheduled-ventilation surface, the fan schedule's surface is the
+// one 650's landing proves, and the bands stay the standard's.
+
+#[test]
+fn bestest_case_950() {
+    let case = core_cases().into_iter().find(|c| c.id == "950").unwrap();
+    run_single_case(&case);
+}
 
 // Cases 195, 395 and 920: the annual band tests, un-stopped. The bands
 // are the standard's Annex B8 rows, pinned un-widened; the drift-lock

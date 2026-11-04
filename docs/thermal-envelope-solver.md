@@ -217,6 +217,19 @@ factorization replaces the O(n) diagonal-scaling path.
 infiltration coupling (`resolve_internal()` in `stepping.rs`). All buffers are
 pre-allocated — zero per-step heap allocation.
 
+A fixture declaring a scheduled ventilation flow
+(`[ventilation] flow_schedule_m3_s`) additionally gets one discretized model
+variant per distinct non-zero rate in the schedule's table, built with that
+rate's sensible conductance folded into the continuous matrices on the zone
+air row (and its outdoor driving column) before discretization. The step
+selects the variant by the schedule's per-step read and the semi-implicit
+coupling carries only the residual (the operating density's ratio and the
+infiltration and natural-ventilation shares); without the variant the
+surface nodes' within-step dynamics would integrate against a fan-free air
+node and the mass's night-purge discharge would be lost (BESTEST 950's
+documented failure mode). See `docs/PHYSICS_DECISIONS.md`, "The scheduled
+ventilation flow's conductance joins the discretized RC model".
+
 ### Input Application Order
 
 `build_input_vector()` writes to u via pre-computed index maps in

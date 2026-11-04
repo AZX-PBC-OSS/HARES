@@ -450,8 +450,11 @@ impl ThermalSolver {
         // reuse it. The prefix depends on x and last_u only, not on whether
         // couplings are active.
         if !self.shared_prefix_valid {
-            self.model
-                .fill_shared_prefix(&self.x, &self.last_u, &mut self.solve_scratch);
+            let model = match self.active_flow_model {
+                Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                None => &self.model,
+            };
+            model.fill_shared_prefix(&self.x, &self.last_u, &mut self.solve_scratch);
             self.shared_prefix_valid = true;
             #[cfg(test)]
             {
@@ -464,7 +467,11 @@ impl ThermalSolver {
         }
 
         let total = if self.last_coupling.is_empty() {
-            self.model.solve_uncoupled_tail(
+            let model = match self.active_flow_model {
+                Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                None => &self.model,
+            };
+            model.solve_uncoupled_tail(
                 &self.x,
                 &self.last_u,
                 target_c,
@@ -473,7 +480,11 @@ impl ThermalSolver {
                 &mut self.solve_scratch,
             )
         } else {
-            self.model.solve_identity_coupled_tail(
+            let model = match self.active_flow_model {
+                Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                None => &self.model,
+            };
+            model.solve_identity_coupled_tail(
                 &self.x,
                 &self.last_u,
                 ScalarSolveTarget {
@@ -598,6 +609,14 @@ impl ThermalSolver {
 
     pub(super) fn build_coupling(&mut self) {
         self.coupling_buf.clear();
+        // The scheduled flow's share of the indoor zone's airflow conductance
+        // rides the active variant's discretized matrices (the conductance is
+        // folded into the continuous matrices before discretization); the
+        // coupling carries only the residual: the operating density's ratio
+        // and the infiltration and natural-ventilation shares. Without an
+        // active variant the whole conductance rides the coupling.
+        let indoor_forced_conductance_w_k = self.active_forced_conductance_w_k();
+        let indoor_zone = self.config.indoor_zone_id;
         for inf in &self.infiltration_buf {
             if inf.h_inf_w_k.abs() < 1e-15 {
                 continue;
@@ -608,9 +627,16 @@ impl ThermalSolver {
             let Some(&input_idx) = self.wiring.zone_sensible_input_indices.get(&inf.zone) else {
                 continue;
             };
-            let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
-            let d = inf.h_inf_w_k * b_coeff;
-            let forcing = inf.h_inf_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
+            let h_coupled_w_k = match indoor_forced_conductance_w_k {
+                Some(g) if inf.zone == indoor_zone => inf.h_inf_w_k - g,
+                _ => inf.h_inf_w_k,
+            };
+            if h_coupled_w_k.abs() < 1e-15 {
+                continue;
+            }
+            let b_coeff = self.model_for_step().b_eff()[(state_idx, input_idx)];
+            let d = h_coupled_w_k * b_coeff;
+            let forcing = h_coupled_w_k * inf.t_forcing_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));
         }
 
@@ -628,7 +654,7 @@ impl ThermalSolver {
             if h_rad_w_k.abs() < 1e-15 {
                 continue;
             }
-            let b_coeff = self.model.b_eff()[(state_idx, input_idx)];
+            let b_coeff = self.model_for_step().b_eff()[(state_idx, input_idx)];
             let d = h_rad_w_k * b_coeff;
             let forcing = h_rad_w_k * t_eff_c * b_coeff + d * self.x[state_idx];
             self.coupling_buf.push((state_idx, d, forcing));
@@ -799,7 +825,11 @@ impl ThermalSolver {
         }
 
         if !self.coupling_buf.is_empty() {
-            self.model.step_with_identity_coupling_into_scratch(
+            let model = match self.active_flow_model {
+                Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                None => &self.model,
+            };
+            model.step_with_identity_coupling_into_scratch(
                 &self.x,
                 &u,
                 &mut self.rhs_buf,
@@ -807,7 +837,11 @@ impl ThermalSolver {
                 &mut self.d_agg_buf,
             );
         } else {
-            self.model.step_into(&self.x, &u, &mut self.rhs_buf);
+            let model = match self.active_flow_model {
+                Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                None => &self.model,
+            };
+            model.step_into(&self.x, &u, &mut self.rhs_buf);
         }
 
         std::mem::swap(&mut self.x, &mut self.rhs_buf);
@@ -817,8 +851,11 @@ impl ThermalSolver {
         // out (`u_buf`-style) so it can be handed back after
         // `format_domain_update` reads it.
         let mut y_next = std::mem::replace(&mut self.y_buf, DVector::zeros(0));
-        self.model
-            .output_into(&self.x, &u, &mut y_next, &mut self.du_buf);
+        let model = match self.active_flow_model {
+            Some(idx) => &self.config.ventilation.flow_models[idx].model,
+            None => &self.model,
+        };
+        model.output_into(&self.x, &u, &mut y_next, &mut self.du_buf);
 
         // Net interior-face convection per boundary category. This feeds the
         // "Wall/Floor/Roof/Window/Internal Mass Heat Gain - Indoor (W)"
@@ -1100,7 +1137,11 @@ impl ThermalSolver {
             if self.coupling_buf.is_empty() {
                 // Uncoupled step: external = B_d·u, internal = (A_d−I)·x_prev
                 let b_d_u = &mut self.balance_buf_a;
-                self.model.step_into(x_zero, &u, b_d_u);
+                let model = match self.active_flow_model {
+                    Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                    None => &self.model,
+                };
+                model.step_into(x_zero, &u, b_d_u);
 
                 let mut external_w = 0.0_f64;
                 for &(idx, c_j_k) in &self.balance_node_terms {
@@ -1110,7 +1151,11 @@ impl ThermalSolver {
 
                 // (A_d·x_prev − x_prev) = (A_d − I)·x_prev
                 let a_d_x = &mut self.balance_buf_b;
-                self.model.step_into(&self.rhs_buf, u_zero, a_d_x);
+                let model = match self.active_flow_model {
+                    Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                    None => &self.model,
+                };
+                model.step_into(&self.rhs_buf, u_zero, a_d_x);
                 let mut internal_w = 0.0_f64;
                 for &(idx, c_j_k) in &self.balance_node_terms {
                     internal_w += c_j_k * (a_d_x[idx] - self.rhs_buf[idx]) / dt_s;
@@ -1134,6 +1179,10 @@ impl ThermalSolver {
                 let h = balance_bufs.0;
                 let g_u = balance_bufs.1;
                 let f_minus_i_x = balance_bufs.2;
+                let model = match self.active_flow_model {
+                    Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                    None => &self.model,
+                };
 
                 // Aggregate diagonal damping per state index before dividing.
                 //
@@ -1153,8 +1202,7 @@ impl ThermalSolver {
                 }
 
                 // h  = coupled_step(0, 0)
-                self.model
-                    .build_coupled_rhs(x_zero, u_zero, h, &self.coupling_buf);
+                model.build_coupled_rhs(x_zero, u_zero, h, &self.coupling_buf);
                 for i in 0..n_states {
                     if d_agg[i] != 0.0 {
                         h[i] /= 1.0 + d_agg[i];
@@ -1162,8 +1210,7 @@ impl ThermalSolver {
                 }
 
                 // g_u = coupled_step(0, u) − h
-                self.model
-                    .build_coupled_rhs(x_zero, &u, g_u, &self.coupling_buf);
+                model.build_coupled_rhs(x_zero, &u, g_u, &self.coupling_buf);
                 for i in 0..n_states {
                     if d_agg[i] != 0.0 {
                         g_u[i] /= 1.0 + d_agg[i];
@@ -1174,12 +1221,7 @@ impl ThermalSolver {
                 }
 
                 // f_minus_i_x = coupled_step(x_prev, 0) − h − x_prev
-                self.model.build_coupled_rhs(
-                    &self.rhs_buf,
-                    u_zero,
-                    f_minus_i_x,
-                    &self.coupling_buf,
-                );
+                model.build_coupled_rhs(&self.rhs_buf, u_zero, f_minus_i_x, &self.coupling_buf);
                 for i in 0..n_states {
                     if d_agg[i] != 0.0 {
                         f_minus_i_x[i] /= 1.0 + d_agg[i];
@@ -1247,16 +1289,19 @@ impl ThermalSolver {
                     self.apply_port_shortwave_inputs(&mut u_port, ports, receipt_is_winter);
                 let mut b_d_port = std::mem::take(&mut self.port_receipt_bd_buf);
                 b_d_port.fill(0.0);
+                let model = match self.active_flow_model {
+                    Some(idx) => &self.config.ventilation.flow_models[idx].model,
+                    None => &self.model,
+                };
                 if self.coupling_buf.is_empty() {
-                    self.model
-                        .step_into(&self.balance_x_zero, &u_port, &mut b_d_port);
+                    model.step_into(&self.balance_x_zero, &u_port, &mut b_d_port);
                 } else {
                     // The port-only response through the same coupled
                     // operator the step applies: `(I + D)⁻¹·B_d·u`, the
                     // `u`-dependent half of the balance block's `g_u`. The
                     // affine term `h` is `u`-independent and is subtracted
                     // so only the ports' share remains.
-                    self.model.build_coupled_rhs(
+                    model.build_coupled_rhs(
                         &self.balance_x_zero,
                         &u_port,
                         &mut b_d_port,

@@ -2492,3 +2492,50 @@ The alternatives
 rejected: the per-step TARP form (the registered production-disabled
 model, its own bench cost) and OCHRE's clamped-ΔT frozen form (the
 D-031 record).
+
+## The scheduled ventilation flow's conductance joins the discretized RC model
+
+A fixture declaring `[ventilation] flow_schedule_m3_s` (the BESTEST 650/950
+night-purge fan, and any synthetic configuration with a scheduled fan) gets,
+for each distinct non-zero rate in the schedule's table, a discretized model
+variant whose continuous matrices carry that rate's sensible conductance on
+the indoor zone's air row (and its outdoor driving column) before the
+zero-order-hold discretization. The step selects the variant by exact bit
+match with the schedule's per-step read; the per-step semi-implicit airflow
+coupling keeps only the residual (the operating density's ratio and the
+infiltration and natural-ventilation shares). The constants' ventilation
+path (no declared schedule column) is unchanged: its whole conductance rides
+the per-step coupling as before.
+
+The form the variant replaces: the fan's conductance rode only the zone
+air row's post-step diagonal (`x_next[zone] = ((N·x + B_eff·u)[zone] +
+h·b_eff·T_out) / (1 + h·b_eff)`), which lands the zone air node on the
+correct quasi-steady blend but leaves every surface row's within-step
+dynamics integrating against a fan-free air node. Inside the step the air
+node equilibrates with the surfaces, the air+surface pair's heat is
+conserved, and the mass cannot discharge: the zone row's damping acts after
+the dynamics, not during them. On BESTEST 950 the concrete walls ended every
+purged night at the temperature they would hold without the fan (~30 C
+surfaces at 07:00 with the zone air purged to 19-23 C), the annual cooling
+ran 1765.8 kWh against the ASHRAE 140-2023 Annex B8 band [586, 707] (2.50x
+the ceiling), and the purge removed 27 percent of Case 900's cooling where
+the reference range removes about 75 percent. The coupling's loss is proven
+by the timestep sweep the diagnosis ran: the annual cooling gave 1765.8 at
+the 3600 s step, 1247.8 at 900 s, 923.2 at 300 s, converging toward the
+band as the within-step coupling recovered, because at finer steps the
+fan-free pair's conservation holds for less time per hour.
+
+The source: ASHRAE 140's zone heat balance puts the ventilation term
+(`m·cp·(T_out − T_zone)`) in the air node's balance simultaneously with the
+interior film conductances, so the surfaces discharge into fan-pinned air
+continuously; the exact ZOH of that linear coupling is what the variant
+discretizes. OCHRE's `linearize_infiltration` mode
+(`Envelope.py add_infiltration_resistances`) puts the same linearized
+infiltration and ventilation conductance into its RC network as an
+EXT-to-zone resistor. The alternative rejected: sub-stepping the coupled
+step (the 300 s sweep number is still 923.2, above the ceiling, and the cost
+lands on every purged step). Measured at the 3600 s step on the Denver
+TMY3 fixture year: 950 cooling 1765.8 → 648.1 kWh (in band, the band
+midpoint's neighbourhood), 650 cooling 4860.4 → 4515.3 kWh (in band), every
+no-ventilation case bit-identical (the variant path is reachable only
+through a declared schedule column).

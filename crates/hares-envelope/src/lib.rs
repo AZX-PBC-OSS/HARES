@@ -38,8 +38,8 @@ pub use longwave_radiation::{
 pub use rc_network::{NodeId, RCNetwork, RCNetworkError, parallel_resistance};
 pub use state_space::{
     OutputMapping, ScalarSolveTarget, SolveScratch, StabilityResult, StateSpaceError,
-    StateSpaceModel, ZERO_GAIN_EPSILON, discretize_auto, discretize_zoh, eigenvalue_check,
-    matrix_exp, van_loan_discretize,
+    StateSpaceModel, VentilationFlowModel, ZERO_GAIN_EPSILON, discretize_auto, discretize_zoh,
+    eigenvalue_check, matrix_exp, van_loan_discretize,
 };
 pub use thermal_solver::{
     BoundaryCategory, BoundaryDiagnosticInfo, DrivingTemp, EnvelopeComponentGains,
