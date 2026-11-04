@@ -378,6 +378,8 @@ def test_make_dwelling_federate_config(monkeypatch: pytest.MonkeyPatch) -> None:
         weather_path=Path("/data/weather.epw"),
         schedule_path=Path("/data/schedule.csv"),
         broker="localhost:24007",
+        start="2019-01-01T00:00:00",
+        **{"duration-s": 86400, "time-res-s": 900},
     )
 
     assert fed.name == "house_1"
@@ -386,9 +388,12 @@ def test_make_dwelling_federate_config(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--weather=/data/weather.epw" in fed.exec_command
     assert "--schedule=/data/schedule.csv" in fed.exec_command
     assert "--broker=localhost:24007" in fed.exec_command
+    assert "--start=2019-01-01T00:00:00" in fed.exec_command
+    assert "--duration-s=86400" in fed.exec_command
+    assert "--time-res-s=900" in fed.exec_command
 
 
-def test_make_dwelling_federate_config_accepts_underscored_and_hyphenated_keys(
+def test_make_dwelling_federate_config_accepts_the_entry_points_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, runner_module, _ = _import_broker_runner_modules(monkeypatch)
@@ -398,12 +403,52 @@ def test_make_dwelling_federate_config_accepts_underscored_and_hyphenated_keys(
         hpxml_path=Path("/data/house.xml"),
         weather_path=Path("/data/weather.epw"),
         schedule_path=Path("/data/schedule.csv"),
-        broker_address="localhost:24007",
-        **{"core-type": "zmq"},
+        broker="localhost:24007",
+        start="2019-01-01T00:00:00",
+        **{"duration-s": 86400, "time-res-s": 900, "core-type": "zmq", "master-seed": 7},
     )
 
-    assert "--broker_address=localhost:24007" in fed.exec_command
+    assert "--broker=localhost:24007" in fed.exec_command
     assert "--core-type=zmq" in fed.exec_command
+    assert "--master-seed=7" in fed.exec_command
+
+
+def test_make_dwelling_federate_config_refuses_a_flag_the_entry_point_does_not_define(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key the entry point does not define is refused where the command is
+    built: the emitted ``--broker_address`` would otherwise pass this helper
+    and die at the child's argparse exit after the launch."""
+    _, runner_module, _ = _import_broker_runner_modules(monkeypatch)
+
+    with pytest.raises(ValueError, match="Unknown dwelling federate argument 'broker_address'"):
+        runner_module.make_dwelling_federate_config(
+            name="house_1",
+            hpxml_path=Path("/data/house.xml"),
+            weather_path=Path("/data/weather.epw"),
+            schedule_path=Path("/data/schedule.csv"),
+            broker_address="localhost:24007",
+            start="2019-01-01T00:00:00",
+            **{"duration-s": 86400, "time-res-s": 900},
+        )
+
+
+def test_make_dwelling_federate_config_refuses_a_command_without_its_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entry point has no default horizon, so a command without one exits
+    at its own required-argument check. The helper refuses it at build time
+    instead, naming the missing flags."""
+    _, runner_module, _ = _import_broker_runner_modules(monkeypatch)
+
+    with pytest.raises(ValueError, match="needs its horizon.*--start"):
+        runner_module.make_dwelling_federate_config(
+            name="house_1",
+            hpxml_path=Path("/data/house.xml"),
+            weather_path=Path("/data/weather.epw"),
+            schedule_path=Path("/data/schedule.csv"),
+            broker="localhost:24007",
+        )
 
 
 def test_make_dwelling_federate_config_quotes_paths_and_values(
@@ -417,6 +462,8 @@ def test_make_dwelling_federate_config_quotes_paths_and_values(
         weather_path=Path("/data/weather file.epw"),
         schedule_path=Path("/data/schedule file.csv"),
         broker="localhost; rm -rf /",
+        start="2019-01-01T00:00:00",
+        **{"duration-s": 86400, "time-res-s": 900},
     )
 
     assert "--name='house 1'" in fed.exec_command

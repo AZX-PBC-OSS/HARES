@@ -1278,8 +1278,8 @@ class HELICSDwelling:
         return entries
 
 
-def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    """Parse the dwelling federate command's arguments.
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the dwelling federate command's parser.
 
     Every flag is explicit: the run's horizon (``--start``, ``--duration-s``,
     ``--time-res-s``) has no default because a silently defaulted horizon
@@ -1339,7 +1339,28 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="The cumulative time drift tolerance in seconds; exceeding it raises (default: unbounded).",
     )
-    return parser.parse_args(argv)
+    return parser
+
+
+def federate_argument_names() -> frozenset[str]:
+    """The entry point's flag names without the leading dashes.
+
+    The runner's command builder validates every extra argument against this
+    set, so a misspelled or nonexistent flag is refused where the command is
+    built rather than surfacing as the child's argparse exit after the launch.
+    Derived from the parser itself: a flag added or removed here is in the
+    vocabulary the builder accepts with no second list to keep in step.
+    """
+    return frozenset(
+        action.dest.replace("_", "-")
+        for action in _build_parser()._actions
+        if action.dest != "help"
+    )
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Parse the dwelling federate command's arguments (see ``_build_parser``)."""
+    return _build_parser().parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
