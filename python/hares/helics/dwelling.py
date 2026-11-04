@@ -51,9 +51,14 @@ Expected HELICS subscription units
 -----------------------------------
 
 ``grid/voltage`` (or caller-provided topic)
-    Grid voltage in per-unit (pu). Expected range: 0.5–1.5 pu.
-    Voltage values in absolute volts (e.g. 240) are out of range and will
-    trigger a diagnostic warning.  External federates must publish per-unit.
+    Grid voltage in per-unit (pu). The admitted set is the contract's
+    (docs/cosim.md): exactly 0.0 is the utility-outage signal, and a
+    finite value in [0.5, 1.5] pu is a connected grid voltage (the band
+    brownout sags live in). Everything else - a negative value, a value
+    in (0.0, 0.5) below the band floor, above 1.5, or a non-finite
+    value - is refused: a value in absolute volts (e.g. 240) is out of
+    range and will trigger a diagnostic warning. External federates
+    must publish per-unit.
 
 ``grid/price`` (or caller-provided topic)
     Real-time electricity price in currency/kWh. Must be non-negative;
@@ -108,6 +113,24 @@ _LOG = logging.getLogger(__name__)
 # the external federate (publishing in volts) and HARES (expecting per-unit).
 VOLTAGE_PU_MIN = 0.5
 VOLTAGE_PU_MAX = 1.5
+
+
+def voltage_pu_admitted(voltage_pu: float) -> bool:
+    """The contract's admitted voltage set (docs/cosim.md): exactly ``0.0``
+    is the utility-outage signal (``Dwelling.set_grid_voltage(0.0)``'s own
+    value, the only way an outage enters the engine through the topic), and
+    a finite value in ``[VOLTAGE_PU_MIN, VOLTAGE_PU_MAX]`` pu is a connected
+    grid voltage, the band brownout sags live in. Everything else - a
+    negative value, a value in ``(0.0, 0.5)`` below the band floor, a value
+    above ``VOLTAGE_PU_MAX``, or a non-finite value - is refused.
+
+    Finiteness is checked explicitly: a NaN fails ``voltage_pu < 0.5`` and
+    ``voltage_pu > 1.5`` alike (every IEEE comparison against a NaN is
+    false), so the range comparison alone would admit it.
+    """
+    return voltage_pu == 0.0 or (
+        math.isfinite(voltage_pu) and VOLTAGE_PU_MIN <= voltage_pu <= VOLTAGE_PU_MAX
+    )
 
 # Grid-frequency range guard: values outside [40, 80] Hz are not grid
 # frequencies a premise simulation should be fed and indicate a likely unit
@@ -794,17 +817,21 @@ class HELICSDwelling:
             if self._sub_voltage is not None and _update_by_sub.get(self._sub_voltage, False):
                 try:
                     voltage_pu = float(self._sub_voltage.double)
-                    if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
-                        # Unit-mismatch guard: a federate publishing absolute
-                        # volts (e.g. 240) instead of per-unit would inject a
-                        # physically absurd voltage into the simulation
-                        # (voltage-dependent ZIP loads scale with v², so 240 pu
-                        # multiplies load power by ~57,600x and destroys the
-                        # thermal solution). Flag and warn, but do NOT apply —
-                        # the dwelling keeps its last valid voltage.
+                    if not voltage_pu_admitted(voltage_pu):
+                        # Unit-mismatch and corruption guard: the refused
+                        # set is a federate publishing absolute volts (e.g.
+                        # 240) instead of per-unit (voltage-dependent ZIP
+                        # loads scale with v^2, so 240 pu multiplies load
+                        # power by ~57,600x and destroys the thermal
+                        # solution), a value in (0.0, 0.5) below the band
+                        # floor, and a non-finite value. Flag and warn, but
+                        # do NOT apply: the dwelling keeps its last valid
+                        # voltage (0.0 admitted is the outage signal, the
+                        # engine's own contract).
                         self._last_voltage_out_of_range = True
                         _LOG.warning(
-                            "Grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
+                            "Grid voltage %r pu outside the contract (exactly 0.0 = utility "
+                            "outage, or a finite value in [%.1f, %.1f] pu); "
                             "check that the external federate publishes per-unit (not volts). "
                             "Value not applied; keeping last valid voltage.",
                             voltage_pu,
@@ -1047,7 +1074,8 @@ class HELICSDwelling:
 
     @property
     def helics_voltage_valid(self) -> bool:
-        """True when the most recent voltage subscription was in [0.5, 1.5] pu."""
+        """True when the most recent voltage subscription was admitted: the
+        outage's exactly 0.0, or a finite value in [0.5, 1.5] pu."""
         return not self._last_voltage_out_of_range
 
     @property
@@ -1057,8 +1085,9 @@ class HELICSDwelling:
 
     @property
     def helics_price_valid(self) -> bool:
-        """True when the most recent price subscription was non-negative."""
-        return not self._last_price_negative
+        """True when the most recent price subscription was finite and
+        non-negative."""
+        return not (self._last_price_negative or self._last_price_non_finite)
 
     @property
     def helics_control_clamped(self) -> int:

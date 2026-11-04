@@ -840,6 +840,73 @@ def test_per_dwelling_voltage_out_of_range_flagged_and_refused(
     assert fleet.grid_voltage_values == [(0, 0.97)]
 
 
+def test_fleet_voltage_zero_is_the_outage_signal_and_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `grid/voltage` topic's exactly 0.0 is the utility-outage signal on
+    both voltage channels (fleet-wide and per-dwelling).
+
+    The contract (docs/cosim.md): the outage enters the engine through the
+    topic's 0.0 - the fleet federate included ("both federates") - so the
+    boundary forwards it to the fleet's setters; refusing it made a
+    co-simulation outage impossible without a side channel.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        per_dwelling_voltage_topics=[
+            "grid/voltage/dwelling_0",
+            "grid/voltage/dwelling_1",
+            "grid/voltage/dwelling_2",
+        ],
+    )
+
+    assert orchestrator._sub_voltage_all is not None
+    orchestrator._sub_voltage_all.push_double(0.0)
+    orchestrator._read_subscriptions()
+    assert fleet.grid_voltage_all_values == [0.0], (
+        "the topic's 0.0 is the outage signal and must reach the fleet's setter"
+    )
+    assert orchestrator.helics_voltage_all_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+    orchestrator._sub_voltage_dwelling[1].push_double(0.0)
+    orchestrator._read_subscriptions()
+    assert fleet.grid_voltage_values == [(1, 0.0)], (
+        "the per-dwelling topic's 0.0 is the outage signal for that dwelling"
+    )
+    assert orchestrator.per_dwelling_voltage_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+
+def test_fleet_voltage_below_the_band_floor_but_above_zero_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value in (0.0, 0.5) is in no admitted class and is refused.
+
+    The contract's admitted set has a hole, deliberately: exactly 0.0 is the
+    outage, [0.5, 1.5] pu is the connected band, and anything between is
+    refused and counted like any other out-of-band value.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage_all is not None
+    orchestrator._sub_voltage_all.push_double(0.25)
+    orchestrator._read_subscriptions()
+    assert fleet.grid_voltage_all_values == [], (
+        "a value in (0.0, 0.5) is in no admitted class and must never be applied"
+    )
+    assert orchestrator.helics_voltage_all_valid is False
+    assert orchestrator.helics_range_violations_total == 1
+
+
 def test_fleet_price_subscription_applies_to_every_dwelling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

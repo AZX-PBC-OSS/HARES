@@ -44,10 +44,18 @@ Expected HELICS subscription units
 -----------------------------------
 
 ``grid/voltage`` (or caller-provided fleet-wide topic)
-    Grid voltage in per-unit (pu). Expected range: 0.5–1.5 pu.
+    Grid voltage in per-unit (pu). The admitted set is the contract's
+    (docs/cosim.md): exactly 0.0 is the utility-outage signal, and a
+    finite value in [0.5, 1.5] pu is a connected grid voltage.
 
 Per-dwelling voltage topics (caller-provided)
-    Same per-unit voltage range (0.5–1.5 pu).
+    Same admitted set as the fleet-wide topic (0.0 outage, [0.5, 1.5] pu
+    connected).
+
+``grid/frequency`` (or caller-provided fleet-wide topic)
+    Grid frequency in Hz. A finite value in [40, 80] Hz is applied to
+    every dwelling; out-of-range or non-finite values are refused,
+    counted, and never applied.
 
 ``grid/price`` (or caller-provided fleet-wide topic)
     Real-time electricity price in currency/kWh, applied to every
@@ -60,6 +68,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -74,7 +83,19 @@ from hares import ControlSignal
 from hares._hares import SteppableFleet as PySteppableFleet
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
-from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, STALE_SUBSCRIPTION_THRESHOLD, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN, handle_time_grant, set_publication_info, validate_control_signal
+from .dwelling import (
+    HELICSPublicationConfig,
+    HELICSSubscriptionConfig,
+    FREQUENCY_HZ_MAX,
+    FREQUENCY_HZ_MIN,
+    STALE_SUBSCRIPTION_THRESHOLD,
+    VOLTAGE_PU_MAX,
+    VOLTAGE_PU_MIN,
+    handle_time_grant,
+    set_publication_info,
+    validate_control_signal,
+    voltage_pu_admitted,
+)
 from .federate import (
     DEFAULT_CONNECT_TIMEOUT_S,
     DEFAULT_GRANT_TIMEOUT_S,
@@ -558,14 +579,19 @@ class HELICSFleet:
             if self._sub_voltage_all is not None and _update_by_sub.get(self._sub_voltage_all, False):
                 try:
                     voltage_pu = float(self._sub_voltage_all.double)
-                    if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                    if not voltage_pu_admitted(voltage_pu):
                         # The ONE boundary behavior (the dwelling federate's
-                        # exactly): out-of-band values are flagged, counted
-                        # and never applied; the dwellings keep their last
-                        # valid voltage.
+                        # exactly): the refused set - a negative value, a
+                        # value in (0.0, 0.5) below the band floor, a value
+                        # above 1.5, a non-finite value - is flagged,
+                        # counted and never applied; the dwellings keep
+                        # their last valid voltage. Exactly 0.0 admitted is
+                        # the utility-outage signal, the engine's own
+                        # contract.
                         self._last_voltage_all_out_of_range = True
                         _LOG.warning(
-                            "Fleet-wide grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
+                            "Fleet-wide grid voltage %r pu outside the contract (exactly 0.0 = "
+                            "utility outage, or a finite value in [%.1f, %.1f] pu); "
                             "check that the external federate publishes per-unit (not volts). "
                             "Value not applied; keeping last valid voltage.",
                             voltage_pu,
@@ -581,12 +607,15 @@ class HELICSFleet:
                 if _update_by_sub.get(subscription, False):
                     try:
                         voltage_pu = float(subscription.double)
-                        if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
-                            # The ONE boundary behavior: out-of-band values
-                            # are flagged, counted and never applied.
+                        if not voltage_pu_admitted(voltage_pu):
+                            # The ONE boundary behavior: out-of-band and
+                            # non-finite values are flagged, counted and
+                            # never applied; exactly 0.0 admitted is the
+                            # utility-outage signal.
                             self._last_per_dwelling_voltage_out_of_range = True
                             _LOG.warning(
-                                "Grid voltage for dwelling %d %.3f pu outside expected range [%.1f, %.1f]; "
+                                "Grid voltage for dwelling %d %r pu outside the contract (exactly "
+                                "0.0 = utility outage, or a finite value in [%.1f, %.1f] pu); "
                                 "value not applied; keeping last valid voltage.",
                                 dwelling_index,
                                 voltage_pu,

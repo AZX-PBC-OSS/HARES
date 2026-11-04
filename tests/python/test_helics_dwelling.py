@@ -871,6 +871,93 @@ def test_voltage_in_range_forwarded_correctly(
     assert dwelling.grid_voltage_values == [0.95]
 
 
+def test_voltage_zero_is_the_outage_signal_and_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `grid/voltage` topic's exactly 0.0 is the utility-outage signal.
+
+    The contract (docs/cosim.md's island semantics): ``Dwelling.set_grid_voltage(0.0)``
+    - the topic's 0.0 included - is the only way an outage enters the engine, so
+    the boundary forwards it; refusing it (the old [0.5, 1.5]-only band) made a
+    co-simulation outage impossible without a side channel to the setter. The
+    engine's own setter admits exactly 0.0 beside the [0.5, 1.5] pu band.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    orchestrator._sub_voltage.push_double(0.0)
+    orchestrator._read_subscriptions()
+    assert dwelling.grid_voltage_values == [0.0], (
+        "the topic's 0.0 is the outage signal and must reach the engine's setter"
+    )
+    assert orchestrator.helics_voltage_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+
+def test_voltage_below_the_band_floor_but_above_zero_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value in (0.0, 0.5) is in no admitted class and is refused.
+
+    The contract's admitted set has a hole, deliberately: exactly 0.0 is the
+    outage, [0.5, 1.5] pu is the connected band (brownout sags included), and
+    anything between - a 0.25 pu reading is no real grid state - is refused
+    and counted like any other out-of-band value.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    orchestrator._sub_voltage.push_double(0.25)
+    orchestrator._read_subscriptions()
+    assert dwelling.grid_voltage_values == [], (
+        "a value in (0.0, 0.5) is in no admitted class and must never be applied"
+    )
+    assert orchestrator.helics_voltage_valid is False
+    assert orchestrator.helics_range_violations_total == 1
+
+
+def test_voltage_non_finite_is_refused_counted_and_reported_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN or infinite voltage is refused, counted, and reported invalid.
+
+    A NaN fails every IEEE comparison (`nan < 0.5` and `nan > 1.5` are both
+    False), so a one-sided band check admits it and the engine's own setter
+    rejects it uncounted - the validator trap utils.rs's own doc warns of:
+    finiteness is checked first, never relied on the comparison to catch.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_voltage.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert dwelling.grid_voltage_values == [], (
+            f"a non-finite voltage ({bad}) must never reach the engine's setter"
+        )
+        assert orchestrator.helics_voltage_valid is False, (
+            f"a non-finite voltage ({bad}) must not report valid"
+        )
+    assert orchestrator.helics_range_violations_total == 3, (
+        "each non-finite refusal is counted once"
+    )
+
+
 def test_negative_price_flagged_and_forwarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
