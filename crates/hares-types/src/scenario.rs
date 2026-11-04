@@ -495,6 +495,28 @@ pub struct ScenarioCorrelation {
     pub rho: f64,
 }
 
+/// The unit a sampled value carries: the documented vocabulary ("C", "W",
+/// "count", "fraction"), closed because the unit is provenance - a manifest
+/// reader interprets the record's value by it, and a free-text unit ("kW"
+/// for watts, a mislabelled temperature) is a provenance defect the spec
+/// must refuse at its own boundary, naming the accepted set, rather than
+/// carry into the record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScenarioUnit {
+    /// Degrees Celsius.
+    #[serde(rename = "C")]
+    C,
+    /// Watts.
+    #[serde(rename = "W")]
+    W,
+    /// A dimensionless count.
+    #[serde(rename = "count")]
+    Count,
+    /// A dimensionless fraction in [0, 1].
+    #[serde(rename = "fraction")]
+    Fraction,
+}
+
 /// One declared parameter: what it is, where it applies, its
 /// distribution and its correlation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -503,10 +525,11 @@ pub struct ScenarioParameter {
     /// The parameter's name: unique in the spec, the sampled record's
     /// key.
     pub name: String,
-    /// The value's unit, carried into the sampled record ("C", "W",
-    /// "count", "fraction").
-    #[serde(default)]
-    pub unit: String,
+    /// The value's unit, carried into the sampled record: one of the
+    /// documented vocabulary's units ("C", "W", "count", "fraction").
+    /// Required, never defaulted: a record whose unit was silently
+    /// chosen for it is a mislabel by omission.
+    pub unit: ScenarioUnit,
     /// Where the value applies.
     pub target: ScenarioTarget,
     /// The declared marginal.
@@ -536,8 +559,7 @@ pub struct SampledValue {
     /// The drawn value.
     pub value: f64,
     /// The value's unit (the spec's).
-    #[serde(default)]
-    pub unit: String,
+    pub unit: ScenarioUnit,
 }
 
 /// One home's sampled scenario: the per-home payload a run manifest
@@ -816,7 +838,7 @@ impl ScenarioSpec {
             values.push(SampledValue {
                 name: parameter.name.clone(),
                 value,
-                unit: parameter.unit.clone(),
+                unit: parameter.unit,
             });
         }
         Ok(ScenarioSample {
@@ -863,7 +885,7 @@ mod tests {
     fn parameter(name: &str, distribution: ScenarioDistribution) -> ScenarioParameter {
         ScenarioParameter {
             name: name.to_string(),
-            unit: "W".to_string(),
+            unit: ScenarioUnit::W,
             target: unique_target(name),
             distribution,
             correlation: None,
@@ -1079,7 +1101,7 @@ mod tests {
     fn appending_a_parameter_moves_no_earlier_draw() {
         let correlated = |name: &str| ScenarioParameter {
             name: name.to_string(),
-            unit: "W".to_string(),
+            unit: ScenarioUnit::W,
             target: unique_target(name),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
@@ -1091,7 +1113,7 @@ mod tests {
         let mut extended_parameters = pair.parameters.clone();
         extended_parameters.push(ScenarioParameter {
             name: "c".to_string(),
-            unit: "W".to_string(),
+            unit: ScenarioUnit::W,
             target: unique_target("c"),
             distribution: uniform(0.0, 1.0),
             correlation: None,
@@ -1130,7 +1152,7 @@ mod tests {
     fn appending_a_new_correlation_group_moves_no_earlier_draw() {
         let member = |name: &str, group: &str| ScenarioParameter {
             name: name.to_string(),
-            unit: "W".to_string(),
+            unit: ScenarioUnit::W,
             target: unique_target(name),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
@@ -1175,7 +1197,7 @@ mod tests {
     fn appending_to_an_existing_group_moves_no_earlier_draw() {
         let member = |name: &str, group: &str| ScenarioParameter {
             name: name.to_string(),
-            unit: "W".to_string(),
+            unit: ScenarioUnit::W,
             target: unique_target(name),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
@@ -1238,7 +1260,7 @@ mod tests {
     fn inserting_a_parameter_moves_only_its_tail() {
         let member = |name: &str, group: &str| ScenarioParameter {
             name: name.to_string(),
-            unit: "W".to_string(),
+            unit: ScenarioUnit::W,
             target: unique_target(name),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
@@ -1334,14 +1356,14 @@ mod tests {
             spec(vec![
                 ScenarioParameter {
                     name: "a".into(),
-                    unit: "W".into(),
+                    unit: ScenarioUnit::W,
                     target: unique_target("a"),
                     distribution: uniform(0.0, 1.0),
                     correlation: corr.clone(),
                 },
                 ScenarioParameter {
                     name: "b".into(),
-                    unit: "W".into(),
+                    unit: ScenarioUnit::W,
                     target: unique_target("b"),
                     distribution: uniform(0.0, 1.0),
                     correlation: corr,
@@ -1399,7 +1421,7 @@ mod tests {
     fn a_non_finite_draw_is_an_error_naming_the_parameter() {
         let s = spec(vec![ScenarioParameter {
             name: "overflowing".into(),
-            unit: "W".into(),
+            unit: ScenarioUnit::W,
             target: override_target("all", "heating_capacity_w"),
             // exp(800 + z) is +inf for every z near zero: the declared
             // mu is finite, so validation accepts it.
@@ -1440,7 +1462,7 @@ mod tests {
         let s = spec(vec![
             ScenarioParameter {
                 name: "a".into(),
-                unit: "W".into(),
+                unit: ScenarioUnit::W,
                 target: unique_target("a"),
                 distribution: uniform(0.0, 1.0),
                 correlation: Some(ScenarioCorrelation {
@@ -1450,7 +1472,7 @@ mod tests {
             },
             ScenarioParameter {
                 name: "b".into(),
-                unit: "W".into(),
+                unit: ScenarioUnit::W,
                 target: unique_target("b"),
                 distribution: uniform(0.0, 1.0),
                 correlation: Some(ScenarioCorrelation {
@@ -1509,7 +1531,7 @@ mod tests {
     fn correlated_members_hold_their_declared_family_moments() {
         let member = |name: &str, distribution: ScenarioDistribution| ScenarioParameter {
             name: name.to_string(),
-            unit: "W".to_string(),
+            unit: ScenarioUnit::W,
             target: unique_target(name),
             distribution,
             correlation: Some(ScenarioCorrelation {
@@ -1590,14 +1612,14 @@ mod tests {
         let s = spec(vec![
             ScenarioParameter {
                 name: "wh_capacity".into(),
-                unit: "W".into(),
+                unit: ScenarioUnit::W,
                 target: override_target("Water Heater 1", "heating_capacity_w"),
                 distribution: uniform(4000.0, 6000.0),
                 correlation: None,
             },
             ScenarioParameter {
                 name: "bedrooms".into(),
-                unit: "count".into(),
+                unit: ScenarioUnit::Count,
                 target: ScenarioTarget::Patch {
                     field: "number_of_bedrooms".into(),
                 },
@@ -1606,7 +1628,7 @@ mod tests {
             },
             ScenarioParameter {
                 name: "all_scale".into(),
-                unit: "W".into(),
+                unit: ScenarioUnit::W,
                 target: override_target("Water Heater 1", "setpoint_c"),
                 distribution: uniform(45.0, 55.0),
                 correlation: None,
@@ -1632,6 +1654,83 @@ mod tests {
         let json = serde_json::to_string(&sample).expect("serializes");
         let back: ScenarioSample = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(back, sample);
+    }
+
+    /// The unit is provenance, carried into the record a manifest reads:
+    /// the spec declares it from the documented vocabulary and the
+    /// boundary refuses anything else, naming the accepted set. A
+    /// free-text unit is the defect the enum's closure removes: "kW"
+    /// beside a W field, or "kWh" on a Celsius setpoint, would ride into
+    /// every manifest the study writes.
+    #[test]
+    fn a_scenario_parameter_unit_outside_the_documented_vocabulary_is_refused() {
+        let mislabelled = r#"{
+            "name": "study",
+            "parameters": [
+                {
+                    "name": "wh_setpoint",
+                    "unit": "kWh",
+                    "target": {"override": {"equipment": "Water Heater 1", "field": "setpoint_c"}},
+                    "distribution": {"uniform": {"low": 45.0, "high": 60.0}}
+                }
+            ]
+        }"#;
+        let err = serde_json::from_str::<ScenarioSpec>(mislabelled)
+            .expect_err("a unit outside the documented vocabulary must be refused");
+        let message = err.to_string();
+        assert!(
+            ["C", "W", "count", "fraction"]
+                .iter()
+                .all(|u| message.contains(u)),
+            "the refusal must name the accepted set: {message}"
+        );
+
+        // The documented vocabulary itself parses, and the audited
+        // pairs carry their target's own unit: a Celsius setpoint
+        // declares C, a watt capacity declares W.
+        for (field, unit) in [("setpoint_c", "C"), ("heating_capacity_w", "W")] {
+            let spec = format!(
+                r#"{{
+                    "name": "study",
+                    "parameters": [
+                        {{
+                            "name": "wh_value",
+                            "unit": "{unit}",
+                            "target": {{"override": {{"equipment": "Water Heater 1", "field": "{field}"}}}},
+                            "distribution": {{"uniform": {{"low": 45.0, "high": 60.0}}}}
+                        }}
+                    ]
+                }}"#
+            );
+            let parsed: ScenarioSpec = serde_json::from_str(&spec)
+                .unwrap_or_else(|err| panic!("the pair {field}/{unit} must parse: {err}"));
+            let sampled = parsed
+                .sample(42, 1, 7)
+                .expect("a declared unit carries into the record");
+            assert_eq!(sampled.values[0].name, "wh_value");
+        }
+    }
+
+    /// A spec that declares no unit is a mislabel by omission: the unit
+    /// is required, so the record it produces always carries one.
+    #[test]
+    fn a_scenario_parameter_without_a_unit_is_refused() {
+        let unitless = r#"{
+            "name": "study",
+            "parameters": [
+                {
+                    "name": "wh_capacity",
+                    "target": {"override": {"equipment": "Water Heater 1", "field": "heating_capacity_w"}},
+                    "distribution": {"uniform": {"low": 4000.0, "high": 6000.0}}
+                }
+            ]
+        }"#;
+        let err = serde_json::from_str::<ScenarioSpec>(unitless)
+            .expect_err("a parameter without a unit must be refused");
+        assert!(
+            err.to_string().contains("unit"),
+            "the refusal must name the missing field: {err}"
+        );
     }
 
     /// A hand-written record (the shape a hand-edited manifest
@@ -1718,14 +1817,14 @@ mod tests {
             parameters: vec![
                 ScenarioParameter {
                     name: "a".to_string(),
-                    unit: "fraction".to_string(),
+                    unit: ScenarioUnit::Fraction,
                     target: target(),
                     distribution: uniform(0.7, 1.0),
                     correlation: None,
                 },
                 ScenarioParameter {
                     name: "b".to_string(),
-                    unit: "fraction".to_string(),
+                    unit: ScenarioUnit::Fraction,
                     target: target(),
                     distribution: uniform(1.0, 1.3),
                     correlation: None,
@@ -1755,7 +1854,7 @@ mod tests {
             parameters: vec![
                 ScenarioParameter {
                     name: "a".to_string(),
-                    unit: "fraction".to_string(),
+                    unit: ScenarioUnit::Fraction,
                     target: target(),
                     distribution: uniform(0.7, 1.0),
                     correlation: Some(ScenarioCorrelation {
@@ -1765,7 +1864,7 @@ mod tests {
                 },
                 ScenarioParameter {
                     name: "b".to_string(),
-                    unit: "fraction".to_string(),
+                    unit: ScenarioUnit::Fraction,
                     target: target(),
                     distribution: uniform(1.0, 1.3),
                     correlation: Some(ScenarioCorrelation {
@@ -2259,7 +2358,7 @@ mod tests {
     fn the_specs_overflow_refusal_names_the_parameter() {
         let s = spec(vec![ScenarioParameter {
             name: "huge".into(),
-            unit: "W".into(),
+            unit: ScenarioUnit::W,
             target: override_target("all", "heating_capacity_w"),
             distribution: ScenarioDistribution::LogNormal {
                 mu: 800.0,
@@ -2420,7 +2519,7 @@ mod tests {
         );
         let bad_rho = spec(vec![ScenarioParameter {
             name: "p".into(),
-            unit: "W".into(),
+            unit: ScenarioUnit::W,
             target: override_target("all", "x"),
             distribution: uniform(0.0, 1.0),
             correlation: Some(ScenarioCorrelation {
@@ -2445,7 +2544,7 @@ mod tests {
         );
         let bad_patch = spec(vec![ScenarioParameter {
             name: "p".into(),
-            unit: "count".into(),
+            unit: ScenarioUnit::Count,
             target: ScenarioTarget::Patch {
                 field: "not_a_field".into(),
             },
