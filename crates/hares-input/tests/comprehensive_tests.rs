@@ -1,6 +1,5 @@
-//! Comprehensive integration tests for hares-input (the input face of the
-//! former hares-io comprehensive suite): ResStock metadata parsing, the
-//! defaults store, and the re-exported mapper trait.
+//! Comprehensive integration tests for hares-input: ResStock metadata
+//! parsing, the defaults store, and the re-exported mapper trait.
 
 use std::io::Write;
 use std::path::Path;

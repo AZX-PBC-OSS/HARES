@@ -309,8 +309,8 @@ pf = 0.96
 
 # ---------------------------------------------------------------------------
 # The rows below keep this file in exact agreement with the in-code class
-# table `hares_types::zip::zip_defaults_for_class` (a drift test in
-# hares-io::defaults enforces bidirectional equality). Alias rows repeat the
+# table `hares_physics::zip::zip_defaults_for_class` (a drift test in
+# hares-input::defaults enforces bidirectional equality). Alias rows repeat the
 # values of their canonical row; HARES-extension rows are not in the OCHRE
 # ZIP Parameters.csv and carry a one-line justification mirroring zip.rs.
 # ---------------------------------------------------------------------------

@@ -10,9 +10,8 @@ use syn::visit::Visit;
 //
 // The SI guard ensures that imperial HVAC efficiency units (BTU, ft, cfm, SEER,
 // EER, HSPF, COP, etc.) do not appear as identifiers in equipment simulation
-// source code.  Imperial units belong only at I/O boundaries (hares-input and
-// hares-output, the split of the former hares-io) where HPXML values are
-// converted to SI.
+// source code.  Imperial units belong only at the I/O boundaries (hares-input
+// and hares-output) where HPXML values are converted to SI.
 //
 // The guard uses `syn` to parse each source file into an AST and walks it to
 // collect all identifiers.  This naturally excludes comments and string-literal

@@ -1,6 +1,5 @@
-//! Comprehensive integration tests for hares-output (the output face of the
-//! former hares-io comprehensive suite): the metrics calculator, the schema
-//! builders, and the streaming recorder.
+//! Comprehensive integration tests for hares-output: the metrics calculator,
+//! the schema builders, and the streaming recorder.
 
 use std::sync::Arc;
 
