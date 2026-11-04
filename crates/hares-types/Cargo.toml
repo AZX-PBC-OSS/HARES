@@ -7,6 +7,11 @@ license.workspace = true
 
 [features]
 observe = []
+# The allocation census's counting allocator: `alloc_count` is compiled
+# only under this feature, so the leaf's default build carries none of
+# the allocator machinery. The census's readers (the profiling summary,
+# the frame_golden tool, the tests' global allocators) enable it.
+profiling = []
 
 [dependencies]
 serde = { workspace = true }
@@ -25,3 +30,9 @@ libm = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 strum = { workspace = true }
+# This crate's own test targets compile `alloc_count` and its tests,
+# which the profiling feature gates: the self dev-dependency turns the
+# feature on for the test targets alone, so the alloc-count witnesses
+# run in every test profile while the default build keeps the module
+# out.
+hares-types = { workspace = true, features = ["profiling"] }

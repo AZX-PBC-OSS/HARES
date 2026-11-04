@@ -12,7 +12,7 @@
 //! rules forbid (the value given was replaced by a policy). The static
 //! ZIP polynomial evaluated across the admitted band is the
 //! voltage-dependence physics the model name carries; the per-equipment
-//! ZIP (`hares-types::zip::ZipLoad::apply`) has never clamped. A value
+//! ZIP (`hares-physics::zip::ZipLoad::apply`) has never clamped. A value
 //! outside the admitted band cannot reach this solver through the setters
 //! (they reject it naming the band); the dead-bus branch of
 //! [`ElectricalSolver::effective_load_scale`] holds the scale at 1.0 for

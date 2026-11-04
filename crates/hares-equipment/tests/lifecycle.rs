@@ -561,7 +561,9 @@ fn scheduled_load_grid_outage_keeps_reactive_core_output_present_when_configured
         ],
         &[("power_schedule_source", "constant")],
     );
-    cfg.zip = Some(hares_types::zip::ZipLoad::reactive_only(0.2, 0.3, 0.5, 0.9));
+    cfg.zip = Some(hares_physics::zip::ZipLoad::reactive_only(
+        0.2, 0.3, 0.5, 0.9,
+    ));
 
     let mut eq = registry
         .create("Plug Loads", cfg.clone())

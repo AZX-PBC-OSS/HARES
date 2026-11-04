@@ -215,20 +215,20 @@ struct HeatPumpHeaterCore {
     /// `ZipLoad::reactive_var` per component (see `hvac::reactive`). ER
     /// backup, pan heater, and resistive defrost elements are resistive
     /// (pf 1.0) and contribute Q ≡ 0.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     /// The indoor blower / outdoor fan motor component's REACTIVE row (pf
     /// 0.87), derived at init via `hvac::reactive::secondary_motor_zip`:
     /// the reactive sum's surface, the unit-level pf = 0.0 sentinel
     /// included. The fan's REAL response never consults this row; it
     /// evaluates the physical `hvac::reactive::FAN_MOTOR_ZIP` row.
-    fan_zip: hares_types::zip::ZipLoad,
+    fan_zip: hares_physics::zip::ZipLoad,
     /// The ground/water-loop circulation pump motor component's REACTIVE
     /// row (pf 0.84), derived at init via
     /// `hvac::reactive::secondary_motor_zip`. Only GSHP and WSHP variants
     /// draw pump power. The reactive sum's surface, the unit-level
     /// pf = 0.0 sentinel included; the pump's REAL response never consults
     /// this row (it evaluates the physical `LOOP_PUMP_ZIP` row).
-    pump_zip: hares_types::zip::ZipLoad,
+    pump_zip: hares_physics::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (W, the
     /// final components' pre-scaling sum at the reference voltage, the
     /// served space fraction included): the premise aggregate's weight for
@@ -469,7 +469,7 @@ impl Equipment for HeatPumpHeaterCore {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         // Primary component: the heat-pump compressor (class default pf 0.84,
         // or a user "zip" override). Fan/loop-pump component ZIPs are
         // secondary; ER backup/defrost elements are resistive (Q ≡ 0).
@@ -746,11 +746,11 @@ impl HeatPumpHeaterCore {
             dr_duty_cycle: 1.0,
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
-            fan_zip: hares_types::zip::ZipLoad::constant_power(),
-            pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            fan_zip: hares_physics::zip::ZipLoad::constant_power(),
+            pump_zip: hares_physics::zip::ZipLoad::constant_power(),
             last_nominal_draw_w: None,
         }
     }
@@ -3701,7 +3701,7 @@ mod tests {
         // The published coefficients are the ASHP Heater class row's own
         // (the row's real polynomial scales the compressor's draw at the
         // bus voltage through the recorded deep-sag form).
-        let class_row = hares_types::zip::zip_defaults_for_class("ASHP Heater").expect("row");
+        let class_row = hares_physics::zip::zip_defaults_for_class("ASHP Heater").expect("row");
         assert_eq!(
             (zip.zp, zip.ip, zip.pp),
             (class_row.zp, class_row.ip, class_row.pp)
@@ -3717,7 +3717,7 @@ mod tests {
     #[test]
     fn resolved_zip_reflects_user_zip_override() {
         let mut cfg = heater_config();
-        cfg.zip = Some(hares_types::zip::ZipLoad::reactive_only(
+        cfg.zip = Some(hares_physics::zip::ZipLoad::reactive_only(
             14.78, -23.71, 9.93, 0.9,
         ));
         let mut eq = ASHPHeater::new(cfg.clone());
@@ -4218,7 +4218,7 @@ mod tests {
     fn heating_real_power_follows_the_row_and_reactive_follows_pf() {
         let config_pf = heater_config();
         let mut config_nopf = config_pf.clone();
-        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        config_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let mut eq_pf = ASHPHeater::new(config_pf.clone());
         let mut eq_nopf = ASHPHeater::new(config_nopf.clone());
@@ -4359,8 +4359,8 @@ mod tests {
             assert!(w.is_finite(), "fixture: {key} must be finite");
             w
         };
-        let hp_row = hares_types::zip::zip_defaults_for_class("ASHP Heater").expect("row");
-        let fan_row = hares_types::zip::zip_defaults_for_class("Ventilation Fan").expect("row");
+        let hp_row = hares_physics::zip::zip_defaults_for_class("ASHP Heater").expect("row");
+        let fan_row = hares_physics::zip::zip_defaults_for_class("Ventilation Fan").expect("row");
         let m_hp = hp_row.zp * 0.25 + hp_row.ip * 0.5 + hp_row.pp;
         let m_fan = fan_row.zp * 0.25 + fan_row.ip * 0.5 + fan_row.pp;
         assert!((m_hp - 0.95).abs() < 1e-12, "hand: {m_hp}");

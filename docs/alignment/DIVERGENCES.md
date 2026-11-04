@@ -1134,7 +1134,7 @@ the references' differing scopes.
   `electric_kw = electric_kw * zip_q.dot(v_quadratic)`, so the real
   coefficients scale the vars and the reactive coefficients scale the
   watts.
-- **HARES behavior:** `ZipLoad::apply` (`hares-types/src/zip.rs`) scales
+- **HARES behavior:** `ZipLoad::apply` (`hares-physics/src/zip.rs`) scales
   real power by the real coefficients `(zp, ip, pp)` and reactive power
   by the reactive coefficients `(zq, iq, pq)`, the physically correct
   wiring (the Z/I/P decomposition of each quantity's own voltage
@@ -1150,7 +1150,7 @@ the references' differing scopes.
   frame. The class table's rows (OCHRE's ZIP Parameters.csv values)
   carry strongly non-flat reactive coefficients, so the error is real
   on any input that drives the bus off 1.0 pu.
-- **Pinning tests:** `crates/hares-types/src/zip.rs`
+- **Pinning tests:** `crates/hares-physics/src/zip.rs`
   (`real_power_follows_the_real_coefficients_and_reactive_the_reactive_off_nominal`,
   `apply_is_bit_identical_to_legacy_arithmetic_for_all_class_rows`).
   The first fails when the wiring reverts to OCHRE's cross-wired form.

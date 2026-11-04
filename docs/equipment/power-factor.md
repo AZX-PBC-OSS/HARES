@@ -2,7 +2,7 @@
 
 [Back to Architecture](../architecture.md)
 
-**Source**: `crates/hares-types/src/zip.rs`, `crates/hares-equipment/src/config.rs`
+**Source**: `crates/hares-physics/src/zip.rs`, `crates/hares-equipment/src/config.rs`
 
 Canonical reference for the ZIP load model, power-factor → reactive-power conversion, sign convention, per-equipment default power factors, configuration override mechanism, control precedence, and known divergences from OCHRE and EnergyPlus.
 
@@ -19,7 +19,7 @@ Q_actual = P_actual · tan(acos(pf)) · (zq·V² + iq·V + pq)
 
 The real and reactive polynomials each normalise to sum ≈1.0 so that the model is a pure redistribution at reference voltage (validated at init via `validate_zip_sums` in `crates/hares-equipment/src/config.rs:459-478`). For typed physics equipment the real polynomial evaluates through the recorded deep-sag form (the recorded motor families as fitted, every other class held at its in-band stationary point below nominal, exactly 1.0 at the reference voltage): see the deep-sag entry in `docs/PHYSICS_DECISIONS.md` and the typed-equipment section below.
 
-### `ZipLoad` struct (`crates/hares-types/src/zip.rs:30-49`)
+### `ZipLoad` struct (`crates/hares-physics/src/zip.rs:30-49`)
 
 | Field | Meaning |
 |-------|---------|
@@ -71,7 +71,7 @@ A debug-build validator `validate_port_core_electrical_consistency` (`crates/har
 
 ## Class-Defaults Table
 
-Every class name and coefficient set below is verified in `crates/hares-types/src/zip.rs:228-458`. Rows marked "HARES extension" are not in the OCHRE ZIP Parameters.csv — each carries a one-line justification in the source.
+Every class name and coefficient set below is verified in `crates/hares-physics/src/zip.rs:228-458`. Rows marked "HARES extension" are not in the OCHRE ZIP Parameters.csv; each carries a one-line justification in the source.
 
 | Class | pf | zq | iq | pq | Source / Note |
 |-------|----|----|----|----|---------------|
@@ -289,7 +289,7 @@ These are documented as potential enhancements, not currently implemented:
 
 | File | Purpose |
 |------|---------|
-| `crates/hares-types/src/zip.rs` | `ZipLoad` struct, `ResolvedZip` (regime-carrying wrapper), `zip_defaults_for_class()` table, `reactive_only()` constructor |
+| `crates/hares-physics/src/zip.rs` | `ZipLoad` struct, `ResolvedZip` (regime-carrying wrapper), `zip_defaults_for_class()` table, `reactive_only()` constructor |
 | `crates/hares-equipment/src/config.rs` | `resolve_zip()`, `resolve_reactive_zip()`, `validate_zip_sums()`, `EquipmentConfig.zip` sidecar |
 | `crates/hares-equipment/src/hvac/reactive.rs` | Per-component HVAC reactive: `FAN_MOTOR_ZIP`, `LOOP_PUMP_ZIP`, `secondary_motor_zip()` |
 | `crates/hares-equipment/src/battery/config.rs` | `BatteryConfig.power_factor`, `BatteryConfig.inverter_capacity_va` |

@@ -988,7 +988,7 @@ fn land_spec_parameters(
 fn spec_config_from_typed(
     typed: &EquipmentConfig,
     spec: &hares_io::EquipmentSpec,
-    base_zip: Option<hares_types::zip::ZipLoad>,
+    base_zip: Option<hares_physics::zip::ZipLoad>,
     layers: hares_io::hpxml::OverrideLayers<'_>,
 ) -> Result<EquipmentConfig> {
     let ConfigPayload::Typed {
@@ -1076,11 +1076,11 @@ const ZIP_OVERRIDE_KEYS: &[&str] = &["zp", "ip", "pp", "zq", "iq", "pq", "pf", "
 /// unknown key, a non-numeric value, or a non-object `"zip"` value all
 /// fail loudly instead of being silently dropped.
 fn merge_zip_override(
-    base: Option<hares_types::zip::ZipLoad>,
+    base: Option<hares_physics::zip::ZipLoad>,
     zip_override: Option<&Value>,
     ochre_class: &str,
     equipment_name: &str,
-) -> Result<Option<hares_types::zip::ZipLoad>> {
+) -> Result<Option<hares_physics::zip::ZipLoad>> {
     let obj = match zip_override {
         None => return Ok(base),
         Some(Value::Object(obj)) => obj,
@@ -1092,8 +1092,8 @@ fn merge_zip_override(
         }
     };
     let mut zip = base
-        .or_else(|| hares_types::zip::zip_defaults_for_class(ochre_class))
-        .unwrap_or_else(hares_types::zip::ZipLoad::constant_power);
+        .or_else(|| hares_physics::zip::zip_defaults_for_class(ochre_class))
+        .unwrap_or_else(hares_physics::zip::ZipLoad::constant_power);
     for (key, value) in obj {
         let Some(v) = value.as_f64() else {
             return Err(HaresError::Equipment(format!(
@@ -1125,8 +1125,8 @@ fn merge_zip_override(
     // NaNs real power across the service band, and an init that reads the
     // row fails the build for the same reason: the typo is rejected at the
     // earliest boundary that sees it. Shared bounds live in
-    // `hares_types::zip` (single source of truth with the init backstop).
-    hares_types::zip::validate_plausible_magnitudes(&zip).map_err(|err| {
+    // `hares_physics::zip` (single source of truth with the init backstop).
+    hares_physics::zip::validate_plausible_magnitudes(&zip).map_err(|err| {
         HaresError::Equipment(format!(
             "equipment '{equipment_name}': \"zip\" \
          override produced an implausible row: {err}"
@@ -3714,7 +3714,7 @@ mod tests {
     #[test]
     fn regression_typed_spec_zip_params_reach_equipment_config_sidecar() {
         let mut spec = gas_furnace_spec();
-        let zip = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
+        let zip = hares_physics::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
         spec.zip_params = Some(zip);
 
         let cfg = equipment_config_from_spec(&spec).expect("spec conversion must succeed");
@@ -3742,7 +3742,7 @@ mod tests {
     #[test]
     fn zip_override_beats_defaults_for_typed_equipment_field_wise() {
         let mut spec = gas_furnace_spec();
-        let base = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
+        let base = hares_physics::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
         spec.zip_params = Some(base);
         let overrides = json!({"Gas Furnace": {"zip": {"pf": 0.9}}});
 
@@ -3824,7 +3824,8 @@ mod tests {
         // gas_furnace_spec() has zip_params: None; the override should merge
         // over the class-table defaults for "Gas Furnace" (blower fan row).
         let spec = gas_furnace_spec();
-        let class_row = hares_types::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
+        let class_row =
+            hares_physics::zip::zip_defaults_for_class("Gas Furnace").expect("class row");
         let overrides = json!({"Gas Furnace": {"zip": {"pf": 0.9}}});
 
         let merged = merged_equipment_config(&spec, &overrides).expect("merge must succeed");
@@ -3843,7 +3844,7 @@ mod tests {
             name: "ASHP Heater".to_string(),
             fuel_type: FuelType::Electric,
             parameters: serde_json::Map::new(),
-            zip_params: hares_types::zip::zip_defaults_for_class("ASHP Heater"),
+            zip_params: hares_physics::zip::zip_defaults_for_class("ASHP Heater"),
             typed_overrides: serde_json::Map::new(),
             typed_config: None,
             system_id: None,

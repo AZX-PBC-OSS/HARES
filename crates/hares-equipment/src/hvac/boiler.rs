@@ -127,13 +127,13 @@ pub struct ElectricBoiler {
     /// element, class default pf 1.0 → Q exactly zero): its real polynomial
     /// scales the element's draw and delivered heat at the bus voltage
     /// through the recorded deep-sag form.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     /// The hydronic circulation-pump motor component's REACTIVE row (pf
     /// 0.84), derived at init via `hvac::reactive::secondary_motor_zip`:
     /// the reactive sum's surface, the unit-level pf = 0.0 sentinel
     /// included. The pump's REAL response never consults this row; it
     /// evaluates the physical `hvac::reactive::LOOP_PUMP_ZIP` row.
-    pump_zip: hares_types::zip::ZipLoad,
+    pump_zip: hares_physics::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (W, the
     /// element's and pump's pre-scaling sum at the reference voltage):
     /// the premise aggregate's weight for this unit, which un-scales the
@@ -188,7 +188,7 @@ pub struct GasBoiler {
     /// The class ZIP row: circulation pump motor pf 0.84; the pump's draw
     /// evaluates the row's real polynomial at the bus voltage through the
     /// recorded deep-sag form; Q comes from ZipLoad::reactive_var.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
 }
 
 /// Version 3: the fluid domain's first-publish marker is persisted (the
@@ -274,10 +274,10 @@ impl ElectricBoiler {
             fluid_payload_absences: 0,
             fluid_absence_warned: false,
             warnings: Vec::new(),
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
-            pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            pump_zip: hares_physics::zip::ZipLoad::constant_power(),
             last_nominal_draw_w: None,
         }
     }
@@ -605,7 +605,7 @@ impl Equipment for ElectricBoiler {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -828,8 +828,8 @@ impl GasBoiler {
             fluid_payload_absences: 0,
             fluid_absence_warned: false,
             warnings: Vec::new(),
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
         }
     }
@@ -1197,7 +1197,7 @@ impl Equipment for GasBoiler {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 

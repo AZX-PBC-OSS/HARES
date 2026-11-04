@@ -47,3 +47,7 @@ uom.workspace = true
 [dev-dependencies]
 tempfile = { workspace = true }
 frame_golden = { path = "../../tools/frame_golden" }
+# The py_gym allocation measurements read the leaf's profiling-gated
+# module: this dev-dependency turns the feature on for the test targets
+# alone (the extension module's production build keeps it out).
+hares-types = { workspace = true, features = ["profiling"] }

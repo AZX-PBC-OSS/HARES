@@ -444,7 +444,7 @@ pub trait Equipment: Send + Sync {
     /// The primary resolved ZIP/power-factor model this equipment applies to
     /// its (primary-component) real power for reactive purposes, together
     /// with the regime it was resolved under
-    /// ([`hares_types::zip::ResolvedZip::real_power_zip_applies`]).
+    /// ([`hares_physics::zip::ResolvedZip::real_power_zip_applies`]).
     ///
     /// Semantics per equipment family:
     /// - **Typed equipment** (HVAC, water heaters, ventilation, scheduled and
@@ -477,9 +477,9 @@ pub trait Equipment: Send + Sync {
     /// published real coefficients must consult the flag first.
     ///
     /// `pf = 0.0` in the returned ZIP is the "reactive disabled" sentinel
-    /// (see [`hares_types::zip::ZipLoad`]). This is a pure inspection
+    /// (see [`hares_physics::zip::ZipLoad`]). This is a pure inspection
     /// surface: it never influences stepping or Q computation.
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         None
     }
 
@@ -500,7 +500,7 @@ pub trait Equipment: Send + Sync {
 
     /// How this equipment's expected mean real power (kW) over the loaded
     /// schedule horizon can be determined, for premise-level ZIP
-    /// aggregation ([`hares_types::zip::ResolvedZip`] mixes weighted by
+    /// aggregation ([`hares_physics::zip::ResolvedZip`] mixes weighted by
     /// expected draw).
     ///
     /// - `Some(ExpectedMeanPower::Kw(mean))` — the equipment's own

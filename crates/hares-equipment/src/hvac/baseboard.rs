@@ -50,7 +50,7 @@ pub struct ElectricBaseboard {
     /// element's draw evaluates the row's real polynomial at the bus
     /// voltage through the recorded deep-sag form (the impedance share,
     /// P = V²/R), and the delivered heat follows the draw.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
 }
 
 /// Version 2: the thermostat hysteresis is persisted.
@@ -112,8 +112,8 @@ impl ElectricBaseboard {
             use_ideal: false,
             mode_override: None,
             dr_level: DRLevel::Normal,
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
         }
     }
@@ -306,7 +306,7 @@ impl Equipment for ElectricBaseboard {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -1060,7 +1060,7 @@ mod tests {
     fn electric_baseboard_real_power_follows_the_row_and_reactive_follows_pf() {
         let cfg_pf = config(3_000.0);
         let mut cfg_nopf = config(3_000.0);
-        cfg_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        cfg_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let env_base = env(18.0);
         let mut eq_pf = ElectricBaseboard::new(cfg_pf.clone());
@@ -1107,7 +1107,7 @@ mod tests {
                      must agree bitwise"
                 );
             } else {
-                let multiplier = hares_types::zip::zip_defaults_for_class("Electric Baseboard")
+                let multiplier = hares_physics::zip::zip_defaults_for_class("Electric Baseboard")
                     .expect("class row")
                     .deep_sag_real_multiplier(*v, false);
                 let expected = ports_nopf.electrical.load_power_w * multiplier;

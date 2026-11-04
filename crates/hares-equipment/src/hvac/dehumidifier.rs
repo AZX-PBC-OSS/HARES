@@ -172,7 +172,7 @@ pub struct Dehumidifier {
     /// scales the on-cycle draw at the bus voltage through the recorded
     /// deep-sag form (as fitted: the recorded Hajagos & Danai row); Q comes
     /// from `ZipLoad::reactive_var`.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     /// The moment's nominal electric draw of the most recent step (W, the
     /// on-cycle share at the reference voltage plus the off-cycle parasitic
     /// share): the premise aggregate's weight for this unit, which
@@ -239,8 +239,8 @@ impl Dehumidifier {
             off_cycle_parasitic_load_w: None,
             min_operating_temp_c: Some(DEFAULT_MIN_OPERATING_TEMP_C),
             max_operating_temp_c: Some(DEFAULT_MAX_OPERATING_TEMP_C),
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
             last_nominal_draw_w: None,
         }
@@ -868,7 +868,7 @@ impl Equipment for Dehumidifier {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -2197,7 +2197,7 @@ mod tests {
     fn dehumidifier_real_power_follows_the_row_and_reactive_follows_pf() {
         let config_pf = config();
         let mut config_nopf = config_pf.clone();
-        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        config_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let mut eq_pf = Dehumidifier::new(config_pf.clone());
         let mut eq_nopf = Dehumidifier::new(config_nopf.clone());

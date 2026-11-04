@@ -12,6 +12,9 @@ libm = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+# The ZIP load model's `ZipLoad` round-trips through the equipment config
+# and the zip_parameters defaults file.
+serde = { workspace = true }
 
 [features]
 # The clamp census's recording sites live in the leaf's observe-gated
@@ -20,3 +23,4 @@ observe = ["hares-types/observe"]
 
 [dev-dependencies]
 approx = "0.5"
+serde_json = { workspace = true }

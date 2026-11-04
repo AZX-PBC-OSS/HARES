@@ -28,7 +28,7 @@ use crate::schedule_helpers::{
     parse_zone_id, restore_schedule_source_state,
 };
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
-use hares_types::zip::{ResolvedZip, ZipLoad};
+use hares_physics::zip::{ResolvedZip, ZipLoad};
 
 /// Format version of `EventBasedLoadState` and `WetApplianceState`.
 const EVENT_LOAD_CHECKPOINT_VERSION: u32 = 4;
@@ -724,7 +724,8 @@ impl Equipment for EventBasedLoad {
         // Resolve the canonical ZIP model (sidecar -> class defaults ->
         // constant power) and validate the coefficient-sum invariants.
         let class_name = config.ochre_class.as_str();
-        if config.zip.is_none() && hares_types::zip::zip_defaults_for_class(class_name).is_none() {
+        if config.zip.is_none() && hares_physics::zip::zip_defaults_for_class(class_name).is_none()
+        {
             tracing::warn!(
                 equipment_type = class_name,
                 instance = %self.descriptor.name,
@@ -1365,7 +1366,8 @@ impl Equipment for WetAppliance {
         // Resolve the canonical ZIP model (sidecar -> class defaults ->
         // constant power) and validate the coefficient-sum invariants.
         let class_name = config.ochre_class.as_str();
-        if config.zip.is_none() && hares_types::zip::zip_defaults_for_class(class_name).is_none() {
+        if config.zip.is_none() && hares_physics::zip::zip_defaults_for_class(class_name).is_none()
+        {
             tracing::warn!(
                 equipment_type = class_name,
                 instance = %self.descriptor.name,
@@ -2121,7 +2123,7 @@ mod tests {
     /// the bus voltage.
     fn event_config_with_washer_zip(name: &str) -> EquipmentConfig {
         let mut config = event_config(name, "EventBasedLoad");
-        config.zip = hares_types::zip::zip_defaults_for_class("Clothes Washer");
+        config.zip = hares_physics::zip::zip_defaults_for_class("Clothes Washer");
         config
     }
 

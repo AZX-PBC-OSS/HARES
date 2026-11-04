@@ -11,6 +11,7 @@
 #[macro_use]
 extern crate uom;
 
+#[cfg(feature = "profiling")]
 pub mod alloc_count;
 #[cfg(feature = "observe")]
 pub mod clamp_census;
@@ -39,7 +40,6 @@ pub mod text;
 pub mod thermostat_axis;
 pub mod thermostat_band;
 pub mod warning;
-pub mod zip;
 pub mod zone_map;
 
 pub use control_signal::*;

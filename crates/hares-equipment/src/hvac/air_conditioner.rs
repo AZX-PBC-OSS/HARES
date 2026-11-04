@@ -171,13 +171,13 @@ pub(super) struct CoolingCore {
     /// compressor's draw at the bus voltage through the recorded deep-sag
     /// form (as fitted: the recorded Hajagos & Danai row); Q comes from
     /// `ZipLoad::reactive_var` per component (see `hvac::reactive`).
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     /// The indoor blower / condenser fan motor component's REACTIVE row
     /// (pf 0.87), derived at init via `hvac::reactive::secondary_motor_zip`:
     /// the reactive sum's surface, the unit-level pf = 0.0 sentinel
     /// included. The blower's REAL response never consults this row; it
     /// evaluates the physical `hvac::reactive::FAN_MOTOR_ZIP` row.
-    fan_zip: hares_types::zip::ZipLoad,
+    fan_zip: hares_physics::zip::ZipLoad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -395,7 +395,7 @@ impl Equipment for AirConditioner {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
         Some(self.core.zip)
@@ -504,7 +504,7 @@ impl Equipment for RoomAC {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         // Primary component: the compressor (class default pf 0.96, or a user
         // "zip" override). The fan component ZIP is secondary.
         Some(self.core.zip)
@@ -736,10 +736,10 @@ impl CoolingCore {
             dr_duty_cycle: 1.0,
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
-            fan_zip: hares_types::zip::ZipLoad::constant_power(),
+            fan_zip: hares_physics::zip::ZipLoad::constant_power(),
         }
     }
 
@@ -3944,7 +3944,7 @@ mod tests {
         let p_nominal = step_once(1.0);
         let p_half = step_once(0.5);
         assert!(p_nominal > 0.0, "fixture: the compressor must run");
-        let row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("class row");
+        let row = hares_physics::zip::zip_defaults_for_class("Air Conditioner").expect("class row");
         let raw_multiplier = row.zp * 0.5 * 0.5 + row.ip * 0.5 + row.pp;
         assert!(
             raw_multiplier > 1.1,
@@ -4024,8 +4024,8 @@ mod tests {
         let compressor_n = component_w(&nominal_unit, tk::COMPRESSOR_KW);
         let fan_n = component_w(&nominal_unit, tk::FAN_KW);
         let crank_n = component_w(&nominal_unit, tk::CRANKCASE_KW);
-        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
-        let fan_row = hares_types::zip::zip_defaults_for_class("Ventilation Fan").expect("row");
+        let ac_row = hares_physics::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let fan_row = hares_physics::zip::zip_defaults_for_class("Ventilation Fan").expect("row");
         let m_compressor = ac_row.zp * 0.25 + ac_row.ip * 0.5 + ac_row.pp;
         let m_fan = fan_row.zp * 0.25 + fan_row.ip * 0.5 + fan_row.pp;
         let m_resistive = 0.25; // the crankcase heater: P = V²/R
@@ -4161,7 +4161,7 @@ mod tests {
         let mut cfg = ac_config_with(|typed| {
             typed.startup_cd = None;
         });
-        cfg.zip = Some(hares_types::zip::ZipLoad {
+        cfg.zip = Some(hares_physics::zip::ZipLoad {
             zp: 0.72,
             ip: -0.98,
             pp: 1.26,
@@ -5059,7 +5059,7 @@ mod tests {
             typed.fan_power_w = Some(0.0);
         });
         let mut config_nopf = config_pf.clone();
-        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        config_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let mut eq_pf = AirConditioner::new(config_pf.clone());
         let mut eq_nopf = AirConditioner::new(config_nopf.clone());
@@ -5101,7 +5101,7 @@ mod tests {
                      real powers must agree bitwise"
                 );
             } else {
-                let multiplier = hares_types::zip::zip_defaults_for_class("Air Conditioner")
+                let multiplier = hares_physics::zip::zip_defaults_for_class("Air Conditioner")
                     .expect("class row")
                     .deep_sag_real_multiplier(*v, true);
                 let expected = ports_nopf.electrical.load_power_w * multiplier;

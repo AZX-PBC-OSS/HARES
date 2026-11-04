@@ -16,6 +16,7 @@ pub mod pv_sizing;
 pub mod solar;
 pub mod units;
 pub mod water_mains;
+pub mod zip;
 
 #[cfg(test)]
 pub mod test_utils;

@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, Timelike};
+use hares_physics::zip::{ResolvedZip, ZipLoad};
 use hares_types::telemetry_keys as tk;
-use hares_types::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     BatteryChemistry, ChargingLevel, ChargingPriority, ChargingStrategy, ControlCapabilities,
     ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance, CoreState, DRLevel,

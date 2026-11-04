@@ -12,8 +12,8 @@ pub mod ocv;
 use std::borrow::Cow;
 use std::time::Duration;
 
+use hares_physics::zip::{ResolvedZip, ZipLoad};
 use hares_types::telemetry_keys as tk;
-use hares_types::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     BatteryChemistry, BmsMode, ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows,
     CoreOutput, CorePerformance, CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState,

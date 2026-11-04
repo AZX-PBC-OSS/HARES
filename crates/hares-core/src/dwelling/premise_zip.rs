@@ -48,7 +48,7 @@
 
 use hares_equipment::{Equipment, ExpectedMeanPower};
 use hares_io::schedule::ScheduleTimeSeries;
-use hares_types::zip::ZipLoad;
+use hares_physics::zip::ZipLoad;
 
 /// The premise-level aggregate ZIP and the equipment roster it was formed
 /// from. See [`crate::dwelling::Dwelling::premise_zip`].
@@ -470,7 +470,7 @@ mod tests {
     /// a fixed expected mean draw.
     struct StubLoad {
         descriptor: hares_types::EquipmentDescriptor,
-        resolved: Option<hares_types::zip::ResolvedZip>,
+        resolved: Option<hares_physics::zip::ResolvedZip>,
         mean: Option<ExpectedMeanPower>,
         core: hares_types::CoreOutput,
         nominal: Option<f64>,
@@ -479,7 +479,7 @@ mod tests {
     impl StubLoad {
         fn new(
             name: &str,
-            resolved: Option<hares_types::zip::ResolvedZip>,
+            resolved: Option<hares_physics::zip::ResolvedZip>,
             mean: Option<ExpectedMeanPower>,
         ) -> Self {
             Self {
@@ -579,7 +579,7 @@ mod tests {
         ) -> std::result::Result<(), hares_types::HaresError> {
             unimplemented!()
         }
-        fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+        fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
             self.resolved
         }
         fn expected_mean_power_w(&self) -> Option<ExpectedMeanPower> {
@@ -594,7 +594,7 @@ mod tests {
     ) -> Box<dyn Equipment> {
         Box::new(StubLoad::new(
             name,
-            Some(hares_types::zip::ResolvedZip::governing(zip)),
+            Some(hares_physics::zip::ResolvedZip::governing(zip)),
             mean,
         ))
     }
@@ -608,7 +608,7 @@ mod tests {
         Box::new(
             StubLoad::new(
                 name,
-                Some(hares_types::zip::ResolvedZip::governing(zip)),
+                Some(hares_physics::zip::ResolvedZip::governing(zip)),
                 mean,
             )
             .with_last_draw(last_raw_draw_w),
@@ -618,7 +618,7 @@ mod tests {
     fn pinned_load(name: &str) -> Box<dyn Equipment> {
         Box::new(StubLoad::new(
             name,
-            Some(hares_types::zip::ResolvedZip::reactive_only(
+            Some(hares_physics::zip::ResolvedZip::reactive_only(
                 ZipLoad::constant_power(),
             )),
             None,
@@ -647,8 +647,8 @@ mod tests {
         // that were off at the moment (the dryer, the range), and the
         // reported aggregate understated the assembled deep-sag response
         // by up to 24.8 percent.
-        let refrigerator = hares_types::zip::zip_defaults_for_class("Refrigerator").expect("row");
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let refrigerator = hares_physics::zip::zip_defaults_for_class("Refrigerator").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         // Two governing loads at the noon moment: the refrigerator drawing
         // raw 100 W and the lighting raw 200 W, both stepped at 0.7 pu.
         // The refrigerator's row is held at its stationary point below
@@ -711,7 +711,7 @@ mod tests {
         // 500 W weight and the Lighting row's 0.0 evaluation (-0.04) as
         // the scale for a load the outage had turned off, while the
         // engine drew zero on the same step.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![governing_stepped_load(
             "Indoor Lighting",
             lighting,
@@ -737,7 +737,7 @@ mod tests {
         // row there would publish the row's 0.0 residue (Lighting -0.04)
         // as the scale of a draw the bus cannot supply. The aggregate is
         // None, the same answer the no-computable-weight contract gives.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![governing_load(
             "Indoor Lighting",
             lighting,
@@ -764,7 +764,7 @@ mod tests {
         // would publish a negative "response" and a 500 W weight for a draw
         // the engine never takes; the honest answer is the same one the
         // de-energized boundary gives: no weight, no aggregate.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         assert!(
             lighting.deep_sag_real_multiplier(0.01, false) < 0.0,
             "fixture: the Lighting row must evaluate negative at 0.01 pu"
@@ -790,7 +790,7 @@ mod tests {
         // weight (the aggregate did not use it): a positive weight the
         // aggregate ignored would break the caller-side audit that recomputes
         // the weighted mean from the rostered positive weights.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![
             governing_load(
                 "Indoor Lighting",
@@ -834,7 +834,7 @@ mod tests {
         // one ulp low (99.99999999999999), so the honest claim is "within
         // one rounding of the division", never "bit-for-bit". The response
         // is the row's evaluation either way.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let bus_voltage = 0.5;
         let multiplier = lighting.deep_sag_real_multiplier(bus_voltage, false);
         let weight_for = |raw_draw_w: f64| -> f64 {
@@ -901,17 +901,17 @@ mod tests {
         // quotient that leaves the normal range loses the bound; the
         // band's multipliers and these draws keep every product and
         // quotient normal.)
-        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
-        let fitted_ac = hares_types::zip::ResolvedZip {
+        let ac_row = hares_physics::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let fitted_ac = hares_physics::zip::ResolvedZip {
             real_shape_as_fitted: true,
-            ..hares_types::zip::ResolvedZip::governing(ac_row)
+            ..hares_physics::zip::ResolvedZip::governing(ac_row)
         };
         // A row override may carry any real coefficient pattern summing to
         // one: the pure forms and a mixed row evaluating to 0.3 at 0.5 pu,
         // between the passive impedance floor and the fitted motor rows'
         // elevations.
         let pure = |zp: f64, ip: f64, pp: f64| {
-            hares_types::zip::ResolvedZip::governing(ZipLoad {
+            hares_physics::zip::ResolvedZip::governing(ZipLoad {
                 zp,
                 ip,
                 pp,
@@ -945,8 +945,8 @@ mod tests {
             fitted_ac.deep_sag_real_multiplier(0.5)
         );
         let shapes = [
-            hares_types::zip::ResolvedZip::governing(lighting), // raw, mixed signs
-            fitted_ac,                                          // the as-fitted polynomial
+            hares_physics::zip::ResolvedZip::governing(lighting), // raw, mixed signs
+            fitted_ac,                                            // the as-fitted polynomial
             pure(1.0, 0.0, 0.0), // pure impedance: 0.25 at 0.5 pu, 2.25 at 1.5 pu
             pure(0.0, 1.0, 0.0), // pure current: 0.5 at 0.5 pu, 1.5 at 1.5 pu
             pure(0.0, 0.0, 1.0), // pure constant power: 1.0 at every voltage
@@ -992,7 +992,7 @@ mod tests {
         // inspected and the load was off), never its 500 W expectation. The
         // expectation is the pre-step route's evidence and must not stand in
         // for a moment that was observed.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![
             governing_stepped_load(
                 "Indoor Lighting",
@@ -1046,7 +1046,7 @@ mod tests {
         // caller the moment was inspected and came up empty, and the 500 W
         // expectation would claim a draw neither the broken report nor the
         // schedule observed.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         for broken in [-3.0, f64::NAN] {
             let equipment: Vec<Box<dyn Equipment>> = vec![
                 governing_stepped_load(
@@ -1094,13 +1094,13 @@ mod tests {
         // must publish no weight for the broken ratio (the unknown-mean
         // semantics), never the 500 W expected mean, and the aggregate
         // must weight only the load it can see.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         for (draw_w, nominal_w) in [(f64::INFINITY, 1200.0), (1e300, 1e-300), (1e-300, 1e300)] {
             let equipment: Vec<Box<dyn Equipment>> = vec![
                 Box::new(
                     StubLoad::new(
                         "Broken Ratio",
-                        Some(hares_types::zip::ResolvedZip::governing(lighting)),
+                        Some(hares_physics::zip::ResolvedZip::governing(lighting)),
                         Some(ExpectedMeanPower::W(500.0)),
                     )
                     .with_last_draw(draw_w)
@@ -1146,7 +1146,7 @@ mod tests {
         // of them, and none of the loads' expectations, may enter the
         // aggregate: a weight here would report a draw a dead bus cannot
         // supply.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         for reported_w in [0.0, 300.0, -3.0, f64::NAN, f64::INFINITY] {
             let equipment: Vec<Box<dyn Equipment>> = vec![
                 governing_stepped_load(
@@ -1233,13 +1233,13 @@ mod tests {
         // the static route, and the roster published the 500 W expectation
         // for a load that reported a 200 W draw, or for one that reported an
         // export and drew nothing.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let run = |power| {
             let equipment: Vec<Box<dyn Equipment>> = vec![
                 Box::new(
                     StubLoad::new(
                         "Reported Moment",
-                        Some(hares_types::zip::ResolvedZip::governing(lighting)),
+                        Some(hares_physics::zip::ResolvedZip::governing(lighting)),
                         Some(ExpectedMeanPower::W(500.0)),
                     )
                     .with_last_flow(power),
@@ -1288,13 +1288,13 @@ mod tests {
         // caller the moment was inspected and came up empty. The roster
         // must publish no weight for it (the broken-draw semantics), and
         // the expectation must not stand in for the moment either.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let run = |power| {
             let equipment: Vec<Box<dyn Equipment>> = vec![
                 Box::new(
                     StubLoad::new(
                         "Broken Export",
-                        Some(hares_types::zip::ResolvedZip::governing(lighting)),
+                        Some(hares_physics::zip::ResolvedZip::governing(lighting)),
                         Some(ExpectedMeanPower::W(500.0)),
                     )
                     .with_last_flow(power),
@@ -1346,7 +1346,7 @@ mod tests {
         // power either (Q is derived from the real draw, and a zero-draw
         // component contributes no var), and the aggregate is None rather
         // than a fabricated constant-power answer.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![
             governing_stepped_load(
                 "Indoor Lighting",
@@ -1376,14 +1376,14 @@ mod tests {
         // only when it is finite and positive; otherwise the aggregate falls
         // back to the resolved row's un-scale, the documented single-row
         // route.
-        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let ac_row = hares_physics::zip::zip_defaults_for_class("Air Conditioner").expect("row");
         for broken in [0.0, f64::NAN, f64::INFINITY] {
             let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
                 StubLoad::new(
                     "Air Conditioner",
-                    Some(hares_types::zip::ResolvedZip {
+                    Some(hares_physics::zip::ResolvedZip {
                         real_shape_as_fitted: true,
-                        ..hares_types::zip::ResolvedZip::governing(ac_row)
+                        ..hares_physics::zip::ResolvedZip::governing(ac_row)
                     }),
                     None,
                 )
@@ -1413,13 +1413,13 @@ mod tests {
         // A broken core draw (inf) with a usable base would divide to inf.
         // The aggregate must not publish it: the aggregate is None, the
         // no-computable-positive-weight answer.
-        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let ac_row = hares_physics::zip::zip_defaults_for_class("Air Conditioner").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
             StubLoad::new(
                 "Air Conditioner",
-                Some(hares_types::zip::ResolvedZip {
+                Some(hares_physics::zip::ResolvedZip {
                     real_shape_as_fitted: true,
-                    ..hares_types::zip::ResolvedZip::governing(ac_row)
+                    ..hares_physics::zip::ResolvedZip::governing(ac_row)
                 }),
                 None,
             )
@@ -1445,13 +1445,13 @@ mod tests {
         // 1.6 x 0.25 - 2.69 x 0.5 + 2.09), a 13 percent overstatement of
         // the response, and the parent weighted the composition 1062 W
         // against the true 1200 W.
-        let ac_row = hares_types::zip::zip_defaults_for_class("Air Conditioner").expect("row");
+        let ac_row = hares_physics::zip::zip_defaults_for_class("Air Conditioner").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
             StubLoad::new(
                 "Air Conditioner",
-                Some(hares_types::zip::ResolvedZip {
+                Some(hares_physics::zip::ResolvedZip {
                     real_shape_as_fitted: true,
-                    ..hares_types::zip::ResolvedZip::governing(ac_row)
+                    ..hares_physics::zip::ResolvedZip::governing(ac_row)
                 }),
                 None,
             )
@@ -1491,11 +1491,11 @@ mod tests {
         // overstatement of the moment's response, weighting the
         // composition 415.8 W against the true 1000 W.
         let hpwh_row =
-            hares_types::zip::zip_defaults_for_class("Heat Pump Water Heater").expect("row");
+            hares_physics::zip::zip_defaults_for_class("Heat Pump Water Heater").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(
             StubLoad::new(
                 "Heat Pump Water Heater",
-                Some(hares_types::zip::ResolvedZip::governing(hpwh_row)),
+                Some(hares_physics::zip::ResolvedZip::governing(hpwh_row)),
                 None,
             )
             .with_last_draw(250.0)
@@ -1522,7 +1522,7 @@ mod tests {
     fn aggregate_weights_by_expected_mean_and_rosters_regimes() {
         // Two governing loads: lighting (1 kW, zp=1 → constant impedance) and
         // a 3 kW constant-power scheduled load, plus a Rule R1 HVAC unit.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![
             governing_load(
                 "Indoor Lighting",
@@ -1555,7 +1555,7 @@ mod tests {
 
     #[test]
     fn unknown_mean_power_is_listed_but_not_weighted() {
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![
             governing_load("MELs", lighting, None),
             governing_load(
@@ -1579,7 +1579,7 @@ mod tests {
         // Every governing load has an unknowable expected draw: an aggregate
         // formed from no information must not present itself as constant
         // power — the conflation the real_power_zip_applies flag prevents.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![
             governing_load("MELs", lighting, None),
             pinned_load("Air Conditioner"),
@@ -1589,7 +1589,7 @@ mod tests {
 
     #[test]
     fn zero_expected_draw_is_none_not_constant_power() {
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let equipment: Vec<Box<dyn Equipment>> = vec![governing_load(
             "Seasonal Pump",
             lighting,
@@ -1669,7 +1669,7 @@ mod tests {
         // explicitly absent weight (`mean_power_w: None`), so the caller
         // can see the degradation — it must not silently vanish from the
         // roster, nor contribute a clamped-to-zero weight.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
         let nan_schedule = ScheduleTimeSeries {
             timestamps: Vec::new(),
             column_names: vec!["lighting".to_string()],
@@ -1717,8 +1717,8 @@ mod tests {
         // coefficients" hazard the weight guard's comment names. A
         // published `Some` must be all-finite; refusing (None) is the
         // honest alternative.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
-        let corrupt = hares_types::zip::ZipLoad {
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
+        let corrupt = hares_physics::zip::ZipLoad {
             zp: f64::NAN,
             ..lighting
         };
@@ -1774,8 +1774,8 @@ mod tests {
         // `None` semantics — rostered with an explicitly absent weight
         // ("contributes no weight") — or exclusion, never a positive
         // weight that was silently ignored.
-        let lighting = hares_types::zip::zip_defaults_for_class("Lighting").expect("row");
-        let corrupt = hares_types::zip::ZipLoad {
+        let lighting = hares_physics::zip::zip_defaults_for_class("Lighting").expect("row");
+        let corrupt = hares_physics::zip::ZipLoad {
             zp: f64::NAN,
             ..lighting
         };

@@ -316,9 +316,9 @@ pub struct EquipmentConfig {
     /// override object merged field-wise over that base. `None` means "no
     /// instance-specific ZIP configured"; consumers resolve the effective
     /// value through [`resolve_zip`], which falls back to the class-table
-    /// defaults and finally to [`hares_types::zip::ZipLoad::constant_power`].
+    /// defaults and finally to [`hares_physics::zip::ZipLoad::constant_power`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zip: Option<hares_types::zip::ZipLoad>,
+    pub zip: Option<hares_physics::zip::ZipLoad>,
     /// Zone-to-role map for auto-routing equipment thermal contributions.
     /// Populated by the dwelling at construction time and injected before
     /// `init()`.  Reconstructed every run from the HPXML-derived building
@@ -826,27 +826,27 @@ pub fn normalize_enum_text(raw: &str) -> Option<serde_json::Value> {
 ///    canonical channel for instance-specific ZIP for raw and typed
 ///    equipment alike.
 /// 2. Class-table defaults via
-///    [`hares_types::zip::zip_defaults_for_class`] on
+///    [`hares_physics::zip::zip_defaults_for_class`] on
 ///    [`EquipmentConfig::ochre_class`].
-/// 3. [`hares_types::zip::ZipLoad::constant_power`] (no reactive power,
+/// 3. [`hares_physics::zip::ZipLoad::constant_power`] (no reactive power,
 ///    real power untouched).
 ///
-/// The returned [`hares_types::zip::ResolvedZip`] is governing -- the equipment (a scheduled or
+/// The returned [`hares_physics::zip::ResolvedZip`] is governing -- the equipment (a scheduled or
 /// event load) scales its real power through the real-power polynomial at
 /// the bus voltage each step.
 #[must_use]
-pub fn resolve_zip(config: &EquipmentConfig) -> hares_types::zip::ResolvedZip {
+pub fn resolve_zip(config: &EquipmentConfig) -> hares_physics::zip::ResolvedZip {
     resolve_governing_with_recorded_shape(config)
 }
 
 /// The coefficient-resolution chain shared by [`resolve_zip`] and
 /// [`resolve_reactive_zip`]: sidecar → class-table defaults → constant
 /// power.
-fn resolve_zip_load(config: &EquipmentConfig) -> hares_types::zip::ZipLoad {
+fn resolve_zip_load(config: &EquipmentConfig) -> hares_physics::zip::ZipLoad {
     config
         .zip
-        .or_else(|| hares_types::zip::zip_defaults_for_class(&config.ochre_class))
-        .unwrap_or_else(hares_types::zip::ZipLoad::constant_power)
+        .or_else(|| hares_physics::zip::zip_defaults_for_class(&config.ochre_class))
+        .unwrap_or_else(hares_physics::zip::ZipLoad::constant_power)
 }
 
 /// The ZIP polynomial coefficient sums must equal 1.0 so that the model is
@@ -879,7 +879,7 @@ pub(crate) const ZIP_SUM_TOLERANCE: f64 = 1e-9;
 /// typed equipment (HVAC, water heaters, fans, pumps).
 pub(crate) fn resolve_reactive_zip(
     config: &EquipmentConfig,
-) -> crate::Result<hares_types::zip::ResolvedZip> {
+) -> crate::Result<hares_physics::zip::ResolvedZip> {
     let resolved = resolve_governing_with_recorded_shape(config);
     validate_zip_sums(&resolved.zip, &config.name)?;
     Ok(resolved)
@@ -889,10 +889,10 @@ pub(crate) fn resolve_reactive_zip(
 /// shape policy for the class.
 fn resolve_governing_with_recorded_shape(
     config: &EquipmentConfig,
-) -> hares_types::zip::ResolvedZip {
-    let mut resolved = hares_types::zip::ResolvedZip::governing(resolve_zip_load(config));
+) -> hares_physics::zip::ResolvedZip {
+    let mut resolved = hares_physics::zip::ResolvedZip::governing(resolve_zip_load(config));
     resolved.real_shape_as_fitted =
-        hares_types::zip::deep_sag_row_evaluates_as_fitted(&config.ochre_class);
+        hares_physics::zip::deep_sag_row_evaluates_as_fitted(&config.ochre_class);
     resolved
 }
 
@@ -912,7 +912,7 @@ fn resolve_governing_with_recorded_shape(
 /// positive: it is a division operand at `apply` (`v / v0`), so `v0 <= 0`
 /// is a division-by-zero/negative-voltage hazard, not a modelling choice.
 pub(crate) fn validate_zip_sums(
-    zip: &hares_types::zip::ZipLoad,
+    zip: &hares_physics::zip::ZipLoad,
     equipment_name: &str,
 ) -> crate::Result<()> {
     let fields = [
@@ -947,9 +947,9 @@ pub(crate) fn validate_zip_sums(
     // service voltage this engine is driven at. Bounds within physical
     // plausibility make the overflow class unrepresentable across the
     // whole band instead of sampling it; see
-    // `hares_types::zip::validate_plausible_magnitudes` for the bound
+    // `hares_physics::zip::validate_plausible_magnitudes` for the bound
     // derivation.
-    hares_types::zip::validate_plausible_magnitudes(zip)
+    hares_physics::zip::validate_plausible_magnitudes(zip)
         .map_err(|err| hares_types::HaresError::Equipment(format!("{equipment_name}: {err}")))?;
     let real_sum = zip.zp + zip.ip + zip.pp;
     if (real_sum - ZIP_SUM_TARGET).abs() > ZIP_SUM_TOLERANCE {
@@ -1422,7 +1422,7 @@ mod tests {
 
     // ── resolve_zip precedence ──────────────────────────────────────────
 
-    use hares_types::zip::{ZipLoad, zip_defaults_for_class};
+    use hares_physics::zip::{ZipLoad, zip_defaults_for_class};
 
     fn raw_cfg(class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
         let data = pairs
@@ -1479,7 +1479,7 @@ mod tests {
 
     #[test]
     fn validate_zip_sums_accepts_all_class_rows() {
-        for name in hares_types::zip::ZIP_CLASS_NAMES {
+        for name in hares_physics::zip::ZIP_CLASS_NAMES {
             let zip = zip_defaults_for_class(name).expect("row");
             super::validate_zip_sums(&zip, name).expect("class row must satisfy sum invariants");
         }

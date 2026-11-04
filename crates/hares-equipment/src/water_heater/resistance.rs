@@ -115,7 +115,7 @@ pub struct ResistanceWH {
     /// voltage through the recorded deep-sag form (the impedance share,
     /// P = V²/R), and the delivered heat follows the draw; Q comes from
     /// `ZipLoad::reactive_var`.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     // --- Setpoint ramp rate ---
     target_setpoint_c: f64,
     setpoint_ramp_rate_c_per_s: Option<f64>,
@@ -237,8 +237,8 @@ impl ResistanceWH {
             draw_l_per_min_source: None,
             mains_temp_c_source: None,
             appliance_draw_source: None,
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
             target_setpoint_c: DEFAULT_SETPOINT_C,
             setpoint_ramp_rate_c_per_s: None,
@@ -870,7 +870,7 @@ impl Equipment for ResistanceWH {
         Some(hares_types::ThermostatBandClass::Tank)
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 

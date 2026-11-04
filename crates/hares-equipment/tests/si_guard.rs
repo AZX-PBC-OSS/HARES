@@ -706,7 +706,7 @@ static UNIT_SUFFIX_ALLOWED: &[&str] = &[
     "crates/hares-types/src/equipment.rs",
     "crates/hares-types/src/mode_flow_guard.rs",
     "crates/hares-types/src/ports.rs",
-    "crates/hares-types/src/zip.rs",
+    "crates/hares-physics/src/zip.rs",
     //
     // (reporting names: the actors' declared variables and the reporting
     // keys they read - the boundary "Reporting names"; the identifier is

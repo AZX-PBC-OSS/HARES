@@ -54,13 +54,13 @@ pub struct ElectricFurnace {
     /// pf 1.0 → Q exactly zero, or a user `"zip"` override): its real
     /// polynomial scales the element's draw and delivered heat at the bus
     /// voltage through the recorded deep-sag form.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     /// The blower fan motor component's REACTIVE row (pf 0.87), derived
     /// at init via `hvac::reactive::secondary_motor_zip`: the reactive
     /// sum's surface, the unit-level pf = 0.0 sentinel included. The
     /// blower's REAL response never consults this row; it evaluates the
     /// physical `hvac::reactive::FAN_MOTOR_ZIP` row.
-    fan_zip: hares_types::zip::ZipLoad,
+    fan_zip: hares_physics::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (W, the
     /// element's and blower's pre-scaling sum at the reference voltage):
     /// the premise aggregate's weight for this unit, which un-scales the
@@ -91,7 +91,7 @@ pub struct GasFurnace {
     /// The class ZIP row: blower fan motor pf 0.87; the blower's draw
     /// evaluates the row's real polynomial at the bus voltage through the
     /// recorded deep-sag form; Q comes from ZipLoad::reactive_var.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
 }
 
 /// Version 2: the thermostat hysteresis is persisted.
@@ -164,10 +164,10 @@ impl ElectricFurnace {
             use_ideal: false,
             mode_override: None,
             dr_level: DRLevel::Normal,
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
-            fan_zip: hares_types::zip::ZipLoad::constant_power(),
+            fan_zip: hares_physics::zip::ZipLoad::constant_power(),
             last_nominal_draw_w: None,
         }
     }
@@ -462,7 +462,7 @@ impl Equipment for ElectricFurnace {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -669,8 +669,8 @@ impl GasFurnace {
             use_ideal: false,
             mode_override: None,
             dr_level: DRLevel::Normal,
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
         }
     }
@@ -963,7 +963,7 @@ impl Equipment for GasFurnace {
         ))
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -2664,7 +2664,7 @@ mod tests {
     fn electric_furnace_real_power_follows_the_row() {
         let cfg_pf = ef_config(8_000.0, 1.05);
         let mut cfg_nopf = ef_config(8_000.0, 1.05);
-        cfg_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        cfg_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let env_base = env(18.0);
         let mut eq_pf = ElectricFurnace::new(cfg_pf.clone());
@@ -2833,7 +2833,7 @@ mod tests {
         let mut cfg_nopf =
             EquipmentConfig::from_typed("GF-NOPF".to_string(), "Gas Furnace".to_string(), base_cfg)
                 .unwrap();
-        cfg_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        cfg_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let env_base = env(18.0);
         let mut eq_pf = GasFurnace::new(cfg_pf.clone());
@@ -2878,7 +2878,7 @@ mod tests {
                     "step {i} (v={v}): at the reference voltage the twins must agree bitwise"
                 );
             } else {
-                let multiplier = hares_types::zip::zip_defaults_for_class("Gas Furnace")
+                let multiplier = hares_physics::zip::zip_defaults_for_class("Gas Furnace")
                     .expect("row")
                     .deep_sag_real_multiplier(*v, true);
                 let expected = ports_nopf.electrical.load_power_w * multiplier;

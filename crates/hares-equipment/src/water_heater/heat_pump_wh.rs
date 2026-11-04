@@ -208,7 +208,7 @@ pub struct HeatPumpWH {
     /// (compressor + backup element + fan/parasitic), whose real polynomial
     /// scales the draw at the bus voltage through the recorded deep-sag
     /// form; Q comes from `ZipLoad::reactive_var`.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     // --- Demand response state ---
     dr_setpoint_offset_c: f64,
     dr_load_fraction: f64,
@@ -362,8 +362,8 @@ impl HeatPumpWH {
             mains_temp_c: 10.0,
             draw_flow_rate_kg_s: 0.0,
             appliance_draw_source: None,
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
             dr_setpoint_offset_c: 0.0,
             dr_load_fraction: 1.0,
@@ -1325,7 +1325,7 @@ impl Equipment for HeatPumpWH {
         Some(hares_types::ThermostatBandClass::Tank)
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -2428,7 +2428,7 @@ mod tests {
     fn real_power_follows_the_row_and_reactive_follows_pf() {
         let config_pf = config();
         let mut config_nopf = config();
-        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        config_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let mut eq_pf = HeatPumpWH::new(config_pf.clone());
         let mut eq_nopf = HeatPumpWH::new(config_nopf.clone());
