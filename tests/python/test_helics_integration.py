@@ -1730,6 +1730,11 @@ def test_the_voltage_topics_zero_carries_the_outage_and_the_publications_witness
         assert dead_bus_rows, (
             "the outage's first step is a dead-bus step: no interchange, no island"
         )
+        for row in dead_bus_rows:
+            assert row["power"] == 0.0, (
+                "the dead-bus step force-offs every load: the published premise "
+                f"balance is exactly 0.0, got {row['power']!r}"
+            )
 
         connected_rows = [row for row in rows if row["islanded"] == 0.0 and row["interchange"] != 0.0]
         assert connected_rows, "a connected step's interchange is the meter's net flow"
