@@ -357,9 +357,14 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
     assert fedinfo.property[fake_helics.HELICS_PROPERTY_TIME_PERIOD] == pytest.approx(0.0)
 
     pubs = orchestrator.register_publications(prefix="grid/")
+    # The aggregate grid interchange rides the aggregate pair: it is the
+    # fleet's demand channel (docs/cosim.md: the feeder reads the
+    # interchange, never the premise balance, which is the islands' phantom
+    # imbalance during an outage).
     assert [p.key for p in pubs] == [
         "grid/fleet_1/aggregate_power_w",
         "grid/fleet_1/aggregate_reactive_var",
+        "grid/fleet_1/aggregate_grid_interchange_w",
         "grid/fleet_1/dwelling_0/total_power_w",
         "grid/fleet_1/dwelling_0/reactive_power_var",
         "grid/fleet_1/dwelling_0/grid_interchange_w",
@@ -1030,6 +1035,64 @@ def test_fleet_run_loop_raises_when_cumulative_drift_exceeds_tolerance(
     assert fleet._step_count == 0, "the guard fires before the first step applies"
 
 
+def test_fleet_publishes_aggregate_grid_interchange(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fleet's demand channel: the aggregate grid interchange.
+
+    Connected, it is the sum of the per-dwelling interchanges (the meter
+    sum); with every dwelling islanded it is exactly 0.0 - a sum of the
+    per-breaker zeros, never the islands' internal imbalance the premise
+    sum would phantom onto the feeder.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    # Connected: the aggregate interchange is the meter sum, on bits.
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator._publish_results()
+    fed = fake_helics.last_fed
+    assert fed is not None
+    per_dwelling = [
+        fed.publications[f"dwelling_{i}/grid_interchange_w"].published[-1] for i in range(3)
+    ]
+    # The orchestrator accumulates in dwelling order by plain addition;
+    # replicate that (Python's sum() is Neumaier-compensated and can be one
+    # ULP off the same floats).
+    received_sum = 0.0
+    for value in per_dwelling:
+        received_sum += value
+    aggregate = fed.publications["aggregate_grid_interchange_w"].published[-1]
+    assert aggregate == received_sum, (
+        "the aggregate interchange is the per-dwelling sum, on bits"
+    )
+    assert fed.publications["aggregate_power_w"].published[-1] == 6.0, (
+        "the premise sum continues beside the interchange aggregate"
+    )
+
+    # Islanded: every per-dwelling interchange exactly 0.0, the aggregate
+    # exactly 0.0, the premise balance still the islands' internal imbalance.
+    islanded_fleet = _FakeFleet(fake_helics.log, islanded=True)
+    islanded_orchestrator = module.HELICSFleet(islanded_fleet, fed_name="fleet_2")
+    islanded_orchestrator.register_publications()
+    islanded_orchestrator._publish_results()
+    fed = fake_helics.last_fed
+    assert fed is not None
+    for i in range(3):
+        assert fed.publications[f"dwelling_{i}/grid_interchange_w"].published[-1] == 0.0, (
+            "an islanded dwelling's interchange is exactly 0.0 at the open breaker"
+        )
+        assert fed.publications[f"dwelling_{i}/islanded"].published[-1] == 1.0
+    assert fed.publications["aggregate_grid_interchange_w"].published[-1] == 0.0, (
+        "the all-islanded fleet's demand reads exactly 0.0, never a phantom load"
+    )
+    assert fed.publications["aggregate_power_w"].published[-1] == 6.0, (
+        "the premise balance continues through the outage (the islands' internal imbalance)"
+    )
+    assert fed.publications["aggregate_grid_interchange_w"]._info == "units=W"
+
+
 def test_fleet_price_subscription_applies_to_every_dwelling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1646,3 +1709,64 @@ def test_fleet_required_subscription_missing_returned(
     missing_pubs, missing_subs = orchestrator._verify_registration_completeness()
     assert "nonexistent_topic" in " ".join(sorted(missing_subs))
     assert len(missing_pubs) == 0
+
+
+def test_fleet_publication_units_match_the_documented_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every fleet publication's ``set_info`` unit is the contract's own unit
+    for that topic (docs/cosim.md's publication tables, per-dwelling and
+    aggregates).
+
+    The fleet aggregates are documented topics: a unit change on either
+    surface fails the doc and the code together.
+    """
+    from conftest import cosim_publication_units
+
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    docs = cosim_publication_units()
+    expected_by_key = {
+        "aggregate_power_w": "W",
+        "aggregate_reactive_var": "VAR",
+        "aggregate_grid_interchange_w": "W",
+        "aggregate_zone_temp_c": "degC",
+        "aggregate_soc_pct": "pct",
+        "dwelling_0/total_power_w": "W",
+        "dwelling_0/reactive_power_var": "VAR",
+        "dwelling_0/grid_interchange_w": "W",
+        "dwelling_0/islanded": "flag",
+        "dwelling_0/bus_voltage_pu": "pu",
+        "dwelling_0/island_unserved_w": "W",
+        "dwelling_0/island_excess_w": "W",
+        "dwelling_0/equipment_0/power_w": "W",
+        "dwelling_0/equipment_0/soc_pct": "pct",
+        "dwelling_0/equipment_0/operating_mode": "enum",
+        "dwelling_0/zone_0/temp_air_c": "degC",
+    }
+    for key, expected_unit in expected_by_key.items():
+        pub = fed.publications[key]
+        assert pub._info == f"units={expected_unit}", (
+            f"{key}'s set_info is the code's unit metadata"
+        )
+        # The fleet's per-dwelling topics are the dwelling federate's own
+        # documented rows under the dwelling_{index}/ prefix; the zone and
+        # equipment rows are the tables' parameterized (combined) rows.
+        stripped = key.split("/", 1)[1] if key.startswith("dwelling_") else key
+        if "temp_air_c" in stripped:
+            doc_key = "`zone_{i}/temp_air_c`"
+            assert expected_unit == "degC"
+        elif "equipment_" in stripped:
+            doc_key = "`equipment_{i}/power_w`, `/soc_pct`, `/operating_mode`"
+        else:
+            doc_key = f"`{stripped}`"
+        row = docs.get(doc_key)
+        assert row is not None, f"docs/cosim.md's publication tables must document {key}"
+        assert expected_unit.lower() in row.lower(), (
+            f"docs/cosim.md's unit for {key} is '{row}', the code's is {expected_unit}"
+        )

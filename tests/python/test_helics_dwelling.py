@@ -1764,3 +1764,68 @@ def test_helics_publications_are_si_with_their_units(
                 f"equipment_{ei}/power_w is the telemetry's own float, on bits"
             )
             assert pub._info == "units=W"
+
+
+def test_dwelling_publication_units_match_the_documented_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every dwelling publication's ``set_info`` unit is the contract's own
+    unit for that topic (docs/cosim.md's publication table).
+
+    The SI keys carry watts and vars (the publications are the telemetry's
+    W/var fields on bits, the SI test's pin); the module prose and the table
+    must agree with the code, so a future unit change fails both surfaces at
+    once.
+    """
+    from conftest import cosim_publication_units
+
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    docs = cosim_publication_units()
+    expected_by_key = {
+        "total_power_w": "W",
+        "reactive_power_var": "VAR",
+        "grid_interchange_w": "W",
+        "islanded": "flag",
+        "bus_voltage_pu": "pu",
+        "island_unserved_w": "W",
+        "island_excess_w": "W",
+        "pv_generation_w": "W",
+    }
+    for key, expected_unit in expected_by_key.items():
+        pub = fed.publications[key]
+        assert pub._info == f"units={expected_unit}", (
+            f"{key}'s set_info is the code's unit metadata"
+        )
+        row = docs.get(f"`{key}`")
+        assert row is not None, f"docs/cosim.md's publication table must document {key}"
+        assert expected_unit.lower() in row.lower(), (
+            f"docs/cosim.md's unit for {key} is '{row}', the code's is {expected_unit}"
+        )
+
+    # The parameterized rows: zones carry degC; the combined equipment row's
+    # cells are W, pct, enum in the table's own order.
+    for key, pub in fed.publications.items():
+        if "/temp_air_c" in key:
+            assert pub._info == "units=degC"
+            assert "degC".lower() in docs["`zone_{i}/temp_air_c`"].lower()
+        elif key.endswith("/power_w") and key.startswith("equipment_"):
+            assert pub._info == "units=W"
+            row = docs["`equipment_{i}/power_w`, `/soc_pct`, `/operating_mode`"]
+            cells = [cell.strip() for cell in row.split(",")]
+            assert cells[0].lower() == "w"
+        elif key.endswith("/soc_pct"):
+            assert pub._info == "units=pct"
+            row = docs["`equipment_{i}/power_w`, `/soc_pct`, `/operating_mode`"]
+            cells = [cell.strip() for cell in row.split(",")]
+            assert cells[1].lower() == "pct"
+        elif key.endswith("/operating_mode"):
+            assert pub._info == "units=enum"
+            row = docs["`equipment_{i}/power_w`, `/soc_pct`, `/operating_mode`"]
+            cells = [cell.strip() for cell in row.split(",")]
+            assert cells[2].lower() == "enum"

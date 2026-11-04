@@ -6,10 +6,11 @@ Expected HELICS publication units
 All publication keys and their expected physical units:
 
 ``{prefix}{fed_name}/total_power_w``
-    Active power in kilowatts (kW).
+    Active power in watts (W): the premise balance (import positive,
+    export negative).
 
 ``{prefix}{fed_name}/reactive_power_var``
-    Reactive power in kilovolt-amperes reactive (kvar).
+    Reactive power in volt-amperes reactive (var).
 
 ``{prefix}{fed_name}/grid_interchange_w``
     The grid interchange in watts (W): exactly 0.0 whenever the utility is
@@ -34,17 +35,20 @@ All publication keys and their expected physical units:
     Zone indoor air temperature in degrees Celsius (degC).
 
 ``{prefix}{fed_name}/equipment_{index}/power_w``
-    Per-equipment active power in kilowatts (kW).
+    Per-equipment active power in watts (W).
 
 ``{prefix}{fed_name}/equipment_{index}/soc_pct``
-    Per-equipment state of charge as a percentage (0-100).
+    Per-equipment state of charge as a percentage (0-100). Equipment
+    whose core output carries no SOC state publishes 0.0: the telemetry
+    substitutes 0.0 for an absent SOC, so a non-storage topic's 0.0
+    means "no SOC state", not "empty".
 
 ``{prefix}{fed_name}/equipment_{index}/operating_mode``
     Per-equipment operating mode as a numeric code (see ``OperatingMode`` in
     ``hares-types``).
 
 ``{prefix}{fed_name}/pv_generation_w``
-    PV generation in kilowatts (kW), identified heuristically from equipment
+    PV generation in watts (W), identified heuristically from equipment
     name and negative power.
 
 Expected HELICS subscription units

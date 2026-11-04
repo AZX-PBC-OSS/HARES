@@ -145,6 +145,28 @@ def _is_helics_module(name: str) -> bool:
     return name in ("helics", "hares.helics") or name.startswith(("helics.", "hares.helics."))
 
 
+def cosim_publication_units() -> dict[str, str]:
+    """The co-sim contract's publication table (``docs/cosim.md``): each
+    row's verbatim topic cell mapped to its unit cell's text.
+
+    Both federates' unit metadata is pinned against this table, so a unit
+    change on either surface fails the doc and the code together. A
+    combined row's topic cell (``equipment_{i}/power_w`, `/soc_pct`, ...``)
+    stays verbatim; its unit cell ("W, pct, enum") is read positionally by
+    the test that pins it.
+    """
+    text = (ROOT / "docs" / "cosim.md").read_text(encoding="utf-8")
+    units: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.startswith("| `") or " | " not in line:
+            continue
+        cells = line.split("|")
+        if len(cells) < 3:
+            continue
+        units[cells[1].strip()] = cells[2].strip()
+    return units
+
+
 @pytest.fixture
 def restore_helics_modules() -> Iterator[None]:
     """Put back the real ``helics`` and ``hares.helics`` modules after the test.

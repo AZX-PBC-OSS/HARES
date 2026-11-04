@@ -6,31 +6,48 @@ Expected HELICS publication units
 All publication keys and their expected physical units:
 
 ``{prefix}{fed_name}/aggregate_power_w``
-    Aggregate active power across all dwellings in kilowatts (kW).
+    Aggregate active power across all dwellings in watts (W): the sum of
+    the per-dwelling premise balances. This is a premise quantity, not a
+    grid quantity: during an outage each islanded dwelling's balance is
+    the island's internal imbalance, so a feeder federate's demand
+    channel reads ``aggregate_grid_interchange_w``, never this topic.
 
 ``{prefix}{fed_name}/aggregate_reactive_var``
-    Aggregate reactive power across all dwellings in kilovolt-amperes reactive (kvar).
+    Aggregate reactive power across all dwellings in volt-amperes
+    reactive (var).
+
+``{prefix}{fed_name}/aggregate_grid_interchange_w``
+    Aggregate grid interchange across all dwellings in watts (W): the sum
+    of the per-dwelling grid interchanges, exactly 0.0 when every
+    dwelling is islanded (each islanded dwelling's interchange is
+    exactly 0.0 at the open breaker). This is the fleet's demand channel.
 
 ``{prefix}{fed_name}/dwelling_{index}/total_power_w``
-    Per-dwelling active power in kilowatts (kW).
+    Per-dwelling active power in watts (W).
 
 ``{prefix}{fed_name}/dwelling_{index}/reactive_power_var``
-    Per-dwelling reactive power in kilovolt-amperes reactive (kvar).
+    Per-dwelling reactive power in volt-amperes reactive (var).
 
 ``{prefix}{fed_name}/aggregate_zone_temp_c``
     Mean zone indoor air temperature across the fleet in degrees Celsius (degC).
 
 ``{prefix}{fed_name}/aggregate_soc_pct``
-    Mean equipment state of charge across the fleet as a percentage (0-100).
+    Mean equipment state of charge across the fleet as a percentage
+    (0-100). Every equipment contributes, and equipment whose core
+    output carries no SOC state publishes 0.0, so the mean is diluted by
+    the non-storage roster: one battery at 50 percent beside nine
+    non-storage units publishes 5, not 50.
 
 ``{prefix}{fed_name}/dwelling_{index}/zone_{zone_index}/temp_air_c``
     Per-dwelling zone indoor air temperature in degrees Celsius (degC).
 
 ``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/power_w``
-    Per-dwelling, per-equipment active power in kilowatts (kW).
+    Per-dwelling, per-equipment active power in watts (W).
 
 ``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/soc_pct``
     Per-dwelling, per-equipment state of charge as a percentage (0-100).
+    As with the aggregate: equipment with no SOC state publishes 0.0
+    ("no SOC state", not "empty").
 
 ``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/operating_mode``
     Per-dwelling, per-equipment operating mode as a numeric code (see
@@ -176,6 +193,7 @@ class HELICSFleet:
 
         self._pub_aggregate_power: HelicsPublicationLike | None = None
         self._pub_aggregate_reactive: HelicsPublicationLike | None = None
+        self._pub_aggregate_interchange: HelicsPublicationLike | None = None
         self._pub_dwelling_power: list[HelicsPublicationLike] = []
         self._pub_dwelling_reactive: list[HelicsPublicationLike] = []
         self._pub_dwelling_interchange: list[HelicsPublicationLike] = []
@@ -240,17 +258,23 @@ class HELICSFleet:
         """
         aggregate_power_name = "aggregate_power_w"
         aggregate_reactive_name = "aggregate_reactive_var"
+        aggregate_interchange_name = "aggregate_grid_interchange_w"
         self._pub_aggregate_power = self._fed.register_publication(aggregate_power_name, "double")
         self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_name, "double")
+        self._pub_aggregate_interchange = self._fed.register_publication(
+            aggregate_interchange_name, "double"
+        )
 
         set_publication_info(self._pub_aggregate_power, "units=W")
         set_publication_info(self._pub_aggregate_reactive, "units=VAR")
+        set_publication_info(self._pub_aggregate_interchange, "units=W")
 
         self._pub_dwelling_power = []
         self._pub_dwelling_reactive = []
         configs: list[HELICSPublicationConfig] = [
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_power_name}"),
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_reactive_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_interchange_name}"),
         ]
 
         # Per-dwelling power and reactive (existing)
@@ -840,6 +864,7 @@ class HELICSFleet:
     def _publish_results(self) -> None:
         aggregate_power_w = 0.0
         aggregate_reactive_var = 0.0
+        aggregate_interchange_w = 0.0
         total_zone_temp = 0.0
         total_zone_count = 0
         total_soc = 0.0
@@ -865,10 +890,16 @@ class HELICSFleet:
             # attribute access: a telemetry object without the grid-facing
             # fields must fail loudly here, never silently publish a
             # stale-quantity substitute.
+            interchange_w = float(telemetry.grid_interchange_w)
             if dwelling_index < len(self._pub_dwelling_interchange):
-                self._pub_dwelling_interchange[dwelling_index].publish(
-                    float(telemetry.grid_interchange_w)
-                )
+                self._pub_dwelling_interchange[dwelling_index].publish(interchange_w)
+            # The fleet's demand channel (docs/cosim.md): the summed grid
+            # interchange, not the summed premise balance. An islanded
+            # dwelling's interchange is exactly 0.0 at the open breaker, so
+            # an all-islanded fleet's aggregate reads exactly 0.0 on bits
+            # (a sum of zeros), and the islands' internal imbalances never
+            # surface as a phantom grid load.
+            aggregate_interchange_w += interchange_w
             if dwelling_index < len(self._pub_dwelling_islanded):
                 self._pub_dwelling_islanded[dwelling_index].publish(
                     1.0 if telemetry.islanded else 0.0
@@ -923,9 +954,12 @@ class HELICSFleet:
             raise RuntimeError("Publications are not registered; call register_publications() first")
         self._pub_aggregate_power.publish(aggregate_power_w)
         self._pub_aggregate_reactive.publish(aggregate_reactive_var)
+        if self._pub_aggregate_interchange is None:
+            raise RuntimeError("Publications are not registered; call register_publications() first")
+        self._pub_aggregate_interchange.publish(aggregate_interchange_w)
 
         _published_count = (
-            2  # aggregate power + reactive
+            3  # aggregate power + reactive + grid interchange
             + len(self._pub_dwelling_power)
             + len(self._pub_dwelling_reactive)
             + sum(len(pubs) for pubs in self._pub_dwelling_zone_temp)
