@@ -192,6 +192,39 @@ resumes the run from the checkpoint.
 equipment declaring it is rejected at registration, since no step loop runs
 it.
 
+### The Per-Equipment Enforcement Block and Its Cost
+
+Beside the whole-run checks above, each equipment's own step carries an
+enforcement block: the pipeline captures the pre-step rollback ports
+(`rollback_ports.copy_into`) and, on the step's success, validates the
+equipment's core-output contract (`validate_core_contract`, warnings landing
+in the run's log stamped with the step) and the port/core electrical
+consistency (`validate_port_core_electrical_consistency`). The block runs
+unconditionally in every build profile.
+
+The block's share of a step is measured, not assumed: the `invariant_cost`
+bench (`benches/invariant_cost.rs`, gated by the CI bench job like every
+other bench) steps the single-equipment synthetic roster and the
+eight-equipment HPXML roster with the block on and off. The off state is a
+dwelling-scoped measurement switch
+(`Dwelling::set_step_validation_enabled`, `#[doc(hidden)]`): it skips
+exactly that block for that dwelling's steps, nothing else, and it also
+forfeits the capture a failed equipment step's rollback restores from, so
+it is the bench's comparison arm, never a supported run mode; construction
+enables the block and no run path clears it. The bench's witness runs
+before anything is timed: a dwelling carrying contract-violating equipment
+fails its step naming the violation in the default and re-enabled states
+and runs the same violation clean in the off state, for both the
+core-output contract's and the consistency check's violation flavors. The
+capture, the block's third site, has its own case: in a step whose first
+equipment deposits 1 kW and whose second fails after depositing, the
+default state's rollback restores the deposit and the step completes,
+while the off state's rollback swaps in the snapshot the skipped capture
+never wrote, and the step's always-on electrical consistency check names
+the lost contribution. The paired delta the bench records is therefore
+the block's own cost. The same witness runs at suite cost in the
+bench_construction suite.
+
 ### Ordering Contract
 
 ```

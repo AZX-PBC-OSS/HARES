@@ -107,6 +107,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_TARGETS=(
     single_building fleet rl_step rc_solver metrics_request
     rl_episode output_row_plan diagnostics_report thermal_step checkpoint
+    invariant_cost
 )
 
 # The per-target accepted ceilings: the ratio a target's benchmarks may

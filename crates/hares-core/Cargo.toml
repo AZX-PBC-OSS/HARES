@@ -153,3 +153,8 @@ name = "checkpoint"
 path = "../../benches/checkpoint.rs"
 harness = false
 
+[[bench]]
+name = "invariant_cost"
+path = "../../benches/invariant_cost.rs"
+harness = false
+
