@@ -11,6 +11,10 @@ use hares_core::{DwellingConfig, SimulationConfig};
 
 use hares_core::DwellingSettings;
 use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_types::{
+    CoreCapabilities, CoreOutput, EndUse, EquipmentDescriptor, EquipmentId, ExecutionStage,
+    FuelType, PortDeclaration, Telemetry,
+};
 
 #[path = "../tests/support/fixture_start.rs"]
 mod fixture_start;
@@ -298,6 +302,390 @@ pub fn checkpoint_large_dwelling(
 ) -> Dwelling {
     let config = checkpoint_large_config(dir, bldg_id, schedule_path, weather_path);
     Dwelling::from_config(config).expect("the checkpoint bench's large dwelling builds")
+}
+
+/// The invariant-cost bench's run lengths: the checkpoint bench's own
+/// roster shapes (the synthetic TOML's 26 hours, the HPXML fleet shape's
+/// 48 hours), each holding the marching arm's steps with margin.
+pub const INVARIANT_COST_SMALL_DURATION_S: i64 = 93_600;
+pub const INVARIANT_COST_LARGE_DURATION_S: i64 = 172_800;
+
+/// The invariant-cost bench's march lengths per timed iteration: eight
+/// simulated hours of the small roster's 60 s steps, one simulated day
+/// of the large roster's 900 s steps.
+pub const INVARIANT_COST_SMALL_ARM_STEPS: u64 = 480;
+pub const INVARIANT_COST_LARGE_ARM_STEPS: u64 = 96;
+
+/// The invariant-cost bench's small-roster dwelling: the shared synthetic
+/// TOML through `from_toml_config_with_reports`, no reports, at the
+/// bench's 26-hour run length.
+pub fn invariant_cost_small_dwelling(dir: &Path) -> Dwelling {
+    let path = numbered_path(dir, "hares-bench-invariant-small", "toml");
+    synthetic_toml_case(&path, INVARIANT_COST_SMALL_DURATION_S);
+    Dwelling::from_toml_config_with_reports(&path, Some(Vec::new()))
+        .expect("the invariant-cost bench's small dwelling builds")
+}
+
+/// The invariant-cost bench's large-roster dwelling: the shared HPXML
+/// fixture through `build_dwelling_config` at the fleet shape (no own
+/// reports, 900 s steps) at the bench's 48-hour run length.
+pub fn invariant_cost_large_dwelling(dir: &Path, bldg_id: i64) -> Dwelling {
+    let schedule_path = numbered_path(dir, "hares-bench-invariant-schedule", "csv");
+    let weather_path = numbered_path(dir, "hares-bench-invariant-weather", "epw");
+    write_schedule_csv(&schedule_path);
+    write_weather_epw(&weather_path);
+    let mut config = build_dwelling_config(
+        dir,
+        bldg_id,
+        schedule_path,
+        weather_path,
+        repo_defaults_path(),
+        Duration::seconds(INVARIANT_COST_LARGE_DURATION_S),
+    );
+    config.settings.sim_config.reports.clear();
+    config.settings.sim_config.time_res = Duration::seconds(900);
+    Dwelling::from_config(config).expect("the invariant-cost bench's large dwelling builds")
+}
+
+/// The validation bench's witness equipment: an electric
+/// Independent-stage appliance that can break the per-equipment contract
+/// the enforcement block checks, deposit a matching flow, fail its own
+/// step, or any combination the witness needs.
+/// `missing_declared_field` publishes no electric flow although the
+/// descriptor declares the ELECTRIC capability (the core-output
+/// contract's missing-field arm) and deposits nothing at its port, so no
+/// downstream check sees a divergence the block itself does not name;
+/// `reactive_divergent` deposits active power its core output matches
+/// plus reactive power its core output does not report, so only the
+/// port/core electrical consistency check's reactive arm fires;
+/// `depositing` and `failing_after_deposit` carry the capture witness:
+/// the first leaves a 1 kW contribution in the shared electrical bus, the
+/// second deposits 500 W and returns an error, so the step's rollback
+/// either restores the deposit (the enforced state) or swaps in the
+/// snapshot the skipped capture never wrote (the off state), and the
+/// step's always-on consistency check separates the two. The
+/// dwelling's real rosters never violate the contract; this equipment
+/// exists so the witness can prove which way the enforcement switch
+/// points.
+struct WitnessEquipment {
+    descriptor: EquipmentDescriptor,
+    telemetry: Telemetry,
+    core_output: CoreOutput,
+    deposited_active_w: f64,
+    deposited_reactive_var: f64,
+    step_error: Option<&'static str>,
+    ports: Vec<PortDeclaration>,
+}
+
+impl WitnessEquipment {
+    /// The missing-declared-field flavor: `validate_core_contract` fails
+    /// the step because the declared `flows.electric_w` is absent. The
+    /// port sees nothing, so the off state's step carries no divergence
+    /// for any other check to catch.
+    fn missing_declared_field(name: &str) -> Self {
+        Self {
+            descriptor: witness_descriptor(name),
+            telemetry: Telemetry::default(),
+            core_output: CoreOutput::default(),
+            deposited_active_w: 0.0,
+            deposited_reactive_var: 0.0,
+            step_error: None,
+            ports: vec![PortDeclaration::electrical()],
+        }
+    }
+
+    /// The reactive-divergent flavor: the core output's active flow
+    /// matches the 3 kW the step deposits, and the step deposits 500 VAR
+    /// the core output does not report, so
+    /// `validate_port_core_electrical_consistency` fails the step on the
+    /// reactive divergence alone.
+    fn reactive_divergent(name: &str) -> Self {
+        let mut core_output = CoreOutput::default();
+        core_output.flows.electric_w =
+            Some(hares_types::ElectricPower::consumption(3_000.0).unwrap());
+        Self {
+            descriptor: witness_descriptor(name),
+            telemetry: Telemetry::default(),
+            core_output,
+            deposited_active_w: 3_000.0,
+            deposited_reactive_var: 500.0,
+            step_error: None,
+            ports: vec![PortDeclaration::electrical()],
+        }
+    }
+
+    /// The capture witness's depositing step: 1 kW into the shared ports,
+    /// reported in the core output so the enforced state's per-equipment
+    /// checks pass it. Its contribution is what the next equipment's
+    /// failed step either restores from the pre-step capture or loses.
+    fn depositing(name: &str) -> Self {
+        let mut core_output = CoreOutput::default();
+        core_output.flows.electric_w =
+            Some(hares_types::ElectricPower::consumption(1_000.0).unwrap());
+        Self {
+            descriptor: witness_descriptor(name),
+            telemetry: Telemetry::default(),
+            core_output,
+            deposited_active_w: 1_000.0,
+            deposited_reactive_var: 0.0,
+            step_error: None,
+            ports: vec![PortDeclaration::electrical()],
+        }
+    }
+
+    /// The capture witness's failing step: 500 W deposited, then an error,
+    /// so `record_equipment_step_failure` runs the rollback over the ports
+    /// the capture did or did not save.
+    fn failing_after_deposit(name: &str) -> Self {
+        Self {
+            descriptor: witness_descriptor(name),
+            telemetry: Telemetry::default(),
+            core_output: CoreOutput::default(),
+            deposited_active_w: 500.0,
+            deposited_reactive_var: 0.0,
+            step_error: Some("the witness equipment's step fails"),
+            ports: vec![PortDeclaration::electrical()],
+        }
+    }
+}
+
+/// The witness equipment's descriptor: a minimal unzoned electric
+/// appliance in the Independent stage, no control surface, no telemetry
+/// fields, the ELECTRIC core capability declared.
+fn witness_descriptor(name: &str) -> EquipmentDescriptor {
+    EquipmentDescriptor {
+        id: EquipmentId(0),
+        name: name.to_string(),
+        end_use: EndUse::OTHER,
+        equipment_type: std::borrow::Cow::Borrowed("WitnessEquipment"),
+        zone: None,
+        fuel: FuelType::Electric,
+        stage: ExecutionStage::Independent,
+        control_capabilities: hares_types::ControlCapabilities::empty(),
+        core_capabilities: CoreCapabilities::ELECTRIC,
+        telemetry_fields: vec![],
+        zone_type: None,
+    }
+}
+
+impl hares_equipment::Equipment for WitnessEquipment {
+    fn descriptor(&self) -> &EquipmentDescriptor {
+        &self.descriptor
+    }
+
+    fn resolved_parameters(&self) -> Vec<hares_types::ResolvedParameter> {
+        Vec::new()
+    }
+
+    fn rename(&mut self, name: String) {
+        self.descriptor.name = name;
+    }
+
+    fn set_equipment_id(
+        &mut self,
+        id: EquipmentId,
+    ) -> std::result::Result<(), hares_types::HaresError> {
+        hares_equipment::apply_identity_write(self.is_initialized(), &mut self.descriptor, id)
+    }
+
+    fn ports(&self) -> &[PortDeclaration] {
+        &self.ports
+    }
+
+    fn init(
+        &mut self,
+        _config: &hares_equipment::EquipmentConfig,
+        _env: &hares_types::EnvironmentState,
+    ) -> std::result::Result<(), hares_types::HaresError> {
+        self.telemetry
+            .insert("power_kw", self.deposited_active_w / 1000.0);
+        Ok(())
+    }
+
+    fn update_control(
+        &mut self,
+        _env: &hares_types::EnvironmentState,
+    ) -> hares_types::OperatingMode {
+        hares_types::OperatingMode::Off
+    }
+
+    fn step(
+        &mut self,
+        _env: &hares_types::EnvironmentState,
+        _dt: std::time::Duration,
+        ports: &mut hares_types::ports::PortSlots,
+    ) -> std::result::Result<(), hares_types::HaresError> {
+        ports.accumulate(&hares_types::ports::PortContribution::Electrical {
+            active_power_w: self.deposited_active_w,
+            reactive_power_var: self.deposited_reactive_var,
+        })?;
+        match self.step_error {
+            Some(message) => Err(hares_types::HaresError::Equipment(message.to_string())),
+            None => Ok(()),
+        }
+    }
+
+    fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
+    fn core_output(&self) -> &CoreOutput {
+        &self.core_output
+    }
+
+    fn save_state(&self) -> std::result::Result<Vec<u8>, hares_types::HaresError> {
+        Ok(vec![])
+    }
+
+    fn load_state(&mut self, _state: &[u8]) -> std::result::Result<(), hares_types::HaresError> {
+        Ok(())
+    }
+
+    fn apply_signal(
+        &mut self,
+        _signal: &hares_types::ControlSignal,
+    ) -> std::result::Result<(), hares_types::HaresError> {
+        Ok(())
+    }
+}
+
+/// The validation bench's witness, run once before anything is timed and
+/// again by the bench_construction suite at suite cost: for each
+/// violation flavor a dwelling steps under each enforcement state, a
+/// fresh dwelling per state (a state's failed step leaves the deposits
+/// the abort did not roll back, so the states share no dwelling), and
+/// the assertions pin the block's behavior. The default state and the
+/// re-enabled state fail the step naming the violated check (the block
+/// the timed on arm prices is the enforcement block itself); the off
+/// state runs the same violation clean (the comparison arm really skips
+/// the block, so the paired delta is its cost, not a no-op's). Both
+/// violation flavors are witnessed: the core-output contract's
+/// missing-field arm and the consistency check's reactive arm. The
+/// block's third site, the pre-step rollback capture, has its own case:
+/// a step that fails after its predecessor deposited 1 kW restores that
+/// deposit in the enforced state and loses it in the off state, so a
+/// switch that gated only the checks cannot pass this witness while the
+/// timed off arm still pays for the capture.
+pub fn assert_validation_witness(dir: &Path) {
+    const MISSING: &str = "witness missing declared field";
+    const DIVERGENT: &str = "witness reactive divergent";
+
+    let mut dwelling = witness_dwelling(dir, WitnessEquipment::missing_declared_field(MISSING));
+    let err = dwelling.step().expect_err(
+        "the default state enforces the core-output contract: the missing \
+                     declared field fails the step",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("core_output contract violation") && msg.contains(MISSING),
+        "the default state's step error must name the contract violation and the \
+         equipment: {msg}"
+    );
+
+    let mut dwelling = witness_dwelling(dir, WitnessEquipment::missing_declared_field(MISSING));
+    dwelling.set_step_validation_enabled(false);
+    dwelling
+        .step()
+        .expect("the off state is the comparison arm: the same violation runs clean");
+
+    let mut dwelling = witness_dwelling(dir, WitnessEquipment::missing_declared_field(MISSING));
+    dwelling.set_step_validation_enabled(true);
+    let err = dwelling.step().expect_err(
+        "re-enabling restores the enforcement: the switch is a state, not \
+                     a one-time latch",
+    );
+    assert!(
+        err.to_string().contains("core_output contract violation"),
+        "the re-enabled state's step error must name the contract violation: {err}"
+    );
+
+    let mut dwelling = witness_dwelling(dir, WitnessEquipment::reactive_divergent(DIVERGENT));
+    let err = dwelling.step().expect_err(
+        "the default state enforces the port/core electrical consistency: \
+                     the unreported reactive power fails the step",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("port/core electrical consistency violation") && msg.contains(DIVERGENT),
+        "the default state's step error must name the consistency violation and the \
+         equipment: {msg}"
+    );
+
+    let mut dwelling = witness_dwelling(dir, WitnessEquipment::reactive_divergent(DIVERGENT));
+    dwelling.set_step_validation_enabled(false);
+    dwelling
+        .step()
+        .expect("the off state is the comparison arm: the same divergence runs clean");
+
+    let mut dwelling = witness_dwelling(dir, WitnessEquipment::reactive_divergent(DIVERGENT));
+    dwelling.set_step_validation_enabled(true);
+    let err = dwelling
+        .step()
+        .expect_err("re-enabling restores the consistency enforcement");
+    assert!(
+        err.to_string()
+            .contains("port/core electrical consistency violation"),
+        "the re-enabled state's step error must name the consistency violation: {err}"
+    );
+
+    // The capture's own case: the block's pre-step rollback capture is
+    // the third site the switch gates. The depositor runs first in the
+    // same step and leaves 1 kW in the shared electrical bus; the failing
+    // equipment then deposits 500 W and returns an error, so the rollback
+    // runs over the snapshot the capture did or did not save.
+    let mut dwelling = capture_witness_dwelling(dir);
+    dwelling.step().expect(
+        "the enforced state captures the bus before the failing equipment, so \
+         the rollback restores the deposit and the step's always-on \
+         electrical consistency check passes",
+    );
+
+    // The off state skipped the capture, so the rollback swaps in the
+    // snapshot the skipped capture never wrote: the deposit is gone from
+    // the bus while the depositor still reports it, and the step's
+    // always-on electrical consistency check names the 1 kW divergence.
+    // A switch that gated only the two checks would pass every case above
+    // and this one, so the timed off arm would still pay for the capture
+    // while the paired delta was read as the block's whole cost.
+    let mut dwelling = capture_witness_dwelling(dir);
+    dwelling.set_step_validation_enabled(false);
+    let err = dwelling.step().expect_err(
+        "the off state's skipped capture leaves the failed step's bus \
+         incoherent, and the always-on check refuses it",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("telemetry electrical consistency"),
+        "the off state's lost deposit must surface as the always-on \
+         electrical consistency violation, not another error: {msg}"
+    );
+}
+
+/// The witness's stepping dwelling: the synthetic single-equipment
+/// fixture carrying one witness equipment.
+fn witness_dwelling(dir: &Path, eq: WitnessEquipment) -> Dwelling {
+    let mut dwelling = invariant_cost_small_dwelling(dir);
+    dwelling
+        .add_equipment(Box::new(eq))
+        .expect("the witness's equipment registers");
+    dwelling
+}
+
+/// The capture witness's dwelling: the synthetic fixture with the
+/// depositing equipment registered before the failing one, so the step's
+/// execution order (insertion order within the Independent stage) leaves
+/// the deposit in the ports before the failure's rollback runs.
+fn capture_witness_dwelling(dir: &Path) -> Dwelling {
+    let mut dwelling = invariant_cost_small_dwelling(dir);
+    for equipment in [
+        WitnessEquipment::depositing("witness capture depositor"),
+        WitnessEquipment::failing_after_deposit("witness capture failure"),
+    ] {
+        dwelling
+            .add_equipment(Box::new(equipment))
+            .expect("the capture witness's equipment registers");
+    }
+    dwelling
 }
 
 /// Steps `n` times, failing with `what` named: the bench's prefix and

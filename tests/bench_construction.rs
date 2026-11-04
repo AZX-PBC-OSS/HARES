@@ -323,6 +323,43 @@ fn bench_checkpoint_round_trip_assertions_hold_at_both_roster_sizes() {
     );
 }
 
+/// The invariant-cost bench is registered: the `[[bench]]` entry the
+/// bench-check job compiles and the CI bench job gates.
+#[test]
+fn bench_invariant_cost_bench_is_registered() {
+    let manifest = include_str!("../crates/hares-core/Cargo.toml");
+    assert!(
+        manifest.contains("[[bench]]\nname = \"invariant_cost\""),
+        "the hares-core manifest does not register the invariant_cost bench: \
+         the per-step enforcement bench's [[bench]] entry is missing"
+    );
+}
+
+/// The invariant-cost bench's instrument and both rosters, at suite cost:
+/// the enforcement witness (a violation's step fails naming the check in
+/// the default and re-enabled states and runs clean in the off state, for
+/// both violation flavors), then each roster's first steps under both
+/// arms. The bench runs the same assertions once per invocation before
+/// anything is timed; here they fail the suite with a named test when the
+/// instrument or the fixtures rot.
+#[test]
+fn bench_invariant_cost_witness_and_rosters_hold() {
+    let dir = tempdir().expect("bench temp dir");
+    bench_common::assert_validation_witness(dir.path());
+    for (arm, enabled) in [("on", true), ("off", false)] {
+        let mut small = bench_common::invariant_cost_small_dwelling(dir.path());
+        small.set_step_validation_enabled(enabled);
+        small
+            .step()
+            .unwrap_or_else(|err| panic!("the small roster's {arm} step fails: {err}"));
+        let mut large = bench_common::invariant_cost_large_dwelling(dir.path(), 1);
+        large.set_step_validation_enabled(enabled);
+        large
+            .step()
+            .unwrap_or_else(|err| panic!("the large roster's {arm} step fails: {err}"));
+    }
+}
+
 /// The rl_episode bench's year episode runs to completion: the 8760-step
 /// bench's dwelling (the shared synthetic fixture, the shared
 /// YEAR_EPISODE_* shapes, the leap-year start 2024-01-01) steps its full

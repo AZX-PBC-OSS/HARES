@@ -2953,6 +2953,15 @@ pub struct Dwelling {
     /// no allocation) to restore the pre-step state.  Initialised from the
     /// same port declarations as `ports` so capacities always match.
     rollback_ports: PortSlots,
+    /// The per-equipment enforcement block's switch: when true, each
+    /// equipment's step captures the pre-step rollback ports and the step's
+    /// success branch runs the core-output contract check and the
+    /// port/core electrical consistency check. Construction enables the
+    /// block; the only caller that clears it is the validation bench's
+    /// comparison arm, through [`Dwelling::set_step_validation_enabled`].
+    /// Nothing in the crate reads the flag for any other purpose and no
+    /// run path resets it.
+    step_validation_enabled: bool,
     /// Per equipment, index-aligned with `equipment`: whether its step in
     /// the latest timestep failed and was rolled back. Such an equipment
     /// delivered nothing that step, so the consistency checks skip it and
@@ -4859,6 +4868,7 @@ fn assemble_from_blueprint_with_seed(
         environment,
         ports: PortSlots::default(),
         rollback_ports: PortSlots::default(),
+        step_validation_enabled: true,
         step_failed: Vec::new(),
         consecutive_step_failures: Vec::new(),
         terminal_error: None,
@@ -6578,6 +6588,20 @@ impl Dwelling {
         &self.health
     }
 
+    /// The per-equipment enforcement block's switch, the validation bench's
+    /// measurement instrument: `false` skips, for this dwelling's steps,
+    /// the pre-step rollback capture and the two per-equipment validations
+    /// (`validate_equipment_contract` and
+    /// `validate_port_core_electrical_consistency`), the block the bench's
+    /// comparison arm prices. The off state also forfeits the capture a
+    /// failed equipment step's rollback restores from, so it is the bench's
+    /// own measurement act, never a supported run mode: construction
+    /// enables the block and no run path clears it.
+    #[doc(hidden)]
+    pub fn set_step_validation_enabled(&mut self, enabled: bool) {
+        self.step_validation_enabled = enabled;
+    }
+
     /// Adds to the run-total clamped-actions counter.
     ///
     /// # Errors
@@ -8264,7 +8288,9 @@ impl Dwelling {
                 .record(pp_before, ObserveAllocSite::EquipmentPrePorts);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
-            self.rollback_ports.copy_into(&self.ports);
+            if self.step_validation_enabled {
+                self.rollback_ports.copy_into(&self.ports);
+            }
             // Snapshot the shared electrical bus so the post-step delta is
             // exactly this equipment's contribution (ElectricalAccumulator
             // is Copy).
@@ -8273,13 +8299,15 @@ impl Dwelling {
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.record_equipment_step_failure(idx, err, pre_state_energy_j)?;
             } else {
-                self.validate_equipment_contract(idx)?;
-                validate_port_core_electrical_consistency(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                    pre_electrical,
-                    &self.ports.electrical,
-                )?;
+                if self.step_validation_enabled {
+                    self.validate_equipment_contract(idx)?;
+                    validate_port_core_electrical_consistency(
+                        self.equipment[idx].descriptor(),
+                        self.equipment[idx].core_output(),
+                        pre_electrical,
+                        &self.ports.electrical,
+                    )?;
+                }
                 self.record_equipment_step_success(idx);
                 self.stepped_stage_ranks.push(stage_rank(stage));
             }
@@ -8381,7 +8409,9 @@ impl Dwelling {
                 .record(pp_before, ObserveAllocSite::EquipmentPrePorts);
 
             let _ = self.equipment[idx].update_control(&self.latest_env);
-            self.rollback_ports.copy_into(&self.ports);
+            if self.step_validation_enabled {
+                self.rollback_ports.copy_into(&self.ports);
+            }
             // Snapshot the shared electrical bus so the post-step delta is
             // exactly this equipment's contribution.
             let pre_electrical = self.ports.electrical;
@@ -8389,13 +8419,15 @@ impl Dwelling {
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.record_equipment_step_failure(idx, err, pre_state_energy_j)?;
             } else {
-                self.validate_equipment_contract(idx)?;
-                validate_port_core_electrical_consistency(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                    pre_electrical,
-                    &self.ports.electrical,
-                )?;
+                if self.step_validation_enabled {
+                    self.validate_equipment_contract(idx)?;
+                    validate_port_core_electrical_consistency(
+                        self.equipment[idx].descriptor(),
+                        self.equipment[idx].core_output(),
+                        pre_electrical,
+                        &self.ports.electrical,
+                    )?;
+                }
                 self.record_equipment_step_success(idx);
                 self.stepped_stage_ranks.push(stage_rank(stage));
             }
@@ -8471,7 +8503,9 @@ impl Dwelling {
             self.observe_allocations
                 .record(pp_before, ObserveAllocSite::EquipmentPrePorts);
 
-            self.rollback_ports.copy_into(&self.ports);
+            if self.step_validation_enabled {
+                self.rollback_ports.copy_into(&self.ports);
+            }
             // Snapshot the shared electrical bus so the post-step delta is
             // exactly this equipment's contribution.
             let pre_electrical = self.ports.electrical;
@@ -8479,13 +8513,15 @@ impl Dwelling {
             if let Err(err) = self.equipment[idx].step(&self.latest_env, dt, &mut self.ports) {
                 self.record_equipment_step_failure(idx, err, pre_state_energy_j)?;
             } else {
-                self.validate_equipment_contract(idx)?;
-                validate_port_core_electrical_consistency(
-                    self.equipment[idx].descriptor(),
-                    self.equipment[idx].core_output(),
-                    pre_electrical,
-                    &self.ports.electrical,
-                )?;
+                if self.step_validation_enabled {
+                    self.validate_equipment_contract(idx)?;
+                    validate_port_core_electrical_consistency(
+                        self.equipment[idx].descriptor(),
+                        self.equipment[idx].core_output(),
+                        pre_electrical,
+                        &self.ports.electrical,
+                    )?;
+                }
                 self.record_equipment_step_success(idx);
                 self.stepped_stage_ranks
                     .push(stage_rank(ExecutionStage::Thermal));
