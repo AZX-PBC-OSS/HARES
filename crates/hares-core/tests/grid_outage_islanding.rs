@@ -501,6 +501,58 @@ fn islanded_load_beyond_discharge_capability_reports_unserved() {
     );
 }
 
+/// The island imbalance is part of the between-steps read surface: a
+/// checkpoint taken at an islanded step carries `island_unserved_w` and
+/// `island_excess_w` as the written run held them. Without the section a
+/// restored dwelling reads the rebuild's zeros until its next step, so the
+/// observation/telemetry between the restore and that step is not the
+/// written run's.
+#[test]
+fn checkpoint_restores_the_island_imbalance_between_steps() {
+    let mut written = build_dwelling_with_base_load("island-checkpoint");
+    add_battery_with_discharge_limit(&mut written, 0.6, 0.5);
+    written.step().expect("nominal step");
+    written
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
+    written.step().expect("the outage's dead-bus step");
+    written.step().expect("islanded step");
+    written.step().expect("second islanded step");
+    let expected_unserved = written.island_unserved_w();
+    let expected_excess = written.island_excess_w();
+    assert!(
+        expected_unserved > 0.5,
+        "the fixture must leave load unserved to make the restore observable, got \
+         {expected_unserved} W"
+    );
+    let checkpoint = written.save_checkpoint().expect("the checkpoint saves");
+
+    let mut restored = build_dwelling_with_base_load("island-checkpoint-target");
+    add_battery_with_discharge_limit(&mut restored, 0.6, 0.5);
+    // The driving scenario re-applies the run's grid override after the
+    // restore: the override is run configuration, not checkpoint state.
+    restored
+        .set_grid_voltage(0.0)
+        .expect("the override is in contract");
+    restored
+        .load_checkpoint(checkpoint)
+        .expect("the checkpoint restores into the same construction");
+
+    assert_eq!(
+        restored.island_unserved_w(),
+        expected_unserved,
+        "the restored run's unserved-load read is the written run's"
+    );
+    assert_eq!(
+        restored.island_excess_w(),
+        expected_excess,
+        "the restored run's surplus-generation read is the written run's"
+    );
+    let telemetry = restored.telemetry().expect("telemetry reads");
+    assert_eq!(telemetry.island_unserved_w, expected_unserved);
+    assert_eq!(telemetry.island_excess_w, expected_excess);
+}
+
 /// A depleted battery (SOC at its floor) cannot island the home: the bus is
 /// dead and loads drop, exactly as with no battery at all.
 #[test]

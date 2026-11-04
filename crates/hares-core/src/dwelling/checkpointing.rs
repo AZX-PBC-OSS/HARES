@@ -126,9 +126,11 @@ impl Dwelling {
                 })
                 .collect(),
             health: self.health.clone(),
-            electrical_net: crate::checkpoint::ElectricalNetCheckpoint {
+            electrical: crate::checkpoint::ElectricalCheckpoint {
                 net_active_w: self.electrical_solver.net_active_w(),
                 net_reactive_var: self.electrical_solver.net_reactive_var(),
+                island_unserved_w: self.island_unserved_w,
+                island_excess_w: self.island_excess_w,
             },
             warnings: self.warnings.snapshot(),
         })
@@ -236,14 +238,15 @@ impl Dwelling {
             })?;
         }
         self.health = cp.health;
-        // The aggregate electrical solver's last solve continues the
-        // written run's: the between-steps power reads (the observation's
-        // `total_power_w`, the telemetry's totals) are the saved run's,
-        // not the rebuild's warm-up's.
-        self.electrical_solver.restore_net(
-            cp.electrical_net.net_active_w,
-            cp.electrical_net.net_reactive_var,
-        );
+        // The electrical domain's between-steps state continues the written
+        // run's: the aggregate solver's last solve and the island imbalance
+        // the step's accounting derived from it (the observation's power
+        // fields, the telemetry's totals and island fields, the Python env
+        // dict) are the saved run's, not the rebuild's warm-up's.
+        self.electrical_solver
+            .restore_net(cp.electrical.net_active_w, cp.electrical.net_reactive_var);
+        self.island_unserved_w = cp.electrical.island_unserved_w;
+        self.island_excess_w = cp.electrical.island_excess_w;
         self.warnings.restore(cp.warnings.clone());
 
         // Populate latest_env.equipment_core and equipment_telemetry from the

@@ -3250,17 +3250,22 @@ pub struct Dwelling {
     /// power-balance violation the island sources could not resolve:
     /// `island_unserved_w` is the load the island sources failed to cover
     /// (would-be phantom import, `net_active_kw().max(0.0)`); 0.0 when not
-    /// islanded. See docs/outage-behavior.md.
+    /// islanded. The checkpoint carries both values, so the between-steps
+    /// reads of a restored run are the written run's. See
+    /// docs/outage-behavior.md.
     island_unserved_w: f64,
     /// Surplus generation the island could not absorb (would-be phantom
-    /// export, `(-net_active_kw()).max(0.0)`); 0.0 when not islanded.
+    /// export, `(-net_active_kw()).max(0.0)`); 0.0 when not islanded. Carried
+    /// by the checkpoint beside `island_unserved_w`.
     island_excess_w: f64,
     /// Whether this run has already raised the islanded unserved-load
     /// warning. Per dwelling, so per run: the warning is a scenario signal
     /// whose first occurrence in a run is recorded in the run's warning
     /// log, and a fresh run (a dwelling rebuilt from its blueprint, as
     /// `reset_with_seed` builds) warns again instead of inheriting the
-    /// previous run's consumed gate.
+    /// previous run's consumed gate. Not part of the checkpoint: a restored
+    /// run may record the same warning once more (the record's content is
+    /// unchanged beyond that duplicate, the `warned_discarded_state` bound).
     island_unserved_warned: bool,
     /// The run's grid-frequency override, the value `set_frequency`
     /// stored. Composed into the environment's grid state beside the
