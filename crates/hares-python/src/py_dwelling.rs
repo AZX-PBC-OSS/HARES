@@ -2066,6 +2066,57 @@ impl PyDwelling {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    /// The episode snapshot: the checkpoint blob (`save_checkpoint`'s
+    /// bytes), the state a gym episode saves at its start and restores at
+    /// its reset. The blob is the checkpoint's own versioned form:
+    /// `restore_state` gates it on the checkpoint version, so a blob from
+    /// another version is refused naming both versions.
+    pub fn snapshot_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        self.save_checkpoint(py)
+    }
+
+    /// Restores an episode snapshot: the checkpoint blob over the
+    /// dwelling's live state, with the optional seed re-deriving every
+    /// random stream after the restore (the gym reset's two calls in one).
+    /// A run that ended part way through a step resumes: the restore
+    /// replaces all of a run's state.
+    #[pyo3(signature = (state, seed=None))]
+    pub fn restore_state(&mut self, state: &[u8], seed: Option<u64>) -> PyResult<()> {
+        self.load_state(state)?;
+        if let Some(seed) = seed {
+            self.reseed(seed)?;
+        }
+        Ok(())
+    }
+
+    /// The pickle protocol: the state is the dwelling's config (the inputs
+    /// and settings the dwelling rebuilds from) beside the episode's
+    /// checkpoint blob and the actor count the rebuild must reproduce.
+    /// The rebuild callable is the extension module's
+    /// `_dwelling_from_state`, pickled by reference. The class has no
+    /// empty constructor (a dwelling exists only over its inputs), so the
+    /// reduce carries the config rather than deferring to a bare
+    /// `__setstate__`. The unpickled dwelling resumes the episode: its
+    /// next step is the uninterrupted run's next step, bitwise. Actors
+    /// added to the dwelling after construction are not part of the
+    /// pickle; the rebuild refuses the restore when the counts disagree
+    /// rather than resume without them.
+    pub fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        let this = slf.borrow();
+        let config = serde_json::to_string(&this.pickle_config()).map_err(|err| {
+            PyValueError::new_err(format!(
+                "the dwelling's config does not serialize for its pickle: {err}"
+            ))
+        })?;
+        let actor_count = this.acquire()?.actor_count();
+        let checkpoint = this.save_checkpoint(py)?;
+        let module = py.import("hares._hares")?;
+        let rebuild = module.getattr("_dwelling_from_state")?.unbind();
+        let args = (config, actor_count, checkpoint).into_pyobject(py)?;
+        let pair = (rebuild, args).into_pyobject(py)?;
+        Ok(pair.unbind().into_any())
+    }
+
     pub fn load_state(&self, state: &[u8]) -> PyResult<()> {
         let checkpoint = DwellingCheckpoint::deserialize_gated(state).map_err(to_py_err)?;
         let mut dwelling = self.acquire()?;
@@ -2445,6 +2496,8 @@ impl PyDwelling {
         let dict = PyDict::new(py);
         dict.set_item("outdoor_temp_c", env.weather.outdoor_temp_c)?;
         dict.set_item("outdoor_humidity_ratio", env.weather.outdoor_humidity_ratio)?;
+        dict.set_item("schedule_row", env.schedule_row)?;
+        dict.set_item("schedule_row", env.schedule_row)?;
         dict.set_item("ghi_w_m2", env.weather.ghi_w_m2)?;
         dict.set_item("dni_w_m2", env.weather.dni_w_m2)?;
         dict.set_item("dhi_w_m2", env.weather.dhi_w_m2)?;
@@ -2545,6 +2598,21 @@ impl PyDwelling {
             gas_tariff: None,
             callback_cause: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// The config the pickle carries: the dwelling's own config, with the
+    /// generated-schedule dwelling's schedule source set to `None`: the
+    /// generated schedule is a function of the inputs and the seed, not
+    /// of a document, and the rebuild regenerates it under the same key.
+    /// (The wrapper's own schedule source for such a dwelling is the
+    /// empty-text placeholder the parsed-handle path stores, which parses
+    /// as nothing.)
+    fn pickle_config(&self) -> DwellingConfig {
+        let mut config = self.config.clone();
+        if self.blueprint.inputs().schedule.was_generated() {
+            config.schedule = None;
+        }
+        config
     }
 
     /// Acquire the dwelling mutex after checking the poisoned flag.
@@ -3014,6 +3082,49 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
 
 pub(crate) fn to_py_err_display<E: std::fmt::Display>(err: E) -> PyErr {
     PyValueError::new_err(err.to_string())
+}
+
+/// The pickle protocol's rebuild callable: the dwelling from its pickled
+/// state (the config, the actor count the pickle observed and the episode
+/// checkpoint blob). The rebuild is the ordinary construction path over
+/// the config's own inputs, then the checkpoint's restore (the same
+/// restore-over-a-rebuilt-dwelling path every checkpoint resume takes),
+/// so the unpickled dwelling's next step is the uninterrupted run's next
+/// step, bitwise. The actor count must reproduce: a pickle of a dwelling
+/// carrying actors the rebuild cannot make (ones added after
+/// construction) is refused rather than resumed without them.
+#[pyfunction]
+pub(crate) fn _dwelling_from_state(
+    py: Python<'_>,
+    config_json: &str,
+    actor_count: usize,
+    checkpoint: &[u8],
+) -> PyResult<PyDwelling> {
+    let config: DwellingConfig = serde_json::from_str(config_json).map_err(|err| {
+        PyValueError::new_err(format!(
+            "the pickled dwelling's config does not parse: {err}"
+        ))
+    })?;
+    let (dwelling, blueprint) = construct_detached(py, {
+        let config = config.clone();
+        move || {
+            DwellingBlueprint::from_config(config)
+                .and_then(|blueprint| blueprint.build().map(|dwelling| (dwelling, blueprint)))
+        }
+    })
+    .map_err(|_| PyRuntimeError::new_err("the pickled dwelling's rebuild panicked"))?;
+    let mut out = PyDwelling::from_blueprint_build(dwelling, config, blueprint);
+    let rebuilt_count = out.acquire()?.actor_count();
+    if rebuilt_count != actor_count {
+        return Err(PyValueError::new_err(format!(
+            "the pickle carries {actor_count} actors and the rebuilt dwelling carries \
+             {rebuilt_count}: actors added to a dwelling after construction are not part \
+             of the pickle; add them again after unpickling"
+        )));
+    }
+    out.load_state(checkpoint)?;
+    out.initialize()?;
+    Ok(out)
 }
 
 #[cfg(feature = "observe")]
@@ -5072,11 +5183,15 @@ mod blueprint_readback_tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use numpy::PyArrayMethods;
+    use pyo3::PyResult;
     use pyo3::Python;
+    use pyo3::types::PyBytesMethods;
     use pyo3::types::PyString;
 
     use crate::py_config::{PySimulationConfig, WholeSeconds};
     use crate::py_dwelling::{PyDwelling, TEST_COUNT_EXCLUSIVITY};
+    use hares_core::CHECKPOINT_VERSION;
 
     fn fixture_paths() -> (PathBuf, PathBuf, PathBuf) {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -5250,6 +5365,223 @@ mod blueprint_readback_tests {
                 EndUse::HVAC_HEATING.as_str(),
                 "the snapshot's end_use is the read-back string, not the Debug form"
             );
+        });
+    }
+
+    /// The lifecycle tests' fixture dwelling: the cz5a building from its
+    /// three files, the sim config's arguments on top.
+    fn lifecycle_dwelling(
+        py: Python<'_>,
+        duration_s: i64,
+        seed: u64,
+    ) -> PyResult<crate::py_dwelling::PyDwelling> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = root.join("tests/fixtures/parity/cz5a_ev_charging");
+        let sim_config = crate::py_config::PySimulationConfig::new(
+            "2023-01-01T00:00:00-07:00",
+            crate::py_config::WholeSeconds(duration_s),
+            crate::py_config::WholeSeconds(900),
+            None,
+            false,
+            false,
+            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            None,
+            None,
+            seed,
+            None,
+            "on",
+            None,
+            None,
+            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            None,
+            crate::py_config::PyWarmupArg::Absent,
+            "hour24",
+            "typical",
+            None,
+        )
+        .expect("the sim config builds");
+        let mut dwelling = PyDwelling::from_hpxml(
+            &py.get_type::<PyDwelling>(),
+            PyString::new(py, fixture.join("building.xml").to_str().expect("utf8")).as_any(),
+            Some(PyString::new(py, fixture.join("schedule.csv").to_str().expect("utf8")).as_any()),
+            PyString::new(py, fixture.join("weather.epw").to_str().expect("utf8")).as_any(),
+            sim_config,
+            1,
+            Some(
+                PyString::new(
+                    py,
+                    root.join("python/hares/defaults").to_str().expect("utf8"),
+                )
+                .as_any(),
+            ),
+            None,
+            None,
+        )?;
+        dwelling.initialize()?;
+        Ok(dwelling)
+    }
+
+    /// The pickle protocol's round trip runs on the Python surface (the
+    /// rebuild callable is pickled by reference to the extension module's
+    /// importable path, so the round trip needs the installed package);
+    /// the Rust-side pins here are the ones that run without it.
+    #[test]
+    fn restore_state_rejects_a_foreign_checkpoint_version() {
+        Python::attach(|py| {
+            let mut dwelling = lifecycle_dwelling(py, 7_200, 7).expect("the fixture constructs");
+            let snapshot_bytes = dwelling
+                .snapshot_state(py)
+                .expect("the snapshot saves")
+                .as_bytes()
+                .to_vec();
+            let snapshot = String::from_utf8(snapshot_bytes).expect("the blob is JSON");
+            let old = snapshot.replace(
+                &format!("\"format_version\":{CHECKPOINT_VERSION}"),
+                &format!("\"format_version\":{}", CHECKPOINT_VERSION - 1),
+            );
+            assert_ne!(
+                old, snapshot,
+                "the tampered blob must differ: the version tag must be present to flip"
+            );
+            let err = dwelling
+                .restore_state(old.as_bytes(), None)
+                .expect_err("a foreign version is refused");
+            let message = err.value(py).to_string();
+            assert!(
+                message.contains("version mismatch"),
+                "the refusal names the version mismatch; got: {message}"
+            );
+        });
+    }
+
+    /// The schedule, occupancy and clock observation fields read the
+    /// engine's own state at the same step: the schedule row is the
+    /// environment's published row, the occupants-present count is the
+    /// occupancy fraction times the resident count (the product the
+    /// occupancy gains read), and the clock fields are the step's local
+    /// time and index.
+    #[test]
+    fn observation_fields_read_the_engine_clock_schedule_and_occupancy() {
+        Python::attach(|py| {
+            // The base-all-north building carries 3.0 residents; with no
+            // schedule CSV the generated schedule's occupancy column
+            // evaluates the shipped default profile, whose WEEKEND
+            // fraction at hours 0 through 3 is 0.028 ("Default Schedule
+            // Parameters.csv", the occupants row's weekend_fractions) --
+            // the run starts Sunday 2023-01-01.
+            let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let residents = 3.0;
+            let night_fraction = 0.028;
+            let sim_config = crate::py_config::PySimulationConfig::new(
+                "2023-01-01T00:00:00-07:00",
+                crate::py_config::WholeSeconds(7_200),
+                crate::py_config::WholeSeconds(900),
+                None,
+                false,
+                false,
+                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                None,
+                None,
+                0,
+                None,
+                // Diversity off: the generated occupancy column carries
+                // the raw profile fraction, so the observation's
+                // occupants-present expectation is the default profile's
+                // own value times the resident count, with no diversity
+                // draw in the product.
+                "off",
+                None,
+                None,
+                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                None,
+                crate::py_config::PyWarmupArg::Absent,
+                "hour24",
+                "typical",
+                None,
+            )
+            .expect("the sim config builds");
+            let mut dwelling = PyDwelling::from_hpxml(
+                &py.get_type::<PyDwelling>(),
+                PyString::new(
+                    py,
+                    root.join("tests/fixtures/hpxml/base-all-north.xml")
+                        .to_str()
+                        .expect("utf8"),
+                )
+                .as_any(),
+                None,
+                PyString::new(
+                    py,
+                    root.join("tests/fixtures/parity/cz5a_ev_charging/weather.epw")
+                        .to_str()
+                        .expect("utf8"),
+                )
+                .as_any(),
+                sim_config,
+                1,
+                Some(
+                    PyString::new(
+                        py,
+                        root.join("python/hares/defaults").to_str().expect("utf8"),
+                    )
+                    .as_any(),
+                ),
+                None,
+                None,
+            )
+            .expect("the generated-schedule dwelling constructs");
+            dwelling.initialize().expect("initialize");
+
+            let fields: Vec<String> = [
+                "schedule_row",
+                "occupants_present",
+                "clock_hour",
+                "clock_day",
+                "clock_step",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let plan = dwelling.observation_plan(fields).expect("the plan builds");
+            let row = numpy::PyArray1::<f64>::zeros(py, 5, false);
+            dwelling
+                .observe_into(&plan, row.as_any())
+                .expect("the observation reads");
+            for slot in row.to_owned_array() {
+                assert!(
+                    slot.is_nan(),
+                    "before the first step every field is NaN; got {slot}"
+                );
+            }
+
+            dwelling.step(py).expect("the step runs");
+            dwelling
+                .observe_into(&plan, row.as_any())
+                .expect("the observation reads");
+            let read = row.to_owned_array();
+            let published_row = {
+                let guard = dwelling.acquire().expect("not poisoned");
+                guard
+                    .latest_env()
+                    .schedule_row
+                    .expect("the stepped state carries its schedule row")
+            };
+            assert_eq!(
+                read[0], published_row as f64,
+                "schedule_row is the environment's published schedule row"
+            );
+            assert_eq!(
+                read[1],
+                residents * night_fraction,
+                "occupants_present is the schedule's occupancy fraction times the \
+                 resident count, the product the occupancy gains read"
+            );
+            assert_eq!(
+                read[2], 0.0,
+                "clock_hour is the step's own wall-clock hour: step 1 starts at 00:15 after step 0's midnight, and the step dict's timestamp is the same instant the clock reads"
+            );
+            assert_eq!(read[3], 1.0, "clock_day is the step's day of year (Jan 1)");
+            assert_eq!(read[4], 1.0, "clock_step is the dwelling's step index");
         });
     }
 }

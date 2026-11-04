@@ -126,6 +126,10 @@ impl Dwelling {
                 })
                 .collect(),
             health: self.health.clone(),
+            electrical_net: crate::checkpoint::ElectricalNetCheckpoint {
+                net_active_w: self.electrical_solver.net_active_w(),
+                net_reactive_var: self.electrical_solver.net_reactive_var(),
+            },
             warnings: self.warnings.snapshot(),
         })
     }
@@ -232,6 +236,14 @@ impl Dwelling {
             })?;
         }
         self.health = cp.health;
+        // The aggregate electrical solver's last solve continues the
+        // written run's: the between-steps power reads (the observation's
+        // `total_power_w`, the telemetry's totals) are the saved run's,
+        // not the rebuild's warm-up's.
+        self.electrical_solver.restore_net(
+            cp.electrical_net.net_active_w,
+            cp.electrical_net.net_reactive_var,
+        );
         self.warnings.restore(cp.warnings.clone());
 
         // Populate latest_env.equipment_core and equipment_telemetry from the

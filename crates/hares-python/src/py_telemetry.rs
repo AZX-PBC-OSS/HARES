@@ -95,6 +95,21 @@ impl PyTelemetry {
         fixed_to_py_datetime(py, self.inner.current_time)
     }
 
+    /// The environment's published schedule row for the step, or `None`
+    /// when the state was built without one.
+    #[getter]
+    pub fn schedule_row(&self) -> Option<usize> {
+        self.inner.schedule_row
+    }
+
+    /// The occupant count the occupancy gains read this step: the
+    /// schedule's occupancy column value times the resident count. 0.0
+    /// when the dwelling carries no occupancy column.
+    #[getter]
+    pub fn occupants_present(&self) -> f64 {
+        self.inner.occupants_present
+    }
+
     #[getter]
     pub fn total_power_w(&self) -> f64 {
         self.inner.total_power_w

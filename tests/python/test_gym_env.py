@@ -2040,3 +2040,210 @@ def test_gym_observation_bounds_are_in_watts():
     assert observation_field_bounds("total_power_w") == (-100_000.0, 100_000.0)
     assert observation_field_bounds("reactive_power_var") == (-100_000.0, 100_000.0)
     assert observation_field_bounds("equipment_power[Gas Furnace]") == (0.0, 100_000.0)
+
+
+# ---------------------------------------------------------------------------
+# Episode lifecycle: snapshot/restore/pickle, masked auto-reset, and the
+# schedule/occupancy/clock observation fields (the lifecycle row's faces).
+# ---------------------------------------------------------------------------
+
+_LIFECYCLE_FIELDS = [
+    "schedule_row",
+    "occupants_present",
+    "clock_hour",
+    "clock_day",
+    "clock_step",
+]
+
+
+def test_pickle_round_trip_continues_the_episode_bitwise():
+    """A pickled Dwelling unpickles to a dwelling whose next step is the
+    uninterrupted run's next step, bitwise: the pickle carries the
+    episode's checkpoint blob, and the continuation after unpickling
+    equals the same run's continuation."""
+    import pickle
+
+    def build():
+        return PyDwelling.from_hpxml(
+            hpxml=HPXML,
+            schedule=SCHEDULE,
+            weather=WEATHER,
+            defaults=str(HARES_DEFAULTS),
+            config=SimulationConfig(
+                start_time="2019-01-01T00:00:00",
+                duration=3600,
+                time_res=60,
+                master_seed=7,
+            ),
+        )
+
+    run = build()
+    run.initialize()
+    twin = build()
+    twin.initialize()
+
+    # Ten uncontrolled steps put the run mid-episode; the pickle crosses
+    # the boundary there.
+    for _ in range(10):
+        run.step()
+        twin.step()
+
+    pickled = pickle.dumps(run)
+    resumed = pickle.loads(pickled)
+
+    fields = ["total_power_w", "clock_hour", "clock_step"]
+    plan = resumed.observation_plan(fields)
+    row = np.empty(len(fields), dtype=np.float64)
+    resumed.observe_into(plan, row)
+
+    plan_ref = twin.observation_plan(fields)
+    row_ref = np.empty(len(fields), dtype=np.float64)
+    twin.observe_into(plan_ref, row_ref)
+    assert row.tobytes() == row_ref.tobytes(), (
+        "the unpickled dwelling's observation must be the uninterrupted "
+        "run's observation, bitwise"
+    )
+
+    step_resumed = resumed.step()
+    step_run = twin.step()
+    plan2 = resumed.observation_plan(fields)
+    row2 = np.empty(len(fields), dtype=np.float64)
+    resumed.observe_into(plan2, row2)
+    plan2_ref = twin.observation_plan(fields)
+    row2_ref = np.empty(len(fields), dtype=np.float64)
+    twin.observe_into(plan2_ref, row2_ref)
+    assert row2.tobytes() == row2_ref.tobytes(), (
+        "the episode's continuation after unpickling must equal the "
+        "uninterrupted run's next step, bitwise"
+    )
+    assert step_resumed["timestamp"] == step_run["timestamp"]
+    assert (
+        step_resumed["net_electric_power_w"].hex()
+        == step_run["net_electric_power_w"].hex()
+    ), "the step's power must be bit-identical across the pickle boundary"
+
+
+def test_the_pickle_refuses_actors_it_cannot_rebuild():
+    """The pickle does not carry actors added to the dwelling after
+    construction: the unpickle's rebuild cannot make them, and it refuses
+    naming the counts rather than resume without them."""
+    import pickle
+
+    dwelling = _make_dwelling(seed=0, duration_s=600)
+    dwelling.add_actor_by_name("IdealThermostat", "probe", {"target": "21.0"})
+    blob = pickle.dumps(dwelling)
+    with pytest.raises(ValueError, match="actors"):
+        pickle.loads(blob)
+
+
+def test_snapshot_state_rejects_a_foreign_checkpoint_version():
+    """restore_state's blob crosses the checkpoint's version gate: a blob
+    whose version tag names another version is refused naming both
+    versions, never parsed as this version's schema."""
+    import json as _json
+
+    dwelling = _make_dwelling(seed=0, duration_s=600)
+    dwelling.initialize()
+    blob = _json.loads(bytes(dwelling.snapshot_state()))
+    assert blob["format_version"] >= 1, "the snapshot carries the checkpoint's version tag"
+    blob["format_version"] = blob["format_version"] - 1
+    tampered = _json.dumps(blob).encode()
+    with pytest.raises(Exception, match="version mismatch"):
+        dwelling.restore_state(tampered)
+
+
+def test_masked_auto_reset_leaves_other_envs_bit_identical():
+    """The masked auto-reset resets only the env whose episode ended: the
+    other env's next steps are bitwise the no-reset run's. The short home
+    (a two-step sim) fails its third step and is the only env the
+    auto-reset touches; the long home's next steps must not move."""
+    fields = _OBS_FIELDS + ["clock_step"]
+
+    def run(auto_reset: bool):
+        dwellings = [
+            _make_dwelling(seed=0, duration_s=120),
+            _make_dwelling(seed=1, duration_s=600),
+        ]
+        env = VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=fields,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=20),
+            auto_reset=auto_reset,
+            seed_sequence=np.random.SeedSequence(2024),
+        )
+        env.reset(seed=7)
+        actions = np.zeros((2, 1), dtype=np.float64)
+        living_rows = []
+        for _ in range(8):
+            obs, _reward, _done, _trunc, _info = env.step(actions)
+            living_rows.append(obs[1].copy())
+        return living_rows
+
+    with_reset = run(True)
+    without_reset = run(False)
+    for step_index, (on, off) in enumerate(zip(with_reset, without_reset, strict=True)):
+        assert on.tobytes() == off.tobytes(), (
+            f"the living env's step {step_index + 1} must be bitwise the "
+            "no-reset run's: the masked reset touched only the ended env"
+        )
+
+
+def test_observation_reports_the_engine_clock_schedule_and_occupancy():
+    """The new observation fields read the engine's own state at the same
+    step: the schedule row is the environment's published row, the
+    occupants-present count is the occupancy fraction the gains read
+    times the resident count, and the clock fields are the step's local
+    time and step index."""
+    fixture = ROOT / "tests/fixtures/hpxml/base-all-north.xml"
+    # 3.0 residents in the fixture's BuildingOccupancy; with no schedule
+    # CSV the generated schedule's occupancy column evaluates the shipped
+    # default profile, whose weekday fraction at hours 0 through 4 is
+    # 0.035 ("Default Schedule Parameters.csv", the occupants row's
+    # weekday_fractions), and the run's first hours are weekday night
+    # (the run starts Tuesday 2019-01-01).
+    residents = 3.0
+    night_fraction = 0.035
+    dwelling = PyDwelling.from_hpxml(
+        hpxml=str(fixture),
+        schedule=None,
+        weather=WEATHER,
+        defaults=str(HARES_DEFAULTS),
+        config=SimulationConfig(
+            start_time="2019-01-01T00:00:00",
+            duration=6 * 3600,
+            time_res=60,
+            master_seed=0,
+            # Diversity off: the generated occupancy column carries the
+            # raw profile fraction, so the expectation is the shipped
+            # profile's own value times the resident count, with no
+            # diversity draw in the product.
+            schedule_diversity="off",
+        ),
+    )
+    dwelling.initialize()
+
+    plan = dwelling.observation_plan(_LIFECYCLE_FIELDS)
+    row = np.empty(len(_LIFECYCLE_FIELDS), dtype=np.float64)
+    dwelling.observe_into(plan, row)
+    assert np.all(np.isnan(row)), "before the first step every field is NaN"
+
+    step_dict = dwelling.step()
+    dwelling.observe_into(plan, row)
+    timestamp = step_dict["timestamp"]
+    assert row[2] == timestamp.hour + timestamp.minute / 60.0 + timestamp.second / 3600.0, (
+        "clock_hour is the step's own start instant's fractional local hour"
+    )
+    expected_ordinal = (
+        timestamp.replace(tzinfo=None) - timestamp.replace(tzinfo=None, month=1, day=1)
+    ).days + 1
+    assert row[3] == float(expected_ordinal), "clock_day is the step's day of year"
+    assert row[4] == 1.0, "clock_step is the dwelling's step index"
+    assert row[0] == dwelling.latest_env()["schedule_row"], (
+        "schedule_row is the environment's published schedule row"
+    )
+    assert row[1] == residents * night_fraction, (
+        "occupants_present is the schedule's occupancy fraction times the "
+        "resident count, the product the occupancy gains read"
+    )

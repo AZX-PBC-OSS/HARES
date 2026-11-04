@@ -37,7 +37,7 @@ use std::time::Duration as StdDuration;
 use std::time::Instant;
 
 use arrow::datatypes::{Field, Schema};
-use chrono::{DateTime, Duration, FixedOffset, NaiveDateTime, Timelike};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDateTime, Timelike};
 use hares_control::{
     DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal, PriorityTier,
 };
@@ -102,6 +102,7 @@ use crate::invariants::InvariantChecker;
 use crate::invariants::check_basement_lighting_foundation;
 use crate::observation::{
     ObservationKind, ObservationPlan, ObservationSource, ObservationSurface, SetpointSide,
+    fractional_hour,
 };
 use crate::result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
@@ -244,7 +245,12 @@ fn unassigned_equipment_id_rejection(spec: &hares_io::EquipmentSpec, name: &str)
 pub type Result<T> = std::result::Result<T, HaresError>;
 
 /// Stable config contract between fleet runners and a single dwelling orchestrator.
-#[derive(Debug, Clone)]
+///
+/// The config serializes: a dwelling's pickle carries the config the
+/// dwelling rebuilds from (the checkpoint deliberately does not: the
+/// restore is always over a dwelling rebuilt from the caller's current
+/// inputs, and the pickle's rebuild is that same path).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DwellingConfig {
     /// The dwelling's HPXML document: a path, or in-memory content.
     pub hpxml: InputSource,
@@ -271,7 +277,7 @@ pub struct DwellingConfig {
 /// The dwelling's settings: [`DwellingConfig`] less its four input
 /// sources. Two configs whose settings agree and whose inputs are the same
 /// files or the same content build the same dwelling.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DwellingSettings {
     pub sim_config: SimulationConfig,
     pub overrides: Option<serde_json::Value>,
@@ -6093,6 +6099,8 @@ impl Dwelling {
             island_excess_w: self.island_excess_w,
             outdoor_temp_c: self.latest_env.weather.outdoor_temp_c,
             outdoor_humidity_ratio: self.latest_env.weather.outdoor_humidity_ratio,
+            schedule_row: self.latest_env.schedule_row,
+            occupants_present: self.scheduled_occupants(),
             actor_telemetry,
             dwelling_failed: self.failed,
             initialized: self.clock.current_step() > 0,
@@ -6224,6 +6232,14 @@ impl Dwelling {
                 .map_or(0.0, |e| e.net_consumption_w()),
             ObservationKind::TimeSin => self.time_feature(false),
             ObservationKind::TimeCos => self.time_feature(true),
+            ObservationKind::ScheduleRow => self
+                .latest_env
+                .schedule_row
+                .map_or(f64::NAN, |row| row as f64),
+            ObservationKind::OccupantsPresent => self.scheduled_occupants(),
+            ObservationKind::ClockHour => fractional_hour(&self.latest_env.current_time),
+            ObservationKind::ClockDay => self.latest_env.current_time.ordinal() as f64,
+            ObservationKind::ClockStep => self.clock.current_step() as f64,
             ObservationKind::ActorDot { actor, channel } => {
                 match self.actor_channel_value(actor, channel) {
                     Some(value) => value,
@@ -6927,6 +6943,28 @@ impl Dwelling {
 
     /// Accumulates occupancy-driven internal heat gains into zone thermal ports.
     ///
+    /// The occupant count the schedule carries for the current step: the
+    /// occupancy column's value times the resident scale, the product
+    /// [`Self::apply_occupancy_gains`] deposits as gains. 0.0 when the
+    /// dwelling carries no occupancy column (an intentionally unoccupied
+    /// dwelling: no column, no occupants). NaN before the first step,
+    /// where no schedule row has been read yet (the observation's
+    /// uninitialized contract; the row is unread there). After a step,
+    /// the column with an absent payload cannot occur: the step's own
+    /// gains read the same payload and would have failed it.
+    fn scheduled_occupants(&self) -> f64 {
+        let Some(col_idx) = self.occupancy_column_idx else {
+            return 0.0;
+        };
+        self.latest_env
+            .domains
+            .schedule
+            .get()
+            .and_then(|u| u.custom_payload.as_ref())
+            .and_then(|p| p.get(col_idx))
+            .map_or(f64::NAN, |fraction| fraction * self.occupancy_scale)
+    }
+
     /// Reads the current occupancy count from the schedule payload carried in
     /// `latest_env`'s schedule slot, then deposits gains into the **conditioned
     /// (indoor) zone only** — matching OCHRE behaviour where occupant heat is

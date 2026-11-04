@@ -147,7 +147,16 @@ use serde::{Deserialize, Serialize};
 /// carries the same name as its per-step drain into that total; it is not
 /// checkpointed itself.) Checkpoints written by v24 builds are rejected by
 /// the version gate.
-pub const CHECKPOINT_VERSION: u32 = 25;
+///
+/// v26: the aggregate electrical solver's last solve rides the checkpoint
+/// (the net active and reactive powers its `net_active_w`/`net_reactive_var`
+/// report). The between-steps reads (the gym observation's
+/// `total_power_w`/`reactive_power_var` and the telemetry's totals) read
+/// the solver's stale last solve, and a restore without the section handed
+/// them the rebuild's warm-up net: the restored dwelling's first
+/// observation was not the saved run's. Checkpoints written by v25 builds
+/// are rejected by the version gate.
+pub const CHECKPOINT_VERSION: u32 = 26;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -274,6 +283,9 @@ pub struct DwellingCheckpoint {
     pub reports: Vec<ReportSection>,
     /// The run's health totals: the counters continue across the restore.
     pub health: crate::health::RunHealth,
+    /// The aggregate electrical solver's last solve, so the restored
+    /// dwelling's between-steps power reads are the saved run's.
+    pub electrical_net: ElectricalNetCheckpoint,
     /// The warning record: both bounded buffers and their dropped counts,
     /// so the restored run's `RunResult.warnings` and its caller's next
     /// drain continue the written run's.
@@ -289,6 +301,15 @@ pub struct ReportSection {
     pub name: String,
     /// The recorder's row stream.
     pub rows: hares_io::ReportRowsSnapshot,
+}
+
+/// The aggregate electrical solver's last solve: the net active and
+/// reactive powers the between-steps reads report (the observation's
+/// power fields, the telemetry's totals).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ElectricalNetCheckpoint {
+    pub net_active_w: f64,
+    pub net_reactive_var: f64,
 }
 
 impl DwellingCheckpoint {
@@ -398,8 +419,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, EquipmentStateCheckpoint,
-        ReportSection,
+        ActorStateCheckpoint, CHECKPOINT_VERSION, DwellingCheckpoint, ElectricalNetCheckpoint,
+        EquipmentStateCheckpoint, ReportSection,
     };
     use hares_envelope::{THERMAL_SNAPSHOT_SCHEMA_VERSION, ThermalSnapshot};
     use hares_types::{ElectricalSummary, ZoneId};
@@ -564,6 +585,10 @@ mod tests {
                     chunk_size: 4,
                 },
             }],
+            electrical_net: ElectricalNetCheckpoint {
+                net_active_w: 4_250.5,
+                net_reactive_var: -12.25,
+            },
             health: crate::health::RunHealth {
                 port_rollbacks: 1,
                 rejected_control_signals: 2,
@@ -631,9 +656,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 25;
+    const PINNED_VERSION: u32 = 26;
     const PINNED_SCHEMA_SHA256: &str =
-        "f2d24fa4d59aed5bf8aafed7723128f55ae2d55750935cf1e8f43d608946a740";
+        "14b628615b23bca20a9446448273e78e5916ace82381e8041f5ae403d4064b9e";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the
@@ -767,6 +792,10 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical_net: ElectricalNetCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -802,6 +831,10 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical_net: ElectricalNetCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -1000,6 +1033,10 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical_net: ElectricalNetCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -1054,6 +1091,10 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical_net: ElectricalNetCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -1148,6 +1189,10 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical_net: ElectricalNetCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 
@@ -1189,6 +1234,10 @@ mod tests {
             metrics: None,
             reports: Vec::new(),
             health: crate::health::RunHealth::default(),
+            electrical_net: ElectricalNetCheckpoint {
+                net_active_w: 0.0,
+                net_reactive_var: 0.0,
+            },
             warnings: crate::dwelling::WarningLogSnapshot::default(),
         };
 

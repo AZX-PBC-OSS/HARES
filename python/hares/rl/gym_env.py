@@ -139,6 +139,29 @@ def validate_episode_length(episode_length: object) -> None:
         )
 
 
+def validated_auto_reset(auto_reset: object) -> bool:
+    """The auto-reset flag is a bool: any other value (a numpy bool among
+    them) is the caller's error, named by type, refused at construction
+    instead of read as a truthiness."""
+    if not isinstance(auto_reset, bool):
+        raise TypeError(f"auto_reset must be a bool, got {type(auto_reset).__name__}")
+    return auto_reset
+
+
+def validated_seed_sequence(seed_sequence: object) -> np.random.SeedSequence | None:
+    """The episode-seed source is a SeedSequence or None: any other value
+    is the caller's error, named by type, refused at construction instead
+    of failing at the first spawn."""
+    if seed_sequence is None:
+        return None
+    if not isinstance(seed_sequence, np.random.SeedSequence):
+        raise TypeError(
+            "seed_sequence must be a numpy.random.SeedSequence or None, got "
+            f"{type(seed_sequence).__name__}"
+        )
+    return seed_sequence
+
+
 def sorted_action_layout(
     action_space_config: Mapping[str, Sequence[str]],
 ) -> tuple[list[tuple[str, str]], dict[str, str]]:
@@ -259,6 +282,16 @@ def observation_field_bounds(field: str) -> tuple[float, float]:
         return (0.0, 1.0)
     if key in {"time_sin", "time_cos"}:
         return (-1.0, 1.0)
+    if key == "schedule_row":
+        return (0.0, _BROAD_HIGH)
+    if key == "occupants_present":
+        return (0.0, _BROAD_HIGH)
+    if key == "clock_hour":
+        return (0.0, 24.0)
+    if key == "clock_day":
+        return (1.0, 366.0)
+    if key == "clock_step":
+        return (0.0, _BROAD_HIGH)
     return (_BROAD_LOW, _BROAD_HIGH)
 
 
@@ -347,6 +380,26 @@ def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) 
             dt = telemetry.current_time
             fhour = float(dt.hour) + float(dt.minute) / 60.0 + float(dt.second) / 3600.0
             out.append(math.cos(2.0 * math.pi * fhour / 24.0))
+            continue
+
+        # The schedule, occupancy and clock fields: the engine's own state
+        # at the step, the same sources the plan's executor reads.
+        if key == "schedule_row":
+            row = getattr(telemetry, "schedule_row", None)
+            out.append(float("nan") if row is None else float(row))
+            continue
+        if key == "occupants_present":
+            out.append(float(telemetry.occupants_present))
+            continue
+        if key == "clock_hour":
+            dt = telemetry.current_time
+            out.append(float(dt.hour) + float(dt.minute) / 60.0 + float(dt.second) / 3600.0)
+            continue
+        if key == "clock_day":
+            out.append(float(telemetry.current_time.timetuple().tm_yday))
+            continue
+        if key == "clock_step":
+            out.append(float(telemetry.timestep_index))
             continue
 
         # Actor telemetry fallback: dot-separated <actor>.<channel>.
