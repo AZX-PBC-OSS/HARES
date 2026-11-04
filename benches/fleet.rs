@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use hares_fleet::{Fleet, FleetReport};
-use hares_io::{Frequency, Selection};
+use hares_input::{Frequency, Selection};
 
 fn fold_report(frequency: Frequency) -> FleetReport {
     FleetReport {
         selection: Selection::Verbosity(0),
         frequency,
-        health_policy: hares_io::HealthPolicy::default(),
+        health_policy: hares_input::HealthPolicy::default(),
     }
 }
 

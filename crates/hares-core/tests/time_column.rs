@@ -5,14 +5,14 @@
 //! warmed-up run's frame starts at the start time with one row per step.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use arrow::array::{RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::{DataType, TimeUnit};
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
+use hares_input::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -46,7 +46,7 @@ fn cz2a_config(
                 reports: vec![ReportSpec {
                     name: "frame".to_string(),
                     selection: Selection::Verbosity(verbosity),
-                    frequency: hares_io::Frequency::default(),
+                    frequency: hares_input::Frequency::default(),
                     destination: Destination::Memory,
                 }],
                 diagnostics: false,
@@ -56,14 +56,14 @@ fn cz2a_config(
                 master_seed: 0,
                 civil_timezone: None,
                 site_location: SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
+                weather_year: hares_input::WeatherYear::default(),
                 warmup: if warmup_s.is_some() {
-                    hares_io::Warmup::default()
+                    hares_input::Warmup::default()
                 } else {
-                    hares_io::Warmup::Disabled
+                    hares_input::Warmup::Disabled
                 },
             },
             None,

@@ -9,7 +9,7 @@
 //! is wrong.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, TimeZone};
@@ -81,12 +81,12 @@ fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             1,
@@ -97,7 +97,7 @@ fn generated_schedule_config(schedule_path: Option<PathBuf>) -> DwellingConfig {
 
 /// Bit digest of a resolved schedule: timestamps, column names, and the bit
 /// pattern of every value, so any change in content or ordering moves it.
-fn schedule_digest(schedule: &hares_io::ScheduleTimeSeries) -> String {
+fn schedule_digest(schedule: &hares_input::ScheduleTimeSeries) -> String {
     let mut hasher = Sha256::new();
     for ts in &schedule.timestamps {
         hasher.update(ts.timestamp().to_le_bytes());
@@ -156,7 +156,7 @@ fn nonexistent_schedule_path_is_an_error() {
 
 /// `None` generates the default schedule: bitwise-equal to the generator
 /// called directly on the same inputs DIVERSIFIED under the home's own
-/// key (the build's transform, `hares_io::schedule_diversity`), and to
+/// key (the build's transform, `hares_input::schedule_diversity`), and to
 /// the digest pinned in `GENERATED_SCHEDULE_DIGEST` (see that constant's
 /// comment for its moves). The undiversified generator is the Off mode's
 /// exact output; the escape-hatch pin is
@@ -167,7 +167,7 @@ fn no_schedule_generates_the_default_schedule() {
     let blueprint = DwellingBlueprint::from_config(config.clone())
         .expect("a None schedule requests the generated schedule");
 
-    let profiles = hares_io::load_default_profiles(&config.defaults.base)
+    let profiles = hares_input::load_default_profiles(&config.defaults.base)
         .expect("the shipped defaults CSV loads");
     let key = hares_types::rng::dwelling_seed_scenario(
         config.settings.sim_config.master_seed,
@@ -175,8 +175,8 @@ fn no_schedule_generates_the_default_schedule() {
         config.settings.bldg_id,
     );
     let draws = hares_types::diversity::ScheduleDiversityDraws::draw(key);
-    let diversified = hares_io::schedule_diversity::diversify_profiles(&profiles, &draws);
-    let generated = hares_io::hpxml_schedule::generate_default_schedule(
+    let diversified = hares_input::schedule_diversity::diversify_profiles(&profiles, &draws);
+    let generated = hares_input::hpxml_schedule::generate_default_schedule(
         config.settings.sim_config.start_time,
         config.settings.sim_config.duration,
         config.settings.sim_config.time_res,
@@ -221,13 +221,13 @@ fn no_schedule_generates_the_default_schedule() {
 #[test]
 fn diversity_off_generates_the_shared_profile() {
     let mut config = generated_schedule_config(None);
-    config.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    config.settings.sim_config.schedule_diversity = hares_input::ScheduleDiversity::Off;
     let blueprint = DwellingBlueprint::from_config(config.clone())
         .expect("a None schedule requests the generated schedule");
 
-    let profiles = hares_io::load_default_profiles(&config.defaults.base)
+    let profiles = hares_input::load_default_profiles(&config.defaults.base)
         .expect("the shipped defaults CSV loads");
-    let generated = hares_io::hpxml_schedule::generate_default_schedule(
+    let generated = hares_input::hpxml_schedule::generate_default_schedule(
         config.settings.sim_config.start_time,
         config.settings.sim_config.duration,
         config.settings.sim_config.time_res,

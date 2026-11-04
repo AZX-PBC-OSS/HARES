@@ -87,10 +87,13 @@ fn resstock_fleet_manifest_parses_with_its_keys() {
         manifest.weather_dir.as_deref(),
         Some("tests/fixtures/resstock/2025.1/weather")
     );
-    assert_eq!(manifest.version, Some(hares_io::ResStockVersion::V2025_1));
+    assert_eq!(
+        manifest.version,
+        Some(hares_input::ResStockVersion::V2025_1)
+    );
     assert_eq!(manifest.duration, Some(172800));
     let fleet = manifest.fleet.as_ref().expect("the [fleet] table parses");
-    assert_eq!(fleet.frequency, hares_io::Frequency::Hourly);
+    assert_eq!(fleet.frequency, hares_input::Frequency::Hourly);
     assert_eq!(fleet.selection.verbosity(), 2);
     assert!(
         manifest.home.is_empty(),

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use arrow::array::{Array, Float64Array, RecordBatch};
 use chrono::{DateTime, Duration};
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings, SimulationConfig, resample_weather};
-use hares_io::FirstHour;
+use hares_input::FirstHour;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -39,24 +39,27 @@ fn config(time_res: i64, duration_secs: i64, start: &str) -> SimulationConfig {
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
 /// The run's resolved site location against one weather file's header,
 /// the resolution the build itself runs.
-fn resolved_site(building: &std::path::Path, weather: &std::path::Path) -> hares_io::SiteLocation {
-    let parsed_building = hares_io::parse_hpxml(building).expect("the fixture parses");
-    let meta = hares_io::read_weather_meta(weather).expect("the weather header parses");
-    hares_io::resolve_site_location(
+fn resolved_site(
+    building: &std::path::Path,
+    weather: &std::path::Path,
+) -> hares_input::SiteLocation {
+    let parsed_building = hares_input::parse_hpxml(building).expect("the fixture parses");
+    let meta = hares_input::read_weather_meta(weather).expect("the weather header parses");
+    hares_input::resolve_site_location(
         &parsed_building.site,
         &meta,
-        &hares_io::SiteLocationOverride::default(),
+        &hares_input::SiteLocationOverride::default(),
     )
 }
 
@@ -82,9 +85,13 @@ fn subhourly_epw_record_covers_the_step() {
     let weather = cz4a_dir().join("weather_ochre_hold_60s.epw");
     let site = resolved_site(&cz4a_dir().join("building.xml"), &weather);
     let cfg = config(60, 86_400, "1995-01-01T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     let read = dry_bulb_bits(&batch);
     assert_eq!(read.len(), 1440, "one row per step of the day");
     for (step, record) in parsed.dry_bulb_c.iter().take(1440).enumerate() {
@@ -102,7 +109,7 @@ fn subhourly_epw_record_covers_the_step() {
 /// configured timesteps per hour.
 #[test]
 fn subhourly_file_interval_must_equal_the_step() {
-    let weather = hares_io::WeatherInput::Path(psm3_fixture());
+    let weather = hares_input::WeatherInput::Path(psm3_fixture());
     let site = resolved_site(&cz4a_dir().join("building.xml"), &psm3_fixture());
     for time_res in [300, 1800] {
         let err = resample_weather(
@@ -128,7 +135,7 @@ fn subhourly_file_interval_must_equal_the_step() {
 /// fixture's dry bulb is -20.0 + 0.5 * (k mod 96) over a full 2019 year.
 #[test]
 fn psm3_record_covers_the_interval_it_starts() {
-    let weather = hares_io::WeatherInput::Path(psm3_fixture());
+    let weather = hares_input::WeatherInput::Path(psm3_fixture());
     let site = resolved_site(&cz4a_dir().join("building.xml"), &psm3_fixture());
     let cfg = config(900, 86_400, "2019-01-01T00:00:00-07:00");
     let batch = resample_weather(&weather, &site, &cfg).expect("the run completes");
@@ -167,19 +174,23 @@ fn subhour_step_must_divide_the_hour() {
 #[test]
 fn hourly_step_reads_the_record_of_the_hour_it_ends() {
     let weather_path = cz4a_dir().join("weather.epw");
-    let parsed = hares_io::parse_weather(&weather_path).expect("the weather parses");
+    let parsed = hares_input::parse_weather(&weather_path).expect("the weather parses");
     let mut cfg = config(3600, 86_400, "2023-01-01T00:00:00-07:00");
-    cfg.reports = vec![hares_io::ReportSpec {
+    cfg.reports = vec![hares_input::ReportSpec {
         name: "weather".to_string(),
-        selection: hares_io::Selection::Named(vec!["Outdoor Dry Bulb (C)".to_string()]),
-        frequency: hares_io::Frequency::Timestep,
-        destination: hares_io::Destination::Memory,
+        selection: hares_input::Selection::Named(vec!["Outdoor Dry Bulb (C)".to_string()]),
+        frequency: hares_input::Frequency::Timestep,
+        destination: hares_input::Destination::Memory,
     }];
     let mut dwelling = Dwelling::from_config(DwellingConfig {
-        hpxml: hares_io::InputSource::Path(cz4a_dir().join("building.xml")),
-        schedule: Some(hares_io::InputSource::Path(cz4a_dir().join("schedule.csv"))),
-        weather: hares_io::WeatherInput::Path(weather_path),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        hpxml: hares_input::InputSource::Path(cz4a_dir().join("building.xml")),
+        schedule: Some(hares_input::InputSource::Path(
+            cz4a_dir().join("schedule.csv"),
+        )),
+        weather: hares_input::WeatherInput::Path(weather_path),
+        defaults: hares_input::DefaultsSource::directory(
+            project_root().join("python/hares/defaults"),
+        ),
         settings: DwellingSettings::new(cfg, None, 1, None),
     })
     .expect("the dwelling builds");
@@ -203,7 +214,7 @@ fn hourly_step_reads_the_record_of_the_hour_it_ends() {
 #[test]
 fn first_hour_uses_hour24_of_the_first_day_by_default() {
     let weather_path = cz4a_dir().join("weather.epw");
-    let parsed = hares_io::parse_weather(&weather_path).expect("the weather parses");
+    let parsed = hares_input::parse_weather(&weather_path).expect("the weather parses");
     let (h1, h24) = (parsed.dry_bulb_c[0], parsed.dry_bulb_c[23]);
     let read = first_hour_run_frame(FirstHour::Hour24);
     let n = 4.0_f64;
@@ -224,7 +235,7 @@ fn first_hour_uses_hour24_of_the_first_day_by_default() {
 #[test]
 fn first_hour_uses_hour1_when_selected() {
     let weather_path = cz4a_dir().join("weather.epw");
-    let parsed = hares_io::parse_weather(&weather_path).expect("the weather parses");
+    let parsed = hares_input::parse_weather(&weather_path).expect("the weather parses");
     let (h1, h2) = (parsed.dry_bulb_c[0], parsed.dry_bulb_c[1]);
     let read = first_hour_run_frame(FirstHour::Hour1);
     let n = 4.0_f64;
@@ -245,21 +256,25 @@ fn first_hour_uses_hour1_when_selected() {
 
 /// The run's outdoor dry-bulb column for one day at 900 s from the cz4a
 /// fixtures, warm-up disabled, with the first-hour rule given.
-fn first_hour_run_frame(first_hour: hares_io::FirstHour) -> Vec<u64> {
+fn first_hour_run_frame(first_hour: hares_input::FirstHour) -> Vec<u64> {
     let weather_path = cz4a_dir().join("weather.epw");
     let mut cfg = config(900, 86_400, "2023-01-01T00:00:00-07:00");
     cfg.first_hour_interpolation = first_hour;
-    cfg.reports = vec![hares_io::ReportSpec {
+    cfg.reports = vec![hares_input::ReportSpec {
         name: "weather".to_string(),
-        selection: hares_io::Selection::Named(vec!["Outdoor Dry Bulb (C)".to_string()]),
-        frequency: hares_io::Frequency::Timestep,
-        destination: hares_io::Destination::Memory,
+        selection: hares_input::Selection::Named(vec!["Outdoor Dry Bulb (C)".to_string()]),
+        frequency: hares_input::Frequency::Timestep,
+        destination: hares_input::Destination::Memory,
     }];
     let mut dwelling = Dwelling::from_config(DwellingConfig {
-        hpxml: hares_io::InputSource::Path(cz4a_dir().join("building.xml")),
-        schedule: Some(hares_io::InputSource::Path(cz4a_dir().join("schedule.csv"))),
-        weather: hares_io::WeatherInput::Path(weather_path),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        hpxml: hares_input::InputSource::Path(cz4a_dir().join("building.xml")),
+        schedule: Some(hares_input::InputSource::Path(
+            cz4a_dir().join("schedule.csv"),
+        )),
+        weather: hares_input::WeatherInput::Path(weather_path),
+        defaults: hares_input::DefaultsSource::directory(
+            project_root().join("python/hares/defaults"),
+        ),
         settings: DwellingSettings::new(cfg, None, 1, None),
     })
     .expect("the dwelling builds");

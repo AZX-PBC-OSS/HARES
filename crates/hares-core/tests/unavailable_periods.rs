@@ -3,7 +3,7 @@
 //! are not moved, and the water heater's freeze protection holds.
 
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use hares_types::telemetry_keys as tk;
 use std::path::PathBuf;
 
@@ -11,8 +11,8 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn sim_config(start: &str, duration_s: i64, step_s: i64) -> hares_io::SimulationConfig {
-    hares_io::SimulationConfig::from_toml(&format!(
+fn sim_config(start: &str, duration_s: i64, step_s: i64) -> hares_input::SimulationConfig {
+    hares_input::SimulationConfig::from_toml(&format!(
         r#"
 start_time = "{start}"
 duration = {duration_s}

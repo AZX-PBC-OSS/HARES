@@ -11,7 +11,7 @@ TARGET_DIRS=("crates" "tests" "docs")
 # Path-based pruning — not grep --exclude-dir: grep's --exclude-dir matches
 # directory *basenames*, so an exempted docs directory name would also skip
 # any production directory that happens to share it (the ASHRAE gate's
-# "hpxml" exemption did exactly that to crates/hares-io/src/hpxml — the
+# "hpxml" exemption did exactly that to crates/hares-input/src/hpxml (the
 # HPXML parser). find -prune matches full paths, so the exemptions stay
 # pinned to the provenance docs they exist for and every production
 # directory stays scanned.

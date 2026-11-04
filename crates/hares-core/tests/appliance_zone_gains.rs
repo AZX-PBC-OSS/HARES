@@ -13,14 +13,14 @@
 //! and 309).
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
 use hares_equipment::Equipment;
-use hares_io::hpxml::building::{ZoneType, parse_building};
+use hares_input::hpxml::building::{ZoneType, parse_building};
 use hares_types::{FuelType, PortSlots, ZoneId};
 
 const TIME_RES_S: i64 = 900;
@@ -100,12 +100,12 @@ fn dwelling_config(run: &Run) -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             run.overrides.clone(),
             run.bldg_id,
@@ -659,12 +659,12 @@ fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             1,
@@ -676,7 +676,7 @@ fn garage_dwelling_config(hpxml: &Path) -> DwellingConfig {
 /// A garage refrigerator's heat lands in the garage zone: the dwelling
 /// gives the appliance the garage's zone id, so every thermal gain it
 /// delivers carries the garage's id and none reaches the conditioned zone.
-/// Pins the end-to-end site rule; the hares-io unit tests pin the parse.
+/// Pins the end-to-end site rule; the hares-input unit tests pin the parse.
 #[test]
 fn a_garage_refrigerators_heat_lands_in_the_garage_zone() {
     let hpxml = project_root().join("tests/fixtures/hpxml/ochre_samples/base-enclosure-garage.xml");

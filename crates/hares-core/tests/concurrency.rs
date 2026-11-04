@@ -19,7 +19,7 @@ use hares_core::actor::{Actor, ActorInterest};
 use hares_core::{
     Dwelling, DwellingBlueprint, DwellingConfig, DwellingSettings, RunHealth, RunMetrics,
 };
-use hares_io::{
+use hares_input::{
     DefaultsSource, Destination, Frequency, InputSource, ReportSpec, Selection, SimulationConfig,
     SiteLocationOverride, WeatherInput,
 };
@@ -50,11 +50,11 @@ fn sim_config(start: DateTime<FixedOffset>, duration_s: i64, step_s: i64) -> Sim
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 

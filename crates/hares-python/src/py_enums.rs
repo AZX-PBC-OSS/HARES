@@ -10,7 +10,7 @@ use hares_equipment::ev::catalog::{
     EvArchetypeId as RustEvArchetypeId, VehicleId as RustVehicleId,
 };
 use hares_equipment::ndinterp::ExtrapolationStrategy as RustExtrapolationStrategy;
-use hares_io::ResStockVersion as IoResStockVersion;
+use hares_input::ResStockVersion as IoResStockVersion;
 use hares_types::{
     BatteryChemistry as RustBatteryChemistry, BmsAction as RustBmsAction, BmsMode as RustBmsMode,
     BmsScheduleWindow as RustBmsScheduleWindow, BmsTimeWindow as RustBmsTimeWindow,

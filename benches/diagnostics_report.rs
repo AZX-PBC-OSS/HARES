@@ -14,10 +14,10 @@ use std::time::Duration;
 use chrono::{FixedOffset, TimeZone};
 use criterion::{Criterion, criterion_group, criterion_main};
 use hares_core::{DwellingConfig, SimulationEngine};
-use hares_io::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
+use hares_input::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 
 fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -43,7 +43,7 @@ fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
                 reports: vec![ReportSpec {
                     name: "file".to_string(),
                     selection: Selection::Verbosity(2),
-                    frequency: hares_io::Frequency::default(),
+                    frequency: hares_input::Frequency::default(),
                     destination: Destination::Csv {
                         path: output.to_path_buf(),
                         overwrite: true,
@@ -56,11 +56,11 @@ fn cz4a_config(diagnostics: bool, output: &Path) -> DwellingConfig {
                 master_seed: 0,
                 civil_timezone: None,
                 site_location: SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-                first_hour_interpolation: hares_io::FirstHour::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
+                first_hour_interpolation: hares_input::FirstHour::default(),
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             1,

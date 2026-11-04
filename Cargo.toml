@@ -5,7 +5,8 @@ members = [
     "crates/hares-envelope",
     "crates/hares-control",
     "crates/hares-equipment",
-    "crates/hares-io",
+    "crates/hares-input",
+    "crates/hares-output",
     "crates/hares-core",
     "crates/hares-fleet",
     "crates/hares-tariff",
@@ -18,7 +19,8 @@ default-members = [
     "crates/hares-envelope",
     "crates/hares-control",
     "crates/hares-equipment",
-    "crates/hares-io",
+    "crates/hares-input",
+    "crates/hares-output",
     "crates/hares-core",
     "crates/hares-tariff",
     "crates/hares-fleet",
@@ -38,7 +40,8 @@ hares-physics = { path = "crates/hares-physics" }
 hares-envelope = { path = "crates/hares-envelope" }
 hares-control = { path = "crates/hares-control" }
 hares-equipment = { path = "crates/hares-equipment" }
-hares-io = { path = "crates/hares-io" }
+hares-input = { path = "crates/hares-input" }
+hares-output = { path = "crates/hares-output" }
 hares-core = { path = "crates/hares-core" }
 hares-tariff = { path = "crates/hares-tariff" }
 hares-fleet = { path = "crates/hares-fleet" }

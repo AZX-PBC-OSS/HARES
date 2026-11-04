@@ -1656,7 +1656,7 @@ fn gas_furnace_dse_multi_zone_energy_conservation() {
 // zone must deliver 100% of its sensible output to ZoneId(2) and zero to
 // ZoneId(1). This is the simulation-level counterpart to the config-layer
 // test `resolve_hvac_propagates_zone_id_for_conditioned_zone_at_index_1`
-// in crates/hares-io/src/hpxml/resolve_hvac.rs.
+// in crates/hares-input/src/hpxml/resolve_hvac.rs.
 //
 // Setup: capacity=10000 W, zone_id=2, no DSE/duct_zone_id, fan_power=0 W.
 // Expected: ZoneId(1)=0 W, ZoneId(2)=10000 W.

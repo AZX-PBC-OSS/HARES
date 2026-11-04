@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use arrow::record_batch::RecordBatch;
-use hares_io::Frequency;
-use hares_io::output::metrics::{
+use hares_input::Frequency;
+use hares_output::metrics::{
     EfficiencyMetrics, EnvelopeComponentLoadsKwh, FullSimulationMetrics, GasEnergyMetrics,
     GridInteractionMetrics, PeakPowerKw, Reliability, RollingPeakKw, SimulationCoverage,
     SimulationMetrics, TotalEnergyKwh,
@@ -20,7 +20,7 @@ use crate::health::RunHealth;
 
 /// The metrics of a finished run: the full metric set, gas included
 /// (`FullSimulationMetrics` flattened; the calculator's own type stays in
-/// `hares-io`; every result surface carries this one).
+/// `hares-output`; every result surface carries this one).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RunMetrics {
     pub total_energy_kwh: TotalEnergyKwh,
@@ -226,7 +226,7 @@ impl BuildInfo {
 /// The catalogue's digest as the 32 bytes the hex string
 /// `Catalogue::digest()` prints, decoded: the value every result's
 /// provenance records beside the build identity.
-pub(crate) fn catalogue_digest_bytes(catalogue: &hares_io::Catalogue) -> [u8; 32] {
+pub(crate) fn catalogue_digest_bytes(catalogue: &hares_output::Catalogue) -> [u8; 32] {
     fn hex_value(c: u8) -> u8 {
         match c {
             b'0'..=b'9' => c - b'0',
@@ -294,7 +294,7 @@ pub struct Provenance {
     /// parsed as, and the digest over the defaults files the load read.
     /// `None` for the synthetic TOML dwellings: that path reads the TOML,
     /// recorded nowhere in the records, and the absence discloses that.
-    pub inputs: Option<hares_io::InputRecords>,
+    pub inputs: Option<hares_input::InputRecords>,
     /// The electric tariff attached with `Dwelling::set_tariff`, `None`
     /// when the run attached none.
     pub tariff: Option<TariffRecord>,

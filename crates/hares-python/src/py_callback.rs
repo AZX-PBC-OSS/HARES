@@ -19,7 +19,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 
 use arrow::record_batch::RecordBatch;
-use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
+use hares_output::callback::{BatchCallback, BatchContext, CallbackError};
 use hares_types::panic_hook::panic_payload_to_string;
 use pyo3::prelude::*;
 

@@ -89,14 +89,14 @@ destination = "memory"
 
 fn dwelling_generated(hpxml: PathBuf) -> Dwelling {
     let config = DwellingConfig {
-        hpxml: hares_io::InputSource::Path(hpxml),
+        hpxml: hares_input::InputSource::Path(hpxml),
         schedule: None,
-        weather: hares_io::WeatherInput::Path(
+        weather: hares_input::WeatherInput::Path(
             repo_root().join("tests/fixtures/resstock/2025.1/weather/G0900090_2018.csv"),
         ),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
+        defaults: hares_input::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&generated_sim_toml())
+            hares_input::SimulationConfig::from_toml(&generated_sim_toml())
                 .expect("the config parses"),
             None,
             1,
@@ -138,7 +138,7 @@ fn scheduled_heating_setpoints(dwelling: &mut Dwelling, expected_len: usize) -> 
     setpoints
 }
 
-fn heating_source_is(dwelling: &Dwelling, equipment: &str, expected: &hares_io::SetpointSource) {
+fn heating_source_is(dwelling: &Dwelling, equipment: &str, expected: &hares_input::SetpointSource) {
     let model = dwelling.resolved_model();
     let unit = model
         .equipment
@@ -152,7 +152,7 @@ fn heating_source_is(dwelling: &Dwelling, equipment: &str, expected: &hares_io::
     );
 }
 
-fn cooling_source_is(dwelling: &Dwelling, equipment: &str, expected: &hares_io::SetpointSource) {
+fn cooling_source_is(dwelling: &Dwelling, equipment: &str, expected: &hares_input::SetpointSource) {
     let model = dwelling.resolved_model();
     let unit = model
         .equipment
@@ -184,12 +184,12 @@ destination = "memory"
 "#
     );
     let config = DwellingConfig {
-        hpxml: hares_io::InputSource::Path(fixture().join("building.xml")),
-        schedule: Some(hares_io::InputSource::Path(schedule_path)),
-        weather: hares_io::WeatherInput::Path(fixture().join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
+        hpxml: hares_input::InputSource::Path(fixture().join("building.xml")),
+        schedule: Some(hares_input::InputSource::Path(schedule_path)),
+        weather: hares_input::WeatherInput::Path(fixture().join("weather.epw")),
+        defaults: hares_input::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            hares_input::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
             None,
             1,
             None,
@@ -425,7 +425,7 @@ fn generated_schedule_keeps_the_hpxml_setpoint_profile() {
     heating_source_is(
         &dwelling,
         "Gas Boiler",
-        &hares_io::SetpointSource::Hpxml {
+        &hares_input::SetpointSource::Hpxml {
             weekday_c: heating_weekday_c.clone(),
             weekend_c: heating_weekend_c.clone(),
         },
@@ -433,7 +433,7 @@ fn generated_schedule_keeps_the_hpxml_setpoint_profile() {
     cooling_source_is(
         &dwelling,
         "Room AC",
-        &hares_io::SetpointSource::Hpxml {
+        &hares_input::SetpointSource::Hpxml {
             weekday_c: cooling_weekday_c.clone(),
             weekend_c: cooling_weekend_c.clone(),
         },
@@ -481,8 +481,8 @@ fn generated_schedule_without_thermostat_uses_the_default_profile() {
             "step {step}: the default profile's 68 F heating setpoint, got {value}"
         );
     }
-    let default_source = hares_io::SetpointSource::DefaultProfile {
-        profile: hares_io::SetpointSource::MANUAL_THERMOSTAT.to_string(),
+    let default_source = hares_input::SetpointSource::DefaultProfile {
+        profile: hares_input::SetpointSource::MANUAL_THERMOSTAT.to_string(),
     };
     heating_source_is(&dwelling, "Gas Boiler", &default_source);
     cooling_source_is(&dwelling, "Room AC", &default_source);

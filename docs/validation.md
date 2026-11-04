@@ -64,9 +64,9 @@ Each equipment subsystem has its own parity test against OCHRE:
 | `hares-equipment/tests/hvac_parity.rs` | HVAC fuel input, thermal output, COP |
 | `hares-equipment/tests/water_heater_parity.rs` | Tank temperature evolution, draw timing |
 | `hares-equipment/tests/der_parity.rs` | Battery, PV, EV equipment |
-| `hares-io/tests/hpxml_parity.rs` | HPXML field extraction matches OCHRE parsing |
-| `hares-io/tests/weather_parity.rs` | Weather ingestion, derived quantities |
-| `hares-io/tests/schedule_parity.rs` | Schedule loading and time-indexing |
+| `hares-input/tests/hpxml_parity.rs` | HPXML field extraction matches OCHRE parsing |
+| `hares-input/tests/weather_parity.rs` | Weather ingestion, derived quantities |
+| `hares-input/tests/schedule_parity.rs` | Schedule loading and time-indexing |
 | `hares-physics/tests/solar_parity.rs` | Solar position, tilted irradiance |
 
 ### Envelope oracle tests

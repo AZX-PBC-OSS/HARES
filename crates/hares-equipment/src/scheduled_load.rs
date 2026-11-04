@@ -2935,7 +2935,7 @@ mod tests {
     #[test]
     fn nan_schedule_value_must_not_degrade_to_silent_zero_draw() {
         // A NaN schedule value is concretely reachable: the CSV loader
-        // (`hares-io/src/schedule.rs`) parses with `str::parse::<f64>()`,
+        // (`hares-input/src/schedule.rs`) parses with `str::parse::<f64>()`,
         // which accepts "nan", with no is_nan/is_finite check at that
         // boundary. At the consumption site below, `raw_schedule_w > 0.0`
         // is false for NaN, so corrupted data silently becomes "no load" —

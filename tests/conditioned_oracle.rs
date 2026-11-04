@@ -32,7 +32,7 @@ mod denver_offset;
 mod tests {
     use super::denver_offset::denver_offset;
     use hares_core::DwellingSettings;
-    use hares_io::{DefaultsSource, InputSource, WeatherInput};
+    use hares_input::{DefaultsSource, InputSource, WeatherInput};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -101,11 +101,11 @@ mod tests {
                     start_time,
                     duration,
                     time_res: Duration::minutes(1),
-                    reports: vec![hares_io::ReportSpec {
+                    reports: vec![hares_input::ReportSpec {
                         name: "frame".to_string(),
-                        selection: hares_io::Selection::Verbosity(6),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Csv {
+                        selection: hares_input::Selection::Verbosity(6),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Csv {
                             path: csv_path,
                             overwrite: false,
                         },
@@ -116,12 +116,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 42,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
                     first_hour_interpolation: Default::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 None,
                 1,

@@ -1,4 +1,4 @@
-use hares_io::{WeatherTimeSeries, epw, psm3, resstock_csv, tmy3, weather};
+use hares_input::{WeatherTimeSeries, epw, psm3, resstock_csv, tmy3, weather};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};

@@ -6,7 +6,7 @@
 // surface is missing.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
@@ -59,7 +59,7 @@ fn dwelling_config(sim_toml: &str) -> DwellingConfig {
         weather: WeatherInput::Path(home.join("weather.epw")),
         defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
+            hares_input::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
             None,
             1,
             None,
@@ -538,12 +538,12 @@ fn provenance_records_callback_destination_marker() {
         deliveries: StdArc<AtomicU64>,
     }
 
-    impl hares_io::output::callback::BatchCallback for CountingCallback {
+    impl hares_output::callback::BatchCallback for CountingCallback {
         fn on_batch(
             &mut self,
-            _context: &hares_io::output::callback::BatchContext,
+            _context: &hares_output::callback::BatchContext,
             _batch: &RecordBatch,
-        ) -> Result<(), hares_io::output::callback::CallbackError> {
+        ) -> Result<(), hares_output::callback::CallbackError> {
             self.deliveries.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -571,7 +571,7 @@ fn provenance_records_callback_destination_marker() {
         .find(|report| report.name == "frame")
         .expect("the report is in the recorded config");
     assert!(
-        matches!(frame.destination, hares_io::Destination::Callback),
+        matches!(frame.destination, hares_input::Destination::Callback),
         "the recorded config's report carries the callback marker, got: {:?}",
         frame.destination
     );

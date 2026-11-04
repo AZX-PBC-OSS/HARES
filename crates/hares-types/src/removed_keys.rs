@@ -3,11 +3,11 @@
 //!
 //! The table lives in `hares-types` - the lowest crate - so every layer
 //! that owns a key surface can consult it: the TOML readers and the
-//! input schema in `hares-io`, the actor registry and the observation
+//! input schema in `hares-input`, the actor registry and the observation
 //! resolver in `hares-core`, the protocol bridge's JSON handler in
 //! `hares-equipment`, and the Python keyword surfaces in `hares-python`.
-//! `hares-io` re-exports it, so the `hares_io::` paths the older surfaces
-//! use keep working.
+//! `hares-input` re-exports it, so the `hares_input::` paths the older
+//! surfaces use keep working.
 
 use serde::{Deserialize, Serialize};
 

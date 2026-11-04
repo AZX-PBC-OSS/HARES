@@ -17,12 +17,12 @@ use arrow::array::{Array, Float64Builder, StringBuilder, TimestampMillisecondBui
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, FixedOffset, TimeZone};
-use hares_io::Frequency;
-use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
-use hares_io::output::reduce::{
+use hares_input::Frequency;
+use hares_input::{Selection, classify_sample_weight};
+use hares_output::callback::{BatchCallback, BatchContext, CallbackError};
+use hares_output::reduce::{
     PeriodCalendar, PeriodReducer, PeriodRow, ReduceError, TimeRule, mode_winner,
 };
-use hares_io::{Selection, classify_sample_weight};
 use hares_types::Aggregation;
 
 use crate::fleet::{FleetError, HomeStatus};
@@ -67,7 +67,7 @@ pub(crate) enum FoldRows {
 
 /// The fleet's report request: the variable selection, the reporting
 /// frequency the fold reduces onto, and the fleet's
-/// [`hares_io::HealthPolicy`], which is applied to every home's run.
+/// [`hares_input::HealthPolicy`], which is applied to every home's run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FleetReport {
     /// The variable selection every home's `fleet` report carries,
@@ -76,7 +76,7 @@ pub struct FleetReport {
     /// The frequency the fleet's products are bucketed at.
     pub frequency: Frequency,
     /// The fleet's health policy, applied to every home's run.
-    pub health_policy: hares_io::HealthPolicy,
+    pub health_policy: hares_input::HealthPolicy,
 }
 
 /// The fleet's coverage weights, by home status.
@@ -421,7 +421,7 @@ impl FleetFold {
         fields: &[Field],
         table: &BTreeMap<i64, Vec<Option<f64>>>,
     ) -> Result<(), FleetError> {
-        if classify_sample_weight(weight) == hares_io::SampleWeightClass::Invalid {
+        if classify_sample_weight(weight) == hares_input::SampleWeightClass::Invalid {
             return Err(FleetError::InvalidAggregationWeight {
                 index,
                 value: weight,
@@ -1095,15 +1095,15 @@ mod tests {
         unit: Unit,
         kind: hares_types::VariableKind,
         aggregation: Aggregation,
-    ) -> hares_io::VariableDef {
-        hares_io::VariableDef {
+    ) -> hares_output::VariableDef {
+        hares_output::VariableDef {
             name: std::borrow::Cow::Owned(name.to_string()),
             unit,
             kind,
             aggregation,
             sampling: hares_types::Sampling::InstantAtEnd,
             nullable: true,
-            source: hares_io::VariableSource::Dwelling,
+            source: hares_output::VariableSource::Dwelling,
             description: std::borrow::Cow::Owned("the test's variable".to_string()),
         }
     }
@@ -1111,8 +1111,8 @@ mod tests {
     /// A declared variable's field, the shape the schema builders write:
     /// the unit, kind, aggregation and across-homes tags in the field
     /// metadata, the declared rules the fold reads.
-    fn declared_field(def: &hares_io::VariableDef) -> Field {
-        hares_io::output::catalogue::variable_field(def)
+    fn declared_field(def: &hares_output::VariableDef) -> Field {
+        hares_output::catalogue::variable_field(def)
             .as_ref()
             .clone()
     }

@@ -10,14 +10,14 @@
 #![cfg(feature = "profiling")]
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 use chrono::Duration;
 use hares_control::DispatchRequest;
 use hares_core::{Actor, Dwelling, DwellingConfig};
-use hares_io::SimulationConfig;
+use hares_input::SimulationConfig;
 use hares_types::{EnvironmentState, TelemetryField};
 
 /// Loads the cz2a fixture at hourly resolution for 96 steps.
@@ -83,11 +83,11 @@ fn load_cz2a_fixture_with_parquet(path: &std::path::Path) -> Dwelling {
         SimulationConfig::from_toml(&sim_toml).expect("simulation config must parse");
     sim_config.time_res = Duration::hours(1);
     sim_config.duration = Duration::hours(96);
-    sim_config.reports = vec![hares_io::ReportSpec {
+    sim_config.reports = vec![hares_input::ReportSpec {
         name: "frame".to_string(),
-        selection: hares_io::Selection::Verbosity(2),
-        frequency: hares_io::Frequency::default(),
-        destination: hares_io::Destination::Parquet {
+        selection: hares_input::Selection::Verbosity(2),
+        frequency: hares_input::Frequency::default(),
+        destination: hares_input::Destination::Parquet {
             path: path.to_path_buf(),
             overwrite: false,
         },

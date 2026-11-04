@@ -59,7 +59,7 @@ chapter citations that are known to be wrong for the claimed topic.
    "Nonresidential Cooling and Heating Load Calculations"; residential
    below-grade content belongs in Ch. 17 (see
    `crates/hares-core/src/dwelling/conversions.rs:170,307`;
-   `crates/hares-io/src/hpxml/building.rs:755`).
+   `crates/hares-input/src/hpxml/building.rs:755`).
 
 3. **Coil bypass factor → ASHRAE 2017 Ch. 18 Eq. 63**: The specific equation
    number could not be verified against the 2017 edition. The citation has been

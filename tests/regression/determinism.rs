@@ -16,7 +16,7 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use chrono::Duration;
 use hares_core::{DwellingBlueprint, DwellingConfig, RunMetrics};
-use hares_io::Destination;
+use hares_input::Destination;
 
 use super::helpers;
 

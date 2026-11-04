@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use chrono::{Duration, TimeZone};
 
 use hares_core::{Dwelling, DwellingBlueprint, DwellingConfig, DwellingSettings};
-use hares_io::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -63,12 +63,12 @@ fn config(bldg_id: i64, master_seed: u64, scenario_seed: Option<u64>) -> Dwellin
                 setpoint_deadband_c: None,
                 master_seed,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
                 max_consecutive_step_failures: 1,
                 health_policy: Default::default(),
-                first_hour_interpolation: hares_io::FirstHour::Hour24,
-                weather_year: hares_io::WeatherYear::Actual,
-                warmup: hares_io::Warmup::default(),
+                first_hour_interpolation: hares_input::FirstHour::Hour24,
+                weather_year: hares_input::WeatherYear::Actual,
+                warmup: hares_input::Warmup::default(),
             },
             None,
             bldg_id,
@@ -214,7 +214,7 @@ fn build_with_seed_draws_the_new_seeds_schedule() {
 /// The resampled weather's columns as their raw bits: the witness
 /// compares these bitwise, so a substituted value at any step of any
 /// column fails.
-fn weather_bits(series: &hares_io::WeatherTimeSeries) -> Vec<(&'static str, Vec<u64>)> {
+fn weather_bits(series: &hares_input::WeatherTimeSeries) -> Vec<(&'static str, Vec<u64>)> {
     let bits = |column: &Vec<f64>| column.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
     vec![
         ("dry_bulb_c", bits(&series.dry_bulb_c)),
@@ -332,9 +332,9 @@ fn a_csv_homes_seed_swap_changes_nothing_in_the_schedule() {
 #[test]
 fn diversity_off_restores_the_shared_profile() {
     let mut off_a = config(1, 42, None);
-    off_a.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    off_a.settings.sim_config.schedule_diversity = hares_input::ScheduleDiversity::Off;
     let mut off_b = config(2, 42, None);
-    off_b.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    off_b.settings.sim_config.schedule_diversity = hares_input::ScheduleDiversity::Off;
     let a = Dwelling::from_config(off_a).expect("home a builds");
     let b = Dwelling::from_config(off_b).expect("home b builds");
     assert_eq!(
@@ -347,10 +347,10 @@ fn diversity_off_restores_the_shared_profile() {
     // the identity, so compare against the generation function's output
     // instead: the off run equals a direct generation from the shipped
     // defaults over the same span.
-    let profiles = hares_io::load_default_profiles(&repo_root().join("python/hares/defaults"))
+    let profiles = hares_input::load_default_profiles(&repo_root().join("python/hares/defaults"))
         .expect("the shipped profiles load");
     let start = config(1, 42, None).settings.sim_config.start_time;
-    let direct = hares_io::hpxml_schedule::generate_default_schedule(
+    let direct = hares_input::hpxml_schedule::generate_default_schedule(
         start,
         Duration::hours(24),
         Duration::seconds(3600),
@@ -387,7 +387,7 @@ fn a_schedule_csv_is_never_diversified() {
     on.schedule = Some(InputSource::Path(csv.clone()));
     let mut off = config(1, 42, None);
     off.schedule = Some(InputSource::Path(csv));
-    off.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    off.settings.sim_config.schedule_diversity = hares_input::ScheduleDiversity::Off;
     let on_dwelling = Dwelling::from_config(on).expect("the CSV home builds");
     let off_dwelling = Dwelling::from_config(off).expect("the CSV home builds with the layer off");
     assert_eq!(
@@ -428,7 +428,7 @@ fn a_checkpoint_restore_keeps_the_drawn_schedule() {
         "the restored home must hold the checkpointed home's drawn schedule"
     );
     let mut off_cfg = config(1, 42, None);
-    off_cfg.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    off_cfg.settings.sim_config.schedule_diversity = hares_input::ScheduleDiversity::Off;
     let off = Dwelling::from_config(off_cfg).expect("the undiversified home builds");
     assert_ne!(
         schedule_rows(&restored),
@@ -460,7 +460,7 @@ fn a_checkpoint_restore_keeps_the_drawn_schedule() {
 #[test]
 fn the_diversity_adds_no_runtime_stochastic_state() {
     let mut off_cfg = config(1, 42, None);
-    off_cfg.settings.sim_config.schedule_diversity = hares_io::ScheduleDiversity::Off;
+    off_cfg.settings.sim_config.schedule_diversity = hares_input::ScheduleDiversity::Off;
     let on = Dwelling::from_config(config(1, 42, None)).expect("the diversified dwelling builds");
     let off = Dwelling::from_config(off_cfg).expect("the undiversified dwelling builds");
     assert_eq!(
@@ -488,9 +488,9 @@ fn the_diversity_adds_no_runtime_stochastic_state() {
     // Warm-up replays the run's first day; it neither adds a stream nor
     // moves the layer's build-time draws.
     let mut cfg_warm = config(1, 42, None);
-    cfg_warm.settings.sim_config.warmup = hares_io::Warmup::default();
+    cfg_warm.settings.sim_config.warmup = hares_input::Warmup::default();
     let mut cfg_nowarm = config(1, 42, None);
-    cfg_nowarm.settings.sim_config.warmup = hares_io::Warmup::Disabled;
+    cfg_nowarm.settings.sim_config.warmup = hares_input::Warmup::Disabled;
     let warm = Dwelling::from_config(cfg_warm).expect("the warm-up dwelling builds");
     let nowarm = Dwelling::from_config(cfg_nowarm).expect("the no-warm-up dwelling builds");
     assert_eq!(

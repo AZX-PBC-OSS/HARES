@@ -1,11 +1,11 @@
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use hares_core::actor::testing::TestEnvBuilder;
 use hares_core::actors::{BatteryManagementActor, BmsParams};
 use hares_core::{Actor, Dwelling, DwellingConfig, StepResult};
-use hares_io::SimulationConfig;
+use hares_input::SimulationConfig;
 use hares_types::{
     BmsMode, ControlSignal, CoreOutput, CoreState, ElectricalSummary, EndUse, EquipmentId,
     GridExportRule, Soc, telemetry_keys::FUEL_INPUT_W,

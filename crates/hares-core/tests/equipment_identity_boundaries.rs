@@ -7,7 +7,7 @@
 //! counter's behaviour at the `u32::MAX` boundary.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
@@ -55,11 +55,11 @@ fn sim_config(
         time_res: Duration::seconds(900),
         reports: csv_path
             .into_iter()
-            .map(|path| hares_io::ReportSpec {
+            .map(|path| hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(verbosity),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Csv {
+                selection: hares_input::Selection::Verbosity(verbosity),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Csv {
                     path,
                     overwrite: false,
                 },
@@ -71,12 +71,12 @@ fn sim_config(
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
@@ -385,7 +385,7 @@ fn malformed_explicit_equipment_id_fails_the_build_loudly() {
             .expect("minimal all-optional DehumidifierConfig"),
     )
     .expect("typed config");
-    let mut spec = hares_io::EquipmentSpec {
+    let mut spec = hares_input::EquipmentSpec {
         name: "Dehumidifier".to_string(),
         instance_name: None,
         fuel_type: FuelType::Electric,
@@ -509,7 +509,7 @@ fn malformed_equipment_id_in_the_typed_payload_fails_the_build_loudly() {
             data: json!({ "equipment_id": -1 }),
         },
     );
-    let spec = hares_io::EquipmentSpec {
+    let spec = hares_input::EquipmentSpec {
         name: "Dehumidifier".to_string(),
         instance_name: None,
         fuel_type: FuelType::Electric,
@@ -585,7 +585,7 @@ fn non_identity_init_failure_is_fatal_after_the_identity_checks() {
             data: json!({ "equipment_id": 7, "capacity_liters_per_day": "not a number" }),
         },
     );
-    let spec = hares_io::EquipmentSpec {
+    let spec = hares_input::EquipmentSpec {
         name: "Dehumidifier".to_string(),
         instance_name: None,
         fuel_type: FuelType::Electric,

@@ -1,7 +1,7 @@
 //! Row 34: the config validation runs on the Rust construction path too.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -26,12 +26,12 @@ fn sim_config(duration_secs: i64, time_res_secs: i64) -> SimulationConfig {
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
@@ -114,7 +114,7 @@ fn validate_fires_for_rust_built_blueprint_per_check_class() {
 
     // A verbosity report above 8 must be rejected.
     let toml = "\nstart_time = \"2018-01-01T00:00:00Z\"\nduration = 3600\ntime_res = 60\n\n[[reports]]\nname = \"frame\"\nselection = { verbosity = 9 }\ndestination = \"memory\"\n";
-    let config = hares_io::SimulationConfig::from_toml(toml);
+    let config = hares_input::SimulationConfig::from_toml(toml);
     assert!(
         config.is_err(),
         "a verbosity report above 8 must be rejected"
@@ -151,9 +151,9 @@ fn validate_fires_for_rust_built_blueprint_per_check_class() {
 
     // The site-location check: one representative field, latitude.
     let mut config = sim_config(3600, 60);
-    config.site_location = hares_io::SiteLocationOverride {
+    config.site_location = hares_input::SiteLocationOverride {
         latitude_deg: Some(95.0),
-        ..hares_io::SiteLocationOverride::default()
+        ..hares_input::SiteLocationOverride::default()
     };
     assert_fails_like_from_toml(
         "out-of-range latitude",

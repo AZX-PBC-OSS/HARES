@@ -9,12 +9,12 @@
 //! `fixtures/diagnostics_cz4a.csv`).
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
+use hares_input::{Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -52,11 +52,11 @@ fn cz4a_sim_config() -> SimulationConfig {
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
@@ -119,7 +119,7 @@ fn diagnostics_absent_without_a_diagnostics_report() {
     sim.reports = vec![ReportSpec {
         name: "frame".to_string(),
         selection: Selection::Verbosity(8),
-        frequency: hares_io::Frequency::default(),
+        frequency: hares_input::Frequency::default(),
         destination: Destination::Memory,
     }];
     let mut dwelling = Dwelling::from_config(cz4a_config(sim)).expect("fixture dwelling builds");
@@ -146,7 +146,7 @@ fn diagnostics_in_memory_with_verbosity_0_report() {
     sim.reports = vec![ReportSpec {
         name: "frame".to_string(),
         selection: Selection::Verbosity(0),
-        frequency: hares_io::Frequency::default(),
+        frequency: hares_input::Frequency::default(),
         destination: Destination::Memory,
     }];
     let mut dwelling = Dwelling::from_config(cz4a_config(sim)).expect("fixture dwelling builds");
@@ -258,7 +258,7 @@ fn without_the_request_frames_equal_the_requested_frames_minus_diagnostics() {
         sim.reports = vec![ReportSpec {
             name: "frame".to_string(),
             selection: Selection::Verbosity(2),
-            frequency: hares_io::Frequency::default(),
+            frequency: hares_input::Frequency::default(),
             destination: Destination::Memory,
         }];
         let mut dwelling =

@@ -1,0 +1,29 @@
+[package]
+name = "hares-output"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+observe = []
+
+[dependencies]
+hares-input = { workspace = true }
+hares-physics = { workspace = true }
+hares-equipment = { workspace = true }
+hares-types = { workspace = true }
+uom = { workspace = true }
+chrono = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+strum = { workspace = true }
+tracing = { workspace = true }
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+serde_json = { workspace = true }

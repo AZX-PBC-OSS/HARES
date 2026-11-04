@@ -15,9 +15,10 @@ use arrow::datatypes::Schema;
 use chrono_tz::Tz;
 use hares_control::DispatchTarget;
 use hares_equipment::Equipment;
-use hares_io::{
-    Catalogue, CatalogueInput, MetricsCalculator, RowPlan, Selection, StreamingRecorder,
-    build_catalogue, build_schema as build_schema_from_catalogue, build_schema_for_columns,
+use hares_input::Selection;
+use hares_output::{
+    Catalogue, CatalogueInput, MetricsCalculator, RowPlan, StreamingRecorder, build_catalogue,
+    build_schema as build_schema_from_catalogue, build_schema_for_columns,
     build_schema_for_diagnostics, resolve_selection,
 };
 use hares_tariff::{ElectricTariff, TariffEvaluator};
@@ -301,7 +302,7 @@ impl Dwelling {
     /// The run's report requests: what each report records and where it
     /// goes.
     #[must_use]
-    pub fn reports(&self) -> &[hares_io::ReportSpec] {
+    pub fn reports(&self) -> &[hares_input::ReportSpec] {
         &self.reports
     }
 
@@ -1265,7 +1266,7 @@ impl Dwelling {
             .iter()
             .map(|eq| {
                 let desc = eq.descriptor();
-                hares_io::CatalogueEquipment {
+                hares_output::CatalogueEquipment {
                     name: desc.name.clone(),
                     instance_name: None,
                     id: desc.id,
@@ -1278,7 +1279,7 @@ impl Dwelling {
             .collect();
         let actor_input = actors
             .iter()
-            .map(|a| hares_io::CatalogueActor {
+            .map(|a| hares_output::CatalogueActor {
                 name: Arc::from(a.name()),
                 output_variables: a.output_variables().to_vec(),
             })
@@ -1649,7 +1650,7 @@ impl Dwelling {
             let time_res_secs = self.sim_config.time_res_secs_u32().map_err(|err| {
                 HaresError::InvalidState(format!("metrics calculator time resolution: {err}"))
             })?;
-            let plan = hares_io::MetricsInputPlan::build(
+            let plan = hares_output::MetricsInputPlan::build(
                 &available,
                 &self.sim_config,
                 catalogue.equipment_end_uses(),

@@ -137,7 +137,8 @@ crates/
 ├── hares-envelope    RC-network thermal envelope solver (state-space, electrical, fluid, humidity)
 ├── hares-control     Control dispatch, capability matching, OCHRE signal compatibility
 ├── hares-equipment   Equipment models: HVAC, battery, PV, EV, water heater, ventilation
-├── hares-io          I/O: HPXML parsing, EPW/TMY3 weather, schedules, Arrow/Parquet output
+├── hares-input       Input: HPXML parsing, EPW/TMY3/PSM3 weather, schedules, defaults, config
+├── hares-output      Output: streaming Arrow/Parquet/CSV writer, catalogue, metrics
 ├── hares-tariff      Electric and gas tariffs: URDB parsing, evaluation, billing
 ├── hares-core        Simulation engine: dwelling, clock, actor system, checkpoint, invariants
 ├── hares-fleet       Fleet-level parallel simulation with rayon and weighted aggregation

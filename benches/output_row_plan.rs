@@ -16,7 +16,8 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use hares_io::{RowPlan, SchemaSurface, Selection, build_schema_for_specs};
+use hares_input::Selection;
+use hares_output::{RowPlan, SchemaSurface, build_schema_for_specs};
 use hares_types::ZoneId;
 
 /// The column names the step path touches every step at verbosity 2: the
@@ -54,7 +55,7 @@ const STEP_LOOKUPS: &[&str] = &[
 ];
 
 fn bench_output_row_plan(c: &mut Criterion) {
-    let specs: Vec<hares_io::EquipmentSpec> = [
+    let specs: Vec<hares_input::EquipmentSpec> = [
         ("Heat Pump Heater", hares_types::FuelType::Electric),
         ("Electric Water Heater", hares_types::FuelType::Electric),
         ("Battery", hares_types::FuelType::Electric),
@@ -63,7 +64,7 @@ fn bench_output_row_plan(c: &mut Criterion) {
         ("Clothes Washer", hares_types::FuelType::Electric),
     ]
     .into_iter()
-    .map(|(name, fuel_type)| hares_io::EquipmentSpec {
+    .map(|(name, fuel_type)| hares_input::EquipmentSpec {
         instance_name: None,
         name: name.to_string(),
         fuel_type,

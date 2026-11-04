@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{
     DwellingBlueprint, DwellingConfig, DwellingSettings, ResolvedBoundary, ResolvedModel,
 };
-use hares_io::{
+use hares_input::{
     DefaultsSource, Destination, Frequency, InputSource, ReportSpec, Selection, SimulationConfig,
     SiteLocationOverride, WeatherInput,
 };
@@ -54,11 +54,11 @@ fn sim_config(duration_s: i64, step_s: i64) -> SimulationConfig {
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
@@ -105,9 +105,9 @@ fn scaled_boundaries(model: &ResolvedModel) -> Vec<&ResolvedBoundary> {
         .filter(|b| {
             !matches!(
                 b.kind,
-                hares_io::hpxml::BoundaryType::Slab
-                    | hares_io::hpxml::BoundaryType::Window
-                    | hares_io::hpxml::BoundaryType::Skylight
+                hares_input::hpxml::BoundaryType::Slab
+                    | hares_input::hpxml::BoundaryType::Window
+                    | hares_input::hpxml::BoundaryType::Skylight
             )
         })
         .collect()
@@ -239,9 +239,9 @@ fn resolved_r_is_continuous_in_the_scale() {
             let material = scaled.r_effective_m2k_w - scaled.films_m2k_w;
             let opaque = !matches!(
                 scaled.kind,
-                hares_io::hpxml::BoundaryType::Slab
-                    | hares_io::hpxml::BoundaryType::Window
-                    | hares_io::hpxml::BoundaryType::Skylight
+                hares_input::hpxml::BoundaryType::Slab
+                    | hares_input::hpxml::BoundaryType::Window
+                    | hares_input::hpxml::BoundaryType::Skylight
             );
             if opaque {
                 let relative = (material / unscaled_material - scale).abs() / scale;

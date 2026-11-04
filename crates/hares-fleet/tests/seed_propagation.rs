@@ -27,12 +27,14 @@ fn project_root() -> PathBuf {
 fn cz5a_config(master_seed: u64, bldg_id: i64) -> DwellingConfig {
     let fixture = project_root().join("tests/fixtures/parity/cz5a_ev_charging");
     DwellingConfig {
-        hpxml: hares_io::InputSource::Path(fixture.join("building.xml")),
-        schedule: Some(hares_io::InputSource::Path(fixture.join("schedule.csv"))),
-        weather: hares_io::WeatherInput::Path(fixture.join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        hpxml: hares_input::InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(hares_input::InputSource::Path(fixture.join("schedule.csv"))),
+        weather: hares_input::WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: hares_input::DefaultsSource::directory(
+            project_root().join("python/hares/defaults"),
+        ),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig {
+            hares_input::SimulationConfig {
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
                 start_time: DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
@@ -47,12 +49,12 @@ fn cz5a_config(master_seed: u64, bldg_id: i64) -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             bldg_id,

@@ -16,7 +16,7 @@ mod denver_offset;
 #[cfg(test)]
 mod tests {
     use hares_core::DwellingSettings;
-    use hares_io::{DefaultsSource, InputSource, WeatherInput};
+    use hares_input::{DefaultsSource, InputSource, WeatherInput};
     use std::path::{Path, PathBuf};
 
     use chrono::{Duration, TimeZone};
@@ -73,12 +73,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 42,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
                     first_hour_interpolation: Default::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 None,
                 1,
@@ -168,12 +169,12 @@ mod tests {
     fn conditioned_basement_is_held_at_the_setpoint() {
         // The merge, at the parse level: no Foundation zone, and the
         // basement's surfaces are the conditioned zone's.
-        let building = hares_io::parse_hpxml(&base_xml()).expect("base.xml parses");
+        let building = hares_input::parse_hpxml(&base_xml()).expect("base.xml parses");
         assert!(
             !building
                 .zones
                 .iter()
-                .any(|z| z.zone_type == hares_io::hpxml::ZoneType::Foundation),
+                .any(|z| z.zone_type == hares_input::hpxml::ZoneType::Foundation),
             "base.xml's conditioned basement must not build a separate (unheated) \
              Foundation zone: OS-HPXML merges it into the conditioned space"
         );
@@ -183,7 +184,7 @@ mod tests {
             if names_basement {
                 assert_eq!(
                     b.interior_zone,
-                    Some(hares_io::hpxml::ZoneType::Conditioned),
+                    Some(hares_input::hpxml::ZoneType::Conditioned),
                     "boundary {} (interior adjacent to the conditioned basement) must be a \
                      conditioned-zone surface",
                     b.id

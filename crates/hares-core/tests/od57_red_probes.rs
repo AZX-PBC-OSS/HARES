@@ -16,7 +16,7 @@ use hares_equipment::{
     ElectricResistanceWaterHeaterConfig, Equipment, EquipmentConfig, GasWaterHeaterConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_io::hpxml::parse_hpxml_str;
+use hares_input::hpxml::parse_hpxml_str;
 use hares_types::{
     BoundaryPolicy, DomainUpdate, EnvironmentState, FuelType, GridState, LoopId,
     ScheduleSourceConfig, WeatherState, ZoneId, ZoneState,
@@ -401,7 +401,7 @@ fn red_probe_window_dangling_attached_wall() {
 /// unreachable.
 #[test]
 fn red_probe_bedroom_count_without_numberofbedrooms() {
-    use hares_io::defaults::DefaultsStore;
+    use hares_input::defaults::DefaultsStore;
 
     let base =
         std::fs::read_to_string(project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
@@ -414,7 +414,7 @@ fn red_probe_bedroom_count_without_numberofbedrooms() {
     let building = parse_hpxml_str(&absent).expect("the parse itself succeeds");
 
     // The water-heater autosize feed errors naming the field.
-    let err = hares_io::hpxml::extract_bedroom_count(&building, None)
+    let err = hares_input::hpxml::extract_bedroom_count(&building, None)
         .expect_err("an absent NumberofBedrooms must fail the extract");
     assert!(
         err.to_string().contains("NumberofBedrooms"),
@@ -423,7 +423,7 @@ fn red_probe_bedroom_count_without_numberofbedrooms() {
 
     // The appliance resolve errors the same way.
     let mut warnings = Vec::new();
-    let err = hares_io::hpxml::resolve_equipment(
+    let err = hares_input::hpxml::resolve_equipment(
         &building,
         building.climate_zone_iecc.as_deref(),
         None,
@@ -448,7 +448,7 @@ fn red_probe_bedroom_count_without_numberofbedrooms() {
 /// resolve "succeeded" with the substituted sizing.
 #[test]
 fn red_probe_blueprint_only_bedroom_count_without_numberofbedrooms() {
-    use hares_io::defaults::DefaultsStore;
+    use hares_input::defaults::DefaultsStore;
 
     let base =
         std::fs::read_to_string(project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"))
@@ -473,7 +473,7 @@ fn red_probe_blueprint_only_bedroom_count_without_numberofbedrooms() {
     let building = parse_hpxml_str(&blueprint_only).expect("the parse itself succeeds");
 
     let mut warnings = Vec::new();
-    let err = hares_io::hpxml::resolve_equipment(
+    let err = hares_input::hpxml::resolve_equipment(
         &building,
         building.climate_zone_iecc.as_deref(),
         None,

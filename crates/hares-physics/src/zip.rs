@@ -372,8 +372,8 @@ impl ZipLoad {
 
 /// Every class name recognized by [`zip_defaults_for_class`], including the
 /// HARES extensions. Kept in sync with the `match` arms below; the
-/// completeness test in this module and the toml drift test in hares-io both
-/// iterate this list.
+/// completeness test in this module and the toml drift test in hares-input
+/// both iterate this list.
 pub const ZIP_CLASS_NAMES: &[&str] = &[
     "Lighting",
     "Indoor Lighting",
@@ -475,7 +475,8 @@ pub fn deep_sag_row_evaluates_as_fitted(class_name: &str) -> bool {
 ///
 /// Rows marked "HARES extension" are not in the OCHRE table; each carries a
 /// one-line justification. Extensions must be mirrored in
-/// `defaults/zip_parameters.toml` (a drift test in hares-io enforces this).
+/// `defaults/zip_parameters.toml` (a drift test in hares-input enforces
+/// this).
 ///
 /// Coefficients sourced from:
 /// - Bokhari et al., IEEE Trans. Power Delivery 29(3), 2014
@@ -485,7 +486,7 @@ pub fn deep_sag_row_evaluates_as_fitted(class_name: &str) -> bool {
 ///
 /// Maintenance invariant: every match arm below MUST also be listed in
 /// [`ZIP_CLASS_NAMES`] — the completeness test in this module and the
-/// toml drift test in hares-io iterate that list, so an arm missing from
+/// toml drift test in hares-input iterate that list, so an arm missing from
 /// it is invisible to both tests (and vice versa: names in the list
 /// without an arm fail the completeness test).
 pub fn zip_defaults_for_class(class_name: &str) -> Option<ZipLoad> {

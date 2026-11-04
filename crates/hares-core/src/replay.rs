@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hares_io::{
+use hares_input::{
     DefaultsSource, InputRecord, InputSource, SimulationConfig, WeatherFormat, WeatherInput,
 };
 use hares_types::HaresError;
@@ -115,7 +115,7 @@ struct StoredInputs {
 struct ReplayManifest {
     schema_version: u32,
     bldg_id: i64,
-    patches: Option<hares_io::HpxmlDataPatches>,
+    patches: Option<hares_input::HpxmlDataPatches>,
     simulation: SimulationConfig,
     inputs: StoredInputs,
     tariff_zone: Option<String>,
@@ -188,30 +188,30 @@ fn weather_file_name(format: WeatherFormat) -> String {
 /// content source's bytes are the record's own.
 fn export_bytes(record: &InputRecord, what: &str) -> Result<Vec<u8>, HaresError> {
     let bytes = match &record.source {
-        hares_io::InputRecordSource::Path(path) => std::fs::read(path).map_err(|err| {
+        hares_input::InputRecordSource::Path(path) => std::fs::read(path).map_err(|err| {
             HaresError::Io(format!(
                 "the {what} input '{}' could not be read for the replay export: {err}",
                 path.display()
             ))
         })?,
-        hares_io::InputRecordSource::Text(text) => text.as_bytes().to_vec(),
-        hares_io::InputRecordSource::Bytes(content) => content.to_vec(),
+        hares_input::InputRecordSource::Text(text) => text.as_bytes().to_vec(),
+        hares_input::InputRecordSource::Bytes(content) => content.to_vec(),
     };
     let digest: [u8; 32] = sha2::Sha256::digest(&bytes).into();
     if digest != record.sha256 {
         let named = match &record.source {
-            hares_io::InputRecordSource::Path(path) => {
+            hares_input::InputRecordSource::Path(path) => {
                 format!("the {what} input at '{}'", path.display())
             }
-            hares_io::InputRecordSource::Text(_) | hares_io::InputRecordSource::Bytes(_) => {
+            hares_input::InputRecordSource::Text(_) | hares_input::InputRecordSource::Bytes(_) => {
                 format!("the {what} input's content")
             }
         };
         return Err(HaresError::Io(format!(
             "{named} changed since the run parsed it: the parse recorded digest {}, \
              the input's content now digests {}",
-            hares_io::input::hex(&record.sha256),
-            hares_io::input::hex(&digest),
+            hares_input::input::hex(&record.sha256),
+            hares_input::input::hex(&digest),
         )));
     }
     Ok(bytes)
@@ -243,7 +243,7 @@ fn store_input(
     write_file(&path, &bytes)?;
     Ok(StoredInput {
         file: relative.to_string(),
-        sha256: hares_io::input::hex(&record.sha256),
+        sha256: hares_input::input::hex(&record.sha256),
     })
 }
 
@@ -311,22 +311,22 @@ pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
     let mut config = settings.sim_config.clone();
     for report in &mut config.reports {
         match &report.destination {
-            hares_io::Destination::Callback => {
-                report.destination = hares_io::Destination::Memory;
+            hares_input::Destination::Callback => {
+                report.destination = hares_input::Destination::Memory;
             }
-            hares_io::Destination::Parquet { overwrite, .. } => {
-                report.destination = hares_io::Destination::Parquet {
+            hares_input::Destination::Parquet { overwrite, .. } => {
+                report.destination = hares_input::Destination::Parquet {
                     path: PathBuf::from(format!("{}.parquet", report.name)),
                     overwrite: *overwrite,
                 };
             }
-            hares_io::Destination::Csv { overwrite, .. } => {
-                report.destination = hares_io::Destination::Csv {
+            hares_input::Destination::Csv { overwrite, .. } => {
+                report.destination = hares_input::Destination::Csv {
                     path: PathBuf::from(format!("{}.csv", report.name)),
                     overwrite: *overwrite,
                 };
             }
-            hares_io::Destination::Memory => {}
+            hares_input::Destination::Memory => {}
         }
     }
 
@@ -340,7 +340,7 @@ pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
             schedule: schedule_stored,
             weather: weather_stored,
             weather_format: inputs.weather_format,
-            defaults_files_sha256: hares_io::input::hex(&inputs.defaults_files_sha256),
+            defaults_files_sha256: hares_input::input::hex(&inputs.defaults_files_sha256),
             defaults_replacements: replacements,
         },
         tariff_zone: result.provenance.tariff.as_ref().map(|r| r.zone.clone()),
@@ -396,7 +396,7 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
                  records digest {}, the file on disk digests {}",
                 path.display(),
                 stored.sha256,
-                hares_io::input::hex(&digest),
+                hares_input::input::hex(&digest),
             )));
         }
         String::from_utf8(bytes)
@@ -426,7 +426,7 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
                  manifest records digest {}, the file on disk digests {}",
                 path.display(),
                 replacement.sha256,
-                hares_io::input::hex(&digest),
+                hares_input::input::hex(&digest),
             )));
         }
         let text = String::from_utf8(bytes).map_err(|err| {
@@ -441,7 +441,7 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
         base: defaults_base.to_path_buf(),
         files,
     };
-    let parsed_defaults = hares_io::ParsedDefaults::parse(&defaults)?;
+    let parsed_defaults = hares_input::ParsedDefaults::parse(&defaults)?;
     let actual = parsed_defaults.composed_digest()?;
     let recorded = decode_hex_digest(&manifest.inputs.defaults_files_sha256)?;
     if actual != recorded {
@@ -450,7 +450,7 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
              digest {}, the tree's load digests {}",
             defaults_base.display(),
             manifest.inputs.defaults_files_sha256,
-            hares_io::input::hex(&actual),
+            hares_input::input::hex(&actual),
         )));
     }
 
@@ -488,13 +488,13 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
         {
             let relative = path.to_path_buf();
             report.destination = match &report.destination {
-                hares_io::Destination::Parquet { overwrite, .. } => {
-                    hares_io::Destination::Parquet {
+                hares_input::Destination::Parquet { overwrite, .. } => {
+                    hares_input::Destination::Parquet {
                         path: dir.join(relative),
                         overwrite: *overwrite,
                     }
                 }
-                hares_io::Destination::Csv { overwrite, .. } => hares_io::Destination::Csv {
+                hares_input::Destination::Csv { overwrite, .. } => hares_input::Destination::Csv {
                     path: dir.join(relative),
                     overwrite: *overwrite,
                 },

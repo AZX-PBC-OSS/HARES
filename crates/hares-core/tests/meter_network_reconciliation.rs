@@ -76,7 +76,7 @@ use std::sync::Arc;
 use arrow::array::{Array, Float64Array};
 use arrow::record_batch::RecordBatch;
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
 
 /// The hybrid tolerance: an absolute floor plus a share of the magnitude
 /// scale. Adding n floating-point terms carries at most n ulps of the

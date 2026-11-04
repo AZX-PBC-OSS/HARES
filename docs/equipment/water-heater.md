@@ -112,7 +112,7 @@ fan-motor class row) but adds no heat to the tank or zone.
 element for water-heater fan power, so HARES reads
 `WaterHeatingSystem/extension/FanPowerWatts` — the same extension convention
 used for HVAC systems (and by OCHRE's HPXML parser). The optional `units`
-attribute is checked at the hares-io boundary (`W` default per the element
+attribute is checked at the hares-input boundary (`W` default per the element
 name; `kW` converted; anything else rejected with a warning). Absent → 0 W,
 leaving existing simulations unchanged.
 

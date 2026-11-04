@@ -4,10 +4,11 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Duration, FixedOffset};
-use hares_io::{
-    Catalogue, EquipmentSpec, InputRecords, InputSource, ParsedInputs, SiteLocation, WeatherInput,
+use hares_input::{
+    EquipmentSpec, InputRecords, InputSource, ParsedInputs, SiteLocation, WeatherInput,
     epw::DesignConditions, hpxml::resolve_equipment, site_location::resolve_site_location,
 };
+use hares_output::Catalogue;
 use hares_types::{EndUse, HaresError, Warning};
 
 use super::solver_builder::{WeatherAverages, compute_weather_averages};
@@ -25,9 +26,9 @@ use crate::resolved::ResolvedModel;
 pub struct DwellingBlueprint {
     pub(super) inputs: ParsedInputs,
     pub(super) settings: DwellingSettings,
-    pub(super) building: Arc<hares_io::Building>,
-    pub(super) resampled_weather: Arc<hares_io::WeatherTimeSeries>,
-    pub(super) resampled_schedule: Arc<hares_io::ScheduleTimeSeries>,
+    pub(super) building: Arc<hares_input::Building>,
+    pub(super) resampled_weather: Arc<hares_input::WeatherTimeSeries>,
+    pub(super) resampled_schedule: Arc<hares_input::ScheduleTimeSeries>,
     pub(super) weather_avgs: WeatherAverages,
     pub(super) design_conditions: Option<DesignConditions>,
     pub(super) site_location: SiteLocation,
@@ -111,13 +112,13 @@ impl DwellingBlueprint {
     /// The weather series resampled to the blueprint's step, shared with
     /// every blueprint at the same resolution over the same weather file.
     #[must_use]
-    pub fn resampled_weather(&self) -> Arc<hares_io::WeatherTimeSeries> {
+    pub fn resampled_weather(&self) -> Arc<hares_input::WeatherTimeSeries> {
         Arc::clone(&self.resampled_weather)
     }
 
     /// The schedule resampled to the blueprint's step.
     #[must_use]
-    pub fn resampled_schedule(&self) -> Arc<hares_io::ScheduleTimeSeries> {
+    pub fn resampled_schedule(&self) -> Arc<hares_input::ScheduleTimeSeries> {
         Arc::clone(&self.resampled_schedule)
     }
 
@@ -261,7 +262,7 @@ impl DwellingBlueprint {
 pub struct DwellingBlueprintBuilder {
     pub(super) inputs: ParsedInputs,
     pub(super) settings: DwellingSettings,
-    pub(super) building: Arc<hares_io::Building>,
+    pub(super) building: Arc<hares_input::Building>,
     pub(super) site_location: SiteLocation,
     pub(super) equipment_specs: Vec<EquipmentSpec>,
     pub(super) equipment_warnings: Vec<Warning>,
@@ -286,7 +287,7 @@ fn diversify_generated_schedule(
     inputs: ParsedInputs,
     settings: &DwellingSettings,
 ) -> Result<ParsedInputs, HaresError> {
-    let generation = hares_io::ScheduleGeneration {
+    let generation = hares_input::ScheduleGeneration {
         start: settings.sim_config.start_time,
         duration: settings.sim_config.duration,
         interval: super::conversions::chrono_to_std_duration(settings.sim_config.time_res)?,
@@ -433,7 +434,7 @@ impl DwellingBlueprintBuilder {
             defaults,
             settings,
         } = config;
-        let generation = hares_io::ScheduleGeneration {
+        let generation = hares_input::ScheduleGeneration {
             start: settings.sim_config.start_time,
             duration: settings.sim_config.duration,
             interval: super::conversions::chrono_to_std_duration(settings.sim_config.time_res)?,
@@ -562,7 +563,7 @@ impl DwellingBlueprintBuilder {
         // The schedule file's four unavailable-period flag columns must
         // match the HPXML periods on the file's own resolution, before
         // any resample: HARES reads the columns and ignores nothing.
-        hares_io::check_schedule_flag_columns(
+        hares_input::check_schedule_flag_columns(
             &inputs.schedule.schedule(),
             &building.unavailable_periods,
         )?;
@@ -672,11 +673,11 @@ pub fn site_offset(config: &DwellingConfig) -> Result<FixedOffset, HaresError> {
 pub fn site_offset_from_inputs(
     hpxml: &InputSource,
     weather: &WeatherInput,
-    override_location: &hares_io::SiteLocationOverride,
+    override_location: &hares_input::SiteLocationOverride,
 ) -> Result<FixedOffset, HaresError> {
-    let site = hares_io::read_site_input(hpxml)
+    let site = hares_input::read_site_input(hpxml)
         .map_err(|err| HaresError::Io(format!("HPXML site read failed: {err}")))?;
-    let weather_meta = hares_io::read_weather_meta_input(weather)
+    let weather_meta = hares_input::read_weather_meta_input(weather)
         .map_err(|err| HaresError::Io(format!("weather header read failed: {err}")))?;
     let location = resolve_site_location(&site, &weather_meta, override_location);
     checked_offset(location.utc_offset_h)

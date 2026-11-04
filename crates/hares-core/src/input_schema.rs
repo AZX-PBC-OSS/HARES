@@ -3,7 +3,7 @@
 //! the config keys, the dwelling keys, the override targets, the schedule
 //! columns, the defaults files and the HPXML elements.
 
-use hares_io::input_schema::{self, InputSchema, OverrideClassSchema};
+use hares_input::input_schema::{self, InputSchema, OverrideClassSchema};
 use hares_types::DescribeFields;
 
 use crate::dwelling::{DwellingConfig, DwellingSettings};
@@ -22,7 +22,7 @@ use crate::dwelling::{DwellingConfig, DwellingSettings};
 #[must_use]
 pub fn input_schema() -> InputSchema {
     let defaults_files =
-        hares_io::input_schema::defaults_file_schemas(&crate::dwelling::shipped_defaults_dir())
+        hares_input::input_schema::defaults_file_schemas(&crate::dwelling::shipped_defaults_dir())
             .expect("the shipped defaults tree reads");
     assemble(defaults_files)
 }
@@ -50,15 +50,15 @@ fn assemble(defaults_files: Vec<String>) -> InputSchema {
     // fold addition). The assembly's override-key validation exempts the key and
     // the scales' own deserialisation and bounds validation enforce it.
     override_classes.push(OverrideClassSchema {
-        name: hares_io::ENVELOPE_OVERRIDE_KEY.to_string(),
+        name: hares_input::ENVELOPE_OVERRIDE_KEY.to_string(),
         description: "the reserved 'envelope' override: the calibration scales the resolved \
              envelope layers multiply by, applied after the LUT row selection"
             .to_string(),
-        fields: <hares_io::EnvelopeScales as DescribeFields>::fields(),
+        fields: <hares_input::EnvelopeScales as DescribeFields>::fields(),
     });
 
     InputSchema {
-        config_fields: <hares_io::SimulationConfig as DescribeFields>::fields(),
+        config_fields: <hares_input::SimulationConfig as DescribeFields>::fields(),
         dwelling_fields: <DwellingConfig as DescribeFields>::fields(),
         settings_fields: <DwellingSettings as DescribeFields>::fields(),
         override_classes,
@@ -76,7 +76,7 @@ fn assemble(defaults_files: Vec<String>) -> InputSchema {
 /// class's sample keeps its config in the parameter bag (the raw
 /// channel's own shape); `None` for a name no registry builds.
 #[must_use]
-pub fn sample_spec(class: &str) -> Option<hares_io::EquipmentSpec> {
+pub fn sample_spec(class: &str) -> Option<hares_input::EquipmentSpec> {
     let config = hares_equipment::sample_config::sample_config_for_class(class)?;
     let mut parameters = serde_json::Map::new();
     let mut typed_config = None;
@@ -88,7 +88,7 @@ pub fn sample_spec(class: &str) -> Option<hares_io::EquipmentSpec> {
             }
         }
     }
-    Some(hares_io::EquipmentSpec {
+    Some(hares_input::EquipmentSpec {
         name: class.to_string(),
         instance_name: None,
         fuel_type: hares_types::FuelType::Electric,
@@ -107,7 +107,7 @@ pub fn sample_spec(class: &str) -> Option<hares_io::EquipmentSpec> {
 #[cfg(test)]
 mod tests {
     use super::{input_schema, sample_spec};
-    use hares_io::input_schema::InputSchema;
+    use hares_input::input_schema::InputSchema;
 
     fn schema() -> InputSchema {
         input_schema()
@@ -117,7 +117,7 @@ mod tests {
     /// the schema's field names as keys; any other key is rejected.
     #[test]
     fn input_schema_config_fields_equal_accepted_keys() {
-        let config = hares_io::SimulationConfig {
+        let config = hares_input::SimulationConfig {
             max_memory_rows: Some(2_880_000),
             scenario_seed: Some(9),
             schedule_diversity: Default::default(),
@@ -125,11 +125,11 @@ mod tests {
                 .expect("valid start time"),
             duration: chrono::Duration::hours(48),
             time_res: chrono::Duration::seconds(900),
-            reports: vec![hares_io::ReportSpec {
+            reports: vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(2),
-                frequency: hares_io::Frequency::Timestep,
-                destination: hares_io::Destination::Memory,
+                selection: hares_input::Selection::Verbosity(2),
+                frequency: hares_input::Frequency::Timestep,
+                destination: hares_input::Destination::Memory,
             }],
             diagnostics: false,
             metrics: false,
@@ -137,17 +137,17 @@ mod tests {
             setpoint_deadband_c: Some(1.0),
             master_seed: 7,
             civil_timezone: Some("America/Denver".to_string()),
-            site_location: hares_io::SiteLocationOverride {
+            site_location: hares_input::SiteLocationOverride {
                 latitude_deg: Some(39.7),
                 longitude_deg: Some(-104.9),
                 elevation_m: Some(1609.0),
                 utc_offset_h: Some(-7.0),
             },
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-            first_hour_interpolation: hares_io::FirstHour::default(),
-            weather_year: hares_io::WeatherYear::default(),
-            warmup: hares_io::Warmup::default(),
+            max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_input::HealthPolicy::default(),
+            first_hour_interpolation: hares_input::FirstHour::default(),
+            weather_year: hares_input::WeatherYear::default(),
+            warmup: hares_input::Warmup::default(),
         };
         let toml = toml::to_string(&config).expect("the config serialises to TOML");
         let table: toml::Table = toml.parse().expect("the TOML parses");
@@ -174,7 +174,7 @@ mod tests {
         let stray = "not_a_config_key = 1\nduration = 3600\ntime_res = 900\
                      \nstart_time = \"2023-01-01T00:00:00-07:00\"";
         assert!(
-            toml::from_str::<hares_io::SimulationConfig>(stray).is_err(),
+            toml::from_str::<hares_input::SimulationConfig>(stray).is_err(),
             "a key the schema does not list is rejected"
         );
     }
@@ -193,7 +193,7 @@ mod tests {
                 "class '{}' lists its fields",
                 class.name
             );
-            if class.name == hares_io::ENVELOPE_OVERRIDE_KEY {
+            if class.name == hares_input::ENVELOPE_OVERRIDE_KEY {
                 // The reserved `envelope` override has no equipment sample and no
                 // merged equipment config: its enforcement is the scales' own
                 // deserialisation and bounds validation, pinned in
@@ -300,7 +300,7 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        expected.push(hares_io::ENVELOPE_OVERRIDE_KEY.to_string());
+        expected.push(hares_input::ENVELOPE_OVERRIDE_KEY.to_string());
         expected.sort_unstable();
         let mut actual: Vec<String> = schema()
             .override_classes
@@ -321,7 +321,7 @@ mod tests {
         let class = schema
             .override_classes
             .iter()
-            .find(|class| class.name == hares_io::ENVELOPE_OVERRIDE_KEY)
+            .find(|class| class.name == hares_input::ENVELOPE_OVERRIDE_KEY)
             .expect("the reserved 'envelope' override is published");
         let mut names: Vec<&str> = class.fields.iter().map(|f| f.name.as_str()).collect();
         names.sort_unstable();
@@ -340,8 +340,8 @@ mod tests {
             assert_eq!(bounds.max, Some(10.0));
             assert!(!bounds.max_exclusive, "ten is included");
         }
-        let err = hares_io::EnvelopeScales::validate(
-            &serde_json::from_value::<hares_io::EnvelopeScales>(serde_json::json!({
+        let err = hares_input::EnvelopeScales::validate(
+            &serde_json::from_value::<hares_input::EnvelopeScales>(serde_json::json!({
                 "opaque_r_scale": 0.0,
             }))
             .expect("the field is a known one"),
@@ -435,7 +435,7 @@ mod tests {
     }
 
     /// The schedule columns' schemas are the column table's reads and the
-    /// NotUsed entries (the hares-io half's own pins carry the table
+    /// NotUsed entries (the hares-input half's own pins carry the table
     /// equality; this one pins the assembly carries them).
     #[test]
     fn input_schema_carries_the_schedule_columns() {

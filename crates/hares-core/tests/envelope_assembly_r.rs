@@ -19,7 +19,7 @@ use hares_core::{
     DwellingBlueprint, DwellingConfig, DwellingSettings, RValueSource, ResolvedBoundary,
     ResolvedModel,
 };
-use hares_io::{
+use hares_input::{
     DefaultsSource, Destination, Frequency, InputSource, ReportSpec, Selection, SimulationConfig,
     SiteLocationOverride, WeatherInput,
 };
@@ -59,11 +59,11 @@ fn sim_config(duration_s: i64, step_s: i64) -> SimulationConfig {
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
@@ -127,12 +127,12 @@ struct Wall1Row {
 }
 
 fn wall1_row(r_ip: f64) -> Wall1Row {
-    let store = hares_io::DefaultsStore::load(&project_root().join("python/hares/defaults"))
+    let store = hares_input::DefaultsStore::load(&project_root().join("python/hares/defaults"))
         .expect("the defaults tree loads");
     let lut = store
         .envelope_lut()
         .expect("the defaults tree carries the envelope LUT");
-    use hares_io::hpxml::{BoundaryType, ZoneType};
+    use hares_input::hpxml::{BoundaryType, ZoneType};
     let name = lut
         .resolve_name(
             &BoundaryType::Wall,

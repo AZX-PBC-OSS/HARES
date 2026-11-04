@@ -10,7 +10,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
-use hares_io::{
+use hares_input::{
     DefaultsSource, InputSource, ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather,
     WeatherFormat, WeatherInput,
 };

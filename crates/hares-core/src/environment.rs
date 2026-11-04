@@ -6,13 +6,13 @@ use std::time::Duration as StdDuration;
 #[cfg(test)]
 use chrono::Duration;
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Timelike};
-use hares_io::forcing::{ForcingKey, ForcingRow, ForcingTable};
-use hares_io::hpxml::building::{BoundaryType, ZoneType};
-use hares_io::{
+use hares_input::forcing::{ForcingKey, ForcingRow, ForcingTable};
+use hares_input::hpxml::building::{BoundaryType, ZoneType};
+use hares_input::{
     Building, ParsedWeather, ScheduleTimeSeries, SiteLocation, WeatherAddressing, WeatherInput,
     WeatherMeta, WeatherTimeSeries, monthly_day_counts,
 };
-use hares_io::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
+use hares_input::{schedule::ScheduleError, weather::WeatherError, weather::WeatherField};
 use hares_physics::{
     constants::{COOLING_DISABLED_SETPOINT_C, HEATING_DISABLED_SETPOINT_C},
     psychrometrics::{humidity_ratio_from_tdp, moist_air_enthalpy, wet_bulb_from_humidity_ratio},
@@ -43,13 +43,13 @@ const DEFAULT_GRID_FREQUENCY_HZ: f64 = 60.0;
 /// How many times this process computed the surface-independent forcing
 /// (the humidity ratio, wet bulb, enthalpy, day of year, solar position and
 /// mains temperature that depend only on the weather and the time grid):
-/// [`hares_io::forcing::FORCING_COMPUTATIONS`], re-exported where the
+/// [`hares_input::forcing::FORCING_COMPUTATIONS`], re-exported where the
 /// forcing tests read it. One increment per forcing table built (a
 /// parsed-weather handle resolves one table per grid key), or per step on
 /// the per-step path [`FORCE_PER_STEP_FORCING`] selects. Dwellings over
 /// one handle and time grid move it by one construction in total, not one
 /// step each.
-pub use hares_io::forcing::FORCING_COMPUTATIONS;
+pub use hares_input::forcing::FORCING_COMPUTATIONS;
 
 /// The surface-independent forcing's accumulated computation time,
 /// compiled in only with the `profiling` feature (an `Instant::now()` pair
@@ -204,12 +204,12 @@ impl StepWeatherEvaluator {
     pub(crate) fn new(
         weather: Arc<WeatherTimeSeries>,
         file: Arc<WeatherTimeSeries>,
-        weather_year: hares_io::WeatherYear,
+        weather_year: hares_input::WeatherYear,
         resolved_site: Option<&SiteLocation>,
         step_secs: u32,
         start_time: DateTime<FixedOffset>,
         civil_timezone: Option<&str>,
-        first_hour: hares_io::FirstHour,
+        first_hour: hares_input::FirstHour,
         horizon_steps: Option<u64>,
         weather_handle: Option<&ParsedWeather>,
     ) -> Result<Self, StepWeatherError> {
@@ -250,7 +250,7 @@ impl StepWeatherEvaluator {
         // checks run before any record lookup, so their error names the
         // ranges, not the first step's slot.
         let skip_feb29 = weather_year.skips_feb29(&file);
-        if weather_year == hares_io::WeatherYear::Actual {
+        if weather_year == hares_input::WeatherYear::Actual {
             let horizon = horizon_steps.unwrap_or(u64::try_from(weather.len()).unwrap_or(u64::MAX));
             let end = start_time.naive_local()
                 + chrono::Duration::seconds(
@@ -1024,7 +1024,7 @@ pub enum EnvironmentManagerError {
         surface_type: String,
     },
     #[error(transparent)]
-    MultipleConditionedZones(#[from] hares_io::hpxml::MultipleConditionedZones),
+    MultipleConditionedZones(#[from] hares_input::hpxml::MultipleConditionedZones),
     #[error("the building has no zones to simulate")]
     NoZones,
     #[error(
@@ -1071,12 +1071,12 @@ pub struct EnvironmentInitOptions<'a> {
     /// first hour's steps interpolate from, when the weather file is
     /// hourly and the step is shorter than an hour. The default is
     /// EnergyPlus's own: hour 24 of the run's first day.
-    pub first_hour_interpolation: hares_io::FirstHour,
+    pub first_hour_interpolation: hares_input::FirstHour,
     /// The weather-year rule: whether the file is a typical (TMY-style)
     /// year or an actual one. The default is `Typical` (EnergyPlus's
     /// "Treat Weather as Actual" = No). It changes which records a step
     /// reads, so it joins the forcing key and the Feb 29 skip rule.
-    pub weather_year: hares_io::WeatherYear,
+    pub weather_year: hares_input::WeatherYear,
 }
 
 /// Produces a complete [`EnvironmentState`] at each timestep.
@@ -1094,7 +1094,7 @@ pub struct EnvironmentManager {
     /// which materialises the expansion); the source-to-sim step ratio for
     /// an upsampled series holding its source rows.
     schedule_upsample_factor: u32,
-    zone_types: Vec<hares_io::hpxml::ZoneType>,
+    zone_types: Vec<hares_input::hpxml::ZoneType>,
     /// The building's one conditioned zone, if it has one.
     conditioned_zone: Option<ZoneId>,
     /// Scheduled-space placements some equipment occupies: their air is
@@ -1712,7 +1712,7 @@ impl EnvironmentManager {
 
     /// Zone types aligned with [`EnvironmentState::zones`].
     #[must_use]
-    pub fn zone_types(&self) -> &[hares_io::hpxml::ZoneType] {
+    pub fn zone_types(&self) -> &[hares_input::hpxml::ZoneType] {
         &self.zone_types
     }
 
@@ -1721,12 +1721,12 @@ impl EnvironmentManager {
     /// The returned index can be used to look up the occupancy value from the
     /// schedule payload in [`EnvironmentState::domains`]'s schedule slot.
     /// Resolution lives in
-    /// `hares_io::resolve_occupancy_column`, shared with the
+    /// `hares_input::resolve_occupancy_column`, shared with the
     /// unknown-schedule-column check, so the check treats the column the
     /// environment reads as read.
     #[must_use]
     pub fn occupancy_column_idx(&self) -> Option<usize> {
-        hares_io::resolve_occupancy_column(&self.schedule.column_index).map(|(_, idx)| idx)
+        hares_input::resolve_occupancy_column(&self.schedule.column_index).map(|(_, idx)| idx)
     }
 
     /// Whether this building can supply `location`'s air: every placement
@@ -2412,13 +2412,13 @@ fn simple_range(values: &[f64]) -> f64 {
 /// end-use rows and the zeroed table rows).
 fn unavailable_period_flags(
     building: &Building,
-    schedule: &hares_io::ScheduleTimeSeries,
+    schedule: &hares_input::ScheduleTimeSeries,
 ) -> Vec<UnavailablePeriodState> {
     let periods = &building.unavailable_periods;
     if periods.is_empty() {
         return Vec::new();
     }
-    let flags = hares_io::unavailable_period_flags(schedule, periods);
+    let flags = hares_input::unavailable_period_flags(schedule, periods);
     for period in periods {
         let kind_flag = |flag: &UnavailablePeriodState| match period.kind {
             hares_types::UnavailableKind::Vacancy => flag.vacancy,
@@ -2430,7 +2430,7 @@ fn unavailable_period_flags(
         let last = flags.iter().rposition(kind_flag);
         let gated_classes: Vec<&str> =
             hares_equipment::unavailable_period_gated_classes(period.kind);
-        let gated_columns: Vec<&str> = hares_io::rows_zeroed_by_kind(period.kind);
+        let gated_columns: Vec<&str> = hares_input::rows_zeroed_by_kind(period.kind);
         tracing::debug!(
             period = period.kind.column_name(),
             first_flagged_step = first,
@@ -2557,7 +2557,7 @@ fn initial_zones(
         .enumerate()
         .map(
             |(idx, zone)| -> Result<ZoneState, EnvironmentManagerError> {
-                use hares_io::hpxml::ZoneType;
+                use hares_input::hpxml::ZoneType;
                 // Conditioned zones start near the active HVAC setpoint.
                 // Foundation zones start at ground temperature.
                 // Other unconditioned zones (attic, garage) start at outdoor temp.
@@ -2600,7 +2600,7 @@ fn initial_zones(
         if !has_setpoints {
             for (idx, zone_state) in zones.iter().enumerate() {
                 let zone = &building.zones[idx];
-                if matches!(zone.zone_type, hares_io::hpxml::ZoneType::Conditioned) {
+                if matches!(zone.zone_type, hares_input::hpxml::ZoneType::Conditioned) {
                     let delta = (zone_state.temperature_c - outdoor_temp_c).abs();
                     assert!(
                         delta <= 5.0,
@@ -2774,7 +2774,7 @@ fn determine_initial_indoor_temp_c(
 pub fn resample_weather(
     weather: &WeatherInput,
     site: &SiteLocation,
-    config: &hares_io::SimulationConfig,
+    config: &hares_input::SimulationConfig,
 ) -> Result<arrow::array::RecordBatch, HaresError> {
     use arrow::array::{Float64Array, RecordBatch, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -2908,9 +2908,9 @@ pub fn resample_weather(
 mod tests {
     use super::*;
     use chrono::{DateTime, FixedOffset, TimeZone};
-    use hares_io::WeatherYear;
-    use hares_io::hpxml::building::XmlNode;
-    use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+    use hares_input::WeatherYear;
+    use hares_input::hpxml::building::XmlNode;
+    use hares_input::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
     use hares_physics::psychrometrics::wet_bulb_from_humidity_ratio;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -2924,7 +2924,7 @@ mod tests {
     fn forcing_key_differs_by_weather_year() {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let weather_path = repo.join("tests/fixtures/weather/G0600770_restamped_2020.csv");
-        let handle = ParsedWeather::parse(&hares_io::WeatherInput::Path(weather_path))
+        let handle = ParsedWeather::parse(&hares_input::WeatherInput::Path(weather_path))
             .expect("the weather parses");
         let step_secs = 3600u32;
         let start = FixedOffset::west_opt(6 * 3600)
@@ -2950,10 +2950,10 @@ mod tests {
                     longitude_deg: -89.0,
                     elevation_m: 300.0,
                     utc_offset_h: -6.0,
-                    latitude_source: hares_io::FieldSource::WeatherFile,
-                    longitude_source: hares_io::FieldSource::WeatherFile,
-                    elevation_source: hares_io::FieldSource::WeatherFile,
-                    utc_offset_source: hares_io::FieldSource::WeatherFile,
+                    latitude_source: hares_input::FieldSource::WeatherFile,
+                    longitude_source: hares_input::FieldSource::WeatherFile,
+                    elevation_source: hares_input::FieldSource::WeatherFile,
+                    utc_offset_source: hares_input::FieldSource::WeatherFile,
                 },
                 options,
                 None,
@@ -3002,8 +3002,8 @@ mod tests {
                 elevation_m: 1000.0,
                 wf_allows_leap_years: true,
                 source_step_secs: 3600,
-                record_label: hares_io::RecordLabel::IntervalEnd,
-                data_period: hares_io::DataPeriod::complete_year(),
+                record_label: hares_input::RecordLabel::IntervalEnd,
+                data_period: hares_input::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -3685,16 +3685,16 @@ mod tests {
     /// The shipped default schedule profiles, the generated schedule's
     /// source. Their month multipliers and hourly fractions are far enough
     /// apart that a wrong calendar date reads a different value.
-    fn shipped_default_profiles() -> hares_io::DefaultProfiles {
+    fn shipped_default_profiles() -> hares_input::DefaultProfiles {
         let dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python/hares/defaults");
-        hares_io::load_default_profiles(&dir).expect("the shipped defaults CSV loads")
+        hares_input::load_default_profiles(&dir).expect("the shipped defaults CSV loads")
     }
 
     /// The schedule payload's value for one named column at the addressed
     /// row, stepping the manager's clock to `sim_time` first.
     fn generated_payload_value_at(
-        schedule: hares_io::ScheduleTimeSeries,
+        schedule: hares_input::ScheduleTimeSeries,
         step_secs: i64,
         sim_time: DateTime<FixedOffset>,
         column: &str,
@@ -3737,7 +3737,7 @@ mod tests {
         let lighting = profiles.get("Indoor Lighting").expect("profile");
         let expected = lighting.weekend_fractions[0] * lighting.month_multipliers[6];
 
-        let schedule = hares_io::hpxml_schedule::generate_default_schedule(
+        let schedule = hares_input::hpxml_schedule::generate_default_schedule(
             start,
             Duration::hours(24 * 7),
             Duration::seconds(step_secs),
@@ -3769,7 +3769,7 @@ mod tests {
         let lighting = profiles.get("Indoor Lighting").expect("profile");
         let expected = lighting.weekday_fractions[0] * lighting.month_multipliers[2];
 
-        let schedule = hares_io::hpxml_schedule::generate_default_schedule(
+        let schedule = hares_input::hpxml_schedule::generate_default_schedule(
             start,
             Duration::hours(24 * 70),
             Duration::seconds(step_secs),
@@ -3807,7 +3807,7 @@ mod tests {
             .expect("Jan 1");
         let expected = lighting.weekend_fractions[0] * lighting.month_multipliers[0];
 
-        let schedule = hares_io::hpxml_schedule::generate_default_schedule(
+        let schedule = hares_input::hpxml_schedule::generate_default_schedule(
             start,
             Duration::hours(48),
             Duration::seconds(step_secs),
@@ -4069,11 +4069,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("held_900s.epw");
         std::fs::write(&path, lines.join("\n") + "\n").expect("write held EPW");
-        let weather = hares_io::epw::parse_epw(&path).expect("the held file parses");
+        let weather = hares_input::epw::parse_epw(&path).expect("the held file parses");
         assert_eq!(weather.meta.source_step_secs, 900);
         assert_eq!(
             weather.meta.record_label,
-            hares_io::RecordLabel::IntervalEnd
+            hares_input::RecordLabel::IntervalEnd
         );
 
         let start = utc_offset().with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap();
@@ -4289,8 +4289,8 @@ mod tests {
                 elevation_m: 10.0,
                 wf_allows_leap_years: true,
                 source_step_secs: 3600,
-                record_label: hares_io::RecordLabel::IntervalEnd,
-                data_period: hares_io::DataPeriod::complete_year(),
+                record_label: hares_input::RecordLabel::IntervalEnd,
+                data_period: hares_input::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -4770,8 +4770,8 @@ mod tests {
                 elevation_m: 0.0,
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
-                record_label: hares_io::RecordLabel::IntervalEnd,
-                data_period: hares_io::DataPeriod::complete_year(),
+                record_label: hares_input::RecordLabel::IntervalEnd,
+                data_period: hares_input::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -4836,8 +4836,8 @@ mod tests {
                 elevation_m: 0.0,
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
-                record_label: hares_io::RecordLabel::IntervalEnd,
-                data_period: hares_io::DataPeriod::complete_year(),
+                record_label: hares_input::RecordLabel::IntervalEnd,
+                data_period: hares_input::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -4914,8 +4914,8 @@ mod tests {
                 elevation_m: 0.0,
                 wf_allows_leap_years: true,
                 source_step_secs: step_secs,
-                record_label: hares_io::RecordLabel::IntervalEnd,
-                data_period: hares_io::DataPeriod::complete_year(),
+                record_label: hares_input::RecordLabel::IntervalEnd,
+                data_period: hares_input::DataPeriod::complete_year(),
                 has_embedded_location: true,
                 station_wmo: None,
             },
@@ -4994,8 +4994,8 @@ mod tests {
                     elevation_m: 10.0,
                     wf_allows_leap_years: true,
                     source_step_secs: 3600,
-                    record_label: hares_io::RecordLabel::IntervalEnd,
-                    data_period: hares_io::DataPeriod::complete_year(),
+                    record_label: hares_input::RecordLabel::IntervalEnd,
+                    data_period: hares_input::DataPeriod::complete_year(),
                     has_embedded_location: true,
                     station_wmo: None,
                 },

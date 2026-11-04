@@ -32,7 +32,7 @@ use hares_envelope::longwave_radiation::{
 };
 use hares_envelope::{BoundaryInput, ExteriorTarget, LayerInput, ZoneInput};
 use hares_equipment::{ConfigPayload, EquipmentConfig, config::ConfigValue};
-use hares_io::{Building, DefaultsStore, EnvelopeScales};
+use hares_input::{Building, DefaultsStore, EnvelopeScales};
 use hares_types::{DomainUpdate, EnvironmentState, ExecutionStage, HaresError, ZoneId};
 use serde_json::{Map, Value};
 
@@ -74,7 +74,7 @@ pub fn building_to_boundary_inputs(
     avg_ground_c: f64,
 ) -> Result<Vec<BoundaryInput>> {
     use hares_envelope::PrecomputedRCLayer;
-    use hares_io::hpxml::{BoundaryType, ZoneType};
+    use hares_input::hpxml::{BoundaryType, ZoneType};
     use hares_physics::film_coefficients::film_resistances;
     use hares_physics::ground::f2_coefficient;
     use hares_physics::solar::window_u_factor_decomposition;
@@ -480,9 +480,9 @@ pub fn building_to_boundary_inputs(
 /// which no attached wall derives one from).
 pub(crate) fn zone_type_to_label(
     boundary_id: &str,
-    zt: Option<&hares_io::hpxml::ZoneType>,
+    zt: Option<&hares_input::hpxml::ZoneType>,
 ) -> Result<hares_physics::film_coefficients::ZoneLabel> {
-    use hares_io::hpxml::ZoneType;
+    use hares_input::hpxml::ZoneType;
     use hares_physics::film_coefficients::ZoneLabel;
     Ok(match zt {
         Some(ZoneType::Conditioned) => ZoneLabel::Conditioned,
@@ -520,7 +520,7 @@ pub(crate) fn zone_type_to_label(
 pub(crate) fn find_zone_idx(
     building: &Building,
     boundary_id: Option<&str>,
-    zone_type: Option<&hares_io::hpxml::ZoneType>,
+    zone_type: Option<&hares_input::hpxml::ZoneType>,
     n_zones: usize,
 ) -> Result<usize> {
     // The zero-zone edge returns zone 0 without consulting the zone type:
@@ -545,7 +545,7 @@ pub(crate) fn find_zone_idx(
     // HPXML parsing (building.rs:rewrite_adjacent_zone_pair). If an Adjacent
     // zone reaches this function, it indicates a bug in that rewrite:
     // an unconditional typed error (the function already returns Result).
-    if matches!(target, hares_io::hpxml::ZoneType::Adjacent) {
+    if matches!(target, hares_input::hpxml::ZoneType::Adjacent) {
         return Err(HaresError::Dwelling(format!(
             "Adjacent zone type reached find_zone_idx (boundary '{bid}'): the \
              rewrite in building.rs was not applied",
@@ -605,13 +605,13 @@ pub(crate) fn check_multi_unit_zones(building: &Building) {
 
 pub(crate) fn resolve_exterior(
     building: &Building,
-    boundary: &hares_io::hpxml::Boundary,
+    boundary: &hares_input::hpxml::Boundary,
     n_zones: usize,
 ) -> Result<ExteriorTarget> {
     match boundary.exterior_zone.as_ref() {
-        Some(hares_io::hpxml::ZoneType::Outdoor) => Ok(ExteriorTarget::Outdoor),
-        Some(hares_io::hpxml::ZoneType::Ground) => Ok(ExteriorTarget::Ground),
-        Some(hares_io::hpxml::ZoneType::Other(raw)) => Err(HaresError::Dwelling(format!(
+        Some(hares_input::hpxml::ZoneType::Outdoor) => Ok(ExteriorTarget::Outdoor),
+        Some(hares_input::hpxml::ZoneType::Ground) => Ok(ExteriorTarget::Ground),
+        Some(hares_input::hpxml::ZoneType::Other(raw)) => Err(HaresError::Dwelling(format!(
             "boundary '{}': unrecognised exterior zone text '{raw}'; no zone may be \
              substituted for a location the input does not name",
             boundary.id
@@ -743,7 +743,7 @@ pub(crate) fn apply_humidity_update_to_zones(
 }
 
 pub(crate) fn equipment_config_from_spec(
-    spec: &hares_io::EquipmentSpec,
+    spec: &hares_input::EquipmentSpec,
 ) -> Result<EquipmentConfig> {
     if let Some(typed) = &spec.typed_config {
         // Typed payloads are #[serde(deny_unknown_fields)], so ZIP parameters
@@ -756,7 +756,7 @@ pub(crate) fn equipment_config_from_spec(
             typed,
             spec,
             zip,
-            hares_io::hpxml::OverrideLayers::default(),
+            hares_input::hpxml::OverrideLayers::default(),
         );
     }
 
@@ -800,7 +800,7 @@ pub(crate) fn equipment_config_from_spec(
 ///
 /// This is the blueprint entrance's spec-level override channel: a
 /// caller-built spec carries its overrides in
-/// [`hares_io::EquipmentSpec::typed_overrides`], deliberately apart from
+/// [`hares_input::EquipmentSpec::typed_overrides`], deliberately apart from
 /// the parameter bag (the bag mixes the resolver's machinery keys with the
 /// serialized payload and cannot diagnose a caller's typo), and every
 /// override lands on the payload whether or not the payload's serialized
@@ -824,7 +824,7 @@ pub(crate) fn equipment_config_from_spec(
 ///
 /// A raw spec has no payload to land on and is returned unchanged: its
 /// bag IS its config.
-pub(crate) fn apply_spec_bag_to_typed_config(spec: &mut hares_io::EquipmentSpec) -> Result<()> {
+pub(crate) fn apply_spec_bag_to_typed_config(spec: &mut hares_input::EquipmentSpec) -> Result<()> {
     let Some(typed) = spec.typed_config.as_mut() else {
         return Ok(());
     };
@@ -890,11 +890,11 @@ pub(crate) fn apply_spec_bag_to_typed_config(spec: &mut hares_io::EquipmentSpec)
 /// payload then validates against it.
 fn land_spec_parameters(
     landed: &mut Map<String, Value>,
-    spec: &hares_io::EquipmentSpec,
+    spec: &hares_input::EquipmentSpec,
     type_name: &str,
 ) -> Result<()> {
     let display_name = spec.instance_name.as_ref().unwrap_or(&spec.name);
-    let bag_layers = hares_io::hpxml::OverrideLayers {
+    let bag_layers = hares_input::hpxml::OverrideLayers {
         wildcard: None,
         own: Some(&spec.typed_overrides),
     };
@@ -923,7 +923,7 @@ fn land_spec_parameters(
         }
         let mut trial = landed.clone();
         let single: Map<String, Value> = [(key.clone(), value.clone())].into_iter().collect();
-        hares_io::hpxml::nested_update(&mut trial, &single);
+        hares_input::hpxml::nested_update(&mut trial, &single);
         if trial == *landed {
             // The override agrees with the payload: nothing to land, and the
             // payload keeps the init-time semantics it always had.
@@ -943,7 +943,7 @@ fn land_spec_parameters(
                         let mut retry = landed.clone();
                         let canonical_single: Map<String, Value> =
                             [(key.clone(), canonical)].into_iter().collect();
-                        hares_io::hpxml::nested_update(&mut retry, &canonical_single);
+                        hares_input::hpxml::nested_update(&mut retry, &canonical_single);
                         match hares_equipment::validate_typed_payload_detailed(
                             type_name,
                             &Value::Object(retry.clone()),
@@ -987,9 +987,9 @@ fn land_spec_parameters(
 /// unvalidated and is checked at init, whose rejection fails the build.
 fn spec_config_from_typed(
     typed: &EquipmentConfig,
-    spec: &hares_io::EquipmentSpec,
+    spec: &hares_input::EquipmentSpec,
     base_zip: Option<hares_physics::zip::ZipLoad>,
-    layers: hares_io::hpxml::OverrideLayers<'_>,
+    layers: hares_input::hpxml::OverrideLayers<'_>,
 ) -> Result<EquipmentConfig> {
     let ConfigPayload::Typed {
         type_name,
@@ -1140,18 +1140,18 @@ fn merge_zip_override(
 ///
 /// # Errors
 ///
-/// A malformed override map ([`hares_io::hpxml::override_layers`]), the
+/// A malformed override map ([`hares_input::hpxml::override_layers`]), the
 /// reserved `equipment_id` in a layer, a parameter the equipment cannot take
 /// (a typed config's schema or a load's parameter list rejects it), or a
 /// malformed `zip` override.
 pub(crate) fn merged_equipment_config(
-    spec: &hares_io::EquipmentSpec,
+    spec: &hares_input::EquipmentSpec,
     overrides: &Value,
 ) -> Result<EquipmentConfig> {
     let Value::Object(root) = overrides else {
         return Err(non_object_overrides(overrides));
     };
-    let layers = hares_io::hpxml::override_layers(root, &spec.name)?;
+    let layers = hares_input::hpxml::override_layers(root, &spec.name)?;
     // Every key the override merge receives is checked against the
     // removed-keys table before anything merges, the wildcard ("all"/"*")
     // payload included: the raw path accepts any key, so without the walk
@@ -1183,7 +1183,7 @@ pub(crate) fn merged_equipment_config(
         &spec.name,
         &spec.name,
     )?;
-    let merged_spec = hares_io::EquipmentSpec {
+    let merged_spec = hares_input::EquipmentSpec {
         instance_name: spec.instance_name.clone(),
         name: spec.name.clone(),
         fuel_type: spec.fuel_type,
@@ -1217,7 +1217,7 @@ fn check_override_removed_key(class: &str, source: &str, key: &str, value: &Valu
     };
     let reject = |row_key: String| -> Result<()> {
         if let Some(replacement) =
-            hares_io::removed_key(hares_io::KeyScope::EquipmentConfig, &row_key)
+            hares_input::removed_key(hares_input::KeyScope::EquipmentConfig, &row_key)
         {
             return Err(HaresError::Dwelling(format!(
                 "equipment '{class}' ({source}): configuration key '{row_key}' \
@@ -1274,13 +1274,14 @@ fn check_layer_removed_keys(class: &str, source: &str, layer: &Map<String, Value
 /// [`HaresError::Dwelling`] naming the key and the offending field when
 /// the object does not deserialise or its fields are out of bounds.
 pub(crate) fn extract_envelope_scales(overrides: Option<&Value>) -> Result<EnvelopeScales> {
-    let Some(value) = overrides.and_then(|root| root.get(hares_io::ENVELOPE_OVERRIDE_KEY)) else {
+    let Some(value) = overrides.and_then(|root| root.get(hares_input::ENVELOPE_OVERRIDE_KEY))
+    else {
         return Ok(EnvelopeScales::default());
     };
     let scales: EnvelopeScales = serde_json::from_value(value.clone()).map_err(|err| {
         HaresError::Dwelling(format!(
             "the '{}' override rejected: {err}",
-            hares_io::ENVELOPE_OVERRIDE_KEY
+            hares_input::ENVELOPE_OVERRIDE_KEY
         ))
     })?;
     scales
@@ -1302,7 +1303,7 @@ pub(crate) fn apply_envelope_scales(
     inputs: &mut [hares_envelope::BoundaryInput],
     scales: &EnvelopeScales,
 ) {
-    use hares_io::hpxml::BoundaryType;
+    use hares_input::hpxml::BoundaryType;
     for (bd, input) in building.boundaries.iter().zip(inputs.iter_mut()) {
         if matches!(
             bd.boundary_type,
@@ -1344,7 +1345,7 @@ const BATTERY_TYPE_NAME: &str = "Battery";
 /// Runs before any equipment is constructed so the build fails before side
 /// effects, not partway through the population.
 pub(crate) fn validate_battery_controls(
-    specs: &[hares_io::EquipmentSpec],
+    specs: &[hares_input::EquipmentSpec],
     overrides: &Value,
     hpxml_display: &str,
 ) -> Result<()> {
@@ -1419,7 +1420,7 @@ fn reject_reserved_key(source: &str, key: &str, equipment: &str) -> Result<()> {
 /// resolved value.
 fn layered_value<'v>(
     resolved: &'v Map<String, Value>,
-    layers: hares_io::hpxml::OverrideLayers<'v>,
+    layers: hares_input::hpxml::OverrideLayers<'v>,
     key: &str,
 ) -> Option<&'v Value> {
     layers
@@ -1448,7 +1449,7 @@ fn typed_reads(
 /// list holds it. A raw spec of a class no list declares vouches for no
 /// parameter.
 fn spec_reads(
-    spec: &hares_io::EquipmentSpec,
+    spec: &hares_input::EquipmentSpec,
     root: &Map<String, Value>,
     key: &str,
     value: &Value,
@@ -1468,7 +1469,7 @@ fn spec_reads(
     let Some(params) = hares_equipment::raw_params_for_class(&spec.name) else {
         return Ok(false);
     };
-    let layers = hares_io::hpxml::override_layers(root, &spec.name)?;
+    let layers = hares_input::hpxml::override_layers(root, &spec.name)?;
     Ok(params.reads(key, &|name| layered_value(&spec.parameters, layers, name)))
 }
 
@@ -1484,12 +1485,12 @@ fn spec_reads(
 /// equipment reads (a misspelling).
 pub(crate) fn validate_wildcard_override(
     overrides: &Value,
-    population: &[&hares_io::EquipmentSpec],
+    population: &[&hares_input::EquipmentSpec],
 ) -> Result<()> {
     let Value::Object(root) = overrides else {
         return Err(non_object_overrides(overrides));
     };
-    let Some((source, wildcard)) = hares_io::hpxml::wildcard_override(root)? else {
+    let Some((source, wildcard)) = hares_input::hpxml::wildcard_override(root)? else {
         return Ok(());
     };
     let every_equipment = format!("every equipment (the '{source}' override)");
@@ -1534,11 +1535,11 @@ pub(crate) fn validate_wildcard_override(
 /// takes the whole wildcard and its own entry unchecked, and vouches for no
 /// wildcard parameter.
 fn raw_load_parameters(
-    spec: &hares_io::EquipmentSpec,
-    layers: hares_io::hpxml::OverrideLayers<'_>,
+    spec: &hares_input::EquipmentSpec,
+    layers: hares_input::hpxml::OverrideLayers<'_>,
 ) -> Result<Map<String, Value>> {
     use hares_equipment::canonical_gain_key;
-    use hares_io::hpxml::nested_insert;
+    use hares_input::hpxml::nested_insert;
 
     let params = hares_equipment::raw_params_for_class(&spec.name);
     let mut merged = spec.parameters.clone();
@@ -1589,11 +1590,11 @@ fn raw_load_parameters(
 /// the schema validates after the merge.
 fn apply_typed_overrides(
     merged: &mut Map<String, Value>,
-    layers: hares_io::hpxml::OverrideLayers<'_>,
+    layers: hares_input::hpxml::OverrideLayers<'_>,
     type_name: &str,
     equipment: &str,
 ) -> Result<()> {
-    use hares_io::hpxml::nested_insert;
+    use hares_input::hpxml::nested_insert;
 
     if let Some((source, wildcard)) = layers.wildcard {
         for (key, value) in wildcard {
@@ -1625,7 +1626,7 @@ fn apply_typed_overrides(
 /// the wildcard, so a null is the last word on the key (an unset), not a
 /// fall-through to the layer beneath.
 fn override_layer_value<'a>(
-    layers: hares_io::hpxml::OverrideLayers<'a>,
+    layers: hares_input::hpxml::OverrideLayers<'a>,
     key: &str,
 ) -> Option<&'a Value> {
     layers
@@ -1646,7 +1647,7 @@ fn override_layer_value<'a>(
 /// the resolution's value on the surviving channel stands.
 fn remove_override_shadowed_ideal_fractions(
     merged: &mut Map<String, Value>,
-    layers: hares_io::hpxml::OverrideLayers<'_>,
+    layers: hares_input::hpxml::OverrideLayers<'_>,
     type_name: &str,
     equipment: &str,
 ) {
@@ -1691,7 +1692,7 @@ const SETPOINT_SOURCE_SHADOWS: [(&str, &str); 2] = [
 /// wildcard's replaced value, and a non-numeric value fails the merged
 /// payload's schema at the validation that follows the merge.
 pub(crate) fn override_constant_setpoint_value(
-    layers: hares_io::hpxml::OverrideLayers<'_>,
+    layers: hares_input::hpxml::OverrideLayers<'_>,
     prefix: &str,
 ) -> Option<f64> {
     let key = format!("{prefix}_setpoint_c");
@@ -1716,7 +1717,7 @@ pub(crate) fn override_constant_setpoint_value(
 /// set is the tier the engine's setpoint chain reads.
 fn remove_override_shadowed_setpoint_sources(
     merged: &mut Map<String, Value>,
-    layers: hares_io::hpxml::OverrideLayers<'_>,
+    layers: hares_input::hpxml::OverrideLayers<'_>,
     equipment: &str,
 ) {
     let Some(sp_obj) = merged.get_mut("setpoint").and_then(Value::as_object_mut) else {
@@ -1877,7 +1878,7 @@ pub(crate) fn cross_tier_setpoint_warnings(
 fn reject_shadowed_wh_efficiency(
     type_name: &str,
     merged: &Map<String, Value>,
-    layers: hares_io::hpxml::OverrideLayers<'_>,
+    layers: hares_input::hpxml::OverrideLayers<'_>,
     key: &str,
     value: &Value,
     equipment: &str,
@@ -1935,7 +1936,7 @@ fn stage_table_for_scalar(type_name: &str, key: &str) -> Option<&'static str> {
 fn reject_shadowed_stage_scalar(
     type_name: &str,
     merged: &Map<String, Value>,
-    layers: hares_io::hpxml::OverrideLayers<'_>,
+    layers: hares_input::hpxml::OverrideLayers<'_>,
     key: &str,
     value: &Value,
     equipment: &str,
@@ -1991,13 +1992,13 @@ pub(crate) fn validate_equipment_override_keys(
         return Err(non_object_overrides(overrides));
     };
     for key in root.keys() {
-        if hares_io::hpxml::WILDCARD_OVERRIDE_KEYS.contains(&key.as_str()) {
+        if hares_input::hpxml::WILDCARD_OVERRIDE_KEYS.contains(&key.as_str()) {
             continue;
         }
         // The reserved `envelope` key is not an equipment name: the
         // envelope scales it names are extracted and validated at the
         // assembly boundary, and the boundary construction applies them.
-        if key == hares_io::ENVELOPE_OVERRIDE_KEY {
+        if key == hares_input::ENVELOPE_OVERRIDE_KEY {
             continue;
         }
         if overridable_names.contains(&key.as_str()) {
@@ -2029,7 +2030,7 @@ pub(crate) fn validate_equipment_override_keys(
 pub(crate) fn boundary_zone_index(
     building: &Building,
     boundary_id: Option<&str>,
-    zone_type: Option<&hares_io::hpxml::ZoneType>,
+    zone_type: Option<&hares_input::hpxml::ZoneType>,
     n_zones: usize,
 ) -> Result<usize> {
     find_zone_idx(building, boundary_id, zone_type, n_zones)
@@ -2111,9 +2112,9 @@ pub(crate) fn required_duration(kwargs: &HashMap<String, Value>, key: &str) -> R
 /// (defaults.rb:817-818). The parser rejects a value outside HPXML's rural,
 /// suburban and urban, so no other case reaches the resolver.
 pub(crate) fn site_type_to_terrain(
-    site_type: Option<&hares_io::hpxml::SiteType>,
+    site_type: Option<&hares_input::hpxml::SiteType>,
 ) -> hares_physics::infiltration::TerrainClass {
-    use hares_io::hpxml::SiteType;
+    use hares_input::hpxml::SiteType;
     use hares_physics::infiltration::TerrainClass;
     match site_type {
         Some(SiteType::Rural) => TerrainClass::Rural,
@@ -2133,13 +2134,13 @@ pub(crate) fn site_type_to_terrain(
 /// have no material element in HPXML and take OS-HPXML v1.12.0's `Rough`
 /// (model.rb:49, :95) without a warning, since no input is missing.
 fn boundary_outside_roughness(
-    bd: &hares_io::hpxml::Boundary,
+    bd: &hares_input::hpxml::Boundary,
     exterior: hares_physics::film_coefficients::ZoneLabel,
 ) -> Result<(
     hares_physics::film_coefficients::SurfaceRoughness,
     Option<String>,
 )> {
-    use hares_io::hpxml::BoundaryType;
+    use hares_input::hpxml::BoundaryType;
     use hares_physics::film_coefficients::{
         OutsideLayer, SurfaceRoughness, ZoneLabel, outside_layer_roughness,
     };
@@ -2232,10 +2233,10 @@ pub(crate) fn envelope_input_warnings(building: &Building) -> Result<Vec<hares_t
 /// [`HaresError::Dwelling`] naming `ResidentialFacilityType` when neither
 /// element is present.
 pub(crate) fn shielding_to_class(
-    shielding: Option<&hares_io::hpxml::ShieldingOfHome>,
+    shielding: Option<&hares_input::hpxml::ShieldingOfHome>,
     residential_facility_type: Option<&str>,
 ) -> Result<hares_physics::infiltration::ShieldingClass> {
-    use hares_io::hpxml::ShieldingOfHome;
+    use hares_input::hpxml::ShieldingOfHome;
     use hares_physics::infiltration::ShieldingClass;
     match shielding {
         Some(ShieldingOfHome::Exposed) => Ok(ShieldingClass::Exposed),
@@ -2288,7 +2289,7 @@ pub(crate) fn shielding_to_class(
 pub(crate) fn flue_or_chimney_in_conditioned_space(
     env: &EnvironmentState,
     building: &Building,
-    specs: &[hares_io::EquipmentSpec],
+    specs: &[hares_input::EquipmentSpec],
     overrides: &Value,
 ) -> Result<bool> {
     use hares_types::FuelType;
@@ -2299,7 +2300,7 @@ pub(crate) fn flue_or_chimney_in_conditioned_space(
     // conditioned-space test reads the building zone it names. A spec
     // serving no declared zone resolves to the conditioned zone at init
     // and reads conditioned here.
-    let zone_is_conditioned = |spec: &hares_io::EquipmentSpec| {
+    let zone_is_conditioned = |spec: &hares_input::EquipmentSpec| {
         let Some(zone_id) = spec_zone_id(spec) else {
             return true;
         };
@@ -2311,7 +2312,7 @@ pub(crate) fn flue_or_chimney_in_conditioned_space(
             Some(index) => building
                 .zones
                 .get(index)
-                .is_some_and(|zone| zone.zone_type == hares_io::hpxml::ZoneType::Conditioned),
+                .is_some_and(|zone| zone.zone_type == hares_input::hpxml::ZoneType::Conditioned),
             None => true,
         }
     };
@@ -2336,7 +2337,7 @@ pub(crate) fn flue_or_chimney_in_conditioned_space(
         // value when one reaches the spec (the merge writes it over the
         // payload), else the resolved payload's.
         let layers =
-            hares_io::hpxml::override_layers(override_root.unwrap_or(&empty_root), &spec.name)?;
+            hares_input::hpxml::override_layers(override_root.unwrap_or(&empty_root), &spec.name)?;
         let effective_value = |key: &str| -> Option<f64> {
             layers
                 .own
@@ -2368,7 +2369,7 @@ pub(crate) fn flue_or_chimney_in_conditioned_space(
 }
 
 /// The `zone_id` a spec's typed payload or raw parameters carry.
-fn spec_zone_id(spec: &hares_io::EquipmentSpec) -> Option<usize> {
+fn spec_zone_id(spec: &hares_input::EquipmentSpec) -> Option<usize> {
     if let Some(typed) = &spec.typed_config
         && let ConfigPayload::Typed { data, .. } = &typed.payload
         && let Some(zone_id) = data.get("zone_id").and_then(Value::as_u64)
@@ -2382,7 +2383,7 @@ fn spec_zone_id(spec: &hares_io::EquipmentSpec) -> Option<usize> {
 }
 
 /// The `f64` a spec's typed payload or raw parameters carry at `key`.
-fn spec_payload_f64(spec: &hares_io::EquipmentSpec, key: &str) -> Option<f64> {
+fn spec_payload_f64(spec: &hares_input::EquipmentSpec, key: &str) -> Option<f64> {
     if let Some(typed) = &spec.typed_config
         && let ConfigPayload::Typed { data, .. } = &typed.payload
         && let Some(value) = data.get(key).and_then(Value::as_f64)
@@ -2410,7 +2411,7 @@ fn calc_ef_from_uef(class: &str, uef: f64) -> f64 {
 ///
 /// Used to select [`FoundationLeakageClass`] for AIM-2 leakage distribution.
 pub(crate) fn has_vented_crawlspace(building: &Building) -> bool {
-    use hares_io::hpxml::ZoneType;
+    use hares_input::hpxml::ZoneType;
     building
         .zones
         .iter()
@@ -2441,7 +2442,7 @@ mod tests {
         ConfigPayload, SetpointReconciliation,
         hvac::heating_config::{DuctConfig, GasFurnaceConfig, HvacSetpointConfig, IdealHvacConfig},
     };
-    use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
+    use hares_input::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
     use hares_types::FuelType;
 
     use super::{
@@ -2453,9 +2454,9 @@ mod tests {
 
     // ── zone capacitance multiplier tests ──────────────────────────────
 
-    fn minimal_building(zones: Vec<Zone>, boundaries: Vec<Boundary>) -> hares_io::Building {
-        hares_io::Building {
-            site: hares_io::hpxml::Site {
+    fn minimal_building(zones: Vec<Zone>, boundaries: Vec<Boundary>) -> hares_input::Building {
+        hares_input::Building {
+            site: hares_input::hpxml::Site {
                 elevation_m: None,
                 site_type: None,
                 shielding_of_home: None,
@@ -2494,7 +2495,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: "root".into(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -2582,7 +2583,7 @@ mod tests {
 
     // ── equipment override tests ───────────────────────────────────────
 
-    fn gas_furnace_spec() -> hares_io::EquipmentSpec {
+    fn gas_furnace_spec() -> hares_input::EquipmentSpec {
         let typed_cfg = GasFurnaceConfig {
             equipment_id: Some(7),
             zone_id: Some(1),
@@ -2600,7 +2601,7 @@ mod tests {
             .as_object()
             .cloned()
             .expect("furnace config object");
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "Gas Furnace".to_string(),
             fuel_type: FuelType::Gas,
@@ -2659,7 +2660,7 @@ mod tests {
         assert!((cfg.capacity_w - 12_000.0).abs() < 1e-12);
     }
 
-    fn ideal_hvac_spec() -> hares_io::EquipmentSpec {
+    fn ideal_hvac_spec() -> hares_input::EquipmentSpec {
         let typed_cfg = IdealHvacConfig {
             zone_id: Some(1),
             heating_capacity_w: Some(10_000.0),
@@ -2672,7 +2673,7 @@ mod tests {
             fraction_cooling_load_served: Some(0.9),
             ..IdealHvacConfig::default()
         };
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "Ideal HVAC".to_string(),
             fuel_type: FuelType::Electric,
@@ -2964,7 +2965,7 @@ mod tests {
     /// A typed spec whose bag mirrors the payload (the shape every
     /// `build_typed_spec` resolver produces), with one bag key changed the
     /// way a blueprint caller overrides a single field.
-    fn pv_spec_with_bag_override(override_kw: f64) -> hares_io::EquipmentSpec {
+    fn pv_spec_with_bag_override(override_kw: f64) -> hares_input::EquipmentSpec {
         let typed_cfg = hares_equipment::PvConfig {
             equipment_id: None,
             zone_id: None,
@@ -2993,7 +2994,7 @@ mod tests {
         parameters.insert("capacity_w".to_string(), json!(override_kw * 1000.0));
         let mut typed_overrides = serde_json::Map::new();
         typed_overrides.insert("capacity_w".to_string(), json!(override_kw * 1000.0));
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "PV".to_string(),
             fuel_type: FuelType::Electric,
@@ -3067,7 +3068,7 @@ mod tests {
         .expect("minimal GasWaterHeaterConfig");
         let mut typed_overrides = serde_json::Map::new();
         typed_overrides.insert("fuel_type".to_string(), json!("natural gas"));
-        let mut spec = hares_io::EquipmentSpec {
+        let mut spec = hares_input::EquipmentSpec {
             instance_name: None,
             name: "Gas Water Heater".to_string(),
             fuel_type: FuelType::Gas,
@@ -3154,7 +3155,7 @@ mod tests {
             .cloned()
             .expect("gas water heater config object");
         typed_overrides.insert("fuel_type".to_string(), json!("ban gas"));
-        let mut spec = hares_io::EquipmentSpec {
+        let mut spec = hares_input::EquipmentSpec {
             instance_name: Some("Hot Water".to_string()),
             name: "Gas Water Heater".to_string(),
             fuel_type: FuelType::Gas,
@@ -3226,10 +3227,10 @@ mod tests {
         data: serde_json::Value,
         field: &str,
         value: serde_json::Value,
-    ) -> hares_io::EquipmentSpec {
+    ) -> hares_input::EquipmentSpec {
         let mut typed_overrides = serde_json::Map::new();
         typed_overrides.insert(field.to_string(), value);
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: type_name.to_string(),
             fuel_type: FuelType::Electric,
@@ -3397,7 +3398,7 @@ mod tests {
 
     /// An ASHP heater spec whose payload carries the backup fuel, the shape
     /// the Python `ASHPHeater` builder produces for `autosize=False`.
-    fn heat_pump_heater_spec_with_backup_fuel(fuel: FuelType) -> hares_io::EquipmentSpec {
+    fn heat_pump_heater_spec_with_backup_fuel(fuel: FuelType) -> hares_input::EquipmentSpec {
         let typed_cfg = hares_equipment::HeatPumpHeaterConfig {
             common: hares_equipment::HeatPumpCommonConfig {
                 backup_fuel: Some(fuel),
@@ -3410,7 +3411,7 @@ mod tests {
             .as_object()
             .cloned()
             .expect("heater config object");
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "ASHP Heater".to_string(),
             fuel_type: FuelType::Electric,
@@ -3433,14 +3434,14 @@ mod tests {
         }
     }
 
-    fn heat_pump_heater_spec() -> hares_io::EquipmentSpec {
+    fn heat_pump_heater_spec() -> hares_input::EquipmentSpec {
         let typed_cfg = hares_equipment::HeatPumpHeaterConfig::default();
         let parameters = serde_json::to_value(&typed_cfg)
             .expect("serializable heater config")
             .as_object()
             .cloned()
             .expect("heater config object");
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "ASHP Heater".to_string(),
             fuel_type: FuelType::Electric,
@@ -3485,7 +3486,7 @@ mod tests {
         );
     }
 
-    fn dehumidifier_spec() -> hares_io::EquipmentSpec {
+    fn dehumidifier_spec() -> hares_input::EquipmentSpec {
         let typed_cfg: hares_equipment::DehumidifierConfig =
             serde_json::from_value(json!({ "zone_id": 1 })).expect("minimal DehumidifierConfig");
         let parameters = serde_json::to_value(&typed_cfg)
@@ -3493,7 +3494,7 @@ mod tests {
             .as_object()
             .cloned()
             .expect("dehumidifier config object");
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "Dehumidifier".to_string(),
             fuel_type: FuelType::Electric,
@@ -3544,7 +3545,7 @@ mod tests {
 
     fn gas_furnace_spec_with_reconciliation(
         reconciliations: Vec<SetpointReconciliation>,
-    ) -> hares_io::EquipmentSpec {
+    ) -> hares_input::EquipmentSpec {
         let typed_cfg = GasFurnaceConfig {
             equipment_id: Some(7),
             zone_id: Some(1),
@@ -3569,7 +3570,7 @@ mod tests {
         )
         .unwrap();
         eq_cfg.setpoints_reconciled = Some(reconciliations);
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "Gas Furnace".to_string(),
             fuel_type: FuelType::Gas,
@@ -3838,8 +3839,8 @@ mod tests {
         );
     }
 
-    fn raw_ashp_spec() -> hares_io::EquipmentSpec {
-        hares_io::EquipmentSpec {
+    fn raw_ashp_spec() -> hares_input::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "ASHP Heater".to_string(),
             fuel_type: FuelType::Electric,
@@ -4189,7 +4190,7 @@ mod tests {
     /// and produces a precomputed RC layer with resistance matching F2 × P.
     #[test]
     fn slab_f_factor_derives_perimeter_from_area() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![slab_boundary(None, None)],
             ..minimal_building(
                 vec![Zone {
@@ -4250,7 +4251,7 @@ mod tests {
     #[test]
     fn slab_f_factor_uses_explicit_perimeter() {
         let perimeter_m = 30.0;
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![slab_boundary(Some(perimeter_m), None)],
             ..minimal_building(
                 vec![Zone {
@@ -4297,7 +4298,7 @@ mod tests {
     fn slab_insulation_increases_resistance() {
         let perimeter_m = 30.0;
 
-        let building_unins = hares_io::Building {
+        let building_unins = hares_input::Building {
             boundaries: vec![slab_boundary(Some(perimeter_m), None)],
             ..minimal_building(
                 vec![Zone {
@@ -4315,7 +4316,7 @@ mod tests {
                 Vec::new(),
             )
         };
-        let building_r5 = hares_io::Building {
+        let building_r5 = hares_input::Building {
             boundaries: vec![slab_boundary(
                 Some(perimeter_m),
                 Some(0.88), // R-5 perimeter insulation (SI)
@@ -4355,7 +4356,7 @@ mod tests {
     /// Non-slab boundaries are unaffected by the slab F-factor path.
     #[test]
     fn wall_boundary_unaffected_by_slab_f_factor() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "wall-1".to_string(),
                 boundary_type: BoundaryType::Wall,
@@ -4418,14 +4419,14 @@ mod tests {
     /// boundary's own films.
     #[test]
     fn material_layer_boundary_unchanged_by_the_declared_r() {
-        let plywood = hares_io::hpxml::MaterialLayer {
+        let plywood = hares_input::hpxml::MaterialLayer {
             thickness_m: 0.02,
             conductivity_w_m_k: 0.13,
             density_kg_m3: 545.0,
             specific_heat_j_kg_k: 1215.0,
             area_m2: 20.0,
         };
-        let batt = hares_io::hpxml::MaterialLayer {
+        let batt = hares_input::hpxml::MaterialLayer {
             thickness_m: 0.14,
             conductivity_w_m_k: 0.043,
             density_kg_m3: 12.0,
@@ -4433,7 +4434,7 @@ mod tests {
             area_m2: 20.0,
         };
         let declared = hares_physics::units::r_value_ip_to_si(23.0);
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "mat-wall".to_string(),
                 boundary_type: BoundaryType::Wall,
@@ -4539,7 +4540,7 @@ mod tests {
     /// loudly rather than silently applying the softwood parallel-path formula.
     #[test]
     fn steel_frame_lut_miss_without_framing_factor_errors() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "steel-wall".to_string(),
                 boundary_type: BoundaryType::Wall,
@@ -4603,7 +4604,7 @@ mod tests {
     /// any other value (`hpxml::building` tests).
     #[test]
     fn the_site_type_sets_the_terrain() {
-        use hares_io::hpxml::SiteType;
+        use hares_input::hpxml::SiteType;
         use hares_physics::infiltration::TerrainClass;
         for (site, terrain) in [
             (Some(SiteType::Rural), TerrainClass::Rural),
@@ -4622,7 +4623,7 @@ mod tests {
     /// get identical R_ext and this test would fail.
     #[test]
     fn finish_type_roughness_changes_exterior_film_resistance() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![
                 Boundary {
                     id: "wall-vinyl".to_string(),
@@ -4958,10 +4959,10 @@ mod tests {
     }
 
     /// Build a minimal DefaultsStore for tests that need one.
-    fn load_defaults_store() -> hares_io::DefaultsStore {
+    fn load_defaults_store() -> hares_input::DefaultsStore {
         let defaults_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../python/hares/defaults");
-        hares_io::DefaultsStore::load(&defaults_path)
+        hares_input::DefaultsStore::load(&defaults_path)
             .expect("DefaultsStore must be loadable from project defaults/ directory")
     }
 
@@ -4975,7 +4976,7 @@ mod tests {
     /// `.max(0.0)` before the `< 0.0` check, making the error path dead.
     #[test]
     fn window_u_factor_too_high_propagates_physics_error() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "Win1".to_string(),
                 boundary_type: BoundaryType::Window,
@@ -5057,7 +5058,7 @@ mod tests {
     /// non-positive U-factors here with a named `HaresError::Dwelling`.
     #[test]
     fn window_zero_u_factor_rejected_in_boundary_construction() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "Win1".to_string(),
                 boundary_type: BoundaryType::Window,
@@ -5135,7 +5136,7 @@ mod tests {
     /// routing them to the `HaresError::Dwelling` return.
     #[test]
     fn window_negative_u_factor_rejected_in_boundary_construction() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "Win1".to_string(),
                 boundary_type: BoundaryType::Window,
@@ -5208,7 +5209,7 @@ mod tests {
     /// code path is wired for the new `BoundaryType::Skylight` variant.
     #[test]
     fn skylight_u_factor_decomposition_uses_fenestration_path() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "SK1".to_string(),
                 boundary_type: BoundaryType::Skylight,
@@ -5302,7 +5303,7 @@ mod tests {
         ];
 
         for &(wind_m_s, _delta_t_k, label) in &n_film_resistances {
-            let building = hares_io::Building {
+            let building = hares_input::Building {
                 boundaries: vec![Boundary {
                     id: window_id.to_string(),
                     boundary_type: BoundaryType::Window,
@@ -5409,7 +5410,7 @@ mod tests {
     /// `fallback_r_m2_k_w` field.
     #[test]
     fn no_r_value_sources_falls_back_to_default_r() {
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "no-r-wall".to_string(),
                 boundary_type: BoundaryType::Wall,
@@ -5469,7 +5470,7 @@ mod tests {
     #[test]
     fn valid_assembly_r_value_produces_correct_fallback_r() {
         let assembly_r = 3.5; // m²·K/W
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             boundaries: vec![Boundary {
                 id: "r35-wall".to_string(),
                 boundary_type: BoundaryType::Wall,
@@ -5735,12 +5736,12 @@ mod tests {
     /// with a four-phase cycle so the wet appliance's phase keys exist.
     const LOAD_OF_EACH_KIND: [&str; 3] = ["Plug Loads", "Cooking Range", "Dishwasher"];
 
-    fn raw_load_spec(class: &str) -> hares_io::EquipmentSpec {
+    fn raw_load_spec(class: &str) -> hares_input::EquipmentSpec {
         let Value::Object(parameters) = json!({ "sensible_gain_fraction": 0.5, "phase_len": 4 })
         else {
             unreachable!()
         };
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: class.to_string(),
             fuel_type: FuelType::Electric,
@@ -5794,7 +5795,7 @@ mod tests {
         }
     }
 
-    fn rejected_key(spec: &hares_io::EquipmentSpec, overrides: &Value) -> Option<String> {
+    fn rejected_key(spec: &hares_input::EquipmentSpec, overrides: &Value) -> Option<String> {
         match merged_equipment_config(spec, overrides) {
             Ok(_) => None,
             Err(HaresError::InvalidEquipmentParameter { key, .. }) => Some(key),
@@ -6359,8 +6360,8 @@ mod tests {
     /// A typed spec of `type_name` carrying `data` and no bag overrides:
     /// the dwelling override channel is the only layer the merge tests
     /// below add.
-    fn typed_payload_spec(type_name: &str, data: Map<String, Value>) -> hares_io::EquipmentSpec {
-        hares_io::EquipmentSpec {
+    fn typed_payload_spec(type_name: &str, data: Map<String, Value>) -> hares_input::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: type_name.to_string(),
             fuel_type: FuelType::Electric,
@@ -6393,7 +6394,7 @@ mod tests {
         type_name: &str,
         scalars: &[(&str, f64)],
         table: Option<(&str, Value)>,
-    ) -> hares_io::EquipmentSpec {
+    ) -> hares_input::EquipmentSpec {
         let mut data = Map::new();
         data.insert("number_of_speeds".to_string(), json!(2));
         if type_name == "Central AC" {
@@ -6630,7 +6631,7 @@ mod tests {
     fn typed_tankless_water_heater_spec(
         energy_factor: Option<f64>,
         uniform_energy_factor: Option<f64>,
-    ) -> hares_io::EquipmentSpec {
+    ) -> hares_input::EquipmentSpec {
         let cfg = hares_equipment::TanklessWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
@@ -6658,7 +6659,7 @@ mod tests {
             cfg,
         )
         .expect("the config is well-formed");
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "Tankless Water Heater".to_string(),
             fuel_type: FuelType::Gas,
@@ -6674,7 +6675,9 @@ mod tests {
         }
     }
 
-    fn typed_gas_water_heater_spec(conversion_efficiency: Option<f64>) -> hares_io::EquipmentSpec {
+    fn typed_gas_water_heater_spec(
+        conversion_efficiency: Option<f64>,
+    ) -> hares_input::EquipmentSpec {
         let cfg = hares_equipment::GasWaterHeaterConfig {
             equipment_id: None,
             zone_id: Some(1),
@@ -6716,7 +6719,7 @@ mod tests {
             cfg,
         )
         .expect("the config is well-formed");
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             instance_name: None,
             name: "Gas Water Heater".to_string(),
             fuel_type: FuelType::Gas,
@@ -6758,8 +6761,8 @@ mod tests {
     /// typed payload their deserialisation accepts (the removed-key walk
     /// runs before it and fails first), the raw classes the parameter
     /// bag.
-    fn override_test_spec(class: &str) -> hares_io::EquipmentSpec {
-        let base = hares_io::EquipmentSpec {
+    fn override_test_spec(class: &str) -> hares_input::EquipmentSpec {
+        let base = hares_input::EquipmentSpec {
             instance_name: None,
             name: class.to_string(),
             fuel_type: FuelType::Electric,
@@ -6787,7 +6790,7 @@ mod tests {
                 return raw_load_spec(class);
             }
         };
-        hares_io::EquipmentSpec {
+        hares_input::EquipmentSpec {
             typed_config: Some(hares_equipment::EquipmentConfig::with_payload(
                 "test".to_string(),
                 class.to_string(),

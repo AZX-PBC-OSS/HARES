@@ -34,24 +34,24 @@ fn config(time_res: i64) -> SimulationConfig {
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
 fn report_config(time_res: i64, weather_columns: &[&str]) -> SimulationConfig {
     let mut config = config(time_res);
-    config.reports = vec![hares_io::ReportSpec {
+    config.reports = vec![hares_input::ReportSpec {
         name: "weather".to_string(),
-        selection: hares_io::Selection::Named(
+        selection: hares_input::Selection::Named(
             weather_columns.iter().map(|c| c.to_string()).collect(),
         ),
-        frequency: hares_io::Frequency::Timestep,
-        destination: hares_io::Destination::Memory,
+        frequency: hares_input::Frequency::Timestep,
+        destination: hares_input::Destination::Memory,
     }];
     config
 }
@@ -59,15 +59,15 @@ fn report_config(time_res: i64, weather_columns: &[&str]) -> SimulationConfig {
 /// The run's resolved site location, the resolution the build itself
 /// runs (the building's site against the weather header and the
 /// config's override).
-fn resolved_site() -> hares_io::SiteLocation {
+fn resolved_site() -> hares_input::SiteLocation {
     let building =
-        hares_io::parse_hpxml(&fixture_dir().join("building.xml")).expect("the fixture parses");
+        hares_input::parse_hpxml(&fixture_dir().join("building.xml")).expect("the fixture parses");
     let weather =
-        hares_io::parse_weather(fixture_dir().join("weather.epw")).expect("the weather parses");
-    hares_io::resolve_site_location(
+        hares_input::parse_weather(fixture_dir().join("weather.epw")).expect("the weather parses");
+    hares_input::resolve_site_location(
         &building.site,
         &weather.meta,
-        &hares_io::SiteLocationOverride::default(),
+        &hares_input::SiteLocationOverride::default(),
     )
 }
 
@@ -116,12 +116,14 @@ fn time_values(batch: &RecordBatch) -> Vec<i64> {
 
 fn run_batches(config: &SimulationConfig) -> RecordBatch {
     let mut dwelling = Dwelling::from_config(DwellingConfig {
-        hpxml: hares_io::InputSource::Path(fixture_dir().join("building.xml")),
-        schedule: Some(hares_io::InputSource::Path(
+        hpxml: hares_input::InputSource::Path(fixture_dir().join("building.xml")),
+        schedule: Some(hares_input::InputSource::Path(
             fixture_dir().join("schedule.csv"),
         )),
-        weather: hares_io::WeatherInput::Path(fixture_dir().join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        weather: hares_input::WeatherInput::Path(fixture_dir().join("weather.epw")),
+        defaults: hares_input::DefaultsSource::directory(
+            project_root().join("python/hares/defaults"),
+        ),
         settings: DwellingSettings::new(config.clone(), None, 1, None),
     })
     .expect("the dwelling builds");
@@ -140,7 +142,7 @@ fn resample_weather_equals_run_weather_columns_at_900_and_3600() {
     for time_res in [900, 3600] {
         let run = run_batches(&report_config(time_res, &WEATHER_VARIABLES));
         let batch = resample_weather(
-            &hares_io::WeatherInput::Path(fixture_dir().join("weather.epw")),
+            &hares_input::WeatherInput::Path(fixture_dir().join("weather.epw")),
             &site,
             &config(time_res),
         )
@@ -175,7 +177,7 @@ fn resample_weather_equals_run_weather_columns_at_900_and_3600() {
 fn resample_weather_columns_are_the_catalogue_names_in_order() {
     let site = resolved_site();
     let batch = resample_weather(
-        &hares_io::WeatherInput::Path(fixture_dir().join("weather.epw")),
+        &hares_input::WeatherInput::Path(fixture_dir().join("weather.epw")),
         &site,
         &config(3600),
     )

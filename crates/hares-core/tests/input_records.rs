@@ -32,10 +32,10 @@ fn config_for(
     defaults: PathBuf,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml: hares_io::InputSource::Path(hpxml),
-        schedule: schedule.map(hares_io::InputSource::Path),
-        weather: hares_io::WeatherInput::Path(weather),
-        defaults: hares_io::DefaultsSource::directory(defaults),
+        hpxml: hares_input::InputSource::Path(hpxml),
+        schedule: schedule.map(hares_input::InputSource::Path),
+        weather: hares_input::WeatherInput::Path(weather),
+        defaults: hares_input::DefaultsSource::directory(defaults),
         settings: DwellingSettings::new(
             SimulationConfig {
                 max_memory_rows: None,
@@ -52,12 +52,12 @@ fn config_for(
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             1,
@@ -66,7 +66,7 @@ fn config_for(
     }
 }
 
-fn run(config: DwellingConfig) -> hares_io::InputRecords {
+fn run(config: DwellingConfig) -> hares_input::InputRecords {
     let result = Dwelling::from_config(config)
         .expect("the dwelling builds")
         .simulate()
@@ -376,7 +376,7 @@ fn generated_schedule_has_no_input_record() {
     );
     assert_eq!(
         inputs.weather_format,
-        hares_io::WeatherFormat::Epw,
+        hares_input::WeatherFormat::Epw,
         "a path source's weather format is the detected one"
     );
 }

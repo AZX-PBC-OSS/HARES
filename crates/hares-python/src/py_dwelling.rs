@@ -744,7 +744,8 @@ pub(crate) static CONSTRUCT_GIL_STATE: std::sync::atomic::AtomicI32 =
 /// attached, before the call, and the closure returns plain Rust values
 /// (`HaresError` crosses as data; the `PyErr` conversion needs the GIL and
 /// happens after). The audited construction path touches no Python-owned
-/// state while released: hares-core and hares-io carry no pyo3 dependency,
+/// state while released: hares-core, hares-input and hares-output carry no
+/// pyo3 dependency,
 /// and the batch callback attaches only to a built dwelling and
 /// re-acquires the GIL itself at delivery.
 pub(crate) fn construct_detached<T: Send>(py: Python<'_>, f: impl FnOnce() -> T + Send) -> T {
@@ -819,11 +820,11 @@ impl PyDwelling {
                 weather: crate::py_inputs::weather_arg(weather)?,
                 defaults: match defaults {
                     Some(path) => crate::py_inputs::defaults_arg(path)?,
-                    None => {
-                        crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::directory(
+                    None => crate::py_inputs::DefaultsArg::Source(
+                        hares_input::DefaultsSource::directory(
                             crate::py_inputs::packaged_defaults_dir(_cls.py())?,
-                        ))
-                    }
+                        ),
+                    ),
                 },
                 config,
                 bldg_id,
@@ -2848,7 +2849,7 @@ impl PyTimestepsIter {
 /// callback re-enters the dwelling from the delivery thread.
 fn reentry_hares_error() -> HaresError {
     HaresError::Callback {
-        report: hares_io::output::callback::TIMESTEP_REPORT.to_string(),
+        report: hares_output::callback::TIMESTEP_REPORT.to_string(),
         message: crate::py_callback::REENTRY_MESSAGE.to_string(),
     }
 }
@@ -2871,18 +2872,18 @@ fn shielding_label(shielding: hares_physics::infiltration::ShieldingClass) -> St
 
 /// The boundary kind's spelling in the read-back dict: the plan's kind
 /// names, lowercased, the parser's `Other` kind carrying its own text.
-fn boundary_kind_label(kind: &hares_io::hpxml::BoundaryType) -> String {
+fn boundary_kind_label(kind: &hares_input::hpxml::BoundaryType) -> String {
     match kind {
-        hares_io::hpxml::BoundaryType::Wall => "wall".to_string(),
-        hares_io::hpxml::BoundaryType::Roof => "roof".to_string(),
-        hares_io::hpxml::BoundaryType::Floor => "floor".to_string(),
-        hares_io::hpxml::BoundaryType::Window => "window".to_string(),
-        hares_io::hpxml::BoundaryType::Skylight => "skylight".to_string(),
-        hares_io::hpxml::BoundaryType::Door => "door".to_string(),
-        hares_io::hpxml::BoundaryType::FoundationWall => "foundation wall".to_string(),
-        hares_io::hpxml::BoundaryType::RimJoist => "rim joist".to_string(),
-        hares_io::hpxml::BoundaryType::Slab => "slab".to_string(),
-        hares_io::hpxml::BoundaryType::Other(text) => text.clone(),
+        hares_input::hpxml::BoundaryType::Wall => "wall".to_string(),
+        hares_input::hpxml::BoundaryType::Roof => "roof".to_string(),
+        hares_input::hpxml::BoundaryType::Floor => "floor".to_string(),
+        hares_input::hpxml::BoundaryType::Window => "window".to_string(),
+        hares_input::hpxml::BoundaryType::Skylight => "skylight".to_string(),
+        hares_input::hpxml::BoundaryType::Door => "door".to_string(),
+        hares_input::hpxml::BoundaryType::FoundationWall => "foundation wall".to_string(),
+        hares_input::hpxml::BoundaryType::RimJoist => "rim joist".to_string(),
+        hares_input::hpxml::BoundaryType::Slab => "slab".to_string(),
+        hares_input::hpxml::BoundaryType::Other(text) => text.clone(),
     }
 }
 
@@ -2910,13 +2911,13 @@ fn resolved_model_to_py(py: Python<'_>, model: &hares_core::ResolvedModel) -> Py
             "heating_setpoint",
             eq.heating_setpoint
                 .as_ref()
-                .map(hares_io::SetpointSource::label),
+                .map(hares_input::SetpointSource::label),
         )?;
         entry.set_item(
             "cooling_setpoint",
             eq.cooling_setpoint
                 .as_ref()
-                .map(hares_io::SetpointSource::label),
+                .map(hares_input::SetpointSource::label),
         )?;
         equipment.append(entry)?;
     }
@@ -4538,7 +4539,7 @@ mod profiling_summary_tests {
                 None,
                 false,
                 false,
-                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 None,
                 0,
@@ -4546,7 +4547,7 @@ mod profiling_summary_tests {
                 "on",
                 None,
                 None,
-                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
                 crate::py_config::PyWarmupArg::Absent,
                 "hour24",
@@ -4670,7 +4671,7 @@ mod profiling_summary_tests {
                 None,
                 false,
                 false,
-                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 None,
                 0,
@@ -4678,7 +4679,7 @@ mod profiling_summary_tests {
                 "on",
                 None,
                 None,
-                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
                 crate::py_config::PyWarmupArg::Absent,
                 "hour24",
@@ -4784,7 +4785,7 @@ mod construction_gil_tests {
             None,
             false,
             false,
-            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
             None,
             0,
@@ -4792,7 +4793,7 @@ mod construction_gil_tests {
             "on",
             None,
             None,
-            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
             crate::py_config::PyWarmupArg::Absent,
             "hour24",
@@ -4982,7 +4983,7 @@ mod construction_gil_tests {
                 None,
                 false,
                 false,
-                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 None,
                 0,
@@ -4990,7 +4991,7 @@ mod construction_gil_tests {
                 "on",
                 None,
                 None,
-                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
                 crate::py_config::PyWarmupArg::Absent,
                 "hour24",
@@ -5213,7 +5214,7 @@ mod blueprint_readback_tests {
             None,
             false,
             false,
-            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
             None,
             0,
@@ -5221,7 +5222,7 @@ mod blueprint_readback_tests {
             "on",
             None,
             None,
-            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
             crate::py_config::PyWarmupArg::Absent,
             "hour24",
@@ -5386,7 +5387,7 @@ mod blueprint_readback_tests {
             None,
             false,
             false,
-            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
             None,
             seed,
@@ -5394,7 +5395,7 @@ mod blueprint_readback_tests {
             "on",
             None,
             None,
-            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
             crate::py_config::PyWarmupArg::Absent,
             "hour24",
@@ -5481,7 +5482,7 @@ mod blueprint_readback_tests {
                 None,
                 false,
                 false,
-                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 None,
                 0,
@@ -5494,7 +5495,7 @@ mod blueprint_readback_tests {
                 "off",
                 None,
                 None,
-                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
                 crate::py_config::PyWarmupArg::Absent,
                 "hour24",

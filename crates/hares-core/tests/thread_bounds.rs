@@ -8,7 +8,7 @@
 //! thread owns its dwelling.
 
 use hares_core::{Dwelling, DwellingBlueprint};
-use hares_io::{ForcingTable, ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather};
+use hares_input::{ForcingTable, ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather};
 
 const fn assert_send<T: Send>() {}
 const fn assert_sync<T: Sync>() {}

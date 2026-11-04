@@ -9,10 +9,10 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{EnvironmentInitOptions, EnvironmentManager, SimClock};
-use hares_io::hpxml::building::XmlNode;
-use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
-use hares_io::schedule::ColumnAggregation;
-use hares_io::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
+use hares_input::hpxml::building::XmlNode;
+use hares_input::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+use hares_input::schedule::ColumnAggregation;
+use hares_input::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 
 #[path = "../../../tests/support/denver_offset.rs"]
 mod denver_offset;
@@ -105,8 +105,8 @@ fn synthetic_weather() -> WeatherTimeSeries {
             elevation_m: 1609.0,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            record_label: hares_io::RecordLabel::IntervalEnd,
-            data_period: hares_io::DataPeriod::complete_year(),
+            record_label: hares_input::RecordLabel::IntervalEnd,
+            data_period: hares_input::DataPeriod::complete_year(),
             has_embedded_location: true,
             station_wmo: None,
         },
@@ -147,7 +147,7 @@ fn minimal_schedule() -> ScheduleTimeSeries {
 }
 
 /// Build a minimal Building with south and north walls for solar surface testing.
-fn minimal_building() -> hares_io::Building {
+fn minimal_building() -> hares_input::Building {
     let details_xml = XmlNode {
         name: "BuildingDetails".to_string(),
         attrs: HashMap::new(),
@@ -160,7 +160,7 @@ fn minimal_building() -> hares_io::Building {
         }],
     };
 
-    hares_io::Building {
+    hares_input::Building {
         site: Site {
             elevation_m: None,
             site_type: None,
@@ -576,8 +576,8 @@ fn leap_year_dec31_reads_correct_weather_row() {
             elevation_m: 0.0,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            record_label: hares_io::RecordLabel::IntervalEnd,
-            data_period: hares_io::DataPeriod::complete_year(),
+            record_label: hares_input::RecordLabel::IntervalEnd,
+            data_period: hares_input::DataPeriod::complete_year(),
             has_embedded_location: true,
             station_wmo: None,
         },
@@ -633,7 +633,7 @@ fn leap_year_dec31_reads_correct_weather_row() {
                 children: Vec::new(),
             }],
         };
-        hares_io::Building {
+        hares_input::Building {
             site: Site {
                 elevation_m: None,
                 site_type: None,
@@ -838,13 +838,13 @@ fn wall_missing_azimuth_constructs_with_warning() {
     let weather = synthetic_weather();
     let schedule = minimal_schedule();
 
-    let details_xml = hares_io::hpxml::building::XmlNode {
+    let details_xml = hares_input::hpxml::building::XmlNode {
         name: "BuildingDetails".to_string(),
         attrs: std::collections::HashMap::new(),
         text: String::new(),
         children: vec![],
     };
-    let building = hares_io::Building {
+    let building = hares_input::Building {
         site: Site {
             elevation_m: None,
             site_type: None,
@@ -954,13 +954,13 @@ fn roof_missing_azimuth_constructs_successfully() {
     let weather = synthetic_weather();
     let schedule = minimal_schedule();
 
-    let details_xml = hares_io::hpxml::building::XmlNode {
+    let details_xml = hares_input::hpxml::building::XmlNode {
         name: "BuildingDetails".to_string(),
         attrs: std::collections::HashMap::new(),
         text: String::new(),
         children: vec![],
     };
-    let building = hares_io::Building {
+    let building = hares_input::Building {
         site: Site {
             elevation_m: None,
             site_type: None,
@@ -1066,13 +1066,13 @@ fn window_missing_azimuth_returns_error() {
     let weather = synthetic_weather();
     let schedule = minimal_schedule();
 
-    let details_xml = hares_io::hpxml::building::XmlNode {
+    let details_xml = hares_input::hpxml::building::XmlNode {
         name: "BuildingDetails".to_string(),
         attrs: std::collections::HashMap::new(),
         text: String::new(),
         children: vec![],
     };
-    let building = hares_io::Building {
+    let building = hares_input::Building {
         site: Site {
             elevation_m: None,
             site_type: None,

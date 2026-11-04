@@ -5,11 +5,11 @@
 //! The sink is minimal on purpose: `on_batch` with the batch and a context
 //! naming the report, the building and the batch's index. The destination
 //! model lands later and turns the sink into one destination among
-//! several; the notes in `crates/hares-io/src/output/callback.rs` mark
+//! several; the notes in `crates/hares-output/src/callback.rs` mark
 //! where each piece plugs in.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -19,8 +19,8 @@ use chrono::{DateTime, Duration};
 use hares_control::DispatchRequest;
 use hares_core::actor::Actor;
 use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
-use hares_io::{Destination, ReportSpec, Selection, SiteLocationOverride};
+use hares_input::{Destination, ReportSpec, Selection, SiteLocationOverride};
+use hares_output::callback::{BatchCallback, BatchContext, CallbackError};
 use hares_types::{EnvironmentState, TelemetryField};
 
 /// The one report the engine builds today: the run's timestep table.
@@ -74,7 +74,7 @@ fn config(retain_batches: bool, output_path: &std::path::Path) -> SimulationConf
         reports: vec![ReportSpec {
             name: REPORT.to_string(),
             selection: Selection::Verbosity(2),
-            frequency: hares_io::Frequency::default(),
+            frequency: hares_input::Frequency::default(),
             destination: if retain_batches {
                 Destination::Memory
             } else {
@@ -91,11 +91,11 @@ fn config(retain_batches: bool, output_path: &std::path::Path) -> SimulationConf
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 

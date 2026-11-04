@@ -1,5 +1,5 @@
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::PathBuf;
 
@@ -156,30 +156,30 @@ fn simulation_config_with_frame(csv_path: PathBuf, with_frame: bool) -> Simulati
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
-fn memory_report(name: &str, verbosity: u8) -> hares_io::ReportSpec {
-    hares_io::ReportSpec {
+fn memory_report(name: &str, verbosity: u8) -> hares_input::ReportSpec {
+    hares_input::ReportSpec {
         name: name.to_string(),
-        selection: hares_io::Selection::Verbosity(verbosity),
-        frequency: hares_io::Frequency::default(),
-        destination: hares_io::Destination::Memory,
+        selection: hares_input::Selection::Verbosity(verbosity),
+        frequency: hares_input::Frequency::default(),
+        destination: hares_input::Destination::Memory,
     }
 }
 
-fn csv_report(name: &str, path: &std::path::Path, verbosity: u8) -> hares_io::ReportSpec {
-    hares_io::ReportSpec {
+fn csv_report(name: &str, path: &std::path::Path, verbosity: u8) -> hares_input::ReportSpec {
+    hares_input::ReportSpec {
         name: name.to_string(),
-        selection: hares_io::Selection::Verbosity(verbosity),
-        frequency: hares_io::Frequency::default(),
-        destination: hares_io::Destination::Csv {
+        selection: hares_input::Selection::Verbosity(verbosity),
+        frequency: hares_input::Frequency::default(),
+        destination: hares_input::Destination::Csv {
             path: path.to_path_buf(),
             overwrite: false,
         },
@@ -356,7 +356,7 @@ fn streaming_metrics_equal_batch_metrics_at_envelope_verbosity() {
                 let csv_path = scratch.path(&format!("retain_{retain}.csv"));
                 let mut cfg = simulation_config_with_frame(csv_path, retain);
                 for report in &mut cfg.reports {
-                    report.selection = hares_io::Selection::Verbosity(6);
+                    report.selection = hares_input::Selection::Verbosity(6);
                 }
                 cfg
             },

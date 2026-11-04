@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DATA_DIR="$REPO_ROOT/crates/hares-io/data"
+DATA_DIR="$REPO_ROOT/crates/hares-input/data"
 BASE_URL="https://raw.githubusercontent.com/NREL/OpenStudio-HPXML/v1.12.0/HPXMLtoOpenStudio/resources/data"
 ZIPCODE_SHA256="d453ec428e9ddf21375dc1a3c606cb7ec628eed280cd49ca26d3e2c5ff094ecd"
 WSF_SHA256="94e64f002695bd24a4ee1a10ad0425726fe35c7b822aabbc62f6d1a2bba9edbb"

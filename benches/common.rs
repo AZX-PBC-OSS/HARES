@@ -10,7 +10,7 @@ use hares_core::Dwelling;
 use hares_core::{DwellingConfig, SimulationConfig};
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use hares_types::{
     CoreCapabilities, CoreOutput, EndUse, EquipmentDescriptor, EquipmentId, ExecutionStage,
     FuelType, PortDeclaration, Telemetry,
@@ -147,11 +147,11 @@ pub fn build_dwelling_config(
                 start_time: fixture_start::fixture_start(),
                 duration,
                 time_res: Duration::minutes(1),
-                reports: vec![hares_io::ReportSpec {
+                reports: vec![hares_input::ReportSpec {
                     name: "file".to_string(),
-                    selection: hares_io::Selection::Verbosity(0),
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Csv {
+                    selection: hares_input::Selection::Verbosity(0),
+                    frequency: hares_input::Frequency::default(),
+                    destination: hares_input::Destination::Csv {
                         path: numbered_path(dir, "hares-bench-output", "csv"),
                         overwrite: true,
                     },
@@ -162,12 +162,12 @@ pub fn build_dwelling_config(
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
-                first_hour_interpolation: hares_io::FirstHour::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
+                first_hour_interpolation: hares_input::FirstHour::default(),
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             bldg_id,

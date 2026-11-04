@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use chrono::DateTime;
-use hares_io::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
+use hares_input::{ColumnAggregation, ScheduleTimeSeries, parse_schedule_csv};
 use hares_types::alloc_count::{CountingAllocator, thread_alloc_bytes, thread_allocations};
 
 #[global_allocator]

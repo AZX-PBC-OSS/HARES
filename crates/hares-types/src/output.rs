@@ -1,7 +1,7 @@
 //! The typed output-variable model: units, kinds, aggregations, sampling
 //! and the `TelemetryField` declaration every observable makes about itself.
 //!
-//! The catalogue (`hares-io`'s `output::catalogue`) is built from these
+//! The catalogue (`hares-output`'s catalogue) is built from these
 //! declarations, so a variable the engine produces but nothing declares
 //! cannot reach an output column: the catalogue is derived, never
 //! hand-listed.

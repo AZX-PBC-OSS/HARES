@@ -1,10 +1,10 @@
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use hares_control::PriorityTier;
 use hares_core::{Dwelling, DwellingConfig, StepResult};
-use hares_io::SimulationConfig;
+use hares_input::SimulationConfig;
 use hares_types::{ControlCapabilities, ControlSignal, EndUse, OperatingMode};
 
 fn load_fixture(fixture_name: &str) -> Dwelling {

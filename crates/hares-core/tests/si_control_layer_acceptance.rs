@@ -13,7 +13,9 @@ use hares_core::actor_registry::{ActorConfig, ActorRegistry};
 use hares_core::actors::BatteryManagementActor;
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
 use hares_equipment::config::ConfigValue;
-use hares_io::{DefaultsSource, InputSource, SimulationConfig, SiteLocationOverride, WeatherInput};
+use hares_input::{
+    DefaultsSource, InputSource, SimulationConfig, SiteLocationOverride, WeatherInput,
+};
 use hares_types::{BmsMode, GridExportRule};
 use std::path::PathBuf;
 
@@ -33,11 +35,11 @@ fn sim_config() -> SimulationConfig {
             .expect("the start time parses"),
         duration: Duration::seconds(604_800),
         time_res: Duration::seconds(900),
-        reports: vec![hares_io::ReportSpec {
+        reports: vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Memory,
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::default(),
+            destination: hares_input::Destination::Memory,
         }],
         diagnostics: false,
         metrics: false,
@@ -46,11 +48,11 @@ fn sim_config() -> SimulationConfig {
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 

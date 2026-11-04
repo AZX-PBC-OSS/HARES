@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Duration, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
-use hares_io::{
+use hares_input::{
     DefaultsSource, InputSource, SetpointSource, SimulationConfig, SiteLocationOverride,
     WeatherInput,
 };
@@ -56,11 +56,11 @@ fn config(hpxml: &Path) -> DwellingConfig {
                 master_seed: 0,
                 civil_timezone: None,
                 site_location: SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             1,
@@ -231,7 +231,7 @@ fn resolved_layers_sum_to_the_boundary_resistance() {
     );
     let mut checked = 0;
     for boundary in &model.boundaries {
-        if boundary.kind == hares_io::hpxml::BoundaryType::Slab {
+        if boundary.kind == hares_input::hpxml::BoundaryType::Slab {
             assert!(
                 boundary.layers.is_empty(),
                 "the F-factor slab reports no layers (the plan's shape), got {}",
@@ -241,7 +241,7 @@ fn resolved_layers_sum_to_the_boundary_resistance() {
         }
         if matches!(
             boundary.kind,
-            hares_io::hpxml::BoundaryType::Window | hares_io::hpxml::BoundaryType::Skylight
+            hares_input::hpxml::BoundaryType::Window | hares_input::hpxml::BoundaryType::Skylight
         ) {
             continue;
         }
