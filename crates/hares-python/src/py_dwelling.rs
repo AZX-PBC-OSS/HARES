@@ -2044,7 +2044,10 @@ impl PyDwelling {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.step_scratch = hares_core::StepResult::default();
-        *self.callback_cause.lock().expect("cause slot mutex") = None;
+        *self
+            .callback_cause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 
         self.initialize()
     }
@@ -3004,7 +3007,7 @@ impl PyDwelling {
             let cause = self
                 .callback_cause
                 .lock()
-                .expect("cause slot mutex")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
                 .map(|cause| cause.clone_ref(py));
             if let Some(cause) = cause {
