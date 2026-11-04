@@ -12,7 +12,7 @@ Two distinct concepts, both carried in `GridState` (`hares-types`):
 
 | Concept | Field / method | Meaning |
 |---------|----------------|---------|
-| Utility outage | `voltage_pu == 0.0` (`GridState::grid_outage()`) | The distribution feeder is dead. Set externally: scenario config, `Dwelling::set_grid_voltage(0.0)`, `Fleet::set_grid_voltage*`. (HELICS voltage subscriptions reject values outside [0.5, 1.5] pu and hold the last valid value, so co-simulation outages are signalled through the explicit setter, not through the voltage topic.) |
+| Utility outage | `voltage_pu == 0.0` (`GridState::grid_outage()`) | The distribution feeder is dead. Set externally: scenario config, `Dwelling::set_grid_voltage(0.0)`, `Fleet::set_grid_voltage*`, or the `grid/voltage` topic's 0.0. (The HELICS voltage topic carries the outage itself: exactly 0.0 is the outage signal, and values outside [0.5, 1.5] pu are refused with the last valid value held, per docs/cosim.md's boundary contract.) |
 | Bus energization | `GridState::bus_energized()` / `GridState::bus_voltage_pu()` | Whether the **home's bus** carries voltage. During an outage, an island-capable source holds the bus at nominal (`island_bus_voltage_pu == Some(1.0)`); otherwise the bus is dead. |
 
 The dwelling resolves bus energization at the start of every timestep:

@@ -55,8 +55,19 @@ Publications (per dwelling; the fleet federate prefixes
 | `island_unserved_w` | W | The island's internal imbalance, load side: the load the island sources failed to cover. 0.0 when not islanded. |
 | `island_excess_w` | W | The island's internal imbalance, generation side: the surplus the island could not absorb. 0.0 when not islanded. |
 | `zone_{i}/temp_air_c` | degC | Zone air temperature. |
-| `equipment_{i}/power_w`, `/soc_pct`, `/operating_mode` | W, pct, enum | Per-equipment power, state of charge (0-100), operating-mode code. |
+| `equipment_{i}/power_w`, `/soc_pct`, `/operating_mode` | W, pct, enum | Per-equipment power, state of charge (0-100), operating-mode code. Equipment whose core output carries no SOC state publishes 0.0 for `soc_pct` ("no SOC state", not "empty"). |
 | `pv_generation_w` | W | PV generation magnitude (positive W). |
+
+The fleet federate's aggregates (its own topics, beside the
+`dwelling_{index}/` prefixed per-dwelling ones):
+
+| Topic | Unit | Meaning |
+|---|---|---|
+| `aggregate_power_w` | W | The sum of the per-dwelling premise balances. A premise quantity, not a grid quantity: during an outage this is the islands' internal imbalance, so a feeder federate's demand channel reads `aggregate_grid_interchange_w`, never this topic. |
+| `aggregate_grid_interchange_w` | W | The sum of the per-dwelling grid interchanges: exactly 0.0 when every dwelling is islanded (a sum of the per-breaker zeros). The fleet's demand channel. |
+| `aggregate_reactive_var` | var | The sum of the per-dwelling reactive powers. |
+| `aggregate_zone_temp_c` | degC | The mean zone air temperature across the fleet. |
+| `aggregate_soc_pct` | pct | The mean equipment state of charge across the fleet. Every equipment contributes and a non-storage equipment's SOC reads 0.0, so the mean is diluted by the non-storage roster (one battery at 50 percent beside nine non-storage units publishes 5, not 50). |
 
 Subscriptions:
 

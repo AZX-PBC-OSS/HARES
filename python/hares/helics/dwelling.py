@@ -6,10 +6,11 @@ Expected HELICS publication units
 All publication keys and their expected physical units:
 
 ``{prefix}{fed_name}/total_power_w``
-    Active power in kilowatts (kW).
+    Active power in watts (W): the premise balance (import positive,
+    export negative).
 
 ``{prefix}{fed_name}/reactive_power_var``
-    Reactive power in kilovolt-amperes reactive (kvar).
+    Reactive power in volt-amperes reactive (var).
 
 ``{prefix}{fed_name}/grid_interchange_w``
     The grid interchange in watts (W): exactly 0.0 whenever the utility is
@@ -34,42 +35,52 @@ All publication keys and their expected physical units:
     Zone indoor air temperature in degrees Celsius (degC).
 
 ``{prefix}{fed_name}/equipment_{index}/power_w``
-    Per-equipment active power in kilowatts (kW).
+    Per-equipment active power in watts (W).
 
 ``{prefix}{fed_name}/equipment_{index}/soc_pct``
-    Per-equipment state of charge as a percentage (0-100).
+    Per-equipment state of charge as a percentage (0-100). Equipment
+    whose core output carries no SOC state publishes 0.0: the telemetry
+    substitutes 0.0 for an absent SOC, so a non-storage topic's 0.0
+    means "no SOC state", not "empty".
 
 ``{prefix}{fed_name}/equipment_{index}/operating_mode``
     Per-equipment operating mode as a numeric code (see ``OperatingMode`` in
     ``hares-types``).
 
 ``{prefix}{fed_name}/pv_generation_w``
-    PV generation in kilowatts (kW), identified heuristically from equipment
+    PV generation in watts (W), identified heuristically from equipment
     name and negative power.
 
 Expected HELICS subscription units
 -----------------------------------
 
 ``grid/voltage`` (or caller-provided topic)
-    Grid voltage in per-unit (pu). Expected range: 0.5–1.5 pu.
-    Voltage values in absolute volts (e.g. 240) are out of range and will
-    trigger a diagnostic warning.  External federates must publish per-unit.
+    Grid voltage in per-unit (pu). The admitted set is the contract's
+    (docs/cosim.md): exactly 0.0 is the utility-outage signal, and a
+    finite value in [0.5, 1.5] pu is a connected grid voltage (the band
+    brownout sags live in). Everything else - a negative value, a value
+    in (0.0, 0.5) below the band floor, above 1.5, or a non-finite
+    value - is refused: a value in absolute volts (e.g. 240) is out of
+    range and will trigger a diagnostic warning. External federates
+    must publish per-unit.
 
 ``grid/price`` (or caller-provided topic)
-    Real-time electricity price in currency/kWh. Must be non-negative;
-    a negative value triggers a diagnostic warning.
+    Real-time electricity price in currency/kWh. A non-finite value is
+    refused (never applied, counted); a negative value is a real
+    scenario: it is warned, counted, and applied.
 
 ``grid/frequency`` (or caller-provided topic)
-    Grid frequency in Hz. Expected range: 40-80 Hz (the band the engine's
-    setter admits: both nominal frequencies' governing event ranges with
-    transient headroom). A value out of range triggers a diagnostic
-    warning and is not applied; the dwelling keeps its last valid
-    frequency. Without a frequency subscription the engine runs the
-    60 Hz constant.
+    Grid frequency in Hz. A finite value in [40, 80] Hz is applied (the
+    band the engine's setter admits: both nominal frequencies' governing
+    event ranges with transient headroom). A value out of range or
+    non-finite triggers a diagnostic warning and is not applied; the
+    dwelling keeps its last valid frequency. Without a frequency
+    subscription the engine runs the 60 Hz constant.
 """
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -77,6 +88,7 @@ import json
 import logging
 import math
 from itertools import chain
+import sys
 from typing import Any, TypedDict
 
 try:
@@ -86,7 +98,7 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
         "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
-from hares import ControlSignal
+from hares import ControlSignal, SimulationConfig
 from hares._hares import MAX_TANK_THERMOSTAT_BAND_C
 from hares._hares import Dwelling as PyDwelling
 
@@ -107,6 +119,24 @@ _LOG = logging.getLogger(__name__)
 # the external federate (publishing in volts) and HARES (expecting per-unit).
 VOLTAGE_PU_MIN = 0.5
 VOLTAGE_PU_MAX = 1.5
+
+
+def voltage_pu_admitted(voltage_pu: float) -> bool:
+    """The contract's admitted voltage set (docs/cosim.md): exactly ``0.0``
+    is the utility-outage signal (``Dwelling.set_grid_voltage(0.0)``'s own
+    value, the only way an outage enters the engine through the topic), and
+    a finite value in ``[VOLTAGE_PU_MIN, VOLTAGE_PU_MAX]`` pu is a connected
+    grid voltage, the band brownout sags live in. Everything else - a
+    negative value, a value in ``(0.0, 0.5)`` below the band floor, a value
+    above ``VOLTAGE_PU_MAX``, or a non-finite value - is refused.
+
+    Finiteness is checked explicitly: a NaN fails ``voltage_pu < 0.5`` and
+    ``voltage_pu > 1.5`` alike (every IEEE comparison against a NaN is
+    false), so the range comparison alone would admit it.
+    """
+    return voltage_pu == 0.0 or (
+        math.isfinite(voltage_pu) and VOLTAGE_PU_MIN <= voltage_pu <= VOLTAGE_PU_MAX
+    )
 
 # Grid-frequency range guard: values outside [40, 80] Hz are not grid
 # frequencies a premise simulation should be fed and indicate a likely unit
@@ -456,6 +486,7 @@ class HELICSDwelling:
         self._federation_terminated = False
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_price_non_finite = False
         self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._range_violations_total = 0
@@ -744,6 +775,7 @@ class HELICSDwelling:
     def _read_subscriptions(self) -> None:
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_price_non_finite = False
         self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._update_mask = 0
@@ -793,17 +825,21 @@ class HELICSDwelling:
             if self._sub_voltage is not None and _update_by_sub.get(self._sub_voltage, False):
                 try:
                     voltage_pu = float(self._sub_voltage.double)
-                    if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
-                        # Unit-mismatch guard: a federate publishing absolute
-                        # volts (e.g. 240) instead of per-unit would inject a
-                        # physically absurd voltage into the simulation
-                        # (voltage-dependent ZIP loads scale with v², so 240 pu
-                        # multiplies load power by ~57,600x and destroys the
-                        # thermal solution). Flag and warn, but do NOT apply —
-                        # the dwelling keeps its last valid voltage.
+                    if not voltage_pu_admitted(voltage_pu):
+                        # Unit-mismatch and corruption guard: the refused
+                        # set is a federate publishing absolute volts (e.g.
+                        # 240) instead of per-unit (voltage-dependent ZIP
+                        # loads scale with v^2, so 240 pu multiplies load
+                        # power by ~57,600x and destroys the thermal
+                        # solution), a value in (0.0, 0.5) below the band
+                        # floor, and a non-finite value. Flag and warn, but
+                        # do NOT apply: the dwelling keeps its last valid
+                        # voltage (0.0 admitted is the outage signal, the
+                        # engine's own contract).
                         self._last_voltage_out_of_range = True
                         _LOG.warning(
-                            "Grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
+                            "Grid voltage %r pu outside the contract (exactly 0.0 = utility "
+                            "outage, or a finite value in [%.1f, %.1f] pu); "
                             "check that the external federate publishes per-unit (not volts). "
                             "Value not applied; keeping last valid voltage.",
                             voltage_pu,
@@ -818,29 +854,50 @@ class HELICSDwelling:
             if self._sub_price is not None and _update_by_sub.get(self._sub_price, False):
                 try:
                     price = float(self._sub_price.double)
-                    if price < 0.0:
-                        self._last_price_negative = True
+                    if not math.isfinite(price):
+                        # A non-finite price (NaN or infinity) is refused,
+                        # never applied: the engine's own setter rejects it
+                        # (a NaN price's comparisons are always false, so
+                        # the price actors' conditionals silently stop
+                        # firing), and the one-sided `price < 0.0` check
+                        # cannot catch it - finiteness is checked first,
+                        # never relied on the comparison to catch. Flagged
+                        # invalid and counted, the same refuse-and-count
+                        # contract the voltage and frequency channels
+                        # enforce.
+                        self._last_price_non_finite = True
                         _LOG.warning(
-                            "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                            "Price signal %r is not finite; expected a finite price in "
+                            "currency/kWh. Value not applied; keeping last valid price.",
                             price,
                         )
-                    self._dwelling.set_price_signal({"electricity_price": price})
+                    else:
+                        if price < 0.0:
+                            self._last_price_negative = True
+                            _LOG.warning(
+                                "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                                price,
+                            )
+                        self._dwelling.set_price_signal({"electricity_price": price})
                 except Exception as exc:
                     _LOG.warning("Failed to apply price signal: %s", exc)
 
             if self._sub_frequency is not None and _update_by_sub.get(self._sub_frequency, False):
                 try:
                     frequency_hz = float(self._sub_frequency.double)
-                    if frequency_hz < FREQUENCY_HZ_MIN or frequency_hz > FREQUENCY_HZ_MAX:
+                    if not math.isfinite(frequency_hz) or frequency_hz < FREQUENCY_HZ_MIN or frequency_hz > FREQUENCY_HZ_MAX:
                         # Unit/corruption guard: a value outside [40, 80] Hz
-                        # is not a grid frequency a premise simulation should
-                        # be fed. Flag and warn, but do NOT apply: the
+                        # is not a grid frequency a premise simulation
+                        # should be fed, and a non-finite value fails the
+                        # band comparison itself (every IEEE comparison
+                        # against a NaN is false), so finiteness is part of
+                        # the guard. Flag and warn, but do NOT apply: the
                         # dwelling keeps its last valid frequency, the same
                         # refuse-and-count contract the voltage channel
                         # enforces.
                         self._last_frequency_out_of_range = True
                         _LOG.warning(
-                            "Grid frequency %.3f Hz outside expected range [%.1f, %.1f]; "
+                            "Grid frequency %r Hz outside expected range [%.1f, %.1f]; "
                             "value not applied; keeping last valid frequency.",
                             frequency_hz,
                             FREQUENCY_HZ_MIN,
@@ -887,7 +944,7 @@ class HELICSDwelling:
                 self._range_violations_total += self._control_clamped
             if self._last_voltage_out_of_range:
                 self._range_violations_total += 1
-            if self._last_price_negative:
+            if self._last_price_negative or self._last_price_non_finite:
                 self._range_violations_total += 1
             if self._last_frequency_out_of_range:
                 self._range_violations_total += 1
@@ -1046,7 +1103,8 @@ class HELICSDwelling:
 
     @property
     def helics_voltage_valid(self) -> bool:
-        """True when the most recent voltage subscription was in [0.5, 1.5] pu."""
+        """True when the most recent voltage subscription was admitted: the
+        outage's exactly 0.0, or a finite value in [0.5, 1.5] pu."""
         return not self._last_voltage_out_of_range
 
     @property
@@ -1056,8 +1114,9 @@ class HELICSDwelling:
 
     @property
     def helics_price_valid(self) -> bool:
-        """True when the most recent price subscription was non-negative."""
-        return not self._last_price_negative
+        """True when the most recent price subscription was finite and
+        non-negative."""
+        return not (self._last_price_negative or self._last_price_non_finite)
 
     @property
     def helics_control_clamped(self) -> int:
@@ -1218,3 +1277,147 @@ class HELICSDwelling:
                 raise ValueError("Multi-equipment payload must be {str: dict}")
             entries.append((item_key, item_value))
         return entries
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the dwelling federate command's parser.
+
+    Every flag is explicit: the run's horizon (``--start``, ``--duration-s``,
+    ``--time-res-s``) has no default because a silently defaulted horizon
+    would misalign every federation the dwelling joins.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m hares.helics.dwelling",
+        description=(
+            "Run one HARES dwelling as a HELICS value federate: the command the "
+            "HELICS runner config launches (make_dwelling_federate_config emits it)."
+        ),
+    )
+    parser.add_argument("--name", required=True, help="The federate's name in the HELICS federation.")
+    parser.add_argument("--hpxml", required=True, help="The HPXML file the dwelling is built from.")
+    parser.add_argument("--weather", required=True, help="The EPW weather file path.")
+    parser.add_argument("--schedule", required=True, help="The schedule CSV path.")
+    parser.add_argument(
+        "--start",
+        required=True,
+        help="The run's start time, RFC 3339 with offset (local wall-clock).",
+    )
+    parser.add_argument("--duration-s", required=True, type=int, help="The run's length in seconds.")
+    parser.add_argument(
+        "--time-res-s", required=True, type=int, help="The timestep in seconds (the federation's period)."
+    )
+    parser.add_argument("--master-seed", type=int, default=0, help="The run's master RNG seed.")
+    parser.add_argument("--bldg-id", type=int, default=0, help="The dwelling's building id.")
+    parser.add_argument(
+        "--broker",
+        default="localhost",
+        help="The broker address (host or host:port or tcp://host:port).",
+    )
+    parser.add_argument(
+        "--core-type", default="zmq", help="The HELICS core transport (default: zmq)."
+    )
+    parser.add_argument(
+        "--time-offset-s",
+        type=float,
+        default=0.0,
+        help="The HELICS time offset in seconds (a positive offset steps this federate after an aggregator).",
+    )
+    parser.add_argument(
+        "--connect-timeout-s",
+        type=float,
+        default=DEFAULT_CONNECT_TIMEOUT_S,
+        help="The wall-clock seconds allowed for broker registration and entering executing mode.",
+    )
+    parser.add_argument(
+        "--grant-timeout-s",
+        type=float,
+        default=DEFAULT_GRANT_TIMEOUT_S,
+        help="The wall-clock seconds allowed for each time grant.",
+    )
+    parser.add_argument(
+        "--max-time-drift-tolerance-s",
+        type=float,
+        default=None,
+        help="The cumulative time drift tolerance in seconds; exceeding it raises (default: unbounded).",
+    )
+    return parser
+
+
+def federate_argument_names() -> frozenset[str]:
+    """The entry point's flag names without the leading dashes.
+
+    The runner's command builder validates every extra argument against this
+    set, so a misspelled or nonexistent flag is refused where the command is
+    built rather than surfacing as the child's argparse exit after the launch.
+    Derived from the parser itself: a flag added or removed here is in the
+    vocabulary the builder accepts with no second list to keep in step.
+    """
+    return frozenset(
+        action.dest.replace("_", "-")
+        for action in _build_parser()._actions
+        if action.dest != "help"
+    )
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Parse the dwelling federate command's arguments (see ``_build_parser``)."""
+    return _build_parser().parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The dwelling federate process's entry point.
+
+    Builds the dwelling from the named inputs, joins the federation at the
+    named broker, registers the contract's publications and subscriptions
+    (docs/cosim.md's topics), and runs the stepping loop to the horizon's
+    end. This is what the HELICS runner launches: a process that joins the
+    federation, registers, and publishes until its run completes.
+    """
+    opts = _parse_args(argv)
+    try:
+        config = SimulationConfig(
+            start_time=opts.start,
+            duration=opts.duration_s,
+            time_res=opts.time_res_s,
+            master_seed=opts.master_seed,
+        )
+        dwelling = PyDwelling.from_hpxml(
+            opts.hpxml,
+            opts.schedule,
+            opts.weather,
+            config=config,
+            bldg_id=opts.bldg_id,
+        )
+        dwelling.initialize()
+    except ValueError as exc:
+        # A bad input is the operator's fix to make, not a stack trace to
+        # read: the typed error names the file or field, and the exit code
+        # keeps the runner from treating the launch as a success. The
+        # horizon's own validation (an unparseable start, a non-positive
+        # duration) is the same class of failure.
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+    orchestrator = HELICSDwelling(
+        dwelling,
+        fed_name=opts.name,
+        broker_address=opts.broker,
+        core_type=opts.core_type,
+        time_offset_s=opts.time_offset_s,
+        connect_timeout_s=opts.connect_timeout_s,
+        grant_timeout_s=opts.grant_timeout_s,
+        max_time_drift_tolerance_s=opts.max_time_drift_tolerance_s,
+    )
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        control_topic="grid/control",
+        price_topic="grid/price",
+        frequency_topic="grid/frequency",
+    )
+    orchestrator.run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

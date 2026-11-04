@@ -6,31 +6,48 @@ Expected HELICS publication units
 All publication keys and their expected physical units:
 
 ``{prefix}{fed_name}/aggregate_power_w``
-    Aggregate active power across all dwellings in kilowatts (kW).
+    Aggregate active power across all dwellings in watts (W): the sum of
+    the per-dwelling premise balances. This is a premise quantity, not a
+    grid quantity: during an outage each islanded dwelling's balance is
+    the island's internal imbalance, so a feeder federate's demand
+    channel reads ``aggregate_grid_interchange_w``, never this topic.
 
 ``{prefix}{fed_name}/aggregate_reactive_var``
-    Aggregate reactive power across all dwellings in kilovolt-amperes reactive (kvar).
+    Aggregate reactive power across all dwellings in volt-amperes
+    reactive (var).
+
+``{prefix}{fed_name}/aggregate_grid_interchange_w``
+    Aggregate grid interchange across all dwellings in watts (W): the sum
+    of the per-dwelling grid interchanges, exactly 0.0 when every
+    dwelling is islanded (each islanded dwelling's interchange is
+    exactly 0.0 at the open breaker). This is the fleet's demand channel.
 
 ``{prefix}{fed_name}/dwelling_{index}/total_power_w``
-    Per-dwelling active power in kilowatts (kW).
+    Per-dwelling active power in watts (W).
 
 ``{prefix}{fed_name}/dwelling_{index}/reactive_power_var``
-    Per-dwelling reactive power in kilovolt-amperes reactive (kvar).
+    Per-dwelling reactive power in volt-amperes reactive (var).
 
 ``{prefix}{fed_name}/aggregate_zone_temp_c``
     Mean zone indoor air temperature across the fleet in degrees Celsius (degC).
 
 ``{prefix}{fed_name}/aggregate_soc_pct``
-    Mean equipment state of charge across the fleet as a percentage (0-100).
+    Mean equipment state of charge across the fleet as a percentage
+    (0-100). Every equipment contributes, and equipment whose core
+    output carries no SOC state publishes 0.0, so the mean is diluted by
+    the non-storage roster: one battery at 50 percent beside nine
+    non-storage units publishes 5, not 50.
 
 ``{prefix}{fed_name}/dwelling_{index}/zone_{zone_index}/temp_air_c``
     Per-dwelling zone indoor air temperature in degrees Celsius (degC).
 
 ``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/power_w``
-    Per-dwelling, per-equipment active power in kilowatts (kW).
+    Per-dwelling, per-equipment active power in watts (W).
 
 ``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/soc_pct``
     Per-dwelling, per-equipment state of charge as a percentage (0-100).
+    As with the aggregate: equipment with no SOC state publishes 0.0
+    ("no SOC state", not "empty").
 
 ``{prefix}{fed_name}/dwelling_{index}/equipment_{equip_index}/operating_mode``
     Per-dwelling, per-equipment operating mode as a numeric code (see
@@ -44,22 +61,32 @@ Expected HELICS subscription units
 -----------------------------------
 
 ``grid/voltage`` (or caller-provided fleet-wide topic)
-    Grid voltage in per-unit (pu). Expected range: 0.5–1.5 pu.
+    Grid voltage in per-unit (pu). The admitted set is the contract's
+    (docs/cosim.md): exactly 0.0 is the utility-outage signal, and a
+    finite value in [0.5, 1.5] pu is a connected grid voltage.
 
 Per-dwelling voltage topics (caller-provided)
-    Same per-unit voltage range (0.5–1.5 pu).
+    Same admitted set as the fleet-wide topic (0.0 outage, [0.5, 1.5] pu
+    connected).
+
+``grid/frequency`` (or caller-provided fleet-wide topic)
+    Grid frequency in Hz. A finite value in [40, 80] Hz is applied to
+    every dwelling; out-of-range or non-finite values are refused,
+    counted, and never applied.
 
 ``grid/price`` (or caller-provided fleet-wide topic)
     Real-time electricity price in currency/kWh, applied to every
-    dwelling. Must be non-negative; a negative value triggers a
-    diagnostic warning. The boundary behavior is the dwelling federate's
-    exactly (one boundary behavior; see docs/cosim.md).
+    dwelling. A non-finite value is refused (never applied, counted); a
+    negative value is a real scenario: warned, counted, and applied. The
+    boundary behavior is the dwelling federate's exactly (one boundary
+    behavior; see docs/cosim.md).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -74,7 +101,19 @@ from hares import ControlSignal
 from hares._hares import SteppableFleet as PySteppableFleet
 
 from ._types import HelicsFederateInfoLike, HelicsPublicationLike, HelicsSubscriptionLike, is_json_object
-from .dwelling import HELICSPublicationConfig, HELICSSubscriptionConfig, STALE_SUBSCRIPTION_THRESHOLD, VOLTAGE_PU_MAX, VOLTAGE_PU_MIN, handle_time_grant, set_publication_info, validate_control_signal
+from .dwelling import (
+    HELICSPublicationConfig,
+    HELICSSubscriptionConfig,
+    FREQUENCY_HZ_MAX,
+    FREQUENCY_HZ_MIN,
+    STALE_SUBSCRIPTION_THRESHOLD,
+    VOLTAGE_PU_MAX,
+    VOLTAGE_PU_MIN,
+    handle_time_grant,
+    set_publication_info,
+    validate_control_signal,
+    voltage_pu_admitted,
+)
 from .federate import (
     DEFAULT_CONNECT_TIMEOUT_S,
     DEFAULT_GRANT_TIMEOUT_S,
@@ -109,6 +148,11 @@ class HELICSFleet:
         grant_timeout_s: Wall-clock seconds allowed for each HELICS time
             grant.  A stalled peer federate raises ``TimeoutError`` instead of
             blocking ``run()`` forever.
+        max_time_drift_tolerance_s: Cumulative absolute time drift in seconds
+            the federate tolerates before raising. ``None`` (default) leaves
+            the drift unbounded and only accumulated. The tolerance is the
+            dwelling federate's own rule (docs/cosim.md's drift clause: the
+            ONE boundary behavior, time included).
     """
 
     def __init__(
@@ -120,6 +164,7 @@ class HELICSFleet:
         time_offset_s: float = 0.0,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         grant_timeout_s: float = DEFAULT_GRANT_TIMEOUT_S,
+        max_time_drift_tolerance_s: float | None = None,
     ) -> None:
         self._fleet = fleet
         self._fed_name = fed_name
@@ -148,6 +193,7 @@ class HELICSFleet:
 
         self._pub_aggregate_power: HelicsPublicationLike | None = None
         self._pub_aggregate_reactive: HelicsPublicationLike | None = None
+        self._pub_aggregate_interchange: HelicsPublicationLike | None = None
         self._pub_dwelling_power: list[HelicsPublicationLike] = []
         self._pub_dwelling_reactive: list[HelicsPublicationLike] = []
         self._pub_dwelling_interchange: list[HelicsPublicationLike] = []
@@ -167,6 +213,7 @@ class HELICSFleet:
         self._sub_voltage_dwelling: list[HelicsSubscriptionLike] = []
         self._sub_control: HelicsSubscriptionLike | None = None
         self._sub_price: HelicsSubscriptionLike | None = None
+        self._sub_frequency: HelicsSubscriptionLike | None = None
 
         self._publication_configs: list[HELICSPublicationConfig] = []
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
@@ -175,6 +222,8 @@ class HELICSFleet:
         self._last_voltage_all_out_of_range = False
         self._last_per_dwelling_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_price_non_finite = False
+        self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._range_violations_total = 0
         self._stale_counts: dict[str, int] = {}
@@ -182,6 +231,9 @@ class HELICSFleet:
         self._stale_subscription_count: int = 0
         self._required_publication_keys: set[str] = set()
         self._required_subscription_keys: set[str] = set()
+
+        self._max_time_drift_tolerance_s = max_time_drift_tolerance_s
+        self._time_drift_cumulative_s = 0.0
 
     def register_publications(
         self,
@@ -206,17 +258,23 @@ class HELICSFleet:
         """
         aggregate_power_name = "aggregate_power_w"
         aggregate_reactive_name = "aggregate_reactive_var"
+        aggregate_interchange_name = "aggregate_grid_interchange_w"
         self._pub_aggregate_power = self._fed.register_publication(aggregate_power_name, "double")
         self._pub_aggregate_reactive = self._fed.register_publication(aggregate_reactive_name, "double")
+        self._pub_aggregate_interchange = self._fed.register_publication(
+            aggregate_interchange_name, "double"
+        )
 
         set_publication_info(self._pub_aggregate_power, "units=W")
         set_publication_info(self._pub_aggregate_reactive, "units=VAR")
+        set_publication_info(self._pub_aggregate_interchange, "units=W")
 
         self._pub_dwelling_power = []
         self._pub_dwelling_reactive = []
         configs: list[HELICSPublicationConfig] = [
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_power_name}"),
             HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_reactive_name}"),
+            HELICSPublicationConfig(key=f"{prefix}{self._fed_name}/{aggregate_interchange_name}"),
         ]
 
         # Per-dwelling power and reactive (existing)
@@ -354,9 +412,14 @@ class HELICSFleet:
         per_dwelling_voltage_topics: list[str] | None = None,
         control_topic: str | None = None,
         price_topic: str | None = None,
+        frequency_topic: str | None = None,
         required_keys: set[str] | None = None,
     ) -> list[HELICSSubscriptionConfig]:
-        """Register fleet-wide/per-dwelling voltage, control, and price subscriptions.
+        """Register fleet-wide/per-dwelling voltage, control, price, and frequency subscriptions.
+
+        The registration order is the update mask's bit order: the
+        fleet-wide voltage, the per-dwelling voltages, then control, then
+        price, then frequency.
 
         Args:
             voltage_topic: Fleet-wide voltage topic (applied to all dwellings).
@@ -365,6 +428,7 @@ class HELICSFleet:
                 provided -- they are **not** auto-derived from ``voltage_topic``.
             control_topic: JSON control topic for equipment setpoints.
             price_topic: Fleet-wide price topic (applied to all dwellings).
+            frequency_topic: Fleet-wide frequency topic (applied to all dwellings).
             required_keys: Optional set of fully-qualified subscription keys that
                 must be registered. After entering execution mode, any missing
                 required key is logged as an error.
@@ -401,6 +465,12 @@ class HELICSFleet:
         else:
             self._sub_price = None
 
+        if frequency_topic is not None:
+            self._sub_frequency = self._fed.register_subscription(frequency_topic, "double")
+            configs.append(HELICSSubscriptionConfig(key=frequency_topic, type="double"))
+        else:
+            self._sub_frequency = None
+
         self._subscription_configs = configs
         if required_keys is not None:
             self._required_subscription_keys = set(required_keys)
@@ -433,6 +503,7 @@ class HELICSFleet:
             self._verify_helics_counts()
             sim_time_s = 0.0
             step_count = 0
+            self._time_drift_cumulative_s = 0.0
             while not self._fleet.is_finished():
                 if step_count >= self._total_steps:
                     _LOG.warning(
@@ -451,11 +522,28 @@ class HELICSFleet:
                     self._federation_terminated = True
                     break
 
+                # The dwelling federate's own drift rule (docs/cosim.md's
+                # drift clause): the absolute difference between requested
+                # and granted times accumulates across the run, and a
+                # tolerance's breach raises rather than silently skewing
+                # the federation.
+                step_drift = abs(granted - exit_time_s)
+                self._time_drift_cumulative_s += step_drift
+                step_count += 1
+                if (
+                    self._max_time_drift_tolerance_s is not None
+                    and self._time_drift_cumulative_s > self._max_time_drift_tolerance_s
+                ):
+                    raise RuntimeError(
+                        f"Time drift {self._time_drift_cumulative_s:.9f}s "
+                        f"exceeds tolerance {self._max_time_drift_tolerance_s:.9f}s "
+                        f"at step {step_count}"
+                    )
+
                 self._read_subscriptions()
                 self._fleet.step()
                 self._publish_results()
 
-                step_count += 1
                 sim_time_s = exit_time_s
             # Signal completion to the HELICS federation. A federate that has
             # no further time steps must inform the broker so it can coordinate
@@ -511,15 +599,18 @@ class HELICSFleet:
         self._last_voltage_all_out_of_range = False
         self._last_per_dwelling_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_price_non_finite = False
+        self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._update_mask = 0
         self._stale_subscription_count = 0
 
         # Track stale subscription counts and build update mask.
-        # Bits match _subscription_configs order: bit 0 = fleet-wide voltage,
-        # bits 1..N = per-dwelling voltages, then price, then control last.
-        # is_updated() is called exactly once per subscription so that stale
-        # tracking and business logic share the same result.
+        # Bits match _subscription_configs order (register_subscriptions'
+        # registration order): bit 0 = fleet-wide voltage, bits 1..N =
+        # per-dwelling voltages, then control, then price, then frequency
+        # last. is_updated() is called exactly once per subscription so
+        # that stale tracking and business logic share the same result.
         _sub_objs: list[HelicsSubscriptionLike] = []
         if self._sub_voltage_all is not None:
             _sub_objs.append(self._sub_voltage_all)
@@ -528,6 +619,8 @@ class HELICSFleet:
             _sub_objs.append(self._sub_control)
         if self._sub_price is not None:
             _sub_objs.append(self._sub_price)
+        if self._sub_frequency is not None:
+            _sub_objs.append(self._sub_frequency)
 
         _updates: list[bool] = []
         for sub_obj in _sub_objs:
@@ -558,14 +651,19 @@ class HELICSFleet:
             if self._sub_voltage_all is not None and _update_by_sub.get(self._sub_voltage_all, False):
                 try:
                     voltage_pu = float(self._sub_voltage_all.double)
-                    if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
+                    if not voltage_pu_admitted(voltage_pu):
                         # The ONE boundary behavior (the dwelling federate's
-                        # exactly): out-of-band values are flagged, counted
-                        # and never applied; the dwellings keep their last
-                        # valid voltage.
+                        # exactly): the refused set - a negative value, a
+                        # value in (0.0, 0.5) below the band floor, a value
+                        # above 1.5, a non-finite value - is flagged,
+                        # counted and never applied; the dwellings keep
+                        # their last valid voltage. Exactly 0.0 admitted is
+                        # the utility-outage signal, the engine's own
+                        # contract.
                         self._last_voltage_all_out_of_range = True
                         _LOG.warning(
-                            "Fleet-wide grid voltage %.3f pu outside expected range [%.1f, %.1f]; "
+                            "Fleet-wide grid voltage %r pu outside the contract (exactly 0.0 = "
+                            "utility outage, or a finite value in [%.1f, %.1f] pu); "
                             "check that the external federate publishes per-unit (not volts). "
                             "Value not applied; keeping last valid voltage.",
                             voltage_pu,
@@ -581,12 +679,15 @@ class HELICSFleet:
                 if _update_by_sub.get(subscription, False):
                     try:
                         voltage_pu = float(subscription.double)
-                        if voltage_pu < VOLTAGE_PU_MIN or voltage_pu > VOLTAGE_PU_MAX:
-                            # The ONE boundary behavior: out-of-band values
-                            # are flagged, counted and never applied.
+                        if not voltage_pu_admitted(voltage_pu):
+                            # The ONE boundary behavior: out-of-band and
+                            # non-finite values are flagged, counted and
+                            # never applied; exactly 0.0 admitted is the
+                            # utility-outage signal.
                             self._last_per_dwelling_voltage_out_of_range = True
                             _LOG.warning(
-                                "Grid voltage for dwelling %d %.3f pu outside expected range [%.1f, %.1f]; "
+                                "Grid voltage for dwelling %d %r pu outside the contract (exactly "
+                                "0.0 = utility outage, or a finite value in [%.1f, %.1f] pu); "
                                 "value not applied; keeping last valid voltage.",
                                 dwelling_index,
                                 voltage_pu,
@@ -601,19 +702,52 @@ class HELICSFleet:
             if self._sub_price is not None and _update_by_sub.get(self._sub_price, False):
                 try:
                     price = float(self._sub_price.double)
-                    # The dwelling federate's price behavior, applied
-                    # exactly: a negative price warns, counts and is
-                    # still applied (a negative tariff is a real
-                    # scenario; the warning is the diagnostic).
-                    if price < 0.0:
-                        self._last_price_negative = True
+                    if not math.isfinite(price):
+                        # The dwelling federate's price behavior, applied
+                        # exactly: a non-finite price (NaN or infinity)
+                        # fails the one-sided comparison itself and is
+                        # refused here before the setter, flagged invalid
+                        # and counted, never applied.
+                        self._last_price_non_finite = True
                         _LOG.warning(
-                            "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                            "Price signal %r is not finite; expected a finite price in "
+                            "currency/kWh. Value not applied; keeping last valid price.",
                             price,
                         )
-                    self._fleet.set_price_signal_all(price)
+                    else:
+                        # A negative price warns, counts and is still
+                        # applied (a negative tariff is a real scenario;
+                        # the warning is the diagnostic).
+                        if price < 0.0:
+                            self._last_price_negative = True
+                            _LOG.warning(
+                                "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                                price,
+                            )
+                        self._fleet.set_price_signal_all(price)
                 except Exception as exc:
                     _LOG.warning("Failed to apply price signal: %s", exc)
+
+            if self._sub_frequency is not None and _update_by_sub.get(self._sub_frequency, False):
+                try:
+                    frequency_hz = float(self._sub_frequency.double)
+                    if not math.isfinite(frequency_hz) or frequency_hz < FREQUENCY_HZ_MIN or frequency_hz > FREQUENCY_HZ_MAX:
+                        # The ONE boundary behavior on the fleet's own
+                        # frequency channel: a value outside [40, 80] Hz or
+                        # non-finite is flagged, counted and never applied;
+                        # the dwellings keep their last valid frequency.
+                        self._last_frequency_out_of_range = True
+                        _LOG.warning(
+                            "Grid frequency %r Hz outside expected range [%.1f, %.1f]; "
+                            "value not applied; keeping last valid frequency.",
+                            frequency_hz,
+                            FREQUENCY_HZ_MIN,
+                            FREQUENCY_HZ_MAX,
+                        )
+                    else:
+                        self._fleet.set_frequency_all(frequency_hz)
+                except Exception as exc:
+                    _LOG.warning("Failed to apply grid frequency: %s", exc)
 
             if self._sub_control is None or not _update_by_sub.get(self._sub_control, False):
                 return
@@ -654,7 +788,9 @@ class HELICSFleet:
                 self._range_violations_total += 1
             if self._last_per_dwelling_voltage_out_of_range:
                 self._range_violations_total += 1
-            if self._last_price_negative:
+            if self._last_price_negative or self._last_price_non_finite:
+                self._range_violations_total += 1
+            if self._last_frequency_out_of_range:
                 self._range_violations_total += 1
 
     def _verify_registration_completeness(self) -> tuple[set[str], set[str]]:
@@ -728,6 +864,7 @@ class HELICSFleet:
     def _publish_results(self) -> None:
         aggregate_power_w = 0.0
         aggregate_reactive_var = 0.0
+        aggregate_interchange_w = 0.0
         total_zone_temp = 0.0
         total_zone_count = 0
         total_soc = 0.0
@@ -753,10 +890,16 @@ class HELICSFleet:
             # attribute access: a telemetry object without the grid-facing
             # fields must fail loudly here, never silently publish a
             # stale-quantity substitute.
+            interchange_w = float(telemetry.grid_interchange_w)
             if dwelling_index < len(self._pub_dwelling_interchange):
-                self._pub_dwelling_interchange[dwelling_index].publish(
-                    float(telemetry.grid_interchange_w)
-                )
+                self._pub_dwelling_interchange[dwelling_index].publish(interchange_w)
+            # The fleet's demand channel (docs/cosim.md): the summed grid
+            # interchange, not the summed premise balance. An islanded
+            # dwelling's interchange is exactly 0.0 at the open breaker, so
+            # an all-islanded fleet's aggregate reads exactly 0.0 on bits
+            # (a sum of zeros), and the islands' internal imbalances never
+            # surface as a phantom grid load.
+            aggregate_interchange_w += interchange_w
             if dwelling_index < len(self._pub_dwelling_islanded):
                 self._pub_dwelling_islanded[dwelling_index].publish(
                     1.0 if telemetry.islanded else 0.0
@@ -811,9 +954,12 @@ class HELICSFleet:
             raise RuntimeError("Publications are not registered; call register_publications() first")
         self._pub_aggregate_power.publish(aggregate_power_w)
         self._pub_aggregate_reactive.publish(aggregate_reactive_var)
+        if self._pub_aggregate_interchange is None:
+            raise RuntimeError("Publications are not registered; call register_publications() first")
+        self._pub_aggregate_interchange.publish(aggregate_interchange_w)
 
         _published_count = (
-            2  # aggregate power + reactive
+            3  # aggregate power + reactive + grid interchange
             + len(self._pub_dwelling_power)
             + len(self._pub_dwelling_reactive)
             + sum(len(pubs) for pubs in self._pub_dwelling_zone_temp)
@@ -921,18 +1067,27 @@ class HELICSFleet:
 
     @property
     def helics_voltage_all_valid(self) -> bool:
-        """True when the most recent fleet-wide voltage subscription was in [0.5, 1.5] pu."""
+        """True when the most recent fleet-wide voltage subscription was
+        admitted: the outage's exactly 0.0, or a finite value in [0.5, 1.5] pu."""
         return not self._last_voltage_all_out_of_range
 
     @property
     def per_dwelling_voltage_valid(self) -> bool:
-        """True when all per-dwelling voltage subscriptions were in [0.5, 1.5] pu this timestep."""
+        """True when all per-dwelling voltage subscriptions were admitted this
+        timestep (the outage's exactly 0.0, or a finite value in [0.5, 1.5] pu)."""
         return not self._last_per_dwelling_voltage_out_of_range
 
     @property
+    def helics_frequency_valid(self) -> bool:
+        """True when the most recent frequency subscription was a finite value
+        in [40, 80] Hz."""
+        return not self._last_frequency_out_of_range
+
+    @property
     def helics_price_valid(self) -> bool:
-        """True when the most recent price subscription was non-negative."""
-        return not self._last_price_negative
+        """True when the most recent price subscription was finite and
+        non-negative."""
+        return not (self._last_price_negative or self._last_price_non_finite)
 
     @property
     def helics_control_clamped(self) -> int:
@@ -941,14 +1096,20 @@ class HELICSFleet:
 
     @property
     def helics_range_violations_total(self) -> int:
-        """Cumulative count of all range violations (voltage, price, control) across the run."""
+        """Cumulative count of all range violations (voltage, price, frequency, control) across the run."""
         return self._range_violations_total
+
+    @property
+    def time_drift_cumulative_s(self) -> float:
+        """Cumulative absolute time drift in seconds accumulated across the run."""
+        return self._time_drift_cumulative_s
 
     def get_diagnostic_row(self) -> dict[str, object]:
         """Return a dict of HELICS diagnostic fields for this timestep.
 
         Keys: ``helics_voltage_all_valid`` (bool), ``per_dwelling_voltage_valid`` (bool),
-        ``helics_price_valid`` (bool), ``helics_control_clamped`` (int),
+        ``helics_frequency_valid`` (bool), ``helics_price_valid`` (bool),
+        ``helics_control_clamped`` (int),
         ``helics_range_violations_total`` (int),
         ``helics_stale_subscription_count`` (int),
         ``helics_update_mask`` (int).
@@ -958,6 +1119,7 @@ class HELICSFleet:
         return {
             "helics_voltage_all_valid": self.helics_voltage_all_valid,
             "per_dwelling_voltage_valid": self.per_dwelling_voltage_valid,
+            "helics_frequency_valid": self.helics_frequency_valid,
             "helics_price_valid": self.helics_price_valid,
             "helics_control_clamped": self.helics_control_clamped,
             "helics_range_violations_total": self.helics_range_violations_total,

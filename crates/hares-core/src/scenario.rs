@@ -160,7 +160,7 @@ mod tests {
     use crate::dwelling::{Dwelling, DwellingConfig};
     use chrono::TimeZone;
     use hares_io::SimulationConfig;
-    use hares_types::ScenarioSpec;
+    use hares_types::{ScenarioSpec, ScenarioUnit};
     use std::path::PathBuf;
 
     fn test_sim_config() -> SimulationConfig {
@@ -365,7 +365,7 @@ mod tests {
             name: "non-object".to_string(),
             parameters: vec![hares_types::ScenarioParameter {
                 name: "wh_capacity".to_string(),
-                unit: "W".to_string(),
+                unit: ScenarioUnit::W,
                 target: hares_types::ScenarioTarget::Override {
                     equipment: "Electric Resistance Water Heater".to_string(),
                     field: "heating_capacity_w".to_string(),
@@ -408,7 +408,7 @@ mod tests {
             name: "entry-shape".to_string(),
             parameters: vec![hares_types::ScenarioParameter {
                 name: "mel_multiplier".to_string(),
-                unit: "fraction".to_string(),
+                unit: ScenarioUnit::Fraction,
                 target: hares_types::ScenarioTarget::Override {
                     equipment: "MELs".to_string(),
                     field: "usage_multiplier".to_string(),
@@ -564,7 +564,7 @@ mod tests {
             parameters: vec![
                 hares_types::ScenarioParameter {
                     name: "wh_capacity".to_string(),
-                    unit: "W".to_string(),
+                    unit: ScenarioUnit::W,
                     target: hares_types::ScenarioTarget::Override {
                         equipment: "Electric Resistance Water Heater".to_string(),
                         field: "heating_capacity_w".to_string(),
@@ -577,7 +577,7 @@ mod tests {
                 },
                 hares_types::ScenarioParameter {
                     name: "bedrooms".to_string(),
-                    unit: "count".to_string(),
+                    unit: ScenarioUnit::Count,
                     target: hares_types::ScenarioTarget::Patch {
                         field: "number_of_bedrooms".to_string(),
                     },
@@ -631,7 +631,7 @@ mod tests {
             name: "unknown-field".to_string(),
             parameters: vec![hares_types::ScenarioParameter {
                 name: "capacity".to_string(),
-                unit: "W".to_string(),
+                unit: ScenarioUnit::W,
                 target: hares_types::ScenarioTarget::Override {
                     equipment: "Electric Resistance Water Heater".to_string(),
                     field: "no_such_field".to_string(),
@@ -687,7 +687,7 @@ mod tests {
             parameters: vec![
                 hares_types::ScenarioParameter {
                     name: "wh_setpoint".to_string(),
-                    unit: "C".to_string(),
+                    unit: ScenarioUnit::C,
                     target: hares_types::ScenarioTarget::Override {
                         equipment: "Electric Resistance Water Heater".to_string(),
                         field: "setpoint_c".to_string(),
@@ -700,7 +700,7 @@ mod tests {
                 },
                 hares_types::ScenarioParameter {
                     name: "wh_capacity".to_string(),
-                    unit: "W".to_string(),
+                    unit: ScenarioUnit::W,
                     target: hares_types::ScenarioTarget::Override {
                         equipment: "Electric Resistance Water Heater".to_string(),
                         field: "heating_capacity_w".to_string(),
@@ -717,7 +717,7 @@ mod tests {
                 },
                 hares_types::ScenarioParameter {
                     name: "bedrooms".to_string(),
-                    unit: "count".to_string(),
+                    unit: ScenarioUnit::Count,
                     target: hares_types::ScenarioTarget::Patch {
                         field: "number_of_bedrooms".to_string(),
                     },
@@ -813,7 +813,7 @@ mod tests {
         let member = |name: &str, load: &str, distribution: hares_types::ScenarioDistribution| {
             hares_types::ScenarioParameter {
                 name: name.to_string(),
-                unit: "fraction".to_string(),
+                unit: ScenarioUnit::Fraction,
                 target: hares_types::ScenarioTarget::Override {
                     equipment: load.to_string(),
                     field: "usage_multiplier".to_string(),
@@ -916,7 +916,7 @@ mod tests {
             name: "wildcard-capacity".to_string(),
             parameters: vec![hares_types::ScenarioParameter {
                 name: "capacity".to_string(),
-                unit: "W".to_string(),
+                unit: ScenarioUnit::W,
                 target: hares_types::ScenarioTarget::Override {
                     equipment: "all".to_string(),
                     field: "heating_capacity_w".to_string(),
@@ -980,7 +980,7 @@ mod tests {
             name: "autosized-capacity".to_string(),
             parameters: vec![hares_types::ScenarioParameter {
                 name: "capacity".to_string(),
-                unit: "W".to_string(),
+                unit: ScenarioUnit::W,
                 target: hares_types::ScenarioTarget::Override {
                     equipment: "Electric Resistance Water Heater".to_string(),
                     field: "heating_capacity_w".to_string(),
@@ -1063,7 +1063,7 @@ mod tests {
             name: "envelope".to_string(),
             parameters: vec![hares_types::ScenarioParameter {
                 name: "r_scale".to_string(),
-                unit: "fraction".to_string(),
+                unit: ScenarioUnit::Fraction,
                 target: hares_types::ScenarioTarget::Override {
                     equipment: "envelope".to_string(),
                     field: "opaque_r_scale".to_string(),
@@ -1149,7 +1149,7 @@ mod tests {
             name: "wildcard".to_string(),
             parameters: vec![hares_types::ScenarioParameter {
                 name: "load_multiplier".to_string(),
-                unit: "fraction".to_string(),
+                unit: ScenarioUnit::Fraction,
                 target: hares_types::ScenarioTarget::Override {
                     equipment: wildcard.to_string(),
                     field: "usage_multiplier".to_string(),

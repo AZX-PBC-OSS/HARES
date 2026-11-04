@@ -5,8 +5,11 @@ from __future__ import annotations
 import builtins
 import importlib
 import json
+import os
 from pathlib import Path
+import shlex
 import socket
+import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -375,6 +378,8 @@ def test_make_dwelling_federate_config(monkeypatch: pytest.MonkeyPatch) -> None:
         weather_path=Path("/data/weather.epw"),
         schedule_path=Path("/data/schedule.csv"),
         broker="localhost:24007",
+        start="2019-01-01T00:00:00",
+        **{"duration-s": 86400, "time-res-s": 900},
     )
 
     assert fed.name == "house_1"
@@ -383,9 +388,12 @@ def test_make_dwelling_federate_config(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--weather=/data/weather.epw" in fed.exec_command
     assert "--schedule=/data/schedule.csv" in fed.exec_command
     assert "--broker=localhost:24007" in fed.exec_command
+    assert "--start=2019-01-01T00:00:00" in fed.exec_command
+    assert "--duration-s=86400" in fed.exec_command
+    assert "--time-res-s=900" in fed.exec_command
 
 
-def test_make_dwelling_federate_config_accepts_underscored_and_hyphenated_keys(
+def test_make_dwelling_federate_config_accepts_the_entry_points_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, runner_module, _ = _import_broker_runner_modules(monkeypatch)
@@ -395,12 +403,52 @@ def test_make_dwelling_federate_config_accepts_underscored_and_hyphenated_keys(
         hpxml_path=Path("/data/house.xml"),
         weather_path=Path("/data/weather.epw"),
         schedule_path=Path("/data/schedule.csv"),
-        broker_address="localhost:24007",
-        **{"core-type": "zmq"},
+        broker="localhost:24007",
+        start="2019-01-01T00:00:00",
+        **{"duration-s": 86400, "time-res-s": 900, "core-type": "zmq", "master-seed": 7},
     )
 
-    assert "--broker_address=localhost:24007" in fed.exec_command
+    assert "--broker=localhost:24007" in fed.exec_command
     assert "--core-type=zmq" in fed.exec_command
+    assert "--master-seed=7" in fed.exec_command
+
+
+def test_make_dwelling_federate_config_refuses_a_flag_the_entry_point_does_not_define(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key the entry point does not define is refused where the command is
+    built: the emitted ``--broker_address`` would otherwise pass this helper
+    and die at the child's argparse exit after the launch."""
+    _, runner_module, _ = _import_broker_runner_modules(monkeypatch)
+
+    with pytest.raises(ValueError, match="Unknown dwelling federate argument 'broker_address'"):
+        runner_module.make_dwelling_federate_config(
+            name="house_1",
+            hpxml_path=Path("/data/house.xml"),
+            weather_path=Path("/data/weather.epw"),
+            schedule_path=Path("/data/schedule.csv"),
+            broker_address="localhost:24007",
+            start="2019-01-01T00:00:00",
+            **{"duration-s": 86400, "time-res-s": 900},
+        )
+
+
+def test_make_dwelling_federate_config_refuses_a_command_without_its_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entry point has no default horizon, so a command without one exits
+    at its own required-argument check. The helper refuses it at build time
+    instead, naming the missing flags."""
+    _, runner_module, _ = _import_broker_runner_modules(monkeypatch)
+
+    with pytest.raises(ValueError, match="needs its horizon.*--start"):
+        runner_module.make_dwelling_federate_config(
+            name="house_1",
+            hpxml_path=Path("/data/house.xml"),
+            weather_path=Path("/data/weather.epw"),
+            schedule_path=Path("/data/schedule.csv"),
+            broker="localhost:24007",
+        )
 
 
 def test_make_dwelling_federate_config_quotes_paths_and_values(
@@ -414,6 +462,8 @@ def test_make_dwelling_federate_config_quotes_paths_and_values(
         weather_path=Path("/data/weather file.epw"),
         schedule_path=Path("/data/schedule file.csv"),
         broker="localhost; rm -rf /",
+        start="2019-01-01T00:00:00",
+        **{"duration-s": 86400, "time-res-s": 900},
     )
 
     assert "--name='house 1'" in fed.exec_command
@@ -436,6 +486,177 @@ def test_make_dwelling_federate_config_rejects_invalid_kwarg_key(
             schedule_path=Path("/data/schedule.csv"),
             **{"bad key": "x"},
         )
+
+
+@pytest.mark.timeout(120, method="thread")
+def test_the_emitted_dwelling_command_joins_the_federation() -> None:
+    """The runner's emitted command launches a process that JOINS the federation.
+
+    The emitted command is executed verbatim against a real in-process broker
+    (real helics, the repo's own package on the interpreter's path): the probe
+    federate on the same broker cannot enter executing mode until the dwelling
+    process registers and enters, and then receives the dwelling's published
+    power. The old no-op (a module with no entry point: it imported, exited 0,
+    and joined nothing) fails here at the probe's executing-mode timeout with
+    every peer waiting out its timeout behind it.
+    """
+    import helics
+
+    from conftest import HPXML, ROOT, SCHEDULE, WEATHER
+
+    broker_module = importlib.import_module("hares.helics.broker")
+    federate_module = importlib.import_module("hares.helics.federate")
+    runner_module = importlib.import_module("hares.helics.runner")
+
+    broker = broker_module.create_broker(n_federates=2, core_type="zmq", port=None)
+    probe: Any = None
+    try:
+        port = broker_module.get_broker_port(broker)
+        config = runner_module.make_dwelling_federate_config(
+            name="house_1",
+            hpxml_path=Path(HPXML),
+            weather_path=Path(WEATHER),
+            schedule_path=Path(SCHEDULE),
+            broker=f"127.0.0.1:{port}",
+            **{
+                "core-type": "zmq",
+                "start": "2019-01-01T00:00:00",
+                "duration-s": 1800,
+                "time-res-s": 900,
+            },
+        )
+
+        env = dict(os.environ)
+        env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
+        # The offline guard's sanctioned python child: the guard's own
+        # sitecustomize dir leads PYTHONPATH and the flag is set, so the
+        # child installs the same refusal (its zmq transport reaches
+        # loopback only, by construction).
+        from offline_guard import SITE_DIR
+
+        env["HARES_TESTS_OFFLINE"] = "1"
+        env["PYTHONPATH"] = os.pathsep.join([str(SITE_DIR), str(ROOT / "python")])
+        proc = subprocess.Popen(
+            shlex.split(config.exec_command),
+            cwd=str(ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            probe = federate_module.create_value_federate(
+                "probe_1",
+                "zmq",
+                f"127.0.0.1:{port}",
+                20.0,
+                lambda core_name, core_init: _probe_fedinfo("zmq", core_name, core_init),
+            )
+            sub_power = probe.register_subscription("house_1/total_power_w", "double")
+            federate_module.enter_executing_mode_with_timeout(probe, 20.0, "probe_1")
+
+            received: list[float] = []
+            granted = federate_module.request_time_with_timeout(probe, 60.0, 30.0, "probe_1")
+            step = 120.0
+            while granted < helics.HELICS_TIME_MAXTIME and len(received) < 2 and step <= 3600.0:
+                if sub_power.is_updated():
+                    received.append(float(sub_power.double))
+                granted = federate_module.request_time_with_timeout(probe, step, 30.0, "probe_1")
+                step += 60.0
+        finally:
+            stdout, stderr = proc.communicate(timeout=60)
+            if probe is not None:
+                probe.disconnect()
+
+        assert proc.returncode == 0, (
+            f"the emitted command must run to its horizon's end: rc={proc.returncode}\n"
+            f"stdout: {stdout.decode()[-2000:]}\nstderr: {stderr.decode()[-2000:]}"
+        )
+        assert received, (
+            "a joined dwelling federate publishes its power to the federation; "
+            "the probe received nothing"
+        )
+    finally:
+        broker_module.destroy_broker(broker)
+
+
+@pytest.mark.timeout(60, method="thread")
+def test_the_dwelling_command_reports_its_input_errors_without_a_traceback() -> None:
+    """The command's input errors are the typed error's exit, not a traceback.
+
+    The entry point builds the dwelling before it joins anything, so a bad
+    HPXML path and a bad horizon are configuration errors: the child prints
+    the typed message (the file it could not read, the field it could not
+    parse) and exits nonzero, rather than dumping the interpreter's frames
+    at the runner's log. No broker is created: the failures are before
+    registration.
+    """
+    from conftest import ROOT, SCHEDULE, WEATHER
+
+    env = dict(os.environ)
+    env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
+    from offline_guard import SITE_DIR
+
+    env["HARES_TESTS_OFFLINE"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join([str(SITE_DIR), str(ROOT / "python")])
+
+    def _run(hpxml: Path, start: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "hares.helics.dwelling",
+                "--name=house_1",
+                f"--hpxml={hpxml}",
+                f"--weather={WEATHER}",
+                f"--schedule={SCHEDULE}",
+                f"--start={start}",
+                "--duration-s=900",
+                "--time-res-s=900",
+            ],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            timeout=45,
+        )
+
+    bad_hpxml = _run(
+        ROOT / "tests/fixtures/hpxml/ochre_samples/no_such_file.xml",
+        "2019-01-01T00:00:00",
+    )
+    assert bad_hpxml.returncode != 0, "a bad HPXML path must fail the launch"
+    assert "Traceback" not in bad_hpxml.stderr.decode(), (
+        "the typed configuration error is the exit's message, not a traceback:\n"
+        f"{bad_hpxml.stderr.decode()}"
+    )
+    assert "no_such_file.xml" in bad_hpxml.stderr.decode(), (
+        f"the refusal names the file it could not read:\n{bad_hpxml.stderr.decode()}"
+    )
+
+    bad_start = _run(
+        ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml",
+        "not-a-timestamp",
+    )
+    assert bad_start.returncode != 0, "an unparseable start must fail the launch"
+    assert "Traceback" not in bad_start.stderr.decode(), (
+        "the horizon's typed validation is the exit's message, not a traceback:\n"
+        f"{bad_start.stderr.decode()}"
+    )
+    assert "invalid start_time format" in bad_start.stderr.decode(), (
+        f"the refusal names the start it could not parse:\n{bad_start.stderr.decode()}"
+    )
+
+
+def _probe_fedinfo(core_type: str, core_name: str, core_init: str) -> Any:
+    import helics
+
+    fedinfo = helics.helicsCreateFederateInfo()
+    helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, core_type)
+    helics.helicsFederateInfoSetCoreName(fedinfo, core_name)
+    helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init)
+    helics.helicsFederateInfoSetTimeProperty(
+        fedinfo, helics.HELICS_PROPERTY_TIME_PERIOD, 60.0
+    )
+    return fedinfo
 
 
 def test_destroy_broker_disconnects(monkeypatch: pytest.MonkeyPatch) -> None:

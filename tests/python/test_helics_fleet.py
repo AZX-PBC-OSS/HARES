@@ -180,6 +180,7 @@ class _FakeFleet:
         raise_on_step: int | None = None,
         zone_counts: list[int] | None = None,
         equip_counts: list[int] | None = None,
+        islanded: bool = False,
     ) -> None:
         self._log = log
         self._raise_on_step = raise_on_step
@@ -187,6 +188,7 @@ class _FakeFleet:
         self._time_res = 60.0
         self._zone_counts = zone_counts
         self._equip_counts = equip_counts
+        self._islanded = islanded
         self._power_steps = [
             [(1.0, 0.1), (2.0, 0.2), (3.0, 0.3)],
             [(1.5, 0.15), (2.5, 0.25), (3.5, 0.35)],
@@ -196,6 +198,7 @@ class _FakeFleet:
         self.grid_voltage_values: list[tuple[int, float]] = []
         self.applied_controls: list[tuple[int, str, Any]] = []
         self.price_signals: list[float] = []
+        self.frequency_values: list[float] = []
 
     def __len__(self) -> int:
         return len(self._zone_counts) if self._zone_counts is not None else 3
@@ -252,11 +255,16 @@ class _FakeFleet:
             "modes": [1.0] * equip_count,
         })
 
+        # The islanded fixture: the breaker is open, so the interchange reads
+        # exactly 0.0 while the premise balance continues (the island's
+        # internal imbalance).
+        interchange = 0.0 if self._islanded else p_kw
+
         return SimpleNamespace(
             total_power_w=p_kw,
             reactive_power_var=q_kvar,
-            grid_interchange_w=p_kw,
-            islanded=False,
+            grid_interchange_w=interchange,
+            islanded=self._islanded,
             bus_voltage_pu=1.0,
             island_unserved_w=0.0,
             island_excess_w=0.0,
@@ -276,6 +284,10 @@ class _FakeFleet:
     def set_price_signal_all(self, electricity_price: float) -> None:
         self.price_signals.append(electricity_price)
         self._log.append(("set_price_signal_all", electricity_price))
+
+    def set_frequency_all(self, frequency_hz: float) -> None:
+        self.frequency_values.append(frequency_hz)
+        self._log.append(("set_frequency_all", frequency_hz))
 
     def apply_control(self, dwelling_index: int, name: str, signal: Any) -> None:
         if name == "Unknown":
@@ -345,9 +357,14 @@ def test_helics_fleet_config_and_registration(monkeypatch: pytest.MonkeyPatch):
     assert fedinfo.property[fake_helics.HELICS_PROPERTY_TIME_PERIOD] == pytest.approx(0.0)
 
     pubs = orchestrator.register_publications(prefix="grid/")
+    # The aggregate grid interchange rides the aggregate pair: it is the
+    # fleet's demand channel (docs/cosim.md: the feeder reads the
+    # interchange, never the premise balance, which is the islands' phantom
+    # imbalance during an outage).
     assert [p.key for p in pubs] == [
         "grid/fleet_1/aggregate_power_w",
         "grid/fleet_1/aggregate_reactive_var",
+        "grid/fleet_1/aggregate_grid_interchange_w",
         "grid/fleet_1/dwelling_0/total_power_w",
         "grid/fleet_1/dwelling_0/reactive_power_var",
         "grid/fleet_1/dwelling_0/grid_interchange_w",
@@ -838,6 +855,242 @@ def test_per_dwelling_voltage_out_of_range_flagged_and_refused(
     orchestrator._sub_voltage_dwelling[0].push_double(0.97)
     orchestrator._read_subscriptions()
     assert fleet.grid_voltage_values == [(0, 0.97)]
+
+
+def test_fleet_voltage_zero_is_the_outage_signal_and_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `grid/voltage` topic's exactly 0.0 is the utility-outage signal on
+    both voltage channels (fleet-wide and per-dwelling).
+
+    The contract (docs/cosim.md): the outage enters the engine through the
+    topic's 0.0 - the fleet federate included ("both federates") - so the
+    boundary forwards it to the fleet's setters; refusing it made a
+    co-simulation outage impossible without a side channel.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        per_dwelling_voltage_topics=[
+            "grid/voltage/dwelling_0",
+            "grid/voltage/dwelling_1",
+            "grid/voltage/dwelling_2",
+        ],
+    )
+
+    assert orchestrator._sub_voltage_all is not None
+    orchestrator._sub_voltage_all.push_double(0.0)
+    orchestrator._read_subscriptions()
+    assert fleet.grid_voltage_all_values == [0.0], (
+        "the topic's 0.0 is the outage signal and must reach the fleet's setter"
+    )
+    assert orchestrator.helics_voltage_all_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+    orchestrator._sub_voltage_dwelling[1].push_double(0.0)
+    orchestrator._read_subscriptions()
+    assert fleet.grid_voltage_values == [(1, 0.0)], (
+        "the per-dwelling topic's 0.0 is the outage signal for that dwelling"
+    )
+    assert orchestrator.per_dwelling_voltage_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+
+def test_fleet_voltage_below_the_band_floor_but_above_zero_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value in (0.0, 0.5) is in no admitted class and is refused.
+
+    The contract's admitted set has a hole, deliberately: exactly 0.0 is the
+    outage, [0.5, 1.5] pu is the connected band, and anything between is
+    refused and counted like any other out-of-band value.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage_all is not None
+    orchestrator._sub_voltage_all.push_double(0.25)
+    orchestrator._read_subscriptions()
+    assert fleet.grid_voltage_all_values == [], (
+        "a value in (0.0, 0.5) is in no admitted class and must never be applied"
+    )
+    assert orchestrator.helics_voltage_all_valid is False
+    assert orchestrator.helics_range_violations_total == 1
+
+
+def test_fleet_price_non_finite_is_refused_counted_and_reported_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN or infinite price is refused, counted, and reported invalid.
+
+    The one-sided `price < 0.0` check cannot catch a non-finite value (every
+    IEEE comparison against a NaN is false; +inf is not below 0.0), so the
+    value passed the boundary unflagged, the fleet's setter rejected it, and
+    the channel reported valid while nothing was applied. The contract's
+    refuse-and-count rule covers the non-finite prices explicitly.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_price.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert fleet.price_signals == [], (
+            f"a non-finite price ({bad}) must never reach the fleet's setter"
+        )
+        assert orchestrator.helics_price_valid is False, (
+            f"a non-finite price ({bad}) must not report valid"
+        )
+    assert orchestrator.helics_range_violations_total == 3, (
+        "each non-finite refusal is counted once"
+    )
+
+
+def test_fleet_frequency_subscription_applies_in_band_value_to_every_dwelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fleet's own `grid/frequency` channel: an in-band frequency is
+    applied to every dwelling through ``set_frequency_all``.
+
+    The contract lists `grid/frequency` under subscriptions and makes the
+    refuse-and-count rule "true for ... the frequency (both federates)"; the
+    Rust fleet exposes ``set_frequency_all``, and this is the channel that
+    carries a published frequency to it.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(frequency_topic="grid/frequency")
+
+    assert orchestrator._sub_frequency is not None
+    orchestrator._sub_frequency.push_double(59.4)
+    orchestrator._read_subscriptions()
+    assert fleet.frequency_values == [59.4], (
+        "an in-band frequency reaches the fleet's set_frequency_all"
+    )
+    assert orchestrator.helics_frequency_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+
+def test_fleet_frequency_refuses_out_of_band_and_non_finite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fleet frequency channel's refuse-and-count behavior: a value
+    outside [40, 80] Hz or non-finite is never applied, counted once, and
+    the channel reports invalid."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(frequency_topic="grid/frequency")
+
+    assert orchestrator._sub_frequency is not None
+
+    for bad in (600.0, float("nan"), float("inf")):
+        orchestrator._sub_frequency.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert fleet.frequency_values == [], (
+            f"a refused frequency ({bad}) must never reach the fleet's setter"
+        )
+        assert orchestrator.helics_frequency_valid is False
+    assert orchestrator.helics_range_violations_total == 3
+
+    orchestrator._sub_frequency.push_double(60.0)
+    orchestrator._read_subscriptions()
+    assert fleet.frequency_values == [60.0]
+    assert orchestrator.helics_frequency_valid is True
+
+
+def test_fleet_run_loop_raises_when_cumulative_drift_exceeds_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fleet federate's drift guard: a tolerance no reachable grant
+    satisfies raises naming the drift on the first step.
+
+    The contract's drift clause is one behavior for both federates: the
+    absolute difference between requested and granted times accumulates, and
+    a breach of ``max_time_drift_tolerance_s`` raises rather than silently
+    skewing the federation. A tolerance of -1.0 (the dwelling federate's own
+    witness shape) fires on the first step whatever the grants were.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1", max_time_drift_tolerance_s=-1.0)
+    orchestrator.register_publications()
+
+    with pytest.raises(RuntimeError, match="drift"):
+        orchestrator.run()
+    assert fleet._step_count == 0, "the guard fires before the first step applies"
+
+
+def test_fleet_publishes_aggregate_grid_interchange(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fleet's demand channel: the aggregate grid interchange.
+
+    Connected, it is the sum of the per-dwelling interchanges (the meter
+    sum); with every dwelling islanded it is exactly 0.0 - a sum of the
+    per-breaker zeros, never the islands' internal imbalance the premise
+    sum would phantom onto the feeder.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+
+    # Connected: the aggregate interchange is the meter sum, on bits.
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator._publish_results()
+    fed = fake_helics.last_fed
+    assert fed is not None
+    per_dwelling = [
+        fed.publications[f"dwelling_{i}/grid_interchange_w"].published[-1] for i in range(3)
+    ]
+    # The orchestrator accumulates in dwelling order by plain addition;
+    # replicate that (Python's sum() is Neumaier-compensated and can be one
+    # ULP off the same floats).
+    received_sum = 0.0
+    for value in per_dwelling:
+        received_sum += value
+    aggregate = fed.publications["aggregate_grid_interchange_w"].published[-1]
+    assert aggregate == received_sum, (
+        "the aggregate interchange is the per-dwelling sum, on bits"
+    )
+    assert fed.publications["aggregate_power_w"].published[-1] == 6.0, (
+        "the premise sum continues beside the interchange aggregate"
+    )
+
+    # Islanded: every per-dwelling interchange exactly 0.0, the aggregate
+    # exactly 0.0, the premise balance still the islands' internal imbalance.
+    islanded_fleet = _FakeFleet(fake_helics.log, islanded=True)
+    islanded_orchestrator = module.HELICSFleet(islanded_fleet, fed_name="fleet_2")
+    islanded_orchestrator.register_publications()
+    islanded_orchestrator._publish_results()
+    fed = fake_helics.last_fed
+    assert fed is not None
+    for i in range(3):
+        assert fed.publications[f"dwelling_{i}/grid_interchange_w"].published[-1] == 0.0, (
+            "an islanded dwelling's interchange is exactly 0.0 at the open breaker"
+        )
+        assert fed.publications[f"dwelling_{i}/islanded"].published[-1] == 1.0
+    assert fed.publications["aggregate_grid_interchange_w"].published[-1] == 0.0, (
+        "the all-islanded fleet's demand reads exactly 0.0, never a phantom load"
+    )
+    assert fed.publications["aggregate_power_w"].published[-1] == 6.0, (
+        "the premise balance continues through the outage (the islands' internal imbalance)"
+    )
+    assert fed.publications["aggregate_grid_interchange_w"]._info == "units=W"
 
 
 def test_fleet_price_subscription_applies_to_every_dwelling(
@@ -1349,6 +1602,61 @@ def test_fleet_update_mask_per_dwelling_voltage_bits(
     assert orchestrator.get_diagnostic_row()["helics_update_mask"] == 0b111
 
 
+def test_fleet_update_mask_pins_one_bit_per_subscription_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The update mask's bit order is the registration order, pinned with
+    every subscription class registered at once: bit 0 the fleet-wide
+    voltage, bits 1..N the per-dwelling voltages, then control, then price,
+    then frequency last. A consumer decoding the mask's only documentation
+    (this order) reads each class's bit where the code sets it.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        per_dwelling_voltage_topics=[
+            "grid/voltage/dwelling_0",
+            "grid/voltage/dwelling_1",
+            "grid/voltage/dwelling_2",
+        ],
+        control_topic="grid/control",
+        price_topic="grid/price",
+        frequency_topic="grid/frequency",
+    )
+
+    def _control_payload() -> str:
+        return json.dumps(
+            {"0": {"Battery": {"type": "PowerSetpoint", "active_power_w": 1.0}}}
+        )
+
+    classes: list[tuple[str, Any, int]] = [
+        ("fleet-wide voltage", orchestrator._sub_voltage_all, 1 << 0),
+        ("dwelling 0 voltage", orchestrator._sub_voltage_dwelling[0], 1 << 1),
+        ("dwelling 1 voltage", orchestrator._sub_voltage_dwelling[1], 1 << 2),
+        ("dwelling 2 voltage", orchestrator._sub_voltage_dwelling[2], 1 << 3),
+        ("control", orchestrator._sub_control, 1 << 4),
+        ("price", orchestrator._sub_price, 1 << 5),
+        ("frequency", orchestrator._sub_frequency, 1 << 6),
+    ]
+    for label, subscription, bit in classes:
+        assert subscription is not None
+        orchestrator._read_subscriptions()  # clear the previous step's receipts
+        if subscription.data_type == "string":
+            subscription.push_string(_control_payload())
+        elif label == "frequency":
+            subscription.push_double(60.0)
+        else:
+            subscription.push_double(0.95)
+        orchestrator._read_subscriptions()
+        mask = orchestrator.get_diagnostic_row()["helics_update_mask"]
+        assert mask == bit, (
+            f"{label} is the mask's only receipt this step: expected bit {bit}, got {mask}"
+        )
+
+
 def test_fleet_diagnostic_row_includes_stale_and_mask(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1401,3 +1709,64 @@ def test_fleet_required_subscription_missing_returned(
     missing_pubs, missing_subs = orchestrator._verify_registration_completeness()
     assert "nonexistent_topic" in " ".join(sorted(missing_subs))
     assert len(missing_pubs) == 0
+
+
+def test_fleet_publication_units_match_the_documented_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every fleet publication's ``set_info`` unit is the contract's own unit
+    for that topic (docs/cosim.md's publication tables, per-dwelling and
+    aggregates).
+
+    The fleet aggregates are documented topics: a unit change on either
+    surface fails the doc and the code together.
+    """
+    from conftest import cosim_publication_units
+
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    docs = cosim_publication_units()
+    expected_by_key = {
+        "aggregate_power_w": "W",
+        "aggregate_reactive_var": "VAR",
+        "aggregate_grid_interchange_w": "W",
+        "aggregate_zone_temp_c": "degC",
+        "aggregate_soc_pct": "pct",
+        "dwelling_0/total_power_w": "W",
+        "dwelling_0/reactive_power_var": "VAR",
+        "dwelling_0/grid_interchange_w": "W",
+        "dwelling_0/islanded": "flag",
+        "dwelling_0/bus_voltage_pu": "pu",
+        "dwelling_0/island_unserved_w": "W",
+        "dwelling_0/island_excess_w": "W",
+        "dwelling_0/equipment_0/power_w": "W",
+        "dwelling_0/equipment_0/soc_pct": "pct",
+        "dwelling_0/equipment_0/operating_mode": "enum",
+        "dwelling_0/zone_0/temp_air_c": "degC",
+    }
+    for key, expected_unit in expected_by_key.items():
+        pub = fed.publications[key]
+        assert pub._info == f"units={expected_unit}", (
+            f"{key}'s set_info is the code's unit metadata"
+        )
+        # The fleet's per-dwelling topics are the dwelling federate's own
+        # documented rows under the dwelling_{index}/ prefix; the zone and
+        # equipment rows are the tables' parameterized (combined) rows.
+        stripped = key.split("/", 1)[1] if key.startswith("dwelling_") else key
+        if "temp_air_c" in stripped:
+            doc_key = "`zone_{i}/temp_air_c`"
+            assert expected_unit == "degC"
+        elif "equipment_" in stripped:
+            doc_key = "`equipment_{i}/power_w`, `/soc_pct`, `/operating_mode`"
+        else:
+            doc_key = f"`{stripped}`"
+        row = docs.get(doc_key)
+        assert row is not None, f"docs/cosim.md's publication tables must document {key}"
+        assert expected_unit.lower() in row.lower(), (
+            f"docs/cosim.md's unit for {key} is '{row}', the code's is {expected_unit}"
+        )

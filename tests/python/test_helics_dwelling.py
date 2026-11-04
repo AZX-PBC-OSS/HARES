@@ -871,6 +871,93 @@ def test_voltage_in_range_forwarded_correctly(
     assert dwelling.grid_voltage_values == [0.95]
 
 
+def test_voltage_zero_is_the_outage_signal_and_is_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `grid/voltage` topic's exactly 0.0 is the utility-outage signal.
+
+    The contract (docs/cosim.md's island semantics): ``Dwelling.set_grid_voltage(0.0)``
+    - the topic's 0.0 included - is the only way an outage enters the engine, so
+    the boundary forwards it; refusing it (the old [0.5, 1.5]-only band) made a
+    co-simulation outage impossible without a side channel to the setter. The
+    engine's own setter admits exactly 0.0 beside the [0.5, 1.5] pu band.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    orchestrator._sub_voltage.push_double(0.0)
+    orchestrator._read_subscriptions()
+    assert dwelling.grid_voltage_values == [0.0], (
+        "the topic's 0.0 is the outage signal and must reach the engine's setter"
+    )
+    assert orchestrator.helics_voltage_valid is True
+    assert orchestrator.helics_range_violations_total == 0
+
+
+def test_voltage_below_the_band_floor_but_above_zero_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value in (0.0, 0.5) is in no admitted class and is refused.
+
+    The contract's admitted set has a hole, deliberately: exactly 0.0 is the
+    outage, [0.5, 1.5] pu is the connected band (brownout sags included), and
+    anything between - a 0.25 pu reading is no real grid state - is refused
+    and counted like any other out-of-band value.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    orchestrator._sub_voltage.push_double(0.25)
+    orchestrator._read_subscriptions()
+    assert dwelling.grid_voltage_values == [], (
+        "a value in (0.0, 0.5) is in no admitted class and must never be applied"
+    )
+    assert orchestrator.helics_voltage_valid is False
+    assert orchestrator.helics_range_violations_total == 1
+
+
+def test_voltage_non_finite_is_refused_counted_and_reported_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN or infinite voltage is refused, counted, and reported invalid.
+
+    A NaN fails every IEEE comparison (`nan < 0.5` and `nan > 1.5` are both
+    False), so a one-sided band check admits it and the engine's own setter
+    rejects it uncounted - the validator trap utils.rs's own doc warns of:
+    finiteness is checked first, never relied on the comparison to catch.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(voltage_topic="grid/voltage")
+
+    assert orchestrator._sub_voltage is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_voltage.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert dwelling.grid_voltage_values == [], (
+            f"a non-finite voltage ({bad}) must never reach the engine's setter"
+        )
+        assert orchestrator.helics_voltage_valid is False, (
+            f"a non-finite voltage ({bad}) must not report valid"
+        )
+    assert orchestrator.helics_range_violations_total == 3, (
+        "each non-finite refusal is counted once"
+    )
+
+
 def test_negative_price_flagged_and_forwarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -902,6 +989,76 @@ def test_non_negative_price_forwarded_correctly(
     orchestrator._sub_price.push_double(0.12)
     orchestrator._read_subscriptions()
     assert dwelling.price_signals == [{"electricity_price": 0.12}]
+
+
+def test_price_non_finite_is_refused_counted_and_reported_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN or infinite price is refused, counted, and reported invalid.
+
+    The one-sided `price < 0.0` check cannot catch a non-finite value (every
+    IEEE comparison against a NaN is false; +inf is not below 0.0), so the
+    value passed the boundary unflagged, the engine's setter rejected it, and
+    the channel reported valid while nothing was applied. The contract's
+    refuse-and-count rule covers the non-finite prices explicitly.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_price.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert dwelling.price_signals == [], (
+            f"a non-finite price ({bad}) must never reach the engine's setter"
+        )
+        assert orchestrator.helics_price_valid is False, (
+            f"a non-finite price ({bad}) must not report valid"
+        )
+    assert orchestrator.helics_range_violations_total == 3, (
+        "each non-finite refusal is counted once"
+    )
+
+    # A finite price still flows.
+    orchestrator._sub_price.push_double(0.12)
+    orchestrator._read_subscriptions()
+    assert dwelling.price_signals == [{"electricity_price": 0.12}]
+    assert orchestrator.helics_price_valid is True
+
+
+def test_frequency_non_finite_is_refused_counted_and_reported_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN or infinite frequency is refused, counted, and reported invalid.
+
+    The band guard alone cannot catch a NaN (`nan < 40.0` and `nan > 80.0`
+    are both False), so finiteness is part of the same guard: refused, once
+    counted, and the channel's validity flag goes False.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(frequency_topic="grid/frequency")
+
+    assert orchestrator._sub_frequency is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_frequency.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert dwelling.frequency_values == [], (
+            f"a non-finite frequency ({bad}) must never reach the engine's setter"
+        )
+        assert orchestrator.helics_frequency_valid is False, (
+            f"a non-finite frequency ({bad}) must not report valid"
+        )
+    assert orchestrator.helics_range_violations_total == 3, (
+        "each non-finite refusal is counted once"
+    )
 
 
 def test_set_publication_info_attaches_unit_metadata(
@@ -1607,3 +1764,74 @@ def test_helics_publications_are_si_with_their_units(
                 f"equipment_{ei}/power_w is the telemetry's own float, on bits"
             )
             assert pub._info == "units=W"
+        # The end-to-end PV publication is the heuristic's own value for the
+        # real dwelling's telemetry, on bits - the docstring's fourth pin.
+        expected_pv = module.HELICSDwelling._compute_pv_generation(tel)
+        assert fed.publications["pv_generation_w"].published[-1] == expected_pv, (
+            "pv_generation_w is the PV heuristic's sum over this step's telemetry, on bits"
+        )
+
+
+def test_dwelling_publication_units_match_the_documented_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every dwelling publication's ``set_info`` unit is the contract's own
+    unit for that topic (docs/cosim.md's publication table).
+
+    The SI keys carry watts and vars (the publications are the telemetry's
+    W/var fields on bits, the SI test's pin); the module prose and the table
+    must agree with the code, so a future unit change fails both surfaces at
+    once.
+    """
+    from conftest import cosim_publication_units
+
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+
+    fed = fake_helics.last_fed
+    assert fed is not None
+    docs = cosim_publication_units()
+    expected_by_key = {
+        "total_power_w": "W",
+        "reactive_power_var": "VAR",
+        "grid_interchange_w": "W",
+        "islanded": "flag",
+        "bus_voltage_pu": "pu",
+        "island_unserved_w": "W",
+        "island_excess_w": "W",
+        "pv_generation_w": "W",
+    }
+    for key, expected_unit in expected_by_key.items():
+        pub = fed.publications[key]
+        assert pub._info == f"units={expected_unit}", (
+            f"{key}'s set_info is the code's unit metadata"
+        )
+        row = docs.get(f"`{key}`")
+        assert row is not None, f"docs/cosim.md's publication table must document {key}"
+        assert expected_unit.lower() in row.lower(), (
+            f"docs/cosim.md's unit for {key} is '{row}', the code's is {expected_unit}"
+        )
+
+    # The parameterized rows: zones carry degC; the combined equipment row's
+    # cells are W, pct, enum in the table's own order.
+    for key, pub in fed.publications.items():
+        if "/temp_air_c" in key:
+            assert pub._info == "units=degC"
+            assert "degC".lower() in docs["`zone_{i}/temp_air_c`"].lower()
+        elif key.endswith("/power_w") and key.startswith("equipment_"):
+            assert pub._info == "units=W"
+            row = docs["`equipment_{i}/power_w`, `/soc_pct`, `/operating_mode`"]
+            cells = [cell.strip() for cell in row.split(",")]
+            assert cells[0].lower() == "w"
+        elif key.endswith("/soc_pct"):
+            assert pub._info == "units=pct"
+            row = docs["`equipment_{i}/power_w`, `/soc_pct`, `/operating_mode`"]
+            cells = [cell.strip() for cell in row.split(",")]
+            assert cells[1].lower() == "pct"
+        elif key.endswith("/operating_mode"):
+            assert pub._info == "units=enum"
+            row = docs["`equipment_{i}/power_w`, `/soc_pct`, `/operating_mode`"]
+            cells = [cell.strip() for cell in row.split(",")]
+            assert cells[2].lower() == "enum"

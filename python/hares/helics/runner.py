@@ -17,6 +17,8 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
         "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
+from .dwelling import federate_argument_names
+
 
 @dataclass(frozen=True, slots=True)
 class FederateConfig:
@@ -129,6 +131,8 @@ def make_dwelling_federate_config(
         ...     weather_path=Path("weather.epw"),
         ...     schedule_path=Path("schedule.csv"),
         ...     broker="localhost:23404",
+        ...     start="2019-01-01T00:00:00",
+        ...     **{"duration-s": 86400, "time-res-s": 900},
         ... )
 
     Args:
@@ -136,15 +140,37 @@ def make_dwelling_federate_config(
         hpxml_path: HPXML file for dwelling initialization.
         weather_path: Weather input path.
         schedule_path: Schedule input path.
-        **kwargs: Extra CLI arguments rendered as ``--key=value``.
+        **kwargs: The entry point's remaining CLI arguments rendered as
+            ``--key=value``. The run's horizon (``start``, ``duration-s``,
+            ``time-res-s``) is required: the entry point has no default
+            because a silently defaulted horizon would misalign every
+            federation the dwelling joins. Every key must be a flag the
+            entry point defines; an unknown key or a missing horizon is a
+            ``ValueError`` here, not the child's argparse exit after launch.
 
     Returns:
         Typed federate config for HELICS runner JSON.
     """
 
+    accepted = federate_argument_names() - {"name", "hpxml", "weather", "schedule"}
     for key in kwargs:
         if not key or not all(c.isalnum() or c in "-_" for c in key):
             raise ValueError(f"Invalid CLI argument key: {key!r}")
+        if key not in accepted:
+            raise ValueError(
+                f"Unknown dwelling federate argument {key!r}: the entry point "
+                f"accepts {sorted(accepted)}"
+            )
+    missing = [
+        key for key in ("start", "duration-s", "time-res-s") if key not in kwargs
+    ]
+    if missing:
+        raise ValueError(
+            "The dwelling federate command needs its horizon: missing "
+            f"{['--' + key for key in missing]}; the entry point has no "
+            "default because a silently defaulted horizon would misalign "
+            "every federation the dwelling joins"
+        )
 
     extra_args = [
         f"--{key}={shlex.quote(str(value))}"
