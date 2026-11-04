@@ -1189,7 +1189,7 @@ impl PyCoreOutput {
 /// ZIP).
 pub(crate) fn zip_to_pydict<'py>(
     py: Python<'py>,
-    resolved: &hares_types::zip::ResolvedZip,
+    resolved: &hares_physics::zip::ResolvedZip,
 ) -> PyResult<Bound<'py, PyDict>> {
     let zip = &resolved.zip;
     let out = PyDict::new(py);
@@ -1211,7 +1211,7 @@ pub struct PyEquipment {
     descriptor: RustEquipmentDescriptor,
     core_output: RustCoreOutput,
     telemetry: RustTelemetry,
-    resolved_zip: Option<hares_types::zip::ResolvedZip>,
+    resolved_zip: Option<hares_physics::zip::ResolvedZip>,
 }
 
 impl PyEquipment {
@@ -1219,7 +1219,7 @@ impl PyEquipment {
         descriptor: RustEquipmentDescriptor,
         core_output: RustCoreOutput,
         telemetry: RustTelemetry,
-        resolved_zip: Option<hares_types::zip::ResolvedZip>,
+        resolved_zip: Option<hares_physics::zip::ResolvedZip>,
     ) -> Self {
         Self {
             descriptor,

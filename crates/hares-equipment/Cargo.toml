@@ -33,3 +33,7 @@ proptest = { workspace = true }
 regex = { workspace = true }
 syn = { version = "3", features = ["full", "visit"] }
 tempfile = { workspace = true }
+# The unit tests' global counting allocator reads the leaf's
+# profiling-gated module: this dev-dependency turns the feature on for
+# the test targets alone.
+hares-types = { workspace = true, features = ["profiling"] }

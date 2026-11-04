@@ -125,7 +125,7 @@ pub struct ScheduledLoad {
     /// [`crate::config::resolve_zip`]; scheduled loads keep the full
     /// voltage-dependent real-power polynomial (OCHRE parity), so the
     /// resolved regime is governing.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     /// Per-month scale factors [0..11] applied after load_fraction, e.g. a
     /// ceiling fan off in winter (divergence D-013).
     month_multipliers: Option<[f64; 12]>,
@@ -182,9 +182,9 @@ impl ScheduledLoad {
             core_output: CoreOutput::default(),
             gas_source: None,
             gains: GainFractions::default(),
-            zip: hares_types::zip::ResolvedZip::governing(
-                hares_types::zip::zip_defaults_for_class(equipment_type)
-                    .unwrap_or_else(hares_types::zip::ZipLoad::constant_power),
+            zip: hares_physics::zip::ResolvedZip::governing(
+                hares_physics::zip::zip_defaults_for_class(equipment_type)
+                    .unwrap_or_else(hares_physics::zip::ZipLoad::constant_power),
             ),
             month_multipliers: None,
             usage_multiplier: 1.0,
@@ -595,7 +595,7 @@ impl Equipment for ScheduledLoad {
         &self.core_output
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -1099,7 +1099,7 @@ mod tests {
 
     use hares_types::telemetry_keys as tk;
 
-    use hares_types::zip::{ResolvedZip, ZipLoad};
+    use hares_physics::zip::{ResolvedZip, ZipLoad};
 
     use super::{
         KEY_GAS_CONSTANT, KEY_GAS_SCHEDULE_SOURCE, KEY_POWER_CONSTANT_W, KEY_POWER_SCHEDULE_COL,

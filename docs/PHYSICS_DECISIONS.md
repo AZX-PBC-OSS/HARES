@@ -1227,7 +1227,7 @@ Architecture note (why the default dwelling still reads near-constant
 power at the aggregate): the voltage response of a real dwelling lives
 per equipment. Every ZIP-governed load (scheduled and event loads) scales
 its own draw through its resolved `ZipLoad` row
-(`hares-types::zip::ZipLoad::apply`) at the bus voltage, which has never
+(`hares-physics::zip::ZipLoad::apply`) at the bus voltage, which has never
 clamped, and the per-equipment rows are the literature's measured
 compositions (Bokhari 2014, Hajagos & Danai 1998, Arif 2013 via the OCHRE
 ZIP Parameters table). The aggregate solver scale exists for the

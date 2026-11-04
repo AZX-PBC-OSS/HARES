@@ -720,7 +720,9 @@ mod tests {
         // a reactive coefficient set that does not sum to 1.0 (with a
         // nonzero pf) must be rejected at init.
         let mut cfg = base_config();
-        cfg.zip = Some(hares_types::zip::ZipLoad::reactive_only(0.5, 0.3, 0.3, 0.9)); // reactive sum = 1.1
+        cfg.zip = Some(hares_physics::zip::ZipLoad::reactive_only(
+            0.5, 0.3, 0.3, 0.9,
+        )); // reactive sum = 1.1
         let result = resolve_reactive_zip(&cfg);
         assert!(result.is_err(), "reactive zq+iq+pq=1.1 must be rejected");
         let err_msg = result.unwrap_err().to_string();
@@ -739,7 +741,7 @@ mod tests {
         // the resistance WH's element drew its rated watts bitwise at 1.0
         // and 0.5 pu while the table scored the row pure impedance).
         let mut cfg = base_config();
-        cfg.zip = Some(hares_types::zip::ZipLoad {
+        cfg.zip = Some(hares_physics::zip::ZipLoad {
             zp: 0.825,
             ip: -0.44,
             pp: 0.615,
@@ -770,7 +772,7 @@ mod tests {
         // (pf = 0 sentinel, zero reactive).
         let cfg = base_config();
         let zip = resolve_reactive_zip(&cfg).expect("constant power fallback");
-        assert_eq!(zip.zip, hares_types::zip::ZipLoad::constant_power());
+        assert_eq!(zip.zip, hares_physics::zip::ZipLoad::constant_power());
         assert!(zip.real_power_zip_applies);
 
         // A production class name resolves the literature row whole: the
@@ -783,7 +785,7 @@ mod tests {
         assert_eq!((zip.zp, zip.ip, zip.pp), (0.825, -0.44, 0.615));
         assert!(zip.real_power_zip_applies);
         let class_row =
-            hares_types::zip::zip_defaults_for_class("Heat Pump Water Heater").expect("row");
+            hares_physics::zip::zip_defaults_for_class("Heat Pump Water Heater").expect("row");
         assert_eq!(
             (zip.zq, zip.iq, zip.pq),
             (class_row.zq, class_row.iq, class_row.pq)

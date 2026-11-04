@@ -49,7 +49,7 @@ def _deep_sag_real_multiplier(zip_dict, voltage_pu: float, as_fitted: bool) -> f
     the deeper-sag side (the evaluated response never rises as the
     voltage falls) and the recorded motor families evaluating the raw
     polynomial as fitted. The model's own evaluation is witnessed end to
-    end by the dwelling witnesses below and the hares-types row tests;
+    end by the dwelling witnesses below and the hares-physics row tests;
     this evaluation pins the published coefficients to the same physics.
     """
     zp, ip, pp = zip_dict["zp"], zip_dict["ip"], zip_dict["pp"]
@@ -110,7 +110,7 @@ class TestRealPowerZipApplicability:
         dw = make_dwelling(duration_s=600, time_res_s=60)
 
         # The class rows, hand-pinned from the recorded literature table
-        # (`zip_defaults_for_class` in crates/hares-types/src/zip.rs): the
+        # (`zip_defaults_for_class` in crates/hares-physics/src/zip.rs): the
         # gas furnace's electric draw is its blower fan motor (the OCHRE
         # fans row), the air conditioner's compressor the Hajagos & Danai
         # 1998 cooling row, the resistance water heater's element pure

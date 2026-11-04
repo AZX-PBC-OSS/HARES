@@ -38,16 +38,16 @@ use crate::schedule_resolve::DEFAULT_SCHEDULES_CSV;
 
 use hares_physics::biquadratic::BiquadraticCurve;
 use hares_physics::constants::BTU_PER_HR_PER_W;
-use hares_types::parse_trimmed_f64;
 /// ZIP load model parameters for voltage-dependent power modelling.
 ///
-/// Re-exported from the shared contract crate: `defaults/zip_parameters.toml`
+/// Re-exported from the shared physics crate: `defaults/zip_parameters.toml`
 /// rows deserialize directly into [`ZipLoad`] (field names `zp`/`ip`/`pp`/
 /// `zq`/`iq`/`pq`/`pf` match; `v0` defaults to 1.0). The toml and the in-code
-/// class table [`hares_types::zip::zip_defaults_for_class`] are dual
+/// class table [`hares_physics::zip::zip_defaults_for_class`] are dual
 /// representations of the same data — a drift test in this module keeps them
 /// in exact agreement.
-pub use hares_types::zip::ZipLoad;
+pub use hares_physics::zip::ZipLoad;
+use hares_types::parse_trimmed_f64;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -2828,12 +2828,12 @@ pf = 1.0
     }
 
     /// Drift test: `defaults/zip_parameters.toml` and the in-code class table
-    /// `hares_types::zip::zip_defaults_for_class` are dual representations of
+    /// `hares_physics::zip::zip_defaults_for_class` are dual representations of
     /// the same data. Every class name must resolve to the same coefficients
     /// through both, and the toml must contain no orphan rows.
     #[test]
     fn zip_parameters_toml_matches_class_table_exactly() {
-        use hares_types::zip::{ZIP_CLASS_NAMES, zip_defaults_for_class};
+        use hares_physics::zip::{ZIP_CLASS_NAMES, zip_defaults_for_class};
 
         let toml_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

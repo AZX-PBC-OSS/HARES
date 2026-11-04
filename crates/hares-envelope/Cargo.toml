@@ -24,6 +24,10 @@ observe_detailed = ["observe"]
 [dev-dependencies]
 approx = "0.5"
 criterion = { workspace = true }
+# The unit tests' global counting allocator reads the leaf's
+# profiling-gated module: this dev-dependency turns the feature on for
+# the test targets alone.
+hares-types = { workspace = true, features = ["profiling"] }
 
 [[bench]]
 name = "rc_solver"

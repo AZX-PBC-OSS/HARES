@@ -178,7 +178,7 @@ pub struct GasWH {
     /// for the draft-inducer fan motor: its real polynomial scales the
     /// fan's draw at the bus voltage through the recorded deep-sag form; Q
     /// comes from `ZipLoad::reactive_var`.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
     // --- TMV tempered draw ---
     fixture_delivery_temp_c: f64,
     hot_draw_temp_c: Option<f64>,
@@ -276,8 +276,8 @@ impl GasWH {
             dr_duration_remaining_s: None,
             dr_level: DRLevel::Normal,
             ctrl_load_fraction: 1.0,
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
             fixture_delivery_temp_c: 40.6,
             hot_draw_temp_c: None,
@@ -907,7 +907,7 @@ impl Equipment for GasWH {
         Some(hares_types::ThermostatBandClass::Tank)
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -1507,7 +1507,7 @@ mod tests {
         // The published coefficients are the fan-motor row's own (the row's
         // real polynomial scales the fan's draw at the bus voltage through
         // the recorded deep-sag form).
-        let fan_row = hares_types::zip::zip_defaults_for_class("Gas Water Heater").expect("row");
+        let fan_row = hares_physics::zip::zip_defaults_for_class("Gas Water Heater").expect("row");
         assert_eq!(
             (eq.zip.zp, eq.zip.ip, eq.zip.pp),
             (fan_row.zp, fan_row.ip, fan_row.pp)

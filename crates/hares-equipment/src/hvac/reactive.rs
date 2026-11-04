@@ -33,7 +33,7 @@
 //!   heaters, resistive defrost elements) have pf = 1.0 exactly and
 //!   contribute `Q ≡ 0` by construction — they appear in no sum term.
 
-use hares_types::zip::ZipLoad;
+use hares_physics::zip::ZipLoad;
 
 /// Indoor blower / outdoor condenser fan motor component (pf 0.87).
 ///
@@ -120,7 +120,7 @@ pub(crate) fn secondary_motor_real_multiplier(component: &ZipLoad, voltage_pu: f
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hares_types::zip::zip_defaults_for_class;
+    use hares_physics::zip::zip_defaults_for_class;
 
     /// The fan component constant must not drift from the canonical class
     /// table (single source of truth for the OCHRE `fans` row).

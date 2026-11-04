@@ -110,7 +110,7 @@ macro_rules! delegate_equipment {
                 self.$inner.island_source_available()
             }
 
-            fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+            fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
                 self.$inner.resolved_zip()
             }
 

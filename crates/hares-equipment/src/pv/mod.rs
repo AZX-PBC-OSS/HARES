@@ -27,13 +27,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::Datelike;
+use hares_physics::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
     ExecutionStage, FuelType, HaresError, InverterPriority, OperatingMode, PortContribution,
     PortDeclaration, PortSlots, SurfaceIrradiance, Telemetry, TelemetryField, Warning,
     telemetry_keys as tk,
-    zip::{ResolvedZip, ZipLoad},
 };
 use serde::{Deserialize, Serialize};
 
@@ -248,7 +248,7 @@ pub struct PV {
     /// generator, not a voltage-scaled ZIP load, so the reactive polynomial is
     /// not applied; the inverter holds the displacement PF. Kept as a
     /// [`ZipLoad`] so the `tan(acos(pf))` formula is shared with the rest of
-    /// HARES via [`hares_types::zip`] rather than duplicated inline. Updated
+    /// HARES via [`hares_physics::zip`] rather than duplicated inline. Updated
     /// on init and whenever a [`ControlSignal::PowerFactorSetpoint`] arrives.
     zip_pf: ZipLoad,
     luts_by_surface: HashMap<u32, PvLut>,
@@ -3089,7 +3089,7 @@ mod tests {
         assert_eq!(restored.power_factor, 0.9);
         assert_eq!(
             restored.zip_pf,
-            hares_types::zip::ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.9)
+            hares_physics::zip::ZipLoad::reactive_only(0.0, 0.0, 1.0, 0.9)
         );
         // The inspection surface agrees with the live Q path.
         assert_eq!(

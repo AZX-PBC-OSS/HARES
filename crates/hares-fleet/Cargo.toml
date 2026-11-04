@@ -23,3 +23,7 @@ parquet = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 hares-control = { workspace = true }
+# The unit tests' global counting allocator and the step-handoff
+# witnesses read the leaf's profiling-gated module: this dev-dependency
+# turns the feature on for the test targets alone.
+hares-types = { workspace = true, features = ["profiling"] }

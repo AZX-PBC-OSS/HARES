@@ -276,7 +276,7 @@ impl Equipment for HpCooler {
         self.inner.thermostat_axes()
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it).
         self.inner.resolved_zip()
@@ -336,7 +336,7 @@ pub struct GshpCooler {
     /// sentinel included; the pump's REAL response never consults this
     /// row). The compressor/fan/crankcase
     /// response comes from the inner [`AirConditioner`].
-    pump_zip: hares_types::zip::ZipLoad,
+    pump_zip: hares_physics::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (the
     /// inner unit's assembled nominal plus the pump's pre-scaling draw):
     /// the premise aggregate's weight for this unit, which un-scales the
@@ -398,7 +398,7 @@ impl GshpCooler {
             pump_efficiency: 0.35,
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
-            pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            pump_zip: hares_physics::zip::ZipLoad::constant_power(),
             last_nominal_draw_w: None,
         }
     }
@@ -747,7 +747,7 @@ impl Equipment for GshpCooler {
         self.inner.thermostat_axes()
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it); the
         // loop-pump component ZIP is secondary.
@@ -820,7 +820,7 @@ pub struct WshpCooler {
     /// (the pump's REAL response evaluates the physical row). The
     /// compressor/fan/crankcase
     /// reactive comes from the inner [`AirConditioner`].
-    pump_zip: hares_types::zip::ZipLoad,
+    pump_zip: hares_physics::zip::ZipLoad,
     /// The moment's nominal component draw of the most recent step (the
     /// inner unit's assembled nominal plus the pump's pre-scaling draw):
     /// the premise aggregate's weight for this unit, which un-scales the
@@ -877,7 +877,7 @@ impl WshpCooler {
             pump_efficiency: 0.35,
             pump_motor_efficiency: 0.40,
             pump_system_head_loss_m: 3.0,
-            pump_zip: hares_types::zip::ZipLoad::constant_power(),
+            pump_zip: hares_physics::zip::ZipLoad::constant_power(),
             last_nominal_draw_w: None,
         }
     }
@@ -1148,7 +1148,7 @@ impl Equipment for WshpCooler {
         self.inner.thermostat_axes()
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         // Primary component: the compressor ZIP resolved by the inner
         // AirConditioner (the user "zip" sidecar is propagated to it); the
         // loop-pump component ZIP is secondary.
@@ -2452,7 +2452,7 @@ mod tests {
     fn ashp_cooler_real_power_follows_the_row_and_reactive_follows_pf() {
         let config_pf = base_config();
         let mut config_nopf = config_pf.clone();
-        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        config_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let mut eq_pf = HpCooler::ashp_cooler(config_pf.clone());
         let mut eq_nopf = HpCooler::ashp_cooler(config_nopf.clone());

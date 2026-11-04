@@ -141,7 +141,7 @@ pub struct IdealHvac {
     /// row is constant power by declaration (the draw's deep-sag multiplier
     /// is exactly 1 at every voltage). Wired uniformly with the rest of the
     /// fleet so the cross-equipment consistency check stays uniform.
-    zip: hares_types::zip::ResolvedZip,
+    zip: hares_physics::zip::ResolvedZip,
 }
 
 /// Serializable snapshot of [`IdealHvac`] mutable fields.
@@ -217,8 +217,8 @@ impl IdealHvac {
             fan_power_ratio: 0.0,
             capacity_min_w: 0.0,
             curves: BiquadraticCurveSet::identity(),
-            zip: hares_types::zip::ResolvedZip::reactive_only(
-                hares_types::zip::ZipLoad::constant_power(),
+            zip: hares_physics::zip::ResolvedZip::reactive_only(
+                hares_physics::zip::ZipLoad::constant_power(),
             ),
         }
     }
@@ -1032,7 +1032,7 @@ impl Equipment for IdealHvac {
         Some(hares_types::ThermostatAxes::Both)
     }
 
-    fn resolved_zip(&self) -> Option<hares_types::zip::ResolvedZip> {
+    fn resolved_zip(&self) -> Option<hares_physics::zip::ResolvedZip> {
         Some(self.zip)
     }
 
@@ -4262,7 +4262,7 @@ mod tests {
         };
         let config_pf = mk();
         let mut config_nopf = mk();
-        config_nopf.zip = Some(hares_types::zip::ZipLoad::constant_power());
+        config_nopf.zip = Some(hares_physics::zip::ZipLoad::constant_power());
 
         let mut eq_pf = IdealHvac::new(config_pf.clone());
         let mut eq_nopf = IdealHvac::new(config_nopf.clone());

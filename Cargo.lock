@@ -1144,6 +1144,8 @@ dependencies = [
  "chrono",
  "hares-types",
  "libm",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tracing",
  "uom",
@@ -1199,6 +1201,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "chrono",
+ "hares-types",
  "libm",
  "rand",
  "rand_chacha",

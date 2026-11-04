@@ -8,7 +8,10 @@ license.workspace = true
 [features]
 dst = ["hares-core/dst"]
 observe = ["hares-core/observe"]
-profiling = ["hares-core/profiling"]
+# The tool's allocator install reads the leaf's counting allocator,
+# which lives in the leaf's profiling-gated module, so this gate
+# carries the leaf's beside the core's.
+profiling = ["hares-core/profiling", "hares-types/profiling"]
 
 [dependencies]
 hares-core = { workspace = true }
@@ -29,3 +32,7 @@ chrono-tz = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The allocator-presence tests read the leaf's profiling-gated module:
+# this dev-dependency turns the feature on for the test targets alone
+# (the tool's own install stays behind the profiling feature).
+hares-types = { workspace = true, features = ["profiling"] }

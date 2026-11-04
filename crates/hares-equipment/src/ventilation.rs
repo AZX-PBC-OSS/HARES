@@ -17,7 +17,7 @@ use hares_physics::air_properties::dry_air_density_kg_m3;
 use hares_physics::constants::{
     CP_DRY_AIR_J_KG_K, LATENT_HEAT_VAPORISATION_0C_J_KG, SEA_LEVEL_PRESSURE_PA,
 };
-use hares_types::zip::{ResolvedZip, ZipLoad};
+use hares_physics::zip::{ResolvedZip, ZipLoad};
 use hares_types::{
     ControlCapabilities, ControlSignal, CoreCapabilities, CoreFlows, CoreOutput, CorePerformance,
     CoreState, DRLevel, ElectricPower, EndUse, EnvironmentState, EquipmentDescriptor, EquipmentId,
@@ -1456,7 +1456,7 @@ mod tests {
         let p_nominal = step_once(1.0);
         let p_half = step_once(0.5);
         assert!(p_nominal > 0.0, "fixture: the fan must draw power");
-        let row = hares_types::zip::zip_defaults_for_class("Ventilation Fan").expect("class row");
+        let row = hares_physics::zip::zip_defaults_for_class("Ventilation Fan").expect("class row");
         let raw_multiplier = row.zp * 0.5 * 0.5 + row.ip * 0.5 + row.pp;
         let expected = p_nominal * raw_multiplier;
         assert_eq!(
@@ -2633,7 +2633,7 @@ mod tests {
                     "step {i} (v={v}): at the reference voltage the twins must agree bitwise"
                 );
             } else {
-                let multiplier = hares_types::zip::zip_defaults_for_class("Ventilation Fan")
+                let multiplier = hares_physics::zip::zip_defaults_for_class("Ventilation Fan")
                     .expect("row")
                     .deep_sag_real_multiplier(*v, true);
                 let expected = ports_nopf.electrical.load_power_w * multiplier;
