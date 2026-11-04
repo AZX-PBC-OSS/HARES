@@ -61,16 +61,17 @@ Expected HELICS subscription units
     must publish per-unit.
 
 ``grid/price`` (or caller-provided topic)
-    Real-time electricity price in currency/kWh. Must be non-negative;
-    a negative value triggers a diagnostic warning.
+    Real-time electricity price in currency/kWh. A non-finite value is
+    refused (never applied, counted); a negative value is a real
+    scenario: it is warned, counted, and applied.
 
 ``grid/frequency`` (or caller-provided topic)
-    Grid frequency in Hz. Expected range: 40-80 Hz (the band the engine's
-    setter admits: both nominal frequencies' governing event ranges with
-    transient headroom). A value out of range triggers a diagnostic
-    warning and is not applied; the dwelling keeps its last valid
-    frequency. Without a frequency subscription the engine runs the
-    60 Hz constant.
+    Grid frequency in Hz. A finite value in [40, 80] Hz is applied (the
+    band the engine's setter admits: both nominal frequencies' governing
+    event ranges with transient headroom). A value out of range or
+    non-finite triggers a diagnostic warning and is not applied; the
+    dwelling keeps its last valid frequency. Without a frequency
+    subscription the engine runs the 60 Hz constant.
 """
 
 from __future__ import annotations
@@ -480,6 +481,7 @@ class HELICSDwelling:
         self._federation_terminated = False
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_price_non_finite = False
         self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._range_violations_total = 0
@@ -768,6 +770,7 @@ class HELICSDwelling:
     def _read_subscriptions(self) -> None:
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_price_non_finite = False
         self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._update_mask = 0
@@ -846,29 +849,50 @@ class HELICSDwelling:
             if self._sub_price is not None and _update_by_sub.get(self._sub_price, False):
                 try:
                     price = float(self._sub_price.double)
-                    if price < 0.0:
-                        self._last_price_negative = True
+                    if not math.isfinite(price):
+                        # A non-finite price (NaN or infinity) is refused,
+                        # never applied: the engine's own setter rejects it
+                        # (a NaN price's comparisons are always false, so
+                        # the price actors' conditionals silently stop
+                        # firing), and the one-sided `price < 0.0` check
+                        # cannot catch it - finiteness is checked first,
+                        # never relied on the comparison to catch. Flagged
+                        # invalid and counted, the same refuse-and-count
+                        # contract the voltage and frequency channels
+                        # enforce.
+                        self._last_price_non_finite = True
                         _LOG.warning(
-                            "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                            "Price signal %r is not finite; expected a finite price in "
+                            "currency/kWh. Value not applied; keeping last valid price.",
                             price,
                         )
-                    self._dwelling.set_price_signal({"electricity_price": price})
+                    else:
+                        if price < 0.0:
+                            self._last_price_negative = True
+                            _LOG.warning(
+                                "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                                price,
+                            )
+                        self._dwelling.set_price_signal({"electricity_price": price})
                 except Exception as exc:
                     _LOG.warning("Failed to apply price signal: %s", exc)
 
             if self._sub_frequency is not None and _update_by_sub.get(self._sub_frequency, False):
                 try:
                     frequency_hz = float(self._sub_frequency.double)
-                    if frequency_hz < FREQUENCY_HZ_MIN or frequency_hz > FREQUENCY_HZ_MAX:
+                    if not math.isfinite(frequency_hz) or frequency_hz < FREQUENCY_HZ_MIN or frequency_hz > FREQUENCY_HZ_MAX:
                         # Unit/corruption guard: a value outside [40, 80] Hz
-                        # is not a grid frequency a premise simulation should
-                        # be fed. Flag and warn, but do NOT apply: the
+                        # is not a grid frequency a premise simulation
+                        # should be fed, and a non-finite value fails the
+                        # band comparison itself (every IEEE comparison
+                        # against a NaN is false), so finiteness is part of
+                        # the guard. Flag and warn, but do NOT apply: the
                         # dwelling keeps its last valid frequency, the same
                         # refuse-and-count contract the voltage channel
                         # enforces.
                         self._last_frequency_out_of_range = True
                         _LOG.warning(
-                            "Grid frequency %.3f Hz outside expected range [%.1f, %.1f]; "
+                            "Grid frequency %r Hz outside expected range [%.1f, %.1f]; "
                             "value not applied; keeping last valid frequency.",
                             frequency_hz,
                             FREQUENCY_HZ_MIN,
@@ -915,7 +939,7 @@ class HELICSDwelling:
                 self._range_violations_total += self._control_clamped
             if self._last_voltage_out_of_range:
                 self._range_violations_total += 1
-            if self._last_price_negative:
+            if self._last_price_negative or self._last_price_non_finite:
                 self._range_violations_total += 1
             if self._last_frequency_out_of_range:
                 self._range_violations_total += 1

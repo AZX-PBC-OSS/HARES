@@ -991,6 +991,76 @@ def test_non_negative_price_forwarded_correctly(
     assert dwelling.price_signals == [{"electricity_price": 0.12}]
 
 
+def test_price_non_finite_is_refused_counted_and_reported_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN or infinite price is refused, counted, and reported invalid.
+
+    The one-sided `price < 0.0` check cannot catch a non-finite value (every
+    IEEE comparison against a NaN is false; +inf is not below 0.0), so the
+    value passed the boundary unflagged, the engine's setter rejected it, and
+    the channel reported valid while nothing was applied. The contract's
+    refuse-and-count rule covers the non-finite prices explicitly.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_price.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert dwelling.price_signals == [], (
+            f"a non-finite price ({bad}) must never reach the engine's setter"
+        )
+        assert orchestrator.helics_price_valid is False, (
+            f"a non-finite price ({bad}) must not report valid"
+        )
+    assert orchestrator.helics_range_violations_total == 3, (
+        "each non-finite refusal is counted once"
+    )
+
+    # A finite price still flows.
+    orchestrator._sub_price.push_double(0.12)
+    orchestrator._read_subscriptions()
+    assert dwelling.price_signals == [{"electricity_price": 0.12}]
+    assert orchestrator.helics_price_valid is True
+
+
+def test_frequency_non_finite_is_refused_counted_and_reported_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN or infinite frequency is refused, counted, and reported invalid.
+
+    The band guard alone cannot catch a NaN (`nan < 40.0` and `nan > 80.0`
+    are both False), so finiteness is part of the same guard: refused, once
+    counted, and the channel's validity flag goes False.
+    """
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(frequency_topic="grid/frequency")
+
+    assert orchestrator._sub_frequency is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_frequency.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert dwelling.frequency_values == [], (
+            f"a non-finite frequency ({bad}) must never reach the engine's setter"
+        )
+        assert orchestrator.helics_frequency_valid is False, (
+            f"a non-finite frequency ({bad}) must not report valid"
+        )
+    assert orchestrator.helics_range_violations_total == 3, (
+        "each non-finite refusal is counted once"
+    )
+
+
 def test_set_publication_info_attaches_unit_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

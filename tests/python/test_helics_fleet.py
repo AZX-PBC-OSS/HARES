@@ -907,6 +907,39 @@ def test_fleet_voltage_below_the_band_floor_but_above_zero_is_refused(
     assert orchestrator.helics_range_violations_total == 1
 
 
+def test_fleet_price_non_finite_is_refused_counted_and_reported_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN or infinite price is refused, counted, and reported invalid.
+
+    The one-sided `price < 0.0` check cannot catch a non-finite value (every
+    IEEE comparison against a NaN is false; +inf is not below 0.0), so the
+    value passed the boundary unflagged, the fleet's setter rejected it, and
+    the channel reported valid while nothing was applied. The contract's
+    refuse-and-count rule covers the non-finite prices explicitly.
+    """
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_price.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert fleet.price_signals == [], (
+            f"a non-finite price ({bad}) must never reach the fleet's setter"
+        )
+        assert orchestrator.helics_price_valid is False, (
+            f"a non-finite price ({bad}) must not report valid"
+        )
+    assert orchestrator.helics_range_violations_total == 3, (
+        "each non-finite refusal is counted once"
+    )
+
+
 def test_fleet_price_subscription_applies_to_every_dwelling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

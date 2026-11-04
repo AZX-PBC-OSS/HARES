@@ -59,9 +59,10 @@ Per-dwelling voltage topics (caller-provided)
 
 ``grid/price`` (or caller-provided fleet-wide topic)
     Real-time electricity price in currency/kWh, applied to every
-    dwelling. Must be non-negative; a negative value triggers a
-    diagnostic warning. The boundary behavior is the dwelling federate's
-    exactly (one boundary behavior; see docs/cosim.md).
+    dwelling. A non-finite value is refused (never applied, counted); a
+    negative value is a real scenario: warned, counted, and applied. The
+    boundary behavior is the dwelling federate's exactly (one boundary
+    behavior; see docs/cosim.md).
 """
 
 from __future__ import annotations
@@ -196,6 +197,8 @@ class HELICSFleet:
         self._last_voltage_all_out_of_range = False
         self._last_per_dwelling_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_price_non_finite = False
+        self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._range_violations_total = 0
         self._stale_counts: dict[str, int] = {}
@@ -532,6 +535,8 @@ class HELICSFleet:
         self._last_voltage_all_out_of_range = False
         self._last_per_dwelling_voltage_out_of_range = False
         self._last_price_negative = False
+        self._last_price_non_finite = False
+        self._last_frequency_out_of_range = False
         self._control_clamped = 0
         self._update_mask = 0
         self._stale_subscription_count = 0
@@ -630,17 +635,29 @@ class HELICSFleet:
             if self._sub_price is not None and _update_by_sub.get(self._sub_price, False):
                 try:
                     price = float(self._sub_price.double)
-                    # The dwelling federate's price behavior, applied
-                    # exactly: a negative price warns, counts and is
-                    # still applied (a negative tariff is a real
-                    # scenario; the warning is the diagnostic).
-                    if price < 0.0:
-                        self._last_price_negative = True
+                    if not math.isfinite(price):
+                        # The dwelling federate's price behavior, applied
+                        # exactly: a non-finite price (NaN or infinity)
+                        # fails the one-sided comparison itself and is
+                        # refused here before the setter, flagged invalid
+                        # and counted, never applied.
+                        self._last_price_non_finite = True
                         _LOG.warning(
-                            "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                            "Price signal %r is not finite; expected a finite price in "
+                            "currency/kWh. Value not applied; keeping last valid price.",
                             price,
                         )
-                    self._fleet.set_price_signal_all(price)
+                    else:
+                        # A negative price warns, counts and is still
+                        # applied (a negative tariff is a real scenario;
+                        # the warning is the diagnostic).
+                        if price < 0.0:
+                            self._last_price_negative = True
+                            _LOG.warning(
+                                "Price signal %.3f is negative; expected >= 0 currency/kWh",
+                                price,
+                            )
+                        self._fleet.set_price_signal_all(price)
                 except Exception as exc:
                     _LOG.warning("Failed to apply price signal: %s", exc)
 
