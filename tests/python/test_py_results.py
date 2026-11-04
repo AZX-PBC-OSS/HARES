@@ -403,6 +403,28 @@ def test_stubs_cover_every_binding() -> None:
     assert missing_from_module == set(), f"stub names missing from the module: {missing_from_module}"
 
 
+def test_telemetry_stub_carries_every_public_member() -> None:
+    """The Telemetry stub class lists every public runtime member: the stub
+    is the static type contract, and a getter the Rust binding adds without
+    the stub is an attribute error for typed callers."""
+    import hares._hares as _hares
+
+    tree = ast.parse((ROOT / "python/hares/_hares.pyi").read_text())
+    cls = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Telemetry"
+    )
+    stub = {
+        node.name
+        for node in cls.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    runtime = {name for name in dir(_hares.Telemetry) if not name.startswith("_")}
+    missing = runtime - stub
+    assert missing == set(), f"Telemetry stub missing public members: {sorted(missing)}"
+
+
 def test_stub_changes_are_listed() -> None:
     """Every name added to or removed from _hares.pyi against the committed
     ebdb1a17 stub, compared by ast, appears in the changelog's "Changes in
