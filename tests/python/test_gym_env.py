@@ -2152,11 +2152,14 @@ def test_snapshot_state_rejects_a_foreign_checkpoint_version():
         dwelling.restore_state(tampered)
 
 
-def test_masked_auto_reset_leaves_other_envs_bit_identical():
-    """The masked auto-reset resets only the env whose episode ended: the
-    other env's next steps are bitwise the no-reset run's. The short home
-    (a two-step sim) fails its third step and is the only env the
-    auto-reset touches; the long home's next steps must not move."""
+def test_masked_auto_reset_resets_the_ended_env_alone():
+    """The masked auto-reset resets only the env whose episode ended, and it
+    does reset that env: the returned row is the new episode's first
+    observation (NaN before its first step), the ended episode's last
+    observation rides `final_observation`, the row's seed is the env's next
+    child spawn, and the next step is the new episode's step 1. The other
+    env's next steps are bitwise the no-reset run's. The short home (a
+    two-step sim) fails its third step; the long home never moves."""
     fields = _OBS_FIELDS + ["clock_step"]
 
     def run(auto_reset: bool):
@@ -2175,19 +2178,151 @@ def test_masked_auto_reset_leaves_other_envs_bit_identical():
         )
         env.reset(seed=7)
         actions = np.zeros((2, 1), dtype=np.float64)
+        short_rows = []
         living_rows = []
-        for _ in range(8):
-            obs, _reward, _done, _trunc, _info = env.step(actions)
+        seeds = []
+        ended = None
+        for step_index in range(8):
+            obs, _reward, done, trunc, info = env.step(actions)
+            short_rows.append(obs[0].copy())
             living_rows.append(obs[1].copy())
-        return living_rows
+            seeds.append((info[0]["seed"], info[1]["seed"]))
+            if auto_reset and ended is None and (done[0] or trunc[0]):
+                ended = {
+                    "step": step_index,
+                    "reset_obs": obs[0].copy(),
+                    "final_observation": info[0]["final_observation"].copy(),
+                    "seed": info[0]["seed"],
+                }
+        return short_rows, living_rows, seeds, ended
 
-    with_reset = run(True)
-    without_reset = run(False)
-    for step_index, (on, off) in enumerate(zip(with_reset, without_reset, strict=True)):
+    with_reset, with_living, with_seeds, ended = run(True)
+    without_reset, without_living, without_seeds, _ = run(False)
+
+    for step_index, (on, off) in enumerate(zip(with_living, without_living, strict=True)):
         assert on.tobytes() == off.tobytes(), (
             f"the living env's step {step_index + 1} must be bitwise the "
             "no-reset run's: the masked reset touched only the ended env"
         )
+
+    # The unmasked env keeps its running episode's seed on every step row:
+    # reset(seed=7) gives `seed + env index`, so env 1 runs under 8.
+    assert [seed1 for _seed0, seed1 in with_seeds] == [8] * 8
+    assert [seed1 for _seed0, seed1 in without_seeds] == [8] * 8
+
+    assert ended is not None, "the short home must end its episode in the window"
+    ended_step = ended["step"]
+    assert np.all(np.isnan(ended["reset_obs"])), (
+        "the auto-reset row is the new episode's first observation, which is "
+        "NaN in every field before the first step"
+    )
+    assert ended["final_observation"].tobytes() == without_reset[ended_step].tobytes(), (
+        "the ended episode's last observation is the no-reset run's failed-step row"
+    )
+    expected_seed = int(
+        np.random.SeedSequence(2024)
+        .spawn(2)[0]
+        .spawn(1)[0]
+        .generate_state(1, dtype=np.uint64)[0]
+    )
+    assert ended["seed"] == expected_seed, (
+        "the new episode's seed is the env's child spawn from the caller "
+        "SeedSequence: (caller sequence, env index 0, episode 2)"
+    )
+    assert with_reset[ended_step + 1][-1] == 1.0, (
+        "the env resets its step counter: the post-reset step is the new "
+        "episode's step 1, not the ended episode's next count"
+    )
+
+
+def test_episode_seeds_derive_from_the_caller_sequence_per_env_and_episode():
+    """The per-env episode seeds are deterministic in (caller SeedSequence,
+    env index, episode count): two batches built from the same caller
+    sequence value derive the same seeds, and one env's resets never
+    advance another env's stream (each env draws from its own child)."""
+    fields = _OBS_FIELDS
+
+    def dwellings():
+        return [
+            _make_dwelling(seed=0, duration_s=1800),
+            _make_dwelling(seed=1, duration_s=1800),
+        ]
+
+    def make_env(seed_sequence):
+        return VecDwellingGymEnv(
+            dwellings=dwellings(),
+            observation_fields=fields,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=20),
+            seed_sequence=seed_sequence,
+        )
+
+    def seeds(env, **kwargs):
+        _obs, infos = env.reset(**kwargs)
+        return [info["seed"] for info in infos]
+
+    first = make_env(np.random.SeedSequence(2024))
+    second = make_env(np.random.SeedSequence(2024))
+    first_batch = seeds(first)
+    assert first_batch == seeds(second), (
+        "the same caller sequence value derives the same per-env first-episode seeds"
+    )
+    second_batch = seeds(first)
+    assert second_batch == seeds(second), (
+        "the second episode's seeds are deterministic in the episode count"
+    )
+
+    # One env's resets advance only its own child: env 1's second episode
+    # seed is the same whether or not env 0 reset in between.
+    independent = make_env(np.random.SeedSequence(2024))
+    seeds(independent)  # episode 1 on both children
+    seeds(independent, mask=np.array([True, False]))  # only env 0's child moves
+    seeds(independent, mask=np.array([True, False]))
+    env1_second = seeds(independent, mask=np.array([False, True]))[1]
+    assert env1_second == second_batch[1], (
+        "env 0's masked resets must not advance env 1's child stream: each "
+        "env's episode count derives from its own child"
+    )
+
+    # A caller SeedSequence on reset re-spawns the per-env children and the
+    # masked env draws that child's next spawn.
+    caller = np.random.SeedSequence(99)
+    _obs, infos = independent.reset(seed=caller)
+    expected = [
+        int(child.spawn(1)[0].generate_state(1, dtype=np.uint64)[0])
+        for child in np.random.SeedSequence(99).spawn(2)
+    ]
+    assert [info["seed"] for info in infos] == expected
+
+
+def test_reset_seed_is_an_integer_or_a_seed_sequence_and_never_dropped():
+    """An explicit integer seed (a numpy integer included) keeps the
+    documented ``seed + env index`` form; a seed of any other type is
+    refused naming the type before a dwelling moves, instead of being
+    silently replaced by an OS-entropy draw."""
+    env = VecDwellingGymEnv(
+        dwellings=[_make_dwelling(seed=0, duration_s=1800)],
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=20),
+        seed_sequence=np.random.SeedSequence(2024),
+    )
+    _obs, infos = env.reset(seed=np.int64(7))
+    assert infos[0]["seed"] == 7, "a numpy integer is the seed + env index form"
+
+    applied = list(env._applied_seeds)
+    # The invalid types are the caller errors the binding refuses; the casts
+    # keep the static signature honest at the call.
+    with pytest.raises(TypeError, match="float64"):
+        env.reset(seed=cast(Any, np.float64(7.0)))
+    with pytest.raises(TypeError, match="str"):
+        env.reset(seed=cast(Any, "7"))
+    assert env._applied_seeds == applied, (
+        "a refused seed leaves every env's applied seed unchanged: validation "
+        "runs before the reset touches a dwelling"
+    )
 
 
 def test_observation_reports_the_engine_clock_schedule_and_occupancy():

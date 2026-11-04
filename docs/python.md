@@ -296,14 +296,18 @@ steps are bitwise the run's own. And with `auto_reset=True`, a step whose
 env ended (terminated or truncated) resets that env alone before the step
 returns: its observation is the new episode's first one, the ended
 episode's last observation rides `info["final_observation"]`, and its
-`info["seed"]` is the new episode's applied seed. Each env's episode seeds
-derive from the constructor's `seed_sequence` (a `numpy.random.SeedSequence`):
-the sequence spawns one child per env and each of the env's episodes draws
-its seed from its child's next spawn, so the seeds are deterministic in
-(caller SeedSequence, env index, episode count) and independent across
-envs; with no SeedSequence the seeds draw from OS entropy, like
-`reset(seed=None)`. An explicit `reset(seed=int)` keeps the documented
-`seed + env index` form.
+`info["seed"]` is the new episode's applied seed. Every step row carries
+the env's current episode seed (omitted before that env's first reset),
+the same field the single-dwelling environment reports. Each env's
+episode seeds derive from the constructor's `seed_sequence` (a
+`numpy.random.SeedSequence`): the sequence spawns one child per env and
+each of the env's episodes draws its seed from its child's next spawn, so
+the seeds are deterministic in (caller SeedSequence, env index, episode
+count) and independent across envs; with no SeedSequence the seeds draw
+from OS entropy, like `reset(seed=None)`. An explicit `reset(seed=int)`
+keeps the documented `seed + env index` form; a numpy integer is that
+same form, and any other seed type is refused naming the type before the
+reset touches a dwelling.
 
 The observation's schedule, occupancy and clock fields read the engine's
 own state at the step: `schedule_row` (the environment's published

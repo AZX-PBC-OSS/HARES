@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 import math
+import numbers
 import secrets
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 import warnings
@@ -160,6 +161,24 @@ def validated_seed_sequence(seed_sequence: object) -> np.random.SeedSequence | N
             f"{type(seed_sequence).__name__}"
         )
     return seed_sequence
+
+
+def validated_reset_seed(
+    seed: object,
+) -> int | np.random.SeedSequence | None:
+    """The reset seed is an integer, a SeedSequence or None: any other value
+    is the caller's error, named by type, refused before the reset touches
+    a dwelling. An integer-like value (a numpy integer among them) is
+    converted once to the Python integer the ``seed + env index`` form
+    reads, so a caller's seed is never silently dropped."""
+    if seed is None or isinstance(seed, np.random.SeedSequence):
+        return seed
+    if isinstance(seed, numbers.Integral):
+        return int(seed)
+    raise TypeError(
+        "seed must be an int, a numpy.random.SeedSequence or None, got "
+        f"{type(seed).__name__}"
+    )
 
 
 def sorted_action_layout(

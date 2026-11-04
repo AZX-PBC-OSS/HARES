@@ -33,6 +33,7 @@ from .gym_env import (
     validate_episode_length,
     validated_auto_reset,
     validated_observation_fields,
+    validated_reset_seed,
     validated_seed_sequence,
 )
 
@@ -300,11 +301,22 @@ class VecDwellingGymEnv:
     def reset(
         self,
         *,
-        seed: int | np.random.SeedSequence | None = None,
+        seed: object = None,
         options: dict[str, Any] | None = None,
         mask: np.ndarray | None = None,
     ):
+        """Reset the masked envs (every env by default) and return the batch's
+        observations.
+
+        ``seed`` is an integer (the documented ``seed + env index`` form), a
+        ``numpy.random.SeedSequence`` (the per-env children re-spawn from it),
+        or ``None`` (each env's own stream, OS entropy when the constructor
+        received no ``seed_sequence``). Any other type is refused naming it.
+        An unmasked env's state, clock, RNG and applied episode seed are left
+        untouched.
+        """
         del options
+        seed = validated_reset_seed(seed)
         if mask is None:
             mask = np.ones(self.num_envs, dtype=bool)
         else:
@@ -465,6 +477,14 @@ class VecDwellingGymEnv:
                     info["warnings"] = warning_messages
                 infos.append(info)
 
+        # Every step row reports the env's current episode seed, the same
+        # field (and the same omission before the env's first reset) the
+        # single-dwelling environment carries. The seed the row's step ran
+        # under is the one this env's state is seeded with.
+        for idx, info in enumerate(infos):
+            if self._applied_seeds[idx] is not None:
+                info["seed"] = self._applied_seeds[idx]
+
         # One contiguous n_envs x n_fields allocation per step by default:
         # an observation a caller keeps across steps is never overwritten.
         # copy=False returns the buffer itself, overwritten by the next
@@ -520,6 +540,7 @@ class VecDwellingGymEnv:
                 self._initial_snapshots[idx], applied_seed
             )
             self._applied_seeds[idx] = applied_seed
+            infos[idx]["seed"] = applied_seed
             self._steps_elapsed[idx] = 0
             self._dwellings[idx].observe_into(plans[idx], self._obs_buffer[idx])
             obs[idx] = self._obs_buffer[idx].copy()
