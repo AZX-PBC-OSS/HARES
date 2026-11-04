@@ -131,6 +131,11 @@ class HELICSFleet:
         grant_timeout_s: Wall-clock seconds allowed for each HELICS time
             grant.  A stalled peer federate raises ``TimeoutError`` instead of
             blocking ``run()`` forever.
+        max_time_drift_tolerance_s: Cumulative absolute time drift in seconds
+            the federate tolerates before raising. ``None`` (default) leaves
+            the drift unbounded and only accumulated. The tolerance is the
+            dwelling federate's own rule (docs/cosim.md's drift clause: the
+            ONE boundary behavior, time included).
     """
 
     def __init__(
@@ -142,6 +147,7 @@ class HELICSFleet:
         time_offset_s: float = 0.0,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         grant_timeout_s: float = DEFAULT_GRANT_TIMEOUT_S,
+        max_time_drift_tolerance_s: float | None = None,
     ) -> None:
         self._fleet = fleet
         self._fed_name = fed_name
@@ -189,6 +195,7 @@ class HELICSFleet:
         self._sub_voltage_dwelling: list[HelicsSubscriptionLike] = []
         self._sub_control: HelicsSubscriptionLike | None = None
         self._sub_price: HelicsSubscriptionLike | None = None
+        self._sub_frequency: HelicsSubscriptionLike | None = None
 
         self._publication_configs: list[HELICSPublicationConfig] = []
         self._subscription_configs: list[HELICSSubscriptionConfig] = []
@@ -206,6 +213,9 @@ class HELICSFleet:
         self._stale_subscription_count: int = 0
         self._required_publication_keys: set[str] = set()
         self._required_subscription_keys: set[str] = set()
+
+        self._max_time_drift_tolerance_s = max_time_drift_tolerance_s
+        self._time_drift_cumulative_s = 0.0
 
     def register_publications(
         self,
@@ -378,9 +388,14 @@ class HELICSFleet:
         per_dwelling_voltage_topics: list[str] | None = None,
         control_topic: str | None = None,
         price_topic: str | None = None,
+        frequency_topic: str | None = None,
         required_keys: set[str] | None = None,
     ) -> list[HELICSSubscriptionConfig]:
-        """Register fleet-wide/per-dwelling voltage, control, and price subscriptions.
+        """Register fleet-wide/per-dwelling voltage, control, price, and frequency subscriptions.
+
+        The registration order is the update mask's bit order: the
+        fleet-wide voltage, the per-dwelling voltages, then control, then
+        price, then frequency.
 
         Args:
             voltage_topic: Fleet-wide voltage topic (applied to all dwellings).
@@ -389,6 +404,7 @@ class HELICSFleet:
                 provided -- they are **not** auto-derived from ``voltage_topic``.
             control_topic: JSON control topic for equipment setpoints.
             price_topic: Fleet-wide price topic (applied to all dwellings).
+            frequency_topic: Fleet-wide frequency topic (applied to all dwellings).
             required_keys: Optional set of fully-qualified subscription keys that
                 must be registered. After entering execution mode, any missing
                 required key is logged as an error.
@@ -425,6 +441,12 @@ class HELICSFleet:
         else:
             self._sub_price = None
 
+        if frequency_topic is not None:
+            self._sub_frequency = self._fed.register_subscription(frequency_topic, "double")
+            configs.append(HELICSSubscriptionConfig(key=frequency_topic, type="double"))
+        else:
+            self._sub_frequency = None
+
         self._subscription_configs = configs
         if required_keys is not None:
             self._required_subscription_keys = set(required_keys)
@@ -457,6 +479,7 @@ class HELICSFleet:
             self._verify_helics_counts()
             sim_time_s = 0.0
             step_count = 0
+            self._time_drift_cumulative_s = 0.0
             while not self._fleet.is_finished():
                 if step_count >= self._total_steps:
                     _LOG.warning(
@@ -475,11 +498,28 @@ class HELICSFleet:
                     self._federation_terminated = True
                     break
 
+                # The dwelling federate's own drift rule (docs/cosim.md's
+                # drift clause): the absolute difference between requested
+                # and granted times accumulates across the run, and a
+                # tolerance's breach raises rather than silently skewing
+                # the federation.
+                step_drift = abs(granted - exit_time_s)
+                self._time_drift_cumulative_s += step_drift
+                step_count += 1
+                if (
+                    self._max_time_drift_tolerance_s is not None
+                    and self._time_drift_cumulative_s > self._max_time_drift_tolerance_s
+                ):
+                    raise RuntimeError(
+                        f"Time drift {self._time_drift_cumulative_s:.9f}s "
+                        f"exceeds tolerance {self._max_time_drift_tolerance_s:.9f}s "
+                        f"at step {step_count}"
+                    )
+
                 self._read_subscriptions()
                 self._fleet.step()
                 self._publish_results()
 
-                step_count += 1
                 sim_time_s = exit_time_s
             # Signal completion to the HELICS federation. A federate that has
             # no further time steps must inform the broker so it can coordinate
@@ -542,10 +582,11 @@ class HELICSFleet:
         self._stale_subscription_count = 0
 
         # Track stale subscription counts and build update mask.
-        # Bits match _subscription_configs order: bit 0 = fleet-wide voltage,
-        # bits 1..N = per-dwelling voltages, then price, then control last.
-        # is_updated() is called exactly once per subscription so that stale
-        # tracking and business logic share the same result.
+        # Bits match _subscription_configs order (register_subscriptions'
+        # registration order): bit 0 = fleet-wide voltage, bits 1..N =
+        # per-dwelling voltages, then control, then price, then frequency
+        # last. is_updated() is called exactly once per subscription so
+        # that stale tracking and business logic share the same result.
         _sub_objs: list[HelicsSubscriptionLike] = []
         if self._sub_voltage_all is not None:
             _sub_objs.append(self._sub_voltage_all)
@@ -554,6 +595,8 @@ class HELICSFleet:
             _sub_objs.append(self._sub_control)
         if self._sub_price is not None:
             _sub_objs.append(self._sub_price)
+        if self._sub_frequency is not None:
+            _sub_objs.append(self._sub_frequency)
 
         _updates: list[bool] = []
         for sub_obj in _sub_objs:
@@ -661,6 +704,27 @@ class HELICSFleet:
                 except Exception as exc:
                     _LOG.warning("Failed to apply price signal: %s", exc)
 
+            if self._sub_frequency is not None and _update_by_sub.get(self._sub_frequency, False):
+                try:
+                    frequency_hz = float(self._sub_frequency.double)
+                    if not math.isfinite(frequency_hz) or frequency_hz < FREQUENCY_HZ_MIN or frequency_hz > FREQUENCY_HZ_MAX:
+                        # The ONE boundary behavior on the fleet's own
+                        # frequency channel: a value outside [40, 80] Hz or
+                        # non-finite is flagged, counted and never applied;
+                        # the dwellings keep their last valid frequency.
+                        self._last_frequency_out_of_range = True
+                        _LOG.warning(
+                            "Grid frequency %r Hz outside expected range [%.1f, %.1f]; "
+                            "value not applied; keeping last valid frequency.",
+                            frequency_hz,
+                            FREQUENCY_HZ_MIN,
+                            FREQUENCY_HZ_MAX,
+                        )
+                    else:
+                        self._fleet.set_frequency_all(frequency_hz)
+                except Exception as exc:
+                    _LOG.warning("Failed to apply grid frequency: %s", exc)
+
             if self._sub_control is None or not _update_by_sub.get(self._sub_control, False):
                 return
 
@@ -700,7 +764,9 @@ class HELICSFleet:
                 self._range_violations_total += 1
             if self._last_per_dwelling_voltage_out_of_range:
                 self._range_violations_total += 1
-            if self._last_price_negative:
+            if self._last_price_negative or self._last_price_non_finite:
+                self._range_violations_total += 1
+            if self._last_frequency_out_of_range:
                 self._range_violations_total += 1
 
     def _verify_registration_completeness(self) -> tuple[set[str], set[str]]:
@@ -967,18 +1033,27 @@ class HELICSFleet:
 
     @property
     def helics_voltage_all_valid(self) -> bool:
-        """True when the most recent fleet-wide voltage subscription was in [0.5, 1.5] pu."""
+        """True when the most recent fleet-wide voltage subscription was
+        admitted: the outage's exactly 0.0, or a finite value in [0.5, 1.5] pu."""
         return not self._last_voltage_all_out_of_range
 
     @property
     def per_dwelling_voltage_valid(self) -> bool:
-        """True when all per-dwelling voltage subscriptions were in [0.5, 1.5] pu this timestep."""
+        """True when all per-dwelling voltage subscriptions were admitted this
+        timestep (the outage's exactly 0.0, or a finite value in [0.5, 1.5] pu)."""
         return not self._last_per_dwelling_voltage_out_of_range
 
     @property
+    def helics_frequency_valid(self) -> bool:
+        """True when the most recent frequency subscription was a finite value
+        in [40, 80] Hz."""
+        return not self._last_frequency_out_of_range
+
+    @property
     def helics_price_valid(self) -> bool:
-        """True when the most recent price subscription was non-negative."""
-        return not self._last_price_negative
+        """True when the most recent price subscription was finite and
+        non-negative."""
+        return not (self._last_price_negative or self._last_price_non_finite)
 
     @property
     def helics_control_clamped(self) -> int:
@@ -987,14 +1062,20 @@ class HELICSFleet:
 
     @property
     def helics_range_violations_total(self) -> int:
-        """Cumulative count of all range violations (voltage, price, control) across the run."""
+        """Cumulative count of all range violations (voltage, price, frequency, control) across the run."""
         return self._range_violations_total
+
+    @property
+    def time_drift_cumulative_s(self) -> float:
+        """Cumulative absolute time drift in seconds accumulated across the run."""
+        return self._time_drift_cumulative_s
 
     def get_diagnostic_row(self) -> dict[str, object]:
         """Return a dict of HELICS diagnostic fields for this timestep.
 
         Keys: ``helics_voltage_all_valid`` (bool), ``per_dwelling_voltage_valid`` (bool),
-        ``helics_price_valid`` (bool), ``helics_control_clamped`` (int),
+        ``helics_frequency_valid`` (bool), ``helics_price_valid`` (bool),
+        ``helics_control_clamped`` (int),
         ``helics_range_violations_total`` (int),
         ``helics_stale_subscription_count`` (int),
         ``helics_update_mask`` (int).
@@ -1004,6 +1085,7 @@ class HELICSFleet:
         return {
             "helics_voltage_all_valid": self.helics_voltage_all_valid,
             "per_dwelling_voltage_valid": self.per_dwelling_voltage_valid,
+            "helics_frequency_valid": self.helics_frequency_valid,
             "helics_price_valid": self.helics_price_valid,
             "helics_control_clamped": self.helics_control_clamped,
             "helics_range_violations_total": self.helics_range_violations_total,

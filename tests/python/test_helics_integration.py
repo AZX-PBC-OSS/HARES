@@ -203,7 +203,9 @@ class _Federation:
     def helics_dwelling(self, dwelling: Any, fed_name: str, **kwargs: Any) -> HELICSDwelling:
         return HELICSDwelling(dwelling=dwelling, fed_name=fed_name, **self._federate_kwargs(kwargs))
 
-    def helics_fleet(self, fleet: SteppableFleet, fed_name: str, **kwargs: Any) -> HELICSFleet:
+    # Any, like helics_dwelling's dwelling: the tests drive decorated
+    # fleets (the recording wrapper) beside the bare one.
+    def helics_fleet(self, fleet: Any, fed_name: str, **kwargs: Any) -> HELICSFleet:
         return HELICSFleet(fleet=fleet, fed_name=fed_name, **self._federate_kwargs(kwargs))
 
     def start(self, target: Callable[[Callable[[], None]], None], name: str) -> _FederateThread:
@@ -1525,3 +1527,122 @@ def test_a_federate_whose_broker_is_unreachable_fails_without_retrying(monkeypat
         )
 
     assert len(draws) == 1
+
+
+class _FrequencyRecordingFleet:
+    """Decorator around ``SteppableFleet`` that records ``set_frequency_all``.
+
+    Delegates the orchestrator's whole surface; the recording is the witness
+    that the fleet's frequency channel actually reaches the fleet.
+    """
+
+    def __init__(self, fleet: SteppableFleet) -> None:
+        self._fleet = fleet
+        self.frequency_values: list[float] = []
+
+    def __len__(self) -> int:
+        return len(self._fleet)
+
+    def time_res_s(self) -> float:
+        return self._fleet.time_res_s()
+
+    def total_steps(self) -> int:
+        return self._fleet.total_steps()
+
+    def current_step(self) -> int:
+        return self._fleet.current_step()
+
+    def is_finished(self) -> bool:
+        return self._fleet.is_finished()
+
+    def step(self):
+        return self._fleet.step()
+
+    def telemetry(self, dwelling_index: int):
+        return self._fleet.telemetry(dwelling_index)
+
+    def set_grid_voltage_all(self, voltage_pu: float) -> None:
+        self._fleet.set_grid_voltage_all(voltage_pu)
+
+    def set_grid_voltage(self, dwelling_index: int, voltage_pu: float) -> None:
+        self._fleet.set_grid_voltage(dwelling_index, voltage_pu)
+
+    def set_frequency(self, dwelling_index: int, frequency_hz: float) -> None:
+        self._fleet.set_frequency(dwelling_index, frequency_hz)
+
+    def set_price_signal_all(
+        self, electricity_price: float, export_price: float | None = None, ghg_intensity: float | None = None
+    ) -> None:
+        self._fleet.set_price_signal_all(electricity_price, export_price, ghg_intensity)
+
+    def set_frequency_all(self, frequency_hz: float) -> None:
+        self.frequency_values.append(frequency_hz)
+        self._fleet.set_frequency_all(frequency_hz)
+
+    def apply_control(self, dwelling_index: int, name: str, signal: ControlSignal) -> None:
+        self._fleet.apply_control(dwelling_index, name, signal)
+
+    @property
+    def build_errors(self):
+        return self._fleet.build_errors
+
+    def __repr__(self) -> str:
+        return repr(self._fleet)
+
+
+def test_the_fleets_frequency_channel_reaches_the_fleet() -> None:
+    """The fleet's ``grid/frequency`` subscription delivers a published
+    frequency to ``set_frequency_all`` through a real federation.
+
+    The contract makes the frequency channel both federates': the aggregator
+    publishes on ``grid/frequency`` and the recording fleet's values are the
+    published ones.
+    """
+    with _Federation(n_federates=2) as federation:
+        recording = _FrequencyRecordingFleet(_new_fleet(n_dwellings=2))
+
+        def _run_federate(ready: Callable[[], None]) -> None:
+            helics_fleet = federation.helics_fleet(recording, "fleet_1")
+            helics_fleet.register_publications()
+            helics_fleet.register_subscriptions(frequency_topic="grid/frequency")
+            ready()
+            helics_fleet.run()
+
+        thread = federation.start(_run_federate, name="fleet-federate")
+        thread.wait_ready()
+
+        aggregator = federation.value_federate("aggregator_1")
+        pub_frequency = aggregator.register_global_publication("grid/frequency", "double")
+
+        _enter_exec(aggregator)
+        for step_idx in range(_TOTAL_STEPS):
+            pub_frequency.publish(59.9 if step_idx % 2 else 60.1)
+            _request(aggregator, (step_idx + 1) * _TIME_RES_S)
+        aggregator.disconnect()
+
+        thread.result()
+        assert recording.frequency_values, (
+            "the fleet's frequency channel delivers every published frequency to set_frequency_all"
+        )
+        assert set(recording.frequency_values) == {59.9, 60.1}
+
+
+def test_the_fleets_drift_guard_raises_when_the_tolerance_is_exceeded() -> None:
+    """The fleet federate's drift rule end to end: a tolerance no reachable
+    grant satisfies raises naming the drift on the first step.
+
+    The contract's drift clause is one behavior for both federates; the
+    dwelling federate's own witness is its negative-tolerance run.
+    """
+    with _Federation(n_federates=1) as federation:
+        fleet = _new_fleet(n_dwellings=2)
+
+        def _run_federate(ready: Callable[[], None]) -> None:
+            helics_fleet = federation.helics_fleet(fleet, "drift_guard", max_time_drift_tolerance_s=-1.0)
+            helics_fleet.register_publications()
+            ready()
+            helics_fleet.run()
+
+        thread = federation.start(_run_federate, name="fleet-federate")
+        with pytest.raises(RuntimeError, match="drift"):
+            thread.result()
