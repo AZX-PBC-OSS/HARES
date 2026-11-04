@@ -5,8 +5,11 @@ from __future__ import annotations
 import builtins
 import importlib
 import json
+import os
 from pathlib import Path
+import shlex
 import socket
+import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -436,6 +439,110 @@ def test_make_dwelling_federate_config_rejects_invalid_kwarg_key(
             schedule_path=Path("/data/schedule.csv"),
             **{"bad key": "x"},
         )
+
+
+@pytest.mark.timeout(120, method="thread")
+def test_the_emitted_dwelling_command_joins_the_federation() -> None:
+    """The runner's emitted command launches a process that JOINS the federation.
+
+    The emitted command is executed verbatim against a real in-process broker
+    (real helics, the repo's own package on the interpreter's path): the probe
+    federate on the same broker cannot enter executing mode until the dwelling
+    process registers and enters, and then receives the dwelling's published
+    power. The old no-op (a module with no entry point: it imported, exited 0,
+    and joined nothing) fails here at the probe's executing-mode timeout with
+    every peer waiting out its timeout behind it.
+    """
+    import helics
+
+    from conftest import HPXML, ROOT, SCHEDULE, WEATHER
+
+    broker_module = importlib.import_module("hares.helics.broker")
+    federate_module = importlib.import_module("hares.helics.federate")
+    runner_module = importlib.import_module("hares.helics.runner")
+
+    broker = broker_module.create_broker(n_federates=2, core_type="zmq", port=None)
+    probe: Any = None
+    try:
+        port = broker_module.get_broker_port(broker)
+        config = runner_module.make_dwelling_federate_config(
+            name="house_1",
+            hpxml_path=Path(HPXML),
+            weather_path=Path(WEATHER),
+            schedule_path=Path(SCHEDULE),
+            broker=f"127.0.0.1:{port}",
+            **{
+                "core-type": "zmq",
+                "start": "2019-01-01T00:00:00",
+                "duration-s": 1800,
+                "time-res-s": 900,
+            },
+        )
+
+        env = dict(os.environ)
+        env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
+        # The offline guard's sanctioned python child: the guard's own
+        # sitecustomize dir leads PYTHONPATH and the flag is set, so the
+        # child installs the same refusal (its zmq transport reaches
+        # loopback only, by construction).
+        from offline_guard import SITE_DIR
+
+        env["HARES_TESTS_OFFLINE"] = "1"
+        env["PYTHONPATH"] = os.pathsep.join([str(SITE_DIR), str(ROOT / "python")])
+        proc = subprocess.Popen(
+            shlex.split(config.exec_command),
+            cwd=str(ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            probe = federate_module.create_value_federate(
+                "probe_1",
+                "zmq",
+                f"127.0.0.1:{port}",
+                20.0,
+                lambda core_name, core_init: _probe_fedinfo("zmq", core_name, core_init),
+            )
+            sub_power = probe.register_subscription("house_1/total_power_w", "double")
+            federate_module.enter_executing_mode_with_timeout(probe, 20.0, "probe_1")
+
+            received: list[float] = []
+            granted = federate_module.request_time_with_timeout(probe, 60.0, 30.0, "probe_1")
+            step = 120.0
+            while granted < helics.HELICS_TIME_MAXTIME and len(received) < 2 and step <= 3600.0:
+                if sub_power.is_updated():
+                    received.append(float(sub_power.double))
+                granted = federate_module.request_time_with_timeout(probe, step, 30.0, "probe_1")
+                step += 60.0
+        finally:
+            stdout, stderr = proc.communicate(timeout=60)
+            if probe is not None:
+                probe.disconnect()
+
+        assert proc.returncode == 0, (
+            f"the emitted command must run to its horizon's end: rc={proc.returncode}\n"
+            f"stdout: {stdout.decode()[-2000:]}\nstderr: {stderr.decode()[-2000:]}"
+        )
+        assert received, (
+            "a joined dwelling federate publishes its power to the federation; "
+            "the probe received nothing"
+        )
+    finally:
+        broker_module.destroy_broker(broker)
+
+
+def _probe_fedinfo(core_type: str, core_name: str, core_init: str) -> Any:
+    import helics
+
+    fedinfo = helics.helicsCreateFederateInfo()
+    helics.helicsFederateInfoSetCoreTypeFromString(fedinfo, core_type)
+    helics.helicsFederateInfoSetCoreName(fedinfo, core_name)
+    helics.helicsFederateInfoSetCoreInitString(fedinfo, core_init)
+    helics.helicsFederateInfoSetTimeProperty(
+        fedinfo, helics.HELICS_PROPERTY_TIME_PERIOD, 60.0
+    )
+    return fedinfo
 
 
 def test_destroy_broker_disconnects(monkeypatch: pytest.MonkeyPatch) -> None:

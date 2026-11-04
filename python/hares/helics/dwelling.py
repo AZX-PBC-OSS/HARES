@@ -70,6 +70,7 @@ Expected HELICS subscription units
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -86,7 +87,7 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
         "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
-from hares import ControlSignal
+from hares import ControlSignal, SimulationConfig
 from hares._hares import MAX_TANK_THERMOSTAT_BAND_C
 from hares._hares import Dwelling as PyDwelling
 
@@ -1218,3 +1219,117 @@ class HELICSDwelling:
                 raise ValueError("Multi-equipment payload must be {str: dict}")
             entries.append((item_key, item_value))
         return entries
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    """Parse the dwelling federate command's arguments.
+
+    Every flag is explicit: the run's horizon (``--start``, ``--duration-s``,
+    ``--time-res-s``) has no default because a silently defaulted horizon
+    would misalign every federation the dwelling joins.
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m hares.helics.dwelling",
+        description=(
+            "Run one HARES dwelling as a HELICS value federate: the command the "
+            "HELICS runner config launches (make_dwelling_federate_config emits it)."
+        ),
+    )
+    parser.add_argument("--name", required=True, help="The federate's name in the HELICS federation.")
+    parser.add_argument("--hpxml", required=True, help="The HPXML file the dwelling is built from.")
+    parser.add_argument("--weather", required=True, help="The EPW weather file path.")
+    parser.add_argument("--schedule", required=True, help="The schedule CSV path.")
+    parser.add_argument(
+        "--start",
+        required=True,
+        help="The run's start time, RFC 3339 with offset (local wall-clock).",
+    )
+    parser.add_argument("--duration-s", required=True, type=int, help="The run's length in seconds.")
+    parser.add_argument(
+        "--time-res-s", required=True, type=int, help="The timestep in seconds (the federation's period)."
+    )
+    parser.add_argument("--master-seed", type=int, default=0, help="The run's master RNG seed.")
+    parser.add_argument("--bldg-id", type=int, default=0, help="The dwelling's building id.")
+    parser.add_argument(
+        "--broker",
+        default="localhost",
+        help="The broker address (host or host:port or tcp://host:port).",
+    )
+    parser.add_argument(
+        "--core-type", default="zmq", help="The HELICS core transport (default: zmq)."
+    )
+    parser.add_argument(
+        "--time-offset-s",
+        type=float,
+        default=0.0,
+        help="The HELICS time offset in seconds (a positive offset steps this federate after an aggregator).",
+    )
+    parser.add_argument(
+        "--connect-timeout-s",
+        type=float,
+        default=DEFAULT_CONNECT_TIMEOUT_S,
+        help="The wall-clock seconds allowed for broker registration and entering executing mode.",
+    )
+    parser.add_argument(
+        "--grant-timeout-s",
+        type=float,
+        default=DEFAULT_GRANT_TIMEOUT_S,
+        help="The wall-clock seconds allowed for each time grant.",
+    )
+    parser.add_argument(
+        "--max-time-drift-tolerance-s",
+        type=float,
+        default=None,
+        help="The cumulative time drift tolerance in seconds; exceeding it raises (default: unbounded).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The dwelling federate process's entry point.
+
+    Builds the dwelling from the named inputs, joins the federation at the
+    named broker, registers the contract's publications and subscriptions
+    (docs/cosim.md's topics), and runs the stepping loop to the horizon's
+    end. This is what the HELICS runner launches: a process that joins the
+    federation, registers, and publishes until its run completes.
+    """
+    opts = _parse_args(argv)
+    config = SimulationConfig(
+        start_time=opts.start,
+        duration=opts.duration_s,
+        time_res=opts.time_res_s,
+        master_seed=opts.master_seed,
+    )
+    dwelling = PyDwelling.from_hpxml(
+        opts.hpxml,
+        opts.schedule,
+        opts.weather,
+        config=config,
+        bldg_id=opts.bldg_id,
+    )
+    dwelling.initialize()
+
+    orchestrator = HELICSDwelling(
+        dwelling,
+        fed_name=opts.name,
+        broker_address=opts.broker,
+        core_type=opts.core_type,
+        time_offset_s=opts.time_offset_s,
+        connect_timeout_s=opts.connect_timeout_s,
+        grant_timeout_s=opts.grant_timeout_s,
+        max_time_drift_tolerance_s=opts.max_time_drift_tolerance_s,
+    )
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(
+        voltage_topic="grid/voltage",
+        control_topic="grid/control",
+        price_topic="grid/price",
+        frequency_topic="grid/frequency",
+    )
+    orchestrator.run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
