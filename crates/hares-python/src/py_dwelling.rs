@@ -2497,7 +2497,6 @@ impl PyDwelling {
         dict.set_item("outdoor_temp_c", env.weather.outdoor_temp_c)?;
         dict.set_item("outdoor_humidity_ratio", env.weather.outdoor_humidity_ratio)?;
         dict.set_item("schedule_row", env.schedule_row)?;
-        dict.set_item("schedule_row", env.schedule_row)?;
         dict.set_item("ghi_w_m2", env.weather.ghi_w_m2)?;
         dict.set_item("dni_w_m2", env.weather.dni_w_m2)?;
         dict.set_item("dhi_w_m2", env.weather.dhi_w_m2)?;
