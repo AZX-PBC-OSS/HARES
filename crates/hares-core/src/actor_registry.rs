@@ -44,6 +44,98 @@ use rand_chacha::ChaCha8Rng;
 pub type ActorFactory =
     Box<dyn Fn(ActorConfig) -> Result<Box<dyn Actor>, HaresError> + Send + Sync + 'static>;
 
+/// The value type one declared actor parameter expects: the variant of
+/// [`ConfigValue`] the factory's accessor reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActorParamKind {
+    F64,
+    Text,
+    Bool,
+    F64Array,
+}
+
+impl ActorParamKind {
+    /// The type's own name, for the validation errors: the ConfigValue
+    /// variant names the factory-level errors already use.
+    fn name(self) -> &'static str {
+        match self {
+            Self::F64 => "a float",
+            Self::Text => "a string",
+            Self::Bool => "a bool",
+            Self::F64Array => "a float array",
+        }
+    }
+
+    /// Whether the value's variant is the declared type.
+    fn accepts(self, value: &ConfigValue) -> bool {
+        match self {
+            Self::F64 => matches!(value, ConfigValue::Float(_)),
+            Self::Text => matches!(value, ConfigValue::Text(_)),
+            Self::Bool => matches!(value, ConfigValue::Bool(_)),
+            Self::F64Array => matches!(value, ConfigValue::FloatArray(_)),
+        }
+    }
+}
+
+/// One declared parameter of an actor factory's schema: its name, its
+/// expected value type and whether the factory requires it. A parameter
+/// not in the factory's schema is the caller's error, never a silent
+/// default.
+#[derive(Clone, Copy, Debug)]
+pub struct ActorParamDecl {
+    pub name: &'static str,
+    pub kind: ActorParamKind,
+    pub required: bool,
+}
+
+/// One actor type's parameter schema: the declared parameters the
+/// registry validates `create`'s config against, before the factory runs.
+pub type ActorParamSchema = &'static [ActorParamDecl];
+
+/// The validation errors `create` raises, one contract: an unknown name,
+/// a wrong-typed value or a missing required parameter is a typed error
+/// naming the actor, the parameter and the expected type.
+fn validate_actor_params(
+    actor_type: &str,
+    schema: ActorParamSchema,
+    config: &ActorConfig,
+) -> Result<(), HaresError> {
+    for (key, value) in &config.parameters {
+        let Some(decl) = schema.iter().find(|decl| decl.name == key.as_str()) else {
+            let known = schema
+                .iter()
+                .map(|decl| decl.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(HaresError::Control(format!(
+                "unknown parameter '{key}' on actor type {actor_type}: the declared \
+                 parameters are {known}"
+            )));
+        };
+        if !decl.kind.accepts(value) {
+            let actual = match value {
+                ConfigValue::Float(_) => "a float",
+                ConfigValue::Text(_) => "a string",
+                ConfigValue::Bool(_) => "a bool",
+                ConfigValue::FloatArray(_) => "a float array",
+            };
+            return Err(HaresError::Control(format!(
+                "parameter '{key}' on actor type {actor_type} expects {}, got {actual}: {value}",
+                decl.kind.name(),
+            )));
+        }
+    }
+    for decl in schema {
+        if decl.required && !config.parameters.contains_key(decl.name) {
+            return Err(HaresError::Control(format!(
+                "actor type {actor_type} requires the '{}' parameter",
+                decl.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Initialization parameters for one actor instance.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ActorConfig {
@@ -89,6 +181,223 @@ impl ActorConfig {
         self.parameters.get(key).and_then(ConfigValue::as_f64_array)
     }
 }
+
+// The built-ins' parameter schemas: one table per factory, the declared
+// contract `create` validates against. A parameter a factory reads must
+// be declared here; the declaration is the name, the expected value type
+// and whether the factory requires it.
+const IDEAL_THERMOSTAT_PARAMS: ActorParamSchema = &[
+    ActorParamDecl {
+        name: "target",
+        kind: ActorParamKind::Text,
+        required: true,
+    },
+    ActorParamDecl {
+        name: "heating_c",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "cooling_c",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "deadband_c",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "hysteresis_c",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+];
+
+const OCCUPANT_PARAMS: ActorParamSchema = &[
+    ActorParamDecl {
+        name: "lighting_target",
+        kind: ActorParamKind::Text,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "occupancy_column",
+        kind: ActorParamKind::F64Array,
+        required: false,
+    },
+];
+
+const EV_DRIVER_PARAMS: ActorParamSchema = &[
+    ActorParamDecl {
+        name: "target",
+        kind: ActorParamKind::Text,
+        required: true,
+    },
+    ActorParamDecl {
+        name: "seed",
+        kind: ActorParamKind::F64,
+        required: true,
+    },
+    ActorParamDecl {
+        name: "preset",
+        kind: ActorParamKind::Text,
+        required: false,
+    },
+];
+
+const DR_COMPLIANCE_PARAMS: ActorParamSchema = &[
+    ActorParamDecl {
+        name: "compliance_rate",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "seed",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "always_comply",
+        kind: ActorParamKind::Bool,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "hvac_target",
+        kind: ActorParamKind::Text,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "hvac_action",
+        kind: ActorParamKind::Text,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "load_targets",
+        kind: ActorParamKind::Text,
+        required: false,
+    },
+];
+
+const BATTERY_MANAGEMENT_PARAMS: ActorParamSchema = &[
+    ActorParamDecl {
+        name: "target",
+        kind: ActorParamKind::Text,
+        required: true,
+    },
+    ActorParamDecl {
+        name: "steps_per_day",
+        kind: ActorParamKind::F64,
+        required: true,
+    },
+    ActorParamDecl {
+        name: "mode",
+        kind: ActorParamKind::Text,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "min_soc",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "max_soc",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "solar_only_charging",
+        kind: ActorParamKind::Bool,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "surplus_deadband_w",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "reserve_soc",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "charge_threshold_percentile",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "discharge_threshold_percentile",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "price_deadband",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "min_duration_steps",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "target_soc",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "charge_from_grid",
+        kind: ActorParamKind::Bool,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "charge_rate_fraction",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "soc_deadband",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "grid_export_rule",
+        kind: ActorParamKind::Text,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "max_charge_w",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "max_discharge_w",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "min_dwell_steps",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+];
+
+const SAFETY_MONITOR_PARAMS: ActorParamSchema = &[
+    ActorParamDecl {
+        name: "target",
+        kind: ActorParamKind::Text,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "freeze_threshold_c",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "over_temp_threshold_c",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+];
 
 fn parse_dispatch_target(raw: &str) -> Result<DispatchTarget, HaresError> {
     if let Some(rest) = raw.strip_prefix("name:") {
@@ -281,6 +590,10 @@ fn parse_load_targets(raw: &str) -> Result<Vec<(DispatchTarget, DrAction)>, Hare
 #[derive(Default)]
 pub struct ActorRegistry {
     factories: HashMap<String, ActorFactory>,
+    /// The declared parameter schemas, one per type that declares one: a
+    /// type without a schema (an external registration) keeps the
+    /// no-validation contract its factory was written under.
+    schemas: HashMap<String, ActorParamSchema>,
 }
 
 impl ActorRegistry {
@@ -288,14 +601,16 @@ impl ActorRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
             factories: HashMap::new(),
+            schemas: HashMap::new(),
         };
         Self::register_builtins(&mut registry);
         registry
     }
 
     fn register_builtins(registry: &mut Self) {
-        registry.register(
+        registry.register_with_schema(
             "IdealThermostat",
+            IDEAL_THERMOSTAT_PARAMS,
             Box::new(|config: ActorConfig| {
                 let target = config.get_str("target").ok_or_else(|| {
                     HaresError::Control("IdealThermostat requires 'target' parameter".into())
@@ -320,8 +635,9 @@ impl ActorRegistry {
             }),
         );
 
-        registry.register(
+        registry.register_with_schema(
             "Occupant",
+            OCCUPANT_PARAMS,
             Box::new(|config: ActorConfig| {
                 let mut occupant = Occupant::new(&config.name);
                 if let Some(target) = config.get_str("lighting_target") {
@@ -345,8 +661,9 @@ impl ActorRegistry {
             }),
         );
 
-        registry.register(
+        registry.register_with_schema(
             "EvDriver",
+            EV_DRIVER_PARAMS,
             Box::new(|config: ActorConfig| {
                 let target = config
                     .get_str("target")
@@ -381,8 +698,9 @@ impl ActorRegistry {
             }),
         );
 
-        registry.register(
+        registry.register_with_schema(
             "DrCompliance",
+            DR_COMPLIANCE_PARAMS,
             Box::new(|config: ActorConfig| {
                 let mut actor = DrCompliance::new(&config.name);
                 if let Some(rate) = config.get_f64("compliance_rate") {
@@ -431,8 +749,9 @@ impl ActorRegistry {
             }),
         );
 
-        registry.register(
+        registry.register_with_schema(
             "BatteryManagement",
+            BATTERY_MANAGEMENT_PARAMS,
             Box::new(|config: ActorConfig| {
                 let target = config
                     .get_str("target")
@@ -540,8 +859,9 @@ impl ActorRegistry {
             }),
         );
 
-        registry.register(
+        registry.register_with_schema(
             "SafetyMonitor",
+            SAFETY_MONITOR_PARAMS,
             Box::new(|config: ActorConfig| {
                 let mut monitor = SafetyMonitor::new(&config.name);
                 if let Some(t) = config.get_f64("freeze_threshold_c") {
@@ -573,6 +893,21 @@ impl ActorRegistry {
         self.factories.insert(actor_type.into(), factory);
     }
 
+    /// Registers a factory with its parameter schema: `create` validates
+    /// every config against the schema before the factory runs, so an
+    /// unknown name, a wrong-typed value or a missing required parameter
+    /// is a typed error instead of the factory's silent default.
+    pub fn register_with_schema(
+        &mut self,
+        actor_type: impl Into<String>,
+        schema: ActorParamSchema,
+        factory: ActorFactory,
+    ) {
+        let actor_type = actor_type.into();
+        self.schemas.insert(actor_type.clone(), schema);
+        self.factories.insert(actor_type, factory);
+    }
+
     #[must_use]
     pub fn get(&self, actor_type: &str) -> Option<&ActorFactory> {
         self.factories.get(actor_type)
@@ -593,6 +928,11 @@ impl ActorRegistry {
                     config.actor_type
                 )));
             }
+        }
+        // A declared factory's schema is validated whole, before the
+        // factory runs: the schema is the parameter contract.
+        if let Some(schema) = self.schemas.get(&config.actor_type) {
+            validate_actor_params(&config.actor_type, schema, &config)?;
         }
         match self.factories.get(&config.actor_type) {
             Some(factory) => factory(config),
@@ -1309,5 +1649,119 @@ mod tests {
             (changes - 0.0).abs() < 1e-9,
             "presence_changes must be 0.0 (no transitions); got {changes}"
         );
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// Every built-in's minimal valid config: the required parameters
+    /// only, exactly as the factories require them.
+    fn builtin_minimal_configs() -> Vec<(&'static str, ActorConfig)> {
+        vec![
+            (
+                "IdealThermostat",
+                ActorConfig::new("t", "IdealThermostat")
+                    .with_param("target", ConfigValue::Text("Gas Furnace".into())),
+            ),
+            ("Occupant", ActorConfig::new("resident", "Occupant")),
+            (
+                "EvDriver",
+                ActorConfig::new("driver", "EvDriver")
+                    .with_param("target", ConfigValue::Text("EV1".into()))
+                    .with_param("seed", ConfigValue::Float(42.0)),
+            ),
+            ("DrCompliance", ActorConfig::new("dr", "DrCompliance")),
+            (
+                "BatteryManagement",
+                ActorConfig::new("bms", "BatteryManagement")
+                    .with_param("target", ConfigValue::Text("BAT1".into()))
+                    .with_param("steps_per_day", ConfigValue::Float(96.0)),
+            ),
+            (
+                "SafetyMonitor",
+                ActorConfig::new("monitor", "SafetyMonitor"),
+            ),
+        ]
+    }
+
+    /// An unknown parameter is refused naming the key, the actor type and
+    /// the declared names, for every built-in: the typo keeps its default
+    /// no more. RED at the defaulted base, where the same configs armed
+    /// the actors with the silent defaults.
+    #[test]
+    fn actor_registry_refuses_an_unknown_parameter_naming_the_schema() {
+        for (actor_type, config) in builtin_minimal_configs() {
+            let config = config.with_param("hysteresys_c", ConfigValue::Float(2.0));
+            let err = ActorRegistry::new()
+                .create(config)
+                .err()
+                .unwrap_or_else(|| panic!("{actor_type}: the typo must be refused"));
+            let message = err.to_string();
+            assert!(
+                message.contains("hysteresys_c") && message.contains(actor_type),
+                "{actor_type}: the error names the key and the actor type: {message}"
+            );
+        }
+    }
+
+    /// A wrong-typed value is refused naming the parameter, the expected
+    /// type and the value: the audit's exact case, a string setpoint
+    /// arming no thermostat at all.
+    #[test]
+    fn actor_registry_refuses_a_wrong_typed_parameter() {
+        let config = ActorConfig::new("t", "IdealThermostat")
+            .with_param("target", ConfigValue::Text("Gas Furnace".into()))
+            .with_param("heating_c", ConfigValue::Text("21".into()));
+        let err = ActorRegistry::new()
+            .create(config)
+            .err()
+            .expect("the string setpoint is refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("heating_c") && message.contains("a float") && message.contains("21"),
+            "the error names the parameter, the expected type and the value: {message}"
+        );
+    }
+
+    /// A required parameter's absence is refused at `create`, naming the
+    /// actor and the parameter, for every declared-required pair.
+    #[test]
+    fn actor_registry_refuses_a_missing_required_parameter() {
+        let cases: Vec<ActorConfig> = vec![
+            ActorConfig::new("t", "IdealThermostat"),
+            ActorConfig::new("driver", "EvDriver").with_param("seed", ConfigValue::Float(42.0)),
+            ActorConfig::new("driver2", "EvDriver")
+                .with_param("target", ConfigValue::Text("EV1".into())),
+            ActorConfig::new("bms", "BatteryManagement")
+                .with_param("steps_per_day", ConfigValue::Float(96.0)),
+            ActorConfig::new("bms2", "BatteryManagement")
+                .with_param("target", ConfigValue::Text("BAT1".into())),
+        ];
+        for config in cases {
+            let actor_type = config.actor_type.clone();
+            let err = ActorRegistry::new()
+                .create(config)
+                .err()
+                .unwrap_or_else(|| panic!("{actor_type}: the missing parameter must be refused"));
+            let message = err.to_string();
+            assert!(
+                message.contains("requires"),
+                "{actor_type}: the error names the required parameter: {message}"
+            );
+        }
+    }
+
+    /// A schema-complete config still arms the actor: the schemas are the
+    /// declared contract, not a refusal of the built-ins' own parameters.
+    #[test]
+    fn actor_registry_creates_every_builtin_from_its_schema() {
+        for (actor_type, config) in builtin_minimal_configs() {
+            let registry = ActorRegistry::new();
+            registry
+                .create(config)
+                .unwrap_or_else(|err| panic!("{actor_type}: the minimal config must arm: {err}"));
+        }
     }
 }

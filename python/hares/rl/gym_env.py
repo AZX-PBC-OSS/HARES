@@ -104,25 +104,27 @@ def validated_config_actors(actors: object) -> list[Any]:
             "actors must be a list or tuple of Actor instances or mappings, "
             f"got {type(actors).__name__}"
         )
+    entries: Sequence[Any] = cast("Sequence[Any]", actors)
     out: list[Any] = []
-    for entry in actors:
+    for entry in entries:
         if isinstance(entry, Mapping):
+            mapping = cast("Mapping[str, Any]", entry)
             required = {"actor_type", "name"}
-            missing = required - set(entry)
+            missing = required - set(mapping)
             if missing:
                 raise ValueError(
                     f"an actors mapping entry requires actor_type and name keys "
-                    f"(parameters is optional); missing {sorted(missing)} in {sorted(entry)}"
+                    f"(parameters is optional); missing {sorted(missing)} in {sorted(mapping)}"
                 )
-            unknown = set(entry) - required - {"parameters"}
+            unknown = set(mapping) - required - {"parameters"}
             if unknown:
                 raise ValueError(
                     f"an actors mapping entry accepts only actor_type, name and "
                     f"parameters keys; unknown {sorted(unknown)}"
                 )
-            actor_type = entry["actor_type"]
-            name = entry["name"]
-            parameters = entry.get("parameters")
+            actor_type = mapping["actor_type"]
+            name = mapping["name"]
+            parameters: Any = mapping.get("parameters")
             if not isinstance(actor_type, str):
                 raise TypeError(
                     f"actors entry's actor_type must be a string, got {type(actor_type).__name__}"
@@ -338,11 +340,17 @@ def action_bounds(dwelling: PyDwelling, equipment: str, field: str) -> tuple[flo
 
 
 def observation_field_bounds(field: str) -> tuple[float, float]:
+    """The observation vocabulary's bounds table, one entry per key the
+    frozen plan resolves (the plan is the one vocabulary; a key this
+    table recognizes but the plan refuses fails the plan's build at
+    reset, naming it). `equipment_power` is the signed watts the
+    equipment report (generation is negative by contract, so a PV
+    home's producing step is inside the Box); `zone_temp`'s floor is the
+    free-float range a vacant zone in design weather reaches, below the
+    outdoor design floor of -50 C."""
     key = field.strip().lower()
     if key in {"outdoor_temp", "outdoor_temp_c"}:
         return (-50.0, 55.0)
-    if key == "outdoor_rh":
-        return (0.0, 1.0)
     if key == "outdoor_humidity_ratio":
         return (0.0, 0.1)
     if key == "total_power_w":
@@ -350,7 +358,7 @@ def observation_field_bounds(field: str) -> tuple[float, float]:
     if key == "reactive_power_var":
         return (-100_000.0, 100_000.0)
     if _bracket_name(key, "zone_temp") is not None:
-        return (0.0, 50.0)
+        return (-80.0, 50.0)
     if _bracket_name(key, "setpoint_heat") is not None:
         return (0.0, 50.0)
     if _bracket_name(key, "setpoint_cool") is not None:
@@ -360,7 +368,7 @@ def observation_field_bounds(field: str) -> tuple[float, float]:
     if _bracket_name(key, "equipment_soc") is not None:
         return (0.0, 1.0)
     if _bracket_name(key, "equipment_power") is not None:
-        return (0.0, 100_000.0)
+        return (-100_000.0, 100_000.0)
     if key in {"battery_soc", "ev_soc"}:
         return (0.0, 1.0)
     if key in {"time_sin", "time_cos"}:
@@ -385,129 +393,9 @@ def _bracket_name(field: str, prefix: str) -> str | None:
     return field[len(head) : -1]
 
 
-def _index_map(names: Sequence[str]) -> dict[str, int]:
-    return {name.strip().lower(): idx for idx, name in enumerate(names)}
-
-
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
-
-
-def telemetry_to_observation(telemetry: Any, observation_fields: Sequence[str]) -> np.ndarray:
-    initialized = getattr(telemetry, "initialized", True)
-    if not initialized:
-        out_arr = np.full(len(observation_fields), np.nan, dtype=np.float64)
-        return np.ascontiguousarray(out_arr)
-
-    zone = telemetry.zone()
-    equipment = telemetry.equipment()
-    zone_idx = _index_map(list(zone.get("names", [])))
-    equip_idx = _index_map(list(equipment.get("names", [])))
-
-    out: list[float] = []
-    for field in observation_fields:
-        key = str(field)
-        if key in {"outdoor_temp", "outdoor_temp_c"}:
-            out.append(float(zone.get("outdoor_temp_c", float("nan"))))
-            continue
-        if key in {"outdoor_humidity_ratio"}:
-            out.append(float(zone.get("outdoor_humidity_ratio", float("nan"))))
-            continue
-        if key == "total_power_w":
-            out.append(float(telemetry.total_power_w))
-            continue
-        if key == "reactive_power_var":
-            out.append(float(telemetry.reactive_power_var))
-            continue
-
-        zone_name = _bracket_name(key, "zone_temp")
-        if zone_name is not None:
-            out.append(float(zone["temperature_c"][zone_idx[zone_name.strip().lower()]]))
-            continue
-        zone_name = _bracket_name(key, "setpoint_heat")
-        if zone_name is not None:
-            out.append(float(zone["setpoint_heat_c"][zone_idx[zone_name.strip().lower()]]))
-            continue
-        zone_name = _bracket_name(key, "setpoint_cool")
-        if zone_name is not None:
-            out.append(float(zone["setpoint_cool_c"][zone_idx[zone_name.strip().lower()]]))
-            continue
-        zone_name = _bracket_name(key, "zone_energy_balance")
-        if zone_name is not None:
-            out.append(float(zone["energy_balance_residuals"][zone_idx[zone_name.strip().lower()]]))
-            continue
-        equip_name = _bracket_name(key, "equipment_soc")
-        if equip_name is not None:
-            out.append(float(equipment["soc"][equip_idx[equip_name.strip().lower()]]))
-            continue
-        equip_name = _bracket_name(key, "equipment_power")
-        if equip_name is not None:
-            out.append(float(equipment["power_w"][equip_idx[equip_name.strip().lower()]]))
-            continue
-
-        if key == "battery_soc":
-            out.append(float(equipment["soc"][equip_idx["battery"]]))
-            continue
-        if key == "ev_soc":
-            out.append(float(equipment["soc"][equip_idx["electric vehicle"]]))
-            continue
-
-        # Temporal encoding: sin/cos of fractional hour for diurnal RL patterns.
-        if key == "time_sin":
-            dt = telemetry.current_time
-            fhour = float(dt.hour) + float(dt.minute) / 60.0 + float(dt.second) / 3600.0
-            out.append(math.sin(2.0 * math.pi * fhour / 24.0))
-            continue
-        if key == "time_cos":
-            dt = telemetry.current_time
-            fhour = float(dt.hour) + float(dt.minute) / 60.0 + float(dt.second) / 3600.0
-            out.append(math.cos(2.0 * math.pi * fhour / 24.0))
-            continue
-
-        # The schedule, occupancy and clock fields: the engine's own state
-        # at the step, the same sources the plan's executor reads.
-        if key == "schedule_row":
-            row = getattr(telemetry, "schedule_row", None)
-            out.append(float("nan") if row is None else float(row))
-            continue
-        if key == "occupants_present":
-            out.append(float(telemetry.occupants_present))
-            continue
-        if key == "clock_hour":
-            dt = telemetry.current_time
-            out.append(float(dt.hour) + float(dt.minute) / 60.0 + float(dt.second) / 3600.0)
-            continue
-        if key == "clock_day":
-            out.append(float(telemetry.current_time.timetuple().tm_yday))
-            continue
-        if key == "clock_step":
-            out.append(float(telemetry.timestep_index))
-            continue
-
-        # Actor telemetry fallback: dot-separated <actor>.<channel>.
-        found_in_actors = False
-        if "." in key:
-            actor_name, channel_name = key.split(".", 1)
-            actors = telemetry.actors()
-            if actor_name in actors and channel_name in actors[actor_name]:
-                out.append(float(actors[actor_name][channel_name]))
-                found_in_actors = True
-        # Bare field name: search all actors (non-deterministic on duplicates).
-        if not found_in_actors:
-            actors = telemetry.actors()
-            for actor_channels in actors.values():
-                if key in actor_channels:
-                    out.append(float(actor_channels[key]))
-                    found_in_actors = True
-                    break
-        if found_in_actors:
-            continue
-
-        raise KeyError(f"unknown observation field `{key}`")
-
-    obs = np.asarray(out, dtype=np.float64)
-    return np.ascontiguousarray(obs)
 
 
 def build_control_signal(signal_type: str, values: Mapping[str, float]) -> Any:

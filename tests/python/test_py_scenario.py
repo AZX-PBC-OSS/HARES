@@ -12,10 +12,13 @@ differently, and the marginals conform to the spec's distributions.
 """
 
 import statistics
+from pathlib import Path
 
 import pytest
 
 from hares import ScenarioSpec
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_spec() -> ScenarioSpec:
@@ -587,3 +590,77 @@ class TestSpecValidation:
         for call in (spec.sample, spec.sample_overrides):
             with pytest.raises(ValueError, match="huge_capacity.*lognormal"):
                 call(master_seed=1, scenario_id=1, bldg_id=1)
+
+
+class TestScenarioPairing:
+    """The scenario pairing's typed contract: the sample handle records the
+    draw key it ran under, and the dwelling constructor refuses a
+    mismatched pair before any home runs."""
+
+    HPXML = str(ROOT / "tests/fixtures/hpxml/ochre_samples/base.xml")
+    SCHEDULE = str(ROOT / "data/examples/BEopt_example_schedule.csv")
+    WEATHER = str(ROOT / "data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw")
+    DEFAULTS = str(ROOT / "python/hares/defaults")
+
+    def _build(self, **kw):
+        from hares import Dwelling, SimulationConfig
+
+        config = SimulationConfig(
+            start_time="2019-01-01T00:00:00",
+            duration=600,
+            time_res=60,
+            master_seed=kw.pop("master_seed", 7),
+            scenario_seed=kw.pop("scenario_seed", 3),
+        )
+        return Dwelling.from_hpxml(
+            self.HPXML,
+            self.SCHEDULE,
+            self.WEATHER,
+            defaults=self.DEFAULTS,
+            bldg_id=kw.pop("bldg_id", 42),
+            config=config,
+            **kw,
+        )
+
+    @staticmethod
+    def _resolved_setpoint(dwelling) -> float:
+        resolved = dwelling.resolved_model()
+        wh = next(
+            eq
+            for eq in resolved["equipment"]
+            if eq["name"] == "Electric Resistance Water Heater"
+        )
+        setpoint = next(p for p in wh["parameters"] if p["name"] == "setpoint_c")
+        return setpoint["value"]
+
+    def test_a_mismatched_scenario_seed_is_refused_before_any_home_runs(self):
+        """A study that samples under scenario 3 and builds with
+        scenario_seed 4 is the caller's error naming both values, raised by
+        the constructor before any dwelling exists."""
+        spec = load_spec()
+        sample = spec.sample_record(master_seed=7, scenario_id=3, bldg_id=42)
+        with pytest.raises(ValueError, match="scenario_seed.*4.*scenario_id 3"):
+            self._build(scenario_seed=4, scenario_sample=sample)
+
+    def test_a_mismatched_master_seed_or_building_is_refused(self):
+        """The pairing is the whole draw key: a master seed or a building
+        id that does not match the handle's is refused naming both."""
+        spec = load_spec()
+        sample = spec.sample_record(master_seed=7, scenario_id=3, bldg_id=42)
+        with pytest.raises(ValueError, match="master_seed.*8.*7"):
+            self._build(master_seed=8, scenario_sample=sample)
+        with pytest.raises(ValueError, match="bldg_id is 43.*bldg_id 42"):
+            self._build(bldg_id=43, scenario_sample=sample)
+
+    def test_a_matched_pair_builds_and_applies_the_sampled_overrides(self):
+        """A matched pair builds, the sampled overrides applying to the
+        home: the sampled water-heater setpoint is the value the handle
+        drew, read back off the built dwelling's resolved model."""
+        spec = load_spec()
+        sample = spec.sample_record(master_seed=7, scenario_id=3, bldg_id=42)
+        overrides = sample.overrides()
+        dwelling = self._build(scenario_sample=sample)
+        sampled_value = overrides["Electric Resistance Water Heater"]["setpoint_c"]
+        assert sampled_value == pytest.approx(self._resolved_setpoint(dwelling)), (
+            "the sampled override reached the typed config it names"
+        )

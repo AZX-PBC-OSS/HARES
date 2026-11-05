@@ -3,7 +3,7 @@
   "features": [],
   "defaults_dir": "python/hares/defaults",
   "defaults_digest": "0c7f6220071c254765a5c7c43451833d289a8a51039fd36232587635fa2f21a8",
-  "git_head": "27ff6c21d81ebe0e095157fd68ae99a80d7f70f0",
+  "git_head": "b51a972420db553f00081ae6f0c5e33207aed2d4",
   "git_dirty": false,
   "metrics": [],
   "products": {
@@ -756,6 +756,51 @@
           "name": "periods_folded",
           "arrow_type": "Int64",
           "nullable": false
+        },
+        {
+          "name": "health_port_rollbacks",
+          "arrow_type": "Int64",
+          "nullable": true
+        },
+        {
+          "name": "health_rejected_control_signals",
+          "arrow_type": "Int64",
+          "nullable": true
+        },
+        {
+          "name": "health_clamped_actions",
+          "arrow_type": "Int64",
+          "nullable": true
+        },
+        {
+          "name": "health_curve_index_clamps",
+          "arrow_type": "Int64",
+          "nullable": true
+        },
+        {
+          "name": "health_fluid_payload_absences",
+          "arrow_type": "Int64",
+          "nullable": true
+        },
+        {
+          "name": "health_evicted_actors",
+          "arrow_type": "Int64",
+          "nullable": true
+        },
+        {
+          "name": "health_cross_tier_deadband_events",
+          "arrow_type": "Int64",
+          "nullable": true
+        },
+        {
+          "name": "health_ideal_capacity_unsolved_steps",
+          "arrow_type": "Int64",
+          "nullable": true
+        },
+        {
+          "name": "health_discarded_state_energy_wh",
+          "arrow_type": "Float64",
+          "nullable": true
         }
       ],
       "columns": [
@@ -799,6 +844,69 @@
           "digest": "cb0d54f9bd2dcb587e7fd6c02e6d5e6952989eec7c1a7ee46cdfda21d70326de",
           "blocks": [
             "cb0d54f9bd2dcb587e7fd6c02e6d5e6952989eec7c1a7ee46cdfda21d70326de"
+          ]
+        },
+        {
+          "name": "health_port_rollbacks",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
+          ]
+        },
+        {
+          "name": "health_rejected_control_signals",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
+          ]
+        },
+        {
+          "name": "health_clamped_actions",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
+          ]
+        },
+        {
+          "name": "health_curve_index_clamps",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
+          ]
+        },
+        {
+          "name": "health_fluid_payload_absences",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
+          ]
+        },
+        {
+          "name": "health_evicted_actors",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
+          ]
+        },
+        {
+          "name": "health_cross_tier_deadband_events",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
+          ]
+        },
+        {
+          "name": "health_ideal_capacity_unsolved_steps",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
+          ]
+        },
+        {
+          "name": "health_discarded_state_energy_wh",
+          "digest": "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104",
+          "blocks": [
+            "45e37fe90eba91b75735401c33dcef946ed61248544f0e62c7c5b401700fb104"
           ]
         }
       ]

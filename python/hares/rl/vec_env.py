@@ -18,8 +18,24 @@ from hares._hares import batch_step as _extension_batch_step
 
 try:
     from gymnasium import spaces
+    from gymnasium.vector import VectorEnv as _VectorEnvBaseRuntime
 except ImportError:  # pragma: no cover - optional dependency
     spaces = None
+    _VectorEnvBaseRuntime = object  # type: ignore[assignment, misc]
+
+if TYPE_CHECKING:
+    # The checker sees the real base class, parameterized by the env's
+    # types (the observations, rewards and actions are float64 ndarrays);
+    # at runtime the guarded import above decides.
+    from gymnasium.vector import VectorEnv as _GymVectorEnv
+
+    _VectorEnvBase = _GymVectorEnv[np.ndarray, np.ndarray, np.ndarray]
+else:
+    _VectorEnvBase = _VectorEnvBaseRuntime  # type: ignore[assignment, misc]
+
+# The Gymnasium presence: the base class is the real VectorEnv only when
+# Gymnasium is installed (the fallback keeps the importable surface).
+_HAS_VECTOR_BASE = _VectorEnvBaseRuntime is not object
 
 from .gym_env import (
     RewardContext,
@@ -29,7 +45,6 @@ from .gym_env import (
     field_bounds,
     observation_field_bounds,
     sorted_action_layout,
-    telemetry_to_observation,
     validate_episode_length,
     validated_auto_reset,
     validated_observation_fields,
@@ -50,7 +65,6 @@ __all__ = [
     "observation_field_bounds",
     "rust_batch_step",
     "sorted_action_layout",
-    "telemetry_to_observation",
 ]
 
 # The extension's batch entrypoint, held as an Optional module global so
@@ -75,7 +89,12 @@ def _reward_context(step_data: StepResult, dwelling: PyDwelling) -> RewardContex
     )
 
 
-class VecDwellingGymEnv:
+class VecDwellingGymEnv(_VectorEnvBase):
+    """The fleet's vector environment, a Gymnasium `VectorEnv` when
+    Gymnasium is installed: the standard vector wrappers accept it, the
+    per-env spaces ride `single_observation_space` /
+    `single_action_space` (the fleet steps one shared space), and the
+    base's `close` bookkeeping drives `close_extras`."""
     def __init__(
         self,
         dwellings: Sequence[PyDwelling],
@@ -152,6 +171,9 @@ class VecDwellingGymEnv:
         # stepping again (Gymnasium's SyncVectorEnv(copy=...) has the same
         # contract).
         self._copy = copy
+        # The Gymnasium VectorEnv's bookkeeping flag: `close()` sets it
+        # once and a second close reads it short.
+        self.closed = False
 
         self._action_layout, self._signal_type_by_equipment = sorted_action_layout(
             action_space_config
@@ -203,12 +225,20 @@ class VecDwellingGymEnv:
                 shape=(len(self._action_layout),),
                 dtype=np.float64,
             )
+            # The per-env spaces: the fleet steps one shared observation
+            # and action space (the constructor refuses bounds that differ
+            # across the dwellings), so the single env's spaces are these.
+            self.single_observation_space = self.observation_space
+            self.single_action_space = self.action_space
         else:
-            self.observation_space = {
+            # The no-Gymnasium surface keeps its dict-shaped stand-ins
+            # (the base class's space attributes do not exist to type
+            # against).
+            self.observation_space = {  # type: ignore[reportAttributeAccessIssue]
                 "shape": (len(self._observation_fields),),
                 "dtype": np.float64,
             }
-            self.action_space = {
+            self.action_space = {  # type: ignore[reportAttributeAccessIssue]
                 "shape": (len(self._action_layout),),
                 "dtype": np.float64,
                 "low": action_low_arr,
@@ -298,7 +328,10 @@ class VecDwellingGymEnv:
             return int(seed) + idx
         return self._next_episode_seed(idx)
 
-    def reset(
+    # The infos slot is the documented divergence from the base class's
+    # batch-dict shape: every row is one env's own dict, the shape the
+    # extension's info contract publishes.
+    def reset(  # type: ignore[reportIncompatibleMethodOverride]
         self,
         *,
         seed: object = None,
@@ -390,7 +423,10 @@ class VecDwellingGymEnv:
                 ),
             )
 
-    def step(self, actions: np.ndarray):
+    # The infos slot is the documented divergence from the base class's
+    # batch-dict shape: every row is one env's own dict, the shape the
+    # extension's info contract publishes.
+    def step(self, actions: np.ndarray):  # type: ignore[reportIncompatibleMethodOverride]
         """Advance every dwelling one timestep.
 
         ``actions`` is the ``(n_envs, n_actions)`` float64 array, passed to
@@ -561,8 +597,21 @@ class VecDwellingGymEnv:
         ``health()`` reads at any step."""
         return self._dwellings
 
-    def close(self) -> None:
-        return None
+    def close(self, **kwargs: Any) -> None:
+        """The base `VectorEnv.close`'s bookkeeping when Gymnasium is
+        installed (`closed` set once, `close_extras` called); the
+        dwellings hold no resources of their own to release."""
+        del kwargs
+        # The runtime base is the real VectorEnv whenever Gymnasium is
+        # installed; the fallback's close is this branch's own.
+        if _HAS_VECTOR_BASE:
+            _VectorEnvBaseRuntime.close(self)  # type: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        else:
+            self.closed = True
+
+    def close_extras(self, **kwargs: Any) -> None:
+        """The fleet's dwellings need no external resource release."""
+        del kwargs
 
     def env_method(
         self,

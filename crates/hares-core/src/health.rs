@@ -152,6 +152,52 @@ impl Default for RunHealth {
     }
 }
 
+impl RunHealth {
+    /// The run's degradation events, one per nonzero counter plus an
+    /// unconverged warm-up, in declaration order: the one enumeration a
+    /// status classifier or a report fold consumes, so a counter added to
+    /// this struct cannot be forgotten by the consumers — the compiler
+    /// names the arm this enumeration must grow. Each event names its
+    /// counter and its count ("`clamped_actions: 3`"); a zeroed
+    /// `RunHealth` with a converged or disabled warm-up enumerates
+    /// nothing.
+    pub fn degradation_events(&self) -> Vec<String> {
+        let mut events: Vec<String> = Vec::new();
+        let mut push_count = |name: &'static str, count: u64| {
+            if count > 0 {
+                events.push(format!("{name}: {count}"));
+            }
+        };
+        push_count("port_rollbacks", self.port_rollbacks);
+        push_count("rejected_control_signals", self.rejected_control_signals);
+        push_count("clamped_actions", self.clamped_actions);
+        push_count("curve_index_clamps", self.curve_index_clamps);
+        push_count("fluid_payload_absences", self.fluid_payload_absences);
+        push_count("evicted_actors", self.evicted_actors);
+        push_count(
+            "cross_tier_deadband_events",
+            self.cross_tier_deadband_events,
+        );
+        push_count(
+            "ideal_capacity_unsolved_steps",
+            self.ideal_capacity_unsolved_steps,
+        );
+        if self.discarded_state_energy_wh != 0.0 {
+            events.push(format!(
+                "discarded_state_energy_wh: {}",
+                self.discarded_state_energy_wh
+            ));
+        }
+        if let WarmupOutcome::Ran {
+            converged: false, ..
+        } = self.warmup
+        {
+            events.push("the warm-up did not converge".to_string());
+        }
+        events
+    }
+}
+
 /// One registered actor's run-total scheduler-entry time, behind the
 /// `profiling` feature: `total` is the actor's share of the run's `actors`
 /// phase (the interest filter, `decide()` and the health check, measured by

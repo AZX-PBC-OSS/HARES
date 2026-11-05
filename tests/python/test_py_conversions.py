@@ -205,10 +205,12 @@ def test_fleet_homes_returns_dataframe(fleet):
 def test_fleet_homes_schema(fleet):
     """Verify FleetResult.homes has exactly the expected schema.
 
-    Exact set equality: the homes frame is pinned to (1, 8) by the shape
+    Exact set equality: the homes frame is pinned to (1, 17) by the shape
     test, so a column added to or removed from the frame must update a pin.
     The fixture's config requests metrics, so the run metrics' columns ride
-    the homes table.
+    the homes table; the homes ran, so each home carries its run health and
+    the health's typed counter columns ride with it (the counters a lake
+    manifest reads, never the reason string).
     """
     from hares import FleetReport, Frequency
 
@@ -224,6 +226,15 @@ def test_fleet_homes_schema(fleet):
         "periods_folded",
         "total_energy_kwh",
         "peak_power_kw",
+        "health_port_rollbacks",
+        "health_rejected_control_signals",
+        "health_clamped_actions",
+        "health_curve_index_clamps",
+        "health_fluid_payload_absences",
+        "health_evicted_actors",
+        "health_cross_tier_deadband_events",
+        "health_ideal_capacity_unsolved_steps",
+        "health_discarded_state_energy_wh",
     ]
     assert df.columns == expected_columns, (
         f"Column mismatch; expected: {expected_columns}, got: {df.columns}"
@@ -243,7 +254,7 @@ def test_fleet_homes_row_count(fleet):
     results = fleet.simulate(FleetReport(Selection.verbosity(0), Frequency.hourly()))
     df = results.homes.table()
 
-    assert df.shape == (1, 8), f"Homes DataFrame shape {df.shape} != (1, 8)"
+    assert df.shape == (1, 17), f"Homes DataFrame shape {df.shape} != (1, 17)"
     row = df.row(0, named=True)
     assert row["weight"] == 1.0, (
         f"One building with no sample_weights must weigh 1.0, got {row['weight']}"

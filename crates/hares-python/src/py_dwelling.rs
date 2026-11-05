@@ -794,7 +794,7 @@ pub struct PyDwelling {
 #[pymethods]
 impl PyDwelling {
     #[classmethod]
-    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, defaults = None, overrides = None, **unexpected))]
+    #[pyo3(signature = (hpxml, schedule, weather, config, *, bldg_id = 0, defaults = None, overrides = None, scenario_sample = None, **unexpected))]
     // PyO3 #[classmethod] constructor must match the Python API parameter list.
     #[allow(clippy::too_many_arguments)]
     pub fn from_hpxml(
@@ -806,8 +806,62 @@ impl PyDwelling {
         bldg_id: i64,
         defaults: Option<&Bound<'_, PyAny>>,
         overrides: Option<&Bound<'_, PyDict>>,
+        scenario_sample: Option<&crate::py_scenario::PyScenarioSample>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        // The scenario pairing is a typed contract, checked before any
+        // build work: a sampled record applied to a home whose behavioral
+        // draws key on another (master seed, scenario, building) is the
+        // caller's error, naming both values.
+        let overrides_arg: Option<Bound<'_, PyDict>> = if let Some(sample) = scenario_sample {
+            let py = _cls.py();
+            let drawn = &sample.sample;
+            if config.0.scenario_seed != Some(drawn.scenario_id) {
+                return Err(PyValueError::new_err(format!(
+                    "the scenario pairing is mismatched: the config's scenario_seed is \
+                     {:?} but the sample drew under scenario_id {}: the sampled values \
+                     would apply to a home whose behavioral draws key on another scenario",
+                    config.0.scenario_seed, drawn.scenario_id,
+                )));
+            }
+            if config.0.master_seed != sample.master_seed {
+                return Err(PyValueError::new_err(format!(
+                    "the scenario pairing is mismatched: the config's master_seed is {} \
+                     but the sample drew under master_seed {}: the sampled values would \
+                     apply to a home whose behavioral draws key on another master seed",
+                    config.0.master_seed, sample.master_seed,
+                )));
+            }
+            if bldg_id != drawn.bldg_id {
+                return Err(PyValueError::new_err(format!(
+                    "the scenario pairing is mismatched: the build's bldg_id is {bldg_id} \
+                     but the sample drew for bldg_id {}: the sampled values would apply \
+                     to another home",
+                    drawn.bldg_id,
+                )));
+            }
+            // The sampled overrides merge under the caller's (the
+            // caller's entries win per equipment key): the pairing
+            // handle applies its record, the caller's overrides layer
+            // deliberate corrections on top.
+            let sampled_any = sample.overrides()?;
+            let sampled = sampled_any
+                .bind(py)
+                .cast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("the sampled overrides are not a dict"))?;
+            let merged = PyDict::new(py);
+            for (key, value) in sampled.iter() {
+                merged.set_item(key, value)?;
+            }
+            if let Some(caller) = overrides {
+                for (key, value) in caller.iter() {
+                    merged.set_item(key, value)?;
+                }
+            }
+            Some(merged)
+        } else {
+            overrides.cloned()
+        };
         // The dwelling-level keywords are the config's own; every simulation
         // setting rides on the one SimulationConfig object. Every handle
         // argument is shared: its parse is used as is. The sources' parses
@@ -827,7 +881,7 @@ impl PyDwelling {
                 },
                 config,
                 bldg_id,
-                overrides,
+                overrides: overrides_arg.as_ref(),
                 unexpected,
             })?;
         let settings = config.settings.clone();
@@ -4590,6 +4644,7 @@ mod profiling_summary_tests {
                 Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
+                None,
             )
             .expect("cz2a fixture must load");
 
@@ -4722,6 +4777,7 @@ mod profiling_summary_tests {
                 Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
+                None,
             )
             .expect("cz2a fixture must load");
 
@@ -4838,6 +4894,7 @@ mod construction_gil_tests {
                 Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
+                None,
             )
             .expect("the cz4a fixture must construct");
         });
@@ -4932,6 +4989,7 @@ mod construction_gil_tests {
                 sim_config_1h_900s(),
                 1,
                 Some(de.as_any()),
+                None,
                 None,
                 None,
             )
@@ -5040,6 +5098,7 @@ mod construction_gil_tests {
                 ),
                 None,
                 None,
+                None,
             )
             .expect("the cz5a fixture must construct");
             dwelling.initialize().expect("initialize");
@@ -5133,6 +5192,7 @@ mod construction_gil_tests {
                 Some(defaults),
                 None,
                 None,
+                None,
             )
             .expect("the cz4a fixture must construct");
             let blueprint_before = Arc::clone(&dwelling.blueprint);
@@ -5154,6 +5214,7 @@ mod construction_gil_tests {
                 sim_config_1h_900s(),
                 1,
                 Some(defaults),
+                None,
                 None,
                 None,
             )
@@ -5270,6 +5331,7 @@ mod blueprint_readback_tests {
                 sim_config_1h_900s(),
                 1,
                 Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
+                None,
                 None,
                 None,
             )
@@ -5440,6 +5502,7 @@ mod blueprint_readback_tests {
             ),
             None,
             None,
+            None,
         )?;
         dwelling.initialize()?;
         Ok(dwelling)
@@ -5550,6 +5613,7 @@ mod blueprint_readback_tests {
                     )
                     .as_any(),
                 ),
+                None,
                 None,
                 None,
             )

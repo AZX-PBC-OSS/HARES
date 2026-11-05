@@ -6,7 +6,6 @@ from .gym_env import (
     GymDwellingConfig,
     RewardContext,
     DwellingGymEnv,
-    telemetry_to_observation,
 )
 from .vec_env import VecDwellingGymEnv
 
@@ -17,5 +16,4 @@ __all__ = [
     "StepResult",
     "DwellingGymEnv",
     "VecDwellingGymEnv",
-    "telemetry_to_observation",
 ]

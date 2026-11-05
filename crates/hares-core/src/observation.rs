@@ -233,7 +233,10 @@ fn resolve_field(
     actor_channels: &BTreeMap<&str, &Vec<String>>,
     warned: &mut ObservationWarnOnce,
 ) -> Result<ObservationKind, HaresError> {
-    if field == "outdoor_temp" {
+    // The outdoor temperature's two spellings: the plan's canonical key
+    // and the telemetry dict's `outdoor_temp_c`, which the bounds table
+    // and the step dicts both carry. One resolution, the same value.
+    if field == "outdoor_temp" || field == "outdoor_temp_c" {
         return Ok(ObservationKind::OutdoorTemp);
     }
     if field == "outdoor_humidity_ratio" {

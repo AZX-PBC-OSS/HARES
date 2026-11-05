@@ -28,7 +28,7 @@ from hares.rl.gym_env import (
     field_bounds,
     observation_field_bounds,
     sorted_action_layout,
-    telemetry_to_observation,
+    validated_config_actors,
 )
 from hares.rl.vec_env import VecDwellingGymEnv
 
@@ -697,7 +697,6 @@ def test_observation_field_bounds_all_finite():
     fields = [
         "outdoor_temp",
         "outdoor_temp_c",
-        "outdoor_rh",
         "outdoor_humidity_ratio",
         "total_power_w",
         "zone_temp[Living Room]",
@@ -793,15 +792,15 @@ def test_field_bounds_overrides_apply():
 def test_observation_field_bounds_case_insensitive():
     """Bracket-prefixed fields match regardless of case or leading whitespace."""
     tests = [
-        ("zone_temp[Living Room]", (0.0, 50.0)),
-        ("Zone_Temp[Living Room]", (0.0, 50.0)),
-        (" ZONE_TEMP[Kitchen]", (0.0, 50.0)),
+        ("zone_temp[Living Room]", (-80.0, 50.0)),
+        ("Zone_Temp[Living Room]", (-80.0, 50.0)),
+        (" ZONE_TEMP[Kitchen]", (-80.0, 50.0)),
         ("setpoint_heat[Main]", (0.0, 50.0)),
         ("Setpoint_Heat[Main]", (0.0, 50.0)),
         (" setpoint_cool[Upstairs]", (0.0, 50.0)),
         ("equipment_soc[Battery]", (0.0, 1.0)),
         ("Equipment_Soc[Battery]", (0.0, 1.0)),
-        (" equipment_power[Gas Furnace]", (0.0, 100000.0)),
+        (" equipment_power[Gas Furnace]", (-100000.0, 100000.0)),
     ]
     for field, expected in tests:
         low, high = observation_field_bounds(field)
@@ -873,7 +872,7 @@ def test_observation_field_bounds_time_sin_cos():
 
 
 def test_time_sin_cos_fields_in_observation():
-    """time_sin and time_cos produce finite, in-bounds values via telemetry_to_observation."""
+    """time_sin and time_cos produce finite, in-bounds values through the env's frozen plan."""
     env = DwellingGymEnv(
         config=_DWELLING_CONFIG,
         observation_fields=["time_sin", "time_cos"],
@@ -907,132 +906,61 @@ def test_time_sin_cos_observation_space_finite():
 
 
 # ---------------------------------------------------------------------------
-# actor_telemetry resolution tests (T-0340)
+# actor_telemetry resolution through the env's frozen plan: the plan is
+# the one observation vocabulary, so the actor channels are pinned through
+# both environments, dot and bare name, with the built-ins winning.
 # ---------------------------------------------------------------------------
 
 
-def test_telemetry_to_observation_actor_telemetry_dot_notation():
-    """telemetry_to_observation resolves actor_telemetry fields via <actor>.<channel> dot notation."""
-    dwelling = _make_dwelling()
-    dwelling.initialize()
-    dwelling.add_actor_by_name("DrCompliance", "DRAgent", None)
-    dwelling.step()
-    tel = dwelling.telemetry()
-
-    obs = telemetry_to_observation(tel, ["DRAgent.dr_level"])
-    assert obs.shape == (1,)
-    assert obs[0] == 0.0, f"dr_level should be 0.0 for Normal DR level, got {obs[0]}"
-
-
-def test_telemetry_to_observation_actor_telemetry_bare_name():
-    """telemetry_to_observation resolves actor_telemetry fields via bare-name search across all actors."""
-    dwelling = _make_dwelling()
-    dwelling.initialize()
-    dwelling.add_actor_by_name("DrCompliance", "DRAgent", None)
-    dwelling.step()
-    tel = dwelling.telemetry()
-
-    obs = telemetry_to_observation(tel, ["dr_active"])
-    assert obs.shape == (1,)
-    assert obs[0] == 0.0, f"dr_active should be 0.0 when no DR event, got {obs[0]}"
+def test_actor_channels_resolve_through_both_envs_dot_and_bare():
+    """An actor's published channels resolve through the env's plan on
+    both gym environments: the dot form names the actor, the bare form
+    searches the actors in sorted-name order."""
+    for env in _both_envs(
+        observation_fields=[cast(Any, "DRAgent.dr_level"), cast(Any, "dr_active")],
+        actors=[{"actor_type": "DrCompliance", "name": "DRAgent"}],
+    ):
+        env.reset(seed=0)
+        obs, _r, _term, _trunc, _info = env.step(_no_action(env))
+        row = obs[0] if obs.ndim == 2 else obs
+        assert row.shape == (2,)
+        assert row[0] == 0.0, f"dr_level should be 0.0 for Normal DR level, got {row[0]}"
+        assert row[1] == 0.0, f"dr_active should be 0.0 when no DR event, got {row[1]}"
 
 
-def test_telemetry_to_observation_builtin_wins_over_actor_fallback():
-    """Built-in telemetry fields take priority over actor_telemetry for the same key name."""
-    dwelling = _make_dwelling()
-    dwelling.initialize()
-    dwelling.add_actor_by_name("DrCompliance", "DRAgent", None)
-    dwelling.step()
-    tel = dwelling.telemetry()
+def test_env_builtin_field_wins_over_an_actor_channel_of_the_same_name():
+    """A built-in field takes priority over an actor channel of the same
+    name: the plan resolves the engine's own source, and the actor's
+    publication of that name never reaches the observation."""
+    from hares import OutputVariable
 
-    # total_power_w is a built-in field; actor_telemetry must not override it.
-    obs = telemetry_to_observation(tel, ["total_power_w"])
-    assert obs.shape == (1,)
-    assert obs[0] != 0.0, "built-in total_power_w should not fall through to actor_telemetry"
+    class PowerPublisher(Actor):
+        def __init__(self):
+            super().__init__()
+            self.name = "PowerPublisher"
 
+        def output_variables(self):
+            return [OutputVariable("total_power_w", "W", "power")]
 
-def test_actor_telemetry_fields_in_dwelling_gym_observation():
-    """End-to-end: actor-injected fields appear in the observation vector via telemetry_to_observation.
+        def decide(self, env):
+            self.set_output("total_power_w", 7.5)
+            return []
 
-    Creates a dwelling, adds a DrCompliance actor, steps, and verifies that
-    actor_telemetry fields resolve correctly in the observation output.
-    This exercises the full actor → dwelling.step → telemetry → telemetry_to_observation
-    pipeline without going through DwellingGymEnv's reset cycle (which recreates the
-    dwelling and would discard dynamically-added actors).
-    """
-    dwelling = _make_dwelling()
-    dwelling.initialize()
-    dwelling.add_actor_by_name("DrCompliance", "DRAgent", None)
-    dwelling.step()
-    tel = dwelling.telemetry()
-
-    # Dot-notation: <actor>.<channel>
-    obs = telemetry_to_observation(tel, ["DRAgent.dr_level"])
-    assert obs.shape == (1,)
-    assert obs[0] == 0.0, f"dr_level should be 0.0 for Normal DR level, got {obs[0]}"
-
-    # Bare-name search
-    obs = telemetry_to_observation(tel, ["dr_active"])
-    assert obs.shape == (1,)
-    assert obs[0] == 0.0, f"dr_active should be 0.0 when no DR event, got {obs[0]}"
-
-    # Combined: built-in + actor_telemetry fields in the same observation vector
-    obs = telemetry_to_observation(tel, ["total_power_w", "DRAgent.dr_level", "DRAgent.dr_active"])
-    assert obs.shape == (3,)
-    assert np.all(np.isfinite(obs)), f"non-finite observation: {obs}"
-    assert obs[0] != 0.0, "built-in total_power_w should be non-zero after step"
-    assert obs[1] == 0.0
-    assert obs[2] == 0.0
+    for env in _both_envs(
+        observation_fields=[cast(Any, "total_power_w")],
+        actors=[PowerPublisher()],
+    ):
+        env.reset(seed=0)
+        obs, _r, _term, _trunc, _info = env.step(_no_action(env))
+        row = obs[0] if obs.ndim == 2 else obs
+        assert row.shape == (1,)
+        assert row[0] != 7.5, "the built-in total_power_w must not read the actor's channel"
+        assert row[0] != 0.0, "the built-in total_power_w reads the engine's own value"
 
 
 # ---------------------------------------------------------------------------
 # Initial observation NaN & initialized flag tests (T-0341)
 # ---------------------------------------------------------------------------
-
-
-class _MockTelemetryMissingOutdoor:
-    """Mock telemetry where zone() dict lacks outdoor_temp_c and outdoor_humidity_ratio."""
-
-    def __init__(self):
-        pass
-
-    @property
-    def initialized(self):
-        return True
-
-    @property
-    def total_power_w(self):
-        return 0.0
-
-    @property
-    def current_time(self):
-        import datetime
-        return datetime.datetime(2019, 1, 1, 0, 0, 0)
-
-    def zone(self):
-        return {"names": [], "temperature_c": [], "setpoint_heat_c": [], "setpoint_cool_c": []}
-
-    def equipment(self):
-        return {"names": [], "modes": [], "soc": [], "power_w": []}
-
-    def actors(self):
-        return {}
-
-
-def test_telemetry_to_observation_nan_fallback_for_missing_outdoor_temp():
-    """When zone dict lacks outdoor_temp_c / outdoor_humidity_ratio, fallback is NaN not 0.0."""
-    mock = _MockTelemetryMissingOutdoor()
-    obs = telemetry_to_observation(mock, ["outdoor_temp"])
-    assert obs.shape == (1,)
-    assert np.isnan(obs[0]), f"expected NaN for missing outdoor_temp_c, got {obs[0]}"
-
-
-def test_telemetry_to_observation_nan_fallback_for_missing_outdoor_rh():
-    """When zone dict lacks outdoor_humidity_ratio, fallback is NaN not 0.0."""
-    mock = _MockTelemetryMissingOutdoor()
-    obs = telemetry_to_observation(mock, ["outdoor_humidity_ratio"])
-    assert obs.shape == (1,)
-    assert np.isnan(obs[0]), f"expected NaN for missing outdoor_humidity_ratio, got {obs[0]}"
 
 
 def test_reset_observation_contains_nan_for_uninitialized():
@@ -1097,36 +1025,6 @@ def test_step_observation_all_finite_after_first_step():
     assert info.get("initial_observation_mask") is None, (
         "initial_observation_mask should be None after step()"
     )
-
-
-def test_telemetry_to_observation_all_nan_when_uninitialized():
-    """telemetry_to_observation returns all NaN when telemetry.initialized is False."""
-    # Use a real dwelling post-construction (before any step)
-    dwelling = _make_dwelling()
-    dwelling.initialize()
-    tel = dwelling.telemetry()
-    assert tel.initialized is False, "telemetry should be uninitialized before first step"
-
-    obs = telemetry_to_observation(
-        tel, ["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
-    )
-    assert obs.shape == (4,)
-    assert np.all(np.isnan(obs)), f"expected all NaN when uninitialized, got {obs}"
-
-
-def test_telemetry_to_observation_finite_after_step():
-    """telemetry_to_observation returns finite values after a simulation step."""
-    dwelling = _make_dwelling()
-    dwelling.initialize()
-    dwelling.step()
-    tel = dwelling.telemetry()
-    assert tel.initialized is True, "telemetry should be initialized after step()"
-
-    obs = telemetry_to_observation(
-        tel, ["total_power_w", "outdoor_temp", "outdoor_humidity_ratio", "time_sin"]
-    )
-    assert obs.shape == (4,)
-    assert np.all(np.isfinite(obs)), f"expected all finite after step(), got {obs}"
 
 
 def test_initialized_flag_present_on_telemetry():
@@ -1217,118 +1115,144 @@ def test_vec_gym_reset_observation_nan_and_mask():
 
 
 # ---------------------------------------------------------------------------
-# Field dispatch regression tests (T-0342)
+# The frozen observation plan: the batch's observations are read into the
+# environment's own buffer through the plan, in place. The plan is the one
+# observation vocabulary; every key the bounds table recognizes is pinned
+# through both environments here.
 # ---------------------------------------------------------------------------
 
 
-class _FakeTelemetry:
-    """Minimal fake telemetry for unit-testing telemetry_to_observation field dispatch.
-
-    Requires no native _hares module, no HPXML fixtures, and no Dwelling construction.
-    """
-
-    initialized = True
-    total_power_w = 5.0
-    reactive_power_var = 1.5
-
-    def __init__(self):
-        import datetime
-        self.current_time = datetime.datetime(2019, 1, 1, 12, 0, 0)
-
-    def zone(self):
-        return {
-            "names": ["Living Room", "Kitchen"],
-            "temperature_c": [22.0, 23.5],
-            "setpoint_heat_c": [20.0, 19.0],
-            "setpoint_cool_c": [24.0, 25.0],
-            "energy_balance_residuals": [10.0, -5.0],
-            "outdoor_temp_c": 5.0,
-            "outdoor_humidity_ratio": 0.004,
-        }
-
-    def equipment(self):
-        return {
-            "names": ["Battery", "Gas Furnace", "electric vehicle"],
-            "soc": [0.5, 0.0, 0.8],
-            "power_w": [1.0, 2.0, 0.0],
-        }
-
-    def actors(self):
-        return {}
+def _no_action(env) -> np.ndarray:
+    """The env's zero-width action: the single env steps on a `(0,)`
+    array, the vec env on one row per env, `(n_envs, 0)`."""
+    n = getattr(env, "num_envs", 1)
+    return np.zeros((n, 0), dtype=np.float64) if n > 1 or isinstance(env, VecDwellingGymEnv) else np.zeros(0, dtype=np.float64)
 
 
-def test_telemetry_to_observation_reactive_power_var_no_keyerror():
-    """telemetry_to_observation handles reactive_power_var without raising KeyError."""
-    obs = telemetry_to_observation(_FakeTelemetry(), ["reactive_power_var"])
-    assert obs.shape == (1,)
-    assert np.isfinite(obs[0])
-    assert obs[0] == 1.5
-
-
-def test_telemetry_to_observation_reactive_power_var_in_mixed_fields():
-    """reactive_power_var coexists with other fields in a single observation vector."""
-    obs = telemetry_to_observation(
-        _FakeTelemetry(),
-        ["total_power_w", "reactive_power_var", "outdoor_temp"],
+def _both_envs(observation_fields: list[Any], actors: list[Any] | None = None):
+    """The single env and a one-env vec env over the same fixture: the
+    same field list resolves and reads through both."""
+    single = DwellingGymEnv(
+        config=_config_with_actors(actors),
+        observation_fields=observation_fields,
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
     )
-    assert obs.shape == (3,)
-    assert np.all(np.isfinite(obs))
-    assert obs[1] == 1.5
+    dwelling = _make_dwelling()
+    dwelling.initialize()
+    for entry in validated_config_actors(actors):
+        if entry[0] == "registry":
+            _kind, actor_type, name, parameters = entry
+            dwelling.add_actor_by_name(actor_type, name, parameters)
+        else:
+            dwelling.add_actor(entry[1])
+    vector = VecDwellingGymEnv(
+        dwellings=[dwelling],
+        observation_fields=observation_fields,
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    return single, vector
 
 
-def test_telemetry_to_observation_zone_energy_balance_no_keyerror():
-    """telemetry_to_observation handles zone_energy_balance[name] without raising KeyError."""
-    obs = telemetry_to_observation(_FakeTelemetry(), ["zone_energy_balance[Living Room]"])
-    assert obs.shape == (1,)
-    assert np.isfinite(obs[0])
-
-
-def test_telemetry_to_observation_unknown_field_keyerror():
-    """telemetry_to_observation raises KeyError for truly unrecognised fields."""
-    with pytest.raises(KeyError, match="unknown observation field"):
-        telemetry_to_observation(_FakeTelemetry(), ["nonexistent_field_name"])
-
-
-def test_telemetry_to_observation_all_known_scalar_keys_no_keyerror():
-    """All known scalar (non-bracket, non-actor) observation keys resolve without KeyError."""
-    fake = _FakeTelemetry()
-    scalar_fields = [
+def test_env_resolves_every_bounds_table_key():
+    """Every scalar key the bounds table recognizes resolves through the
+    plan and reads a finite value on both gym environments, the alias and
+    the actor channels included."""
+    fields = [
         "outdoor_temp",
         "outdoor_temp_c",
         "outdoor_humidity_ratio",
         "total_power_w",
         "reactive_power_var",
-        "battery_soc",
-        "ev_soc",
+        "grid_interchange_w",
+        "islanded",
+        "bus_voltage_pu",
+        "zone_temp[Indoor]",
+        "setpoint_heat[Indoor]",
+        "setpoint_cool[Indoor]",
+        "zone_energy_balance[Indoor]",
         "time_sin",
         "time_cos",
+        "schedule_row",
+        "occupants_present",
+        "clock_hour",
+        "clock_day",
+        "clock_step",
+        "DRAgent.dr_level",
+        "dr_active",
     ]
-    obs = telemetry_to_observation(fake, scalar_fields)
-    assert obs.shape == (len(scalar_fields),)
-    assert np.all(np.isfinite(obs))
+    for env in _both_envs(
+        [cast(Any, f) for f in fields],
+        actors=[{"actor_type": "DrCompliance", "name": "DRAgent"}],
+    ):
+        env.reset(seed=0)
+        obs, _r, _term, _trunc, _info = env.step(_no_action(env))
+        row = obs[0] if obs.ndim == 2 else obs
+        assert row.shape == (len(fields),)
+        assert np.all(np.isfinite(row)), f"non-finite observation: {row}"
 
 
-def test_telemetry_to_observation_bracket_keys_no_keyerror():
-    """All bracket-prefixed observation keys resolve without KeyError."""
-    fake = _FakeTelemetry()
-    bracket_fields = [
-        "zone_temp[Living Room]",
-        "zone_temp[Kitchen]",
-        "setpoint_heat[Living Room]",
-        "setpoint_cool[Living Room]",
-        "zone_energy_balance[Living Room]",
-        "equipment_soc[Battery]",
-        "equipment_power[Gas Furnace]",
-    ]
-    obs = telemetry_to_observation(fake, bracket_fields)
-    assert obs.shape == (len(bracket_fields),)
-    assert np.all(np.isfinite(obs))
+def test_env_equipment_keys_resolve_for_every_roster_unit():
+    """The equipment bracket keys resolve for every unit the dwelling
+    carries, on both gym environments: each planned field reads that
+    unit's own telemetry power and SOC."""
+    probe = _make_dwelling()
+    probe.initialize()
+    names = list(probe.telemetry().equipment()["names"])
+    fields = [cast(Any, f"equipment_power[{name}]") for name in names]
+    fields += [cast(Any, f"equipment_soc[{name}]") for name in names]
+    for env in _both_envs(fields):
+        env.reset(seed=0)
+        obs, _r, _term, _trunc, _info = env.step(_no_action(env))
+        row = obs[0] if obs.ndim == 2 else obs
+        assert row.shape == (len(fields),)
+        assert np.all(np.isfinite(row)), f"non-finite observation: {row}"
+        unit = env.dwelling if hasattr(env, "dwelling") else env.envs[0]
+        equipment = unit.telemetry().equipment()
+        powers = list(equipment["power_w"])
+        for idx, name in enumerate(names):
+            expected = powers[equipment["names"].index(name)]
+            assert struct.pack("<d", row[idx]) == struct.pack("<d", float(expected)), (
+                f"equipment_power[{name}] must read the unit's own telemetry power"
+            )
 
 
-# ---------------------------------------------------------------------------
-# The frozen observation plan: the batch's observations are read into the
-# environment's own buffer through the plan, in place.
-# ---------------------------------------------------------------------------
+def test_outdoor_temp_c_alias_reads_the_canonical_value():
+    """The telemetry dict's `outdoor_temp_c` spelling resolves to the same
+    source the plan's canonical `outdoor_temp` reads: one value, on
+    bits, through both environments."""
+    for env in _both_envs([cast(Any, "outdoor_temp"), cast(Any, "outdoor_temp_c")]):
+        env.reset(seed=0)
+        obs, _r, _term, _trunc, _info = env.step(_no_action(env))
+        row = obs[0] if obs.ndim == 2 else obs
+        assert struct.pack("<d", row[0]) == struct.pack("<d", row[1]), (
+            "the alias must read the same value as the canonical key"
+        )
+
+
+def test_outdoor_rh_is_retired_from_the_vocabulary():
+    """`outdoor_rh` is retired everywhere: the plan refuses it on both gym
+    environments, naming the key, as the Rust telemetry's own rejection
+    does."""
+    with pytest.raises(Exception, match="outdoor_rh"):
+        DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=[cast(Any, "outdoor_rh")],
+            action_space_config={},
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        ).reset(seed=0)
+    with pytest.raises(Exception, match="outdoor_rh"):
+        VecDwellingGymEnv(
+            dwellings=[_make_dwelling()],
+            observation_fields=[cast(Any, "outdoor_rh")],
+            action_space_config={},
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        ).reset(seed=0)
 
 
 def test_unknown_observation_field_fails_at_reset():
@@ -2230,11 +2154,13 @@ def _make_dwelling_for_reports(seed: int = 0) -> PyDwelling:
 def test_gym_observation_bounds_are_in_watts():
     """The default observation space's `total_power_w` bounds are
     (-100 000, 100 000), `reactive_power_var`'s the same and each
-    equipment `power_w` (0, 100 000); one episode keeps every observation
-    inside its Box; the built-in reward is minus the step's net power in
-    kW. The home is the der_pv_battery_900s inputs' PV home without the
-    battery: the gym config carries no override surface, and the bounds
-    and the reward need no battery."""
+    equipment `power_w` the signed W range (generation is negative by
+    contract, so a PV home's producing step is inside its Box); one
+    episode keeps every observation inside its Box, the PV's own
+    equipment column included; the built-in reward is minus the step's
+    net power in kW. The home is the der_pv_battery_900s inputs' PV home
+    without the battery: the gym config carries no override surface, and
+    the bounds and the reward need no battery."""
     from hares import SimulationConfig
 
     config = GymDwellingConfig(
@@ -2266,10 +2192,69 @@ def test_gym_observation_bounds_are_in_watts():
         # The built-in reward: minus the step's net power in kW, converted
         # once from the step's watts.
         assert reward == -info["step"]["net_electric_power_w"] / 1000.0
-    # The bounds are the W-scale ones.
+    # The bounds are the W-scale ones, the equipment power signed.
     assert observation_field_bounds("total_power_w") == (-100_000.0, 100_000.0)
     assert observation_field_bounds("reactive_power_var") == (-100_000.0, 100_000.0)
-    assert observation_field_bounds("equipment_power[Gas Furnace]") == (0.0, 100_000.0)
+    assert observation_field_bounds("equipment_power[Gas Furnace]") == (
+        -100_000.0,
+        100_000.0,
+    )
+    assert observation_field_bounds("zone_temp[Indoor]") == (-80.0, 50.0)
+
+
+def test_pv_production_sits_inside_the_observation_box():
+    """A PV home's producing step publishes a negative `equipment_power`
+    for the PV (generation is negative watts by contract) and the whole
+    observation stays inside the Box the bounds table declared: the
+    containment Gymnasium's passive checker warns on, and `check_env`
+    would refuse."""
+    from hares import SimulationConfig
+
+    config = GymDwellingConfig(
+        hpxml=str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml"),
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        defaults=str(HARES_DEFAULTS),
+        sim_config=SimulationConfig(
+            start_time="2023-06-01T10:00:00-07:00",
+            duration=14400,
+            time_res=900,
+            master_seed=0,
+        ),
+    )
+    # The PV unit's own name, read off the built home's roster.
+    probe = PyDwelling.from_hpxml(
+        hpxml=config.hpxml,
+        schedule=config.schedule,
+        weather=config.weather,
+        defaults=config.defaults,
+        config=config.sim_config,
+    )
+    probe.initialize()
+    names = list(probe.telemetry().equipment()["names"])
+    pv_names = [name for name in names if "pv" in name.lower()]
+    assert pv_names, f"the PV fixture must carry a PV unit, got {names}"
+    pv_field = cast(Any, f"equipment_power[{pv_names[0]}]")
+
+    env = DwellingGymEnv(
+        config=config,
+        observation_fields=[pv_field],
+        action_space_config={},
+        reward_fn=None,
+        episode_length=timedelta(hours=4),
+    )
+    env.reset(seed=0)
+    produced = False
+    for _ in range(10):
+        obs, _r, _term, _trunc, _info = env.step(np.zeros(0, dtype=np.float64))
+        assert env.observation_space.contains(obs), (
+            f"{pv_field} = {obs[0]} must sit inside the declared Box"
+        )
+        produced = produced or obs[0] < 0.0
+    assert produced, (
+        "the PV home must produce within the episode: a negative "
+        f"{pv_field} step is the containment witness"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2612,3 +2597,71 @@ def test_observation_reports_the_engine_clock_schedule_and_occupancy():
         "occupants_present is the schedule's occupancy fraction times the "
         "resident count, the product the occupancy gains read"
     )
+
+
+# ---------------------------------------------------------------------------
+# The Gymnasium vector surface: the class is a VectorEnv, the standard
+# wrappers accept it, and the per-env spaces ride the single_* attributes.
+# ---------------------------------------------------------------------------
+
+
+def test_vec_env_is_a_gymnasium_vector_env_with_single_spaces():
+    """`VecDwellingGymEnv` subclasses `gymnasium.vector.VectorEnv`: the
+    standard wrappers accept it, `single_observation_space` /
+    `single_action_space` are the per-env spaces the base class expects,
+    and `unwrapped` exposes the environment itself."""
+    import gymnasium
+
+    dwellings = [_make_dwelling(seed=0)]
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    assert isinstance(env, gymnasium.vector.VectorEnv)
+    assert env.single_observation_space == env.observation_space
+    assert env.single_action_space == env.action_space
+    assert env.observation_space.shape == (len(_OBS_FIELDS),)
+    assert env.unwrapped is env
+
+    obs, infos = env.reset(seed=0)
+    assert obs.shape == (1, len(_OBS_FIELDS))
+    obs, _r, _d, _t, _i = env.step(np.full((1, 1), 21.0, dtype=np.float64))
+    assert env.single_observation_space.contains(obs[0]), (
+        "the step observation sits inside the declared per-env space"
+    )
+    env.close()
+    assert env.closed
+
+
+def test_vec_env_accepts_the_standard_episode_statistics_wrapper():
+    """The standard vector wrapper composes: the wrapped env steps with
+    the action clipped to the declared action space, the info rows keep
+    the documented per-env shape, and the base class's bookkeeping
+    (`closed`, `unwrapped`) follows the wrapped chain."""
+    import gymnasium
+
+    dwellings = [_make_dwelling(seed=0) for _ in range(2)]
+    env = gymnasium.wrappers.vector.ClipAction(
+        VecDwellingGymEnv(
+            dwellings=dwellings,
+            observation_fields=_OBS_FIELDS,
+            action_space_config=_ACTION_CONFIG,
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+        )
+    )
+    env.reset(seed=0)
+    # An action outside the declared Box: the wrapper clips it to the
+    # space before the environment sees it, and the step reads like the
+    # in-bounds action's own.
+    _obs, rewards, _dones, _truncs, infos = env.step(
+        np.full((2, 1), 10.0, dtype=np.float64)
+    )
+    assert len(infos) == 2, "one info row per env, the documented shape"
+    for info in infos:
+        assert isinstance(info, dict) and "warning_count" in info
+    env.close()
+    assert env.unwrapped.closed

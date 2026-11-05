@@ -1442,6 +1442,7 @@ mod tests {
             ),
             None,
             None,
+            None,
         )
         .expect("base.xml must load");
         dwelling.initialize().expect("initialize must succeed");

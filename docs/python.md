@@ -246,7 +246,10 @@ name; a unit that names none fails when the dwelling is built.
 
 The `hares.rl` package wraps the engine in Gymnasium environments
 (`DwellingGymEnv` for one dwelling, `VecDwellingGymEnv` for a fleet stepped
-through the extension's `batch_step`). Both paths clamp every action value
+through the extension's `batch_step`; the vector class is a
+`gymnasium.vector.VectorEnv`, the per-env spaces on
+`single_observation_space`/`single_action_space`, so the standard vector
+wrappers compose). Both paths clamp every action value
 to the declared bounds of its column before the value reaches the dwelling,
 and the clamped values are counted on the acting dwelling's run health in
 every build; the count is exposed with the run's `RunResult`, alongside the
