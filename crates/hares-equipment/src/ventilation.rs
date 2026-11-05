@@ -88,13 +88,33 @@ pub struct VentilationConfig {
     pub defrost_time_increase_rate_per_k: Option<f64>,
     /// Ventilation type: "exhaust_fan", "hrv", or "erv"
     pub ventilation_type: Option<String>,
-    /// Informational: whether the system is balanced (HRV/ERV) or one-directional
-    /// (exhaust/supply). Populated by HPXML parser for reporting/diagnostics.
-    /// Does not affect simulation behaviour — `init_typed` derives balanced state
-    /// from `ventilation_type`, not this field.
+    /// Whether the system is balanced (HRV/ERV, supply and exhaust) or
+    /// one-directional (exhaust/supply). When unset, resolved from
+    /// `ventilation_type` through [`VentilationConfig::resolved_balanced`],
+    /// the one derivation the envelope's recovery gate reads; the HPXML
+    /// path sets the field to the document's own declared balance.
     pub balanced: Option<bool>,
-    /// Daily hours of operation (0–24). Used by the EA-001 energy audit model.
+    /// Daily hours of operation (0-24). Used by the EA-001 energy audit model.
     pub hours_in_operation: Option<f64>,
+}
+
+impl VentilationConfig {
+    /// The balance the envelope's recovery gate reads: the field when
+    /// set, else the ventilation type's own balance (an HRV or ERV
+    /// exchanges supply and exhaust; an exhaust or supply fan moves air
+    /// one way). A type string the equipment would reject resolves as
+    /// unbalanced here: the equipment's init fails the build with the
+    /// typed error naming the accepted spellings, so this arm is never
+    /// the simulation's answer.
+    pub fn resolved_balanced(&self) -> bool {
+        match self.balanced {
+            Some(balanced) => balanced,
+            None => matches!(
+                parse_ventilation_type(self.ventilation_type.as_deref()),
+                Ok(VentilationType::Hrv) | Ok(VentilationType::Erv)
+            ),
+        }
+    }
 }
 
 impl EquipmentTypedConfig for VentilationConfig {
@@ -680,6 +700,7 @@ impl Equipment for Ventilation {
             self.telemetry.set(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
             self.telemetry.set(tk::SENSIBLE_RECOVERY_W, 0.0);
             self.telemetry.set(tk::LATENT_RECOVERY_W, 0.0);
+            self.telemetry.set(tk::VENT_DEFROST_FRACTION, 0.0);
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
@@ -745,6 +766,7 @@ impl Equipment for Ventilation {
             self.telemetry.set(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
             self.telemetry.set(tk::SENSIBLE_RECOVERY_W, 0.0);
             self.telemetry.set(tk::LATENT_RECOVERY_W, 0.0);
+            self.telemetry.set(tk::VENT_DEFROST_FRACTION, 0.0);
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
@@ -3014,6 +3036,56 @@ mod tests {
         assert!(
             eff_l.abs() < 1e-12,
             "latent effectiveness should be 0.0 after turning off, got {eff_l}"
+        );
+    }
+
+    // A defrosting run publishes the defrost fraction; the off branch
+    // zeroes every other telemetry key and this one beside them: a unit
+    // that ran cold and then stopped reports no defrost, it does not
+    // keep publishing the last running step's value.
+    #[test]
+    fn defrost_telemetry_clears_when_the_unit_stops() {
+        // -25 °C is 20 K below the -5 °C defrost threshold at the 0.05/K
+        // rate: the defrost fraction is 1.0 while the unit runs.
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e_cold = env(-25.0, 20.0);
+        hrv.init(&cfg, &e_cold).expect("init");
+
+        hrv.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::On,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e_cold, Duration::from_secs(300), &mut ports)
+            .expect("step running");
+        let running = hrv
+            .telemetry()
+            .get(tk::VENT_DEFROST_FRACTION)
+            .expect("defrost fraction while running");
+        assert!(
+            (running - 1.0).abs() < 1e-9,
+            "a -25 °C step defrosts at the full fraction, got {running}"
+        );
+
+        // Off: the stale defrost fraction must go with the other keys.
+        hrv.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        hrv.step(&e_cold, Duration::from_secs(300), &mut ports)
+            .expect("step off");
+        let off = hrv
+            .telemetry()
+            .get(tk::VENT_DEFROST_FRACTION)
+            .expect("defrost fraction while off");
+        assert!(
+            off.abs() < 1e-12,
+            "the off step must zero the defrost fraction, got {off}"
         );
     }
 

@@ -33,14 +33,17 @@ impl DemandWindow {
         }
     }
 
-    fn push(&mut self, power_kw: f64) {
+    /// Pushes one sample of the interval's net import power (W; the
+    /// window's samples and averages are watts, the summary converts to
+    /// kW once where it prices).
+    fn push(&mut self, power_w: f64) {
         let cap = self.samples.len();
         if cap == 0 {
             return;
         }
         self.running_sum -= self.samples[self.head];
-        self.samples[self.head] = power_kw;
-        self.running_sum += power_kw;
+        self.samples[self.head] = power_w;
+        self.running_sum += power_w;
         self.head = (self.head + 1) % cap;
         if self.count < cap {
             self.count += 1;
@@ -107,10 +110,11 @@ impl DemandWindow {
 
 /// One per-step set of billing inputs, grouped to keep the
 /// [`BillingState::update`] hot-path signature readable. All fields are
-/// copied, so passing by value adds no allocation.
+/// copied, so passing by value adds no allocation. The units are SI:
+/// powers in watts, energies in joules, exactly as the field names say.
 #[derive(Clone, Copy, Debug)]
 pub struct BillingStep {
-    /// Net metered power this step (kW) (export negative).
+    /// Net metered power this step (W; export negative).
     pub net_power_w: f64,
     /// Step length (s).
     pub dt_seconds: f64,
@@ -122,7 +126,7 @@ pub struct BillingStep {
     pub period_idx: u16,
     /// Demand-window TOU period index.
     pub demand_period_idx: u16,
-    /// EV import energy this step (kWh), tracked separately for CPP events.
+    /// EV import energy this step (J), tracked separately for CPP events.
     pub ev_import_j: f64,
 }
 
@@ -934,6 +938,42 @@ mod tests {
         assert!((state.cumulative_import_j - 3.6e6).abs() < 1e-6);
         assert!((state.cumulative_export_j).abs() < 1e-10);
         assert!((state.cumulative_energy_cost_usd - 0.10).abs() < 1e-10);
+    }
+
+    // The BillingStep fields are SI, as their names say (W and J): a
+    // 1000 W step over 3600 s accumulates 3.6e6 J (hand-computed:
+    // 1000 W x 3600 s = 3.6e6 J = 1 kWh at $0.10/kWh = $0.10), the EV
+    // import accumulates in joules, and the full window's peak average
+    // is watts. A caller following a kW/kWh doc would bill 1000x off;
+    // this pin fails with the doc if the units ever move.
+    #[test]
+    fn billing_step_fields_are_si_watts_and_joules() {
+        let mut state =
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0).expect("the billing state constructs");
+        // The window's capacity is 15 min x 60 / 3600 s = 4 samples;
+        // four steps fill it.
+        for _ in 0..4 {
+            state.update(BillingStep {
+                net_power_w: 1000.0,
+                dt_seconds: 3600.0,
+                import_price: 0.10,
+                export_price: 0.0,
+                period_idx: 0,
+                demand_period_idx: 0,
+                ev_import_j: 3.6e6,
+            });
+        }
+        assert!(
+            (state.cumulative_energy_cost_usd - 4.0 * 0.10).abs() < 1e-10,
+            "four 1 kWh steps at $0.10/kWh: got {}",
+            state.cumulative_energy_cost_usd
+        );
+        assert!((state.cumulative_ev_j - 4.0 * 3.6e6).abs() < 1e-6);
+        assert!(
+            (state.peak_demand_w - 1000.0).abs() < 1e-10,
+            "the demand window's average is watts: got {}",
+            state.peak_demand_w
+        );
     }
 
     #[test]
