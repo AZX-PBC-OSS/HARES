@@ -6458,6 +6458,7 @@ mod tests {
                 equipment: Vec::new(),
                 inputs: None,
                 tariff: None,
+                script: None,
                 replay_blockers: Vec::new(),
             },
         };

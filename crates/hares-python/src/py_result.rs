@@ -834,6 +834,20 @@ impl PyProvenance {
             .collect()
     }
 
+    /// The scenario script that drove the run, as a dict holding the
+    /// script's name and the 64 char hex digest over its content, or
+    /// `None` for a run no script drove.
+    #[getter]
+    fn script<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(record) = self.inner.script.as_ref() else {
+            return Ok(None);
+        };
+        let dict = PyDict::new(py);
+        dict.set_item("name", record.name.clone())?;
+        dict.set_item("sha256", hares_input::input::hex(&record.sha256))?;
+        Ok(Some(dict))
+    }
+
     /// The electric tariff the run attached, as a dict holding the
     /// tariff's own dict and its zone, or `None` when the run attached
     /// none.

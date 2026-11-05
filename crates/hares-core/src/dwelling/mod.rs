@@ -101,7 +101,7 @@ use crate::observation::{
 };
 use crate::result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
-    TariffRecord,
+    ScriptRecord, TariffRecord,
 };
 use crate::rng::SeededStream;
 use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
@@ -2039,6 +2039,10 @@ pub struct Dwelling {
     /// The electric tariff attached with `set_tariff`, recorded for the
     /// run's provenance and its replay export.
     tariff_record: Option<TariffRecord>,
+    /// The scenario script driving the run, recorded for the run's
+    /// provenance and its replay export: the driver behind the external
+    /// inputs the script's events applied.
+    script: Option<ScriptRecord>,
     /// Why the run cannot be exported for exact replay, each category
     /// once in the order first seen, recorded the first time the change
     /// happened.
@@ -3848,6 +3852,7 @@ fn assemble_from_blueprint_with_seed(
         latest_env: initial_env,
         run_result: None,
         tariff_record: None,
+        script: None,
         replay_blockers: if bp.blueprint_edited {
             vec![hares_types::ReplayBlocker::BlueprintEdited]
         } else {
@@ -4158,6 +4163,7 @@ impl Dwelling {
             equipment,
             inputs: self.inputs.clone(),
             tariff: self.tariff_record.clone(),
+            script: self.script.clone(),
             replay_blockers: self.replay_blockers.clone(),
         }
     }
@@ -4699,6 +4705,19 @@ impl Dwelling {
     #[must_use]
     pub fn price_signal(&self) -> &PriceSignal {
         &self.price_signal
+    }
+
+    /// Records the scenario script driving the run: the script's
+    /// identity (its name and the digest over its content) rides the
+    /// run's provenance and its replay export. The script engine calls
+    /// this once, at the first applied event; the setters the script's
+    /// events drive record the external-input replay blocker
+    /// themselves.
+    pub fn record_script(&mut self, name: &str, sha256: [u8; 32]) {
+        self.script = Some(ScriptRecord {
+            name: name.to_string(),
+            sha256,
+        });
     }
 
     /// Returns accumulated billing period summaries.

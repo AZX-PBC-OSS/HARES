@@ -3000,6 +3000,12 @@ class Provenance:
         """The electric tariff the run attached: a dict holding the
         tariff's own dict (``tariff``) and the IANA zone it was attached
         in (``zone``), or ``None`` when the run attached none."""
+    @property
+    def script(self) -> dict[str, Any] | None:
+        """The scenario script that drove the run: a dict holding the
+        script's declared name (``name``) and the 64 char hex digest
+        over its content (``sha256``), or ``None`` for a run no script
+        drove."""
     def __repr__(self) -> str: ...
 
 class EquipmentProvenance:

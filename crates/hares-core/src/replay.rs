@@ -31,7 +31,7 @@ use crate::result::{BuildInfo, RunResult, TariffRecord};
 /// `initialization_duration_s` key: the warm-up lives in the embedded
 /// `SimulationConfig`'s `warmup` field, and an older export's key is a
 /// removed key.
-const REPLAY_SCHEMA_VERSION: u32 = 2;
+const REPLAY_SCHEMA_VERSION: u32 = 3;
 
 /// The stored file names the export writes the inputs under, inside the
 /// replay directory.
@@ -120,6 +120,11 @@ struct ReplayManifest {
     inputs: StoredInputs,
     tariff_zone: Option<String>,
     tariff_attach_step: Option<u64>,
+    /// The scenario script that drove the run: its declared name and the
+    /// digest over its content. `None` for a run no script drove. The
+    /// script's content is the caller's to hold; the identity names it.
+    script_name: Option<String>,
+    script_sha256: Option<String>,
     build: RecordedBuild,
 }
 
@@ -250,9 +255,21 @@ fn store_input(
 /// Writes the run's replay export into `dir`
 /// ([`RunResult::export_replay`](crate::RunResult::export_replay)).
 pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
-    if !result.provenance.replay_blockers.is_empty() {
+    let blockers = &result.provenance.replay_blockers;
+    // The script-carried exception: the one blocker a script-driven
+    // run's export admits is the external input the script itself
+    // applied (the price, voltage, frequency and control pushes its
+    // events drove). The export names the script, and re-running it is
+    // the replay of those inputs. Every other blocker refuses as
+    // before, and an untagged run refuses the external input as
+    // before: the tag is the run's own statement of its driver.
+    let script_backed = result.provenance.script.is_some()
+        && blockers
+            .iter()
+            .all(|b| matches!(b, hares_types::ReplayBlocker::ExternalInput));
+    if !script_backed && !blockers.is_empty() {
         return Err(HaresError::NotReplayable {
-            blockers: result.provenance.replay_blockers.clone(),
+            blockers: blockers.clone(),
         });
     }
     let Some(inputs) = result.provenance.inputs.as_ref() else {
@@ -345,6 +362,12 @@ pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
         },
         tariff_zone: result.provenance.tariff.as_ref().map(|r| r.zone.clone()),
         tariff_attach_step: result.provenance.tariff.as_ref().map(|r| r.attach_step),
+        script_name: result.provenance.script.as_ref().map(|s| s.name.clone()),
+        script_sha256: result
+            .provenance
+            .script
+            .as_ref()
+            .map(|s| hares_input::input::hex(&s.sha256)),
         build: RecordedBuild::from_build_info(&result.provenance.build),
     };
     let toml = toml::to_string_pretty(&manifest)
