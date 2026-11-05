@@ -2534,6 +2534,11 @@ class ScenarioSample:
     ``Dwelling.from_hpxml(scenario_sample=...)`` accepts."""
 
     @property
+    def master_seed(self) -> int:
+        """The master seed the sample's draws ran under: the draw key's
+        first component, beside the scenario id and the building id."""
+        ...
+    @property
     def scenario_id(self) -> int: ...
     @property
     def bldg_id(self) -> int: ...

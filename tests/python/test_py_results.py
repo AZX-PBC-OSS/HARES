@@ -425,6 +425,32 @@ def test_telemetry_stub_carries_every_public_member() -> None:
     assert missing == set(), f"Telemetry stub missing public members: {sorted(missing)}"
 
 
+def test_scenario_sample_stub_carries_every_public_member() -> None:
+    """The ScenarioSample stub class lists every public runtime member: the
+    pairing handle publishes its draw key's own triple (the master seed,
+    the scenario id, the building id) beside the overrides form, and a
+    getter the Rust binding adds without the stub is a pyright error for
+    typed callers, the divergence the handle's own fix closed."""
+    import hares._hares as _hares
+
+    tree = ast.parse((ROOT / "python/hares/_hares.pyi").read_text())
+    cls = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ScenarioSample"
+    )
+    stub = {
+        node.name
+        for node in cls.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    runtime = {name for name in dir(_hares.ScenarioSample) if not name.startswith("_")}
+    missing = runtime - stub
+    assert missing == set(), (
+        f"ScenarioSample stub missing public members: {sorted(missing)}"
+    )
+
+
 def test_stub_changes_are_listed() -> None:
     """Every name added to or removed from _hares.pyi against the committed
     ebdb1a17 stub, compared by ast, appears in the changelog's "Changes in

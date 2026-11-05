@@ -320,8 +320,8 @@ replacement.
   category, nothing written. `Provenance.tariff` reads the attached
   tariff as a dict holding `tariff` (the tariff's own dict) and `zone`
   (the IANA name), or `None`.
-- Added: `ScenarioSample` (with `scenario_id`, `bldg_id` and
-  `overrides()`), `ScenarioSpec.sample_record(master_seed, scenario_id,
+- Added: `ScenarioSample` (with `master_seed`, `scenario_id`, `bldg_id`
+  and `overrides()`), `ScenarioSpec.sample_record(master_seed, scenario_id,
   bldg_id)` and the `scenario_sample=` keyword on `Dwelling.from_hpxml`:
   the scenario pairing handle. A sample's draw key is the
   `(master_seed, scenario_id, bldg_id)` triple; the constructor refuses
