@@ -7363,6 +7363,30 @@ mod tests {
     }
 
     #[test]
+    fn economizer_serving_a_zone_other_than_the_indoor_zone_is_a_typed_error() {
+        // The damper's outdoor-air load lands on the unit's served zone: a
+        // unit declared for a zone that is not the dwelling's indoor zone
+        // would mis-land it, so the init rejects the declaration with a
+        // typed error naming both zones rather than run a mis-landed load.
+        let mut cfg = economizer_ac_config(|_| {});
+        let mut zone_map = hares_types::ZoneMap::new();
+        zone_map.insert(hares_types::ZoneRole::Indoor, ZoneId(5));
+        cfg.zone_map = Some(zone_map);
+        let mut eq = AirConditioner::new(cfg.clone());
+        let e = env_with_oa(26.0, 9.0, 0.005);
+        let err = eq
+            .init(&cfg, &e)
+            .expect_err("a damper serving a non-indoor zone is a declaration error");
+        let text = err.to_string();
+        assert!(
+            text.contains("indoor zone")
+                && text.contains("serves zone 1")
+                && text.contains("indoor zone is 5"),
+            "the error names the served and indoor zones: {text}"
+        );
+    }
+
+    #[test]
     fn unconfigured_ac_carries_no_economizer_surface() {
         // The off default: no economizer keys, no damper state, the step's
         // draw the damper-free unit's own.
