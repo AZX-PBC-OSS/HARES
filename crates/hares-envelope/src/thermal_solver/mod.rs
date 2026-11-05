@@ -574,6 +574,28 @@ impl ThermalSolver {
         Ok(())
     }
 
+    /// Sets the mechanical ventilation forced flow (m³/s) the next step's
+    /// infiltration/ventilation coupling reads: the ventilation equipment's
+    /// effective flow (the rated flow times the schedule fraction, zero
+    /// when the fan is stopped), so the envelope's ventilation load, the
+    /// fan energy and the equipment's reported flow move together. Beside
+    /// [`ThermalSolver::set_ventilation_recovery`], it is the only other
+    /// part of the configuration that changes after construction; it is
+    /// part of [`ThermalSnapshot`]. A flow the equipment's own schedule
+    /// column governs (the config's `flow_schedule_col`) still takes the
+    /// column's value per step: the hook feeds the constant-flow path.
+    ///
+    /// # Errors
+    ///
+    /// A flow that is not finite and non-negative.
+    pub fn set_ventilation_flow(&mut self, flow_m3_s: f64) -> Result<()> {
+        if !flow_m3_s.is_finite() || flow_m3_s < 0.0 {
+            return Err(ThermalSolverError::InvalidVentilationFlow { value: flow_m3_s });
+        }
+        self.config.ventilation_flow_m3_s = flow_m3_s;
+        Ok(())
+    }
+
     /// Returns true when the zone's most recent `solve_ideal_capacity_for_target`
     /// call returned a degraded fallback (last-good capacity after consecutive
     /// solver failures exceeded the threshold). False otherwise.
@@ -8546,6 +8568,7 @@ mod tests {
             let bad_snap = ThermalSnapshot {
                 sensible_recovery_efficiency: sensible,
                 latent_recovery_efficiency: latent,
+                ventilation_flow_m3_s: latent,
                 ..valid.clone()
             };
             assert_restore_rejected_atomically(&mut solver, &bad_snap, "is outside [0, 1]");
@@ -8698,6 +8721,44 @@ mod tests {
         let ventilation = &restored.config().ventilation;
         assert_eq!(ventilation.sensible_recovery_efficiency, 0.34);
         assert_eq!(ventilation.latent_recovery_efficiency, 0.12);
+    }
+
+    /// The forced ventilation flow set by the dwelling after one step rides
+    /// the snapshot beside the recovery effectiveness it sits with: the
+    /// first post-restore solve (the ideal-capacity solve's input build)
+    /// reads it before the step's own propagation overwrites it.
+    #[test]
+    fn restore_state_restores_ventilation_flow() {
+        let env = env_for_temp(20.0, 5.0);
+        let mut original = one_zone_solver(&env);
+        original.set_ventilation_flow(0.0175).unwrap();
+        let snap = original.snapshot_state();
+
+        let mut restored = one_zone_solver(&env);
+        restored.set_ventilation_flow(0.035).unwrap();
+        restored.restore_state(&snap).unwrap();
+        assert_eq!(restored.config().ventilation_flow_m3_s, 0.0175);
+        // And the snapshot round-trips the flow on bits.
+        assert_eq!(
+            restored.snapshot_state().ventilation_flow_m3_s.to_bits(),
+            0.0175_f64.to_bits()
+        );
+    }
+
+    /// A flow that is not finite and non-negative is the typed error.
+    #[test]
+    fn set_ventilation_flow_rejects_values_outside_the_domain() {
+        let env = env_for_temp(20.0, 5.0);
+        let mut solver = one_zone_solver(&env);
+        for flow in [-1e-3, f64::NAN, f64::NEG_INFINITY] {
+            let err = solver
+                .set_ventilation_flow(flow)
+                .expect_err("a flow outside the domain must fail");
+            assert!(
+                err.to_string().contains("finite"),
+                "the error states the domain: {err}"
+            );
+        }
     }
 
     #[test]

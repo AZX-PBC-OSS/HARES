@@ -1579,7 +1579,7 @@ pub(crate) fn build_default_solvers(
             match tc.typed::<hares_equipment::VentilationConfig>() {
                 Ok(cfg) => {
                     thermal_cfg.ventilation_flow_m3_s = cfg.flow_rate_m3_s;
-                    thermal_cfg.ventilation.balanced = cfg.balanced.unwrap_or(false);
+                    thermal_cfg.ventilation.balanced = cfg.resolved_balanced();
                     if let Some(sens) = cfg.sensible_effectiveness {
                         thermal_cfg.ventilation.sensible_recovery_efficiency = sens;
                     }

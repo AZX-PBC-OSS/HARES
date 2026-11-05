@@ -260,10 +260,11 @@ impl PyTariffEvaluator {
     ) -> PyResult<Option<PyBillingPeriodSummary>> {
         let dt: DateTime<FixedOffset> = extract_datetime(current_time)?;
         let tz_dt = fixed_offset_to_tz(dt);
-        Ok(self
+        let summary = self
             .evaluator
             .step(net_power_w, 0.0, dt_seconds, tz_dt)
-            .map(|s| PyBillingPeriodSummary::from_rust(&s)))
+            .map_err(crate::py_dwelling::to_py_err)?;
+        Ok(summary.map(|s| PyBillingPeriodSummary::from_rust(&s)))
     }
 
     fn finalize(
@@ -272,15 +273,19 @@ impl PyTariffEvaluator {
     ) -> PyResult<Option<PyBillingPeriodSummary>> {
         let end: DateTime<FixedOffset> = extract_datetime(sim_end)?;
         let tz_end = fixed_offset_to_tz(end);
-        Ok(self
+        let summary = self
             .evaluator
             .finalize(tz_end)
-            .map(|s| PyBillingPeriodSummary::from_rust(&s)))
+            .map_err(crate::py_dwelling::to_py_err)?;
+        Ok(summary.map(|s| PyBillingPeriodSummary::from_rust(&s)))
     }
 
     #[getter]
-    fn current_metrics(&self) -> PyBillingPeriodSummary {
-        PyBillingPeriodSummary::from_rust(&self.evaluator.current_metrics())
+    fn current_metrics(&self) -> PyResult<PyBillingPeriodSummary> {
+        self.evaluator
+            .current_metrics()
+            .map(|m| PyBillingPeriodSummary::from_rust(&m))
+            .map_err(crate::py_dwelling::to_py_err)
     }
 
     #[getter]

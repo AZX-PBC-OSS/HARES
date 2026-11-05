@@ -88,13 +88,33 @@ pub struct VentilationConfig {
     pub defrost_time_increase_rate_per_k: Option<f64>,
     /// Ventilation type: "exhaust_fan", "hrv", or "erv"
     pub ventilation_type: Option<String>,
-    /// Informational: whether the system is balanced (HRV/ERV) or one-directional
-    /// (exhaust/supply). Populated by HPXML parser for reporting/diagnostics.
-    /// Does not affect simulation behaviour — `init_typed` derives balanced state
-    /// from `ventilation_type`, not this field.
+    /// Whether the system is balanced (HRV/ERV, supply and exhaust) or
+    /// one-directional (exhaust/supply). When unset, resolved from
+    /// `ventilation_type` through [`VentilationConfig::resolved_balanced`],
+    /// the one derivation the envelope's recovery gate reads; the HPXML
+    /// path sets the field to the document's own declared balance.
     pub balanced: Option<bool>,
-    /// Daily hours of operation (0–24). Used by the EA-001 energy audit model.
+    /// Daily hours of operation (0-24). Used by the EA-001 energy audit model.
     pub hours_in_operation: Option<f64>,
+}
+
+impl VentilationConfig {
+    /// The balance the envelope's recovery gate reads: the field when
+    /// set, else the ventilation type's own balance (an HRV or ERV
+    /// exchanges supply and exhaust; an exhaust or supply fan moves air
+    /// one way). A type string the equipment would reject resolves as
+    /// unbalanced here: the equipment's init fails the build with the
+    /// typed error naming the accepted spellings, so this arm is never
+    /// the simulation's answer.
+    pub fn resolved_balanced(&self) -> bool {
+        match self.balanced {
+            Some(balanced) => balanced,
+            None => matches!(
+                parse_ventilation_type(self.ventilation_type.as_deref()),
+                Ok(VentilationType::Hrv) | Ok(VentilationType::Erv)
+            ),
+        }
+    }
 }
 
 impl EquipmentTypedConfig for VentilationConfig {
@@ -339,6 +359,12 @@ pub struct Ventilation {
     // before the thermal solver integrates.
     effective_sensible_effectiveness: f64,
     effective_latent_effectiveness: f64,
+    /// The step's effective forced flow (m³/s): the rated flow times the
+    /// schedule fraction, zero on the off and zero-flow branches. The
+    /// dwelling propagates it to the envelope's forced ventilation beside
+    /// the recovery effectiveness, so the load, the fan energy and the
+    /// reported flow move together.
+    effective_flow_rate_m3_s: f64,
 
     // Bypass: when outdoor temp is within comfort range, bypass recovery (free cooling).
     bypass_temp_min_c: f64,
@@ -415,6 +441,7 @@ impl Ventilation {
             sensible_effectiveness: DEFAULT_SENSIBLE_EFFECTIVENESS,
             latent_effectiveness: DEFAULT_LATENT_EFFECTIVENESS,
             effective_sensible_effectiveness: DEFAULT_SENSIBLE_EFFECTIVENESS,
+            effective_flow_rate_m3_s: DEFAULT_FLOW_RATE_M3_S,
             effective_latent_effectiveness: DEFAULT_LATENT_EFFECTIVENESS,
             bypass_temp_min_c: DEFAULT_BYPASS_TEMP_MIN_C,
             bypass_temp_max_c: DEFAULT_BYPASS_TEMP_MAX_C,
@@ -540,6 +567,10 @@ impl Ventilation {
         // correct rated defaults rather than the hard-coded new() values.
         self.effective_sensible_effectiveness = self.sensible_effectiveness;
         self.effective_latent_effectiveness = self.latent_effectiveness;
+        // The flow's pre-first-step form is the rated flow: no schedule
+        // fraction has been read yet, and the constant source's fraction
+        // below is what the first step's propagation will carry.
+        self.effective_flow_rate_m3_s = self.flow_rate_m3_s * schedule_frac;
 
         // Ventilation exchanges the conditioned zone's air with outdoors.
         let zone = resolve_served_zone(config, self.zone_id)?;
@@ -672,6 +703,9 @@ impl Equipment for Ventilation {
             // is not occurring.
             self.effective_sensible_effectiveness = 0.0;
             self.effective_latent_effectiveness = 0.0;
+            // A stopped fan moves no air: the envelope's forced flow goes
+            // with the effectiveness to zero.
+            self.effective_flow_rate_m3_s = 0.0;
 
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -680,6 +714,7 @@ impl Equipment for Ventilation {
             self.telemetry.set(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
             self.telemetry.set(tk::SENSIBLE_RECOVERY_W, 0.0);
             self.telemetry.set(tk::LATENT_RECOVERY_W, 0.0);
+            self.telemetry.set(tk::VENT_DEFROST_FRACTION, 0.0);
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
@@ -736,8 +771,16 @@ impl Equipment for Ventilation {
 
         let schedule_frac = self.schedule_source.value_at(env)?.clamp(0.0, 1.0);
         let effective_flow_rate_m3_s = self.flow_rate_m3_s * schedule_frac;
+        // The step's forced flow the dwelling propagates to the envelope:
+        // one value governs the fan energy, the reported flow and the
+        // ventilation load.
+        self.effective_flow_rate_m3_s = effective_flow_rate_m3_s;
 
         if effective_flow_rate_m3_s <= 0.0 {
+            // A zero flow moves no air: the effective flow is exactly zero
+            // for the propagation, whatever the rated-times-fraction product
+            // rounded to.
+            self.effective_flow_rate_m3_s = 0.0;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::FAN_POWER_W, 0.0);
@@ -745,6 +788,7 @@ impl Equipment for Ventilation {
             self.telemetry.set(tk::VENT_EXHAUST_FAN_POWER_W, 0.0);
             self.telemetry.set(tk::SENSIBLE_RECOVERY_W, 0.0);
             self.telemetry.set(tk::LATENT_RECOVERY_W, 0.0);
+            self.telemetry.set(tk::VENT_DEFROST_FRACTION, 0.0);
             self.telemetry
                 .set(tk::SUPPLY_TEMP_C, env.weather.outdoor_temp_c);
             self.telemetry.set(tk::BYPASS_ACTIVE, 0.0);
@@ -952,6 +996,10 @@ impl Equipment for Ventilation {
             self.effective_sensible_effectiveness,
             self.effective_latent_effectiveness,
         ))
+    }
+
+    fn effective_ventilation_flow_m3_s(&self) -> Option<f64> {
+        Some(self.effective_flow_rate_m3_s)
     }
 
     fn resolved_zip(&self) -> Option<ResolvedZip> {
@@ -3014,6 +3062,56 @@ mod tests {
         assert!(
             eff_l.abs() < 1e-12,
             "latent effectiveness should be 0.0 after turning off, got {eff_l}"
+        );
+    }
+
+    // A defrosting run publishes the defrost fraction; the off branch
+    // zeroes every other telemetry key and this one beside them: a unit
+    // that ran cold and then stopped reports no defrost, it does not
+    // keep publishing the last running step's value.
+    #[test]
+    fn defrost_telemetry_clears_when_the_unit_stops() {
+        // -25 °C is 20 K below the -5 °C defrost threshold at the 0.05/K
+        // rate: the defrost fraction is 1.0 while the unit runs.
+        let cfg = hrv_config();
+        let mut hrv = Ventilation::new(cfg.clone());
+        let e_cold = env(-25.0, 20.0);
+        hrv.init(&cfg, &e_cold).expect("init");
+
+        hrv.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::On,
+        })
+        .unwrap();
+
+        let mut ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..PortSlots::default()
+        };
+        hrv.step(&e_cold, Duration::from_secs(300), &mut ports)
+            .expect("step running");
+        let running = hrv
+            .telemetry()
+            .get(tk::VENT_DEFROST_FRACTION)
+            .expect("defrost fraction while running");
+        assert!(
+            (running - 1.0).abs() < 1e-9,
+            "a -25 °C step defrosts at the full fraction, got {running}"
+        );
+
+        // Off: the stale defrost fraction must go with the other keys.
+        hrv.apply_control_unchecked(&ControlSignal::ModeOverride {
+            mode: OperatingMode::Off,
+        })
+        .unwrap();
+        hrv.step(&e_cold, Duration::from_secs(300), &mut ports)
+            .expect("step off");
+        let off = hrv
+            .telemetry()
+            .get(tk::VENT_DEFROST_FRACTION)
+            .expect("defrost fraction while off");
+        assert!(
+            off.abs() < 1e-12,
+            "the off step must zero the defrost fraction, got {off}"
         );
     }
 

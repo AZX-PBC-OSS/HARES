@@ -424,6 +424,22 @@ pub(crate) fn parse_schedule_csv_str(
     let time_col_idx = detect_time_column(&headers);
     let is_index_based = time_col_idx.is_none();
 
+    // The time-column contract: a header naming a time column under any
+    // other spelling is a contract error naming the accepted names, not a
+    // data column.
+    for (idx, header) in headers.iter().enumerate() {
+        if Some(idx) == time_col_idx {
+            continue;
+        }
+        if time_like_header(header) {
+            return Err(ScheduleError::Parse(format!(
+                "schedule CSV header `{header}` names a time column; the accepted \
+                 time-column names are `timestamp` and `time` (case-insensitive), \
+                 and a file with no time column is indexed by row order"
+            )));
+        }
+    }
+
     if !is_index_based && headers.len() < 2 {
         return Err(ScheduleError::Parse(
             "schedule CSV must contain at least one time column and one data column".to_string(),
@@ -574,6 +590,39 @@ pub(crate) fn parse_schedule_csv_str(
     }
 
     Ok(series)
+}
+
+/// The schedule CSV's time-column vocabulary: the accepted names are
+/// `timestamp` and `time` (case-insensitive, the header's own trim). A
+/// header that names a time column under any other spelling (an `Hour`
+/// column, a `date_time` epoch column, a `Time Stamp` spelling) is
+/// rejected rather than parsed as data: its numeric values would divide
+/// the year, and the file would be accepted with the timestamps inferred
+/// from row order and the would-be time column left in the custom
+/// domain. The match is on the header's alphanumerics lowercased, so
+/// `time_stamp` and `date_time` normalize into the vocabulary without
+/// being accepted spellings.
+const TIME_LIKE_HEADERS: &[&str] = &[
+    "time",
+    "timestamp",
+    "hour",
+    "hourofyear",
+    "date",
+    "datetime",
+    "dateandtime",
+    "localtime",
+    "epoch",
+    "epochtime",
+    "unixtime",
+];
+
+fn time_like_header(header: &str) -> bool {
+    let normalized: String = header
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    TIME_LIKE_HEADERS.contains(&normalized.as_str())
 }
 
 fn detect_time_column(headers: &[String]) -> Option<usize> {
@@ -860,6 +909,32 @@ mod tests {
 
     fn parse_fixed(ts: &str) -> DateTime<FixedOffset> {
         DateTime::parse_from_rfc3339(ts).expect("valid RFC3339 timestamp")
+    }
+
+    // A header that names a time column under any other spelling is
+    // rejected, naming the header and the accepted names: an `Hour`
+    // column parsed as data (its numeric values dividing the year) would
+    // have the file accepted with timestamps inferred from row order and
+    // the would-be time column left in the custom domain.
+    #[test]
+    fn an_unrecognized_time_like_header_is_rejected() {
+        let rows: Vec<String> = (1..=8760).map(|h| format!("{h},0.5")).collect();
+        let csv = ["Hour,Load (kW)".to_string()]
+            .into_iter()
+            .chain(rows)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = parse_schedule_csv_str(&csv, &["Load (kW)"], None, None)
+            .expect_err("an `Hour` header is not data and not an accepted time column");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("Hour"),
+            "the error names the header: {shown}"
+        );
+        assert!(
+            shown.contains("timestamp") && shown.contains("time"),
+            "the error names the accepted time-column names: {shown}"
+        );
     }
 
     #[test]

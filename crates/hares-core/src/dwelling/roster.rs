@@ -647,7 +647,7 @@ impl Dwelling {
         let attach_time = start
             + chrono::Duration::seconds(self.clock.current_step as i64 * interval_secs as i64);
         if self.clock.current_step > 0 {
-            evaluator.activate_at(attach_time);
+            evaluator.activate_at(attach_time)?;
         }
         let change = self.plan_built_in_actor_rebuild(Some(&evaluator))?;
         let plan =
@@ -657,7 +657,9 @@ impl Dwelling {
         // succeeded, so a rejected set_tariff leaves the billing summaries
         // as they were.
         let outgoing_close = match self.tariff_evaluator.take() {
-            Some(mut outgoing) => outgoing.close_open_period(attach_time),
+            Some(mut outgoing) => outgoing
+                .close_open_period(attach_time)
+                .map_err(|err| HaresError::Dwelling(format!("tariff replacement close: {err}")))?,
             None => None,
         };
         // Parse warnings report in every run the tariff is attached to: a

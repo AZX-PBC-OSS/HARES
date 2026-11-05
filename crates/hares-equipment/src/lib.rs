@@ -441,6 +441,16 @@ pub trait Equipment: Send + Sync {
         None
     }
 
+    /// Returns the ventilation device's effective forced flow this step
+    /// (m³/s): the rated flow times the schedule fraction, zero on the off
+    /// and zero-flow branches. The envelope's forced ventilation integrates
+    /// this value, so one source of truth governs the fan energy, the
+    /// reported flow and the ventilation load. `None` for non-ventilation
+    /// equipment.
+    fn effective_ventilation_flow_m3_s(&self) -> Option<f64> {
+        None
+    }
+
     /// The primary resolved ZIP/power-factor model this equipment applies to
     /// its (primary-component) real power for reactive purposes, together
     /// with the regime it was resolved under

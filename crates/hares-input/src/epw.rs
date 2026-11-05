@@ -380,39 +380,60 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
     // HARES substitutes no value it was not given.
     let (expected_standard, expected_leap) = if data_period.is_complete_year() {
         (
-            EXPECTED_RECORDS_STANDARD * records_per_hour as usize,
-            EXPECTED_RECORDS_LEAP * records_per_hour as usize,
+            Some(EXPECTED_RECORDS_STANDARD * records_per_hour as usize),
+            Some(EXPECTED_RECORDS_LEAP * records_per_hour as usize),
         )
     } else {
-        let days = data_period_day_count(data_period, false);
-        let days_leap = data_period_day_count(data_period, true);
+        // The period's day count in each calendar: a day the calendar does
+        // not contain (a non-leap February 29 among them) leaves that
+        // calendar's count None, and the file must match the calendar
+        // that can hold its period.
+        let to_records =
+            |days: Option<usize>| days.map(|days| days * 24 * records_per_hour as usize);
         (
-            days * 24 * records_per_hour as usize,
-            days_leap * 24 * records_per_hour as usize,
+            to_records(data_period_day_count(data_period, false)),
+            to_records(data_period_day_count(data_period, true)),
         )
     };
-    if records.len() != expected_standard && records.len() != expected_leap {
+    let count_matches =
+        |count: usize, expected: Option<usize>| expected.is_some_and(|expected| count == expected);
+    if !count_matches(records.len(), expected_standard)
+        && !count_matches(records.len(), expected_leap)
+    {
+        let expected = |expected: Option<usize>| match expected {
+            Some(count) => count.to_string(),
+            None => "no record count (the calendar cannot hold the period's dates)".to_string(),
+        };
         return Err(WeatherError::Validation(format!(
-            "EPW record count must be {expected_standard} or {expected_leap} for the data \
-             period {data_period} (a complete year: the water mains annual mean and monthly \
-             range and the ground temperature derived from twelve monthly dry-bulb means need \
-             a complete year), got {}",
+            "EPW record count must be {} or {} for the data period {} (a complete \
+             year: the water mains annual mean and monthly range and the ground \
+             temperature derived from twelve monthly dry-bulb means need a complete \
+             year), got {}",
+            expected(expected_standard),
+            expected(expected_leap),
+            data_period,
             records.len()
         )));
     }
-
-    let is_leap_year = records.len() == expected_leap;
+    let is_leap_year = count_matches(records.len(), expected_leap);
 
     // EnergyPlus WeatherManager.cc:2816-2827: if WFAllowsLeapYears is false,
     // Feb 29 data is discarded and February is treated as a 28-day month.
     if is_leap_year && !wf_allows_leap_years {
+        let Some(expected_standard_count) = expected_standard else {
+            return Err(WeatherError::Validation(format!(
+                "EPW file declares Leap Year Observed = No but its data period {} \
+                 cannot exist without the leap day its record count carries",
+                data_period
+            )));
+        };
         warn!(
             "EPW header declares Leap Year Observed = No, but file contains {} rows. Discarding Feb 29 data.",
             EXPECTED_RECORDS_LEAP * records_per_hour as usize
         );
         // Retain only records that are NOT Feb 29.
-        let mut retained = Vec::with_capacity(expected_standard);
-        let mut retained_stamps = Vec::with_capacity(expected_standard);
+        let mut retained = Vec::with_capacity(expected_standard_count);
+        let mut retained_stamps = Vec::with_capacity(expected_standard_count);
         for (rec, stamp) in records.into_iter().zip(record_stamps) {
             if !stamp.is_feb29() {
                 retained.push(rec);
@@ -423,13 +444,13 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
         record_stamps = retained_stamps;
     }
 
-    let is_leap_year = records.len() == expected_leap;
+    let is_leap_year = count_matches(records.len(), expected_leap);
 
     // A leap-year file that claims leap observation must actually carry a
     // Feb 29 record; an 8784-record file without leap observation cannot
     // exist because the strip loop above removed Feb 29 when the header
     // said No.
-    if records.len() == expected_leap && wf_allows_leap_years {
+    if count_matches(records.len(), expected_leap) && wf_allows_leap_years {
         let has_feb29 = record_stamps.iter().any(RecordStamp::is_feb29);
         if !has_feb29 {
             return Err(WeatherError::Validation(
@@ -644,6 +665,17 @@ fn parse_data_period(line: &str) -> Result<(u32, DataPeriod), WeatherError> {
                  `{text}`"
             )));
         }
+        // The pair must be a date the calendar can hold: the month-day is
+        // validated against a leap-year February (the most permissive
+        // calendar, the header carrying no year), so 4/31 and 2/30 are
+        // header errors naming the field and the pair while 2/29 stays a
+        // leap-year possibility the count check resolves per calendar.
+        if NaiveDate::from_ymd_opt(2000, month, day).is_none() {
+            return Err(WeatherError::Parse(format!(
+                "DATA PERIODS {name} `{text}` is not a date the calendar has: the \
+                 month does not carry that day"
+            )));
+        }
         Ok((month, day))
     };
 
@@ -667,14 +699,16 @@ fn parse_data_period(line: &str) -> Result<(u32, DataPeriod), WeatherError> {
 
 /// The inclusive day count of a data period within one calendar year:
 /// `leap_year` selects February's length (the period's day span differs
-/// only when it crosses February).
-fn data_period_day_count(period: DataPeriod, leap_year: bool) -> usize {
+/// only when it crosses February). `None` when the period names a date
+/// the calendar does not contain (a non-leap February 29 among them) or
+/// the end precedes the start: the record-count check then reports the
+/// period against the calendar that can hold it, and never expects an
+/// absent date.
+fn data_period_day_count(period: DataPeriod, leap_year: bool) -> Option<usize> {
     let reference: i32 = if leap_year { 2000 } else { 2001 };
-    let start = NaiveDate::from_ymd_opt(reference, period.start_month, period.start_day)
-        .expect("a valid start date");
-    let end = NaiveDate::from_ymd_opt(reference, period.end_month, period.end_day)
-        .expect("a valid end date");
-    usize::try_from((end - start).num_days() + 1).unwrap_or(0)
+    let start = NaiveDate::from_ymd_opt(reference, period.start_month, period.start_day)?;
+    let end = NaiveDate::from_ymd_opt(reference, period.end_month, period.end_day)?;
+    usize::try_from((end - start).num_days() + 1).ok()
 }
 
 /// Parses the monthly ground temperatures from the GROUND TEMPERATURES header line.
@@ -1598,6 +1632,38 @@ mod tests {
         let epw = epw.replacen("DATA PERIODS,1,1", "DATA PERIODS,1,7", 1);
         let err = parse_epw_str(&epw).expect_err("records per hour not dividing 60 should fail");
         assert!(err.to_string().contains("must divide 60"));
+    }
+
+    // A DATA PERIODS end day the month does not have (April 31) is a
+    // typed parse error naming the header field and the pair: the header
+    // validates the (month, day) pair against a calendar, and the
+    // record-count check never expects a date that does not exist.
+    #[test]
+    fn data_periods_header_rejects_a_day_the_month_does_not_have() {
+        let epw = build_synthetic_epw(8760, |_row, _fields| {});
+        let epw = epw.replacen(" 1/ 1,12/31", " 4/ 1, 4/31", 1);
+        let err = parse_epw_str(&epw).expect_err("April 31 does not exist");
+        let text = err.to_string();
+        assert!(
+            text.contains("end day/month") && text.contains("4/31"),
+            "the error names the header field and the pair: {text}"
+        );
+    }
+
+    // A February 29 the non-leap calendar cannot contain is a typed
+    // error: the header admits the leap-possible pair, and a file whose
+    // records cannot fill it fails the record-count check naming the
+    // data period, never an expect on an absent date.
+    #[test]
+    fn data_periods_feb_29_in_a_non_leap_calendar_is_a_typed_error() {
+        let epw = build_synthetic_epw(8760, |_row, _fields| {});
+        let epw = epw.replacen(" 1/ 1,12/31", " 2/ 1, 2/29", 1);
+        let err = parse_epw_str(&epw).expect_err("a non-leap calendar has no February 29");
+        let text = err.to_string();
+        assert!(
+            text.contains("2/29") || text.contains("data period"),
+            "the error names the impossible pair or the period: {text}"
+        );
     }
 
     #[test]
