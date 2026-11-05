@@ -303,6 +303,50 @@ pub(crate) fn containing_period_start(
     }
 }
 
+/// The closed period's (month, day-share) segments: a period that spans a
+/// season boundary (a custom cycle's 90 days crossing the June edge)
+/// prices each month's share of its days at that month's own season and
+/// tier block, matching the per-step energy prices' months. The shares
+/// are each segment's truncated day count over the period's total (the
+/// same day arithmetic the fixed charge runs), so a period inside one
+/// month is a single segment at share 1.0 and the monthly cycle's
+/// charges are the single-month filter's, unchanged.
+///
+/// # Errors
+///
+/// A month boundary the zone cannot resolve.
+pub(crate) fn period_month_segments(
+    period_start: DateTime<Tz>,
+    period_end: DateTime<Tz>,
+) -> Result<Vec<(u8, f64)>, HaresError> {
+    let mut days_per_month: Vec<(u8, u64)> = Vec::new();
+    let mut total_days = 0u64;
+    let mut cursor = period_start;
+    while cursor < period_end {
+        let (next_year, next_month) = if cursor.month() == 12 {
+            (cursor.year() + 1, 1u32)
+        } else {
+            (cursor.year(), cursor.month() + 1)
+        };
+        let month_start =
+            local_midnight_or_first_valid(cursor.timezone(), next_year, next_month, 1)?;
+        let segment_end = month_start.min(period_end);
+        let days = (segment_end - cursor).num_days().max(0) as u64;
+        let month = cursor.month() as u8;
+        match days_per_month.iter_mut().find(|(m, _)| *m == month) {
+            Some((_, count)) => *count += days,
+            None => days_per_month.push((month, days)),
+        }
+        total_days += days;
+        cursor = segment_end;
+    }
+    let total = total_days as f64;
+    Ok(days_per_month
+        .into_iter()
+        .map(|(month, days)| (month, days as f64 / total))
+        .collect())
+}
+
 impl BillingState {
     pub fn new(
         period_start: DateTime<Tz>,

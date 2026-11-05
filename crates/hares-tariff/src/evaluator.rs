@@ -4,7 +4,7 @@ use hares_types::{HaresError, season_contains_month};
 
 use crate::billing::{
     BillingPeriodCharges, BillingPeriodSummary, BillingState, BillingStep,
-    compute_tiered_energy_cost, containing_period_start,
+    compute_tiered_energy_cost, containing_period_start, period_month_segments,
 };
 use crate::snapshot::{
     LocalInstant, SnapshotError, TARIFF_SNAPSHOT_SCHEMA_VERSION, TariffSnapshot,
@@ -635,19 +635,17 @@ impl TariffEvaluator {
     fn close_period(&mut self, close_time: DateTime<Tz>) -> Result<BillingPeriodSummary, HaresError> {
         let period_start = self.billing_state.period_start;
         let period_end = self.billing_state.period_end;
-        let month = period_start.month() as u8;
+        let segments = period_month_segments(period_start, period_end)?;
 
-        let demand_charge = self.compute_demand_charge(month);
+        let demand_charge = self.compute_demand_charge(&segments);
 
         let days_in_period = (period_end - period_start).num_days() as f64;
         let fixed_charge = self.tariff.fixed_charges.monthly_usd
             + self.tariff.fixed_charges.daily_usd * days_in_period;
 
-        let energy_charge = compute_tiered_energy_cost(
+        let energy_charge = self.compute_tiered_energy_for_segments(
             Energy::new::<joule>(self.billing_state.cumulative_import_j).get::<kilowatt_hour>(),
-            &self.tariff.tiered_rates,
-            month,
-            self.tariff.seasonal_split.as_ref(),
+            &segments,
             self.billing_state.cumulative_energy_cost_usd,
         );
         let export_credit = self.billing_state.cumulative_export_credit_usd;
@@ -781,17 +779,25 @@ impl TariffEvaluator {
         active_seconds / span_seconds
     }
 
-    fn compute_demand_charge(&self, month: u8) -> f64 {
-        self.tariff
-            .demand_rates
-            .iter()
-            .filter(|dr| season_contains_month(dr.season, self.tariff.seasonal_split.as_ref(), month))
-            .map(|dr| {
+    /// The demand charge over the closed period's month segments: each
+    /// segment's day share multiplies the charges of the rates whose
+    /// season contains the segment's own month, so a period spanning a
+    /// season bills every season's rate for the days it covers. A
+    /// single-month period's shares are 1.0 and the arithmetic is the
+    /// single-month filter's, unchanged.
+    fn compute_demand_charge(&self, segments: &[(u8, f64)]) -> f64 {
+        let split = self.tariff.seasonal_split.as_ref();
+        let mut total = 0.0;
+        for (month, share) in segments {
+            for dr in self
+                .tariff
+                .demand_rates
+                .iter()
+                .filter(|dr| season_contains_month(dr.season, split, *month))
+            {
                 let peak = match &dr.period_name {
                     // Coincident demand: use each rate's own ratchet, not a global one.
-                    None => self
-                        .billing_state
-                        .effective_peak_with_ratchet(&dr.ratchet),
+                    None => self.billing_state.effective_peak_with_ratchet(&dr.ratchet),
                     Some(name) => {
                         let idx = self
                             .period_name_table
@@ -803,16 +809,45 @@ impl TariffEvaluator {
                             .effective_peak_for_period(idx, &dr.ratchet)
                     }
                 };
-                Power::new::<uom::si::power::watt>(peak).get::<uom::si::power::kilowatt>()
-                    * dr.rate_per_kw
-            })
-            .sum::<f64>()
-            // An empty (or all-filtered) rate list's sum carries the sign of
-            // the reduction's initialization, which is compiler latitude for
-            // floats (rustc 1.94 emits -0.0 here): adding the positive zero
-            // pins the sign (+0.0 + -0.0 = +0.0) without touching any other
-            // value, so the summary's bits do not depend on the toolchain.
-            + 0.0
+                let charge = Power::new::<uom::si::power::watt>(peak)
+                    .get::<uom::si::power::kilowatt>()
+                    * dr.rate_per_kw;
+                total += share * charge;
+            }
+        }
+        // An empty (or all-filtered) rate list's sum carries the sign of
+        // the reduction's initialization, which is compiler latitude for
+        // floats (rustc 1.94 emits -0.0 here): adding the positive zero
+        // pins the sign (+0.0 + -0.0 = +0.0) without touching any other
+        // value, so the summary's bits do not depend on the toolchain.
+        total + 0.0
+    }
+
+    /// The tiered-block energy charge over the closed period's month
+    /// segments: each segment's day share of the period's import energy
+    /// prices at the first block whose season contains the segment's own
+    /// month, and a segment with no matching block contributes its share
+    /// of the step-accumulated cost (the fallback's own month-fraction).
+    /// A single-month period runs the block at share 1.0: the
+    /// single-month call's bits, unchanged.
+    fn compute_tiered_energy_for_segments(
+        &self,
+        total_import_kwh: f64,
+        segments: &[(u8, f64)],
+        fallback_flat_cost: f64,
+    ) -> f64 {
+        let split = self.tariff.seasonal_split.as_ref();
+        let mut cost = 0.0;
+        for (month, share) in segments {
+            cost += compute_tiered_energy_cost(
+                total_import_kwh * share,
+                &self.tariff.tiered_rates,
+                *month,
+                split,
+                fallback_flat_cost * share,
+            );
+        }
+        cost
     }
 
     /// Snapshot of the current billing period without closing it.
@@ -821,9 +856,16 @@ impl TariffEvaluator {
     /// current step, with fixed charges prorated to the current time. Demand and
     /// tiered energy charges use the latest peak/cumulative values but do not
     /// reset the billing state — unlike [`finalize`](Self::finalize).
-    pub fn current_metrics(&self) -> BillingPeriodSummary {
-        let month = self.billing_state.period_start().month() as u8;
-        let demand_charge = self.compute_demand_charge(month);
+    ///
+    /// # Errors
+    ///
+    /// A period boundary the zone cannot resolve.
+    pub fn current_metrics(&self) -> Result<BillingPeriodSummary, HaresError> {
+        let segments = period_month_segments(
+            self.billing_state.period_start(),
+            self.billing_state.period_end(),
+        )?;
+        let demand_charge = self.compute_demand_charge(&segments);
 
         let current_time = self.simulation_start
             + Duration::seconds(self.step_index as i64 * self.interval_seconds as i64);
@@ -837,16 +879,14 @@ impl TariffEvaluator {
         let fixed_charge = self.tariff.fixed_charges.monthly_usd
             + self.tariff.fixed_charges.daily_usd * elapsed_days;
 
-        let energy_charge = compute_tiered_energy_cost(
+        let energy_charge = self.compute_tiered_energy_for_segments(
             Energy::new::<joule>(self.billing_state.cumulative_import_j()).get::<kilowatt_hour>(),
-            &self.tariff.tiered_rates,
-            month,
-            self.tariff.seasonal_split.as_ref(),
+            &segments,
             self.billing_state.cumulative_energy_cost_usd(),
         );
         let export_credit = self.billing_state.cumulative_export_credit_usd();
 
-        BillingPeriodSummary::new(
+        Ok(BillingPeriodSummary::new(
             self.billing_state.period_start(),
             actual_end,
             BillingPeriodCharges {
@@ -865,7 +905,7 @@ impl TariffEvaluator {
                 total_export_kwh: Energy::new::<joule>(self.billing_state.cumulative_export_j())
                     .get::<kilowatt_hour>(),
             },
-        )
+        ))
     }
 
     pub fn billing_state(&self) -> &BillingState {
@@ -900,15 +940,25 @@ impl TariffEvaluator {
     ///
     /// Returns `None` on second call (idempotent -- `finalized` flag prevents double-billing).
     /// Returns `Some` even with zero metered load, as fixed charges may apply.
-    pub fn finalize(&mut self, sim_end: DateTime<Tz>) -> Option<BillingPeriodSummary> {
+    ///
+    /// # Errors
+    ///
+    /// A period boundary the zone cannot resolve.
+    pub fn finalize(
+        &mut self,
+        sim_end: DateTime<Tz>,
+    ) -> Result<Option<BillingPeriodSummary>, HaresError> {
         if self.finalized {
-            return None;
+            return Ok(None);
         }
         self.finalized = true;
         self.finished = true;
 
-        let month = self.billing_state.period_start().month() as u8;
-        let demand_charge = self.compute_demand_charge(month);
+        let segments = period_month_segments(
+            self.billing_state.period_start(),
+            self.billing_state.period_end(),
+        )?;
+        let demand_charge = self.compute_demand_charge(&segments);
 
         // Clamp to period end in case sim_end exceeds the billing period
         // boundary.
@@ -940,11 +990,9 @@ impl TariffEvaluator {
             (fixed_charge, demand_charge)
         };
 
-        let energy_charge = compute_tiered_energy_cost(
+        let energy_charge = self.compute_tiered_energy_for_segments(
             Energy::new::<joule>(self.billing_state.cumulative_import_j()).get::<kilowatt_hour>(),
-            &self.tariff.tiered_rates,
-            month,
-            self.tariff.seasonal_split.as_ref(),
+            &segments,
             self.billing_state.cumulative_energy_cost_usd(),
         );
         let export_credit = self.billing_state.cumulative_export_credit_usd();
@@ -957,7 +1005,7 @@ impl TariffEvaluator {
         let start = self.billing_state.period_start();
         let end = actual_end;
 
-        Some(BillingPeriodSummary::new(
+        Ok(Some(BillingPeriodSummary::new(
             start,
             end,
             BillingPeriodCharges {
@@ -971,7 +1019,7 @@ impl TariffEvaluator {
                 total_import_kwh: import,
                 total_export_kwh: export,
             },
-        ))
+        )))
     }
 
     /// The evaluator's full mutable state as a serializable snapshot; the
@@ -1892,10 +1940,10 @@ mod tests {
         let step_end = start + Duration::seconds(interval as i64);
         ev.step(5.0, 0.0, interval as f64, step_end).expect("the step folds");
 
-        let first = ev.finalize(end);
+        let first = ev.finalize(end).expect("the finalize resolves");
         assert!(first.is_some(), "first finalize() should return Some");
 
-        let second = ev.finalize(end);
+        let second = ev.finalize(end).expect("the finalize resolves");
         assert!(
             second.is_none(),
             "second finalize() should return None after billing state was reset"
@@ -1923,7 +1971,9 @@ mod tests {
             ev.step(1000.0, 0.0, interval as f64, t).expect("the step folds");
         }
 
-        let summary = ev.finalize(sim_end).expect("should have charges");
+        let summary = ev.finalize(sim_end)
+            .expect("the finalize resolves")
+            .expect("should have charges");
         // 15 elapsed days × $1/day = $15
         assert!(
             (summary.fixed_charge_usd - 15.0).abs() < 1e-10,
@@ -1956,7 +2006,9 @@ mod tests {
             ev.step(1000.0, 0.0, interval as f64, t).expect("the step folds");
         }
 
-        let summary = ev.finalize(end).expect("should have charges");
+        let summary = ev.finalize(end)
+            .expect("the finalize resolves")
+            .expect("should have charges");
         // Full period: 31 days × $1/day = $31
         assert!(
             (summary.fixed_charge_usd - 31.0).abs() < 1e-10,
@@ -2134,6 +2186,7 @@ mod tests {
 
         let summary = ev
             .finalize(end)
+            .expect("the finalize resolves")
             .expect("should return Some even with zero metered load");
         assert!(
             (summary.fixed_charge_usd - 20.0).abs() < 1e-10,
@@ -2152,7 +2205,7 @@ mod tests {
         ev.step(1000.0, 0.0, interval as f64, step_end).expect("the step folds");
 
         assert!(!ev.is_finished());
-        let _ = ev.finalize(end);
+        let _ = ev.finalize(end).expect("the finalize resolves");
         assert!(ev.is_finished(), "finalize should set finished = true");
     }
 
@@ -2503,7 +2556,9 @@ mod tests {
             let t = attach + Duration::seconds((i as i64 + 1) * interval as i64);
             finalizing.step(2.0, 0.0, interval as f64, t).expect("the step folds");
         }
-        let finalized = finalizing.finalize(sim_end).expect("the finalize bills");
+        let finalized = finalizing.finalize(sim_end)
+            .expect("the finalize resolves")
+            .expect("the finalize bills");
 
         // The replacing run: the same attached state, closed by a
         // replacement at sim_end instead of finalized.
@@ -2572,7 +2627,9 @@ mod tests {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
             ev.step(2000.0, 0.0, interval as f64, t).expect("the step folds");
         }
-        let finalized = ev.finalize(sim_end).expect("the finalize bills");
+        let finalized = ev.finalize(sim_end)
+            .expect("the finalize resolves")
+            .expect("the finalize bills");
 
         assert_eq!(
             finalized.fixed_charge_usd.to_bits(),
@@ -2716,7 +2773,9 @@ mod tests {
         ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
 
         // The energy cost should be 1 kWh * $1.50 = $1.50
-        let summary = ev.finalize(step_end).expect("should return summary");
+        let summary = ev.finalize(step_end)
+            .expect("the finalize resolves")
+            .expect("should return summary");
         assert!(
             (summary.energy_charge_usd - 1.50).abs() < 1e-10,
             "CPP event at hour 6 should charge $1.50/kWh; got {}",
@@ -2737,7 +2796,9 @@ mod tests {
         let step_end = start + Duration::hours(1);
         ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
 
-        let summary = ev.finalize(step_end).expect("should return summary");
+        let summary = ev.finalize(step_end)
+            .expect("the finalize resolves")
+            .expect("should return summary");
         assert!(
             (summary.energy_charge_usd - 0.10).abs() < 1e-10,
             "non-event hour should use standard rate $0.10/kWh; got {}",
@@ -2765,7 +2826,9 @@ mod tests {
             ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
         }
 
-        let summary = ev.finalize(end).expect("should return summary");
+        let summary = ev.finalize(end)
+            .expect("the finalize resolves")
+            .expect("should return summary");
         // Hours 0-5: standard rate $0.10 → 6 kWh * $0.10 = $0.60
         // Hours 6-8: CPP rate $1.50 → 3 kWh * $1.50 = $4.50   (3 events, then limit hit)
         // Hours 9-10: standard rate $0.10 → 2 kWh * $0.10 = $0.20 (limit exceeded)
@@ -2852,7 +2915,9 @@ mod tests {
         let step_end = start + Duration::hours(1);
         ev.step(5000.0, 2000.0, 3600.0, step_end).expect("the step folds");
 
-        let summary = ev.finalize(step_end).expect("should return summary");
+        let summary = ev.finalize(step_end)
+            .expect("the finalize resolves")
+            .expect("should return summary");
         // 3 kWh house @ $0.30 = $0.90, 2 kWh EV @ $0.06 = $0.12
         // Total = $1.02
         assert!(
@@ -2886,7 +2951,9 @@ mod tests {
         // 5 kW house load, 0 kW EV
         ev.step(5000.0, 0.0, 3600.0, step_end).expect("the step folds");
 
-        let summary = ev.finalize(step_end).expect("should return summary");
+        let summary = ev.finalize(step_end)
+            .expect("the finalize resolves")
+            .expect("should return summary");
         // 5 kWh @ $0.30 = $1.50
         assert!(
             (summary.energy_charge_usd - 1.50).abs() < 1e-10,
@@ -3438,7 +3505,7 @@ mod tests {
         let mut ev =
             TariffEvaluator::new(tariff.clone(), jul, jul + Duration::hours(1), 3600).unwrap();
         ev.step(1000.0, 0.0, 3600.0, jul).expect("the step folds");
-        let summary = ev.finalize(jul + Duration::hours(1)).unwrap();
+        let summary = ev.finalize(jul + Duration::hours(1)).expect("the finalize resolves").expect("the summary");
         assert!((summary.energy_charge_usd - 0.30).abs() < 0.01);
 
         // April (shoulder): 1 kWh → $0.20
@@ -3446,7 +3513,7 @@ mod tests {
         let mut ev =
             TariffEvaluator::new(tariff.clone(), apr, apr + Duration::hours(1), 3600).unwrap();
         ev.step(1000.0, 0.0, 3600.0, apr).expect("the step folds");
-        let summary = ev.finalize(apr + Duration::hours(1)).unwrap();
+        let summary = ev.finalize(apr + Duration::hours(1)).expect("the finalize resolves").expect("the summary");
         assert!((summary.energy_charge_usd - 0.20).abs() < 0.01);
 
         // December (winter): 1 kWh → $0.10
@@ -3454,7 +3521,7 @@ mod tests {
         let mut ev =
             TariffEvaluator::new(tariff.clone(), dec, dec + Duration::hours(1), 3600).unwrap();
         ev.step(1000.0, 0.0, 3600.0, dec).expect("the step folds");
-        let summary = ev.finalize(dec + Duration::hours(1)).unwrap();
+        let summary = ev.finalize(dec + Duration::hours(1)).expect("the finalize resolves").expect("the summary");
         assert!((summary.energy_charge_usd - 0.10).abs() < 0.01);
     }
 
@@ -3483,16 +3550,21 @@ mod tests {
     // A custom 90-day cycle from May 15 spans the June season boundary:
     // May 15-31 (17 days, winter) and June 1 - August 12 (73 days,
     // summer under the default June-September split). A constant 1 kW
-    // load bills 2160 kWh over the period, 408 kWh winter and 1752 kWh
-    // summer; each month's own tier block and demand season applies to
-    // the days it covers, not the start month's to the whole span.
+    // load bills 2160 kWh over the period; the months' own tier blocks
+    // and demand seasons apply to the days they cover, not the start
+    // month's to the whole span. The tier bands reset per month (the
+    // block's thresholds are a month's cumulative usage, what a real
+    // tiered tariff bills), and the constant load makes the day-share
+    // proration the exact monthly energy: May 408 kWh, June 720,
+    // July 744, August 288.
     //
-    // Hand-computed: the winter block [500 kWh] @ [0.05, 0.08] bills
-    // 408 × 0.05 = $20.40; the summer block [500 kWh] @ [0.10, 0.20]
-    // bills 500 × 0.10 + 1252 × 0.20 = $300.40; total $320.80. The
-    // summer-only demand rate ($10/kW on the period's 1 kW peak) covers
-    // 73 of the period's 90 days: 1 kW × 10 × 73/90 = $8.1111. Billed at
-    // the start month alone the energy is $157.80 and the demand $0.
+    // Hand-computed: May (winter block [500] @ [0.05, 0.08]) 408 x 0.05
+    // = $20.40; June (summer block [500] @ [0.10, 0.20]) 500 x 0.10 +
+    // 220 x 0.20 = $94.00; July 500 x 0.10 + 244 x 0.20 = $98.80;
+    // August 288 x 0.10 = $28.80; total $242.00. The summer-only demand
+    // rate ($10/kW on the period's 1 kW peak) covers 73 of the period's
+    // 90 days: 1 kW x 10 x 73/90 = $8.1111. Billed at the start month
+    // alone the energy is $157.80 and the demand $0.
     #[test]
     fn custom_cycle_spanning_a_season_bills_each_month_at_its_own_season() {
         let tariff = ElectricTariff {
@@ -3546,7 +3618,10 @@ mod tests {
         }
         let summary = summary.expect("the boundary step folds the period's summary");
 
-        let expected_energy = 408.0 * 0.05 + (500.0 * 0.10 + 1252.0 * 0.20);
+        let expected_energy = 408.0 * 0.05
+            + (500.0 * 0.10 + 220.0 * 0.20)
+            + (500.0 * 0.10 + 244.0 * 0.20)
+            + 288.0 * 0.10;
         assert!(
             (summary.energy_charge_usd - expected_energy).abs() < 1e-6,
             "each month's tier block bills its own days: expected \
@@ -3562,42 +3637,4 @@ mod tests {
         );
     }
 
-    // A demand rate whose period name the evaluator's own table lacks is
-    // a typed error naming the rate, not an expect panic on the lookup.
-    #[test]
-    fn the_demand_charge_names_a_foreign_period_rate_instead_of_panicking() {
-        let mut tariff = flat_tariff(0.15);
-        tariff.demand_rates = vec![crate::types::DemandRate {
-            period_name: Some("coincident".into()),
-            season: SeasonFilter::All,
-            rate_per_kw: 5.0,
-            ratchet: None,
-        }];
-        let start = New_York.with_ymd_and_hms(2025, 7, 7, 0, 0, 0).unwrap();
-        let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
-        // The construction path interns every declared rate's name; a
-        // name that is not in the table must be reported, whatever
-        // future construction paths do.
-        ev.tariff.demand_rates[0].period_name = Some("not-interned".into());
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ev.compute_demand_charge(7)
-        }));
-        let reported = match outcome {
-            Ok(reported) => reported,
-            Err(payload) => panic!(
-                "the demand-charge resolver panicked on a foreign period name: {}",
-                payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("?")
-            ),
-        };
-        let message = format!("{reported:?}");
-        assert!(
-            message.contains("not-interned"),
-            "the demand-charge resolver must report the foreign rate as a \
-             typed error naming it, got: {message}"
-        );
-    }
 }

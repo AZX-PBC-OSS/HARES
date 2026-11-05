@@ -4018,7 +4018,7 @@ impl Dwelling {
             return Err(ended.clone());
         }
 
-        self.finalize_billing();
+        self.finalize_billing()?;
 
         // --- Post-hoc diagnostic checks on accumulated observer data ---
         #[cfg(feature = "observe")]
@@ -4186,14 +4186,19 @@ impl Dwelling {
     /// Emit the final partial billing period (if any). Call after the last
     /// `step()` when driving the simulation step-by-step. Idempotent --
     /// a second call has no effect.
-    pub fn finalize_billing(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// A period boundary the zone cannot resolve.
+    pub fn finalize_billing(&mut self) -> Result<()> {
         if let Some(ref mut evaluator) = self.tariff_evaluator {
             let tz = evaluator.simulation_start().timezone();
             let sim_end = self.clock.current_time().with_timezone(&tz);
-            if let Some(summary) = evaluator.finalize(sim_end) {
+            if let Some(summary) = evaluator.finalize(sim_end)? {
                 self.billing_summaries.push(summary);
             }
         }
+        Ok(())
     }
 
     /// Returns accumulated results gathered so far.
@@ -20741,7 +20746,8 @@ latent_gain_fraction = 0.08
         let accruals = twin
             .tariff_evaluator()
             .expect("the twin carries the tariff")
-            .current_metrics();
+            .current_metrics()
+            .expect("the twin's open period resolves");
 
         let mut expensive = flat_tariff();
         expensive.energy_rates[0].rate_per_kwh = 0.20;
