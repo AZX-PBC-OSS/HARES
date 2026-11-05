@@ -2499,12 +2499,17 @@ class ScenarioSpec:
     both fill the scenario bytes of the scenario-mixed per-dwelling key,
     so a sample at ``(master_seed, scenario_id, bldg_id)`` and a dwelling
     built with that ``master_seed``, ``scenario_seed = scenario_id`` and
-    ``bldg_id`` belong to one home. Nothing checks the pairing (the
-    sampler reads no config, the build reads no record).
+    ``bldg_id`` belong to one home. Nothing checks the pairing by
+    default: the sampler reads no config and the build reads no record.
+    The pairing is checked when the study binds them:
+    ``sample_record()`` returns the handle carrying the draw key it ran
+    under, and the dwelling constructor's ``scenario_sample=`` argument
+    refuses a mismatched triple naming both values, before any home runs.
 
     The application surface: ``sample_overrides()`` returns the form the
     dwelling constructor's ``overrides=`` accepts, so the override
-    targets apply on the Python surface. The patch targets' application
+    targets apply on the Python surface (the handle's through
+    ``from_hpxml(scenario_sample=...)``). The patch targets' application
     is the Rust surface's (``hares_core::scenario::apply_sample``): the
     Python record carries the sampled patch values (``sample()``'s
     ``values`` and ``targets``) and there is deliberately no Python
@@ -2515,6 +2520,28 @@ class ScenarioSpec:
     def name(self) -> str: ...
     def sample(self, master_seed: int, scenario_id: int, bldg_id: int) -> dict[str, Any]: ...
     def sample_overrides(self, master_seed: int, scenario_id: int, bldg_id: int) -> dict[str, Any]: ...
+    def sample_record(
+        self, master_seed: int, scenario_id: int, bldg_id: int
+    ) -> ScenarioSample:
+        """The sampled record as the pairing handle: the draw key it ran
+        under beside the values, so the dwelling constructor can refuse a
+        mismatched triple before any home runs."""
+        ...
+
+class ScenarioSample:
+    """One home's sampled scenario and the draw key it ran under: the
+    handle ``ScenarioSpec.sample_record`` returns and
+    ``Dwelling.from_hpxml(scenario_sample=...)`` accepts."""
+
+    @property
+    def scenario_id(self) -> int: ...
+    @property
+    def bldg_id(self) -> int: ...
+    def overrides(self) -> dict[str, Any]:
+        """The sampled Override targets in the dwelling constructor's
+        ``overrides=`` form; the Patch targets apply through the Rust
+        ``apply_sample`` surface."""
+        ...
 
 class SimulationConfig:
     """The one simulation config. The `warmup` keyword has three cases:
@@ -3366,8 +3393,13 @@ class Dwelling:
         bldg_id: int = ...,
         defaults: str | ParsedDefaults | None = ...,
         overrides: dict[str, Any] | None = ...,
+        scenario_sample: ScenarioSample | None = ...,
         **unexpected: object,
     ) -> Dwelling: ...
+    # ``scenario_sample`` is the pairing handle ``ScenarioSpec.sample_record``
+    # returns: its overrides apply after the draw-key check, and a
+    # mismatched (master seed, scenario id, building id) is refused before
+    # any home runs.
     def blueprint(self) -> DwellingBlueprintRef: ...
     def initialize(self) -> None: ...
     def timesteps(self) -> TimestepsIter: ...

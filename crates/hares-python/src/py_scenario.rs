@@ -108,9 +108,9 @@ fn json_to_python(py: Python<'_>, json: serde_json::Value) -> PyResult<Py<PyAny>
 
 /// One home's sampled scenario, the pairing handle: the draw key's own
 /// triple, recorded beside the sampled values, so the build can refuse a
-/// mismatched pair — sampled values applied to a home whose behavioral
-/// draws key on another (master seed, scenario, building) — before any
-/// home runs.
+/// mismatched pair: sampled values applied to a home whose behavioral
+/// draws key on another (master seed, scenario, building), refused before
+/// any home runs.
 #[pyclass(name = "ScenarioSample")]
 pub struct PyScenarioSample {
     /// The master seed the draws ran under.
@@ -183,9 +183,9 @@ fn spec_error(err: hares_types::HaresError) -> PyErr {
 ///
 /// The application surface: `sample_overrides` and the handle's
 /// `overrides()` return the form the dwelling constructor's `overrides=`
-/// accepts, so the override targets apply on the Python surface — the
+/// accepts, so the override targets apply on the Python surface (the
 /// handle's through `from_hpxml(scenario_sample=...)`, which applies them
-/// after the pairing check. The patch targets' application is the
+/// after the pairing check). The patch targets' application is the
 /// Rust surface's (`hares_core::scenario::apply_sample`): the record
 /// `sample` returns carries the sampled patch values (the values and
 /// their targets) and there is deliberately no Python apply binding.

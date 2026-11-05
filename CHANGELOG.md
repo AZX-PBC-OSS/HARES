@@ -320,3 +320,14 @@ replacement.
   category, nothing written. `Provenance.tariff` reads the attached
   tariff as a dict holding `tariff` (the tariff's own dict) and `zone`
   (the IANA name), or `None`.
+- Added: `ScenarioSample` (with `scenario_id`, `bldg_id` and
+  `overrides()`), `ScenarioSpec.sample_record(master_seed, scenario_id,
+  bldg_id)` and the `scenario_sample=` keyword on `Dwelling.from_hpxml`:
+  the scenario pairing handle. A sample's draw key is the
+  `(master_seed, scenario_id, bldg_id)` triple; the constructor refuses
+  a build whose `SimulationConfig.scenario_seed`, `master_seed` or
+  `bldg_id` differs from the handle's, naming both values before any
+  home runs. A matched handle applies its sampled overrides (the
+  caller's own `overrides=` entries win per key). The free-standing
+  `sample` and `sample_overrides` forms remain unchecked, the
+  documented default for a study that does not bind the handle.

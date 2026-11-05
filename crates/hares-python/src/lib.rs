@@ -83,6 +83,7 @@ fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySiteLocationOverride>()?;
     m.add_class::<PyDwellingConfig>()?;
     m.add_class::<py_scenario::PyScenarioSpec>()?;
+    m.add_class::<py_scenario::PyScenarioSample>()?;
     m.add_class::<PyReportSpec>()?;
     m.add_class::<PySelection>()?;
     m.add_class::<PyFrequency>()?;

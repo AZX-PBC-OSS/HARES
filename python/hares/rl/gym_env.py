@@ -235,7 +235,7 @@ def validated_reset_seed(
     """The reset seed is an integer in the u64 range, a SeedSequence or
     None: any other value is the caller's error, named by type, and an
     integer outside the u64 range (negative or over 2**64-1) is named by
-    value — both refused before the reset touches a dwelling, so a
+    value, both refused before the reset touches a dwelling, so a
     refused seed leaves the env's state exactly as it was. An
     integer-like value (a numpy integer among them) is converted once to
     the Python integer the ``seed + env index`` form reads, so a caller's
@@ -516,7 +516,7 @@ class DwellingGymEnv(_GYM_BASE):
     """The single-dwelling environment.
 
     The reward: a callable over the ``RewardContext``, or ``None`` for
-    the default — minus the step's net electric power in **kW**, converted
+    the default, minus the step's net electric power in **kW**, converted
     once from the step dict's ``net_electric_power_w`` in **W** (a
     1 kW step rewards -1.0). A custom ``reward_fn`` reads the same
     context's watts and owns its own scale.
@@ -688,7 +688,7 @@ class DwellingGymEnv(_GYM_BASE):
     def reset(
         self,
         *,
-        seed: int | None = None,
+        seed: object = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         del options

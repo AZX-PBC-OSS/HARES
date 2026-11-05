@@ -411,7 +411,7 @@ criterion_main!(benches);
 /// action through `apply_control` (a thermal setpoint on the furnace),
 /// reads the observation through the frozen plan, and computes the
 /// default reward (minus the step's net power in kW, converted once from
-/// the step's watts) — the per-step work the raw `Dwelling::step` benches
+/// the step's watts), the per-step work the raw `Dwelling::step` benches
 /// above exclude. 8 and 16 envs, a day's episode at the two RL time
 /// resolutions (900 s and 60 s), the real observation width (the
 /// narrow five-field set, no padded duplication); the throughput unit is
