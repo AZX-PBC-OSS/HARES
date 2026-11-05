@@ -6,9 +6,11 @@ These helpers centralize broker startup details used by GridLAB-D + HARES runs.
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 import os
 import random
 import socket
+import threading
 import time
 from typing import Any
 import weakref
@@ -22,7 +24,16 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
         "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
+_LOG = logging.getLogger(__name__)
+
 _PORT_BY_BROKER: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
+
+# The broker teardown's counted failures. A failed disconnect leaves the
+# broker process alive holding its port pair, and the only symptom is the
+# next federation's failed bind or stall, so the count is the run's
+# diagnostic (the quality bar's no-silent-fallback rule).
+_BROKER_TEARDOWN_LOCK = threading.Lock()
+_broker_teardown_failures = 0
 
 # Port pairs are drawn from 24200-29999. Below it sit the HELICS default
 # ports (23404-23415 zmq, 23500, 23901 udp, 24160 tcp), which a stock broker
@@ -122,12 +133,51 @@ def wait_for_broker(broker: helics.HelicsBroker, timeout: float = 60.0) -> None:
     raise TimeoutError(f"Broker did not connect within {timeout:.1f}s")
 
 
+def broker_teardown_failures() -> int:
+    """The broker teardown's failure count this process.
+
+    A failed disconnect leaves the broker process alive holding its port
+    pair; the symptom is the next federation's failed bind or stall. The
+    count is that failure's diagnostic.
+    """
+    with _BROKER_TEARDOWN_LOCK:
+        return _broker_teardown_failures
+
+
+def _count_teardown_failure() -> None:
+    global _broker_teardown_failures
+    with _BROKER_TEARDOWN_LOCK:
+        _broker_teardown_failures += 1
+
+
+def _broker_identity(broker: Any) -> str:
+    """The broker's name or address for a failure's log line, or a type
+    description when the handle exposes neither."""
+    for getter in (
+        lambda: str(broker.name),
+        lambda: str(broker.address),
+    ):
+        try:
+            value = getter()
+        except Exception:
+            continue
+        if value:
+            return value
+    return type(broker).__name__
+
+
 def destroy_broker(broker: helics.HelicsBroker) -> None:
     """Disconnect a HELICS broker and release its resources.
 
     Call after all federates have disconnected.  This does **not** call
     ``helicsCloseLibrary()`` because that is a process-global teardown that
     would invalidate all remaining HELICS handles in the process.
+
+    A teardown failure is logged naming the broker and counted in
+    :func:`broker_teardown_failures` (a failed disconnect leaves the
+    broker process alive holding its port pair, and the only symptom
+    would be the next federation's failed bind or stall), never
+    discarded.
 
     Args:
         broker: HELICS broker handle to shut down.
@@ -137,8 +187,20 @@ def destroy_broker(broker: helics.HelicsBroker) -> None:
             broker.disconnect()
         elif hasattr(helics, "helicsBrokerDisconnect"):
             helics.helicsBrokerDisconnect(broker)
-    except Exception:
-        pass
+        else:
+            _LOG.error(
+                "The broker %s exposes neither a disconnect method nor helicsBrokerDisconnect; "
+                "it may keep running and hold its port pair",
+                _broker_identity(broker),
+            )
+            _count_teardown_failure()
+    except Exception as exc:
+        _LOG.error(
+            "The broker %s failed to disconnect: %s. It may keep running and hold its port pair",
+            _broker_identity(broker),
+            exc,
+        )
+        _count_teardown_failure()
 
 
 def get_broker_port(broker: helics.HelicsBroker) -> int:
