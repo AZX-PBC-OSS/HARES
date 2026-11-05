@@ -371,6 +371,16 @@ impl RunResult {
     /// took inputs a replay cannot rebuild
     /// (`HaresError::NotReplayable`).
     ///
+    /// A run a recorded script drove exports when the external input the
+    /// script itself applied is its only blocker: the manifest names the
+    /// script, and the export is that run's configuration, inputs and
+    /// driver record. It is not a self-contained replay (the script's
+    /// external inputs are not stored), so
+    /// [`replay::load`](crate::replay::load) refuses it by name;
+    /// re-running the script against the export's configuration is the
+    /// exact replay. A script whose run applied no external input leaves
+    /// an export the configuration alone replays, and it loads.
+    ///
     /// # Errors
     ///
     /// [`HaresError::NotReplayable`] naming every recorded blocker, or

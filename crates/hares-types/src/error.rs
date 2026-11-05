@@ -144,6 +144,18 @@ pub enum HaresError {
         blockers.iter().map(ReplayBlocker::as_str).collect::<Vec<_>>().join("; ")
     )]
     NotReplayable { blockers: Vec<ReplayBlocker> },
+    /// A replay export names a scenario script as the run's driver and
+    /// its events applied external inputs: the export carries the
+    /// script's identity (its declared name and the digest over its
+    /// content) but not those inputs, so a replay from the export alone
+    /// would silently run a different scenario. Raised when such an
+    /// export is loaded; the exact replay is re-running the script,
+    /// which the replay API cannot do.
+    #[error(
+        "the replay export names the driving script '{name}' ({sha256}): the external inputs \
+         it applied are not stored, so an exact replay must re-run the script"
+    )]
+    ReplayDriverScript { name: String, sha256: String },
 }
 
 /// Why a run cannot be exported for exact replay: one category per way

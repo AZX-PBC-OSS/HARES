@@ -3045,8 +3045,11 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::PreconditioningAxis { .. }
         // A run that cannot be exported for exact replay is the caller's
         // configuration mistake: the dwelling was changed in a way a
-        // replay cannot rebuild.
-        | HaresError::NotReplayable { .. } => HaresConfigError::new_err(msg),
+        // replay cannot rebuild. A script-driven export is the same
+        // class at the load boundary: its external inputs must be
+        // re-applied by re-running the script.
+        | HaresError::NotReplayable { .. }
+        | HaresError::ReplayDriverScript { .. } => HaresConfigError::new_err(msg),
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
         }

@@ -207,6 +207,61 @@ fn replay_export_carries_the_driving_script() {
     );
 }
 
+/// The export's admission is not a self-contained replay: the manifest
+/// names the driving script, and the script's external inputs are not
+/// stored, so a load must refuse by name rather than silently replay the
+/// configuration without the scenario's events. The red state at the
+/// parent loaded the export and built a run whose provenance carried no
+/// script, a different scenario with no signal that it was one.
+#[test]
+fn replay_load_refuses_a_script_driven_export_naming_the_script() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
+    let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    dwelling.record_script("grid-event-study", [7u8; 32]);
+    dwelling.set_price_signal(hares_types::PriceSignal {
+        electricity_price: Some(0.42),
+        export_price: None,
+        ghg_intensity: None,
+    });
+    dwelling.step().expect("the scripted step");
+    let result = dwelling.finish().expect("the run finishes");
+    let export = tempfile::tempdir().expect("the export directory");
+    result
+        .export_replay(export.path())
+        .expect("the script-driven export");
+
+    match replay::load(export.path(), &repo_root().join("python/hares/defaults")) {
+        Err(HaresError::ReplayDriverScript { name, sha256 }) => {
+            assert_eq!(name, "grid-event-study", "the refusal names the driver");
+            assert_eq!(sha256, "07".repeat(32), "and carries its digest");
+        }
+        Ok(_) => panic!("a script-driven export must refuse at load, naming the script"),
+        Err(other) => panic!("the refusal is the script's: {other:?}"),
+    }
+}
+
+/// The refusal's narrowness: a recorded script whose run applied no
+/// external input left the export's configuration sufficient, so the
+/// export replays exactly and loads. The re-run flag tracks the
+/// admission, not the mere presence of a script tag.
+#[test]
+fn a_script_tag_with_no_external_input_still_replays() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
+    let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    dwelling.record_script("inert-study", [3u8; 32]);
+    dwelling.step().expect("the step");
+    let result = dwelling.finish().expect("the run finishes");
+    let export = tempfile::tempdir().expect("the export directory");
+    result
+        .export_replay(export.path())
+        .expect("a script that applied no external input exports");
+
+    replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("and the export replays exactly, so it loads");
+}
+
 /// The admission's narrowness: an untagged run's external input still
 /// refuses (the tag is the run's own statement of its driver), and a
 /// script tag beside any other blocker refuses too, the script backing

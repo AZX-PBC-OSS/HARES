@@ -718,7 +718,10 @@ pub fn build_info() -> PyBuildInfo {
 /// directory): `load`, the build, then `simulate()`, returning the
 /// replayed run's `RunResult`. The `defaults` directory is the packaged
 /// tree by default; an explicit path overrides it, and the export
-/// verifies the digest over the tree it reads.
+/// verifies the digest over the tree it reads. A script-driven export
+/// is refused by the load, naming the script: its external inputs are
+/// not stored, so the caller re-runs the script against the export's
+/// configuration for the exact replay.
 #[pyfunction]
 #[pyo3(signature = (dir, defaults=None))]
 pub fn replay(py: Python<'_>, dir: &str, defaults: Option<&str>) -> PyResult<PyRunResult> {

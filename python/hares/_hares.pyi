@@ -2862,7 +2862,13 @@ class RunResult:
         reproduces this run's frames bitwise. Fails with
         ``HaresConfigError`` naming every blocker when the dwelling was
         changed in a way a replay cannot rebuild, and nothing is
-        written."""
+        written.
+
+        A script-driven run exports when the external input its script
+        applied is the only blocker: the export names the script. It is
+        not a self-contained replay, so ``hares.replay`` refuses it with
+        ``HaresConfigError`` naming the script; re-running the script
+        against the export's configuration is its exact replay."""
     def __repr__(self) -> str: ...
 
 class RunHealth:
@@ -3626,5 +3632,9 @@ def resample_weather(
 # directory): load, the build, then simulate(), returning the replayed
 # run's RunResult, its frames bitwise the original's. `defaults` is the
 # defaults directory the replay reads the exported run's tree from (the
-# export verifies its digest); None reads the packaged defaults.
+# export verifies its digest); None reads the packaged defaults. A
+# script-driven export whose events applied external inputs is refused
+# with HaresConfigError naming the script: those inputs are not stored,
+# so re-run the script against the export's configuration for the exact
+# replay (a script that applied none leaves a replayable export).
 def replay(dir: str, defaults: str | None = None) -> RunResult: ...
