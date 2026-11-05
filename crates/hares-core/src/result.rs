@@ -298,6 +298,9 @@ pub struct Provenance {
     /// The electric tariff attached with `Dwelling::set_tariff`, `None`
     /// when the run attached none.
     pub tariff: Option<TariffRecord>,
+    /// The scenario script that drove the run, recorded at
+    /// `Dwelling::record_script`, `None` for a run no script drove.
+    pub script: Option<ScriptRecord>,
     /// Why the run cannot be exported for exact replay, each category
     /// once in the order first seen. Empty for a run a replay can
     /// rebuild from its settings, inputs and tariff.
@@ -319,6 +322,23 @@ pub struct TariffRecord {
     /// The step index the tariff attached at: the clock's current step
     /// when `set_tariff` succeeded, the first step the evaluator folds.
     pub attach_step: u64,
+}
+
+/// The scenario script a run was driven by, recorded as its identity:
+/// the name it was declared under and the digest over its content. The
+/// record is the run's own statement of the driver behind the external
+/// inputs the setters applied (the price, voltage, frequency and control
+/// pushes the script's events drove, each recorded as a
+/// [`hares_types::ReplayBlocker::ExternalInput`]), and the replay export
+/// carries it so the run names its driver; re-running the script is the
+/// replay of a script-driven run. The script's content is the caller's
+/// to hold: the digest identifies it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScriptRecord {
+    /// The script's declared name.
+    pub name: String,
+    /// The SHA-256 digest over the script's content.
+    pub sha256: [u8; 32],
 }
 
 /// One simulation run's result: the finalisation every run shares, whether
@@ -350,6 +370,16 @@ impl RunResult {
     /// the report outputs; fails without writing anything when the run
     /// took inputs a replay cannot rebuild
     /// (`HaresError::NotReplayable`).
+    ///
+    /// A run a recorded script drove exports when the external input the
+    /// script itself applied is its only blocker: the manifest names the
+    /// script, and the export is that run's configuration, inputs and
+    /// driver record. It is not a self-contained replay (the script's
+    /// external inputs are not stored), so
+    /// [`replay::load`](crate::replay::load) refuses it by name;
+    /// re-running the script against the export's configuration is the
+    /// exact replay. A script whose run applied no external input leaves
+    /// an export the configuration alone replays, and it loads.
     ///
     /// # Errors
     ///

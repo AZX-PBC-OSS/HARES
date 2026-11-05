@@ -10,7 +10,12 @@
 //! `DwellingConfig` from a directory alone and
 //! verifies the defaults tree the replay will read against the digest the
 //! run recorded, so a replay either reproduces the run or fails naming
-//! what it cannot reproduce.
+//! what it cannot reproduce. A script-driven run's export names its
+//! driver but stores none of the external inputs its events applied, so
+//! [`load`] refuses such an export by name rather than replaying a
+//! different scenario; re-running the script against the reconstructed
+//! configuration is its exact replay. A script whose run applied no
+//! external input is replayable from the export and loads.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,7 +36,7 @@ use crate::result::{BuildInfo, RunResult, TariffRecord};
 /// `initialization_duration_s` key: the warm-up lives in the embedded
 /// `SimulationConfig`'s `warmup` field, and an older export's key is a
 /// removed key.
-const REPLAY_SCHEMA_VERSION: u32 = 2;
+const REPLAY_SCHEMA_VERSION: u32 = 3;
 
 /// The stored file names the export writes the inputs under, inside the
 /// replay directory.
@@ -120,6 +125,18 @@ struct ReplayManifest {
     inputs: StoredInputs,
     tariff_zone: Option<String>,
     tariff_attach_step: Option<u64>,
+    /// The scenario script that drove the run: its declared name and the
+    /// digest over its content. `None` for a run no script drove. The
+    /// script's content is the caller's to hold; the identity names it.
+    script_name: Option<String>,
+    script_sha256: Option<String>,
+    /// True when the recorded script applied external inputs the export
+    /// does not store (the case the export admitted only because the
+    /// script is the driver): a replay must re-run the script. False for
+    /// a script whose run applied no external input, which the export's
+    /// resolved configuration replays exactly.
+    #[serde(default)]
+    script_needs_rerun: bool,
     build: RecordedBuild,
 }
 
@@ -250,9 +267,24 @@ fn store_input(
 /// Writes the run's replay export into `dir`
 /// ([`RunResult::export_replay`](crate::RunResult::export_replay)).
 pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
-    if !result.provenance.replay_blockers.is_empty() {
+    let blockers = &result.provenance.replay_blockers;
+    // The script-carried exception: the one blocker a script-driven
+    // run's export admits is the external input the script itself
+    // applied (the price, voltage, frequency and control pushes its
+    // events drove). The export names the script and carries the
+    // resolved configuration and inputs; re-running the script against
+    // them is the exact replay, which this export alone cannot do (the
+    // loader refuses a script-driven export by name rather than
+    // replaying a different scenario). Every other blocker refuses as
+    // before, and an untagged run refuses the external input as
+    // before: the tag is the run's own statement of its driver.
+    let script_backed = result.provenance.script.is_some()
+        && blockers
+            .iter()
+            .all(|b| matches!(b, hares_types::ReplayBlocker::ExternalInput));
+    if !script_backed && !blockers.is_empty() {
         return Err(HaresError::NotReplayable {
-            blockers: result.provenance.replay_blockers.clone(),
+            blockers: blockers.clone(),
         });
     }
     let Some(inputs) = result.provenance.inputs.as_ref() else {
@@ -345,6 +377,16 @@ pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
         },
         tariff_zone: result.provenance.tariff.as_ref().map(|r| r.zone.clone()),
         tariff_attach_step: result.provenance.tariff.as_ref().map(|r| r.attach_step),
+        script_name: result.provenance.script.as_ref().map(|s| s.name.clone()),
+        script_sha256: result
+            .provenance
+            .script
+            .as_ref()
+            .map(|s| hares_input::input::hex(&s.sha256)),
+        // The export admitted this run only when its recorded script
+        // backs the external inputs its events applied; a script whose
+        // run recorded no external input needs no re-run.
+        script_needs_rerun: result.provenance.script.is_some() && !blockers.is_empty(),
         build: RecordedBuild::from_build_info(&result.provenance.build),
     };
     let toml = toml::to_string_pretty(&manifest)
@@ -357,9 +399,12 @@ pub(crate) fn export(result: &RunResult, dir: &Path) -> Result<(), HaresError> {
 ///
 /// # Errors
 ///
-/// [`HaresError::Io`] naming the mismatch when the defaults tree at
-/// `defaults_base` digests differently from the one the exported run
-/// read, and when the directory or any file cannot be read.
+/// [`HaresError::ReplayDriverScript`] naming the script when the export
+/// records one as the run's driver: its external inputs are not stored,
+/// so the export alone cannot replay the run. [`HaresError::Io`] naming
+/// the mismatch when the defaults tree at `defaults_base` digests
+/// differently from the one the exported run read, and when the
+/// directory or any file cannot be read.
 pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
     let toml = std::fs::read_to_string(dir.join("replay.toml")).map_err(|err| {
         HaresError::Io(format!(
@@ -374,6 +419,45 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
             "the replay manifest's schema version is {} and this engine reads {}",
             manifest.schema_version, REPLAY_SCHEMA_VERSION
         )));
+    }
+
+    // A script-driven export names its driver but stores only the
+    // script's identity, not the external inputs its events applied.
+    // Loading such an export would silently replay a different
+    // scenario, so the load refuses and names the script: re-running it
+    // against the reconstructed configuration is the exact replay (the
+    // export's config, inputs and digests are still the run's record). A
+    // script whose run recorded no external input needed no re-run, so
+    // its export replays exactly and loads. A manifest carrying one half
+    // of the identity, or the re-run flag without the identity, is
+    // malformed.
+    match (&manifest.script_name, &manifest.script_sha256) {
+        (Some(name), Some(sha256)) => {
+            if manifest.script_needs_rerun {
+                return Err(HaresError::ReplayDriverScript {
+                    name: name.clone(),
+                    sha256: sha256.clone(),
+                });
+            }
+        }
+        (None, None) => {
+            if manifest.script_needs_rerun {
+                return Err(HaresError::Io(
+                    "the replay manifest marks a script re-run without naming the script"
+                        .to_string(),
+                ));
+            }
+        }
+        (Some(_), None) => {
+            return Err(HaresError::Io(
+                "the replay manifest names a driving script without its digest".to_string(),
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(HaresError::Io(
+                "the replay manifest carries a script digest without the script's name".to_string(),
+            ));
+        }
     }
 
     // The exported inputs, read back from the export directory as content.
@@ -539,26 +623,6 @@ pub fn load(dir: &Path, defaults_base: &Path) -> Result<Replay, HaresError> {
 
 /// The 64 char hex digest the manifest carries, decoded.
 fn decode_hex_digest(hex: &str) -> Result<[u8; 32], HaresError> {
-    fn value(c: u8) -> Result<u8, HaresError> {
-        match c {
-            b'0'..=b'9' => Ok(c - b'0'),
-            b'a'..=b'f' => Ok(c - b'a' + 10),
-            other => Err(HaresError::Io(format!(
-                "the replay manifest's digest is not lowercase hex: {}",
-                other as char
-            ))),
-        }
-    }
-    let bytes = hex.as_bytes();
-    if bytes.len() != 64 {
-        return Err(HaresError::Io(format!(
-            "the replay manifest's digest is {} characters, expected 64",
-            bytes.len()
-        )));
-    }
-    let mut digest = [0u8; 32];
-    for (index, byte) in digest.iter_mut().enumerate() {
-        *byte = (value(bytes[index * 2])? << 4) | value(bytes[index * 2 + 1])?;
-    }
-    Ok(digest)
+    hares_input::input::unhex(hex)
+        .map_err(|reason| HaresError::Io(format!("the replay manifest's digest {reason}")))
 }

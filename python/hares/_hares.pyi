@@ -2862,7 +2862,13 @@ class RunResult:
         reproduces this run's frames bitwise. Fails with
         ``HaresConfigError`` naming every blocker when the dwelling was
         changed in a way a replay cannot rebuild, and nothing is
-        written."""
+        written.
+
+        A script-driven run exports when the external input its script
+        applied is the only blocker: the export names the script. It is
+        not a self-contained replay, so ``hares.replay`` refuses it with
+        ``HaresConfigError`` naming the script; re-running the script
+        against the export's configuration is its exact replay."""
     def __repr__(self) -> str: ...
 
 class RunHealth:
@@ -3000,6 +3006,12 @@ class Provenance:
         """The electric tariff the run attached: a dict holding the
         tariff's own dict (``tariff``) and the IANA zone it was attached
         in (``zone``), or ``None`` when the run attached none."""
+    @property
+    def script(self) -> dict[str, Any] | None:
+        """The scenario script that drove the run: a dict holding the
+        script's declared name (``name``) and the 64 char hex digest
+        over its content (``sha256``), or ``None`` for a run no script
+        drove."""
     def __repr__(self) -> str: ...
 
 class EquipmentProvenance:
@@ -3149,7 +3161,16 @@ class SteppableFleet:
         electricity_price: float,
         export_price: float | None = ...,
         ghg_intensity: float | None = ...,
-    ) -> None: ...
+    ) -> None:
+        """The fleet-wide per-field price update: the named fields apply
+        to every dwelling, the omitted fields preserve each dwelling's
+        stored value. Non-finite values are refused."""
+    def update_price_signal_all(self, signal: dict[str, float | None]) -> None:
+        """The dict form of the fleet-wide per-field price update: the
+        named fields apply to every dwelling, the absent fields preserve
+        them. Accepts the same keys as the dwelling's
+        ``set_price_signal``: an unknown key and a dict naming no field
+        are refused."""
     def apply_control(
         self,
         dwelling_index: int,
@@ -3157,6 +3178,11 @@ class SteppableFleet:
         signal: ControlSignal,
     ) -> None: ...
     def telemetry(self, dwelling_index: int) -> Telemetry: ...
+    def equipment_descriptors(self, dwelling_index: int) -> list[EquipmentDescriptor]:
+        """Each equipment's descriptor for the dwelling, in equipment
+        order: the typed surface the per-DER folds group on (the
+        descriptor's ``equipment_type`` and ``end_use``, the engine's own
+        kind, never a name heuristic)."""
     def is_finished(self) -> bool: ...
     def time_res_s(self) -> float: ...
     def total_steps(self) -> int: ...
@@ -3355,7 +3381,18 @@ class Dwelling:
         name: str,
         params: dict[str, Any] | None = ...,
     ) -> None: ...
-    def set_price_signal(self, signal: dict[str, float | None]) -> None: ...
+    def set_price_signal(self, signal: dict[str, float | None]) -> None:
+        """The per-field price update: the dict's named fields
+        (``electricity_price``, ``export_price``, ``ghg_intensity``)
+        overwrite the stored ones and the absent fields preserve them, so
+        a partial dict wipes nothing. An unknown key and a dict naming no
+        field are refused, as are non-finite values."""
+    def record_script(self, name: str, sha256: str) -> None:
+        """Records the scenario script driving the run for its provenance:
+        the script's declared name and the 64 char lowercase hex SHA-256
+        digest over its content (the form ``Provenance.script`` renders).
+        The scenario engine calls this once, at the first applied event;
+        the script's content stays the caller's to hold."""
     def set_grid_voltage(self, voltage_pu: float) -> None: ...
     def set_frequency(self, frequency_hz: float) -> None: ...
     def take_warnings(self) -> list[str]: ...
@@ -3601,5 +3638,9 @@ def resample_weather(
 # directory): load, the build, then simulate(), returning the replayed
 # run's RunResult, its frames bitwise the original's. `defaults` is the
 # defaults directory the replay reads the exported run's tree from (the
-# export verifies its digest); None reads the packaged defaults.
+# export verifies its digest); None reads the packaged defaults. A
+# script-driven export whose events applied external inputs is refused
+# with HaresConfigError naming the script: those inputs are not stored,
+# so re-run the script against the export's configuration for the exact
+# replay (a script that applied none leaves a replayable export).
 def replay(dir: str, defaults: str | None = None) -> RunResult: ...

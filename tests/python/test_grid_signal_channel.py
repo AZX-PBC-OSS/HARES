@@ -102,3 +102,11 @@ class TestFleetPriceChannel:
         fleet = SteppableFleet.from_configs([_fleet_config(1)], n_threads=0)
         with pytest.raises(Exception):
             fleet.set_price_signal_all(float("nan"))
+
+    def test_fleet_update_price_signal_all_rejects_an_unknown_key(self):
+        """The fleet's dict form runs the dwelling dict setter's key
+        contract: an unknown key is refused naming it, never silently
+        dropped."""
+        fleet = SteppableFleet.from_configs([_fleet_config(1)], n_threads=0)
+        with pytest.raises(ValueError, match="ghg"):
+            fleet.update_price_signal_all({"electricity_price": 0.2, "ghg": 0.4})

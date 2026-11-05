@@ -104,10 +104,10 @@ pub struct Ev {
     der1547: Option<crate::der1547::Der1547Controller>,
     /// The layer's outcome for the step in flight, `Some` on the steps
     /// the layer stepped: the step's outcome is authoritative for the
-    /// channels it sets (a fail-safe trip never reaches the latch, and
-    /// the firing step's window is spent in the run state), so the
-    /// publication reads it there and the run state on the steps the
-    /// layer does not step.
+    /// channels it sets (a fail-safe trip latches like the standard
+    /// trips, and the firing step's window is spent in the run state),
+    /// so the publication reads it there and the run state on the steps
+    /// the layer does not step.
     der1547_step_outcome: Option<crate::der1547::Der1547Outcome>,
     /// Grid excursions seen while the layer is unconfigured (the counted
     /// event behind the run's first warning). Always 0 when configured.
@@ -1306,11 +1306,10 @@ impl Ev {
         // The IEEE 1547 layer's channels. The step the layer stepped
         // publishes its outcome, the same source the PV's and the
         // battery's channels read: a fail-safe trip on a poisoned grid
-        // reading is the step's outcome and never reaches the latch, and
-        // the firing step's window is spent in the run state. The steps
-        // the layer does not step (an idle export leg) publish the run
-        // state, so a latched trip stays reported while the export leg is
-        // off.
+        // reading latches like the standard trips, and the firing
+        // step's window is spent in the run state. The steps the layer
+        // does not step (an idle export leg) publish the run state, so
+        // a latched trip stays reported while the export leg is off.
         match &self.der1547 {
             Some(controller) => {
                 let state = controller.state();

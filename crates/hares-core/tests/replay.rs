@@ -161,6 +161,160 @@ fn exported_file(dir: &Path, relative: &str) -> PathBuf {
     dir.join(relative)
 }
 
+/// A script-driven run exports: the run's only replay blocker is the
+/// external input the script itself applied, and the export's manifest
+/// names the driving script (its declared name and the digest over its
+/// content), the run's record of what produced it. The red state at the
+/// parent was the carrier's absence: no provenance field held the
+/// script and the export refused every external-input run, so a
+/// grid-event run could neither name its driver nor leave the engine.
+#[test]
+fn replay_export_carries_the_driving_script() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
+    let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    dwelling.record_script("grid-event-study", [7u8; 32]);
+    dwelling.set_price_signal(hares_types::PriceSignal {
+        electricity_price: Some(0.42),
+        export_price: None,
+        ghg_intensity: None,
+    });
+    dwelling.step().expect("the scripted step");
+    let result = dwelling.finish().expect("the run finishes");
+
+    let script = result
+        .provenance
+        .script
+        .as_ref()
+        .expect("the run records its driver");
+    assert_eq!(script.name, "grid-event-study");
+
+    let export = tempfile::tempdir().expect("the export directory");
+    result
+        .export_replay(export.path())
+        .expect("a script-driven run exports: the script is the input a replay re-runs");
+
+    let toml_text =
+        std::fs::read_to_string(exported_file(export.path(), "replay.toml")).expect("replay.toml");
+    assert!(
+        toml_text.contains("script_name = \"grid-event-study\""),
+        "the manifest names the script: {toml_text}"
+    );
+    // The digest's hex: [7u8; 32] is "07" repeated 32 times.
+    assert!(
+        toml_text.contains(&format!("script_sha256 = \"{}\"", "07".repeat(32))),
+        "the manifest carries the digest: {toml_text}"
+    );
+}
+
+/// The export's admission is not a self-contained replay: the manifest
+/// names the driving script, and the script's external inputs are not
+/// stored, so a load must refuse by name rather than silently replay the
+/// configuration without the scenario's events. The red state at the
+/// parent loaded the export and built a run whose provenance carried no
+/// script, a different scenario with no signal that it was one.
+#[test]
+fn replay_load_refuses_a_script_driven_export_naming_the_script() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
+    let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    dwelling.record_script("grid-event-study", [7u8; 32]);
+    dwelling.set_price_signal(hares_types::PriceSignal {
+        electricity_price: Some(0.42),
+        export_price: None,
+        ghg_intensity: None,
+    });
+    dwelling.step().expect("the scripted step");
+    let result = dwelling.finish().expect("the run finishes");
+    let export = tempfile::tempdir().expect("the export directory");
+    result
+        .export_replay(export.path())
+        .expect("the script-driven export");
+
+    match replay::load(export.path(), &repo_root().join("python/hares/defaults")) {
+        Err(HaresError::ReplayDriverScript { name, sha256 }) => {
+            assert_eq!(name, "grid-event-study", "the refusal names the driver");
+            assert_eq!(sha256, "07".repeat(32), "and carries its digest");
+        }
+        Ok(_) => panic!("a script-driven export must refuse at load, naming the script"),
+        Err(other) => panic!("the refusal is the script's: {other:?}"),
+    }
+}
+
+/// The refusal's narrowness: a recorded script whose run applied no
+/// external input left the export's configuration sufficient, so the
+/// export replays exactly and loads. The re-run flag tracks the
+/// admission, not the mere presence of a script tag.
+#[test]
+fn a_script_tag_with_no_external_input_still_replays() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
+    let mut dwelling = Dwelling::from_config(config).expect("the dwelling builds");
+    dwelling.record_script("inert-study", [3u8; 32]);
+    dwelling.step().expect("the step");
+    let result = dwelling.finish().expect("the run finishes");
+    let export = tempfile::tempdir().expect("the export directory");
+    result
+        .export_replay(export.path())
+        .expect("a script that applied no external input exports");
+
+    replay::load(export.path(), &repo_root().join("python/hares/defaults"))
+        .expect("and the export replays exactly, so it loads");
+}
+
+/// The admission's narrowness: an untagged run's external input still
+/// refuses (the tag is the run's own statement of its driver), and a
+/// script tag beside any other blocker refuses too, the script backing
+/// only the setter inputs it drove.
+#[test]
+fn replay_export_refuses_an_untagged_or_otherly_blocked_run() {
+    let inputs = tempfile::tempdir().expect("the inputs directory");
+    let config = consumer_shape_config(inputs.path(), 4 * 3600, false);
+
+    let mut untagged = Dwelling::from_config(config.clone()).expect("the dwelling builds");
+    untagged.set_price_signal(hares_types::PriceSignal {
+        electricity_price: Some(0.42),
+        export_price: None,
+        ghg_intensity: None,
+    });
+    untagged.step().expect("the step");
+    let result = untagged.finish().expect("the run finishes");
+    let export = tempfile::tempdir().expect("the export directory");
+    match result.export_replay(export.path()) {
+        Err(HaresError::NotReplayable { blockers }) => {
+            assert_eq!(blockers, vec![ReplayBlocker::ExternalInput])
+        }
+        other => panic!("an untagged external-input run refuses: {other:?}"),
+    }
+
+    let mut tagged_and_restored = Dwelling::from_config(config).expect("the dwelling builds");
+    tagged_and_restored.record_script("grid-event-study", [7u8; 32]);
+    tagged_and_restored.set_price_signal(hares_types::PriceSignal {
+        electricity_price: Some(0.42),
+        export_price: None,
+        ghg_intensity: None,
+    });
+    tagged_and_restored.step().expect("the step");
+    let checkpoint = tagged_and_restored
+        .save_checkpoint()
+        .expect("the checkpoint saves");
+    tagged_and_restored
+        .load_checkpoint(checkpoint)
+        .expect("the checkpoint restores");
+    let result = tagged_and_restored.finish().expect("the run finishes");
+    let export = tempfile::tempdir().expect("the export directory");
+    match result.export_replay(export.path()) {
+        Err(HaresError::NotReplayable { blockers }) => {
+            assert_ne!(
+                blockers,
+                vec![ReplayBlocker::ExternalInput],
+                "the restored state is the script's to name, and the script does not"
+            )
+        }
+        other => panic!("a script tag beside another blocker refuses: {other:?}"),
+    }
+}
+
 /// `replay_export_reproduces_frame_bitwise`: the inputs copied into a
 /// temporary directory, run, export, delete that input directory, replay:
 /// every report and the metrics equal the original on bits. The replay

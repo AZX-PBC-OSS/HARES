@@ -120,6 +120,14 @@ _LOG = logging.getLogger(__name__)
 VOLTAGE_PU_MIN = 0.5
 VOLTAGE_PU_MAX = 1.5
 
+# The price channel's companion topics: the channel carries the import
+# price, the export price and the GHG intensity as three fields, one
+# topic each (docs/cosim.md's subscription table). The companions ride
+# the price topic's presence: they register beside it at these names
+# unless the caller names others explicitly.
+DEFAULT_EXPORT_PRICE_TOPIC = "grid/export_price"
+DEFAULT_GHG_INTENSITY_TOPIC = "grid/ghg_intensity"
+
 
 def voltage_pu_admitted(voltage_pu: float) -> bool:
     """The contract's admitted voltage set (docs/cosim.md): exactly ``0.0``
@@ -469,6 +477,8 @@ class HELICSDwelling:
         self._sub_voltage: HelicsSubscriptionLike | None = None
         self._sub_control: HelicsSubscriptionLike | None = None
         self._sub_price: HelicsSubscriptionLike | None = None
+        self._sub_export_price: HelicsSubscriptionLike | None = None
+        self._sub_ghg_intensity: HelicsSubscriptionLike | None = None
         self._sub_frequency: HelicsSubscriptionLike | None = None
 
         self._pub_zone_temp: list[HelicsPublicationLike] = []
@@ -614,6 +624,8 @@ class HELICSDwelling:
         voltage_topic: str | None = None,
         control_topic: str | None = None,
         price_topic: str | None = None,
+        export_price_topic: str | None = None,
+        ghg_intensity_topic: str | None = None,
         frequency_topic: str | None = None,
         required_keys: set[str] | None = None,
     ) -> list[HELICSSubscriptionConfig]:
@@ -623,6 +635,14 @@ class HELICSDwelling:
             voltage_topic: HELICS topic for grid voltage (per-unit).
             control_topic: HELICS topic for JSON control messages.
             price_topic: HELICS topic for real-time electricity price.
+            export_price_topic: HELICS topic for the export (sell-back)
+                price. Registered beside ``price_topic`` at
+                ``grid/export_price`` unless the caller names another;
+                the price channel's three fields share one presence.
+            ghg_intensity_topic: HELICS topic for the grid's carbon
+                intensity (kg CO2e/kWh). Registered beside
+                ``price_topic`` at ``grid/ghg_intensity`` unless the
+                caller names another.
             frequency_topic: HELICS topic for grid frequency (Hz).
             required_keys: Optional set of fully-qualified subscription keys that
                 must be registered. After entering execution mode, any missing
@@ -641,6 +661,15 @@ class HELICSDwelling:
         if price_topic is not None:
             self._sub_price = self._fed.register_subscription(price_topic, "double")
             configs.append(HELICSSubscriptionConfig(key=price_topic, type="double"))
+            export_topic = export_price_topic or DEFAULT_EXPORT_PRICE_TOPIC
+            self._sub_export_price = self._fed.register_subscription(export_topic, "double")
+            configs.append(HELICSSubscriptionConfig(key=export_topic, type="double"))
+            ghg_topic = ghg_intensity_topic or DEFAULT_GHG_INTENSITY_TOPIC
+            self._sub_ghg_intensity = self._fed.register_subscription(ghg_topic, "double")
+            configs.append(HELICSSubscriptionConfig(key=ghg_topic, type="double"))
+        else:
+            self._sub_export_price = None
+            self._sub_ghg_intensity = None
 
         if frequency_topic is not None:
             self._sub_frequency = self._fed.register_subscription(frequency_topic, "double")
@@ -772,6 +801,46 @@ class HELICSDwelling:
             self._finalized = True
             raise
 
+    def _apply_price_field(self, sub: HelicsSubscriptionLike, key: str, units: str) -> None:
+        """Apply one price channel field: the channel's one boundary
+        behavior, per field.
+
+        A non-finite value (NaN or infinity) is refused, never applied:
+        the engine's own setter rejects it (a NaN price's comparisons are
+        always false, so the price actors' conditionals silently stop
+        firing), and the one-sided negative check cannot catch it -
+        finiteness is checked first, never relied on the comparison to
+        catch. Flagged invalid and counted, the same refuse-and-count
+        contract the voltage and frequency channels enforce. A negative
+        value warns, counts and is still applied (a negative tariff is a
+        real scenario; the warning is the diagnostic). The named field
+        applies alone: the per-field update preserves the other fields'
+        stored values (docs/cosim.md's subscription table).
+        """
+        try:
+            value = float(sub.double)
+            if not math.isfinite(value):
+                self._last_price_non_finite = True
+                _LOG.warning(
+                    "The %s signal %r is not finite; expected a finite value in %s. "
+                    "Value not applied; keeping last valid value.",
+                    key,
+                    value,
+                    units,
+                )
+            else:
+                if value < 0.0:
+                    self._last_price_negative = True
+                    _LOG.warning(
+                        "The %s signal %.3f is negative; expected >= 0 %s",
+                        key,
+                        value,
+                        units,
+                    )
+                self._dwelling.set_price_signal({key: value})
+        except Exception as exc:
+            _LOG.warning("Failed to apply the %s signal: %s", key, exc)
+
     def _read_subscriptions(self) -> None:
         self._last_voltage_out_of_range = False
         self._last_price_negative = False
@@ -792,6 +861,10 @@ class HELICSDwelling:
             _sub_objs.append(self._sub_control)
         if self._sub_price is not None:
             _sub_objs.append(self._sub_price)
+        if self._sub_export_price is not None:
+            _sub_objs.append(self._sub_export_price)
+        if self._sub_ghg_intensity is not None:
+            _sub_objs.append(self._sub_ghg_intensity)
         if self._sub_frequency is not None:
             _sub_objs.append(self._sub_frequency)
 
@@ -852,35 +925,17 @@ class HELICSDwelling:
                     _LOG.warning("Failed to apply grid voltage: %s", exc)
 
             if self._sub_price is not None and _update_by_sub.get(self._sub_price, False):
-                try:
-                    price = float(self._sub_price.double)
-                    if not math.isfinite(price):
-                        # A non-finite price (NaN or infinity) is refused,
-                        # never applied: the engine's own setter rejects it
-                        # (a NaN price's comparisons are always false, so
-                        # the price actors' conditionals silently stop
-                        # firing), and the one-sided `price < 0.0` check
-                        # cannot catch it - finiteness is checked first,
-                        # never relied on the comparison to catch. Flagged
-                        # invalid and counted, the same refuse-and-count
-                        # contract the voltage and frequency channels
-                        # enforce.
-                        self._last_price_non_finite = True
-                        _LOG.warning(
-                            "Price signal %r is not finite; expected a finite price in "
-                            "currency/kWh. Value not applied; keeping last valid price.",
-                            price,
-                        )
-                    else:
-                        if price < 0.0:
-                            self._last_price_negative = True
-                            _LOG.warning(
-                                "Price signal %.3f is negative; expected >= 0 currency/kWh",
-                                price,
-                            )
-                        self._dwelling.set_price_signal({"electricity_price": price})
-                except Exception as exc:
-                    _LOG.warning("Failed to apply price signal: %s", exc)
+                self._apply_price_field(self._sub_price, "electricity_price", "currency/kWh")
+
+            if self._sub_export_price is not None and _update_by_sub.get(
+                self._sub_export_price, False
+            ):
+                self._apply_price_field(self._sub_export_price, "export_price", "currency/kWh")
+
+            if self._sub_ghg_intensity is not None and _update_by_sub.get(
+                self._sub_ghg_intensity, False
+            ):
+                self._apply_price_field(self._sub_ghg_intensity, "ghg_intensity", "kg CO2e/kWh")
 
             if self._sub_frequency is not None and _update_by_sub.get(self._sub_frequency, False):
                 try:

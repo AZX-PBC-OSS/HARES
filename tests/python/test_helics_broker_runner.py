@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import importlib
 import json
+import logging
 import os
 from pathlib import Path
 import shlex
@@ -275,6 +276,33 @@ def test_wait_for_broker_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(TimeoutError, match="did not connect"):
         broker_module.wait_for_broker(broker, timeout=0.01)
+
+
+def test_wait_for_broker_rejects_an_infinite_and_a_nan_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broker wait's timeout routes through the shared validator: a
+    positive finite number of seconds, the error naming the value. The
+    red state at the parent ran the raw ``<= 0`` guard: it admitted ``inf``
+    (the loop never expired: the wait hung until the process was killed)
+    and rejected ``nan`` as a ``TimeoutError`` raised with no wait, the
+    wrong error class."""
+    broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
+
+    class _CountingBroker(_NeverConnectedBroker):
+        def __init__(self) -> None:
+            super().__init__("zmq", "b", "--federates=1")
+            self.probes = 0
+
+        def is_connected(self) -> bool:
+            self.probes += 1
+            return False
+
+    broker = _CountingBroker()
+    for bad in (float("inf"), float("nan"), -1.0, 0.0):
+        with pytest.raises(ValueError, match="positive, finite number of seconds"):
+            broker_module.wait_for_broker(broker, timeout=bad)
+    assert broker.probes == 0, "no refusal entered the connectivity loop"
 
 
 def test_wait_for_broker_raises_when_connectivity_api_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -670,3 +698,48 @@ def test_destroy_broker_disconnects(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Idempotent -- does not raise on second call
     broker_module.destroy_broker(broker)
+
+    # The success and the idempotence arm are not failures: the count is
+    # unchanged and nothing is logged.
+    assert broker_module.broker_teardown_failures() == 0
+
+
+def test_destroy_broker_logs_and_counts_a_failed_disconnect(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A teardown failure is logged naming the broker and counted, never
+    discarded. The red state at the parent was the silent ``except: pass``:
+    a failed disconnect left the broker process alive holding its port
+    pair, and the only symptom was the next federation's failed bind or
+    stall."""
+    broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
+
+    class _FailingBroker(_FakeBroker):
+        def disconnect(self) -> None:
+            raise RuntimeError("the zmq context is gone")
+
+    broker = _FailingBroker("zmq", "failing_broker", "--federates=1")
+    before = broker_module.broker_teardown_failures()
+    with caplog.at_level(logging.ERROR, logger="hares.helics.broker"):
+        broker_module.destroy_broker(broker)
+
+    assert broker_module.broker_teardown_failures() == before + 1
+    assert "failing_broker" in caplog.text, "the failure names the broker"
+    assert "the zmq context is gone" in caplog.text, "the failure carries its cause"
+
+
+def test_destroy_broker_counts_a_handle_with_neither_disconnect_form(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A broker handle exposing neither disconnect form is a teardown
+    failure like a raising one: named and counted (the fake wheel carries
+    no ``helicsBrokerDisconnect``, so the module has no form to call)."""
+    broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
+
+    broker = object()
+    before = broker_module.broker_teardown_failures()
+    with caplog.at_level(logging.ERROR, logger="hares.helics.broker"):
+        broker_module.destroy_broker(broker)
+
+    assert broker_module.broker_teardown_failures() == before + 1
+    assert caplog.text.strip(), "the neither-form teardown failure is logged"

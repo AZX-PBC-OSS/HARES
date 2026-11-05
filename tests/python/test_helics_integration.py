@@ -1575,6 +1575,9 @@ class _FrequencyRecordingFleet:
     ) -> None:
         self._fleet.set_price_signal_all(electricity_price, export_price, ghg_intensity)
 
+    def update_price_signal_all(self, signal: dict[str, float | None]) -> None:
+        self._fleet.update_price_signal_all(signal)
+
     def set_frequency_all(self, frequency_hz: float) -> None:
         self.frequency_values.append(frequency_hz)
         self._fleet.set_frequency_all(frequency_hz)

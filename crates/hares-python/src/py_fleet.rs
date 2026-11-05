@@ -21,9 +21,11 @@ use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig, PyHealthPolicy};
 use crate::py_control::PyControlSignal;
 use crate::py_dwelling::HaresSimulationError;
 use crate::py_enums::PyResStockVersion;
+use crate::py_equipment::PyEquipmentDescriptor;
 use crate::py_report::{PyFrequency, PySelection};
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::check_unexpected_kwargs;
+use crate::utils::price_signal_from_dict;
 use crate::utils::validate_finite;
 use hares_types::PriceSignal;
 
@@ -838,11 +840,26 @@ impl PySteppableFleet {
             validate_finite(v, "ghg_intensity")?;
         }
         let mut fleet = self.acquire()?;
-        fleet.set_price_signal_all(PriceSignal {
+        // The per-field update: a call names the fields it carries, and
+        // the fields it omits preserve each dwelling's stored value, the
+        // dwelling dict setter's partial-update semantics exactly. An
+        // import-price-only broadcast never clears an export price or a
+        // GHG intensity the homes already hold.
+        fleet.update_price_signal_all(PriceSignal {
             electricity_price: Some(electricity_price),
             export_price,
             ghg_intensity,
         });
+        Ok(())
+    }
+
+    pub fn update_price_signal_all(&self, signal: &Bound<'_, PyDict>) -> PyResult<()> {
+        // The dict form of the per-field fleet-wide update: the named
+        // fields apply to every dwelling, the absent fields preserve, the
+        // same reader the dwelling's dict setter runs (`utils.rs`).
+        let price = price_signal_from_dict(signal)?;
+        let mut fleet = self.acquire()?;
+        fleet.update_price_signal_all(price);
         Ok(())
     }
 
@@ -863,6 +880,22 @@ impl PySteppableFleet {
         fleet
             .telemetry(dwelling_index)
             .map(PyTelemetry::new)
+            .map_err(steppable_error_to_py_err)
+    }
+
+    pub fn equipment_descriptors(
+        &self,
+        dwelling_index: usize,
+    ) -> PyResult<Vec<PyEquipmentDescriptor>> {
+        let fleet = self.acquire()?;
+        fleet
+            .equipment_descriptors(dwelling_index)
+            .map(|descriptors| {
+                descriptors
+                    .into_iter()
+                    .map(PyEquipmentDescriptor::new)
+                    .collect()
+            })
             .map_err(steppable_error_to_py_err)
     }
 

@@ -2062,6 +2062,17 @@ impl SteppableFleet {
         }
     }
 
+    /// Applies a per-field price-signal update to every dwelling: a named
+    /// field (`Some`) overwrites the stored one, an absent field (`None`)
+    /// preserves it, each home through its own `update_price_signal`. The
+    /// HELICS price topics' form: a topic carries one field, and its
+    /// publication never clears the fields the other topics published.
+    pub fn update_price_signal_all(&mut self, signal: PriceSignal) {
+        for dwelling in &mut self.dwellings {
+            dwelling.update_price_signal(signal.clone());
+        }
+    }
+
     /// Queues a control signal for one dwelling by equipment name.
     ///
     /// # Errors
@@ -2084,6 +2095,34 @@ impl SteppableFleet {
             })?;
         dwelling.apply_control(name, signal);
         Ok(())
+    }
+
+    /// Returns each equipment's descriptor for one dwelling, in
+    /// equipment order: the typed surface the per-DER folds group on.
+    /// The descriptor's `equipment_type` and `end_use` are the engine's
+    /// own kind of the equipment, never a name heuristic.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::NoSuchHome`] naming the index and the length when
+    /// the index is out of range.
+    pub fn equipment_descriptors(
+        &self,
+        dwelling_index: usize,
+    ) -> Result<Vec<hares_types::EquipmentDescriptor>> {
+        let len = self.dwellings.len();
+        let dwelling = self
+            .dwellings
+            .get(dwelling_index)
+            .ok_or(FleetError::NoSuchHome {
+                index: dwelling_index,
+                len,
+            })?;
+        Ok(dwelling
+            .equipment()
+            .iter()
+            .map(|eq| eq.descriptor().clone())
+            .collect())
     }
 
     /// Returns telemetry for one dwelling.
@@ -6419,6 +6458,7 @@ mod tests {
                 equipment: Vec::new(),
                 inputs: None,
                 tariff: None,
+                script: None,
                 replay_blockers: Vec::new(),
             },
         };

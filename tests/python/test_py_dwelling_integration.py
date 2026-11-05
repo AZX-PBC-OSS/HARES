@@ -5,6 +5,7 @@ injection → stepping → metrics extraction → checkpoint/restore. Also inclu
 GIL safety stress tests for batch_step.
 """
 
+import hashlib
 import math
 import threading
 from array import array
@@ -344,6 +345,69 @@ class TestPriceAndGridVoltage:
         dw.set_price_signal({"electricity_price": 0.15})
         result = dw.step()
         assert "timestamp" in result
+
+    def test_partial_price_update_preserves_the_other_fields(self):
+        """The price update is a per-field set: a dict naming one field
+        preserves the stored others. The red state at the parent replaced
+        the stored signal whole, so an export-only update wiped the import
+        price. The environment view's price fields are the consumers':
+        the EV driver's V2G and price logic reads the export price from
+        this same struct."""
+        dw = _init_dwelling()
+        dw.set_price_signal({"electricity_price": 0.2, "ghg_intensity": 0.3})
+        dw.step()
+        env = dw.latest_env()
+        assert env["electricity_price"] == pytest.approx(0.2)
+        assert env["ghg_intensity"] == pytest.approx(0.3)
+
+        dw.set_price_signal({"export_price": 0.06})
+        dw.step()
+        env = dw.latest_env()
+        assert env["export_price"] == pytest.approx(0.06)
+        assert env["electricity_price"] == pytest.approx(0.2), (
+            "the export-only update preserves the stored import price"
+        )
+        assert env["ghg_intensity"] == pytest.approx(0.3), (
+            "the export-only update preserves the stored GHG intensity"
+        )
+
+    def test_unknown_price_key_is_refused(self):
+        """A misspelled key is the silent-drop class: refused, naming it.
+        The red state at the parent ignored every unknown key, so a
+        typo'd ``ghg`` dropped the carbon intensity silently and a
+        wrong-keyed dict stored an all-``None`` signal, clearing the
+        active price."""
+        dw = _init_dwelling()
+        with pytest.raises(ValueError, match="ghg"):
+            dw.set_price_signal({"electricity_price": 0.2, "ghg": 0.4})
+
+    def test_empty_price_dict_is_refused(self):
+        """A dict naming no field applies nothing; it is refused rather
+        than recorded as a no-op application."""
+        dw = _init_dwelling()
+        with pytest.raises(ValueError, match="no price field"):
+            dw.set_price_signal({})
+
+    def test_record_script_lands_in_the_runs_provenance(self):
+        """The scenario engine records its driver through the dwelling's
+        own surface: the declared name and the SHA-256 digest over the
+        script's content. The provenance getter renders the digest as the
+        hex the setter accepts, so a run names its driver end to end."""
+        dw = _init_dwelling()
+        content = b"voltage_pu: 0.6 at t=900\n"
+        digest = hashlib.sha256(content).hexdigest()
+        dw.record_script("grid-event-study", digest)
+        dw.step()
+        result = dw.finish()
+        assert result.provenance.script == {
+            "name": "grid-event-study",
+            "sha256": digest,
+        }
+
+    def test_record_script_refuses_a_malformed_digest(self):
+        dw = _init_dwelling()
+        with pytest.raises(ValueError, match="SHA-256 digest"):
+            dw.record_script("grid-event-study", "not-a-digest")
 
     def test_set_grid_voltage(self):
         dw = _init_dwelling()

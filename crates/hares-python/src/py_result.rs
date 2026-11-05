@@ -718,7 +718,10 @@ pub fn build_info() -> PyBuildInfo {
 /// directory): `load`, the build, then `simulate()`, returning the
 /// replayed run's `RunResult`. The `defaults` directory is the packaged
 /// tree by default; an explicit path overrides it, and the export
-/// verifies the digest over the tree it reads.
+/// verifies the digest over the tree it reads. A script-driven export
+/// is refused by the load, naming the script: its external inputs are
+/// not stored, so the caller re-runs the script against the export's
+/// configuration for the exact replay.
 #[pyfunction]
 #[pyo3(signature = (dir, defaults=None))]
 pub fn replay(py: Python<'_>, dir: &str, defaults: Option<&str>) -> PyResult<PyRunResult> {
@@ -832,6 +835,20 @@ impl PyProvenance {
                 inner: entry.clone(),
             })
             .collect()
+    }
+
+    /// The scenario script that drove the run, as a dict holding the
+    /// script's name and the 64 char hex digest over its content, or
+    /// `None` for a run no script drove.
+    #[getter]
+    fn script<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(record) = self.inner.script.as_ref() else {
+            return Ok(None);
+        };
+        let dict = PyDict::new(py);
+        dict.set_item("name", record.name.clone())?;
+        dict.set_item("sha256", hares_input::input::hex(&record.sha256))?;
+        Ok(Some(dict))
     }
 
     /// The electric tariff the run attached, as a dict holding the

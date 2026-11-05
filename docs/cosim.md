@@ -75,7 +75,17 @@ Subscriptions:
 |---|---|---|
 | `grid/voltage` | pu | The utility service voltage. Exactly 0.0 signals a utility outage; otherwise a finite value in [0.5, 1.5] pu. |
 | `grid/frequency` | Hz | The grid frequency. A finite value in [40, 80] Hz. |
-| `grid/price` | currency/kWh | The real-time electricity price, non-negative. |
+| `grid/price` | currency/kWh | The real-time import electricity price. A finite value; a negative price is a real scenario and is applied with a warning. |
+| `grid/export_price` | currency/kWh | The export (sell-back) electricity price, the field the EV's V2G and price logic reads. A finite value; the same negative-price rule. |
+| `grid/ghg_intensity` | kg CO₂e/kWh | The grid's carbon intensity, copied into the dwelling's environment view every step. A finite value; the same negative-price rule. |
+
+An update on ONE price topic applies that field only: the other fields'
+last values are preserved, never cleared (the price channels are
+per-field sets over the dwelling's stored signal). The applied price
+also wins over an attached tariff evaluator's feed for the step it was
+applied on; the tariff's signal resumes on the next step with no
+applied price (docs/PHYSICS_DECISIONS.md, the price pipeline's
+precedence).
 
 ## The boundary contract (one behavior, both federates)
 

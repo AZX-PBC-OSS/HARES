@@ -2487,9 +2487,7 @@ fn battery_telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::code_code(
             tk::DER1547_TRIP_REASON,
             crate::der1547::trip_reason::LABELS.as_slice(),
-            "The IEEE 1547 trip condition that fired: 0.0 = none, 1.0 = uv2, \
-                 2.0 = uv1, 3.0 = ov1, 4.0 = ov2, 5.0 = uf2, 6.0 = uf1, \
-                 7.0 = of1, 8.0 = of2",
+            crate::der1547::trip_reason::DESCRIPTION,
         ),
         TelemetryField::flow_mean(
             tk::DER1547_RIDE_THROUGH_S,
@@ -3492,15 +3490,20 @@ mod tests {
         );
     }
 
-    /// The fail-safe fires on an unavailable step without latching: the
-    /// battery's layer steps through the period (its trip tables watch
-    /// the bus), so a non-finite grid reading on such a step reaches it
-    /// and the fail-safe's per-step de-energization is the step's
-    /// outcome. It names no table and never reaches the latch: the next
-    /// finite step resumes the period's idle with the trip state
-    /// released.
+    /// The fail-safe fires on an unavailable step and latches like the
+    /// standard trips: the battery's layer steps through the period (its
+    /// trip tables watch the bus), so a non-finite grid reading on such a
+    /// step reaches it. It carries its own reason code (9, the
+    /// input-invalid fail-safe) and the trip holds: the next finite step
+    /// waits on the enter-service windows instead of resuming. The red
+    /// state at the parent named no table (reason 0, "none", a word the
+    /// vocabulary gives no tripped inverter) and released the trip on the
+    /// next step: a NaN is indistinguishable from a dead bus from the
+    /// inverter's seat (every band comparison against it is false), and
+    /// the enter-service procedure is the standard's protection against
+    /// re-energizing into a grid the reading could not evaluate.
     #[test]
-    fn a_non_finite_reading_on_an_unavailable_step_fires_the_failsafe_not_a_latch() {
+    fn a_non_finite_reading_on_an_unavailable_step_fires_the_failsafe_and_latches() {
         let config = battery_config_with_der1547(Some(cat2_settings()));
         let mut bat = Battery::new(config.clone());
         bat.init(&config, &base_env()).unwrap();
@@ -3519,8 +3522,8 @@ mod tests {
         );
         assert_eq!(
             bat.telemetry().get(tk::DER1547_TRIP_REASON),
-            Some(0.0),
-            "the fail-safe names no table"
+            Some(9.0),
+            "the fail-safe names its own condition"
         );
         assert_eq!(
             bat.telemetry().get(tk::ACTIVE_POWER_KW),
@@ -3535,11 +3538,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             bat.telemetry().get(tk::DER1547_TRIPPED),
-            Some(0.0),
-            "the fail-safe is the step's, not a latch: the finite step \
-             resumes the period's idle"
+            Some(1.0),
+            "the fail-safe latches like the others: the finite step waits \
+             on the enter-service windows"
         );
-        assert_eq!(bat.telemetry().get(tk::DER1547_ENTER_SERVICE_S), Some(0.0));
+        assert_eq!(
+            bat.telemetry().get(tk::DER1547_ENTER_SERVICE_S),
+            Some(60.0),
+            "the return to service accumulates inside the windows"
+        );
     }
 
     /// The 1547 run state survives a checkpoint round trip: a trip

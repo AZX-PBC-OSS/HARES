@@ -99,6 +99,32 @@ pub fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// The inverse of [`hex`]: a 64 char lowercase hex string decoded to its
+/// 32 bytes. The error names the length or the offending byte; the
+/// caller adds its own context.
+///
+/// # Errors
+///
+/// The description when `hex` is not 64 lowercase hex characters.
+pub fn unhex(hex: &str) -> Result<[u8; 32], String> {
+    fn value(c: u8) -> Result<u8, String> {
+        match c {
+            b'0'..=b'9' => Ok(c - b'0'),
+            b'a'..=b'f' => Ok(c - b'a' + 10),
+            other => Err(format!("is not lowercase hex at '{}'", other as char)),
+        }
+    }
+    let bytes = hex.as_bytes();
+    if bytes.len() != 64 {
+        return Err(format!("is {} characters, expected 64", bytes.len()));
+    }
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = (value(bytes[index * 2])? << 4) | value(bytes[index * 2 + 1])?;
+    }
+    Ok(digest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +138,18 @@ mod tests {
         assert_eq!(
             record.hex(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn unhex_is_the_inverse_of_hex_and_names_a_malformed_digest() {
+        let bytes = Sha256::digest(b"abc").into();
+        assert_eq!(unhex(&hex(&bytes)), Ok(bytes));
+        assert!(unhex("not-a-digest").unwrap_err().contains("characters"));
+        assert!(
+            unhex(&"z".repeat(64))
+                .unwrap_err()
+                .contains("not lowercase hex")
         );
     }
 

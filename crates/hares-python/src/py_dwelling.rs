@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, FixedOffset};
-use hares_control::PriceSignal;
 use hares_core::{
     ActorConfig, ActorRegistry, BatteryLutData, Dwelling, DwellingBlueprint,
     DwellingBlueprintBuilder, DwellingCheckpoint, DwellingConfig, PremiseZip,
@@ -103,7 +102,7 @@ use crate::py_equipment::{
 };
 use crate::py_result::{PyRunHealth, PyRunResult};
 use crate::py_telemetry::PyTelemetry;
-use crate::utils::finite_f64_optional;
+use crate::utils::price_signal_from_dict;
 use crate::utils::validate_finite;
 
 fn parse_solar_override(
@@ -1196,18 +1195,31 @@ impl PyDwelling {
     }
 
     pub fn set_price_signal(&self, signal: &Bound<'_, PyDict>) -> PyResult<()> {
-        // Loud on non-finite prices at the boundary (the shared
-        // validators' section rationale, `utils.rs`): a NaN price's
-        // comparisons are always false, so the price actors'
-        // conditionals (the EvDriver's price logic) silently stop
-        // firing in release builds.
-        let price = PriceSignal {
-            electricity_price: finite_f64_optional(signal, "electricity_price")?,
-            export_price: finite_f64_optional(signal, "export_price")?,
-            ghg_intensity: finite_f64_optional(signal, "ghg_intensity")?,
-        };
+        // The dict's named fields apply and its absent fields preserve the
+        // stored ones (the shared reader, `utils.rs`): the price update is
+        // a per-field set, so a dict touching one field never clears the
+        // others the way a whole-struct replace would. Loud on non-finite
+        // prices at the boundary (the shared validators' section
+        // rationale, `utils.rs`): a NaN price's comparisons are always
+        // false, so the price actors' conditionals (the EvDriver's price
+        // logic) silently stop firing in release builds.
+        let price = price_signal_from_dict(signal)?;
         let mut dwelling = self.acquire()?;
-        dwelling.set_price_signal(price);
+        dwelling.update_price_signal(price);
+        Ok(())
+    }
+
+    /// Records the scenario script driving the run for its provenance:
+    /// the script's declared name and the 64 char lowercase hex SHA-256
+    /// digest over its content (the form ``Provenance.script`` renders).
+    /// The scenario engine calls this once, at the first applied event;
+    /// the script's content stays the caller's to hold.
+    pub fn record_script(&self, name: &str, sha256: &str) -> PyResult<()> {
+        let digest = hares_input::input::unhex(sha256).map_err(|reason| {
+            PyValueError::new_err(format!("record_script: the SHA-256 digest {reason}"))
+        })?;
+        let mut dwelling = self.acquire()?;
+        dwelling.record_script(name, digest);
         Ok(())
     }
 
@@ -2509,6 +2521,12 @@ impl PyDwelling {
         dict.set_item("mains_temp_c", env.weather.mains_temp_c)?;
         dict.set_item("grid_voltage_pu", env.grid.voltage_pu)?;
         dict.set_item("grid_frequency_hz", env.grid.frequency_hz)?;
+        // The price signal the step resolved with: the environment view
+        // the price consumers read (the EV driver's V2G and price logic
+        // among them). `None` for a field no source set.
+        dict.set_item("electricity_price", env.price_signal.electricity_price)?;
+        dict.set_item("export_price", env.price_signal.export_price)?;
+        dict.set_item("ghg_intensity", env.price_signal.ghg_intensity)?;
         // Outage/islanding observability: `grid_voltage_pu` is the utility
         // service voltage (0.0 = outage); `grid_bus_voltage_pu` is the bus
         // voltage equipment actually sees (nonzero when a backup source
@@ -3041,8 +3059,11 @@ pub(crate) fn to_py_err(err: HaresError) -> PyErr {
         | HaresError::PreconditioningAxis { .. }
         // A run that cannot be exported for exact replay is the caller's
         // configuration mistake: the dwelling was changed in a way a
-        // replay cannot rebuild.
-        | HaresError::NotReplayable { .. } => HaresConfigError::new_err(msg),
+        // replay cannot rebuild. A script-driven export is the same
+        // class at the load boundary: its external inputs must be
+        // re-applied by re-running the script.
+        | HaresError::NotReplayable { .. }
+        | HaresError::ReplayDriverScript { .. } => HaresConfigError::new_err(msg),
         HaresError::Equipment(_) | HaresError::InvalidEquipmentParameter { .. } => {
             HaresEquipmentError::new_err(msg)
         }

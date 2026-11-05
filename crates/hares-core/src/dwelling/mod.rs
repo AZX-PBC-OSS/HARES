@@ -101,7 +101,7 @@ use crate::observation::{
 };
 use crate::result::{
     BuildInfo, EquipmentProvenance, Provenance, ReportOutput, ReportResult, RunMetrics, RunResult,
-    TariffRecord,
+    ScriptRecord, TariffRecord,
 };
 use crate::rng::SeededStream;
 use crate::rng::{advance_dwelling_rng, derive_sub_rng, ev_driver_stream};
@@ -2019,6 +2019,16 @@ pub struct Dwelling {
 
     control_dispatcher: ControlDispatcher,
     price_signal: PriceSignal,
+    /// The applied-price marker: set by every explicit price
+    /// application (`set_price_signal` and its per-field
+    /// `update_price_signal`, reached by the fleet's broadcasts and the
+    /// HELICS price topics), consumed by the step that follows.
+    /// The precedence rule's state: the operator's hand wins for the one
+    /// step it landed on, the tariff's background feed governs the rest.
+    /// Not checkpoint state: a restored run re-applies its prices through
+    /// the setters, the same external-input rule the stored signal and
+    /// the grid overrides follow.
+    price_signal_applied: bool,
     tariff_evaluator: Option<TariffEvaluator>,
     billing_summaries: Vec<BillingPeriodSummary>,
     prior_electrical_summary: ElectricalSummary,
@@ -2030,6 +2040,10 @@ pub struct Dwelling {
     /// The electric tariff attached with `set_tariff`, recorded for the
     /// run's provenance and its replay export.
     tariff_record: Option<TariffRecord>,
+    /// The scenario script driving the run, recorded for the run's
+    /// provenance and its replay export: the driver behind the external
+    /// inputs the script's events applied.
+    script: Option<ScriptRecord>,
     /// Why the run cannot be exported for exact replay, each category
     /// once in the order first seen, recorded the first time the change
     /// happened.
@@ -3832,12 +3846,14 @@ fn assemble_from_blueprint_with_seed(
         pv_panel_defaults: defaults.pv_panel_map(),
         control_dispatcher: ControlDispatcher::default(),
         price_signal: PriceSignal::default(),
+        price_signal_applied: false,
         tariff_evaluator: None,
         billing_summaries: Vec::new(),
         prior_electrical_summary: ElectricalSummary::default(),
         latest_env: initial_env,
         run_result: None,
         tariff_record: None,
+        script: None,
         replay_blockers: if bp.blueprint_edited {
             vec![hares_types::ReplayBlocker::BlueprintEdited]
         } else {
@@ -4148,6 +4164,7 @@ impl Dwelling {
             equipment,
             inputs: self.inputs.clone(),
             tariff: self.tariff_record.clone(),
+            script: self.script.clone(),
             replay_blockers: self.replay_blockers.clone(),
         }
     }
@@ -4654,9 +4671,43 @@ impl Dwelling {
         &self.clamp_census
     }
 
-    /// Stores the active price signal for equipment controllers.
+    /// Stores the active price signal for equipment controllers. The
+    /// application marks the step in flight: the explicitly applied price
+    /// wins over the attached tariff evaluator's feed for exactly that
+    /// step (the precedence rule in `docs/PHYSICS_DECISIONS.md`).
     pub fn set_price_signal(&mut self, signal: PriceSignal) {
         self.price_signal = signal;
+        self.price_signal_applied = true;
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
+    }
+
+    /// Applies a price-signal update per field: a named field (`Some`)
+    /// overwrites the stored one, an absent field (`None`) preserves it.
+    /// This is the boundary's partial-update form (the HELICS price
+    /// topics, the dict setter): an update touching one field never
+    /// clears the others, so an import-price publication cannot wipe a
+    /// set export price the EV's V2G and price logic reads. A signal
+    /// naming at least one field marks the applied-price step exactly as
+    /// `set_price_signal` does; a signal naming none applies nothing, so
+    /// it neither marks the step nor records the external input (an
+    /// empty update must not hand the stored signal the tariff's step).
+    pub fn update_price_signal(&mut self, signal: PriceSignal) {
+        if signal.electricity_price.is_none()
+            && signal.export_price.is_none()
+            && signal.ghg_intensity.is_none()
+        {
+            return;
+        }
+        if signal.electricity_price.is_some() {
+            self.price_signal.electricity_price = signal.electricity_price;
+        }
+        if signal.export_price.is_some() {
+            self.price_signal.export_price = signal.export_price;
+        }
+        if signal.ghg_intensity.is_some() {
+            self.price_signal.ghg_intensity = signal.ghg_intensity;
+        }
+        self.price_signal_applied = true;
         self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
     }
 
@@ -4664,6 +4715,19 @@ impl Dwelling {
     #[must_use]
     pub fn price_signal(&self) -> &PriceSignal {
         &self.price_signal
+    }
+
+    /// Records the scenario script driving the run: the script's
+    /// identity (its name and the digest over its content) rides the
+    /// run's provenance and its replay export. The script engine calls
+    /// this once, at the first applied event; the setters the script's
+    /// events drive record the external-input replay blocker
+    /// themselves.
+    pub fn record_script(&mut self, name: &str, sha256: [u8; 32]) {
+        self.script = Some(ScriptRecord {
+            name: name.to_string(),
+            sha256,
+        });
     }
 
     /// Returns accumulated billing period summaries.
@@ -6631,15 +6695,31 @@ impl Dwelling {
         self.environment
             .update_in_place(&mut self.latest_env, &self.clock)?;
 
-        // Populate price signal from tariff evaluator (deterministic function of clock).
-        if let Some(ref evaluator) = self.tariff_evaluator {
-            self.latest_env.price_signal = PriceSignal {
-                electricity_price: Some(evaluator.current_price()),
-                export_price: Some(evaluator.current_export_price()),
-                ghg_intensity: self.latest_env.price_signal.ghg_intensity,
-            };
-        } else {
-            self.latest_env.price_signal = self.price_signal.clone();
+        // The price pipeline's precedence rule (docs/PHYSICS_DECISIONS.md):
+        // an explicitly applied price signal (the setter, the fleet's
+        // `set_price_signal_all`, the HELICS price topics) is the
+        // operator's hand and wins for the one step it was applied on; the
+        // attached tariff evaluator is the background feed and governs
+        // every step no explicit price was applied on. The marker is
+        // consumed here every step, so an application overrides exactly
+        // the step it landed on and the tariff resumes on the next.
+        let explicit_price_applied = std::mem::take(&mut self.price_signal_applied);
+        match self.tariff_evaluator.as_ref() {
+            Some(evaluator) if !explicit_price_applied => {
+                // The tariff feeds the import and export prices only. The
+                // environment's price signal was reset by the update just
+                // above, so the intensity's unchanged value is the stored
+                // signal's, never the view's (which would clear it every
+                // tariff step).
+                self.latest_env.price_signal = PriceSignal {
+                    electricity_price: Some(evaluator.current_price()),
+                    export_price: Some(evaluator.current_export_price()),
+                    ghg_intensity: self.price_signal.ghg_intensity,
+                };
+            }
+            // An explicit price this step, or no tariff attached: the
+            // stored signal is the price.
+            Some(_) | None => self.latest_env.price_signal = self.price_signal.clone(),
         }
 
         // Populate electrical summary from prior step's solver results.
@@ -20815,6 +20895,150 @@ latent_gain_fraction = 0.08
         assert!(
             replacement_bill.total_import_kwh > 0.0,
             "the replacement's accruals carried into its first bill"
+        );
+    }
+
+    /// The price pipeline's precedence rule (docs/PHYSICS_DECISIONS.md):
+    /// an explicitly applied price signal is the operator's hand and wins
+    /// for the one step it was applied on; the attached tariff evaluator
+    /// is the background feed and governs every step no explicit price
+    /// was applied on. The red state at the parent was the evaluator's
+    /// unconditional per-step overwrite: with a tariff attached, a price
+    /// applied through `set_price_signal` (the fleet's
+    /// `set_price_signal_all` and the HELICS `grid/price` topic included)
+    /// never reached the environment view every consumer reads.
+    #[test]
+    fn an_applied_price_wins_over_the_attached_tariff_on_its_step() {
+        let tz = chrono_tz::America::Denver;
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+
+        // The tariff-only step: the background feed's price flows. The
+        // flat fixture's import rate is 0.15 currency/kWh.
+        dwelling.step().expect("the tariff-only step");
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.15),
+            "a step with no applied price carries the tariff's signal"
+        );
+
+        // The operator's hand: the applied signal flows whole, import and
+        // export both, on the step it was applied.
+        dwelling.set_price_signal(PriceSignal {
+            electricity_price: Some(0.42),
+            export_price: Some(0.05),
+            ghg_intensity: None,
+        });
+        dwelling.step().expect("the applied step");
+        let applied = &dwelling.latest_env.price_signal;
+        assert_eq!(
+            applied.electricity_price,
+            Some(0.42),
+            "the explicitly applied price wins over the attached tariff for its step"
+        );
+        assert_eq!(
+            applied.export_price,
+            Some(0.05),
+            "the applied signal's export price flows whole: the tariff's export feed does not replace it"
+        );
+
+        // The next step applies nothing: the tariff's feed resumes.
+        dwelling.step().expect("the step after the application");
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.15),
+            "the applied price governs exactly its own step; the tariff resumes after"
+        );
+    }
+
+    /// The no-tariff arm of the same pipeline: the applied price is the
+    /// only source and flows every step. Pins the marker's introduction
+    /// against the arm that was already correct.
+    #[test]
+    fn an_applied_price_flows_every_step_without_a_tariff() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.set_price_signal(PriceSignal {
+            electricity_price: Some(0.30),
+            export_price: None,
+            ghg_intensity: None,
+        });
+        for _ in 0..3 {
+            dwelling.step().expect("step");
+        }
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.30),
+            "with no tariff attached the stored signal is the run's price"
+        );
+    }
+
+    /// The tariff has no GHG feed: the carbon intensity an applied price
+    /// carried is the run's only source, so it survives the tariff's
+    /// resumption instead of resetting with the step's environment
+    /// recompute. The red state at the parent read the intensity back
+    /// from the environment view `update_in_place` had just reset, so the
+    /// stored field was published as `None` from the first tariff step
+    /// on: the wipe the price channel's per-field update exists to stop,
+    /// one step past the application.
+    #[test]
+    fn a_tariff_step_carries_the_applied_ghg_intensity() {
+        let tz = chrono_tz::America::Denver;
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+        dwelling.set_price_signal(PriceSignal {
+            electricity_price: Some(0.42),
+            export_price: Some(0.05),
+            ghg_intensity: Some(0.33),
+        });
+        dwelling.step().expect("the applied step");
+        assert_eq!(
+            dwelling.latest_env.price_signal.ghg_intensity,
+            Some(0.33),
+            "the applied signal's intensity flows on its step"
+        );
+        dwelling.step().expect("the tariff step");
+        assert_eq!(
+            dwelling.latest_env.price_signal.ghg_intensity,
+            Some(0.33),
+            "the tariff feeds no intensity: the stored one carries"
+        );
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.15),
+            "the tariff's import price governs the same step"
+        );
+    }
+
+    /// An update naming no field applies nothing: it neither marks the
+    /// step (so the tariff keeps governing) nor records the external
+    /// input. The red state at the parent set the marker
+    /// unconditionally, so an all-`None` update won its step with a
+    /// stored signal of `None`s and the tariff's price vanished.
+    #[test]
+    fn an_update_naming_no_field_leaves_the_tariff_in_charge() {
+        let tz = chrono_tz::America::Denver;
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+        dwelling.update_price_signal(PriceSignal::default());
+        dwelling.step().expect("the step");
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.15),
+            "an all-None update applies nothing: the tariff governs"
+        );
+        let result = dwelling.finish().expect("the run finishes");
+        assert!(
+            !result
+                .provenance
+                .replay_blockers
+                .contains(&hares_types::ReplayBlocker::ExternalInput),
+            "a no-op update records no external input"
         );
     }
 
