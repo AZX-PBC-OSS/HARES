@@ -2545,9 +2545,10 @@ through a declared schedule column).
 A dwelling's price for a step resolves from two sources: the tariff
 evaluator attached with `Dwelling::set_tariff` (the background feed, a
 deterministic function of the clock) and an explicitly applied price
-signal (`Dwelling::set_price_signal`, reached by the fleet's
-`set_price_signal_all` and the HELICS `grid/price` and
-`grid/export_price` topics). The rule: the explicitly applied price is
+signal (`Dwelling::set_price_signal` and the per-field
+`Dwelling::update_price_signal`, reached by the fleet's broadcasts and
+the HELICS `grid/price`, `grid/export_price` and `grid/ghg_intensity`
+topics). The rule: the explicitly applied price is
 the operator's hand and wins for the one step it was applied on; the
 tariff's signal governs every step no explicit price was applied on. The
 machinery is an applied-price marker on the dwelling, set by every
@@ -2565,3 +2566,11 @@ alternative, a typed refusal when both sources are present, is wrong for
 the co-simulation's shape: a tariff and a live price topic are the
 normal configuration, and the topic's updates are intermittent, so the
 two sources must compose per step, not exclude each other.
+
+The tariff evaluator feeds the import and export prices; it has no
+carbon-intensity source. The stored GHG intensity therefore carries
+across a tariff step unchanged, the same persistence the no-tariff arm
+gives it: the environment view is recomputed each step, and the tariff
+arm reads the intensity from the stored signal rather than from the view
+it just reset (which published `None` from the first tariff step on and
+undid the per-field update one step after its application).

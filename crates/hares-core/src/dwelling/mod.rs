@@ -2019,9 +2019,10 @@ pub struct Dwelling {
 
     control_dispatcher: ControlDispatcher,
     price_signal: PriceSignal,
-    /// The applied-price marker: set by every explicit application
-    /// (`set_price_signal`, reached by the fleet's `set_price_signal_all`
-    /// and the HELICS price topics), consumed by the step that follows.
+    /// The applied-price marker: set by every explicit price
+    /// application (`set_price_signal` and its per-field
+    /// `update_price_signal`, reached by the fleet's broadcasts and the
+    /// HELICS price topics), consumed by the step that follows.
     /// The precedence rule's state: the operator's hand wins for the one
     /// step it landed on, the tariff's background feed governs the rest.
     /// Not checkpoint state: a restored run re-applies its prices through
@@ -4685,9 +4686,18 @@ impl Dwelling {
     /// This is the boundary's partial-update form (the HELICS price
     /// topics, the dict setter): an update touching one field never
     /// clears the others, so an import-price publication cannot wipe a
-    /// set export price the EV's V2G and price logic reads. Marks the
-    /// applied-price step exactly as `set_price_signal` does.
+    /// set export price the EV's V2G and price logic reads. A signal
+    /// naming at least one field marks the applied-price step exactly as
+    /// `set_price_signal` does; a signal naming none applies nothing, so
+    /// it neither marks the step nor records the external input (an
+    /// empty update must not hand the stored signal the tariff's step).
     pub fn update_price_signal(&mut self, signal: PriceSignal) {
+        if signal.electricity_price.is_none()
+            && signal.export_price.is_none()
+            && signal.ghg_intensity.is_none()
+        {
+            return;
+        }
         if signal.electricity_price.is_some() {
             self.price_signal.electricity_price = signal.electricity_price;
         }
@@ -6696,10 +6706,15 @@ impl Dwelling {
         let explicit_price_applied = std::mem::take(&mut self.price_signal_applied);
         match self.tariff_evaluator.as_ref() {
             Some(evaluator) if !explicit_price_applied => {
+                // The tariff feeds the import and export prices only. The
+                // environment's price signal was reset by the update just
+                // above, so the intensity's unchanged value is the stored
+                // signal's, never the view's (which would clear it every
+                // tariff step).
                 self.latest_env.price_signal = PriceSignal {
                     electricity_price: Some(evaluator.current_price()),
                     export_price: Some(evaluator.current_export_price()),
-                    ghg_intensity: self.latest_env.price_signal.ghg_intensity,
+                    ghg_intensity: self.price_signal.ghg_intensity,
                 };
             }
             // An explicit price this step, or no tariff attached: the
@@ -20956,6 +20971,74 @@ latent_gain_fraction = 0.08
             dwelling.latest_env.price_signal.electricity_price,
             Some(0.30),
             "with no tariff attached the stored signal is the run's price"
+        );
+    }
+
+    /// The tariff has no GHG feed: the carbon intensity an applied price
+    /// carried is the run's only source, so it survives the tariff's
+    /// resumption instead of resetting with the step's environment
+    /// recompute. The red state at the parent read the intensity back
+    /// from the environment view `update_in_place` had just reset, so the
+    /// stored field was published as `None` from the first tariff step
+    /// on: the wipe the price channel's per-field update exists to stop,
+    /// one step past the application.
+    #[test]
+    fn a_tariff_step_carries_the_applied_ghg_intensity() {
+        let tz = chrono_tz::America::Denver;
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+        dwelling.set_price_signal(PriceSignal {
+            electricity_price: Some(0.42),
+            export_price: Some(0.05),
+            ghg_intensity: Some(0.33),
+        });
+        dwelling.step().expect("the applied step");
+        assert_eq!(
+            dwelling.latest_env.price_signal.ghg_intensity,
+            Some(0.33),
+            "the applied signal's intensity flows on its step"
+        );
+        dwelling.step().expect("the tariff step");
+        assert_eq!(
+            dwelling.latest_env.price_signal.ghg_intensity,
+            Some(0.33),
+            "the tariff feeds no intensity: the stored one carries"
+        );
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.15),
+            "the tariff's import price governs the same step"
+        );
+    }
+
+    /// An update naming no field applies nothing: it neither marks the
+    /// step (so the tariff keeps governing) nor records the external
+    /// input. The red state at the parent set the marker
+    /// unconditionally, so an all-`None` update won its step with a
+    /// stored signal of `None`s and the tariff's price vanished.
+    #[test]
+    fn an_update_naming_no_field_leaves_the_tariff_in_charge() {
+        let tz = chrono_tz::America::Denver;
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+        dwelling.update_price_signal(PriceSignal::default());
+        dwelling.step().expect("the step");
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.15),
+            "an all-None update applies nothing: the tariff governs"
+        );
+        let result = dwelling.finish().expect("the run finishes");
+        assert!(
+            !result
+                .provenance
+                .replay_blockers
+                .contains(&hares_types::ReplayBlocker::ExternalInput),
+            "a no-op update records no external input"
         );
     }
 

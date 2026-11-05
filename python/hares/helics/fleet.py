@@ -664,9 +664,10 @@ class HELICSFleet:
         # Track stale subscription counts and build update mask.
         # Bits match _subscription_configs order (register_subscriptions'
         # registration order): bit 0 = fleet-wide voltage, bits 1..N =
-        # per-dwelling voltages, then control, then price, then frequency
-        # last. is_updated() is called exactly once per subscription so
-        # that stale tracking and business logic share the same result.
+        # per-dwelling voltages, then control, then the price channel's
+        # three fields (import, export, GHG), then frequency last.
+        # is_updated() is called exactly once per subscription so that
+        # stale tracking and business logic share the same result.
         _sub_objs: list[HelicsSubscriptionLike] = []
         if self._sub_voltage_all is not None:
             _sub_objs.append(self._sub_voltage_all)
