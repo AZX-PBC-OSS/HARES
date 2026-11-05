@@ -3149,7 +3149,15 @@ class SteppableFleet:
         electricity_price: float,
         export_price: float | None = ...,
         ghg_intensity: float | None = ...,
-    ) -> None: ...
+    ) -> None:
+        """The fleet-wide per-field price update: the named fields apply
+        to every dwelling, the omitted fields preserve each dwelling's
+        stored value. Non-finite values are refused."""
+    def update_price_signal_all(self, signal: dict[str, float | None]) -> None:
+        """The dict form of the fleet-wide per-field price update: the
+        named fields apply to every dwelling, the absent fields preserve
+        them. Accepts the same keys as the dwelling's
+        ``set_price_signal``."""
     def apply_control(
         self,
         dwelling_index: int,
@@ -3355,7 +3363,11 @@ class Dwelling:
         name: str,
         params: dict[str, Any] | None = ...,
     ) -> None: ...
-    def set_price_signal(self, signal: dict[str, float | None]) -> None: ...
+    def set_price_signal(self, signal: dict[str, float | None]) -> None:
+        """The per-field price update: the dict's named fields
+        (``electricity_price``, ``export_price``, ``ghg_intensity``)
+        overwrite the stored ones and the absent fields preserve them, so
+        a partial dict wipes nothing. Non-finite values are refused."""
     def set_grid_voltage(self, voltage_pu: float) -> None: ...
     def set_frequency(self, frequency_hz: float) -> None: ...
     def take_warnings(self) -> list[str]: ...

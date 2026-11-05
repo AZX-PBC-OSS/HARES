@@ -4674,6 +4674,27 @@ impl Dwelling {
         self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
     }
 
+    /// Applies a price-signal update per field: a named field (`Some`)
+    /// overwrites the stored one, an absent field (`None`) preserves it.
+    /// This is the boundary's partial-update form (the HELICS price
+    /// topics, the dict setter): an update touching one field never
+    /// clears the others, so an import-price publication cannot wipe a
+    /// set export price the EV's V2G and price logic reads. Marks the
+    /// applied-price step exactly as `set_price_signal` does.
+    pub fn update_price_signal(&mut self, signal: PriceSignal) {
+        if signal.electricity_price.is_some() {
+            self.price_signal.electricity_price = signal.electricity_price;
+        }
+        if signal.export_price.is_some() {
+            self.price_signal.export_price = signal.export_price;
+        }
+        if signal.ghg_intensity.is_some() {
+            self.price_signal.ghg_intensity = signal.ghg_intensity;
+        }
+        self.price_signal_applied = true;
+        self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
+    }
+
     /// Returns the current price signal.
     #[must_use]
     pub fn price_signal(&self) -> &PriceSignal {

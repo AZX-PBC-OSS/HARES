@@ -197,7 +197,7 @@ class _FakeFleet:
         self.grid_voltage_all_values: list[float] = []
         self.grid_voltage_values: list[tuple[int, float]] = []
         self.applied_controls: list[tuple[int, str, Any]] = []
-        self.price_signals: list[float] = []
+        self.price_signals: list[dict[str, float | None]] = []
         self.frequency_values: list[float] = []
 
     def __len__(self) -> int:
@@ -281,9 +281,9 @@ class _FakeFleet:
         self.grid_voltage_values.append((dwelling_index, voltage_pu))
         self._log.append(("set_grid_voltage", dwelling_index, voltage_pu))
 
-    def set_price_signal_all(self, electricity_price: float) -> None:
-        self.price_signals.append(electricity_price)
-        self._log.append(("set_price_signal_all", electricity_price))
+    def update_price_signal_all(self, signal: dict[str, float | None]) -> None:
+        self.price_signals.append(signal)
+        self._log.append(("update_price_signal_all", signal))
 
     def set_frequency_all(self, frequency_hz: float) -> None:
         self.frequency_values.append(frequency_hz)
@@ -1110,18 +1110,51 @@ def test_fleet_price_subscription_applies_to_every_dwelling(
 
     orchestrator._sub_price.push_double(0.42)
     orchestrator._read_subscriptions()
-    assert fleet.price_signals == [0.42]
+    assert fleet.price_signals == [{"electricity_price": 0.42}]
     assert orchestrator.helics_price_valid is True
     assert orchestrator.helics_range_violations_total == 0
 
     orchestrator._sub_price.push_double(-0.05)
     orchestrator._read_subscriptions()
-    assert fleet.price_signals == [0.42, -0.05], (
+    assert fleet.price_signals == [{"electricity_price": 0.42}, {"electricity_price": -0.05}], (
         "a negative price is applied after its warning, the dwelling "
         "federate's exact price behavior"
     )
     assert orchestrator.helics_price_valid is False
     assert orchestrator.helics_range_violations_total == 1
+
+
+def test_fleet_export_price_update_applies_its_field_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An update on the fleet's export-price topic applies that field
+    alone, fleet-wide: the per-field update preserves the import price's
+    stored value in every dwelling. The red state at the parent broadcast
+    the import price only through a whole-signal set, wiping the other
+    fields, and no export topic existed."""
+    module, fake_helics = _import_fleet_module(monkeypatch)
+    fleet = _FakeFleet(fake_helics.log)
+    orchestrator = module.HELICSFleet(fleet, fed_name="fleet_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_export_price is not None
+
+    orchestrator._sub_export_price.push_double(0.07)
+    orchestrator._read_subscriptions()
+    assert fleet.price_signals == [{"export_price": 0.07}]
+
+    # The import topic's broadcast composes beside it, one field per topic.
+    assert orchestrator._sub_price is not None
+    orchestrator._sub_price.push_double(0.19)
+    orchestrator._read_subscriptions()
+    assert fleet.price_signals == [{"export_price": 0.07}, {"electricity_price": 0.19}]
+
+    # The GHG topic: the third field, the same per-field application.
+    assert orchestrator._sub_ghg_intensity is not None
+    orchestrator._sub_ghg_intensity.push_double(0.41)
+    orchestrator._read_subscriptions()
+    assert fleet.price_signals[-1] == {"ghg_intensity": 0.41}
 
 
 def test_set_publication_info_attaches_unit_metadata(
@@ -1639,7 +1672,9 @@ def test_fleet_update_mask_pins_one_bit_per_subscription_class(
         ("dwelling 2 voltage", orchestrator._sub_voltage_dwelling[2], 1 << 3),
         ("control", orchestrator._sub_control, 1 << 4),
         ("price", orchestrator._sub_price, 1 << 5),
-        ("frequency", orchestrator._sub_frequency, 1 << 6),
+        ("export price", orchestrator._sub_export_price, 1 << 6),
+        ("ghg intensity", orchestrator._sub_ghg_intensity, 1 << 7),
+        ("frequency", orchestrator._sub_frequency, 1 << 8),
     ]
     for label, subscription, bit in classes:
         assert subscription is not None

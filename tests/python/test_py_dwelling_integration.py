@@ -345,6 +345,31 @@ class TestPriceAndGridVoltage:
         result = dw.step()
         assert "timestamp" in result
 
+    def test_partial_price_update_preserves_the_other_fields(self):
+        """The price update is a per-field set: a dict naming one field
+        preserves the stored others. The red state at the parent replaced
+        the stored signal whole, so an export-only update wiped the import
+        price. The environment view's price fields are the consumers':
+        the EV driver's V2G and price logic reads the export price from
+        this same struct."""
+        dw = _init_dwelling()
+        dw.set_price_signal({"electricity_price": 0.2, "ghg_intensity": 0.3})
+        dw.step()
+        env = dw.latest_env()
+        assert env["electricity_price"] == pytest.approx(0.2)
+        assert env["ghg_intensity"] == pytest.approx(0.3)
+
+        dw.set_price_signal({"export_price": 0.06})
+        dw.step()
+        env = dw.latest_env()
+        assert env["export_price"] == pytest.approx(0.06)
+        assert env["electricity_price"] == pytest.approx(0.2), (
+            "the export-only update preserves the stored import price"
+        )
+        assert env["ghg_intensity"] == pytest.approx(0.3), (
+            "the export-only update preserves the stored GHG intensity"
+        )
+
     def test_set_grid_voltage(self):
         dw = _init_dwelling()
         dw.set_grid_voltage(1.05)

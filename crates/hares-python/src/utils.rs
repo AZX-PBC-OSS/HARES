@@ -3,7 +3,7 @@
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
 use hares_equipment::EquipmentConfig;
 use hares_input::EquipmentSpec;
-use hares_types::{DayFilter, FuelType};
+use hares_types::{DayFilter, FuelType, PriceSignal};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -498,4 +498,20 @@ pub(crate) fn finite_f64_optional(d: &Bound<'_, PyDict>, key: &str) -> PyResult<
         validate_finite(x, key)?;
     }
     Ok(v)
+}
+
+/// Reads the price signal's three fields (`electricity_price`,
+/// `export_price`, `ghg_intensity`) from the caller's dict as a partial
+/// signal: an absent or `None` field stays `None`, which the engine's
+/// per-field update reads as "not named, preserve the stored one". Every
+/// price-signal dict on the Python surface (the single dwelling's
+/// `set_price_signal`, the fleet's `update_price_signal_all`) routes
+/// through here, so the partial-update semantics and the finiteness
+/// guard are one behavior.
+pub(crate) fn price_signal_from_dict(d: &Bound<'_, PyDict>) -> PyResult<PriceSignal> {
+    Ok(PriceSignal {
+        electricity_price: finite_f64_optional(d, "electricity_price")?,
+        export_price: finite_f64_optional(d, "export_price")?,
+        ghg_intensity: finite_f64_optional(d, "ghg_intensity")?,
+    })
 }

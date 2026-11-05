@@ -363,6 +363,8 @@ def test_helics_dwelling_config_and_registration(monkeypatch: pytest.MonkeyPatch
         ("grid/voltage", "double"),
         ("grid/control", "string"),
         ("grid/price", "double"),
+        ("grid/export_price", "double"),
+        ("grid/ghg_intensity", "double"),
     ]
 
 
@@ -1028,6 +1030,127 @@ def test_price_non_finite_is_refused_counted_and_reported_invalid(
     orchestrator._read_subscriptions()
     assert dwelling.price_signals == [{"electricity_price": 0.12}]
     assert orchestrator.helics_price_valid is True
+
+
+def test_price_channel_companions_register_beside_the_price_topic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The price channel carries three fields, one topic each: the export
+    price and the GHG intensity register beside the import price (the
+    companion topics ride the price topic's presence; docs/cosim.md's
+    subscription table)."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_price is not None
+    assert orchestrator._sub_export_price is not None
+    assert orchestrator._sub_ghg_intensity is not None
+
+    # A custom companion topic name moves the companion; a federate built
+    # with no price topic has no price channel at all, companions
+    # included.
+    orchestrator.register_subscriptions(
+        price_topic="grid/price",
+        export_price_topic="custom/export",
+        ghg_intensity_topic="custom/ghg",
+    )
+    assert [(s.key, s.type) for s in orchestrator._subscription_configs] == [
+        ("grid/price", "double"),
+        ("custom/export", "double"),
+        ("custom/ghg", "double"),
+    ]
+    bare = module.HELICSDwelling(_FakeDwelling(fake_helics.log), fed_name="house_2")
+    bare.register_subscriptions()
+    assert bare._sub_price is None
+    assert bare._sub_export_price is None
+    assert bare._sub_ghg_intensity is None
+
+
+def test_export_price_update_applies_its_field_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An update on the export-price topic applies that field alone: the
+    per-field update preserves the import price's stored value instead of
+    wiping it. The red state at the parent forwarded the import price only
+    and no export topic existed, so a run could not carry an export price
+    at all."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_export_price is not None
+
+    orchestrator._sub_export_price.push_double(0.07)
+    orchestrator._read_subscriptions()
+    assert dwelling.price_signals == [{"export_price": 0.07}]
+
+    # The import topic's update composes beside it, one field per topic.
+    assert orchestrator._sub_price is not None
+    orchestrator._sub_price.push_double(0.19)
+    orchestrator._read_subscriptions()
+    assert dwelling.price_signals == [{"export_price": 0.07}, {"electricity_price": 0.19}]
+
+
+def test_ghg_intensity_update_applies_its_field_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An update on the GHG topic applies the carbon intensity alone; the
+    field reaches the environment view the dwelling copies it from every
+    step."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_ghg_intensity is not None
+
+    orchestrator._sub_ghg_intensity.push_double(0.41)
+    orchestrator._read_subscriptions()
+    assert dwelling.price_signals == [{"ghg_intensity": 0.41}]
+
+
+def test_companion_price_fields_refuse_non_finite_and_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The companion topics enforce the import price's boundary behavior
+    exactly: a non-finite value on either is refused, counted, and
+    reported invalid; a negative value warns, counts, and is applied."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    dwelling = _FakeDwelling(fake_helics.log)
+    orchestrator = module.HELICSDwelling(dwelling, fed_name="house_1")
+    orchestrator.register_publications()
+    orchestrator.register_subscriptions(price_topic="grid/price")
+
+    assert orchestrator._sub_export_price is not None
+    assert orchestrator._sub_ghg_intensity is not None
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        orchestrator._sub_export_price.push_double(bad)
+        orchestrator._read_subscriptions()
+        assert dwelling.price_signals == [], (
+            f"a non-finite export price ({bad}) must never reach the engine's setter"
+        )
+        assert orchestrator.helics_price_valid is False
+    assert orchestrator.helics_range_violations_total == 3
+
+    # A negative export price is a real scenario: applied, with the count.
+    orchestrator._sub_export_price.push_double(-0.02)
+    orchestrator._read_subscriptions()
+    assert dwelling.price_signals == [{"export_price": -0.02}]
+    assert orchestrator._last_price_negative is True
+
+    orchestrator._sub_ghg_intensity.push_double(float("nan"))
+    orchestrator._read_subscriptions()
+    assert dwelling.price_signals == [{"export_price": -0.02}], (
+        "a non-finite GHG intensity must never reach the engine's setter"
+    )
+    assert orchestrator.helics_price_valid is False
 
 
 def test_frequency_non_finite_is_refused_counted_and_reported_invalid(
