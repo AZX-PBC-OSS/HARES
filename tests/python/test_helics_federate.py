@@ -384,6 +384,112 @@ def test_a_released_helics_core_leaves_its_object_nothing_to_free() -> None:
     assert not core._finalizer.alive
 
 
+def test_the_wrapper_gate_mirrors_read_the_environments_shapes(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirrors read the wrapper's exact semantics: ``bool()`` of the
+    string, so only the EMPTY string reads false, ``"0"`` and ``"false"``
+    read true; the free gate unset is true (the wrapper's default), the
+    cleanup gate unset falls to the deprecated ``PYHELICS_CLEANUP``."""
+    for name in (
+        "PYHELICS_FREE_ON_DESTRUCTION",
+        "PYHELICS_CLEANUP_ON_DESTRUCTION",
+        "PYHELICS_CLEANUP",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert federate_module._wrapper_free_gate() is True
+    assert federate_module._wrapper_cleanup_gate() is False
+
+    monkeypatch.setenv("PYHELICS_FREE_ON_DESTRUCTION", "")
+    assert federate_module._wrapper_free_gate() is False, "the empty string is the leak shape"
+    for true_shape in ("0", "false", "no"):
+        monkeypatch.setenv("PYHELICS_FREE_ON_DESTRUCTION", true_shape)
+        assert federate_module._wrapper_free_gate() is True, (
+            f"bool() of the string: {true_shape!r} reads true in the wrapper"
+        )
+
+    monkeypatch.delenv("PYHELICS_FREE_ON_DESTRUCTION", raising=False)
+    monkeypatch.setenv("PYHELICS_CLEANUP", "1")
+    assert federate_module._wrapper_cleanup_gate() is True, (
+        "the deprecated variable is the cleanup gate's default"
+    )
+    monkeypatch.setenv("PYHELICS_CLEANUP_ON_DESTRUCTION", "")
+    assert federate_module._wrapper_cleanup_gate() is False, (
+        "the explicit gate overrides the deprecated default"
+    )
+
+
+_RELEASE_STEP_PATCH = {
+    "helicsCoreDisconnect": lambda *args: None,
+    "helicsCoreWaitForDisconnect": lambda *args: True,
+}
+
+
+def _patch_release_steps(module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, step in _RELEASE_STEP_PATCH.items():
+        monkeypatch.setattr(module.helics, name, step)
+
+
+def test_a_release_with_a_false_free_gate_reports_the_leak_and_spends_nothing(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The wrapper's free gate set empty makes its callback free nothing
+    while spending the finalizer: the silent leak path. The release
+    reports the leak instead of reporting clean, and the finalizer is
+    left unspent. Red at the parent: the finalizer ran and the release
+    reported clean either way."""
+    freed: list[str] = []
+    core = _FakeCore("core_free_gate", freed.append)
+
+    _patch_release_steps(federate_module, monkeypatch)
+    monkeypatch.setattr(federate_module, "PYHELICS_FREE_GATE", False)
+    with caplog.at_level(logging.WARNING, logger="hares.helics.federate"):
+        assert federate_module._release(core) is None
+
+    assert freed == [], "a false free gate must not spend the finalizer on nothing"
+    assert core._finalizer.alive, "the unspent finalizer stays available"
+    assert any("PYHELICS_FREE_ON_DESTRUCTION" in r.getMessage() for r in caplog.records)
+    assert any("leak" in r.getMessage() for r in caplog.records)
+
+
+def test_a_release_with_a_truthy_cleanup_gate_refuses_the_process_global_teardown(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """PYHELICS_CLEANUP_ON_DESTRUCTION (or the deprecated PYHELICS_CLEANUP)
+    makes the wrapper's callback run helicsCleanupLibrary(), the
+    process-global teardown this module forbids mid-run: a registration
+    failure can race an in-flight teardown thread. The release refuses
+    the callback and names the gate. Red at the parent: the finalizer ran
+    the global teardown unconditionally."""
+    freed: list[str] = []
+    core = _FakeCore("core_cleanup_gate", freed.append)
+
+    _patch_release_steps(federate_module, monkeypatch)
+    monkeypatch.setattr(federate_module, "PYHELICS_CLEANUP_GATE", True)
+    with caplog.at_level(logging.WARNING, logger="hares.helics.federate"):
+        assert federate_module._release(core) is None
+
+    assert freed == [], "the cleanup gate's callback never runs mid-run"
+    assert any("PYHELICS_CLEANUP_ON_DESTRUCTION" in r.getMessage() for r in caplog.records)
+
+
+def test_a_release_with_safe_gates_frees_the_handle_exactly_once(
+    federate_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gates' safe shape (the free gate true, the cleanup gate false,
+    the CI default): the finalizer runs and frees the handle once. Pins
+    the gate introduction against the path every existing release test
+    exercises."""
+    freed: list[str] = []
+    core = _FakeCore("core_safe_gates", freed.append)
+
+    _patch_release_steps(federate_module, monkeypatch)
+    assert federate_module._release(core) is None
+    assert freed == ["core_safe_gates"]
+    assert not core._finalizer.alive
+
+
 def test_a_core_without_the_wrappers_finalizer_is_released_and_left_to_its_wrapper(
     federate_module: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

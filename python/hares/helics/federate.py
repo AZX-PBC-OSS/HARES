@@ -24,6 +24,7 @@ from collections.abc import Callable
 import itertools
 import logging
 import math
+import os
 import socket
 import threading
 import time
@@ -88,6 +89,35 @@ __all__ = [
 # use-after-free; call wait_for_pending_aborts() first.
 _PENDING_ABORT_THREADS: set[threading.Thread] = set()
 _PENDING_ABORT_LOCK = threading.Lock()
+
+
+def _wrapper_free_gate() -> bool:
+    """The wrapper's ``PYHELICS_FREE_ON_DESTRUCTION`` gate, read the way
+    the wrapper reads it: once, at import. Its value is ``bool()`` of the
+    string, so only the EMPTY string reads false; ``"0"`` and ``"false"``
+    read true; unset is the wrapper's default true."""
+    value = os.environ.get("PYHELICS_FREE_ON_DESTRUCTION")
+    return True if value is None else bool(value)
+
+
+def _wrapper_cleanup_gate() -> bool:
+    """The wrapper's ``PYHELICS_CLEANUP_ON_DESTRUCTION`` gate (the
+    deprecated ``PYHELICS_CLEANUP`` as its default), read the way the
+    wrapper reads it: once, at import; ``bool()`` of the string, unset
+    false."""
+    raw = os.environ.get("PYHELICS_CLEANUP_ON_DESTRUCTION")
+    if raw is not None:
+        return bool(raw)
+    deprecated = os.environ.get("PYHELICS_CLEANUP")
+    return bool(deprecated) if deprecated is not None else False
+
+
+# The gates at this module's import, which is after the helics import
+# (the wrapper captured them at its own import), so the mirror holds
+# unless someone mutates the environment between the two imports: the
+# flags belong before either import.
+PYHELICS_FREE_GATE = _wrapper_free_gate()
+PYHELICS_CLEANUP_GATE = _wrapper_cleanup_gate()
 
 
 def wait_for_pending_aborts(timeout_s: float = 10.0) -> bool:
@@ -260,16 +290,32 @@ def _release(core: HelicsCoreLike) -> helics.HelicsException | None:
     # collected. After an explicit helicsCoreFree, that second free would land
     # on whichever core HELICS had since allocated at the same address and
     # invalidate it, so the core is freed by running the wrapper's own
-    # finalizer now, which frees it once and never again. The wrapper frees
-    # nothing there when PYHELICS_FREE_ON_DESTRUCTION is set empty. The
-    # finalizer is the wrapper's private attribute, so the dependency is
-    # pinned to helics 3.x, and a wrapper without it leaves the handle to the
-    # wrapper to free rather than failing the cleanup of a core that is
-    # already failing.
+    # finalizer now, which frees it once and never again. The finalizer is
+    # the wrapper's private attribute, so the dependency is pinned to
+    # helics 3.x, and a wrapper without it leaves the handle to the wrapper
+    # to free rather than failing the cleanup of a core that is already
+    # failing. The wrapper's callback honors two environment gates this
+    # module mirrors at import (PYHELICS_FREE_GATE,
+    # PYHELICS_CLEANUP_GATE): a finalizer whose free gate is false would
+    # spend the finalizer while freeing nothing (the silent leak path, so
+    # the leak is reported instead), and one whose cleanup gate is true
+    # would run the process-global helicsCleanupLibrary() this module
+    # forbids mid-run, so it is refused here.
     finalizer: weakref.finalize[..., object] | None = getattr(core, "_finalizer", None)
     if finalizer is None:
         _LOG.warning(
             "The helics wrapper exposed no _finalizer for a failed core; leaving its handle to the wrapper to free"
+        )
+    elif not PYHELICS_FREE_GATE:
+        _LOG.warning(
+            "The helics wrapper frees no handle while PYHELICS_FREE_ON_DESTRUCTION is set empty: "
+            "the failed core's handle leaks. Unset the variable or set it non-empty."
+        )
+    elif PYHELICS_CLEANUP_GATE:
+        _LOG.warning(
+            "The helics wrapper's finalizer would run helicsCleanupLibrary() while "
+            "PYHELICS_CLEANUP_ON_DESTRUCTION is set; that is a process-global teardown "
+            "this module forbids mid-run, so it is refused for the failed core."
         )
     else:
         finalizer()
