@@ -20,6 +20,7 @@ from gymnasium import spaces
 
 from hares._hares import Dwelling as PyDwelling
 from hares._hares import SimulationConfig
+from hares import Actor
 from hares.rl.gym_env import (
     DwellingGymEnv,
     GymDwellingConfig,
@@ -1468,6 +1469,121 @@ def test_batch_step_refuses_a_removed_equipment_field_as_a_row_error():
     assert terminated[0], "the drifted roster ends that environment"
     assert "no longer in the dwelling's equipment roster" in infos[0]["error_msg"]
     assert f"equipment_power[{names[0]}]" in infos[0]["error_msg"]
+
+
+# ---------------------------------------------------------------------------
+# The episode lifecycle's actor surface: the env config registers actors
+# before the construction snapshot, and a Python actor's state rides the
+# checkpoint (and is cleared by a reset) through the wrapper's hooks.
+# ---------------------------------------------------------------------------
+
+
+class _StatefulActor(Actor):
+    """A Python actor whose mutable state is a plain Python field, declared
+    through the checkpoint hooks: the state the wrapper must carry across
+    a restore and a reset."""
+
+    def __init__(self):
+        super().__init__()
+        self.name = "Stateful"
+        self.steps = 0
+
+    def decide(self, env):
+        self.steps += 1
+        return []
+
+    def save_state(self):
+        return int(self.steps).to_bytes(8, "little")
+
+    def load_state(self, state):
+        self.steps = int.from_bytes(state, "little")
+
+
+def _config_with_actors(actors: list[Any]) -> GymDwellingConfig:
+    return GymDwellingConfig(
+        hpxml=HPXML,
+        schedule=SCHEDULE,
+        weather=WEATHER,
+        defaults=str(HARES_DEFAULTS),
+        sim_config=SimulationConfig(
+            start_time="2019-01-01T00:00:00", duration=600, time_res=60,
+        ),
+        actors=actors,
+    )
+
+
+def test_python_actor_state_rides_the_checkpoint_round_trip():
+    """A stateful Python actor's fields restore to the checkpoint's value:
+    `save_state` serializes them through the wrapper's hooks and
+    `restore_state` reloads them, so a resumed episode continues the
+    actor's own counts."""
+    dwelling = _make_dwelling()
+    actor = _StatefulActor()
+    dwelling.add_actor(actor)
+    dwelling.initialize()
+
+    for _ in range(3):
+        dwelling.step()
+    assert actor.steps == 3, "the counter advances one per decide"
+    blob = bytes(dwelling.save_state())
+    dwelling.step()
+    dwelling.step()
+    assert actor.steps == 5
+
+    dwelling.restore_state(blob)
+    assert actor.steps == 3, (
+        f"the checkpoint's actor state must restore (3), got {actor.steps}: "
+        "the state carried across the restore instead"
+    )
+
+
+def test_single_env_config_actor_runs_two_episodes():
+    """An actor declared in the env config registers before the
+    construction snapshot, so the env's reset restores a checkpoint that
+    carries it: two episodes on one env, the actor's channel in the
+    observation both times."""
+    env = DwellingGymEnv(
+        config=_config_with_actors(
+            [{"actor_type": "DrCompliance", "name": "DRAgent"}]
+        ),
+        observation_fields=[cast(Any, "DRAgent.dr_level")],
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    for episode in range(2):
+        # The reset itself is the witness: the construction snapshot
+        # carries the registered actor, so the restore never fails the
+        # actor-count check.
+        env.reset(seed=0)
+        obs, _r, _term, _trunc, _info = env.step(np.zeros(0, dtype=np.float64))
+        assert obs.shape == (1,), "the actor channel's observation resolves"
+        assert np.isfinite(obs[0]), f"episode {episode}: the channel reads a value"
+
+
+def test_single_env_reset_clears_a_stateful_python_actor():
+    """A stateful Python actor declared in the env config restarts each
+    episode at its construction state: the reset restores the checkpoint
+    saved at construction, and the wrapper's load_state hook reloads the
+    actor's own saved state."""
+    actor = _StatefulActor()
+    env = DwellingGymEnv(
+        config=_config_with_actors([actor]),
+        observation_fields=[cast(Any, "total_power_w")],
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    for _ in range(3):
+        env.step(np.zeros(0, dtype=np.float64))
+    assert actor.steps == 3, "the counter advances one per decide"
+
+    env.reset(seed=0)
+    assert actor.steps == 0, (
+        f"the reset must restore the actor's construction state (0), "
+        f"got {actor.steps}: the state carried across the reset instead"
+    )
 
 
 def test_batch_step_returns_a_fresh_observation_by_default():

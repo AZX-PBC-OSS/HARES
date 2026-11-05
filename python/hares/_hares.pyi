@@ -1040,6 +1040,20 @@ class Actor:
         publication still fails the step naming the actor and the key.
         """
         ...
+    def save_state(self) -> bytes:
+        """The actor's mutable decision state, serialized. The default
+        actor carries none (empty bytes); a stateful actor overrides this
+        and ``load_state`` with the matching read."""
+        ...
+    def load_state(self, state: bytes) -> None:
+        """Restores what ``save_state`` serialized. The default accepts
+        only an empty blob: a non-empty one is refused, since the actor
+        saved state it cannot restore."""
+        ...
+    def checkpoint_version(self) -> int:
+        """The schema version of the blob ``save_state`` returns; bump when
+        the serialized shape changes. Read once at registration."""
+        ...
 
 # ---------------------------------------------------------------------------
 # Telemetry

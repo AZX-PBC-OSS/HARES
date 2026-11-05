@@ -14,6 +14,7 @@ import warnings
 import numpy as np
 
 from hares._hares import (
+    Actor as PyActor,
     ControlSignal as PyControlSignal,
     Dwelling as PyDwelling,
     SimulationConfig,
@@ -57,6 +58,13 @@ class GymDwellingConfig:
 
     Use ``sim_config`` to pass simulation-level settings (time resolution,
     output verbosity, etc.) instead of the old untyped ``kwargs`` dict.
+
+    ``actors`` registers actors on the dwelling before the construction
+    snapshot, so the episode lifecycle (every ``reset()``'s restore) carries
+    them: each entry is an ``hares.Actor`` instance or a mapping of the
+    registry form ``{"actor_type": ..., "name": ..., "parameters": {...}}``.
+    An actor added to ``env.dwelling`` after construction is outside the
+    snapshot and makes every ``reset()`` fail the actor-count check.
     """
 
     hpxml: str
@@ -64,6 +72,7 @@ class GymDwellingConfig:
     weather: str
     defaults: str | None = None
     sim_config: SimulationConfig | None = None
+    actors: Sequence[Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +90,61 @@ class RewardContext(TypedDict):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def validated_config_actors(actors: object) -> list[Any]:
+    """The env config's actor surface: each entry is an ``hares.Actor``
+    instance or a mapping of the registry form ``{"actor_type", "name",
+    "parameters"}``. Anything else is the caller's error, named by entry
+    and type, refused at construction instead of the first reset."""
+    if actors is None:
+        return []
+    if not isinstance(actors, (list, tuple)):
+        raise TypeError(
+            "actors must be a list or tuple of Actor instances or mappings, "
+            f"got {type(actors).__name__}"
+        )
+    out: list[Any] = []
+    for entry in actors:
+        if isinstance(entry, Mapping):
+            required = {"actor_type", "name"}
+            missing = required - set(entry)
+            if missing:
+                raise ValueError(
+                    f"an actors mapping entry requires actor_type and name keys "
+                    f"(parameters is optional); missing {sorted(missing)} in {sorted(entry)}"
+                )
+            unknown = set(entry) - required - {"parameters"}
+            if unknown:
+                raise ValueError(
+                    f"an actors mapping entry accepts only actor_type, name and "
+                    f"parameters keys; unknown {sorted(unknown)}"
+                )
+            actor_type = entry["actor_type"]
+            name = entry["name"]
+            parameters = entry.get("parameters")
+            if not isinstance(actor_type, str):
+                raise TypeError(
+                    f"actors entry's actor_type must be a string, got {type(actor_type).__name__}"
+                )
+            if not isinstance(name, str):
+                raise TypeError(
+                    f"actors entry's name must be a string, got {type(name).__name__}"
+                )
+            if parameters is not None and not isinstance(parameters, Mapping):
+                raise TypeError(
+                    f"actors entry's parameters must be a mapping or None, "
+                    f"got {type(parameters).__name__}"
+                )
+            out.append(("registry", actor_type, name, parameters))
+        elif isinstance(entry, PyActor):
+            out.append(("instance", entry))
+        else:
+            raise TypeError(
+                "each actors entry must be an Actor instance or a mapping of "
+                f"{{actor_type, name, parameters}}, got {type(entry).__name__}: {entry!r}"
+            )
+    return out
 
 
 def _normalize_config(config: object) -> GymDwellingConfig:
@@ -538,6 +602,7 @@ class DwellingGymEnv(_GYM_BASE):
         self._observation_fields = validated_observation_fields(observation_fields)
         validate_reward_fn(reward_fn)
         validate_episode_length(episode_length)
+        self._actors = validated_config_actors(config.actors)
         self._reward_fn = reward_fn
         self._episode_length = episode_length
         self._action_layout, self._signal_type_by_equipment = sorted_action_layout(
@@ -559,6 +624,15 @@ class DwellingGymEnv(_GYM_BASE):
             **hpxml_kwargs,
         )
         self._dwelling.initialize()
+        # The config's actors register before the construction snapshot:
+        # the snapshot then carries their state, and every reset()'s
+        # restore matches the live roster.
+        for entry in self._actors:
+            if entry[0] == "registry":
+                _kind, actor_type, name, parameters = entry
+                self._dwelling.add_actor_by_name(actor_type, name, parameters)
+            else:
+                self._dwelling.add_actor(entry[1])
         self._initial_snapshot = bytes(self._dwelling.save_state())
         # The episode's finished run result, `None` until a truncating step
         # finalises the run through ``finish()``.
