@@ -628,19 +628,6 @@ pub(crate) fn resolve_exterior(
     }
 }
 
-pub(crate) fn build_output_column_index(
-    schema: &arrow::datatypes::Schema,
-) -> HashMap<String, usize> {
-    // Recorder rows exclude the timestamp column.
-    schema
-        .fields()
-        .iter()
-        .skip(1)
-        .enumerate()
-        .map(|(idx, field)| (field.name().to_string(), idx))
-        .collect()
-}
-
 pub(crate) fn chrono_to_std_duration(duration: Duration) -> Result<StdDuration> {
     let millis = duration.num_milliseconds();
     if millis <= 0 {

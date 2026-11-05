@@ -6,6 +6,7 @@ mod checkpointing;
 pub(crate) mod conversions;
 mod loop_allocator;
 mod premise_zip;
+mod recording;
 mod roster;
 mod solver_builder;
 mod synthetic;
@@ -36,7 +37,6 @@ use std::time::Duration as StdDuration;
 #[cfg(feature = "profiling")]
 use std::time::Instant;
 
-use arrow::datatypes::{Field, Schema};
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDateTime, Timelike};
 use hares_control::{
     DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT, PriceSignal, PriorityTier,
@@ -44,8 +44,7 @@ use hares_control::{
 #[cfg(any(debug_assertions, feature = "observe_detailed"))]
 use hares_envelope::EnvelopeDiagnostics;
 use hares_envelope::{
-    ElectricalSolver, EnvelopeComponentGains, FluidSolver, FluidSolverConfig, HumiditySolver,
-    ThermalSolver,
+    ElectricalSolver, FluidSolver, FluidSolverConfig, HumiditySolver, ThermalSolver,
 };
 use hares_equipment::{
     ActorSeed, BatteryLutType, ConfigPayload, Equipment, EquipmentConfig, EquipmentRegistry,
@@ -55,22 +54,15 @@ use hares_input::{
     Building, DefaultsSource, Destination, InputSource, PvPanelDefaults, SetpointSource,
     SimulationConfig, WeatherInput,
 };
-use hares_output::OutputError;
 use hares_output::callback::{BatchCallback, CallbackAttachment};
+#[cfg(test)]
 use hares_output::{
-    CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
-    DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
-    ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
-    FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, GAS_POWER_SUFFIX,
-    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX,
-    MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX, MetricsCalculator,
-    PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
-    REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
-    RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, RowWriter, SCHEDULE_SUFFIX,
-    SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
-    SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, StreamingRecorder,
-    end_use_electric_power_column, is_reserved_output_column_name,
+    COMPRESSOR_POWER_KW_SUFFIX, DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX,
+    EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX, MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX,
+    PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX, RETURN_TEMP_SUFFIX, SPEED_SUFFIX,
+    SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, end_use_electric_power_column,
 };
+use hares_output::{MetricsCalculator, StreamingRecorder};
 
 use hares_physics::constants::{
     OCCUPANT_CONVECTIVE_FRACTION, OCCUPANT_LATENT_GAIN_W, OCCUPANT_RADIATIVE_FRACTION,
@@ -131,12 +123,17 @@ use crate::observer_capture;
 use roster::RosterCaches;
 
 use conversions::{
-    apply_humidity_update_to_zones, apply_thermal_update_to_zones, build_output_column_index,
-    chrono_to_std_duration, merged_equipment_config, required_datetime, required_duration,
-    required_path, validate_equipment_override_keys, validate_wildcard_override,
+    apply_humidity_update_to_zones, apply_thermal_update_to_zones, chrono_to_std_duration,
+    merged_equipment_config, required_datetime, required_duration, required_path,
+    validate_equipment_override_keys, validate_wildcard_override,
+};
+#[cfg(test)]
+use hares_output::recording::{
+    build_output_column_index, build_output_row_bindings, enrich_schema_with_telemetry_units,
 };
 #[cfg(any(feature = "profiling", test))]
 use hares_types::alloc_count::thread_allocations;
+use recording::StepRecordInputs;
 use solver_builder::build_default_solvers;
 #[cfg(feature = "profiling")]
 use synthetic::current_process_hwm_kb;
@@ -610,1061 +607,6 @@ impl PhaseClock {
         {
             timings.record(slot, span, called);
         }
-    }
-}
-
-/// Pre-resolved output column indices for one equipment piece.
-#[derive(Debug, Clone, Default)]
-struct EquipmentColumns {
-    electric_power: Option<usize>,
-    gas_power: Option<usize>,
-    mode: Option<usize>,
-    setpoint: Option<usize>,
-    soc: Option<usize>,
-    capacity: Option<usize>,
-    cop: Option<usize>,
-    reactive_power: Option<usize>,
-    power_factor: Option<usize>,
-    energy_kwh: Option<usize>,
-    schedule: Option<usize>,
-    defrost_state: Option<usize>,
-    er_power: Option<usize>,
-    shr: Option<usize>,
-    speed: Option<usize>,
-    fan_power: Option<usize>,
-    main_power: Option<usize>,
-    runtime_fraction: Option<usize>,
-    latent_gains: Option<usize>,
-    duct_losses: Option<usize>,
-    /// Verbosity-8 per-equipment telemetry columns, as
-    /// (telemetry_key, column_index), split by what the value is: a state
-    /// is recorded even for a failed step (it keeps the committed value), a
-    /// flow is not (the failed step delivered nothing).
-    v8_state_columns: Vec<(&'static str, usize)>,
-    v8_flow_columns: Vec<(&'static str, usize)>,
-}
-
-/// What a frame column's value is, which decides what a failed step
-/// records in it.
-#[derive(Clone, Copy)]
-enum RecordedValue {
-    State,
-    Flow,
-}
-
-/// Enriches the catalogue-derived output schema's Arrow field metadata with
-/// unit declarations from equipment `TelemetryField` descriptors, closing
-/// the round-trip gap between equipment-declared units and the columns the
-/// aggregation pipeline reads.
-///
-/// For every schema column whose name starts with an equipment instance
-/// name, the column's unit (the catalogue declaration's `Unit::symbol()`)
-/// is verified against the corresponding equipment's `telemetry_fields`.
-/// For a column the catalogue maps to a telemetry key
-/// ([`Catalogue::telemetry_key`]), the check is per field: the equipment's
-/// declared field for that key must carry the column's unit; a mismatch
-/// warns and the column goes unvalidated (the assembly check makes this
-/// unreachable for a catalogue built from the same equipment; it is the
-/// net for a schema built against a different declaration set). For a
-/// column with no telemetry key (the core-output columns, read from
-/// `CoreOutput`), the unit is checked against the equipment's declared
-/// unit set. When the unit is found, the field's metadata is enriched with
-/// a `"unit_source"` key set to `"telemetry_field"` to indicate the unit
-/// has been validated against the authoritative equipment telemetry
-/// declaration.
-///
-/// A telemetry-keyed column whose owning equipment does not declare its
-/// key (the per-capability column exists for the name family; the
-/// equipment never claimed the channel) keeps its catalogue-derived
-/// metadata unannotated and does not warn.
-fn enrich_schema_with_telemetry_units(
-    schema: Schema,
-    equipment: &[&dyn Equipment],
-    catalogue: &hares_output::Catalogue,
-) -> Schema {
-    // Compute instance-qualified names matching the catalogue's convention.
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for eq in equipment {
-        *counts.entry(eq.descriptor().name.as_str()).or_default() += 1;
-    }
-    let mut indices: HashMap<&str, usize> = HashMap::new();
-    let instance_units: Vec<(
-        String,
-        HashSet<String>,
-        HashMap<&str, &hares_types::TelemetryField>,
-    )> = equipment
-        .iter()
-        .map(|eq| {
-            let desc = eq.descriptor();
-            let base = desc.name.as_str();
-            let name = if counts[base] > 1 {
-                let idx = indices.entry(base).or_insert(0);
-                *idx += 1;
-                format!("{base} #{idx}")
-            } else {
-                base.to_string()
-            };
-            let units: HashSet<String> = desc
-                .telemetry_fields
-                .iter()
-                .map(|tf| tf.unit.symbol().to_string())
-                .collect();
-            let by_key: HashMap<&str, &hares_types::TelemetryField> = desc
-                .telemetry_fields
-                .iter()
-                .map(|tf| (tf.name.as_ref(), tf))
-                .collect();
-            (name, units, by_key)
-        })
-        .collect();
-
-    // For each schema field that belongs to a known equipment instance,
-    // verify the column's catalogue unit against the equipment's declared
-    // telemetry field units and enrich metadata.
-    let fields: Vec<std::sync::Arc<Field>> = schema
-        .fields()
-        .iter()
-        .map(|field| {
-            let col_name = field.name();
-            let mut metadata = field.metadata().clone();
-
-            // Check if this column name starts with a known instance name
-            // followed by a space (to avoid false prefix matches).
-            let owner = instance_units.iter().find(|(name, _, _)| {
-                col_name.as_bytes().starts_with(name.as_bytes())
-                    && (col_name.len() == name.len() || col_name.as_bytes()[name.len()] == b' ')
-            });
-            if let Some((_name, units, by_key)) = owner
-                && let Some(def) = catalogue.resolve(col_name)
-                && def.unit != hares_types::Unit::None
-            {
-                // A telemetry-keyed column checks its key's declared field
-                // (per field, per key); a keyless column (the core-output
-                // ones) falls back to the whole-descriptor unit set.
-                let keyed = catalogue.telemetry_key(col_name).map(|key| by_key.get(key));
-                match keyed {
-                    Some(Some(field)) => {
-                        if field.unit == def.unit {
-                            metadata
-                                .insert("unit_source".to_string(), "telemetry_field".to_string());
-                        } else {
-                            tracing::warn!(
-                                column = col_name,
-                                unit = def.unit.symbol(),
-                                declared = field.unit.symbol(),
-                                "column unit disagrees with the equipment's declared \
-                                 telemetry field for its key"
-                            );
-                        }
-                    }
-                    // The per-capability column exists for the name family;
-                    // the owner never declared the channel: keep the
-                    // catalogue-derived metadata unannotated.
-                    Some(None) => {}
-                    None => {
-                        if units.contains(def.unit.symbol()) {
-                            metadata
-                                .insert("unit_source".to_string(), "telemetry_field".to_string());
-                        } else {
-                            tracing::warn!(
-                                column = col_name,
-                                unit = def.unit.symbol(),
-                                "column unit not found in equipment telemetry fields"
-                            );
-                        }
-                    }
-                }
-            }
-
-            std::sync::Arc::new(field.as_ref().clone().with_metadata(metadata))
-        })
-        .collect();
-
-    Schema::new_with_metadata(fields, schema.metadata().clone())
-}
-
-/// Build column index maps for each equipment piece using instance-qualified
-/// names (matching `hares_output::columns::instance_qualified_names`).
-/// Schema membership rule, single home for the column-map builder and
-/// record_step's column invariants: an equipment is schema-known iff the
-/// schema emitted its unconditional per-equipment column under its own
-/// name (verbosity ≥ 1 always emits `{name} Electric Power (kW)`), and
-/// that column is not one of the reserved aggregate names — an equipment
-/// named "Total" must not read the aggregate column as evidence of its
-/// own membership.
-fn is_schema_known_equipment(column_index: &HashMap<String, usize>, name: &str) -> bool {
-    let membership_column = format!("{name} {ELECTRIC_POWER_SUFFIX}");
-    column_index.contains_key(&membership_column)
-        && !is_reserved_output_column_name(&membership_column)
-}
-
-/// Resolves the per-equipment column positions of the row plan's producer
-/// bindings, against the freeze-time column index of the schema the plan
-/// freezes from. Runs once per plan build, never per step.
-///
-/// `expected` is the set of column names the run's reports promise (the
-/// union of the selections resolved against the catalogue): a promised
-/// column a schema-known equipment cannot resolve is schema drift and
-/// fails the plan; a column no report selects resolves to `None` and the
-/// step writes nothing to it.
-fn plan_equipment_columns(
-    equipment: &[&dyn Equipment],
-    column_index: &HashMap<String, usize>,
-    expected: &HashSet<String>,
-) -> Result<Vec<EquipmentColumns>> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for eq in equipment {
-        *counts.entry(&eq.descriptor().name).or_default() += 1;
-    }
-    let mut indices: HashMap<&str, usize> = HashMap::new();
-    equipment
-        .iter()
-        .map(|eq| {
-            let desc = eq.descriptor();
-            let base = &desc.name;
-            let name = if counts[base.as_str()] > 1 {
-                let idx = indices.entry(base).or_insert(0);
-                *idx += 1;
-                format!("{base} #{idx}")
-            } else {
-                base.clone()
-            };
-            // `expected` holds only for equipment the schema was built from.
-            // The column map is re-derived against a FROZEN column index
-            // whenever rows have been recorded (mid-run add/remove/replace),
-            // and equipment that joined after the schema was frozen has no
-            // columns in it — by design ("missing values, never misattributed
-            // ones"). Demanding its columns would fail here; instead it gets
-            // an empty map. Equipment the schema DOES know must resolve every
-            // applicable column — a miss there is a real schema/map drift.
-            // Membership is EXACT — the schema's unconditional
-            // `{name} Electric Power (kW)` column at verbosity ≥ 1 — not a
-            // name-prefix match: a mid-run equipment whose name is a
-            // word-boundary prefix of another equipment's name ("Electric"
-            // vs "Electric Resistance Water Heater") must not inherit the
-            // other instance's columns as evidence of its own. It also
-            // excludes the RESERVED aggregate namespace via the shared
-            // membership rule (`is_schema_known_equipment`).
-            let in_schema = is_schema_known_equipment(column_index, &name);
-            // A schema-known equipment resolves — and demands — every
-            // applicable column; a schema-unknown one claims NOTHING, not
-            // even a column that happens to exist under its name (the
-            // reserved aggregates are exactly that case: present in the
-            // index, never this equipment's own).
-            let resolve = |col_name: &str| -> Result<Option<usize>> {
-                if !in_schema {
-                    return Ok(None);
-                }
-                resolve_against_index(col_name, column_index, &name, expected.contains(col_name))
-            };
-            // Shared predicate with build_schema: the schema emits a
-            // "{name} Gas Power (therms/hour)" column iff this returns true,
-            // so resolving with the same predicate guarantees every emitted
-            // column is populated.
-            let families = hares_output::EquipmentColumnFamilies::of_descriptor(desc);
-            let has_gas = families.has_gas;
-            let is_hvac = families.is_hvac;
-            let is_cooling = families.is_cooling;
-            let is_hp_heater = families.is_hp_heater;
-            let has_soc = families.has_soc;
-
-            let electric_power = resolve(&format!("{name} {ELECTRIC_POWER_SUFFIX}"))?;
-            let gas_power = if has_gas {
-                resolve(&format!("{name} {GAS_POWER_SUFFIX}"))?
-            } else {
-                None
-            };
-            let mode = resolve(&format!("{name} {MODE_SUFFIX}"))?;
-            let setpoint = if is_hvac {
-                resolve(&format!("{name} {SETPOINT_SUFFIX}"))?
-            } else {
-                None
-            };
-            let soc = if has_soc {
-                resolve(&format!("{name} {SOC_SUFFIX}"))?
-            } else {
-                None
-            };
-            let capacity = if is_hvac {
-                resolve(&format!("{name} {CAPACITY_SUFFIX}"))?
-            } else {
-                None
-            };
-            let cop = if is_hvac {
-                resolve(&format!("{name} {COP_SUFFIX}"))?
-            } else {
-                None
-            };
-            // Reactive/PF columns exist for every equipment at verbosity ≥ 5
-            // (mirroring the unconditional Electric Power column): gas
-            // equipment with electric parasitics (blower fans, circulation
-            // pumps, draft inducers) emits reactive power too.
-            let reactive = resolve(&format!("{name} {REACTIVE_POWER_SUFFIX}"))?;
-            let pf = resolve(&format!("{name} {POWER_FACTOR_SUFFIX}"))?;
-            let energy_kwh = resolve(&format!("{name} {ENERGY_SUFFIX}"))?;
-            let schedule = resolve(&format!("{name} {SCHEDULE_SUFFIX}"))?;
-            let defrost_state = if is_hp_heater {
-                resolve(&format!("{name} {DEFROST_STATE_SUFFIX}"))?
-            } else {
-                None
-            };
-            let er_power = if is_hp_heater {
-                resolve(&format!("{name} {ER_POWER_SUFFIX}"))?
-            } else {
-                None
-            };
-            let shr = if is_cooling {
-                resolve(&format!("{name} {SHR_SUFFIX}"))?
-            } else {
-                None
-            };
-            let speed = if is_hvac {
-                resolve(&format!("{name} {SPEED_SUFFIX}"))?
-            } else {
-                None
-            };
-            let fan_power = if is_hvac {
-                resolve(&format!("{name} {FAN_POWER_SUFFIX}"))?
-            } else {
-                None
-            };
-            let main_power = if is_hvac {
-                resolve(&format!("{name} {MAIN_POWER_SUFFIX}"))?
-            } else {
-                None
-            };
-            let runtime_fraction = if is_hvac {
-                resolve(&format!("{name} {RUNTIME_FRACTION_SUFFIX}"))?
-            } else {
-                None
-            };
-            let latent_gains = if is_cooling {
-                resolve(&format!("{name} {LATENT_GAINS_SUFFIX}"))?
-            } else {
-                None
-            };
-            // `HVAC Duct Losses (W)` is a GLOBAL aggregate column, not a
-            // per-equipment one: record_step accumulates every equipment's
-            // duct-loss telemetry into the same row slot (`row[idx] +=`),
-            // and its invariant demands the column for every
-            // equipment when a report selects it. It therefore resolves
-            // for ANY equipment when the schema carries it — including
-            // equipment added after the schema froze, whose per-equipment
-            // columns are missing by design but whose duct contribution
-            // must still count toward the aggregate (gating it on
-            // `in_schema` would fail the invariant and silently undercount
-            // the aggregate in release builds).
-            let duct_losses = resolve_against_index(
-                HVAC_DUCT_LOSSES_COL,
-                column_index,
-                &name,
-                expected.contains(HVAC_DUCT_LOSSES_COL),
-            )?;
-
-            // V8 per-equipment telemetry diagnostic columns: resolved
-            // leniently (a column no report selects is skipped), so the
-            // run-level tier gate the old verbosity field carried is the
-            // selections' own.
-            let (v8_state_columns, v8_flow_columns) = resolve_v8_columns(
-                &name,
-                column_index,
-                is_hvac,
-                is_hp_heater,
-                families.is_pv,
-                families.is_ev,
-            );
-
-            Ok(EquipmentColumns {
-                electric_power,
-                gas_power,
-                mode,
-                setpoint,
-                soc,
-                capacity,
-                cop,
-                reactive_power: reactive,
-                power_factor: pf,
-                energy_kwh,
-                schedule,
-                defrost_state,
-                er_power,
-                shr,
-                speed,
-                fan_power,
-                main_power,
-                runtime_fraction,
-                latent_gains,
-                duct_losses,
-                v8_state_columns,
-                v8_flow_columns,
-            })
-        })
-        .collect()
-}
-
-/// Resolve each equipment's EndUse aggregate electric-power column index:
-/// positional, one entry per equipment in vector order (`record_step` zips
-/// it against the equipment vector, accumulating every member's power into
-/// its end-use's single column). The column is the equipment's TYPED end
-/// use's aggregate: the rollup groups by the descriptor's declared end
-/// use, never by the name string. The positional contract is why the map
-/// must be re-derived whenever the equipment vector changes mid-run: a
-/// remove that shifts the vector would otherwise leave every survivor
-/// writing into its departed neighbour's end-use aggregate. Shared by
-/// assembly, the fresh-schema rebuild, and the frozen-schema
-/// re-derivation so the three cannot drift.
-fn build_end_use_aggregate_indices(
-    equipment: &[&dyn Equipment],
-    column_index: &HashMap<String, usize>,
-) -> Vec<Option<usize>> {
-    equipment
-        .iter()
-        .map(|eq| {
-            let col_name = end_use_electric_power_column(&eq.descriptor().end_use);
-            column_index.get(&col_name).copied()
-        })
-        .collect()
-}
-
-/// Resolve each actor's telemetry columns against the output column
-/// index: `(key, index)` entry lists, one per actor, in actor order.
-/// Actors without telemetry get an empty entry list — the positional
-/// `zip` against the actor vector in `record_step` requires a per-actor
-/// entry regardless. Shared by the fresh-schema and frozen-schema roster
-/// plans so the two derivations cannot drift; pre-resolving also keeps the
-/// per-step `format!("actor:{name}:{key}")` out of the hot path.
-fn build_actor_column_map(
-    actors: &[&dyn Actor],
-    column_index: &HashMap<String, usize>,
-) -> Vec<Vec<(String, usize)>> {
-    actors
-        .iter()
-        .map(|actor| {
-            let Some(tel) = actor.telemetry() else {
-                return Vec::new();
-            };
-            let actor_name = actor.name();
-            let mut entries = Vec::with_capacity(tel.0.len());
-            for key in tel.0.keys() {
-                let col_name = format!("actor:{actor_name}:{key}");
-                if let Some(&idx) = column_index.get(&col_name) {
-                    entries.push((key.clone(), idx));
-                }
-            }
-            entries
-        })
-        .collect()
-}
-
-type V8Columns = Vec<(&'static str, usize)>;
-
-/// Resolves one column name against the freeze-time column index. Schema
-/// drift for a column the schema owes the equipment (`expected`) is a typed
-/// error in every build profile; a missing column that was never demanded
-/// resolves to `None` by design ("missing values, never misattributed
-/// ones"). Private to the row plan's construction.
-fn resolve_against_index(
-    col_name: &str,
-    column_index: &HashMap<String, usize>,
-    equipment_name: &str,
-    expected: bool,
-) -> Result<Option<usize>> {
-    match column_index.get(col_name).copied() {
-        Some(idx) => Ok(Some(idx)),
-        None if expected => {
-            tracing::warn!(
-                column_name = %col_name,
-                equipment_name = %equipment_name,
-                "output column index not resolved; data will not be emitted for this column"
-            );
-            Err(HaresError::InvariantViolation {
-                check_name: format!(
-                    "output_schema_drift: expected output column '{col_name}' for equipment \
-                     '{equipment_name}' not found in schema"
-                ),
-                value: 0.0,
-                tolerance: 0.0,
-            })
-        }
-        None => Ok(None),
-    }
-}
-
-/// The dwelling-level output columns of the frozen row plan: every column
-/// name the step path used to look up, resolved once at freeze to its
-/// producer slot. `record_step` writes by these indices only.
-#[derive(Debug, Default)]
-struct DwellingColumns {
-    total_electric: Option<usize>,
-    total_gas: Option<usize>,
-    total_reactive: Option<usize>,
-    /// The old-style indoor temperature column, fed from the first zone's
-    /// temperature for schemas that still carry it.
-    indoor_temp_fallback: Option<usize>,
-    outdoor_dry_bulb: Option<usize>,
-    ground_temp: Option<usize>,
-    mains_temp: Option<usize>,
-    outdoor_humidity_ratio: Option<usize>,
-    pressure_kpa: Option<usize>,
-    wind_speed_m_s: Option<usize>,
-    sky_temp_c: Option<usize>,
-    ghi_w_m2: Option<usize>,
-    dni_w_m2: Option<usize>,
-    dhi_w_m2: Option<usize>,
-    /// Position of the first HVAC or water-heater equipment, whose
-    /// telemetry feeds the setpoint chain columns.
-    first_hvac: Option<usize>,
-    scheduled_heating_setpoint: Option<usize>,
-    scheduled_cooling_setpoint: Option<usize>,
-    runtime_heating_setpoint: Option<usize>,
-    runtime_cooling_setpoint: Option<usize>,
-    /// Envelope and gain columns, each bound to the gain term that feeds
-    /// it: the value extractors are frozen with the indices, so the step
-    /// path neither builds a name table nor looks a name up.
-    envelope: Vec<EnvelopeColumn>,
-}
-
-/// One frozen envelope column: the gain term that produces its value and
-/// the slot it writes.
-type EnvelopeColumn = (fn(&EnvelopeComponentGains) -> f64, Option<usize>);
-
-/// The gain terms the envelope columns read, as (column name, extractor)
-/// pairs in a fixed order. Frozen once into [`DwellingColumns::envelope`]
-/// with each name's resolved slot.
-type EnvelopeTerm = (&'static str, fn(&EnvelopeComponentGains) -> f64);
-
-#[cfg_attr(not(feature = "observe"), allow(unused_mut))]
-fn envelope_column_terms() -> Vec<EnvelopeTerm> {
-    let mut terms: Vec<EnvelopeTerm> = vec![
-        // Transmitted (through-glass) flux only, the OCHRE column
-        // definition (Envelope.py:1160); the inward-flowing absorbed
-        // share is part of `window_solar_w`, not this term.
-        ("Window Transmitted Solar Gain (W)", |g| {
-            g.window_through_glass_w
-        }),
-        ("Infiltration Heat Gain - Indoor (W)", |g| g.infiltration_w),
-        ("Forced Ventilation Heat Gain - Indoor (W)", |g| {
-            g.ventilation_w
-        }),
-        ("Natural Ventilation Heat Gain - Indoor (W)", |g| {
-            g.natural_ventilation_w
-        }),
-        // Net sensible = direct heat injections on zone air, matching
-        // OCHRE's "Net Sensible Heat Gain - {zone} (W)" (zone heat input:
-        // occupancy, HVAC, equipment, infiltration, ventilation, window
-        // solar). Opaque envelope conduction reaches the zone through the
-        // A-matrix surface coupling rather than a direct injection, so it
-        // is reported per boundary below instead of here. The gross
-        // exterior solar + LWR absorption (`opaque_solar_lwr_w`) is a
-        // boundary condition on the exterior RC nodes, not a zone input,
-        // and is excluded entirely.
-        ("Net Sensible Heat Gain - Indoor (W)", |g| {
-            g.window_solar_w
-                + g.infiltration_w
-                + g.ventilation_w
-                + g.natural_ventilation_w
-                + g.internal_gain_w
-                + g.jacket_loss_w
-                + g.duct_loss_w
-                + g.hvac_heating_w.max(0.0)
-                + g.hvac_cooling_w
-        }),
-        ("Internal Heat Gain - Indoor (W)", |g| g.internal_gain_w),
-        ("Interior LWR Exchange - Indoor (W)", |g| g.interior_lwr_w),
-        // Net conduction from the opaque envelope into the zone (wall +
-        // floor + roof interior surfaces) — the inside-face convection
-        // term of the zone air heat balance (EnergyPlus ERM 26.1 —
-        // "Inside Heat Balance": Interior Convection), aggregated from
-        // the three per-boundary terms below. The gross exterior solar +
-        // LWR absorption is an outside-face balance driver
-        // (EnergyPlus ERM 26.1 — "Outside Surface Heat Balance"): most of
-        // it re-leaves via exterior convection and sky exchange, so it is
-        // not a load on the conditioned zone.
-        ("Opaque Surface Heat Gain - Indoor (W)", |g| {
-            g.wall_heat_gain_w + g.floor_heat_gain_w + g.roof_heat_gain_w
-        }),
-        ("Duct Loss Heat Gain - Indoor (W)", |g| g.duct_loss_w),
-        ("Roof Heat Gain - Indoor (W)", |g| g.roof_heat_gain_w),
-        ("Floor Heat Gain - Indoor (W)", |g| g.floor_heat_gain_w),
-        ("Wall Heat Gain - Indoor (W)", |g| g.wall_heat_gain_w),
-        ("Window Heat Gain - Indoor (W)", |g| g.window_heat_gain_w),
-        ("Internal Mass Heat Gain - Indoor (W)", |g| {
-            g.internal_mass_heat_gain_w
-        }),
-        ("HVAC Heating Delivered (W)", |g| g.hvac_heating_w),
-        ("HVAC Cooling Delivered (W)", |g| g.hvac_cooling_w.abs()),
-        // Complete zone air heat-balance residual (E+ Output:Diagnostics
-        // analogue): C_zone·ΔT/dt − Σ(all gain terms). Small in a correct
-        // model; O(kW) values mean a mis-wired or mislabeled gain — the
-        // I-02 defect class made visible in every output file.
-        ("Zone Air Heat Balance Residual (W)", |g| {
-            g.zone_air_balance_residual_w
-        }),
-    ];
-    #[cfg(feature = "observe")]
-    terms.extend([
-        (
-            "Natural Ventilation Cw (-)",
-            (|g: &EnvelopeComponentGains| g.natural_ventilation_cw)
-                as fn(&EnvelopeComponentGains) -> f64,
-        ),
-        (
-            "Natural Ventilation Wind Angle (deg)",
-            (|g: &EnvelopeComponentGains| g.natural_ventilation_wind_angle_deg)
-                as fn(&EnvelopeComponentGains) -> f64,
-        ),
-    ]);
-    terms
-}
-
-/// Resolves the dwelling-level columns of the row plan against the
-/// freeze-time column index. Runs once per plan build, never per step.
-fn build_dwelling_columns(
-    column_index: &HashMap<String, usize>,
-    first_hvac: Option<usize>,
-) -> DwellingColumns {
-    let resolve = |col_name: &str| column_index.get(col_name).copied();
-    DwellingColumns {
-        total_electric: resolve("Total Electric Power (kW)"),
-        total_gas: resolve("Total Gas Power (therms/hour)"),
-        total_reactive: resolve("Total Reactive Power (kVAR)"),
-        indoor_temp_fallback: resolve("Indoor Temperature (C)"),
-        outdoor_dry_bulb: resolve("Outdoor Dry Bulb (C)"),
-        ground_temp: resolve("Temperature - Ground (C)"),
-        mains_temp: resolve("Hot Water Mains Temperature (C)"),
-        outdoor_humidity_ratio: resolve("Outdoor Humidity Ratio (kg/kg)"),
-        pressure_kpa: resolve("Outdoor Pressure (kPa)"),
-        wind_speed_m_s: resolve("Wind Speed (m/s)"),
-        sky_temp_c: resolve("Sky Temperature (C)"),
-        ghi_w_m2: resolve("GHI (W/m2)"),
-        dni_w_m2: resolve("DNI (W/m2)"),
-        dhi_w_m2: resolve("DHI (W/m2)"),
-        first_hvac,
-        scheduled_heating_setpoint: resolve(SCHEDULED_HEATING_SETPOINT_COL),
-        scheduled_cooling_setpoint: resolve(SCHEDULED_COOLING_SETPOINT_COL),
-        runtime_heating_setpoint: resolve(RUNTIME_HEATING_SETPOINT_COL),
-        runtime_cooling_setpoint: resolve(RUNTIME_COOLING_SETPOINT_COL),
-        envelope: envelope_column_terms()
-            .into_iter()
-            .map(|(name, term)| (term, column_index.get(name).copied()))
-            .collect(),
-    }
-}
-/// The row plan's producer bindings: everything `record_step` writes,
-/// resolved once at freeze against the schema the plan freezes from.
-#[derive(Debug, Default)]
-struct OutputRowBindings {
-    dwelling: DwellingColumns,
-    /// Output columns of each equipment, in equipment-vector order.
-    equipment: Vec<EquipmentColumns>,
-    /// End-use aggregate electric-power column of each equipment, in
-    /// equipment-vector order.
-    end_use_aggregates: Vec<Option<usize>>,
-    /// Telemetry key to output column of each actor, in actor order.
-    actors: Vec<Vec<(String, usize)>>,
-    /// The slots valid every step whose value is the row's zero: the
-    /// summed cells whose contributors exist (the duct losses slot when
-    /// the dwelling has HVAC equipment; every bound end-use aggregate
-    /// slot), and the not-nullable columns a roster change orphaned. The
-    /// step marks them valid after the producers write.
-    always_valid_slots: Vec<usize>,
-    /// The diagnostics block's slots, present only when the frozen schema
-    /// carries the block (the run requested the diagnostics report). The
-    /// per-step gate rides this `Option`: with `None` the step reads and
-    /// writes nothing for the diagnostics.
-    diagnostics: Option<DiagnosticsBindings>,
-}
-
-/// The slot of one zone's three diagnostics columns.
-#[derive(Debug, Default, Clone)]
-struct ZoneDiagSlots {
-    zone: ZoneId,
-    temp_c: usize,
-    thermal_gain_w: usize,
-    latent_gain_w: usize,
-}
-
-/// The slots of the diagnostics block's envelope columns, in the block's
-/// order.
-#[derive(Debug, Default, Clone)]
-struct DiagEnvelopeSlots {
-    port_radiant_w: usize,
-    port_shortwave_w: usize,
-    port_convective_w: usize,
-    window_solar_w: usize,
-    opaque_solar_lwr_w: usize,
-    interior_lwr_w: usize,
-    internal_gain_w: usize,
-    air_density_kg_m3: usize,
-    ghi_w_m2: usize,
-}
-
-/// The diagnostics block's producer bindings: every diagnostics column's
-/// slot, resolved once at freeze from the schema's marked fields.
-#[derive(Debug, Default, Clone)]
-struct DiagnosticsBindings {
-    step: usize,
-    timestamp_s: usize,
-    outdoor_temp_c: usize,
-    zones: Vec<ZoneDiagSlots>,
-    electrical_net_w: usize,
-    electrical_net_var: usize,
-    envelope: DiagEnvelopeSlots,
-}
-
-/// Which per-zone diagnostics column a name spells.
-enum ZoneDiagKind {
-    Temp,
-    Sensible,
-    Latent,
-}
-
-/// Parses a diagnostics zone column name: `zone{N}_temp_c`,
-/// `zone{N}_thermal_gain_w` or `zone{N}_latent_gain_w`, where N is the
-/// zone's id.
-fn zone_diag_name(name: &str) -> Option<(u16, ZoneDiagKind)> {
-    let rest = name.strip_prefix("zone")?;
-    let underscore = rest.find('_')?;
-    let id = rest[..underscore].parse().ok()?;
-    let kind = match &rest[underscore..] {
-        "_temp_c" => ZoneDiagKind::Temp,
-        "_thermal_gain_w" => ZoneDiagKind::Sensible,
-        "_latent_gain_w" => ZoneDiagKind::Latent,
-        _ => return None,
-    };
-    Some((id, kind))
-}
-
-/// Resolves the diagnostics block's producer bindings from the frozen
-/// schema: every field carrying the diagnostics marker, by name. `None`
-/// when the schema carries no marked field, which is the per-step gate.
-fn build_diagnostics_bindings(schema: &Schema) -> Option<DiagnosticsBindings> {
-    let mut diag = DiagnosticsBindings::default();
-    let mut zones: Vec<Option<ZoneDiagSlots>> = Vec::new();
-    let mut any = false;
-    for (slot, field) in schema.fields().iter().skip(1).enumerate() {
-        if !field
-            .metadata()
-            .contains_key(hares_output::DIAGNOSTICS_METADATA_KEY)
-        {
-            continue;
-        }
-        any = true;
-        let name = field.name().as_str();
-        match name {
-            "step" => diag.step = slot,
-            "timestamp_s" => diag.timestamp_s = slot,
-            "outdoor_temp_c" => diag.outdoor_temp_c = slot,
-            "electrical_net_w" => diag.electrical_net_w = slot,
-            "electrical_net_var" => diag.electrical_net_var = slot,
-            "port_radiant_w" => diag.envelope.port_radiant_w = slot,
-            "port_shortwave_w" => diag.envelope.port_shortwave_w = slot,
-            "port_convective_w" => diag.envelope.port_convective_w = slot,
-            "window_solar_w" => diag.envelope.window_solar_w = slot,
-            "opaque_solar_lwr_w" => diag.envelope.opaque_solar_lwr_w = slot,
-            "interior_lwr_w" => diag.envelope.interior_lwr_w = slot,
-            "internal_gain_w" => diag.envelope.internal_gain_w = slot,
-            "air_density_kg_m3" => diag.envelope.air_density_kg_m3 = slot,
-            "ghi_w_m2" => diag.envelope.ghi_w_m2 = slot,
-            other => {
-                if let Some((id, kind)) = zone_diag_name(other) {
-                    let index = usize::from(id);
-                    if zones.len() < index {
-                        zones.resize(index, None);
-                    }
-                    let entry = &mut zones[index - 1];
-                    let entry = entry.get_or_insert_with(|| ZoneDiagSlots {
-                        zone: ZoneId(id),
-                        temp_c: 0,
-                        thermal_gain_w: 0,
-                        latent_gain_w: 0,
-                    });
-                    match kind {
-                        ZoneDiagKind::Temp => entry.temp_c = slot,
-                        ZoneDiagKind::Sensible => entry.thermal_gain_w = slot,
-                        ZoneDiagKind::Latent => entry.latent_gain_w = slot,
-                    }
-                }
-            }
-        }
-    }
-    any.then(|| {
-        diag.zones = zones.into_iter().flatten().collect();
-        diag
-    })
-}
-
-/// Constructs the row plan's producer bindings from the frozen schema: the
-/// dwelling-level columns, the per-equipment columns (an expected variable
-/// the schema cannot place is a typed drift error), the end-use aggregates
-/// and the actor columns. The name-to-column index lives only in this
-/// construction, so nothing downstream of it can look a column name up.
-fn build_output_row_bindings(
-    schema: &Schema,
-    equipment: &[&dyn Equipment],
-    actors: &[&dyn Actor],
-    expected: &HashSet<String>,
-) -> Result<OutputRowBindings> {
-    let column_index = build_output_column_index(schema);
-    let first_hvac = equipment
-        .iter()
-        .position(|eq| eq.descriptor().end_use.is_hvac_or_water_heating());
-    let dwelling = build_dwelling_columns(&column_index, first_hvac);
-    let equipment_columns = plan_equipment_columns(equipment, &column_index, expected)?;
-    let end_use_aggregates = build_end_use_aggregate_indices(equipment, &column_index);
-    // The slots valid every step whose value is the row's zero:
-    // - the summed cells whose contributors exist: the duct-losses slot
-    //   counts only when the dwelling has HVAC equipment (a non-HVAC
-    //   equipment binds the aggregate's slot but contributes no duct
-    //   distribution); an end-use aggregate slot exists only for an end
-    //   use with at least one contributing equipment (the catalogue emits
-    //   the column for no other);
-    // - a not-nullable column whose producer left the roster: a mid-run
-    //   remove against the frozen schema keeps the column (the reports'
-    //   schemas never change mid-run) with nothing producing it; the
-    //   variable's declaration says never null, so the row's zero stands
-    //   (the cell's meaning reverts to the equipment's inactive zero).
-    let has_hvac = equipment
-        .iter()
-        .any(|eq| eq.descriptor().end_use.is_hvac_or_water_heating());
-    let mut always_valid_slots: Vec<usize> = end_use_aggregates
-        .iter()
-        .take(equipment.len())
-        .flatten()
-        .copied()
-        .collect();
-    if has_hvac {
-        always_valid_slots.extend(equipment_columns.iter().filter_map(|c| c.duct_losses));
-    }
-    let claimed = claimed_slots(&dwelling, &equipment_columns, &end_use_aggregates);
-    for (slot, field) in schema.fields().iter().skip(1).enumerate() {
-        if !field.is_nullable() && !claimed.contains(&slot) {
-            always_valid_slots.push(slot);
-        }
-    }
-
-    Ok(OutputRowBindings {
-        dwelling,
-        equipment: equipment_columns,
-        end_use_aggregates,
-        actors: build_actor_column_map(actors, &column_index),
-        always_valid_slots,
-        diagnostics: build_diagnostics_bindings(schema),
-    })
-}
-
-/// The producer slots the current bindings claim: the dwelling totals',
-/// every bound equipment column's and every end-use aggregate's. The
-/// always-valid slot rule subtracts this set from the frozen schema's
-/// not-nullable columns to find the orphans a roster change left.
-fn claimed_slots(
-    dwelling: &DwellingColumns,
-    equipment: &[EquipmentColumns],
-    end_use_aggregates: &[Option<usize>],
-) -> std::collections::HashSet<usize> {
-    let mut claimed = std::collections::HashSet::new();
-    claimed.extend(dwelling.total_electric);
-    claimed.extend(dwelling.total_gas);
-    claimed.extend(dwelling.total_reactive);
-    for cols in equipment {
-        claimed.extend(cols.electric_power);
-        claimed.extend(cols.gas_power);
-        claimed.extend(cols.capacity);
-        claimed.extend(cols.reactive_power);
-        claimed.extend(cols.energy_kwh);
-        claimed.extend(cols.schedule);
-        claimed.extend(cols.er_power);
-        claimed.extend(cols.fan_power);
-        claimed.extend(cols.main_power);
-        claimed.extend(cols.runtime_fraction);
-        claimed.extend(cols.latent_gains);
-    }
-    claimed.extend(end_use_aggregates.iter().flatten());
-    claimed
-}
-
-/// Writes one step's diagnostics columns into the plan row: the zone
-/// temperatures, the thermal ports' sensible and latent gains, the
-/// electrical net from the ports, and the thermal solver's component
-/// gains. The values are the per-step diagnostics CSV's row semantics
-/// (a zone absent from the environment or the ports records 0.0, the same
-/// default the CSV's row writer applied), at full f64 precision. Every
-/// bound slot is written, valid every step.
-fn write_diagnostics_row(
-    writer: &mut RowWriter<'_>,
-    diag: &DiagnosticsBindings,
-    step: u64,
-    env: &EnvironmentState,
-    ports: &PortSlots,
-    gains: &EnvelopeComponentGains,
-) {
-    writer.write(diag.step, step as f64);
-    writer.write(diag.timestamp_s, env.current_time.timestamp() as f64);
-    writer.write(diag.outdoor_temp_c, env.weather.outdoor_temp_c);
-    for zone in &diag.zones {
-        let temp = env
-            .zones
-            .iter()
-            .find(|z| z.id == zone.zone)
-            .map(|z| z.temperature_c)
-            .unwrap_or(0.0);
-        writer.write(zone.temp_c, temp);
-        let thermal = ports.thermal.iter().find(|t| t.zone == zone.zone);
-        writer.write(
-            zone.thermal_gain_w,
-            thermal.map_or(0.0, |t| t.heat().sensible_w()),
-        );
-        writer.write(
-            zone.latent_gain_w,
-            thermal.map_or(0.0, |t| t.heat().latent_w),
-        );
-    }
-    // The diagnostics CSV's reporting names convert once from SI here.
-    writer.write(diag.electrical_net_w, ports.electrical.net_active_w());
-    writer.write(diag.electrical_net_var, ports.electrical.reactive_power_var);
-    writer.write(diag.envelope.port_radiant_w, gains.port_radiant_w);
-    writer.write(diag.envelope.port_shortwave_w, gains.port_shortwave_w);
-    writer.write(diag.envelope.port_convective_w, gains.port_convective_w);
-    writer.write(diag.envelope.window_solar_w, gains.window_solar_w);
-    writer.write(diag.envelope.opaque_solar_lwr_w, gains.opaque_solar_lwr_w);
-    writer.write(diag.envelope.interior_lwr_w, gains.interior_lwr_w);
-    writer.write(diag.envelope.internal_gain_w, gains.internal_gain_w);
-    writer.write(diag.envelope.air_density_kg_m3, gains.air_density_kg_m3);
-    writer.write(diag.envelope.ghi_w_m2, env.weather.ghi_w_m2);
-}
-
-/// Resolves v8 per-equipment telemetry diagnostic columns for the given
-/// equipment instance, as (state columns, flow columns) of
-/// (telemetry_key, column_index) pairs populated directly from equipment
-/// telemetry in record_step.
-fn resolve_v8_columns(
-    instance_name: &str,
-    column_index: &HashMap<String, usize>,
-    is_hvac: bool,
-    is_hp_heater: bool,
-    is_pv: bool,
-    is_ev: bool,
-) -> (V8Columns, V8Columns) {
-    use RecordedValue::{Flow, State};
-    const HVAC: &[(&str, &str, RecordedValue)] = &[
-        (tk::SUPPLY_TEMP_C, SUPPLY_TEMP_SUFFIX, State),
-        (tk::RETURN_TEMP_C, RETURN_TEMP_SUFFIX, State),
-        (tk::COMPRESSOR_POWER_W, COMPRESSOR_POWER_W_SUFFIX, Flow),
-        (tk::COMPRESSOR_KW, COMPRESSOR_POWER_KW_SUFFIX, Flow),
-        (tk::FAN_ELECTRIC_W, FAN_ELECTRIC_POWER_SUFFIX, Flow),
-        (tk::FAN_POWER_W, FAN_POWER_W_SUFFIX, Flow),
-        (tk::MIN_ON_TIME_S, MIN_ON_TIME_SUFFIX, State),
-        (tk::MIN_OFF_TIME_S, MIN_OFF_TIME_SUFFIX, State),
-    ];
-    const HP_HEATER: &[(&str, &str, RecordedValue)] = &[
-        (tk::SUPPLY_AIR_TEMP_C, SUPPLY_AIR_TEMP_SUFFIX, State),
-        (tk::PAN_HEATER_KW, PAN_HEATER_POWER_SUFFIX, Flow),
-        (tk::HP_CAPACITY_W, HP_CAPACITY_SUFFIX, Flow),
-        (tk::ER_CAPACITY_W, ER_CAPACITY_SUFFIX, Flow),
-    ];
-    const PV: &[(&str, &str, RecordedValue)] = &[
-        (tk::DC_POWER_KW, PV_DC_POWER_SUFFIX, Flow),
-        // The absorbed (soiled, capacity-weighted) irradiance the step
-        // computes: an output of the step, not the array's state.
-        (tk::IRRADIANCE_W_M2, PV_IRRADIANCE_SUFFIX, Flow),
-    ];
-    const EV: &[(&str, &str, RecordedValue)] = &[
-        (tk::CONNECTION_STATE, EV_CONNECTION_STATE_SUFFIX, State),
-        (tk::CHARGING_LEVEL, EV_CHARGING_LEVEL_SUFFIX, State),
-    ];
-
-    let mut state = Vec::new();
-    let mut flow = Vec::new();
-    for (applies, defs) in [
-        (is_hvac, HVAC),
-        (is_hp_heater, HP_HEATER),
-        (is_pv, PV),
-        (is_ev, EV),
-    ] {
-        if !applies {
-            continue;
-        }
-        for &(key, suffix, value) in defs {
-            if let Some(&idx) = column_index.get(&format!("{instance_name} {suffix}")) {
-                match value {
-                    State => state.push((key, idx)),
-                    Flow => flow.push((key, idx)),
-                }
-            }
-        }
-    }
-    (state, flow)
-}
-
-/// Pre-resolved zone column indices for record_step, avoiding per-step format!() allocations.
-#[derive(Default)]
-struct ZoneColumnCaches {
-    /// ZoneId → column_index for per-zone infiltration columns (non-indoor only).
-    infiltration_columns: HashMap<ZoneId, usize>,
-    /// ZoneId → column_index for per-zone interior LWR columns.
-    lwr_columns: HashMap<ZoneId, usize>,
-    /// ZoneId → (heating_col, cooling_col) for per-zone HVAC thermal attribution columns.
-    hvac_columns: HashMap<ZoneId, (usize, usize)>,
-    /// Zone IDs in sorted order for StepResult construction.
-    sorted_zone_ids: Vec<ZoneId>,
-    /// For each entry in sorted_zone_ids, the index into EnvironmentState::zones where
-    /// that zone lives. Enables O(1) temperature lookup in the hot loop.
-    zone_env_indices: Vec<Option<usize>>,
-    /// For each entry in sorted_zone_ids, the output column index for zone temperature,
-    /// or None if no temperature column exists for that zone.
-    zone_temp_col_indices: Vec<Option<usize>>,
-}
-
-fn build_zone_column_caches(
-    zones: &[hares_types::ZoneState],
-    zone_types: &[hares_input::hpxml::ZoneType],
-    indoor_zone: ZoneId,
-    column_index: &HashMap<String, usize>,
-) -> ZoneColumnCaches {
-    let mut sorted_zone_ids: Vec<ZoneId> = zones.iter().map(|z| z.id).collect();
-    sorted_zone_ids.sort();
-
-    let mut infiltration_columns = HashMap::new();
-    let mut lwr_columns = HashMap::new();
-    let mut hvac_columns = HashMap::new();
-    let mut zone_env_indices = Vec::with_capacity(sorted_zone_ids.len());
-    let mut zone_temp_col_indices = Vec::with_capacity(sorted_zone_ids.len());
-
-    for &zone_id in &sorted_zone_ids {
-        // Pre-compute the index of this zone in the zones slice for O(1) hot-loop access.
-        let env_idx = zones.iter().position(|z| z.id == zone_id);
-        let zone_type = env_idx.and_then(|idx| zone_types.get(idx));
-        let label = zone_display_name(zone_id, indoor_zone, zone_type);
-        let temp_key = format!("Temperature - {label} (C)");
-        let temp_col = column_index.get(&temp_key).copied();
-        if zone_id != indoor_zone {
-            let inf_key = format!("Infiltration Heat Gain - {label} (W)");
-            if let Some(&idx) = column_index.get(&inf_key) {
-                infiltration_columns.insert(zone_id, idx);
-            }
-        }
-        let lwr_key = format!("Interior LWR Exchange - {label} (W)");
-        if let Some(&idx) = column_index.get(&lwr_key) {
-            lwr_columns.insert(zone_id, idx);
-        }
-        let heat_key = format!("HVAC Heating Delivered - {label} (W)");
-        let cool_key = format!("HVAC Cooling Delivered - {label} (W)");
-        if let (Some(&heat_idx), Some(&cool_idx)) =
-            (column_index.get(&heat_key), column_index.get(&cool_key))
-        {
-            hvac_columns.insert(zone_id, (heat_idx, cool_idx));
-        }
-        zone_env_indices.push(env_idx);
-        zone_temp_col_indices.push(temp_col);
-    }
-
-    ZoneColumnCaches {
-        infiltration_columns,
-        lwr_columns,
-        hvac_columns,
-        sorted_zone_ids,
-        zone_env_indices,
-        zone_temp_col_indices,
     }
 }
 
@@ -3148,13 +2090,6 @@ pub struct Dwelling {
     /// fleet's time alignment applies to recover an instant from the Time
     /// column's naive local wall clock.
     utc_offset_s: i32,
-    /// Reused scratch for the per-report projected rows: the union row's
-    /// values one report's projection selects, pushed to that report's
-    /// recorder. Cleared and refilled per report per step.
-    projected_row_buf: Vec<f64>,
-    /// The projected row's validity, parallel to `projected_row_buf`, fed
-    /// to the recorders with every pushed row.
-    projected_valid_buf: Vec<bool>,
     /// Schedule column index for the occupancy time series, or `None` if the
     /// schedule does not include an occupancy column.
     occupancy_column_idx: Option<usize>,
@@ -4920,8 +3855,6 @@ fn assemble_from_blueprint_with_seed(
         snapshot_allocations: SnapshotAllocations::default(),
         #[cfg(all(test, feature = "observe"))]
         observe_allocations: ObserveAllocations::default(),
-        projected_row_buf: Vec::new(),
-        projected_valid_buf: Vec::new(),
         occupancy_column_idx,
         occupancy_scale,
         prev_humidity_ratios: init_humidity_ratios,
@@ -5104,7 +4037,7 @@ impl Dwelling {
         for recorder in self.recorders.iter_mut() {
             match recorder
                 .flush_and_close()
-                .map_err(|err| Self::recorder_error("output close", err))
+                .map_err(|err| recording::recorder_error("output close", err))
             {
                 Ok(()) => {}
                 // A callback error at the close (the final partial batch)
@@ -6857,17 +5790,6 @@ impl Dwelling {
         self.recorders[report_index].attach_callback(attachment.clone());
         self.attached_callback = Some(attachment);
         Ok(())
-    }
-
-    /// The recorder error the run's step path maps: a callback failure
-    /// keeps its typed variant (the run names the report and stays ended),
-    /// every other recorder failure is an I/O error as before, prefixed
-    /// with the flushing context that produced it.
-    fn recorder_error(context: &str, err: OutputError) -> HaresError {
-        match err {
-            OutputError::Callback { report, message } => HaresError::Callback { report, message },
-            other => HaresError::Io(format!("{context} failed: {other}")),
-        }
     }
 
     /// Rows written to the run's recorders over the run; `None` when no
@@ -9284,7 +8206,7 @@ impl Dwelling {
         );
 
         for (i, entry) in self.roster.zone_temp_scratch.iter_mut().enumerate() {
-            entry.1 = if let Some(env_idx) = self.roster.zones.zone_env_indices[i] {
+            entry.1 = if let Some(env_idx) = self.roster.recording.zones.zone_env_indices[i] {
                 self.latest_env.zones[env_idx].temperature_c
             } else {
                 // Zone not found in environment -- should not happen in a correctly
@@ -9539,21 +8461,29 @@ impl Dwelling {
             "{schema:?}|{}|{projections:?}|{:?}|{:?}|{}",
             self.roster.row_plan.slots(),
             self.roster
+                .recording
                 .bindings
                 .end_use_aggregates
                 .iter()
                 .map(|slot| slot.map(|s| s.to_string()))
                 .collect::<Vec<_>>(),
             self.roster
+                .recording
                 .bindings
                 .actors
                 .iter()
                 .map(|actor| actor.len())
                 .collect::<Vec<_>>(),
-            self.roster.bindings.equipment.len(),
+            self.roster.recording.bindings.equipment.len(),
         )
     }
 
+    /// Records one step: the frozen row plan's row is begun and written
+    /// through the recording layer (the producer bindings, the zone
+    /// columns, the envelope gain columns and the diagnostics block), the
+    /// run metrics' accumulator is fed from the producer slots, and every
+    /// report's recorder gets its projection of the row. Every write is
+    /// by precomputed index; the steady-state step allocates nothing.
     fn record_step(&mut self, step: &StepResult) -> Result<()> {
         // Begin the row the frozen plan built: zeroed, validity cleared,
         // timestamp stamped. Every write below is by precomputed index;
@@ -9563,443 +8493,28 @@ impl Dwelling {
         self.roster
             .row_plan
             .begin_row(self.latest_env.current_time.timestamp());
-        // The row's Time: the step's naive local wall clock, written once
-        // per row as the milliseconds the Timestamp(Millisecond, None)
-        // field carries.
-        let time_ms = step.timestamp.and_utc().timestamp_millis();
         let mut writer = self.roster.row_plan.writer();
-        let dwelling_columns = &self.roster.bindings.dwelling;
-
-        if let Some(idx) = dwelling_columns.total_electric {
-            writer.write(idx, step.net_electric_power_w);
-        }
-        if let Some(idx) = dwelling_columns.total_gas {
-            // The value is W (SI); the column's declared therms/hour unit
-            // converts once in the writer.
-            let gas_w = self.ports.fuel.get(hares_types::FuelType::Gas);
-            writer.write(idx, gas_w);
-        }
-        if let Some(idx) = dwelling_columns.total_reactive {
-            writer.write(idx, self.electrical_solver.net_reactive_var());
-        }
-
-        // Per-equipment columns via the frozen plan's producer bindings. The
-        // state columns (mode, setpoint, SOC, schedule) read the committed
-        // state; the flow and telemetry columns read what the equipment
-        // delivered this step, which for a failed-and-rolled-back step is
-        // nothing.
-        for (eq_idx, (eq, cols)) in self
-            .equipment
-            .iter()
-            .zip(&self.roster.bindings.equipment)
-            .enumerate()
-        {
-            let co = eq.core_output();
-            if let Some(idx) = cols.mode {
-                writer.write_opt(idx, co.state.operating_mode.map(|m| m.as_code()));
-            }
-            if let Some(idx) = cols.setpoint {
-                writer.write_opt(idx, co.state.setpoint_c);
-            }
-            if let Some(idx) = cols.soc {
-                writer.write_opt(idx, co.state.soc.map(|soc| soc.get()));
-            }
-            if let Some(idx) = cols.schedule {
-                let is_active = co
-                    .state
-                    .operating_mode
-                    .is_some_and(|m| m != hares_types::OperatingMode::Off);
-                writer.write(idx, if is_active { 1.0 } else { 0.0 });
-            }
-            if let Some(idx) = cols.speed {
-                writer.write_opt(idx, co.state.speed_index.map(f64::from));
-            }
-            if let Some(idx) = cols.defrost_state {
-                writer.write_opt(idx, eq.telemetry().get(tk::DEFROST_CYCLE_STATE)); // allowed: defrost cycle state remains telemetry-only until CoreOutput gains a defrost_state field.
-            }
-            for &(key, idx) in &cols.v8_state_columns {
-                writer.write_opt(idx, eq.telemetry().get(key)); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
-            }
-            if self.step_failed[eq_idx] {
-                // The step failed and was rolled back: the equipment
-                // delivered nothing this step. The not-nullable flow
-                // columns read their inactive zeros (the same zeros the
-                // success path's substitutions give an inactive
-                // component), and the nullable ones stay unwritten, null.
-                if let Some(idx) = cols.electric_power {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.gas_power {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.capacity {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.reactive_power {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.energy_kwh {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.er_power {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.fan_power {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.main_power {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.runtime_fraction {
-                    writer.write(idx, 0.0);
-                }
-                if let Some(idx) = cols.latent_gains {
-                    writer.write(idx, 0.0);
-                }
-                continue;
-            }
-            if let Some(idx) = cols.electric_power {
-                // Not nullable: the quantity is physically zero when its
-                // component is inactive (an undeclared channel is the zero,
-                // the declared one's absence the contract's wiring defect).
-                writer.write(
-                    idx,
-                    co.flows.electric_w.map_or(0.0, |e| e.net_consumption_w()),
-                );
-            }
-            if let Some(idx) = cols.gas_power {
-                writer.write(idx, co.flows.fuel_w.map_or(0.0, |f| f.consumption_w));
-            }
-            if let Some(idx) = cols.capacity {
-                // Capacity column is always a positive magnitude (OCHRE HVAC.py:598:
-                // `capacity_list` is asserted strictly positive). thermal_output_w uses
-                // the signed convention (negative for cooling), so take abs().
-                // Not nullable: 0.0 when the equipment reports no thermal
-                // channel (inactive).
-                let capacity_w = co
-                    .flows
-                    .thermal_output_w
-                    .map(f64::abs)
-                    .or(co.flows.sensible_cooling_w.map(f64::abs))
-                    .unwrap_or(0.0);
-                writer.write(idx, capacity_w);
-            }
-            if let Some(idx) = cols.cop {
-                // Nullable: the COP of a step with no compressor input is
-                // undefined, the cell null (today a 0.0 sentinel).
-                writer.write_opt(idx, co.performance.cop);
-            }
-            if let Some(idx) = cols.reactive_power {
-                let q = co.flows.reactive_power_var.unwrap_or(0.0);
-                writer.write(idx, q);
-                if let Some(pf_idx) = cols.power_factor {
-                    let p = co.flows.electric_w.map_or(0.0, |e| e.signed_w());
-                    let s = (p * p + q * q).sqrt();
-                    // Zero apparent power has no power factor: the ratio is
-                    // undefined, the cell null (today it carried the 1.0
-                    // sentinel).
-                    writer.write_opt(pf_idx, (s > 1e-9).then(|| (p / s).abs()));
-                }
-            }
-            if let Some(idx) = cols.energy_kwh {
-                let dt_s = self.latest_env.time_step_secs();
-                // Not nullable: the step's energy is zero when the
-                // equipment drew nothing. The value is the step's J (SI);
-                // the column's declared kWh unit converts once in the
-                // writer.
-                writer.write(
-                    idx,
-                    co.flows.electric_w.map_or(0.0, |e| e.net_consumption_w()) * dt_s,
-                );
-            }
-            if let Some(idx) = cols.er_power {
-                // OCHRE HVAC.py:1464-1467: ER Power = er_capacity * er_eir_rated * space_fraction / 1000.
-                // Maps to BACKUP_ER_KW (already space-fraction-adjusted in heater step).
-                writer.write(
-                    idx,
-                    eq.telemetry().get(tk::BACKUP_ER_KW).unwrap_or(0.0), // allowed: ER power remains telemetry-only until CoreOutput gains an er_power field.
-                );
-            }
-            // Per-equipment HVAC performance columns at v7.
-            // Some read from CoreOutput (setpoint, capacity, COP, speed, main_power),
-            // the rest remain telemetry-only until their fields are promoted.
-            if let Some(idx) = cols.shr {
-                // The sensible heat ratio exists while the step delivered
-                // sensible cooling: the cell is null otherwise (the
-                // telemetry key holds the last cooling step's value, not a
-                // per-step presence), never a 0.0 sentinel.
-                writer.write_opt(
-                    idx,
-                    co.flows
-                        .sensible_cooling_w
-                        .filter(|sc| *sc < 0.0)
-                        .and_then(|_| eq.telemetry().get(tk::SHR)), // allowed: SHR remains telemetry-only until CoreOutput gains an SHR field.
-                );
-            }
-            if let Some(idx) = cols.fan_power {
-                writer.write(
-                    idx,
-                    eq.telemetry().get(tk::FAN_KW).unwrap_or(0.0), // allowed: fan power remains telemetry-only until CoreOutput gains a fan power field.
-                );
-            }
-            if let Some(idx) = cols.main_power {
-                writer.write(idx, co.performance.main_power_w.unwrap_or(0.0));
-            }
-            if let Some(idx) = cols.runtime_fraction {
-                writer.write(
-                    idx,
-                    eq.telemetry().get(tk::RUNTIME_FRACTION).unwrap_or(0.0), // allowed: runtime fraction remains telemetry-only until CoreOutput gains an RTF field.
-                );
-            }
-            if let Some(idx) = cols.latent_gains {
-                // OCHRE HVAC.py:595: Latent Gains = latent_gain * space_fraction (pre-DSE).
-                writer.write(
-                    idx,
-                    eq.telemetry().get(tk::LATENT_GAINS_W).unwrap_or(0.0), // allowed: latent gains remains telemetry-only until CoreOutput gains a latent gains field.
-                );
-            }
-            if let Some(idx) = cols.duct_losses {
-                // Aggregate column: sum duct_loss_w across all HVAC equipment.
-                // Only the first equipment's index is used; all HVAC contributions
-                // are accumulated into the same row slot.
-                writer.add(
-                    idx,
-                    eq.telemetry().get(tk::DUCT_LOSS_W).unwrap_or(0.0), // allowed: duct loss remains telemetry-only until CoreOutput gains a duct loss field.
-                );
-            }
-            for &(key, idx) in &cols.v8_flow_columns {
-                writer.write_opt(idx, eq.telemetry().get(key)); // allowed: v8 telemetry pass-through uses pre-resolved tk:: constants bound to `key`.
-            }
-        }
-
-        // The slots whose value is the row's zero every step: the summed
-        // cells' accumulator when its contributors exist, and the
-        // not-nullable columns a roster change orphaned (see the
-        // bindings' builder).
-        for &slot in &self.roster.bindings.always_valid_slots {
-            writer.mark_valid(slot);
-        }
-
-        // Per-EndUse aggregate electric power columns.
-        // Each equipment's electric power is accumulated into the aggregate column
-        // for its EndUse category (e.g. all HVAC_HEATING equipment contribute to
-        // "HVAC Heating End Use Electric Power (kW)").
-        for (eq_idx, &agg_idx_opt) in self
-            .roster
-            .bindings
-            .end_use_aggregates
-            .iter()
-            .take(self.equipment.len())
-            .enumerate()
-        {
-            if let Some(idx) = agg_idx_opt
-                && !self.step_failed[eq_idx]
-            {
-                writer.add(
-                    idx,
-                    self.equipment[eq_idx]
-                        .core_output()
-                        .flows
-                        .electric_w
-                        .map_or(0.0, |e| e.net_consumption_w()),
-                );
-            }
-        }
-
-        // Actor telemetry columns: pre-resolved column indices avoid
-        // per-timestep format!() allocation (parallel to the plan's
-        // equipment bindings). A key the actor did not emit this step
-        // leaves its cell unwritten, null.
-        for (actor, pre_resolved) in self.actors.iter().zip(&self.roster.bindings.actors) {
-            if let Some(tel) = actor.telemetry() {
-                for (key, column_idx) in pre_resolved {
-                    if let Some(value) = tel.get(key) {
-                        // The actors hold SI values; the declared unit's
-                        // reporting column converts once in the writer.
-                        writer.write(*column_idx, value);
-                    }
-                }
-            }
-        }
-
-        // Zone temperature columns -- direct index lookup, no allocations.
-        for (i, &(_, temp_c)) in self.roster.zone_temp_scratch.iter().enumerate() {
-            if let Some(idx) = self.roster.zones.zone_temp_col_indices[i] {
-                writer.write(idx, temp_c);
-            }
-        }
-        // Fallback for old-style column name
-        if let Some(idx) = dwelling_columns.indoor_temp_fallback
-            && let Some(&(_, temp_c)) = self.roster.zone_temp_scratch.first()
-        {
-            writer.write(idx, temp_c);
-        }
-
-        if let Some(idx) = dwelling_columns.outdoor_dry_bulb {
-            writer.write(idx, self.latest_env.weather.outdoor_temp_c);
-        }
-
-        // Envelope, boundary, and HVAC thermal gains from the thermal
-        // solver, written through the plan's frozen gain terms and column
-        // indices.
-        let gains = self.thermal_solver.component_gains();
-        for &(term, idx) in &dwelling_columns.envelope {
-            if let Some(idx) = idx {
-                writer.write(idx, term(gains));
-            }
-        }
-
-        if let Some(idx) = dwelling_columns.ground_temp {
-            writer.write(idx, self.latest_env.weather.ground_temp_c);
-        }
-        if let Some(idx) = dwelling_columns.mains_temp {
-            writer.write(idx, self.latest_env.weather.mains_temp_c);
-        }
-        // The engine's per-step weather channels (the resample_weather
-        // row): the run's internal series, the values the environment's
-        // evaluation carried this step.
-        if let Some(idx) = dwelling_columns.outdoor_humidity_ratio {
-            writer.write(idx, self.latest_env.weather.outdoor_humidity_ratio);
-        }
-        if let Some(idx) = dwelling_columns.pressure_kpa {
-            writer.write(idx, self.latest_env.weather.pressure_kpa);
-        }
-        if let Some(idx) = dwelling_columns.wind_speed_m_s {
-            writer.write(idx, self.latest_env.weather.wind_speed_m_s);
-        }
-        if let Some(idx) = dwelling_columns.sky_temp_c {
-            writer.write(idx, self.latest_env.weather.sky_temp_c);
-        }
-        if let Some(idx) = dwelling_columns.ghi_w_m2 {
-            writer.write(idx, self.latest_env.weather.ghi_w_m2);
-        }
-        if let Some(idx) = dwelling_columns.dni_w_m2 {
-            writer.write(idx, self.latest_env.weather.dni_w_m2);
-        }
-        if let Some(idx) = dwelling_columns.dhi_w_m2 {
-            writer.write(idx, self.latest_env.weather.dhi_w_m2);
-        }
-
-        // Setpoint chain: dwelling-level context columns for control auditing.
-        // Read from the first HVAC equipment that publishes these keys; setpoint
-        // reconciliation writes them to all HVAC equipment telemetry, so any
-        // one carries the correct value. The equipment position is frozen
-        // with the plan (every roster change rebuilds it). Before the first
-        // reconcile the keys are absent and the cells stay unwritten, null.
-        if let Some(first_hvac_pos) = dwelling_columns.first_hvac {
-            let first_hvac = &self.equipment[first_hvac_pos];
-            if let Some(idx) = dwelling_columns.scheduled_heating_setpoint {
-                writer.write_opt(
-                    idx,
-                    // allowed: setpoint telemetry keys are populated by HVAC
-                    // equipment reconcile logic after the first timestep; before
-                    // that the cell stays unwritten, null.
-                    first_hvac.telemetry().get(tk::SCHEDULE_HEATING_SETPOINT_C),
-                );
-            }
-            if let Some(idx) = dwelling_columns.scheduled_cooling_setpoint {
-                writer.write_opt(
-                    idx,
-                    // allowed: see the scheduled heating setpoint read above.
-                    first_hvac.telemetry().get(tk::SCHEDULE_COOLING_SETPOINT_C),
-                );
-            }
-            if let Some(idx) = dwelling_columns.runtime_heating_setpoint {
-                writer.write_opt(
-                    idx,
-                    // allowed: see the scheduled heating setpoint read above.
-                    first_hvac.telemetry().get(tk::RUNTIME_HEATING_SETPOINT_C),
-                );
-            }
-            if let Some(idx) = dwelling_columns.runtime_cooling_setpoint {
-                writer.write_opt(
-                    idx,
-                    // allowed: see the scheduled heating setpoint read above.
-                    first_hvac.telemetry().get(tk::RUNTIME_COOLING_SETPOINT_C),
-                );
-            }
-        }
-
-        for &(zone, value) in &gains.infiltration_by_zone {
-            if let Some(&idx) = self.roster.zones.infiltration_columns.get(&zone) {
-                writer.write(idx, value);
-            }
-        }
-
-        for &(zone, value) in &gains.interior_lwr_by_zone {
-            if let Some(&idx) = self.roster.zones.lwr_columns.get(&zone) {
-                writer.write(idx, value);
-            }
-        }
-
-        // Per-zone HVAC thermal attribution: read sensible gains by category
-        // from the thermal port accumulators. Ports still hold equipment-step
-        // values because ports.zero() runs AFTER record_step.
-        // The basement zone receives HvacHeating/HvacCooling directly
-        // (not merged into conditioned); duct zones are tagged DuctLoss which
-        // is reported in the separate "HVAC Duct Losses (W)" column at
-        // verbosity 5, not here.
-        for thermal in &self.ports.thermal {
-            if let Some(&(heat_idx, cool_idx)) = self.roster.zones.hvac_columns.get(&thermal.zone) {
-                writer.write(
-                    heat_idx,
-                    thermal.sensible_for_category(ThermalCategory::HvacHeating),
-                );
-                writer.write(
-                    cool_idx,
-                    thermal
-                        .sensible_for_category(ThermalCategory::HvacCooling)
-                        .abs(),
-                );
-            }
-        }
-
-        // The diagnostics block: written only when the run requested the
-        // diagnostics report and the frozen schema carries the block. Every
-        // value is the per-step diagnostics CSV's row semantics (the zone
-        // lookups default to 0.0 the same way), at full f64 precision.
-        if let Some(diag) = &self.roster.bindings.diagnostics {
-            write_diagnostics_row(
-                &mut writer,
-                diag,
-                self.clock.current_step(),
-                &self.latest_env,
-                &self.ports,
-                gains,
-            );
-        }
-
-        // Every report's recorder gets the row its selection projected out
-        // of the union row, in the report's own column order. The
-        // projections were copied at freeze; the union row's borrow ends
-        // with the producers' writes above.
-        // The run metrics' one path: the accumulator is fed per step from
-        // the row plan's producer slots, before anything reads the row
-        // onward. `None` when the run did not request metrics: the step
-        // pays one branch and nothing else.
-        if let Some(calculator) = self.metrics_calculator.as_mut() {
-            calculator.accumulate_row(writer.row()).map_err(|err| {
-                HaresError::InvalidState(format!("metrics accumulation failed: {err}"))
-            })?;
-        }
-        for (recorder, projection) in self
-            .recorders
-            .iter_mut()
-            .zip(self.roster.record_projections.iter())
-        {
-            self.projected_row_buf.clear();
-            self.projected_row_buf
-                .extend(projection.iter().map(|&slot| writer.row()[slot]));
-            self.projected_valid_buf.clear();
-            self.projected_valid_buf
-                .extend(projection.iter().map(|&slot| writer.valid(slot)));
-            if let Err(err) =
-                recorder.push_row(time_ms, &self.projected_row_buf, &self.projected_valid_buf)
-            {
-                return Err(Self::recorder_error("record push", err));
-            }
-        }
-        Ok(())
+        // The component gains are read here (the same solver read the
+        // state-snapshot phase took): the record path mutates nothing the
+        // gains derive from, so the producers' values are this step's.
+        let inputs = StepRecordInputs {
+            step,
+            env: &self.latest_env,
+            ports: &self.ports,
+            step_number: self.clock.current_step(),
+            net_reactive_var: self.electrical_solver.net_reactive_var(),
+            zone_temps: &self.roster.zone_temp_scratch,
+            step_failed: &self.step_failed,
+            equipment: &self.equipment,
+            actors: &self.actors,
+            gains: self.thermal_solver.component_gains(),
+        };
+        self.roster.recording.record_step(
+            &mut writer,
+            &inputs,
+            self.metrics_calculator.as_mut(),
+            &mut self.recorders,
+        )
     }
 
     /// Runs per-timestep invariant checks.
@@ -10471,22 +8986,6 @@ fn discarded_thermal_w(rolled_back: &PortSlots, restored: &PortSlots) -> f64 {
     total(rolled_back) - total(restored)
 }
 
-/// Maps a ZoneId to its display name for output column labels.
-/// The configured indoor zone = "Indoor", attic zones = "Attic", others = "Zone_{id}".
-fn zone_display_name(
-    zone: ZoneId,
-    indoor_zone: ZoneId,
-    zone_type: Option<&hares_input::hpxml::ZoneType>,
-) -> String {
-    if zone == indoor_zone {
-        "Indoor".to_string()
-    } else if matches!(zone_type, Some(hares_input::hpxml::ZoneType::Attic)) {
-        "Attic".to_string()
-    } else {
-        format!("Zone_{}", zone.0)
-    }
-}
-
 /// Guards against EV driver RNG stream collisions during actor construction.
 ///
 /// Records each `(seed, stream)` pair used for an EV driver actor and panics
@@ -10760,9 +9259,7 @@ mod tests {
     #[cfg(feature = "observe")]
     use crate::observer::DispatchCapture;
     use crate::rng::RNG_STREAM_EV_DRIVER_BASE;
-    use conversions::{
-        build_output_column_index, equipment_config_from_spec, json_value_to_config_value,
-    };
+    use conversions::{equipment_config_from_spec, json_value_to_config_value};
     use hares_control::PriorityTier;
     use hares_equipment::config::ConfigValue;
     use hares_equipment::{Equipment, EquipmentConfig};
@@ -11959,9 +10456,14 @@ fn cfg_gated_helper() {
             .skip(1)
             .map(|f| f.name().clone())
             .collect();
-        dwelling.roster.bindings =
-            build_output_row_bindings(&bindings_schema, &equipment, &actor_refs, &expected)
-                .expect("test helper: producer bindings must resolve against the frozen schema");
+        dwelling.roster.recording.bindings = build_output_row_bindings(
+            &bindings_schema,
+            &hares_output::recording::build_output_column_index(&bindings_schema),
+            &equipment,
+            &recording::actor_telemetry_views(&actor_refs),
+            &expected,
+        )
+        .expect("test helper: producer bindings must resolve against the frozen schema");
         dwelling
             .solver_feedback_actor
             .set_dispatch_targets(compute_equipment_dispatch_targets(&equipment));
@@ -16979,117 +15481,6 @@ occupancy = 1.0
             msg.contains("unknown equipment class"),
             "error should preserve registry failure context, got: {msg}"
         );
-    }
-
-    #[test]
-    fn attic_temperature_column_uses_zone_type_not_zone_id() {
-        use hares_input::hpxml::ZoneType;
-
-        let zones = vec![
-            ZoneState {
-                id: ZoneId(10),
-                temperature_c: 21.0,
-                humidity_ratio: 0.008,
-                volume_m3: 200.0,
-            },
-            ZoneState {
-                id: ZoneId(3),
-                temperature_c: 16.0,
-                humidity_ratio: 0.008,
-                volume_m3: 120.0,
-            },
-        ];
-        let zone_types = vec![ZoneType::Conditioned, ZoneType::Attic];
-        let schema = hares_output::build_schema_for_specs(
-            &[],
-            2,
-            &[
-                (ZoneId(10), "Indoor".to_string()),
-                (ZoneId(3), "Attic".to_string()),
-            ],
-        );
-        let column_index = build_output_column_index(&schema);
-        let caches = build_zone_column_caches(&zones, &zone_types, ZoneId(10), &column_index);
-
-        let attic_idx = column_index
-            .get("Temperature - Attic (C)")
-            .copied()
-            .expect("schema must include attic temperature column");
-        assert_eq!(
-            caches.zone_temp_col_indices,
-            vec![
-                Some(attic_idx),
-                Some(column_index["Temperature - Indoor (C)"])
-            ],
-            "zone temperatures should be mapped by zone type, not zone number"
-        );
-    }
-
-    #[test]
-    fn per_zone_hvac_columns_written_from_port_accumulators() {
-        use hares_input::hpxml::ZoneType;
-        use hares_types::ports::PortContribution;
-
-        let zones = vec![ZoneState {
-            id: ZoneId(1),
-            temperature_c: 21.0,
-            humidity_ratio: 0.008,
-            volume_m3: 200.0,
-        }];
-        let zone_types = vec![ZoneType::Conditioned];
-        let schema =
-            hares_output::build_schema_for_specs(&[], 6, &[(ZoneId(1), "Indoor".to_string())]);
-        let column_index = build_output_column_index(&schema);
-        let caches = build_zone_column_caches(&zones, &zone_types, ZoneId(1), &column_index);
-
-        let (heat_idx, cool_idx) = caches
-            .hvac_columns
-            .get(&ZoneId(1))
-            .copied()
-            .expect("Indoor zone must have HVAC column indices at verbosity 6");
-        assert_ne!(
-            heat_idx, cool_idx,
-            "heating and cooling column indices must differ"
-        );
-
-        // Simulate equipment writing HvacHeating and HvacCooling to ports.
-        let mut ports = PortSlots::from_declarations(&[PortDeclaration::thermal(ZoneId(1))]);
-        ports
-            .accumulate(&PortContribution::Thermal {
-                zone: ZoneId(1),
-                sensible_gain_w: 500.0,
-                radiant_gain_w: 0.0,
-                latent_gain_w: 0.0,
-                category: ThermalCategory::HvacHeating,
-            })
-            .expect("accumulate must succeed");
-        ports
-            .accumulate(&PortContribution::Thermal {
-                zone: ZoneId(1),
-                sensible_gain_w: -200.0,
-                radiant_gain_w: 0.0,
-                latent_gain_w: 0.0,
-                category: ThermalCategory::HvacCooling,
-            })
-            .expect("accumulate must succeed");
-
-        let indoor_heating = ports.thermal[0].sensible_for_category(ThermalCategory::HvacHeating);
-        let indoor_cooling = ports.thermal[0].sensible_for_category(ThermalCategory::HvacCooling);
-        assert!(
-            (indoor_heating - 500.0).abs() < 1e-9,
-            "expected 500.0 W heating, got {indoor_heating}"
-        );
-        assert!(
-            (indoor_cooling - (-200.0)).abs() < 1e-9,
-            "expected -200.0 W cooling, got {indoor_cooling}"
-        );
-
-        // Build a minimal record context and write to scratch.
-        let mut record_scratch = vec![0.0; column_index.len()];
-        record_scratch[heat_idx] = indoor_heating;
-        record_scratch[cool_idx] = indoor_cooling.abs();
-        assert!((record_scratch[heat_idx] - 500.0).abs() < 1e-9);
-        assert!((record_scratch[cool_idx] - 200.0).abs() < 1e-9);
     }
 
     #[test]
@@ -25399,58 +23790,6 @@ occupancy = 0.0
 
     // ── Telemetry-to-Column Mapping Tests ──
 
-    /// A schema the row plan freezes from that omits a column the schema
-    /// KNOWS it owes (membership = the schema's unconditional
-    /// `{name} Electric Power (kW)` column) is a typed error at freeze, in
-    /// every build. Only schema-unknown equipment (added after the schema
-    /// froze, carrying no columns by design) are exempt.
-    #[test]
-    fn row_plan_rejects_unplaceable_expected_variable() {
-        let mut eq = TestEquipment::new("Battery", ControlCapabilities::empty());
-        eq.descriptor.end_use = EndUse::BATTERY;
-        eq.descriptor.fuel = FuelType::Electric;
-        // The storage capability the SOC column's typed gate reads.
-        eq.descriptor.core_capabilities |= CoreCapabilities::HAS_SOC;
-        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        // A schema-known equipment: the schema carries its membership column
-        // (Electric Power, emitted unconditionally at verbosity ≥ 1) and its
-        // Mode column, but not the SOC column its declared storage
-        // capability demands at verbosity 3. Drift for a known equipment
-        // must stay loud.
-        let schema = arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("Time", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new(
-                "Battery Electric Power (kW)",
-                arrow::datatypes::DataType::Float64,
-                true,
-            ),
-            arrow::datatypes::Field::new(
-                "Battery Mode (-)",
-                arrow::datatypes::DataType::Float64,
-                true,
-            ),
-        ]);
-        let err = build_output_row_bindings(
-            &schema,
-            &equipment_refs(&equipment),
-            &[],
-            &[
-                "Battery Electric Power (kW)".to_string(),
-                "Battery Mode (-)".to_string(),
-                "Battery SOC (-)".to_string(),
-            ]
-            .into_iter()
-            .collect(),
-        )
-        .expect_err("schema drift for a known equipment must be a typed error");
-        assert!(
-            matches!(&err, HaresError::InvariantViolation { check_name, .. }
-                if check_name.contains("Battery SOC (-)")
-                    && check_name.contains("Battery")),
-            "the error must name the missing column and the equipment, got: {err:?}"
-        );
-    }
-
     /// In one run whose row plan holds a `Named` single-column selection
     /// and a `Verbosity(8)` selection, the named projection is the
     /// verbosity projection's slot for the same variable, and the values
@@ -25483,8 +23822,14 @@ occupancy = 0.0
             .skip(1)
             .map(|f| f.name().clone())
             .collect();
-        let bindings = build_output_row_bindings(&schema, &equipment, &actors, &expected)
-            .expect("bindings resolve");
+        let bindings = build_output_row_bindings(
+            &schema,
+            &hares_output::recording::build_output_column_index(&schema),
+            &equipment,
+            &recording::actor_telemetry_views(&actors),
+            &expected,
+        )
+        .expect("bindings resolve");
 
         // One recorder per report, each with its own schema: the named
         // report's schema spans its one column; the verbosity report's is
@@ -25501,10 +23846,10 @@ occupancy = 0.0
                 .expect("full recorder");
         dwelling.recorders = vec![named_recorder, full_recorder];
         dwelling.roster.row_plan = row_plan;
-        dwelling.roster.record_projections = dwelling.roster.row_plan.projections().to_vec();
+        dwelling.roster.recording.projections = dwelling.roster.row_plan.projections().to_vec();
         dwelling.roster.union_schema = schema;
         dwelling.roster.expected_columns = expected;
-        dwelling.roster.bindings = bindings;
+        dwelling.roster.recording.bindings = bindings;
 
         // The named projection is the single slot the verbosity projection
         // also carries.
@@ -25590,8 +23935,9 @@ occupancy = 0.0
         .expect("plan builds");
         let bindings = build_output_row_bindings(
             &schema,
+            &golden_columns,
             &equipment,
-            &actors,
+            &recording::actor_telemetry_views(&actors),
             &golden_columns.keys().cloned().collect(),
         )
         .expect("bindings resolve");
@@ -25607,10 +23953,10 @@ occupancy = 0.0
             destination: hares_input::Destination::Memory,
         }];
         dwelling.roster.row_plan = row_plan;
-        dwelling.roster.record_projections = dwelling.roster.row_plan.projections().to_vec();
+        dwelling.roster.recording.projections = dwelling.roster.row_plan.projections().to_vec();
         dwelling.roster.union_schema = schema;
         dwelling.roster.expected_columns = golden_columns.keys().cloned().collect();
-        dwelling.roster.bindings = bindings;
+        dwelling.roster.recording.bindings = bindings;
 
         // Three steps of the real run; the third is the fixed step the pin
         // reads. A chunk size of 1 flushes one batch per row, so batch
@@ -25721,7 +24067,7 @@ occupancy = 0.0
         heater.descriptor.end_use = EndUse::HVAC_HEATING;
         replace_equipment_for_test(&mut dwelling, vec![Box::new(load), Box::new(heater)]);
         assert_eq!(
-            dwelling.roster.bindings.dwelling.first_hvac,
+            dwelling.roster.recording.bindings.dwelling.first_hvac,
             Some(1),
             "the rebuilt bindings must freeze the new roster's first HVAC position"
         );
@@ -25735,7 +24081,7 @@ occupancy = 0.0
             .expect("init sole load stub");
         replace_equipment_for_test(&mut dwelling, vec![Box::new(load2)]);
         assert_eq!(
-            dwelling.roster.bindings.dwelling.first_hvac, None,
+            dwelling.roster.recording.bindings.dwelling.first_hvac, None,
             "the shorter roster carries no HVAC, so the setpoint chain must unbind"
         );
 
@@ -25751,6 +24097,7 @@ occupancy = 0.0
             .collect();
         let total_electric = dwelling
             .roster
+            .recording
             .bindings
             .dwelling
             .total_electric
@@ -25790,718 +24137,6 @@ occupancy = 0.0
         }
     }
 
-    /// An equipment whose name shadows a reserved aggregate column ("Total")
-    /// must claim NOTHING from a schema that carries the aggregate —
-    /// not even the column that exists under its own name. Claiming it would
-    /// make record_step's later per-equipment write silently replace the
-    /// dwelling's total; and treating the aggregate's presence as membership
-    /// would fail the plan on the absent Mode column. Both faces are pinned
-    /// here: no claim, no panic.
-    #[test]
-    fn column_map_claims_nothing_for_an_equipment_name_shadowing_the_aggregate_column() {
-        let eq = TestEquipment::new("Total", ControlCapabilities::empty());
-        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        // The schema carries only the level-0 aggregate — the exact state a
-        // frozen schema presents to a mid-run equipment named "Total".
-        let schema = arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("Time", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new(
-                "Total Electric Power (kW)",
-                arrow::datatypes::DataType::Float64,
-                true,
-            ),
-        ]);
-        let bindings = build_output_row_bindings(
-            &schema,
-            &equipment_refs(&equipment),
-            &[],
-            &["Total Electric Power (kW)".to_string()]
-                .into_iter()
-                .collect(),
-        )
-        .expect("reserved-aggregate shadowing must not error");
-        let cols = &bindings.equipment[0];
-        assert!(
-            cols.electric_power.is_none(),
-            "an equipment named 'Total' must not claim the aggregate \
-             'Total Electric Power (kW)' column as its own"
-        );
-        assert!(
-            cols.mode.is_none(),
-            "the aggregate's presence must not be read as schema membership — \
-             the absent Mode column must not panic"
-        );
-    }
-
-    /// At verbosity 7, all per-equipment column indices for applicable equipment
-    /// types are resolved to `Some`.
-    #[test]
-    fn plan_equipment_columns_v7_all_columns_resolved_for_applicable_equipment() {
-        let specs = vec![
-            hares_input::EquipmentSpec {
-                instance_name: None,
-                name: "ASHP Heater".to_string(),
-                fuel_type: FuelType::Electric,
-                parameters: Map::new(),
-                zip_params: None,
-                typed_overrides: serde_json::Map::new(),
-                typed_config: None,
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
-            },
-            hares_input::EquipmentSpec {
-                instance_name: None,
-                name: "Battery".to_string(),
-                fuel_type: FuelType::Electric,
-                parameters: Map::new(),
-                zip_params: None,
-                typed_overrides: serde_json::Map::new(),
-                typed_config: None,
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
-            },
-        ];
-        let schema = hares_output::build_schema_for_specs(&specs, 7, &[]);
-        let column_index = build_output_column_index(&schema);
-
-        let mut eq1 = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
-        eq1.descriptor.end_use = EndUse::HVAC_HEATING;
-        eq1.descriptor.fuel = FuelType::Electric;
-        // The heat-pump-heater family's defining declaration (the
-        // defrost/ER columns' typed gate), as the real class declares it.
-        eq1.descriptor
-            .telemetry_fields
-            .push(TelemetryField::power_kw(
-                tk::PAN_HEATER_KW,
-                "Minisplit pan/crankcase heater power",
-            ));
-        let mut eq2 = TestEquipment::new("Battery", ControlCapabilities::empty());
-        eq2.descriptor.end_use = EndUse::BATTERY;
-        eq2.descriptor.fuel = FuelType::Electric;
-        // The storage capability the SOC column family's typed gate reads.
-        eq2.descriptor.core_capabilities |= CoreCapabilities::HAS_SOC;
-        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq1), Box::new(eq2)];
-        let col_map = plan_equipment_columns(
-            &equipment_refs(&equipment),
-            &column_index,
-            &column_index.keys().cloned().collect(),
-        )
-        .expect("column map resolves");
-
-        let ashp = &col_map[0];
-        let bat = &col_map[1];
-
-        assert!(ashp.electric_power.is_some());
-        assert!(ashp.mode.is_some());
-        assert!(ashp.setpoint.is_some());
-        assert!(ashp.capacity.is_some());
-        assert!(ashp.cop.is_some());
-        assert!(ashp.energy_kwh.is_some());
-        assert!(ashp.schedule.is_some());
-        assert!(ashp.defrost_state.is_some());
-        assert!(ashp.er_power.is_some());
-        assert!(ashp.speed.is_some());
-        assert!(ashp.fan_power.is_some());
-        assert!(ashp.main_power.is_some());
-        assert!(ashp.runtime_fraction.is_some());
-        assert!(ashp.shr.is_none());
-        assert!(ashp.latent_gains.is_none());
-
-        assert!(bat.electric_power.is_some());
-        assert!(bat.soc.is_some());
-        assert!(bat.energy_kwh.is_some());
-        assert!(bat.mode.is_some());
-        assert!(bat.setpoint.is_none());
-        assert!(bat.capacity.is_none());
-        assert!(bat.cop.is_none());
-    }
-
-    /// For every `FuelType` variant, the schema emits a
-    /// `"{name} Gas Power (therms/hour)"` column if and only if
-    /// `plan_equipment_columns` resolves it. Both sites share
-    /// `hares_output::fuel_reports_gas_power_column`; this test guards against the
-    /// predicate being forked again (previously Wood/Coal/WoodPellet equipment
-    /// got a schema column that was never populated).
-    #[test]
-    fn gas_power_schema_column_and_resolved_column_agree_for_every_fuel_type() {
-        let all_fuels = hares_types::ports::ALL_FUEL_TYPES
-            .iter()
-            .copied()
-            .chain(std::iter::once(FuelType::None));
-        for fuel in all_fuels {
-            let name = "Test Load";
-            let specs = vec![hares_input::EquipmentSpec {
-                instance_name: None,
-                name: name.to_string(),
-                fuel_type: fuel,
-                parameters: Map::new(),
-                zip_params: None,
-                typed_overrides: serde_json::Map::new(),
-                typed_config: None,
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
-            }];
-            let schema = hares_output::build_schema_for_specs(&specs, 1, &[]);
-            let column_index = build_output_column_index(&schema);
-            let schema_has_gas_col =
-                column_index.contains_key(&format!("{name} {GAS_POWER_SUFFIX}"));
-
-            let mut eq = TestEquipment::new(name, ControlCapabilities::empty());
-            eq.descriptor.fuel = fuel;
-            let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-            let col_map = plan_equipment_columns(
-                &equipment_refs(&equipment),
-                &column_index,
-                &column_index.keys().cloned().collect(),
-            )
-            .expect("column map resolves");
-            let resolved_gas_col = col_map[0].gas_power.is_some();
-
-            assert_eq!(
-                schema_has_gas_col, resolved_gas_col,
-                "fuel {fuel:?}: schema column presence ({schema_has_gas_col}) must match \
-                 resolved column presence ({resolved_gas_col})"
-            );
-            assert_eq!(
-                schema_has_gas_col,
-                hares_output::fuel_reports_gas_power_column(fuel),
-                "fuel {fuel:?}: schema must follow the shared predicate"
-            );
-        }
-    }
-
-    /// At verbosity 0, per-equipment columns are not in the schema.
-    #[test]
-    fn plan_equipment_columns_v0_all_per_equipment_columns_none() {
-        let schema = hares_output::build_schema_for_specs(&[], 0, &[]);
-        let column_index = build_output_column_index(&schema);
-        let eq = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
-        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let col_map = plan_equipment_columns(
-            &equipment_refs(&equipment),
-            &column_index,
-            &column_index.keys().cloned().collect(),
-        )
-        .expect("column map resolves");
-        let cols = &col_map[0];
-        assert!(cols.electric_power.is_none());
-        assert!(cols.gas_power.is_none());
-        assert!(cols.mode.is_none());
-        assert!(cols.soc.is_none());
-        assert!(cols.capacity.is_none());
-        assert!(cols.energy_kwh.is_none());
-        assert!(cols.schedule.is_none());
-        assert!(cols.defrost_state.is_none());
-        assert!(cols.duct_losses.is_none());
-    }
-
-    /// Gas-fueled equipment with electric parasitics (gas furnace blower at
-    /// pf 0.87, gas boiler pump at 0.84, gas WH draft fan at 0.87) emits
-    /// reactive power, so at verbosity ≥ 5 the Reactive Power / Power Factor
-    /// columns must exist and resolve for gas equipment too — the columns
-    /// mirror the unconditional Electric Power column instead of gating on
-    /// fuel type.
-    #[test]
-    fn gas_equipment_reactive_and_power_factor_columns_resolve_at_verbosity_5() {
-        let specs = vec![hares_input::EquipmentSpec {
-            instance_name: None,
-            name: "Gas Furnace".to_string(),
-            fuel_type: FuelType::Gas,
-            parameters: Map::new(),
-            zip_params: None,
-            typed_overrides: serde_json::Map::new(),
-            typed_config: None,
-            system_id: None,
-            related_hvac_idref: None,
-            primary_role: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
-        }];
-        let schema = hares_output::build_schema_for_specs(&specs, 5, &[]);
-        let column_index = build_output_column_index(&schema);
-        let mut eq = TestEquipment::new("Gas Furnace", ControlCapabilities::empty());
-        eq.descriptor.end_use = EndUse::HVAC_HEATING;
-        eq.descriptor.fuel = FuelType::Gas;
-        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-        let col_map = plan_equipment_columns(
-            &equipment_refs(&equipment),
-            &column_index,
-            &column_index.keys().cloned().collect(),
-        )
-        .expect("column map resolves");
-        let cols = &col_map[0];
-        assert!(
-            cols.reactive_power.is_some(),
-            "gas furnace blower emits Q — reactive column must resolve"
-        );
-        assert!(
-            cols.power_factor.is_some(),
-            "gas furnace blower emits Q — power factor column must resolve"
-        );
-        // Below verbosity 5 the columns are absent for all equipment.
-        let schema_v4 = hares_output::build_schema_for_specs(&specs, 4, &[]);
-        let column_index_v4 = build_output_column_index(&schema_v4);
-        let mut eq_v4 = TestEquipment::new("Gas Furnace", ControlCapabilities::empty());
-        eq_v4.descriptor.end_use = EndUse::HVAC_HEATING;
-        eq_v4.descriptor.fuel = FuelType::Gas;
-        let equipment_v4: Vec<Box<dyn Equipment>> = vec![Box::new(eq_v4)];
-        let col_map_v4 = plan_equipment_columns(
-            &equipment_refs(&equipment_v4),
-            &column_index_v4,
-            &column_index_v4.keys().cloned().collect(),
-        )
-        .expect("column map resolves");
-        assert!(col_map_v4[0].reactive_power.is_none());
-        assert!(col_map_v4[0].power_factor.is_none());
-    }
-
-    /// A typo in a column name string results in `None` index.
-    #[test]
-    fn column_name_typo_results_in_none_column_index() {
-        let specs = vec![hares_input::EquipmentSpec {
-            instance_name: None,
-            name: "ASHP Heater".to_string(),
-            fuel_type: FuelType::Electric,
-            parameters: Map::new(),
-            zip_params: None,
-            typed_overrides: serde_json::Map::new(),
-            typed_config: None,
-            system_id: None,
-            related_hvac_idref: None,
-            primary_role: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
-        }];
-        let schema = hares_output::build_schema_for_specs(&specs, 1, &[]);
-        let column_index = build_output_column_index(&schema);
-        assert!(column_index.contains_key("ASHP Heater Electric Power (kW)"));
-        assert!(!column_index.contains_key("ASHP Heater Electrix Power (kW)"));
-    }
-
-    /// Column suffix constants produce names matching the schema.
-    #[test]
-    fn column_suffix_constants_match_build_schema_output() {
-        let specs = vec![hares_input::EquipmentSpec {
-            instance_name: None,
-            name: "Air Conditioner".to_string(),
-            fuel_type: FuelType::Electric,
-            parameters: Map::new(),
-            zip_params: None,
-            typed_overrides: serde_json::Map::new(),
-            typed_config: None,
-            system_id: None,
-            related_hvac_idref: None,
-            primary_role: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
-        }];
-        let schema = hares_output::build_schema_for_specs(&specs, 7, &[]);
-        let column_index = build_output_column_index(&schema);
-        let name = "Air Conditioner";
-        assert!(column_index.contains_key(&format!("{name} {ELECTRIC_POWER_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {MODE_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {SETPOINT_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {CAPACITY_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {COP_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {SHR_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {LATENT_GAINS_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {SPEED_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {FAN_POWER_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {MAIN_POWER_SUFFIX}")));
-        assert!(column_index.contains_key(&format!("{name} {RUNTIME_FRACTION_SUFFIX}")));
-    }
-
-    /// `HVAC_DUCT_LOSSES_COL` constant resolves in the schema at v5+.
-    #[test]
-    fn duct_losses_column_uses_shared_constant() {
-        let schema_v5 = hares_output::build_schema_for_specs(&[], 5, &[]);
-        let col_idx_v5 = build_output_column_index(&schema_v5);
-        assert!(col_idx_v5.contains_key(HVAC_DUCT_LOSSES_COL));
-        let schema_v4 = hares_output::build_schema_for_specs(&[], 4, &[]);
-        let col_idx_v4 = build_output_column_index(&schema_v4);
-        assert!(!col_idx_v4.contains_key(HVAC_DUCT_LOSSES_COL));
-    }
-
-    /// Every output-scoped telemetry key in `OUTPUT_SCOPE_KEYS` has a
-    /// corresponding column mapping in the output schema when the
-    /// relevant equipment type is present at max verbosity (8).
-    ///
-    /// This is the integration-level counterpart to the unit tests in
-    /// `telemetry_keys.rs` — those verify every key constant has a scope
-    /// annotation; this one verifies the scope annotations are backed
-    /// by actual column definitions.
-    #[test]
-    fn all_output_scope_keys_have_column_mappings_at_max_verbosity() {
-        use hares_types::telemetry_keys::{self as tk};
-        let specs: Vec<hares_input::EquipmentSpec> = vec![
-            // HVAC with compressor (heat pump)
-            hares_input::EquipmentSpec {
-                instance_name: Some("ASHP Heater".to_string()),
-                name: "ASHP Heater".to_string(),
-                fuel_type: FuelType::Electric,
-                parameters: serde_json::Map::new(),
-                zip_params: None,
-                typed_overrides: serde_json::Map::new(),
-                typed_config: None,
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
-            },
-            // PV
-            hares_input::EquipmentSpec {
-                instance_name: Some("PV".to_string()),
-                name: "PV".to_string(),
-                fuel_type: FuelType::Electric,
-                parameters: serde_json::Map::new(),
-                zip_params: None,
-                typed_overrides: serde_json::Map::new(),
-                typed_config: None,
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
-            },
-            // EV
-            hares_input::EquipmentSpec {
-                instance_name: Some("EV".to_string()),
-                name: "EV".to_string(),
-                fuel_type: FuelType::Electric,
-                parameters: serde_json::Map::new(),
-                zip_params: None,
-                typed_overrides: serde_json::Map::new(),
-                typed_config: None,
-                system_id: None,
-                related_hvac_idref: None,
-                primary_role: None,
-                heating_setpoint_source: None,
-                cooling_setpoint_source: None,
-            },
-        ];
-        let schema = hares_output::build_schema_for_specs(&specs, 8, &[]);
-        let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-
-        // Build the expected column set from the schema and the
-        // equipment column map logic. We can't call plan_equipment_columns
-        // directly because it requires Box<dyn Equipment> instances, so we
-        // verify against the column names in the schema instead.
-        //
-        // For each output-scoped key, check that the schema contains at
-        // least one column whose suffix matches the key's column suffix.
-        // The schema should have per-equipment columns for HVAC, PV, and EV.
-
-        // Per-HVAC columns (including heat pump and compressor):
-        assert!(
-            column_names.contains(&"ASHP Heater Supply Temperature (C)"),
-            "missing HVAC supply temp column; got: {column_names:?}"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Return Temperature (C)"),
-            "missing HVAC return temp column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Compressor Power (W)"),
-            "missing compressor power (W) column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Compressor Power (kW)"),
-            "missing compressor power (kW) column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Fan Electric Power (W)"),
-            "missing fan electric power column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Fan Power (W)"),
-            "missing fan power (W) column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Supply Air Temperature (C)"),
-            "missing HP supply air temp column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Pan Heater Power (kW)"),
-            "missing pan heater power column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Heat Pump Capacity (W)"),
-            "missing HP capacity column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater ER Capacity (W)"),
-            "missing ER capacity column"
-        );
-
-        // Per-PV columns:
-        assert!(
-            column_names.contains(&"PV DC Power (kW)"),
-            "missing PV DC power column"
-        );
-        assert!(
-            column_names.contains(&"PV Irradiance (W/m2)"),
-            "missing PV irradiance column"
-        );
-
-        // Per-EV columns:
-        assert!(
-            column_names.contains(&"EV Connection State (-)"),
-            "missing EV connection state column"
-        );
-        assert!(
-            column_names.contains(&"EV Charging Level (-)"),
-            "missing EV charging level column"
-        );
-
-        // Setpoint chain columns (dwelling-level, at v7):
-        assert!(
-            column_names.contains(&"Scheduled Heating Setpoint (C)"),
-            "missing scheduled heating setpoint column"
-        );
-        assert!(
-            column_names.contains(&"Scheduled Cooling Setpoint (C)"),
-            "missing scheduled cooling setpoint column"
-        );
-        assert!(
-            column_names.contains(&"Runtime Heating Setpoint (C)"),
-            "missing runtime heating setpoint column"
-        );
-        assert!(
-            column_names.contains(&"Runtime Cooling Setpoint (C)"),
-            "missing runtime cooling setpoint column"
-        );
-
-        // Thermostat short-cycle protection columns (per-equipment):
-        assert!(
-            column_names.contains(&"ASHP Heater Min On Time (s)"),
-            "missing min on time column"
-        );
-        assert!(
-            column_names.contains(&"ASHP Heater Min Off Time (s)"),
-            "missing min off time column"
-        );
-
-        // Verify all 27 output-scope keys are accounted for.
-        // 7 legacy (FAN_KW, SHR, DEFROST_CYCLE_STATE, BACKUP_ER_KW,
-        //   RUNTIME_FRACTION, LATENT_GAINS_W, DUCT_LOSS_W)
-        // + 4 setpoint chain
-        // + 3 HVAC temps
-        // + 4 compressor/fan detail
-        // + 3 HP detail
-        // + 2 PV
-        // + 2 EV
-        // + 2 thermostat short-cycle protection
-        // = 27 total keys
-        //
-        // 7 legacy output keys are verified by existing tests
-        // (verbosity_7 tests for fan, SHR, defrost, ER, RTF, latent, duct).
-        // The 20 new keys are verified above.
-        assert_eq!(
-            tk::OUTPUT_SCOPE_KEYS.len(),
-            27,
-            "OUTPUT_SCOPE_KEYS length changed; ensure all are tested above"
-        );
-    }
-
-    /// A catalogue built from live equipment descriptors, for the enrich
-    /// tests.
-    fn catalogue_from_equipment(equipment: &[Box<dyn Equipment>]) -> hares_output::Catalogue {
-        let input = hares_output::CatalogueInput {
-            equipment: equipment_refs(equipment)
-                .iter()
-                .map(|eq| {
-                    let d = eq.descriptor();
-                    hares_output::CatalogueEquipment {
-                        name: d.name.clone(),
-                        instance_name: None,
-                        id: d.id,
-                        fuel: d.fuel,
-                        end_use: d.end_use.clone(),
-                        core_capabilities: d.core_capabilities,
-                        telemetry: d.telemetry_fields.clone(),
-                    }
-                })
-                .collect(),
-            zones: Vec::new(),
-            actors: Vec::new(),
-        };
-        hares_output::build_catalogue(&input).expect("the test catalogue builds")
-    }
-
-    #[test]
-    fn enrich_schema_telemetry_units_tags_matching_column_with_unit_source() {
-        let mut eq = TestEquipment::new("TestEq", ControlCapabilities::empty());
-        eq.descriptor
-            .telemetry_fields
-            .push(TelemetryField::power_kvar(
-                "test_reactive",
-                "test reactive power",
-            ));
-        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-
-        let catalogue = catalogue_from_equipment(&equipment);
-        let schema = hares_output::build_schema(&catalogue, 5, false);
-        let enriched =
-            enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment), &catalogue);
-        let reactive_col = enriched
-            .fields()
-            .iter()
-            .find(|f| f.name() == "TestEq Reactive Power (kVAR)")
-            .expect("schema v5 must include per-equipment reactive power column");
-        assert_eq!(
-            reactive_col
-                .metadata()
-                .get("unit_source")
-                .map(|s| s.as_str()),
-            Some("telemetry_field"),
-            "reactive power column with matching declared telemetry field unit should carry unit_source"
-        );
-    }
-    #[test]
-    fn enrich_schema_telemetry_units_sets_no_unit_source_when_unit_absent_from_descriptor() {
-        let mut eq = TestEquipment::new("TestEq", ControlCapabilities::empty());
-        eq.descriptor
-            .telemetry_fields
-            .push(TelemetryField::power_kw("test_kw", "test active power"));
-        let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
-
-        let catalogue = catalogue_from_equipment(&equipment);
-        let schema = hares_output::build_schema(&catalogue, 5, false);
-        let enriched =
-            enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment), &catalogue);
-        let reactive_col = enriched
-            .fields()
-            .iter()
-            .find(|f| f.name() == "TestEq Reactive Power (kVAR)")
-            .expect("schema v5 must include per-equipment reactive power column");
-        assert!(
-            reactive_col.metadata().get("unit_source").is_none(),
-            "reactive power column should not get unit_source when equipment declares no kVAR field"
-        );
-    }
-
-    /// The enrichment's per-field check is unmasked: a column whose
-    /// telemetry key the owning equipment declares with a DIFFERENT unit
-    /// must not validate on the equipment's other declared units (the
-    /// whole-set membership that let the EV columns' dimensionless metadata
-    /// pass against `code` declarations). The agreeing field validates; the
-    /// disagreeing one warns and leaves the column unannotated.
-    #[test]
-    fn enrich_unit_source_follows_the_key_field_not_the_unit_set() {
-        // The EV name puts the name family's telemetry-derived columns in
-        // the catalogue; the specs path carries no equipment declarations,
-        // so the columns hold the static per-capability table's `code`
-        // declaration.
-        let specs = [hares_input::EquipmentSpec {
-            instance_name: None,
-            name: "EV".to_string(),
-            fuel_type: FuelType::Electric,
-            parameters: serde_json::Map::new(),
-            zip_params: None,
-            typed_overrides: serde_json::Map::new(),
-            typed_config: None,
-            system_id: None,
-            related_hvac_idref: None,
-            primary_role: None,
-            heating_setpoint_source: None,
-            cooling_setpoint_source: None,
-        }];
-        let zones = vec![(ZoneId(1), "Indoor".to_string())];
-        let input = hares_output::CatalogueInput {
-            equipment: specs
-                .iter()
-                .enumerate()
-                .map(|(i, s)| hares_output::CatalogueEquipment {
-                    name: s.name.clone(),
-                    instance_name: None,
-                    id: EquipmentId(u32::try_from(i + 1).expect("equipment count")),
-                    fuel: s.fuel_type,
-                    end_use: hares_equipment::class_declared_surface(&s.name)
-                        .map_or(hares_types::EndUse::OTHER, |surface| surface.end_use),
-                    core_capabilities: hares_equipment::class_declared_surface(&s.name)
-                        .map_or(hares_types::CoreCapabilities::default(), |surface| {
-                            surface.core_capabilities
-                        }),
-                    telemetry: Vec::new(),
-                })
-                .collect(),
-            zones,
-            actors: Vec::new(),
-        };
-        let catalogue = hares_output::build_catalogue(&input).expect("the specs catalogue builds");
-        let schema = hares_output::build_schema(&catalogue, 8, false);
-
-        let make = |unit_declaration: TelemetryField| -> Vec<Box<dyn Equipment>> {
-            make_multiple(vec![unit_declaration])
-        };
-
-        // The agreeing declaration validates the column.
-        let agreeing = make(TelemetryField::code_code(
-            "connection_state",
-            hares_types::EV_CONNECTION_STATE_LABELS,
-            "the declaration the column mirrors",
-        ));
-        let enriched = enrich_schema_with_telemetry_units(
-            schema.clone(),
-            &equipment_refs(&agreeing),
-            &catalogue,
-        );
-        let col = enriched
-            .fields()
-            .iter()
-            .find(|f| f.name() == "EV Connection State (-)")
-            .expect("the schema carries the EV column at verbosity 8");
-        assert_eq!(
-            col.metadata().get("unit_source").map(String::as_str),
-            Some("telemetry_field"),
-            "the declared field for the column's key agrees and validates it"
-        );
-
-        // The disagreeing declaration must not validate on the unit SET:
-        // the equipment also declares an unrelated code-unit field, so the
-        // whole-set membership finds the column's unit and would annotate
-        // the column despite the key field's disagreement (the trap the EV
-        // columns' dimensionless metadata fell into).
-        let disagreeing = make_multiple(vec![
-            TelemetryField::ratio(
-                "connection_state",
-                "drifts from the column's code declaration",
-            ),
-            TelemetryField::code_code(
-                "phase",
-                hares_types::EV_CHARGING_LEVEL_LABELS,
-                "an unrelated code field puts code in the unit set",
-            ),
-        ]);
-        let enriched =
-            enrich_schema_with_telemetry_units(schema, &equipment_refs(&disagreeing), &catalogue);
-        let col = enriched
-            .fields()
-            .iter()
-            .find(|f| f.name() == "EV Connection State (-)")
-            .expect("the schema carries the EV column at verbosity 8");
-        assert!(
-            col.metadata().get("unit_source").is_none(),
-            "a per-field unit disagreement must leave the column unvalidated, whatever the \
-             equipment's other declared units are"
-        );
-    }
-
-    fn make_multiple(declarations: Vec<TelemetryField>) -> Vec<Box<dyn Equipment>> {
-        let mut eq = TestEquipment::new("EV", ControlCapabilities::empty());
-        eq.descriptor.telemetry_fields = declarations;
-        vec![Box::new(eq)]
-    }
     /// Interest-filtering state must stay per-equipment: `prev_equipment_modes`
     /// is `EquipmentId`-keyed and `equipment_mode_changed` attributes a mode
     /// change to the actor's target equipment by comparing against this map.
@@ -26658,7 +24293,7 @@ occupancy = 1.0"#,
         );
         println!(
             "binding: {:?}",
-            dwelling.roster.bindings.dwelling.total_electric
+            dwelling.roster.recording.bindings.dwelling.total_electric
         );
         println!(
             "union columns: {}",

@@ -33,13 +33,17 @@ use crate::Actor;
 use crate::health::ActorTimings;
 use crate::scheduler::{ActorSlot, ExecutionPhase};
 
-use super::conversions::build_output_column_index;
+use hares_output::recording::{
+    OutputRowBindings, ZoneColumnCaches, build_output_column_index, build_output_row_bindings,
+    build_zone_column_caches, enrich_schema_with_telemetry_units, zone_display_name,
+};
+
+use super::recording::{RecordingLayer, actor_telemetry_views, build_envelope_columns};
 use super::{
-    ActorPricing, ActorSeedState, Dwelling, OutputRowBindings, Result, ZoneColumnCaches,
-    actor_equipment, build_actors_from_seeds, build_hvac_thermal_consistency,
-    build_output_row_bindings, build_zone_column_caches, compute_equipment_dispatch_targets,
-    compute_equipment_execution_order, describe_target, enrich_schema_with_telemetry_units,
-    target_lost, validate_equipment_stage, validate_equipment_zones, zone_display_name,
+    ActorPricing, ActorSeedState, Dwelling, Result, actor_equipment, build_actors_from_seeds,
+    build_hvac_thermal_consistency, compute_equipment_dispatch_targets,
+    compute_equipment_execution_order, describe_target, target_lost, validate_equipment_stage,
+    validate_equipment_zones,
 };
 /// The values the per-step path reads that derive from the equipment and
 /// actor rosters. Replaced only by [`Dwelling::install_roster_caches`];
@@ -54,8 +58,6 @@ pub(super) struct RosterCaches {
     /// indices of the HVAC heating or cooling equipment assigned to that
     /// zone, for the per-zone thermal consistency check.
     pub(super) hvac_thermal_consistency: Vec<Vec<usize>>,
-    /// Zone positions in the environment and in the output schema.
-    pub(super) zones: ZoneColumnCaches,
     /// Zone temperatures for the step result, reused every step.
     pub(super) zone_temp_scratch: Vec<(ZoneId, f64)>,
     /// The frozen output row plan: the reused row `record_step` fills, its
@@ -63,10 +65,6 @@ pub(super) struct RosterCaches {
     /// Empty until assembly installs the first plan; every write on the step
     /// path goes through its precomputed indices.
     pub(super) row_plan: RowPlan,
-    /// The row plan's per-report projections, copied at freeze: record_step
-    /// pushes each report's projected row to its recorder through these
-    /// indices without borrowing the plan.
-    pub(super) record_projections: Vec<Vec<usize>>,
     /// The union schema the producer bindings resolved against: the columns
     /// every report's selections span, first-seen across the reports. A
     /// mid-run roster change rebuilds the bindings against this frozen
@@ -76,10 +74,11 @@ pub(super) struct RosterCaches {
     /// resolved against the catalogue): an expected column the frozen
     /// schema cannot place is schema drift.
     pub(super) expected_columns: std::collections::HashSet<String>,
-    /// The row plan's producer bindings, resolved at freeze: the
-    /// dwelling-level columns, the per-equipment columns, the end-use
-    /// aggregates and the actor columns.
-    pub(super) bindings: OutputRowBindings,
+    /// The recording layer the step's record path writes through: the
+    /// producer bindings, the envelope gain columns and the zone column
+    /// caches frozen beside them, and the per-report projections and
+    /// projected-row scratch the recorder pushes read.
+    pub(super) recording: RecordingLayer,
     /// The output variable catalogue of the current roster: every variable
     /// the model can produce, declared once, typed. Readable from build on,
     /// before the first step.
@@ -92,13 +91,11 @@ impl Default for RosterCaches {
             equipment_execution_order: Vec::new(),
             equipment_ids: Vec::new(),
             hvac_thermal_consistency: Vec::new(),
-            zones: ZoneColumnCaches::default(),
             zone_temp_scratch: Vec::new(),
             row_plan: RowPlan::default(),
-            record_projections: Vec::new(),
             union_schema: Schema::empty(),
             expected_columns: std::collections::HashSet::new(),
-            bindings: OutputRowBindings::default(),
+            recording: RecordingLayer::default(),
             catalogue: Arc::new(Catalogue::default()),
         }
     }
@@ -140,13 +137,15 @@ struct FrozenOutputCaches {
 }
 
 /// The fresh-schema plan's payload: one recorder per report, the row plan
-/// and its producer bindings, and the union schema the bindings resolved
-/// against with the columns the reports promise. The metrics accumulator,
-/// built when the run requested metrics, rides the same freeze.
+/// and its producer bindings (the envelope gain columns frozen beside
+/// them), and the union schema the bindings resolved against with the
+/// columns the reports promise. The metrics accumulator, built when the
+/// run requested metrics, rides the same freeze.
 struct FreshOutputCaches {
     recorders: Vec<StreamingRecorder>,
     row_plan: RowPlan,
     bindings: OutputRowBindings,
+    envelope_columns: Vec<super::recording::EnvelopeColumn>,
     union_schema: Schema,
     expected_columns: std::collections::HashSet<String>,
     metrics_calculator: Option<MetricsCalculator>,
@@ -1425,11 +1424,16 @@ impl Dwelling {
         {
             self.plan_fresh_schema(equipment, actors, &catalogue)?
         } else {
+            // The freeze-time column index of the frozen union schema, the
+            // one index the rebuilt bindings resolve against (the zone
+            // columns' caches below resolve against the same schema).
+            let column_index = build_output_column_index(&self.roster.union_schema);
             OutputCachesPlan::FrozenUpdate(Box::new(FrozenOutputCaches {
                 bindings: build_output_row_bindings(
                     &self.roster.union_schema,
+                    &column_index,
                     equipment,
-                    actors,
+                    &actor_telemetry_views(actors),
                     &self.roster.expected_columns,
                 )?,
             }))
@@ -1595,9 +1599,19 @@ impl Dwelling {
             projections,
         );
 
-        // The producer bindings, against the union schema.
-        let bindings =
-            build_output_row_bindings(&union_schema, equipment, actors, &expected_columns)?;
+        // The producer bindings, against the union schema: one freeze-time
+        // column index resolves the bindings and the envelope gain columns
+        // beside them. The caller's zone-column caches rebuild the same
+        // index against the same schema after this returns.
+        let column_index = build_output_column_index(&union_schema);
+        let bindings = build_output_row_bindings(
+            &union_schema,
+            &column_index,
+            equipment,
+            &actor_telemetry_views(actors),
+            &expected_columns,
+        )?;
+        let envelope_columns = build_envelope_columns(&column_index);
 
         // One recorder per report, each with its own schema: a verbosity
         // selection's schema is the catalogue's schema at that tier; a
@@ -1682,6 +1696,7 @@ impl Dwelling {
             recorders,
             row_plan,
             bindings,
+            envelope_columns,
             union_schema,
             expected_columns,
             metrics_calculator,
@@ -1778,23 +1793,24 @@ impl Dwelling {
             .iter()
             .map(|&z| (z, 0.0))
             .collect();
-        self.roster.zones = plan.zones;
+        self.roster.recording.zones = plan.zones;
 
         match plan.output {
             OutputCachesPlan::Disabled => {
                 self.metrics_calculator = None;
             }
             OutputCachesPlan::FrozenUpdate(frozen) => {
-                self.roster.bindings = frozen.bindings;
+                self.roster.recording.bindings = frozen.bindings;
             }
             OutputCachesPlan::FreshSchema(fresh) => {
                 self.recorders = fresh.recorders;
                 self.metrics_calculator = fresh.metrics_calculator;
                 self.roster.row_plan = fresh.row_plan;
-                self.roster.record_projections = self.roster.row_plan.projections().to_vec();
+                self.roster.recording.projections = self.roster.row_plan.projections().to_vec();
                 self.roster.union_schema = fresh.union_schema;
                 self.roster.expected_columns = fresh.expected_columns;
-                self.roster.bindings = fresh.bindings;
+                self.roster.recording.bindings = fresh.bindings;
+                self.roster.recording.envelope_columns = fresh.envelope_columns;
                 #[cfg(feature = "observe")]
                 self.log_output_keys_without_columns();
             }
@@ -1809,7 +1825,7 @@ impl Dwelling {
     #[cfg(feature = "observe")]
     fn log_output_keys_without_columns(&self) {
         let mut covered: HashSet<&str> = HashSet::new();
-        for cols in &self.roster.bindings.equipment {
+        for cols in &self.roster.recording.bindings.equipment {
             for &(key, _idx) in cols.v8_state_columns.iter().chain(&cols.v8_flow_columns) {
                 covered.insert(key);
             }
@@ -1830,6 +1846,7 @@ impl Dwelling {
         }
         if self
             .roster
+            .recording
             .bindings
             .dwelling
             .scheduled_heating_setpoint
