@@ -2539,3 +2539,29 @@ TMY3 fixture year: 950 cooling 1765.8 → 648.1 kWh (in band, the band
 midpoint's neighbourhood), 650 cooling 4860.4 → 4515.3 kWh (in band), every
 no-ventilation case bit-identical (the variant path is reachable only
 through a declared schedule column).
+
+## The price pipeline's precedence: an applied price wins over the tariff feed for its step
+
+A dwelling's price for a step resolves from two sources: the tariff
+evaluator attached with `Dwelling::set_tariff` (the background feed, a
+deterministic function of the clock) and an explicitly applied price
+signal (`Dwelling::set_price_signal`, reached by the fleet's
+`set_price_signal_all` and the HELICS `grid/price` and
+`grid/export_price` topics). The rule: the explicitly applied price is
+the operator's hand and wins for the one step it was applied on; the
+tariff's signal governs every step no explicit price was applied on. The
+machinery is an applied-price marker on the dwelling, set by every
+application and consumed by the step that follows it, so an application
+overrides exactly the step it landed on and the tariff resumes on the
+next.
+
+The alternative rejected: the tariff always governs (the pre-fix
+behavior), which silently discarded every applied price on a
+tariff-attached run: the environment view every consumer reads was
+overwritten from the evaluator each step, so a co-simulation's price
+topic and a scenario script's price events had no effect on the bill or
+the controllers while the run reported the channel valid. The other
+alternative, a typed refusal when both sources are present, is wrong for
+the co-simulation's shape: a tariff and a live price topic are the
+normal configuration, and the topic's updates are intermittent, so the
+two sources must compose per step, not exclude each other.

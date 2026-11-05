@@ -2019,6 +2019,15 @@ pub struct Dwelling {
 
     control_dispatcher: ControlDispatcher,
     price_signal: PriceSignal,
+    /// The applied-price marker: set by every explicit application
+    /// (`set_price_signal`, reached by the fleet's `set_price_signal_all`
+    /// and the HELICS price topics), consumed by the step that follows.
+    /// The precedence rule's state: the operator's hand wins for the one
+    /// step it landed on, the tariff's background feed governs the rest.
+    /// Not checkpoint state: a restored run re-applies its prices through
+    /// the setters, the same external-input rule the stored signal and
+    /// the grid overrides follow.
+    price_signal_applied: bool,
     tariff_evaluator: Option<TariffEvaluator>,
     billing_summaries: Vec<BillingPeriodSummary>,
     prior_electrical_summary: ElectricalSummary,
@@ -3832,6 +3841,7 @@ fn assemble_from_blueprint_with_seed(
         pv_panel_defaults: defaults.pv_panel_map(),
         control_dispatcher: ControlDispatcher::default(),
         price_signal: PriceSignal::default(),
+        price_signal_applied: false,
         tariff_evaluator: None,
         billing_summaries: Vec::new(),
         prior_electrical_summary: ElectricalSummary::default(),
@@ -4654,9 +4664,13 @@ impl Dwelling {
         &self.clamp_census
     }
 
-    /// Stores the active price signal for equipment controllers.
+    /// Stores the active price signal for equipment controllers. The
+    /// application marks the step in flight: the explicitly applied price
+    /// wins over the attached tariff evaluator's feed for exactly that
+    /// step (the precedence rule in `docs/PHYSICS_DECISIONS.md`).
     pub fn set_price_signal(&mut self, signal: PriceSignal) {
         self.price_signal = signal;
+        self.price_signal_applied = true;
         self.record_replay_blocker(hares_types::ReplayBlocker::ExternalInput);
     }
 
@@ -6631,15 +6645,26 @@ impl Dwelling {
         self.environment
             .update_in_place(&mut self.latest_env, &self.clock)?;
 
-        // Populate price signal from tariff evaluator (deterministic function of clock).
-        if let Some(ref evaluator) = self.tariff_evaluator {
-            self.latest_env.price_signal = PriceSignal {
-                electricity_price: Some(evaluator.current_price()),
-                export_price: Some(evaluator.current_export_price()),
-                ghg_intensity: self.latest_env.price_signal.ghg_intensity,
-            };
-        } else {
-            self.latest_env.price_signal = self.price_signal.clone();
+        // The price pipeline's precedence rule (docs/PHYSICS_DECISIONS.md):
+        // an explicitly applied price signal (the setter, the fleet's
+        // `set_price_signal_all`, the HELICS price topics) is the
+        // operator's hand and wins for the one step it was applied on; the
+        // attached tariff evaluator is the background feed and governs
+        // every step no explicit price was applied on. The marker is
+        // consumed here every step, so an application overrides exactly
+        // the step it landed on and the tariff resumes on the next.
+        let explicit_price_applied = std::mem::take(&mut self.price_signal_applied);
+        match self.tariff_evaluator.as_ref() {
+            Some(evaluator) if !explicit_price_applied => {
+                self.latest_env.price_signal = PriceSignal {
+                    electricity_price: Some(evaluator.current_price()),
+                    export_price: Some(evaluator.current_export_price()),
+                    ghg_intensity: self.latest_env.price_signal.ghg_intensity,
+                };
+            }
+            // An explicit price this step, or no tariff attached: the
+            // stored signal is the price.
+            Some(_) | None => self.latest_env.price_signal = self.price_signal.clone(),
         }
 
         // Populate electrical summary from prior step's solver results.
@@ -20815,6 +20840,82 @@ latent_gain_fraction = 0.08
         assert!(
             replacement_bill.total_import_kwh > 0.0,
             "the replacement's accruals carried into its first bill"
+        );
+    }
+
+    /// The price pipeline's precedence rule (docs/PHYSICS_DECISIONS.md):
+    /// an explicitly applied price signal is the operator's hand and wins
+    /// for the one step it was applied on; the attached tariff evaluator
+    /// is the background feed and governs every step no explicit price
+    /// was applied on. The red state at the parent was the evaluator's
+    /// unconditional per-step overwrite: with a tariff attached, a price
+    /// applied through `set_price_signal` (the fleet's
+    /// `set_price_signal_all` and the HELICS `grid/price` topic included)
+    /// never reached the environment view every consumer reads.
+    #[test]
+    fn an_applied_price_wins_over_the_attached_tariff_on_its_step() {
+        let tz = chrono_tz::America::Denver;
+        let mut dwelling = bestest_dwelling();
+        dwelling
+            .set_tariff(flat_tariff(), tz)
+            .expect("attach the tariff");
+
+        // The tariff-only step: the background feed's price flows. The
+        // flat fixture's import rate is 0.15 currency/kWh.
+        dwelling.step().expect("the tariff-only step");
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.15),
+            "a step with no applied price carries the tariff's signal"
+        );
+
+        // The operator's hand: the applied signal flows whole, import and
+        // export both, on the step it was applied.
+        dwelling.set_price_signal(PriceSignal {
+            electricity_price: Some(0.42),
+            export_price: Some(0.05),
+            ghg_intensity: None,
+        });
+        dwelling.step().expect("the applied step");
+        let applied = &dwelling.latest_env.price_signal;
+        assert_eq!(
+            applied.electricity_price,
+            Some(0.42),
+            "the explicitly applied price wins over the attached tariff for its step"
+        );
+        assert_eq!(
+            applied.export_price,
+            Some(0.05),
+            "the applied signal's export price flows whole: the tariff's export feed does not replace it"
+        );
+
+        // The next step applies nothing: the tariff's feed resumes.
+        dwelling.step().expect("the step after the application");
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.15),
+            "the applied price governs exactly its own step; the tariff resumes after"
+        );
+    }
+
+    /// The no-tariff arm of the same pipeline: the applied price is the
+    /// only source and flows every step. Pins the marker's introduction
+    /// against the arm that was already correct.
+    #[test]
+    fn an_applied_price_flows_every_step_without_a_tariff() {
+        let mut dwelling = bestest_dwelling();
+        dwelling.set_price_signal(PriceSignal {
+            electricity_price: Some(0.30),
+            export_price: None,
+            ghg_intensity: None,
+        });
+        for _ in 0..3 {
+            dwelling.step().expect("step");
+        }
+        assert_eq!(
+            dwelling.latest_env.price_signal.electricity_price,
+            Some(0.30),
+            "with no tariff attached the stored signal is the run's price"
         );
     }
 
