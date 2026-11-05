@@ -60,11 +60,25 @@ pub mod trip_reason {
     pub const UF1: u8 = 6;
     pub const OF1: u8 = 7;
     pub const OF2: u8 = 8;
+    /// The fail-safe trip: the bus voltage or the grid frequency the
+    /// step saw was non-finite, so no standard condition's band can be
+    /// evaluated. The trip latches like the standard ones; the return
+    /// to service waits on the enter-service windows.
+    pub const INPUT_INVALID: u8 = 9;
 
     /// The label each telemetry code resolves to, in code order
     /// (index = the numeric code).
-    pub const LABELS: [&str; 9] = [
-        "none", "uv2", "uv1", "ov1", "ov2", "uf2", "uf1", "of1", "of2",
+    pub const LABELS: [&str; 10] = [
+        "none",
+        "uv2",
+        "uv1",
+        "ov1",
+        "ov2",
+        "uf2",
+        "uf1",
+        "of1",
+        "of2",
+        "input_invalid",
     ];
 }
 
@@ -488,10 +502,14 @@ impl Der1547Controller {
     /// pair: the DER cannot reach the floor's injection) leaves the
     /// reference at the availability rather than at an unreachable floor.
     ///
-    /// A non-finite bus voltage or frequency trips the layer for the step
-    /// (fail-safe, matching `GridState::bus_energized`'s NaN robustness: a
-    /// poisoned grid state de-energizes the inverter rather than un-gating
-    /// it). A non-positive or non-finite timestep is an error.
+    /// A non-finite bus voltage or frequency trips an untripped layer
+    /// with the input-invalid reason code, and the trip latches like the
+    /// standard ones (matching `GridState::bus_energized`'s NaN
+    /// robustness: a poisoned grid state de-energizes the inverter rather
+    /// than un-gating it); the return to service waits on the
+    /// enter-service windows, and an already-tripped controller's latch
+    /// carries through the step unchanged. A non-positive or non-finite
+    /// timestep is an error.
     ///
     /// # Errors
     ///
@@ -515,9 +533,39 @@ impl Der1547Controller {
             )));
         }
         if !v_pu.is_finite() || !f_hz.is_finite() {
+            // A poisoned grid reading de-energizes the step: NaN fails
+            // every band comparison (each comparison against a NaN is
+            // false), so the layer cannot evaluate any condition. On an
+            // untripped controller the reading is a fail-safe TRIP: it
+            // carries its own reason code (the vocabulary's word for the
+            // condition no table names) and LATCHES like the standard
+            // trips, the enter-service procedure guarding the return to
+            // service exactly as for any fired condition; resuming
+            // without it would re-energize into a grid the reading could
+            // not evaluate, and a poison mid-ride-through is the same
+            // cannot-evaluate state a dead bus is. On an already-tripped
+            // controller the latch holds and the poison changes nothing:
+            // the step carries no evidence, so the fired condition's
+            // record and the return-to-service wait are untouched (the
+            // poison step publishes the latched arm's own outcome shape).
+            if !self.state.tripped {
+                self.state.tripped = true;
+                self.state.trip_reason = trip_reason::INPUT_INVALID;
+                self.state.es_s = 0.0;
+                self.state.uv1_s = 0.0;
+                self.state.uv2_s = 0.0;
+                self.state.ov1_s = 0.0;
+                self.state.ov2_s = 0.0;
+                self.state.uf1_s = 0.0;
+                self.state.uf2_s = 0.0;
+                self.state.of1_s = 0.0;
+                self.state.of2_s = 0.0;
+                self.state.fw_p_pre_pu = None;
+                self.state.last_fw_adj_pu = 0.0;
+            }
             return Ok(Der1547Outcome {
                 tripped: true,
-                trip_reason: trip_reason::NONE,
+                trip_reason: self.state.trip_reason,
                 p_ref_w: 0.0,
                 fw_adj_pu: 0.0,
                 ride_through_s: 0.0,
@@ -1847,17 +1895,21 @@ mod tests {
         }
     }
 
-    /// The fail-safe: a non-finite bus voltage or frequency de-energizes
-    /// the inverter for the step without latching it. A poisoned grid
-    /// state is not evidence about any table's condition, so the step
-    /// takes no trip reason, spends no ride-through window, and accrues
-    /// no enter-service time: the state carries unchanged and the next
-    /// finite step resumes exactly where it stood.
+    /// A non-finite bus voltage or frequency de-energizes the inverter
+    /// and, on an untripped controller, trips it with the input-invalid
+    /// reason code, latched like the standard trips. A poisoned grid
+    /// state is evidence about no table's condition: NaN fails every
+    /// band comparison, so the layer cannot evaluate the step, and the
+    /// return to service runs the enter-service procedure rather than
+    /// resuming on data the reading did not vouch for. On an
+    /// already-tripped controller the poison changes nothing: the latch
+    /// keeps its fired reason and its part-spent enter-service wait
+    /// carries.
     #[test]
-    fn a_non_finite_bus_reading_de_energizes_the_step_without_latching() {
+    fn a_non_finite_bus_reading_trips_the_untripped_inverter_and_carries_a_latched_one() {
         // A latched controller with a part-spent enter-service wait: the
-        // poisoned step de-energizes, names no table, and carries the
-        // wait (60 s) unadvanced and unreset.
+        // poisoned step de-energizes, keeps the fired condition, and
+        // carries the wait (60 s) unadvanced and unreset.
         let mut ctrl = controller(&cat2(), 5000.0);
         let _ = one_step(&mut ctrl, 0.6, 60.0, 60.0, 2700.0);
         let wait = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2700.0);
@@ -1868,8 +1920,8 @@ mod tests {
         assert!(poisoned.tripped, "the poisoned step is de-energized");
         assert_eq!(
             poisoned.trip_reason,
-            trip_reason::NONE,
-            "no table fired: the fail-safe names none"
+            trip_reason::UV1,
+            "the latched arm's own publication shape: the reason the latch holds"
         );
         assert_eq!(poisoned.p_ref_w, 0.0);
         assert_eq!(poisoned.ride_through_s, 0.0);
@@ -1877,35 +1929,45 @@ mod tests {
             poisoned.enter_service_s, 60.0,
             "the wait neither advances (120) nor resets (0): it carries"
         );
-        assert!(ctrl.state().tripped, "the fail-safe does not clear a latch");
+        assert!(ctrl.state().tripped, "the poison does not clear a latch");
         assert_eq!(
             ctrl.state().trip_reason,
             trip_reason::UV1,
-            "the latch keeps its own reason; the step's outcome does not"
+            "the latch keeps its own reason"
         );
 
-        // A poisoned voltage on an untripped controller: the same
-        // per-step de-energization, and a part-spent ride-through window
-        // carried (not advanced into the trip, not spent by it).
+        // A poisoned voltage on an untripped controller mid-ride-through:
+        // the fail-safe TRIP fires, latched with its own code, and the
+        // return to service runs the enter-service procedure from zero.
+        // The red state at the parent published a reasonless trip
+        // (reason 0, "none") with no latch and carried the part-spent
+        // window, resuming the ride on the next finite step: a poison
+        // mid-ride is the same cannot-evaluate state a dead bus is, and
+        // riding resumed on data the reading did not vouch for.
         let mut ctrl = controller(&cat2(), 5000.0);
         let _ = one_step(&mut ctrl, 0.6, 60.0, 5.0, 2700.0);
         let poisoned = ctrl
             .step(f64::NAN, 60.0, 60.0, true, 2700.0, 2700.0, 0.0)
             .expect("the fail-safe is not an error");
         assert!(poisoned.tripped);
-        assert_eq!(poisoned.trip_reason, trip_reason::NONE);
-        assert!(!ctrl.state().tripped, "no latch from a poisoned step");
         assert_eq!(
-            ctrl.state().uv1_s,
-            5.0,
-            "the window carries: not advanced (10), not spent (0)"
+            poisoned.trip_reason,
+            trip_reason::INPUT_INVALID,
+            "the fail-safe names its own condition"
         );
-        let resume = one_step(&mut ctrl, 0.6, 60.0, 5.0, 2700.0);
         assert!(
-            resume.tripped,
-            "the next in-band step completes the carried window"
+            ctrl.state().tripped,
+            "the fail-safe latches like the others"
         );
-        assert_eq!(resume.ride_through_s, 10.0);
+        assert_eq!(ctrl.state().trip_reason, trip_reason::INPUT_INVALID);
+        // The enter-service windows and delay (the Category II default
+        // 300 s) complete in five nominal 60 s steps: the reconnect.
+        let mut reconnected = false;
+        for _ in 0..5 {
+            let out = one_step(&mut ctrl, 1.0, 60.0, 60.0, 2700.0);
+            reconnected |= !out.tripped;
+        }
+        assert!(reconnected, "the enter-service procedure completes");
     }
 
     // -- The state's checkpoint round trip. --

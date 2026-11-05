@@ -569,7 +569,10 @@ pub const DER1547_TRIPPED: &str = "der1547_tripped";
 /// under-voltage), 2.0 = UV1 (sustained under-voltage), 3.0 = OV1
 /// (sustained over-voltage), 4.0 = OV2 (deep over-voltage), 5.0 = UF2
 /// (deep under-frequency), 6.0 = UF1 (sustained under-frequency), 7.0 =
-/// OF1 (sustained over-frequency), 8.0 = OF2 (deep over-frequency).
+/// OF1 (sustained over-frequency), 8.0 = OF2 (deep over-frequency), 9.0
+/// = the non-finite input fail-safe (the bus voltage or the frequency
+/// the step saw was not a number; the trip latches like the standard
+/// ones).
 ///
 /// scope: internal
 pub const DER1547_TRIP_REASON: &str = "der1547_trip_reason";
