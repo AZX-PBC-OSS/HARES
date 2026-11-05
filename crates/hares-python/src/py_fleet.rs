@@ -21,6 +21,7 @@ use crate::py_config::{MAX_CHRONO_SECONDS, PyDwellingConfig, PyHealthPolicy};
 use crate::py_control::PyControlSignal;
 use crate::py_dwelling::HaresSimulationError;
 use crate::py_enums::PyResStockVersion;
+use crate::py_equipment::PyEquipmentDescriptor;
 use crate::py_report::{PyFrequency, PySelection};
 use crate::py_telemetry::PyTelemetry;
 use crate::utils::check_unexpected_kwargs;
@@ -879,6 +880,22 @@ impl PySteppableFleet {
         fleet
             .telemetry(dwelling_index)
             .map(PyTelemetry::new)
+            .map_err(steppable_error_to_py_err)
+    }
+
+    pub fn equipment_descriptors(
+        &self,
+        dwelling_index: usize,
+    ) -> PyResult<Vec<PyEquipmentDescriptor>> {
+        let fleet = self.acquire()?;
+        fleet
+            .equipment_descriptors(dwelling_index)
+            .map(|descriptors| {
+                descriptors
+                    .into_iter()
+                    .map(PyEquipmentDescriptor::new)
+                    .collect()
+            })
             .map_err(steppable_error_to_py_err)
     }
 

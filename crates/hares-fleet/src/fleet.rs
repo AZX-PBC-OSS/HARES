@@ -2097,6 +2097,34 @@ impl SteppableFleet {
         Ok(())
     }
 
+    /// Returns each equipment's descriptor for one dwelling, in
+    /// equipment order: the typed surface the per-DER folds group on.
+    /// The descriptor's `equipment_type` and `end_use` are the engine's
+    /// own kind of the equipment, never a name heuristic.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetError::NoSuchHome`] naming the index and the length when
+    /// the index is out of range.
+    pub fn equipment_descriptors(
+        &self,
+        dwelling_index: usize,
+    ) -> Result<Vec<hares_types::EquipmentDescriptor>> {
+        let len = self.dwellings.len();
+        let dwelling = self
+            .dwellings
+            .get(dwelling_index)
+            .ok_or(FleetError::NoSuchHome {
+                index: dwelling_index,
+                len,
+            })?;
+        Ok(dwelling
+            .equipment()
+            .iter()
+            .map(|eq| eq.descriptor().clone())
+            .collect())
+    }
+
     /// Returns telemetry for one dwelling.
     ///
     /// # Errors
