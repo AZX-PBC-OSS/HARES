@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import struct
 
 from hares import Destination, ReportSpec, Selection, SimulationConfig, SiteLocationOverride
 import math
@@ -1354,6 +1355,119 @@ def test_unknown_observation_field_fails_at_reset():
     )
     with pytest.raises(Exception, match="bogus_field"):
         single.reset(seed=0)
+
+
+def _roster(dwelling: PyDwelling) -> tuple[list[str], list[float]]:
+    """The dwelling's equipment names and their power readings, in the
+    dwelling order the observation plan and the telemetry share."""
+    equipment = dwelling.telemetry().equipment()
+    return list(equipment["names"]), list(equipment["power_w"])
+
+
+def test_single_env_observation_reads_a_surviving_unit_under_its_own_name():
+    """The frozen plan binds equipment by its never-reused id: removing a
+    unit ahead of a planned one leaves the planned field on the surviving
+    unit's own value, never on whatever took its roster slot."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=[cast(Any, "equipment_power[Gas Furnace]")],
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    names, _powers = _roster(env.dwelling)
+    # A plan on the second unit, the removal of the first: the plan froze
+    # the second unit's identity, so the removal must not touch its read.
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=[cast(Any, f"equipment_power[{names[1]}]")],
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    env.dwelling.remove_equipment(names[0])
+
+    obs, _reward, _term, _trunc, _info = env.step(np.zeros(0, dtype=np.float64))
+    names_after, powers_after = _roster(env.dwelling)
+    assert names_after[0] == names[1], "the surviving unit keeps its name"
+    # Bit-for-bit the unit's own value: struct-level equality, so even a
+    # signed-zero or NaN difference cannot pass.
+    assert struct.pack("<d", obs[0]) == struct.pack("<d", float(powers_after[0])), (
+        f"equipment_power[{names[1]}] must read the surviving unit's own "
+        f"power ({powers_after[0]}), not the shifted roster's"
+    )
+
+
+def test_single_env_observation_refuses_a_removed_equipment_field():
+    """A unit the plan named that has left the roster is a typed error
+    naming the field and the id, on the single env's step: never a panic
+    out of bounds, never a silent read of the shifted unit."""
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=[cast(Any, "equipment_power[Gas Furnace]")],
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    names, _powers = _roster(env.dwelling)
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=[
+            cast(Any, f"equipment_power[{names[0]}]"),
+            cast(Any, f"equipment_power[{names[2]}]"),
+        ],
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    env.dwelling.remove_equipment(names[0])
+
+    with pytest.raises(Exception, match="no longer in the dwelling's equipment roster"):
+        env.step(np.zeros(0, dtype=np.float64))
+
+
+def test_batch_step_refuses_a_removed_equipment_field_as_a_row_error():
+    """The batch's observation read is protected: a roster change between
+    the plan's build and the read ends that environment with its error
+    (`terminated=True`, the field named in `info["error_msg"]`) instead of
+    unwinding the batch."""
+    dwellings = [_make_dwelling(seed=0)]
+    probe = VecDwellingGymEnv(
+        dwellings=[PyDwelling.from_hpxml(
+            hpxml=HPXML, schedule=SCHEDULE, weather=WEATHER,
+            defaults=str(HARES_DEFAULTS),
+            config=SimulationConfig(
+                start_time="2019-01-01T00:00:00", duration=600, time_res=60, master_seed=0,
+            ),
+        )],
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    probe.reset(seed=0)
+    names, _powers = _roster(probe.envs[0])
+    env = VecDwellingGymEnv(
+        dwellings=dwellings,
+        observation_fields=[
+            cast(Any, f"equipment_power[{names[0]}]"),
+            cast(Any, f"equipment_power[{names[2]}]"),
+        ],
+        action_space_config={},
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    env.envs[0].remove_equipment(names[0])
+
+    _obs, _rewards, terminated, _trunc, infos = env.step(np.zeros((1, 0), dtype=np.float64))
+    assert terminated[0], "the drifted roster ends that environment"
+    assert "no longer in the dwelling's equipment roster" in infos[0]["error_msg"]
+    assert f"equipment_power[{names[0]}]" in infos[0]["error_msg"]
 
 
 def test_batch_step_returns_a_fresh_observation_by_default():

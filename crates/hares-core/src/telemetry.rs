@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, FixedOffset};
-use hares_types::{HaresError, ZoneId};
+use hares_types::{EquipmentId, HaresError, ZoneId};
 
 use crate::observation::{ObservationPlan, ObservationSurface, telemetry_observe_into};
 
@@ -167,7 +167,15 @@ impl DwellingTelemetry {
                 .iter()
                 .map(|name| (name.clone(), ZoneId(0)))
                 .collect(),
-            equipment_names: self.equipment_names.clone(),
+            // The ids play no part in the snapshot executor (the vectors
+            // are in dwelling order and frozen at capture), so the plan's
+            // equipment bindings carry a placeholder here, the zone ids'
+            // own precedent above.
+            equipment: self
+                .equipment_names
+                .iter()
+                .map(|name| (name.clone(), EquipmentId(0)))
+                .collect(),
             actors: self
                 .actor_telemetry
                 .iter()
