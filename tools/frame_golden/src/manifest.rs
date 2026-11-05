@@ -72,13 +72,13 @@ impl<'de> Deserialize<'de> for ManifestSelection {
             .ok_or_else(|| {
                 serde::de::Error::custom(format!(
                     "unknown selection {text:?}: the accepted spelling is \"verbosity-<level>\" with a level of 0 to {}",
-                    hares_io::MAX_VERBOSITY
+                    hares_input::MAX_VERBOSITY
                 ))
             })?;
-        if level > hares_io::MAX_VERBOSITY {
+        if level > hares_input::MAX_VERBOSITY {
             return Err(serde::de::Error::custom(format!(
                 "selection {text:?}: verbosity level {level} exceeds the maximum of {}",
-                hares_io::MAX_VERBOSITY
+                hares_input::MAX_VERBOSITY
             )));
         }
         Ok(ManifestSelection::Verbosity(level))
@@ -129,9 +129,9 @@ impl<'de> Deserialize<'de> for ManifestAlignment {
 
 /// The manifest's required `[fleet]` table for the fleet kinds: the fleet
 /// report's request, as the engine spells it. The frequency is a
-/// `hares_io::Frequency` verbatim (`"hourly"`, `{ minutes = 15 }`, and so
+/// `hares_input::Frequency` verbatim (`"hourly"`, `{ minutes = 15 }`, and so
 /// on); the selection is the `verbosity-N` spelling; the optional
-/// `health_policy` is a `hares_io::HealthPolicy` verbatim, the default
+/// `health_policy` is a `hares_input::HealthPolicy` verbatim, the default
 /// empty policy left implicit; the optional `alignment` is the fleet's
 /// declared time alignment, absent meaning no declared alignment (the
 /// engine's own meaning).
@@ -139,12 +139,12 @@ impl<'de> Deserialize<'de> for ManifestAlignment {
 #[serde(deny_unknown_fields)]
 pub struct FleetReportSpec {
     /// The frequency the fleet's products are bucketed at.
-    pub frequency: hares_io::Frequency,
+    pub frequency: hares_input::Frequency,
     /// The variable selection the fleet's homes report.
     pub selection: ManifestSelection,
     /// The fleet's health policy, applied to every home's run.
     #[serde(default)]
-    pub health_policy: Option<hares_io::HealthPolicy>,
+    pub health_policy: Option<hares_input::HealthPolicy>,
     /// The fleet's declared time alignment; absent means no declared
     /// alignment.
     #[serde(default)]
@@ -156,7 +156,7 @@ impl FleetReportSpec {
     #[must_use]
     pub fn fleet_report(&self) -> hares_fleet::FleetReport {
         hares_fleet::FleetReport {
-            selection: hares_io::Selection::Verbosity(self.selection.verbosity()),
+            selection: hares_input::Selection::Verbosity(self.selection.verbosity()),
             frequency: self.frequency,
             health_policy: self.health_policy.clone().unwrap_or_default(),
         }
@@ -242,7 +242,7 @@ pub struct GoldenManifest {
     /// Kind "resstock_fleet" only: the ResStock release the metadata
     /// speaks.
     #[serde(default, deserialize_with = "resstock_version")]
-    pub version: Option<hares_io::ResStockVersion>,
+    pub version: Option<hares_input::ResStockVersion>,
     /// Kind "resstock_fleet" only: the simulation duration in seconds.
     /// The fleet's own sim config (the ResStock constructor's) carries the
     /// start, the step and the output settings.
@@ -261,7 +261,9 @@ pub struct GoldenManifest {
 
 /// Deserializes a `ResStockVersion` from its release spelling, so a
 /// manifest naming an unknown release fails with the known spellings.
-fn resstock_version<'de, D>(deserializer: D) -> Result<Option<hares_io::ResStockVersion>, D::Error>
+fn resstock_version<'de, D>(
+    deserializer: D,
+) -> Result<Option<hares_input::ResStockVersion>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -272,7 +274,7 @@ where
     }
 }
 
-/// Every field of `hares_io::SimulationConfig`. A manifest key outside this
+/// Every field of `hares_input::SimulationConfig`. A manifest key outside this
 /// list is rejected instead of being silently dropped by serde defaults.
 const SIMULATION_KEYS: &[&str] = &[
     "start_time",
@@ -481,7 +483,7 @@ impl GoldenManifest {
     /// the verbosity cap) apply exactly as they do anywhere else. The
     /// validator rejects a kind without the table it needs, so the
     /// `None` here is unreachable through [`GoldenManifest::load`].
-    pub fn simulation_config(&self) -> FrameGoldenResult<hares_io::SimulationConfig> {
+    pub fn simulation_config(&self) -> FrameGoldenResult<hares_input::SimulationConfig> {
         let text = toml::to_string(self.simulation.as_ref().ok_or_else(|| {
             FrameGoldenError::SimulationConfig(format!(
                 "manifest {:?}: kind {:?} carries no [simulation] table",
@@ -489,7 +491,7 @@ impl GoldenManifest {
             ))
         })?)
         .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))?;
-        hares_io::SimulationConfig::from_toml(&text)
+        hares_input::SimulationConfig::from_toml(&text)
             .map_err(|err| FrameGoldenError::SimulationConfig(err.to_string()))
     }
 
@@ -622,17 +624,17 @@ mod tests {
     /// table's key set is the struct's field-name set.
     #[test]
     fn simulation_keys_match_the_struct() {
-        let cfg = hares_io::SimulationConfig {
+        let cfg = hares_input::SimulationConfig {
             max_memory_rows: None,
             start_time: chrono::DateTime::parse_from_rfc3339("2023-01-01T00:00:00-07:00")
                 .expect("parse start"),
             duration: chrono::Duration::seconds(86400),
             time_res: chrono::Duration::seconds(3600),
-            reports: vec![hares_io::ReportSpec {
+            reports: vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(2),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Memory,
+                selection: hares_input::Selection::Verbosity(2),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Memory,
             }],
             diagnostics: false,
             metrics: false,
@@ -642,17 +644,17 @@ mod tests {
             scenario_seed: Some(3),
             schedule_diversity: Default::default(),
             civil_timezone: Some("UTC".into()),
-            site_location: hares_io::SiteLocationOverride {
+            site_location: hares_input::SiteLocationOverride {
                 latitude_deg: Some(40.0),
                 longitude_deg: None,
                 elevation_m: None,
                 utc_offset_h: None,
             },
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-            first_hour_interpolation: hares_io::FirstHour::default(),
-            weather_year: hares_io::WeatherYear::default(),
-            warmup: hares_io::Warmup::default(),
+            max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_input::HealthPolicy::default(),
+            first_hour_interpolation: hares_input::FirstHour::default(),
+            weather_year: hares_input::WeatherYear::default(),
+            warmup: hares_input::Warmup::default(),
         };
         let text = cfg.to_toml().expect("serialise the config");
         let table: toml::Table = toml::from_str(&text).expect("parse the TOML back");

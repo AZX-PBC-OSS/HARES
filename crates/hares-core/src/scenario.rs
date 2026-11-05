@@ -72,9 +72,9 @@ fn merge_overrides(
 /// overlay the base's, every other field passes through. A field the
 /// patches do not carry is an error naming it, and `base` is not touched.
 fn patches_applied_to(
-    base: Option<&hares_io::HpxmlDataPatches>,
+    base: Option<&hares_input::HpxmlDataPatches>,
     patches: &[(String, f64)],
-) -> Result<hares_io::HpxmlDataPatches, HaresError> {
+) -> Result<hares_input::HpxmlDataPatches, HaresError> {
     let mut out = base.cloned().unwrap_or_default();
     for (field, value) in patches {
         match field.as_str() {
@@ -159,7 +159,7 @@ mod tests {
     use super::*;
     use crate::dwelling::{Dwelling, DwellingConfig};
     use chrono::TimeZone;
-    use hares_io::SimulationConfig;
+    use hares_input::SimulationConfig;
     use hares_types::{ScenarioSpec, ScenarioUnit};
     use std::path::PathBuf;
 
@@ -183,11 +183,11 @@ mod tests {
             master_seed: 0,
             civil_timezone: None,
             site_location: Default::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             health_policy: Default::default(),
             first_hour_interpolation: Default::default(),
             weather_year: Default::default(),
-            warmup: hares_io::Warmup::Disabled,
+            warmup: hares_input::Warmup::Disabled,
         }
     }
 
@@ -333,7 +333,7 @@ mod tests {
             test_sim_config(),
             Some(base_overrides.clone()),
             7,
-            Some(hares_io::HpxmlDataPatches {
+            Some(hares_input::HpxmlDataPatches {
                 number_of_bedrooms: Some(2.0),
             }),
         );
@@ -446,7 +446,7 @@ mod tests {
     /// one contract, so a field the assembly can carry but this module
     /// fails to write (or the reverse) fails here rather than at a user's
     /// build. The struct's own field list is pinned against the table in
-    /// hares-io (`the_scenario_patch_fields_are_this_structs_fields`).
+    /// hares-input (`the_scenario_patch_fields_are_this_structs_fields`).
     #[test]
     fn every_recorded_patch_field_applies() {
         for field in hares_types::PATCH_FIELDS {
@@ -647,16 +647,16 @@ mod tests {
         let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
         apply_sample(&sample, &mut settings).expect("the sample applies");
         let config = DwellingConfig {
-            hpxml: hares_io::InputSource::Path(
+            hpxml: hares_input::InputSource::Path(
                 project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
             ),
-            schedule: Some(hares_io::InputSource::Path(
+            schedule: Some(hares_input::InputSource::Path(
                 project_root().join("data/examples/BEopt_example_schedule.csv"),
             )),
-            weather: hares_io::WeatherInput::Path(
+            weather: hares_input::WeatherInput::Path(
                 project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: hares_io::DefaultsSource::directory(
+            defaults: hares_input::DefaultsSource::directory(
                 project_root().join("python/hares/defaults"),
             ),
             settings,
@@ -745,16 +745,16 @@ mod tests {
         let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
         apply_sample(&sample, &mut settings).expect("the sample applies");
         let config = DwellingConfig {
-            hpxml: hares_io::InputSource::Path(
+            hpxml: hares_input::InputSource::Path(
                 project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
             ),
-            schedule: Some(hares_io::InputSource::Path(
+            schedule: Some(hares_input::InputSource::Path(
                 project_root().join("data/examples/BEopt_example_schedule.csv"),
             )),
-            weather: hares_io::WeatherInput::Path(
+            weather: hares_input::WeatherInput::Path(
                 project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: hares_io::DefaultsSource::directory(
+            defaults: hares_input::DefaultsSource::directory(
                 project_root().join("python/hares/defaults"),
             ),
             settings,
@@ -865,16 +865,16 @@ mod tests {
         let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
         apply_sample(&sample, &mut settings).expect("the pair applies");
         let config = DwellingConfig {
-            hpxml: hares_io::InputSource::Path(
+            hpxml: hares_input::InputSource::Path(
                 project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
             ),
-            schedule: Some(hares_io::InputSource::Path(
+            schedule: Some(hares_input::InputSource::Path(
                 project_root().join("data/examples/BEopt_example_schedule.csv"),
             )),
-            weather: hares_io::WeatherInput::Path(
+            weather: hares_input::WeatherInput::Path(
                 project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: hares_io::DefaultsSource::directory(
+            defaults: hares_input::DefaultsSource::directory(
                 project_root().join("python/hares/defaults"),
             ),
             settings,
@@ -933,16 +933,16 @@ mod tests {
         let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
         apply_sample(&sample, &mut settings).expect("the sample applies");
         let config = DwellingConfig {
-            hpxml: hares_io::InputSource::Path(
+            hpxml: hares_input::InputSource::Path(
                 project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
             ),
-            schedule: Some(hares_io::InputSource::Path(
+            schedule: Some(hares_input::InputSource::Path(
                 project_root().join("data/examples/BEopt_example_schedule.csv"),
             )),
-            weather: hares_io::WeatherInput::Path(
+            weather: hares_input::WeatherInput::Path(
                 project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: hares_io::DefaultsSource::directory(
+            defaults: hares_input::DefaultsSource::directory(
                 project_root().join("python/hares/defaults"),
             ),
             settings,
@@ -996,17 +996,17 @@ mod tests {
         let sampled = sample.values[0].value;
 
         let dwelling_config = |settings: DwellingSettings| DwellingConfig {
-            hpxml: hares_io::InputSource::Path(
+            hpxml: hares_input::InputSource::Path(
                 project_root()
                     .join("tests/fixtures/hpxml/ochre_samples/base-water-heater-autosize.xml"),
             ),
-            schedule: Some(hares_io::InputSource::Path(
+            schedule: Some(hares_input::InputSource::Path(
                 project_root().join("data/examples/BEopt_example_schedule.csv"),
             )),
-            weather: hares_io::WeatherInput::Path(
+            weather: hares_input::WeatherInput::Path(
                 project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: hares_io::DefaultsSource::directory(
+            defaults: hares_input::DefaultsSource::directory(
                 project_root().join("python/hares/defaults"),
             ),
             settings,
@@ -1083,16 +1083,16 @@ mod tests {
         let mut settings = DwellingSettings::new(test_sim_config(), None, 7, None);
         apply_sample(&sample, &mut settings).expect("the envelope sample applies");
         let config_for = |settings: DwellingSettings| DwellingConfig {
-            hpxml: hares_io::InputSource::Path(
+            hpxml: hares_input::InputSource::Path(
                 project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
             ),
-            schedule: Some(hares_io::InputSource::Path(
+            schedule: Some(hares_input::InputSource::Path(
                 project_root().join("data/examples/BEopt_example_schedule.csv"),
             )),
-            weather: hares_io::WeatherInput::Path(
+            weather: hares_input::WeatherInput::Path(
                 project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: hares_io::DefaultsSource::directory(
+            defaults: hares_input::DefaultsSource::directory(
                 project_root().join("python/hares/defaults"),
             ),
             settings,
@@ -1114,7 +1114,7 @@ mod tests {
                 .resolved_model()
                 .boundaries
                 .iter()
-                .filter(|boundary| boundary.kind == hares_io::hpxml::BoundaryType::Wall)
+                .filter(|boundary| boundary.kind == hares_input::hpxml::BoundaryType::Wall)
                 .flat_map(|boundary| boundary.layers.iter())
                 .map(|layer| layer.r_m2k_w)
                 .next()
@@ -1162,16 +1162,16 @@ mod tests {
             }],
         };
         let config_for = |settings: DwellingSettings| DwellingConfig {
-            hpxml: hares_io::InputSource::Path(
+            hpxml: hares_input::InputSource::Path(
                 project_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
             ),
-            schedule: Some(hares_io::InputSource::Path(
+            schedule: Some(hares_input::InputSource::Path(
                 project_root().join("data/examples/BEopt_example_schedule.csv"),
             )),
-            weather: hares_io::WeatherInput::Path(
+            weather: hares_input::WeatherInput::Path(
                 project_root().join("data/examples/USA_CO_Denver.Intl.AP.725650_TMY3.epw"),
             ),
-            defaults: hares_io::DefaultsSource::directory(
+            defaults: hares_input::DefaultsSource::directory(
                 project_root().join("python/hares/defaults"),
             ),
             settings,

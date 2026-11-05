@@ -26,7 +26,8 @@ hares-core = { workspace = true }
 hares-fleet = { workspace = true }
 hares-control = { workspace = true }
 hares-equipment = { workspace = true }
-hares-io = { workspace = true }
+hares-input = { workspace = true }
+hares-output = { workspace = true }
 hares-physics = { workspace = true }
 hares-tariff = { workspace = true }
 hares-types = { workspace = true }

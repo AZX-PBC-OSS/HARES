@@ -9,7 +9,7 @@ use hares_equipment::hvac::heating_config::{
     DuctConfig, ElectricBaseboardConfig, ElectricBoilerConfig, ElectricFurnaceConfig,
     GasBoilerConfig, GasFurnaceConfig, HvacSetpointConfig, IdealHvacConfig,
 };
-use hares_io::EquipmentSpec;
+use hares_input::EquipmentSpec;
 use hares_types::FuelType;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

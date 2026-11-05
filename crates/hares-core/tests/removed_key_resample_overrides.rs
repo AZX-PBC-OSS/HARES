@@ -4,7 +4,7 @@
 //! removed-keys table's message naming the Python adapter that holds the
 //! weather now. The Python surfaces' arms of the same test live in
 //! tests/python/test_py_config.py; the scoped lookup's own tests live with
-//! the table in hares-io.
+//! the table in hares-input.
 
 use std::path::PathBuf;
 

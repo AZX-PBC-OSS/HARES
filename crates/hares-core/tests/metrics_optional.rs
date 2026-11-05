@@ -9,7 +9,7 @@
 // row's change lands.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use hares_core::{Dwelling, DwellingConfig, SimulationEngine};
@@ -33,7 +33,7 @@ fn dwelling_config_from(sim_toml: &str, fixture: &str) -> DwellingConfig {
         weather: WeatherInput::Path(home.join("weather.epw")),
         defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
+            hares_input::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
             None,
             1,
             None,

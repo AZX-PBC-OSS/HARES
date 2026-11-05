@@ -28,7 +28,7 @@ The real and reactive polynomials each normalise to sum ≈1.0 so that the model
 | `pf` | Power-factor magnitude; `0.0` = sentinel "no reactive" |
 | `v0` | Reference voltage [pu], default 1.0 |
 
-The struct is the single source of truth for ZIP parameters. Field names match `defaults/zip_parameters.toml` rows, so the struct deserialises directly from that file. A drift test in `hares-io` asserts that every toml row matches the in-code class table `zip_defaults_for_class()`.
+The struct is the single source of truth for ZIP parameters. Field names match `defaults/zip_parameters.toml` rows, so the struct deserialises directly from that file. A drift test in `hares-input` asserts that every toml row matches the in-code class table `zip_defaults_for_class()`.
 
 ### pf=0 Sentinel
 

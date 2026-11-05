@@ -10,8 +10,8 @@ use syn::visit::Visit;
 //
 // The SI guard ensures that imperial HVAC efficiency units (BTU, ft, cfm, SEER,
 // EER, HSPF, COP, etc.) do not appear as identifiers in equipment simulation
-// source code.  Imperial units belong only at I/O boundaries (hares-io) where
-// HPXML values are converted to SI.
+// source code.  Imperial units belong only at the I/O boundaries (hares-input
+// and hares-output) where HPXML values are converted to SI.
 //
 // The guard uses `syn` to parse each source file into an AST and walks it to
 // collect all identifiers.  This naturally excludes comments and string-literal
@@ -614,7 +614,7 @@ static UNIT_SUFFIX_ALLOWED: &[&str] = &[
     "crates/hares-control/src/compat.rs",
     "crates/hares-equipment/src/battery/catalog.rs",
     "crates/hares-equipment/src/ev/catalog.rs",
-    "crates/hares-io/src/output/columns.rs",
+    "crates/hares-output/src/columns.rs",
     "crates/hares-types/src/output.rs",
     "crates/hares-types/src/telemetry_keys.rs",
     // Every entry below names the boundary that holds the names: the run-state and control-layer names are gone (the SI moves), so what remains is a reporting name (a declared variable, a telemetry-key constant's use), an output record's own field, a datasheet unit, an external unit column or a test of one of those.
@@ -666,25 +666,25 @@ static UNIT_SUFFIX_ALLOWED: &[&str] = &[
     "crates/hares-core/src/telemetry.rs",
     "crates/hares-envelope/src/electrical_solver.rs",
     "crates/hares-fleet/src/fold.rs",
-    "crates/hares-io/src/defaults.rs",
-    "crates/hares-io/src/hpxml/elements/table.rs",
-    "crates/hares-io/src/hpxml/equipment.rs",
-    "crates/hares-io/src/hpxml/mod.rs",
-    "crates/hares-io/src/hpxml/resolve_der.rs",
-    "crates/hares-io/src/hpxml/resolve_hvac.rs",
-    "crates/hares-io/src/hpxml/resolve_loads.rs",
-    "crates/hares-io/src/hpxml/resolve_pool.rs",
-    "crates/hares-io/src/hpxml/resolve_water_heater.rs",
-    "crates/hares-io/src/hpxml/wet_appliance.rs",
-    "crates/hares-io/src/hpxml/xml_helpers.rs",
-    "crates/hares-io/src/lib.rs",
-    "crates/hares-io/src/output/catalogue.rs",
-    "crates/hares-io/src/output/metrics.rs",
-    "crates/hares-io/src/output/mod.rs",
-    "crates/hares-io/src/output/reduce.rs",
-    "crates/hares-io/src/psm3.rs",
-    "crates/hares-io/src/schedule_resolve.rs",
-    "crates/hares-io/src/tmy3.rs",
+    "crates/hares-input/src/defaults.rs",
+    "crates/hares-input/src/hpxml/elements/table.rs",
+    "crates/hares-input/src/hpxml/equipment.rs",
+    "crates/hares-input/src/hpxml/mod.rs",
+    "crates/hares-input/src/hpxml/resolve_der.rs",
+    "crates/hares-input/src/hpxml/resolve_hvac.rs",
+    "crates/hares-input/src/hpxml/resolve_loads.rs",
+    "crates/hares-input/src/hpxml/resolve_pool.rs",
+    "crates/hares-input/src/hpxml/resolve_water_heater.rs",
+    "crates/hares-input/src/hpxml/wet_appliance.rs",
+    "crates/hares-input/src/hpxml/xml_helpers.rs",
+    "crates/hares-input/src/lib.rs",
+    "crates/hares-output/src/catalogue.rs",
+    "crates/hares-output/src/lib.rs",
+    "crates/hares-output/src/metrics.rs",
+    "crates/hares-output/src/reduce.rs",
+    "crates/hares-input/src/psm3.rs",
+    "crates/hares-input/src/schedule_resolve.rs",
+    "crates/hares-input/src/tmy3.rs",
     "crates/hares-physics/src/constants.rs",
     "crates/hares-physics/src/pump.rs",
     "crates/hares-physics/src/pv_sizing.rs",

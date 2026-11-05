@@ -6,8 +6,8 @@
 
 use chrono::NaiveDateTime;
 use hares_envelope::boundary_rc::{BoundaryDiagnostic, BoundaryInput, ExteriorTarget, RCPath};
-use hares_io::hpxml::BoundaryType;
-use hares_io::{SetpointSource, SiteLocation};
+use hares_input::hpxml::BoundaryType;
+use hares_input::{SetpointSource, SiteLocation};
 use hares_types::{EndUse, EquipmentId, ResolvedParameter};
 
 /// The envelope half of the read-back, computed where the RC network is
@@ -196,7 +196,7 @@ pub struct Aim2Defaults {
 /// resolved window properties keyed by surface id (the boundary index)
 /// with the ids in the config's sorted order.
 pub(crate) fn resolved_envelope(
-    building: &hares_io::hpxml::Building,
+    building: &hares_input::hpxml::Building,
     boundary_inputs: &[BoundaryInput],
     diagnostics: &[BoundaryDiagnostic],
     window_properties: &std::collections::HashMap<
@@ -399,7 +399,7 @@ fn same_zone_fin_chain(path: RCPath, layers: &[ResolvedLayer]) -> f64 {
 /// building's values (the ACH50 the leakage conversion produced, the ELA
 /// converted from cm², the constant rate the synthetic inputs fix).
 pub(crate) fn resolved_infiltration(
-    building: &hares_io::hpxml::Building,
+    building: &hares_input::hpxml::Building,
     aim2: Option<&Aim2Defaults>,
     shielding: Option<hares_physics::infiltration::ShieldingClass>,
 ) -> ResolvedInfiltration {

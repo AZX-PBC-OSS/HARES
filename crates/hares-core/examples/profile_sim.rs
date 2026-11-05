@@ -21,7 +21,7 @@ mod harness {
     use hares_core::dwelling::{
         Dwelling, DwellingConfig, DwellingProfilingSummary, DwellingSettings,
     };
-    use hares_io::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
+    use hares_input::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
 
     fn config(days: i64, root: &Path, fixture: &Path, weather: &Path) -> DwellingConfig {
         // SimulationConfig carries serde defaults for every field we do not name

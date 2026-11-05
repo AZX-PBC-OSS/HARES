@@ -3,12 +3,12 @@
 //! it does not depend on the step length, and a vacant home draws nothing.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig};
-use hares_io::{SimulationConfig, SiteLocationOverride};
+use hares_input::{SimulationConfig, SiteLocationOverride};
 use hares_types::telemetry_keys as tk;
 
 fn project_root() -> PathBuf {
@@ -35,11 +35,11 @@ fn sim_config(
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
@@ -80,13 +80,13 @@ fn wet_appliance_hot_water_is_independent_of_the_step() {
 
     // The resolved daily volumes and the water heater's hot supply
     // temperature, read off the same inputs the run builds from.
-    let defaults = hares_io::DefaultsStore::load(&project_root().join("python/hares/defaults"))
+    let defaults = hares_input::DefaultsStore::load(&project_root().join("python/hares/defaults"))
         .expect("defaults load");
-    let building = hares_io::parse_hpxml(
+    let building = hares_input::parse_hpxml(
         &project_root().join("tests/fixtures/parity/cz4a_ashp_hpwh/building.xml"),
     )
     .expect("cz4a building parses");
-    let specs = hares_io::hpxml::equipment::resolve_equipment(
+    let specs = hares_input::hpxml::equipment::resolve_equipment(
         &building,
         building.climate_zone_iecc.as_deref(),
         None,

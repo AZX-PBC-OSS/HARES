@@ -8,14 +8,14 @@
 #![cfg(feature = "profiling")]
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use chrono::Duration;
 use hares_core::{ActorTimings, Dwelling, DwellingConfig};
-use hares_io::SimulationConfig;
+use hares_input::SimulationConfig;
 use hares_types::alloc_count::{CountingAllocator, thread_allocations};
 
 #[global_allocator]

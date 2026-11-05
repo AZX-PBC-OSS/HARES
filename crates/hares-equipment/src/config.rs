@@ -1518,7 +1518,7 @@ mod tests {
     #[test]
     fn validate_zip_sums_rejects_non_finite_coefficients() {
         // The sidecar channel is reachable with non-finite values: the
-        // defaults loader (`hares-io` `load_zip_parameters`) parses
+        // defaults loader (`hares-input` `load_zip_parameters`) parses
         // `zip_parameters.toml` with no finiteness check, and TOML accepts
         // `nan`/`inf` natively. A NaN coefficient makes the sum NaN, and
         // `(NaN - 1.0).abs() > tolerance` is false, so the comparison-based

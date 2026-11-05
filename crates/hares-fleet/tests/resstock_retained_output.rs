@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use hares_fleet::{Fleet, FleetReport};
-use hares_io::{Frequency, ResStockVersion, Selection};
+use hares_input::{Frequency, ResStockVersion, Selection};
 
 fn fleet() -> hares_fleet::Fleet {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -30,7 +30,7 @@ fn report(selection: Selection, frequency: Frequency) -> FleetReport {
     FleetReport {
         selection,
         frequency,
-        health_policy: hares_io::HealthPolicy::default(),
+        health_policy: hares_input::HealthPolicy::default(),
     }
 }
 

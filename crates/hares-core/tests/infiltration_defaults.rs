@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -52,7 +52,7 @@ master_seed = 0
         ),
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            hares_input::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
             None,
             1,
             None,
@@ -85,7 +85,7 @@ master_seed = 0
         ),
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            hares_input::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
             Some(overrides),
             1,
             None,

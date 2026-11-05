@@ -881,7 +881,8 @@ dependencies = [
  "chrono-tz",
  "hares-core",
  "hares-fleet",
- "hares-io",
+ "hares-input",
+ "hares-output",
  "hares-tariff",
  "hares-types",
  "parquet",
@@ -1020,7 +1021,8 @@ dependencies = [
  "hares-envelope",
  "hares-equipment",
  "hares-fleet",
- "hares-io",
+ "hares-input",
+ "hares-output",
  "hares-physics",
  "hares-tariff",
  "hares-types",
@@ -1097,7 +1099,8 @@ dependencies = [
  "chrono",
  "hares-control",
  "hares-core",
- "hares-io",
+ "hares-input",
+ "hares-output",
  "hares-types",
  "parquet",
  "rayon",
@@ -1108,14 +1111,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "hares-io"
+name = "hares-input"
 version = "0.1.0"
 dependencies = [
  "arrow",
  "chrono",
  "chrono-tz",
  "csv",
- "hares-control",
  "hares-envelope",
  "hares-equipment",
  "hares-physics",
@@ -1126,13 +1128,34 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "strum",
  "tempfile",
  "thiserror 2.0.21",
  "toml",
  "tracing",
  "tracing-subscriber",
  "tzf-rs",
+ "uom",
+]
+
+[[package]]
+name = "hares-output"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "chrono",
+ "hares-equipment",
+ "hares-input",
+ "hares-physics",
+ "hares-types",
+ "parquet",
+ "serde",
+ "serde_json",
+ "sha2",
+ "strum",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
  "uom",
 ]
 
@@ -1163,7 +1186,8 @@ dependencies = [
  "hares-core",
  "hares-equipment",
  "hares-fleet",
- "hares-io",
+ "hares-input",
+ "hares-output",
  "hares-physics",
  "hares-tariff",
  "hares-types",

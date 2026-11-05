@@ -1026,7 +1026,7 @@ fn kusuda_depth_correction_sign_reversal_in_summer_minneapolis() {
 /// solver was systematically under-predicting winter slab heat loss.
 ///
 /// References:
-/// - HARES `crates/hares-io/src/epw.rs:363-465` (DOE-2 formula)
+/// - HARES `crates/hares-input/src/epw.rs:363-465` (DOE-2 formula)
 /// - HARES `crates/hares-physics/src/ground.rs:37-80` (Kusuda-Achenbach)
 /// - EnergyPlus Auxiliary Programs: "Do not use the 'undisturbed' ground
 ///   temperatures from the weather data. These values are too extreme for the

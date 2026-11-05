@@ -12,7 +12,7 @@ use hares_envelope::{
     StateSpaceWiring, SurfaceLayerInfo, ThermalSolver, ThermalSolverConfig, VentilationFlowModel,
     WindowSolarProperties, assemble_building_rc, derive_zone_capacitances, skin_rad_coupling,
 };
-use hares_io::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
+use hares_input::{Building, DefaultsStore, EquipmentSpec, SimulationConfig, WeatherTimeSeries};
 use hares_physics::constants::CP_DRY_AIR_J_KG_K;
 #[cfg(feature = "observe")]
 use hares_physics::film_coefficients::{SurfaceRoughness, film_resistances};
@@ -135,7 +135,7 @@ fn build_solver_boundaries(
         .filter(|(idx, bd)| {
             bd.exterior_zone
                 .as_ref()
-                .map(|z| *z == hares_io::hpxml::ZoneType::Outdoor)
+                .map(|z| *z == hares_input::hpxml::ZoneType::Outdoor)
                 .unwrap_or(false)
                 && rc.layer_info.get(idx).is_some()
         })
@@ -151,18 +151,18 @@ fn build_solver_boundaries(
         let is_exterior = boundary
             .exterior_zone
             .as_ref()
-            .map(|z| *z == hares_io::hpxml::ZoneType::Outdoor)
+            .map(|z| *z == hares_input::hpxml::ZoneType::Outdoor)
             .unwrap_or(false);
 
         let is_conditioned_interior = boundary
             .interior_zone
             .as_ref()
-            .map(|z| *z == hares_io::hpxml::ZoneType::Conditioned)
+            .map(|z| *z == hares_input::hpxml::ZoneType::Conditioned)
             .unwrap_or(false);
         let is_attic_interior = boundary
             .interior_zone
             .as_ref()
-            .map(|z| *z == hares_io::hpxml::ZoneType::Attic)
+            .map(|z| *z == hares_input::hpxml::ZoneType::Attic)
             .unwrap_or(false);
         // Foundation zones (conditioned basements/crawlspaces) participate
         // in interior solar/LWR distribution: their slabs and walls are
@@ -174,7 +174,7 @@ fn build_solver_boundaries(
         let is_foundation_interior = boundary
             .interior_zone
             .as_ref()
-            .map(|z| *z == hares_io::hpxml::ZoneType::Foundation)
+            .map(|z| *z == hares_input::hpxml::ZoneType::Foundation)
             .unwrap_or(false);
 
         let zone_idx = boundary_zone_index(
@@ -262,37 +262,39 @@ fn build_solver_boundaries(
             Some(BoundaryCategory::InternalMass)
         } else {
             match boundary.boundary_type {
-                    hares_io::hpxml::BoundaryType::Wall
-                    | hares_io::hpxml::BoundaryType::FoundationWall
-                    | hares_io::hpxml::BoundaryType::RimJoist
+                    hares_input::hpxml::BoundaryType::Wall
+                    | hares_input::hpxml::BoundaryType::FoundationWall
+                    | hares_input::hpxml::BoundaryType::RimJoist
                     // Doors conduct to the conditioned zone like walls;
                     // OCHRE's COMPONENT_LOAD_MAP groups Door under Wall.
-                    | hares_io::hpxml::BoundaryType::Door => Some(BoundaryCategory::Wall),
-                    hares_io::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
-                    hares_io::hpxml::BoundaryType::Floor | hares_io::hpxml::BoundaryType::Slab => {
+                    | hares_input::hpxml::BoundaryType::Door => Some(BoundaryCategory::Wall),
+                    hares_input::hpxml::BoundaryType::Roof => Some(BoundaryCategory::Roof),
+                    hares_input::hpxml::BoundaryType::Floor | hares_input::hpxml::BoundaryType::Slab => {
                         // Attic floor (exterior = Attic) represents heat flow from roof/attic
                         // path into the conditioned zone -- categorize as Roof for OCHRE parity.
                         let is_attic_floor = boundary
                             .exterior_zone
                             .as_ref()
-                            .is_some_and(|z| *z == hares_io::hpxml::ZoneType::Attic);
+                            .is_some_and(|z| *z == hares_input::hpxml::ZoneType::Attic);
                         if is_attic_floor {
                             Some(BoundaryCategory::Roof)
                         } else {
                             Some(BoundaryCategory::Floor)
                         }
                     }
-                    hares_io::hpxml::BoundaryType::Window
-                    | hares_io::hpxml::BoundaryType::Skylight => Some(BoundaryCategory::Window),
-                    hares_io::hpxml::BoundaryType::Other(_) => None,
+                    hares_input::hpxml::BoundaryType::Window
+                    | hares_input::hpxml::BoundaryType::Skylight => Some(BoundaryCategory::Window),
+                    hares_input::hpxml::BoundaryType::Other(_) => None,
                 }
         };
 
         // Tilt: use parsed value from HPXML, fall back to type-based default.
         let tilt_deg = boundary.tilt_deg.unwrap_or(match boundary.boundary_type {
-            hares_io::hpxml::BoundaryType::Roof => 0.0,
-            hares_io::hpxml::BoundaryType::Slab | hares_io::hpxml::BoundaryType::Floor => 180.0,
-            hares_io::hpxml::BoundaryType::Skylight => 0.0,
+            hares_input::hpxml::BoundaryType::Roof => 0.0,
+            hares_input::hpxml::BoundaryType::Slab | hares_input::hpxml::BoundaryType::Floor => {
+                180.0
+            }
+            hares_input::hpxml::BoundaryType::Skylight => 0.0,
             _ => 90.0,
         });
 
@@ -307,7 +309,7 @@ fn build_solver_boundaries(
         // exterior path (exterior == Zone), so no exterior physics reads
         // this value.
         let tilt_deg = match boundary.floor_or_ceiling {
-            Some(hares_io::hpxml::building::FloorOrCeiling::Ceiling) => 0.0,
+            Some(hares_input::hpxml::building::FloorOrCeiling::Ceiling) => 0.0,
             _ => tilt_deg,
         };
 
@@ -396,7 +398,7 @@ fn build_solver_boundaries(
         // Wall boundaries receive opaque solar via ExteriorSurfaceInfo.absorptance.
         let is_fenestration = matches!(
             boundary.boundary_type,
-            hares_io::hpxml::BoundaryType::Window | hares_io::hpxml::BoundaryType::Skylight
+            hares_input::hpxml::BoundaryType::Window | hares_input::hpxml::BoundaryType::Skylight
         );
         let window_solar = if is_exterior && is_fenestration {
             // Look up the fenestration in both windows and skylights (they share
@@ -408,7 +410,7 @@ fn build_solver_boundaries(
                 .find(|w| w.id == boundary.id);
             if let Some(win) = fen {
                 let fen_type = match boundary.boundary_type {
-                    hares_io::hpxml::BoundaryType::Skylight => "skylight",
+                    hares_input::hpxml::BoundaryType::Skylight => "skylight",
                     _ => "window",
                 };
                 let u_factor = win.u_factor_w_m2_k.ok_or_else(|| {
@@ -619,7 +621,7 @@ fn build_solver_boundaries(
             // Only check boundaries that have an explicit interior zone type.
             // Boundaries with None interior zone (e.g. some windows) naturally
             // coexist with typed boundaries in the same zone.
-            let types_in_zone: Vec<&hares_io::hpxml::ZoneType> = solver_boundaries
+            let types_in_zone: Vec<&hares_input::hpxml::ZoneType> = solver_boundaries
                 .iter()
                 .filter(|sb| sb.zone_idx == z_idx)
                 .filter_map(|sb| building.boundaries[sb.surface_idx].interior_zone.as_ref())
@@ -642,10 +644,10 @@ fn build_solver_boundaries(
     Ok((solver_boundaries, n_ext_surface_inputs, int_col_counter))
 }
 
-fn exterior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
+fn exterior_emissivity(boundary: &hares_input::hpxml::Boundary) -> f64 {
     if matches!(
         boundary.boundary_type,
-        hares_io::hpxml::BoundaryType::Window | hares_io::hpxml::BoundaryType::Skylight
+        hares_input::hpxml::BoundaryType::Window | hares_input::hpxml::BoundaryType::Skylight
     ) {
         boundary.emittance.unwrap_or(EMISSIVITY_WINDOW)
     } else {
@@ -653,9 +655,9 @@ fn exterior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
     }
 }
 
-fn attic_interior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
+fn attic_interior_emissivity(boundary: &hares_input::hpxml::Boundary) -> f64 {
     if boundary.has_radiant_barrier
-        && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic)
+        && boundary.interior_zone.as_ref() == Some(&hares_input::hpxml::ZoneType::Attic)
     {
         EMISSIVITY_RADIANT_BARRIER
     } else {
@@ -663,16 +665,16 @@ fn attic_interior_emissivity(boundary: &hares_io::hpxml::Boundary) -> f64 {
     }
 }
 
-fn exterior_solar_absorptance(boundary: &hares_io::hpxml::Boundary) -> f64 {
+fn exterior_solar_absorptance(boundary: &hares_input::hpxml::Boundary) -> f64 {
     boundary
         .solar_absorptance
         .unwrap_or(SOLAR_ABSORPTANCE_DEFAULT)
 }
 
-fn interior_solar_absorptance(boundary: &hares_io::hpxml::Boundary) -> f64 {
+fn interior_solar_absorptance(boundary: &hares_input::hpxml::Boundary) -> f64 {
     // Radiant barrier in attic zone: very low absorptance (high reflectivity).
     if boundary.has_radiant_barrier
-        && boundary.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Attic)
+        && boundary.interior_zone.as_ref() == Some(&hares_input::hpxml::ZoneType::Attic)
     {
         SOLAR_ABSORPTANCE_RADIANT_BARRIER
     } else {
@@ -714,8 +716,8 @@ fn include_interior_lwr(
 /// for typical residential buildings where operable windows are not symmetrically
 /// distributed across the 0°/360° azimuth boundary.
 fn compute_opening_azimuth_and_area(
-    windows: &[hares_io::hpxml::Window],
-    boundaries: &[hares_io::hpxml::Boundary],
+    windows: &[hares_input::hpxml::Window],
+    boundaries: &[hares_input::hpxml::Boundary],
     default_azimuth_deg: f64,
 ) -> (f64, f64) {
     let (total_operable_area, az_area_sum, az_weighted_sum) = windows
@@ -724,7 +726,9 @@ fn compute_opening_azimuth_and_area(
             w.attached_to_wall_id
                 .as_ref()
                 .and_then(|wall_id| boundaries.iter().find(|b| b.id == *wall_id))
-                .map(|b| b.interior_zone.as_ref() == Some(&hares_io::hpxml::ZoneType::Conditioned))
+                .map(|b| {
+                    b.interior_zone.as_ref() == Some(&hares_input::hpxml::ZoneType::Conditioned)
+                })
                 .unwrap_or(false)
         })
         .fold(
@@ -752,7 +756,7 @@ pub(crate) struct WeatherAverages {
     pub(crate) avg_wind_m_s: f64,
     pub(crate) avg_ambient_c: f64,
     pub(crate) avg_ground_c: f64,
-    /// ASHRAE 62.2 weather and shielding factor (`hares_io::wsf`), computed
+    /// ASHRAE 62.2 weather and shielding factor (`hares_input::wsf`), computed
     /// only for a building with a vented crawlspace, the one zone whose air
     /// exchange reads it.
     pub(crate) wsf: Option<f64>,
@@ -765,7 +769,7 @@ pub(crate) fn compute_weather_averages(
     let n = weather.len().max(1) as f64;
     let wsf = if building.zones.iter().any(needs_wsf) {
         Some(
-            hares_io::wsf::ashrae_622_wsf(weather)
+            hares_input::wsf::ashrae_622_wsf(weather)
                 .map_err(|err| HaresError::Io(format!("weather and shielding factor: {err}")))?,
         )
     } else {
@@ -783,9 +787,9 @@ const VENTED_CRAWLSPACE: &str = "crawlspace - vented";
 
 /// Whether `zone`'s air exchange derives from the weather's WSF: a vented
 /// crawlspace's ACH from its SLA, and a vented attic's SLA from a given ACH.
-fn needs_wsf(zone: &hares_io::hpxml::Zone) -> bool {
+fn needs_wsf(zone: &hares_input::hpxml::Zone) -> bool {
     zone.hpxml_location.as_deref() == Some(VENTED_CRAWLSPACE)
-        || (zone.zone_type == hares_io::hpxml::ZoneType::Attic
+        || (zone.zone_type == hares_input::hpxml::ZoneType::Attic
             && zone.ventilation_sla.is_none()
             && zone.ventilation_ach.is_some())
 }
@@ -852,7 +856,7 @@ pub(crate) struct SolverInputs<'a> {
     /// map).
     pub overrides: Option<&'a Value>,
     pub site_elevation_m: f64,
-    pub envelope_scales: &'a hares_io::EnvelopeScales,
+    pub envelope_scales: &'a hares_input::EnvelopeScales,
 }
 
 pub(crate) fn build_default_solvers(
@@ -1424,16 +1428,17 @@ pub(crate) fn build_default_solvers(
     // Priority: ACH50 > CFM50 > ELA.
     {
         use hares_envelope::InfiltrationMethod;
-        use hares_io::hpxml::ZoneType;
+        use hares_input::hpxml::ZoneType;
         use hares_physics::infiltration::{
             Aim2Params, FoundationLeakageClass, N_I_DEFAULT, aim2_coefficients_from_ach50,
         };
 
-        use hares_io::hpxml::infiltration_geometry::{foundation_top_m, walls_top_m};
+        use hares_input::hpxml::infiltration_geometry::{foundation_top_m, walls_top_m};
         let exterior_ach50 = unit_exterior_ach50(building)?;
-        let height_above_grade = |height: std::result::Result<f64, hares_io::hpxml::HpxmlError>| {
-            height.map_err(|err| HaresError::Dwelling(format!("height above grade: {err}")))
-        };
+        let height_above_grade =
+            |height: std::result::Result<f64, hares_input::hpxml::HpxmlError>| {
+                height.map_err(|err| HaresError::Dwelling(format!("height above grade: {err}")))
+            };
         for (zone_idx, bz) in building.zones.iter().enumerate() {
             let zone_id = env.zones.get(zone_idx).map(|z| z.id).ok_or_else(|| {
                 HaresError::Dwelling(format!(
@@ -1460,7 +1465,7 @@ pub(crate) fn build_default_solvers(
                         let h = match building.infiltration_height_m {
                             Some(height_m) => height_m,
                             None => {
-                                let estimated = hares_io::hpxml::infiltration_geometry::infiltration_height_estimate_m(building).map_err(|err| {
+                                let estimated = hares_input::hpxml::infiltration_geometry::infiltration_height_estimate_m(building).map_err(|err| {
                                     HaresError::Dwelling(format!("infiltration height: {err}"))
                                 })?;
                                 tracing::debug!(
@@ -1711,7 +1716,7 @@ pub(crate) fn build_default_solvers(
     // Fan flow is estimated from hvac_capacity_w × standard 350 CFM/ton (midpoint
     // of the 312–400 CFM/ton residential range).
     {
-        use hares_io::hpxml::building::DuctType;
+        use hares_input::hpxml::building::DuctType;
         use hares_physics::constants::{CFM_TO_M3_S, W_PER_TON};
 
         const AIRFLOW_CFM_PER_TON: f64 = 350.0;
@@ -1720,7 +1725,7 @@ pub(crate) fn build_default_solvers(
         let mut return_leakage_frac = 0.0_f64;
 
         for zone in &building.zones {
-            if matches!(zone.zone_type, hares_io::hpxml::ZoneType::Conditioned) {
+            if matches!(zone.zone_type, hares_input::hpxml::ZoneType::Conditioned) {
                 continue;
             }
             for duct in &zone.duct_systems {
@@ -1761,7 +1766,7 @@ pub(crate) fn build_default_solvers(
         let n_conditioned = building
             .zones
             .iter()
-            .filter(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
+            .filter(|z| z.zone_type == hares_input::hpxml::ZoneType::Conditioned)
             .count()
             .max(1) as f64;
         let building_height_m = default_ceiling_height_m * n_conditioned;
@@ -1857,7 +1862,7 @@ const ASHRAE_622_REFERENCE_HEIGHT_FT: f64 = 8.202;
 /// or crawlspace is conditioned space in OS-HPXML, inside the dwelling's
 /// own infiltration volume, so it has no exchange of its own.
 fn foundation_infiltration_method(
-    zone: &hares_io::hpxml::Zone,
+    zone: &hares_input::hpxml::Zone,
     wsf: Option<f64>,
 ) -> Result<hares_envelope::InfiltrationMethod> {
     use hares_envelope::InfiltrationMethod;
@@ -1926,7 +1931,7 @@ fn building_ceiling_height_m(building: &Building) -> Result<f64> {
 /// stack and wind at its own height above the walls top; an unvented
 /// attic exchanges 0.1 ACH.
 fn attic_infiltration_method(
-    zone: &hares_io::hpxml::Zone,
+    zone: &hares_input::hpxml::Zone,
     walls_top_m: impl FnOnce() -> Result<f64>,
     wsf: Option<f64>,
     shielding: impl FnOnce() -> Result<ShieldingClass>,
@@ -2005,7 +2010,7 @@ fn unit_exterior_ach50(building: &Building) -> Result<Option<f64>> {
         return Ok(None);
     };
     let exterior_share =
-        hares_io::hpxml::infiltration_geometry::exterior_leakage_fraction(building)
+        hares_input::hpxml::infiltration_geometry::exterior_leakage_fraction(building)
             .map_err(|err| HaresError::Dwelling(format!("exterior share of the leakage: {err}")))?;
     Ok(Some(ach50 * exterior_share))
 }
@@ -2019,7 +2024,7 @@ fn unit_exterior_ach50(building: &Building) -> Result<Option<f64>> {
 /// The floor area is the garage's volume over its height, its slab area
 /// when it has slabs, as OS-HPXML's space floor area is.
 fn garage_infiltration_method(
-    zone: &hares_io::hpxml::Zone,
+    zone: &hares_input::hpxml::Zone,
     unit_exterior_ach50: Option<f64>,
     foundation_top_m: f64,
     shielding: impl FnOnce() -> Result<ShieldingClass>,
@@ -2082,7 +2087,7 @@ mod tests {
     };
     use hares_envelope::INTERIOR_SOLAR_ABSORPTANCE_DEFAULT;
     use hares_envelope::InfiltrationMethod;
-    use hares_io::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
+    use hares_input::hpxml::{Boundary, BoundaryType, Window, Zone, ZoneType};
     use hares_physics::infiltration::{
         N_I_DEFAULT, ShieldingClass, TerrainClass, attic_ela_coefficients,
     };
@@ -2103,9 +2108,9 @@ mod tests {
         }
     }
 
-    fn building_with_zones(zones: Vec<Zone>) -> hares_io::Building {
-        hares_io::Building {
-            site: hares_io::hpxml::Site {
+    fn building_with_zones(zones: Vec<Zone>) -> hares_input::Building {
+        hares_input::Building {
+            site: hares_input::hpxml::Site {
                 elevation_m: None,
                 site_type: None,
                 shielding_of_home: None,
@@ -2145,7 +2150,7 @@ mod tests {
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             unavailable_periods: Vec::new(),
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: "root".into(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -2215,7 +2220,7 @@ mod tests {
         ]);
         let env = env_with_zone_temps(&[21.0]);
 
-        let sim_config = hares_io::SimulationConfig {
+        let sim_config = hares_input::SimulationConfig {
             max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
@@ -2233,12 +2238,12 @@ mod tests {
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-            first_hour_interpolation: hares_io::FirstHour::default(),
-            weather_year: hares_io::WeatherYear::default(),
-            warmup: hares_io::Warmup::Disabled,
+            site_location: hares_input::SiteLocationOverride::default(),
+            max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_input::HealthPolicy::default(),
+            first_hour_interpolation: hares_input::FirstHour::default(),
+            weather_year: hares_input::WeatherYear::default(),
+            warmup: hares_input::Warmup::Disabled,
         };
         let weather_avgs = super::WeatherAverages {
             avg_wind_m_s: 2.0,
@@ -2252,12 +2257,12 @@ mod tests {
             &sim_config,
             super::SolverInputs {
                 building: &building,
-                defaults: &hares_io::DefaultsStore::empty(),
+                defaults: &hares_input::DefaultsStore::empty(),
                 weather_avgs: &weather_avgs,
                 equipment_specs: &[],
                 overrides: None,
                 site_elevation_m: 0.0,
-                envelope_scales: &hares_io::EnvelopeScales::default(),
+                envelope_scales: &hares_input::EnvelopeScales::default(),
             },
         ) {
             Err(err) => err,
@@ -2288,7 +2293,7 @@ mod tests {
         building.infiltration_constant_ach = None;
         let env = env_with_zone_temps(&[21.0]);
 
-        let sim_config = hares_io::SimulationConfig {
+        let sim_config = hares_input::SimulationConfig {
             max_memory_rows: None,
             scenario_seed: None,
             schedule_diversity: Default::default(),
@@ -2306,12 +2311,12 @@ mod tests {
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-            first_hour_interpolation: hares_io::FirstHour::default(),
-            weather_year: hares_io::WeatherYear::default(),
-            warmup: hares_io::Warmup::Disabled,
+            site_location: hares_input::SiteLocationOverride::default(),
+            max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_input::HealthPolicy::default(),
+            first_hour_interpolation: hares_input::FirstHour::default(),
+            weather_year: hares_input::WeatherYear::default(),
+            warmup: hares_input::Warmup::Disabled,
         };
         let weather_avgs = super::WeatherAverages {
             avg_wind_m_s: 2.0,
@@ -2325,12 +2330,12 @@ mod tests {
             &sim_config,
             super::SolverInputs {
                 building: &building,
-                defaults: &hares_io::DefaultsStore::empty(),
+                defaults: &hares_input::DefaultsStore::empty(),
                 weather_avgs: &weather_avgs,
                 equipment_specs: &[],
                 overrides: None,
                 site_elevation_m: 0.0,
-                envelope_scales: &hares_io::EnvelopeScales::default(),
+                envelope_scales: &hares_input::EnvelopeScales::default(),
             },
         ) {
             Err(err) => err,
@@ -3127,7 +3132,7 @@ mod tests {
     fn a_gable_attic_leaks_by_its_geometric_rise() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../data/examples/BEopt_example.xml");
-        let building = hares_io::parse_hpxml(&path).expect("BEopt example parses");
+        let building = hares_input::parse_hpxml(&path).expect("BEopt example parses");
         let attic = building
             .zones
             .iter()
@@ -3429,7 +3434,7 @@ mod tests {
             "../../vendors/OCHRE/test/OS-HPXML Sample Files/\
              base-bldgtype-attached-infil-compartmentalization-test.xml",
         );
-        let building = hares_io::hpxml::parse_hpxml(&path).expect("sample parses");
+        let building = hares_input::hpxml::parse_hpxml(&path).expect("sample parses");
         let ach50 = unit_exterior_ach50(&building)
             .expect("exterior share")
             .expect("an ACH50");
@@ -3482,7 +3487,7 @@ mod tests {
 </HPXML>"#;
 
         let building =
-            hares_io::hpxml::building::parse_building(xml).expect("parse should succeed");
+            hares_input::hpxml::building::parse_building(xml).expect("parse should succeed");
 
         let roof = building
             .boundaries
@@ -3512,7 +3517,7 @@ mod tests {
             BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
             SurfaceLayerInfo,
         };
-        use hares_io::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
+        use hares_input::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
         use hares_types::{EnvironmentState, GridState, ZoneState};
         use std::collections::HashMap;
 
@@ -3591,7 +3596,7 @@ mod tests {
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             unavailable_periods: Vec::new(),
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -3731,7 +3736,7 @@ mod tests {
         use hares_envelope::{
             BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
         };
-        use hares_io::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
+        use hares_input::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
         use hares_types::{EnvironmentState, GridState, ZoneState};
         use std::collections::HashMap;
 
@@ -3812,7 +3817,7 @@ mod tests {
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             unavailable_periods: Vec::new(),
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -3962,8 +3967,8 @@ mod tests {
         use hares_envelope::{
             BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget, NodeId, RCPath,
         };
-        use hares_io::hpxml::building::FloorOrCeiling;
-        use hares_io::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
+        use hares_input::hpxml::building::FloorOrCeiling;
+        use hares_input::hpxml::{Boundary, BoundaryType, Building, Site, Zone, ZoneType};
         use hares_types::{EnvironmentState, GridState, ZoneState};
         use std::collections::HashMap;
 
@@ -4061,7 +4066,7 @@ mod tests {
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             unavailable_periods: Vec::new(),
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -4218,13 +4223,13 @@ mod tests {
             BoundaryCategory, BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics,
             ExteriorTarget,
         };
-        use hares_io::hpxml::{Boundary, BoundaryType, Site};
+        use hares_input::hpxml::{Boundary, BoundaryType, Site};
         use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
         use std::collections::HashMap;
 
         let skylight_id = "SK1";
 
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             site: Site {
                 elevation_m: None,
                 site_type: None,
@@ -4311,7 +4316,7 @@ mod tests {
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             unavailable_periods: Vec::new(),
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -4516,7 +4521,7 @@ mod tests {
         use hares_envelope::{
             BoundaryDiagnostic, BoundaryInput, EnvelopeDiagnostics, ExteriorTarget,
         };
-        use hares_io::hpxml::{Boundary, BoundaryType, Site};
+        use hares_input::hpxml::{Boundary, BoundaryType, Site};
         use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
         use std::collections::HashMap;
 
@@ -4526,7 +4531,7 @@ mod tests {
         let u_factor = 1.8;
         let shgc = 0.40;
 
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             site: Site {
                 elevation_m: None,
                 site_type: None,
@@ -4613,7 +4618,7 @@ mod tests {
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             unavailable_periods: Vec::new(),
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -4793,20 +4798,20 @@ mod tests {
         use chrono::TimeZone;
         use hares_envelope::ExteriorTarget;
         use hares_envelope::{BoundaryDiagnostic, EnvelopeDiagnostics};
-        use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+        use hares_input::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
         use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
         use std::collections::HashMap;
 
         let defaults_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../python/hares/defaults");
-        let store = hares_io::DefaultsStore::load(&defaults_path)
+        let store = hares_input::DefaultsStore::load(&defaults_path)
             .expect("DefaultsStore must be loadable from project defaults/ directory");
 
         let u_factor = 1.8;
         let shgc = 0.40;
         let window_id = "W_NFRC";
 
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             site: Site {
                 elevation_m: None,
                 site_type: None,
@@ -4893,7 +4898,7 @@ mod tests {
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             unavailable_periods: Vec::new(),
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -5063,20 +5068,20 @@ mod tests {
         use chrono::TimeZone;
         use hares_envelope::ExteriorTarget;
         use hares_envelope::{BoundaryDiagnostic, EnvelopeDiagnostics};
-        use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+        use hares_input::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
         use hares_types::{EnvironmentState, GridState, PriceSignal, ZoneId, ZoneState};
         use std::collections::HashMap;
 
         let defaults_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../python/hares/defaults");
-        let store = hares_io::DefaultsStore::load(&defaults_path)
+        let store = hares_input::DefaultsStore::load(&defaults_path)
             .expect("DefaultsStore must be loadable from project defaults/ directory");
 
         let u_factor = 1.8;
         let shgc = 0.40;
         let window_id = "W_HIGHWIND";
 
-        let building = hares_io::Building {
+        let building = hares_input::Building {
             site: Site {
                 elevation_m: None,
                 site_type: None,
@@ -5163,7 +5168,7 @@ mod tests {
             hvac_deadband_c: None,
             climate_zone_iecc: None,
             unavailable_periods: Vec::new(),
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: String::new(),
                 attrs: Default::default(),
                 text: String::new(),

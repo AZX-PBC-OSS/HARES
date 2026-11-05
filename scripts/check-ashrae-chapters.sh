@@ -17,7 +17,7 @@ TARGET_DIRS=("crates" "docs" "tests")
 # directory *basenames*, so exempting the name "hpxml" (the intent: the
 # generated docs/hpxml data-dictionary dumps and the tests/fixtures/hpxml
 # fixture copies, which may quote known-erroneous citations for provenance)
-# also skipped crates/hares-io/src/hpxml — production parser code carrying
+# also skipped crates/hares-input/src/hpxml: production parser code carrying
 # this gate's exact citation class. find -prune matches full paths, so the
 # exemptions stay pinned to the provenance material they exist for and
 # every production directory stays scanned.

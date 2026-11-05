@@ -76,7 +76,7 @@
 //! few seconds.
 
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings, StepResult};
-use hares_io::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
 use hares_types::alloc_count::{CountingAllocator, thread_allocations};
 use std::path::PathBuf;
 

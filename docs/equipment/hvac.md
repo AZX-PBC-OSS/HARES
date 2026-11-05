@@ -6,7 +6,7 @@ HVAC equipment in HARES covers heating, cooling, and dehumidification for condit
 
 ## Operating-Mode Codes
 
-There is exactly one numeric encoding of operating modes: `OperatingMode::as_code()` (`crates/hares-types/src/equipment.rs`), the `#[repr(u8)]` enum discriminant as `f64`. The `operating_mode` telemetry key, the CSV/Parquet "Mode" columns, and the Parquet `MODE_ORDINALS` metadata (`crates/hares-io/src/output/columns.rs`) all use it.
+There is exactly one numeric encoding of operating modes: `OperatingMode::as_code()` (`crates/hares-types/src/equipment.rs`), the `#[repr(u8)]` enum discriminant as `f64`. The `operating_mode` telemetry key, the CSV/Parquet "Mode" columns, and the Parquet `MODE_ORDINALS` metadata (`crates/hares-output/src/columns.rs`) all use it.
 
 | Code | Mode | | Code | Mode |
 |------|------|-|------|------|

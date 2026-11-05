@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use arrow::array::{Array, Float64Array, RecordBatch, TimestampMillisecondArray};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Weekday};
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings, SimulationConfig, resample_weather};
-use hares_io::WeatherYear;
+use hares_input::WeatherYear;
 use hares_types::schedule_day_ordinal;
 
 fn project_root() -> PathBuf {
@@ -43,25 +43,25 @@ fn config(time_res: i64, duration_secs: i64, start: &str) -> SimulationConfig {
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
         weather_year: WeatherYear::Typical,
-        warmup: hares_io::Warmup::Disabled,
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
 /// The run's resolved site location against one weather file's header,
 /// the resolution the build itself runs.
-fn resolved_site(weather: &std::path::Path) -> hares_io::SiteLocation {
+fn resolved_site(weather: &std::path::Path) -> hares_input::SiteLocation {
     let parsed_building =
-        hares_io::parse_hpxml(&cz4a_dir().join("building.xml")).expect("the fixture parses");
-    let meta = hares_io::read_weather_meta(weather).expect("the weather header parses");
-    hares_io::resolve_site_location(
+        hares_input::parse_hpxml(&cz4a_dir().join("building.xml")).expect("the fixture parses");
+    let meta = hares_input::read_weather_meta(weather).expect("the weather header parses");
+    hares_input::resolve_site_location(
         &parsed_building.site,
         &meta,
-        &hares_io::SiteLocationOverride::default(),
+        &hares_input::SiteLocationOverride::default(),
     )
 }
 
@@ -113,7 +113,7 @@ fn file_day_index(date: NaiveDate, file_days: usize) -> u32 {
 }
 
 /// The file record (0-based row) of `date`'s hour `h` (1..=24).
-fn file_record(series: &hares_io::WeatherTimeSeries, date: NaiveDate, h: u32) -> f64 {
+fn file_record(series: &hares_input::WeatherTimeSeries, date: NaiveDate, h: u32) -> f64 {
     let file_days = series.len() / 24;
     series.dry_bulb_c[(file_day_index(date, file_days) * 24 + h - 1) as usize]
 }
@@ -128,7 +128,7 @@ fn file_record(series: &hares_io::WeatherTimeSeries, date: NaiveDate, h: u32) ->
 /// (`file_has_feb29 = false`), so no step is labelled Feb 29 and every
 /// later date reads its own calendar date's records.
 fn expected_reads(
-    series: &hares_io::WeatherTimeSeries,
+    series: &hares_input::WeatherTimeSeries,
     start: NaiveDate,
     days: u32,
     sph: usize,
@@ -175,9 +175,13 @@ fn leap_year_start_after_feb29_reads_its_calendar_date() {
     let weather = cz4a_dir().join("weather.epw");
     let site = resolved_site(&weather);
     let cfg = config(900, 86_400, "2020-03-01T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     let read = dry_bulb_bits(&batch);
     let expected = expected_reads(
         &parsed,
@@ -201,9 +205,13 @@ fn leap_year_run_realigns_after_feb29() {
     let weather = cz4a_dir().join("weather.epw");
     let site = resolved_site(&weather);
     let cfg = config(3600, 70 * 86_400, "2020-01-01T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     let read = dry_bulb_bits(&batch);
     let labels = time_labels(&batch);
     // 70 calendar days less the skipped Feb 29: 69 days of hourly rows.
@@ -233,9 +241,13 @@ fn typical_file_without_feb29_skips_the_day() {
     let weather = cz4a_dir().join("weather.epw");
     let site = resolved_site(&weather);
     let cfg = config(900, 5 * 86_400, "2024-02-27T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     let read = dry_bulb_bits(&batch);
     let labels = time_labels(&batch);
     assert_eq!(read.len(), 384, "480 calendar steps less the 96 of Feb 29");
@@ -277,8 +289,12 @@ fn day_types_after_a_skipped_feb29_follow_the_calendar() {
     let weather = cz4a_dir().join("weather.epw");
     let site = resolved_site(&weather);
     let cfg = config(900, 5 * 86_400, "2024-02-27T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
     let labels = time_labels(&batch);
     let weekday_of = |row: usize| labels[row].weekday();
     assert_eq!(weekday_of(0), Weekday::Tue, "2024-02-27 is a Tuesday");
@@ -302,9 +318,13 @@ fn typical_file_with_feb29_uses_it() {
     let weather = weather_fixture("cz4a_with_feb29.epw");
     let site = resolved_site(&weather);
     let cfg = config(900, 5 * 86_400, "2024-02-27T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     let read = dry_bulb_bits(&batch);
     let labels = time_labels(&batch);
     assert_eq!(read.len(), 480, "every calendar day is simulated");
@@ -347,9 +367,13 @@ fn non_leap_run_skips_the_files_feb29() {
     let weather = weather_fixture("cz4a_with_feb29.epw");
     let site = resolved_site(&weather);
     let cfg = config(3600, 2 * 86_400, "2023-02-28T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     let read = dry_bulb_bits(&batch);
     assert_eq!(read.len(), 48, "two days of hourly rows");
     for (row, got) in read.iter().enumerate() {
@@ -377,10 +401,12 @@ fn start_on_skipped_feb29_is_a_validate_error() {
     let home = cz4a_dir();
     let cfg = config(900, 86_400, "2024-02-29T00:00:00-07:00");
     let result = Dwelling::from_config(DwellingConfig {
-        hpxml: hares_io::InputSource::Path(home.join("building.xml")),
-        schedule: Some(hares_io::InputSource::Path(home.join("schedule.csv"))),
-        weather: hares_io::WeatherInput::Path(home.join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        hpxml: hares_input::InputSource::Path(home.join("building.xml")),
+        schedule: Some(hares_input::InputSource::Path(home.join("schedule.csv"))),
+        weather: hares_input::WeatherInput::Path(home.join("weather.epw")),
+        defaults: hares_input::DefaultsSource::directory(
+            project_root().join("python/hares/defaults"),
+        ),
         settings: DwellingSettings::new(cfg, None, 1, None),
     });
     let err = match result {
@@ -401,20 +427,20 @@ fn start_on_skipped_feb29_is_a_validate_error() {
 #[test]
 fn weather_and_schedule_agree_on_every_date_of_a_leap_year() {
     let weather_path = cz4a_dir().join("weather.epw");
-    let parsed = hares_io::parse_weather(&weather_path).expect("the weather parses");
-    let building = hares_io::parse_hpxml(&cz4a_dir().join("building.xml")).expect("parses");
+    let parsed = hares_input::parse_weather(&weather_path).expect("the weather parses");
+    let building = hares_input::parse_hpxml(&cz4a_dir().join("building.xml")).expect("parses");
     let schedule =
-        hares_io::parse_schedule_csv(cz4a_dir().join("schedule.csv").as_path(), &[], None, None)
+        hares_input::parse_schedule_csv(cz4a_dir().join("schedule.csv").as_path(), &[], None, None)
             .expect("the schedule parses");
-    let meta = hares_io::read_weather_meta(&weather_path).expect("the header parses");
-    let site = hares_io::resolve_site_location(
+    let meta = hares_input::read_weather_meta(&weather_path).expect("the header parses");
+    let site = hares_input::resolve_site_location(
         &building.site,
         &meta,
-        &hares_io::SiteLocationOverride::default(),
+        &hares_input::SiteLocationOverride::default(),
     );
     let cfg = config(3600, 366 * 86_400, "2024-01-01T00:00:00-07:00");
     let batch = resample_weather(
-        &hares_io::WeatherInput::Path(weather_path.clone()),
+        &hares_input::WeatherInput::Path(weather_path.clone()),
         &site,
         &cfg,
     )
@@ -467,9 +493,13 @@ fn typical_year_wraps_by_day_of_year() {
     let weather = cz4a_dir().join("weather.epw");
     let site = resolved_site(&weather);
     let cfg = config(900, 4 * 86_400, "2023-12-30T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     let read = dry_bulb_bits(&batch);
     let labels = time_labels(&batch);
     let expected = expected_reads(
@@ -507,9 +537,13 @@ fn wrap_survives_a_leap_year() {
     let weather = cz4a_dir().join("weather.epw");
     let site = resolved_site(&weather);
     let cfg = config(900, 4 * 86_400, "2024-12-30T00:00:00-07:00");
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     let read = dry_bulb_bits(&batch);
     let labels = time_labels(&batch);
     let expected = expected_reads(
@@ -545,7 +579,7 @@ fn partial_year_file_is_an_error() {
     let weather = weather_fixture("cz4a_january.epw");
     let site = resolved_site(&weather);
     let cfg = config(3600, 5 * 86_400, "2023-01-25T00:00:00-07:00");
-    let err = resample_weather(&hares_io::WeatherInput::Path(weather), &site, &cfg)
+    let err = resample_weather(&hares_input::WeatherInput::Path(weather), &site, &cfg)
         .expect_err("a partial-year file is a construction error");
     let message = err.to_string();
     assert!(
@@ -573,10 +607,14 @@ fn weather_is_read_by_standard_time_under_daylight_saving() {
     let site = resolved_site(&weather);
     let mut cfg = config(3600, 86_400, "2023-07-01T00:00:00-07:00");
     cfg.civil_timezone = Some("America/Denver".to_string());
-    let with_tz = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the dst run completes");
+    let with_tz = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the dst run completes");
     cfg.civil_timezone = None;
-    let without_tz = resample_weather(&hares_io::WeatherInput::Path(weather), &site, &cfg)
+    let without_tz = resample_weather(&hares_input::WeatherInput::Path(weather), &site, &cfg)
         .expect("the plain run completes");
     assert_eq!(
         dry_bulb_bits(&with_tz),
@@ -595,7 +633,7 @@ fn actual_year_run_outside_the_file_is_an_error() {
     let site = resolved_site(&weather);
     let mut cfg = config(3600, 86_400, "2019-01-01T00:00:00-08:00");
     cfg.weather_year = WeatherYear::Actual;
-    let err = resample_weather(&hares_io::WeatherInput::Path(weather), &site, &cfg)
+    let err = resample_weather(&hares_input::WeatherInput::Path(weather), &site, &cfg)
         .expect_err("an actual-year run outside the file is an error");
     let message = err.to_string();
     assert!(
@@ -617,7 +655,7 @@ fn actual_year_leap_run_without_feb29_is_an_error() {
     let site = resolved_site(&weather);
     let mut cfg = config(3600, 3 * 86_400, "2020-02-27T00:00:00-08:00");
     cfg.weather_year = WeatherYear::Actual;
-    let err = resample_weather(&hares_io::WeatherInput::Path(weather), &site, &cfg)
+    let err = resample_weather(&hares_input::WeatherInput::Path(weather), &site, &cfg)
         .expect_err("an actual-year leap run without Feb 29 is an error");
     let message = err.to_string();
     assert!(
@@ -635,11 +673,15 @@ fn actual_year_reads_the_files_own_dates() {
     let site = resolved_site(&weather);
     let mut cfg = config(3600, 86_400, "2020-06-01T00:00:00-08:00");
     cfg.weather_year = WeatherYear::Actual;
-    let batch = resample_weather(&hares_io::WeatherInput::Path(weather.clone()), &site, &cfg)
-        .expect("the run completes");
+    let batch = resample_weather(
+        &hares_input::WeatherInput::Path(weather.clone()),
+        &site,
+        &cfg,
+    )
+    .expect("the run completes");
     let read = dry_bulb_bits(&batch);
     assert_eq!(read.len(), 24, "one row per hour of the day");
-    let parsed = hares_io::parse_weather(&weather).expect("the weather parses");
+    let parsed = hares_input::parse_weather(&weather).expect("the weather parses");
     // The file's records for 2020-06-01's hours: the stamps are the
     // interval ends, so the hour h record is stamped 2020-06-01 h:00
     // except hour 24, stamped 2020-06-02 00:00.

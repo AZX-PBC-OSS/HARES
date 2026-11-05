@@ -128,7 +128,7 @@ fn bench_checkpoint_bench_is_registered() {
 /// regression on it would pass the job silently). The members are
 /// enumerated by `cargo metadata` at test time and the bench names parsed
 /// from each member's manifest, so a bench added to any crate's manifest
-/// (hares-fleet's or hares-io's included) without an array entry fails
+/// (hares-fleet's or hares-input's included) without an array entry fails
 /// this test the same way the five ungated benches this test was written
 /// against do.
 #[test]
@@ -433,7 +433,7 @@ fn relocate_reports(
 ) -> hares_core::DwellingConfig {
     let mut config = config.clone();
     for report in &mut config.settings.sim_config.reports {
-        if let hares_io::Destination::Csv { path, .. } = &mut report.destination
+        if let hares_input::Destination::Csv { path, .. } = &mut report.destination
             && let Some(name) = path.file_name()
         {
             *path = out_dir.join(name);

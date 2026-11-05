@@ -23,11 +23,12 @@ use hares_core::{
     DwellingBlueprint, DwellingConfig, DwellingSettings, ResolvedBoundary, ResolvedClock,
     ResolvedLayer, ResolvedModel,
 };
-use hares_io::hpxml::BoundaryType;
-use hares_io::{
-    Catalogue, DefaultsSource, Destination, Frequency, InputSource, ReportSpec, Selection,
-    SimulationConfig, SiteLocationOverride, WeatherInput,
+use hares_input::hpxml::BoundaryType;
+use hares_input::{
+    DefaultsSource, Destination, Frequency, InputSource, ReportSpec, Selection, SimulationConfig,
+    SiteLocationOverride, WeatherInput,
 };
+use hares_output::Catalogue;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -65,11 +66,11 @@ fn sim_config(duration_s: i64, step_s: i64) -> SimulationConfig {
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 

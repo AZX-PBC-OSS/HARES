@@ -3,10 +3,10 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{EnvironmentManager, SimClock};
-use hares_io::hpxml::building::XmlNode;
-use hares_io::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
-use hares_io::schedule::ColumnAggregation;
-use hares_io::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
+use hares_input::hpxml::building::XmlNode;
+use hares_input::hpxml::{Boundary, BoundaryType, Site, Window, Zone, ZoneType};
+use hares_input::schedule::ColumnAggregation;
+use hares_input::{ScheduleTimeSeries, WeatherMeta, WeatherTimeSeries};
 
 fn offset_east(seconds: i32) -> FixedOffset {
     FixedOffset::east_opt(seconds).expect("valid offset")
@@ -16,7 +16,7 @@ fn offset_west(seconds: i32) -> FixedOffset {
     FixedOffset::west_opt(seconds).expect("valid offset")
 }
 
-fn minimal_building() -> hares_io::Building {
+fn minimal_building() -> hares_input::Building {
     let details_xml = XmlNode {
         name: "BuildingDetails".to_string(),
         attrs: HashMap::new(),
@@ -29,7 +29,7 @@ fn minimal_building() -> hares_io::Building {
         }],
     };
 
-    hares_io::Building {
+    hares_input::Building {
         site: Site {
             elevation_m: None,
             site_type: None,
@@ -140,8 +140,8 @@ fn sequential_weather(start_temp_c: f64, rows: usize, timezone_offset_h: f64) ->
             elevation_m: 10.0,
             wf_allows_leap_years: true,
             source_step_secs: 3600,
-            record_label: hares_io::RecordLabel::IntervalEnd,
-            data_period: hares_io::DataPeriod::complete_year(),
+            record_label: hares_input::RecordLabel::IntervalEnd,
+            data_period: hares_input::DataPeriod::complete_year(),
             has_embedded_location: true,
             station_wmo: None,
         },

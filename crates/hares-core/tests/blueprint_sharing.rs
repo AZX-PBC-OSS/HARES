@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{
     Dwelling, DwellingBlueprint, DwellingBlueprintBuilder, DwellingConfig, DwellingSettings,
 };
-use hares_io::{
+use hares_input::{
     DefaultsSource, Destination, Frequency, InputSource, ParsedDefaults, ParsedHpxml, ParsedInputs,
     ParsedSchedule, ParsedWeather, ReportSpec, Selection, SimulationConfig, SiteLocationOverride,
     WeatherFormat, WeatherInput,
@@ -47,11 +47,11 @@ fn sim_config(start_time: DateTime<FixedOffset>, duration_s: i64, step_s: i64) -
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 

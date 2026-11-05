@@ -23,7 +23,7 @@ use hares_equipment::{
     EquipmentTypedConfig, GasBoilerConfig, GasWaterHeaterConfig, GeneratorConfig,
     HeatPumpWaterHeaterConfig, IndirectTankConfig, TanklessWaterHeaterConfig,
 };
-use hares_io::EquipmentSpec;
+use hares_input::EquipmentSpec;
 use hares_types::HaresError;
 
 /// All allocated loop IDs across equipment typed configs.

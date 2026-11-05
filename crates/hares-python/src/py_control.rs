@@ -35,7 +35,9 @@ pub(crate) fn check_signal_kwargs(
     }
     let key = keys.get_item(0)?;
     let key_str: String = key.extract()?;
-    if let Some(replacement) = hares_io::removed_key(hares_io::KeyScope::ControlSignal, &key_str) {
+    if let Some(replacement) =
+        hares_input::removed_key(hares_input::KeyScope::ControlSignal, &key_str)
+    {
         return Err(PyTypeError::new_err(format!(
             "signal keyword '{key_str}' was removed: {replacement}"
         )));
@@ -476,7 +478,7 @@ impl PyControlSignal {
         for key in d.keys() {
             let key_str: String = key.extract()?;
             if let Some(replacement) =
-                hares_io::removed_key(hares_io::KeyScope::ControlSignal, &key_str)
+                hares_input::removed_key(hares_input::KeyScope::ControlSignal, &key_str)
             {
                 return Err(PyValueError::new_err(format!(
                     "signal key '{key_str}' was removed: {replacement}"

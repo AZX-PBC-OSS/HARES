@@ -33,7 +33,7 @@
 
 use hares_envelope::ThermalSolver;
 use hares_envelope::thermal_solver::SiteLocation;
-use hares_io::{
+use hares_input::{
     Building, DesignConditions, EquipmentSpec,
     hpxml::{
         rebuild_wh_typed_config,
@@ -208,7 +208,7 @@ pub fn compute_default_internal_gains(
                 .find(|z| {
                     matches!(
                         z.zone_type,
-                        hares_io::hpxml::building::ZoneType::Conditioned
+                        hares_input::hpxml::building::ZoneType::Conditioned
                     )
                 })
                 .and_then(|z| z.floor_area_m2)
@@ -1122,7 +1122,7 @@ mod tests {
 
     fn minimal_building() -> Building {
         Building {
-            site: hares_io::hpxml::Site {
+            site: hares_input::hpxml::Site {
                 elevation_m: None,
                 site_type: None,
                 shielding_of_home: None,
@@ -1161,7 +1161,7 @@ mod tests {
             temperature_capacitance_multiplier: 7.0,
             hvac_deadband_c: None,
             climate_zone_iecc: None,
-            details_xml: hares_io::hpxml::building::XmlNode {
+            details_xml: hares_input::hpxml::building::XmlNode {
                 name: "root".into(),
                 attrs: Default::default(),
                 text: String::new(),
@@ -2185,9 +2185,9 @@ mod tests {
 
     // ── Full-pipeline integration tests (parse → resolve → autosize) ────
 
-    use hares_io::defaults::DefaultsStore;
-    use hares_io::hpxml::building::parse_building;
-    use hares_io::hpxml::equipment::resolve_equipment;
+    use hares_input::defaults::DefaultsStore;
+    use hares_input::hpxml::building::parse_building;
+    use hares_input::hpxml::equipment::resolve_equipment;
 
     /// Build a minimal HPXML document with a gas furnace that omits
     /// `<HeatingCapacity>` but includes efficiency and building metadata.
@@ -2925,7 +2925,7 @@ mod tests {
     fn compute_default_internal_gains_includes_lighting_plug_from_floor_area() {
         // When the building has a conditioned floor area, the default internal
         // gains should include occupancy + 5 W/m² lights/plug loads.
-        use hares_io::hpxml::building::{Zone, ZoneType};
+        use hares_input::hpxml::building::{Zone, ZoneType};
 
         let mut building = minimal_building();
         building.conditioned_volume_m3 = 180.0; // 150 m² × 2.4 m ceiling

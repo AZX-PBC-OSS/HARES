@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use arrow::array::{Float64Array, RecordBatch};
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use serde_json::json;
 
 fn project_root() -> PathBuf {
@@ -58,7 +58,7 @@ destination = "memory"
         ),
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            hares_input::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
             overrides,
             1,
             None,
@@ -197,7 +197,7 @@ destination = "memory"
         ),
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            hares_input::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
             Some(json!({
                 "Gas Furnace": {"setpoint": {"heating_setpoint_c": 25.0}},
             })),
@@ -336,7 +336,7 @@ destination = "memory"
         ),
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            hares_input::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
             overrides,
             1,
             None,
@@ -391,7 +391,7 @@ destination = "memory"
         ),
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
+            hares_input::SimulationConfig::from_toml(&sim_toml).expect("the config parses"),
             Some(json!({
                 "Gas Furnace": {"setpoint": {"heating_setpoint_c": 25.0}},
             })),

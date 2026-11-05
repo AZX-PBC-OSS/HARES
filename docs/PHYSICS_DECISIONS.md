@@ -17,7 +17,7 @@ AverageCeilingHeight + ConditionedCrawlspaceVolume` with an 8 ft
 (<https://openstudio-hpxml.readthedocs.io/en/latest/workflow_inputs.html>,
 "HPXML Building Construction"). HARES derives its ceiling height and zone
 air volumes from the declared volume
-(`crates/hares-io/src/hpxml/building.rs`), so defaulting the volume would
+(`crates/hares-input/src/hpxml/building.rs`), so defaulting the volume would
 also silently replace those derived values with an 8 ft constant. Every
 HPXML document OpenStudio-HPXML writes after applying its own defaults,
 ResStock's included, carries the element, so the strict rule excludes no
@@ -345,7 +345,7 @@ any home whose schedule file carries setpoint columns; no committed
 golden carries one, and no golden moved.
 
 The active source per side is recorded where the setpoints resolve
-(`crates/hares-io/src/setpoint_source.rs`, the equipment spec's
+(`crates/hares-input/src/setpoint_source.rs`, the equipment spec's
 `heating_setpoint_source` / `cooling_setpoint_source`), so the run's
 provenance names where each thermostat's setpoints came from: the schedule
 column, the HPXML control, or the default profile. OCHRE lets the column
@@ -487,7 +487,7 @@ Three places, deliberate:
   interpolation loop assigns no albedo. HARES holds the hour's record.
 - **Total sky cover.** EnergyPlus interpolates total and opaque sky
   cover (`:3098-3100`); HARES's weather has no total sky cover field
-  (`crates/hares-io/src/weather.rs`, opaque sky cover only), so that
+  (`crates/hares-input/src/weather.rs`, opaque sky cover only), so that
   field has no counterpart to interpolate.
 - **Global horizontal irradiance.** EnergyPlus keeps no global
   horizontal in its per-timestep weather (the `WeatherVars` set,
@@ -658,7 +658,7 @@ An output column's cell reads null wherever the underlying quantity does
 not apply to the current state, so the consumers' statistics (means,
 sums) are not poisoned by zeros-as-data. The catalogue decides, per
 variable, what a missing value means (`VariableDef.nullable`,
-`crates/hares-io/src/output/catalogue.rs`), and every variable's
+`crates/hares-output/src/catalogue.rs`), and every variable's
 nullability is logged at catalogue build (`tracing` at `debug`):
 
 | Variable class | Nullability | What a missing value means |
@@ -683,7 +683,7 @@ compressor speed, the EV connection state and charging level, an actor's
 declared enum channel) fold by the weighted Mode in both fleet stages:
 each home's over-time reduction takes the period's most frequent code,
 ties to the lowest code, exactly the reporting reducer's Mode rule
-(`crates/hares-io/src/output/reduce.rs`), and the across-homes fold takes
+(`crates/hares-output/src/reduce.rs`), and the across-homes fold takes
 the code with the greatest summed home weight, ties to the lowest code.
 A mean over mode codes is never taken: the codes are labels of an
 enumeration, not quantities, and their mean is no code. A period whose

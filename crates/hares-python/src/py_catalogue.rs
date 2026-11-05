@@ -41,7 +41,10 @@ fn sampling_tag(sampling: Sampling) -> &'static str {
 /// carries, name, unit, kind, aggregation, sampling, nullability, source,
 /// labels, across-homes rule and description, compared through those
 /// spellings.
-fn variables_read_the_same(a: &[hares_io::VariableDef], b: &[hares_io::VariableDef]) -> bool {
+fn variables_read_the_same(
+    a: &[hares_output::VariableDef],
+    b: &[hares_output::VariableDef],
+) -> bool {
     a.len() == b.len()
         && a.iter().zip(b.iter()).all(|(x, y)| {
             x.name == y.name
@@ -67,7 +70,7 @@ fn variables_read_the_same(a: &[hares_io::VariableDef], b: &[hares_io::VariableD
 /// for every other kind. The view the Variable's `labels` getter carries:
 /// a label table read back from a catalogue deserialisation is the same
 /// table the declarations carry, whichever variant holds it.
-fn labels_of(def: &hares_io::VariableDef) -> Option<Vec<String>> {
+fn labels_of(def: &hares_output::VariableDef) -> Option<Vec<String>> {
     match &def.kind {
         VariableKind::Enum { labels } => Some(
             (0..labels.len())
@@ -81,7 +84,7 @@ fn labels_of(def: &hares_io::VariableDef) -> Option<Vec<String>> {
 /// One catalogue variable: the column's declaration, read only.
 #[pyclass(frozen, name = "Variable")]
 pub struct PyVariable {
-    pub(crate) inner: hares_io::VariableDef,
+    pub(crate) inner: hares_output::VariableDef,
 }
 
 #[pymethods]
@@ -173,7 +176,7 @@ impl PyVariable {
 /// run (`RunResult.catalogue`).
 #[pyclass(frozen, name = "Catalogue")]
 pub struct PyCatalogue {
-    pub(crate) inner: Arc<hares_io::Catalogue>,
+    pub(crate) inner: Arc<hares_output::Catalogue>,
 }
 
 #[pymethods]
@@ -235,9 +238,9 @@ impl PyCatalogue {
     /// sources.
     #[classmethod]
     fn from_json(_cls: &Bound<'_, PyType>, json_str: &str) -> PyResult<Self> {
-        let defs: Vec<hares_io::VariableDef> = serde_json::from_str(json_str)
+        let defs: Vec<hares_output::VariableDef> = serde_json::from_str(json_str)
             .map_err(|err| PyValueError::new_err(format!("JSON parse error: {err}")))?;
-        let catalogue = hares_io::Catalogue::from_defs(defs)
+        let catalogue = hares_output::Catalogue::from_defs(defs)
             .map_err(|err| PyValueError::new_err(err.to_string()))?;
         Ok(Self {
             inner: Arc::new(catalogue),
@@ -315,10 +318,10 @@ pub fn metrics_from_table(
         }
     };
     let batches: Vec<arrow::record_batch::RecordBatch> = table.batches().to_vec();
-    let catalogue: Arc<hares_io::Catalogue> = catalogue.borrow().inner.clone();
+    let catalogue: Arc<hares_output::Catalogue> = catalogue.borrow().inner.clone();
 
     let metrics = py.detach(move || {
-        hares_io::metrics_from_table(
+        hares_output::metrics_from_table(
             &batches,
             &catalogue,
             chrono::Duration::seconds(time_res.0),
@@ -339,8 +342,8 @@ mod tests {
     use arrow::datatypes::Field;
     use arrow::record_batch::{RecordBatch, RecordBatchIterator};
     use hares_core::{Dwelling, DwellingConfig, DwellingSettings, RunMetrics, SimulationEngine};
-    use hares_io::Catalogue;
-    use hares_io::{DefaultsSource, InputSource, WeatherInput};
+    use hares_input::{DefaultsSource, InputSource, WeatherInput};
+    use hares_output::Catalogue;
     use pyo3::Py;
     use pyo3::Python;
     use pyo3::types::{PyAnyMethods, PyCapsule};
@@ -367,7 +370,7 @@ mod tests {
     fn acceptance_run() -> (RunMetrics, Arc<Catalogue>, Vec<RecordBatch>) {
         let root = repo_root();
         let home = root.join("tests/fixtures/parity/cz4a_ashp_hpwh");
-        let sim = hares_io::SimulationConfig::from_toml(&sim_toml()).expect("sim config parses");
+        let sim = hares_input::SimulationConfig::from_toml(&sim_toml()).expect("sim config parses");
         let config = DwellingConfig {
             hpxml: InputSource::Path(home.join("building.xml")),
             schedule: Some(InputSource::Path(home.join("schedule.csv"))),
@@ -582,7 +585,7 @@ mod tests {
     fn metrics_from_table_binding_matches_the_rust_path_on_bits() {
         let (in_run, catalogue, batches) = acceptance_run();
 
-        let from_rust = hares_io::metrics_from_table(
+        let from_rust = hares_output::metrics_from_table(
             &batches,
             &catalogue,
             chrono::Duration::seconds(900),

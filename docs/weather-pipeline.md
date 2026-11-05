@@ -8,7 +8,7 @@ per-timestep environmental state to equipment and solvers.
 ## Module Layout
 
 ```
-hares-io/src/
+hares-input/src/
 ├── epw.rs              EPW file parser, sky temp, ground temp models
 ├── psm3.rs             NREL PSM3/NSRDB CSV parser (5/15/30/60-min native solar)
 └── weather.rs          WeatherTimeSeries, WeatherFormat dispatch, resampling
@@ -33,7 +33,7 @@ HARES supports multiple weather file formats via a unified dispatch layer.
 
 ### Unified Dispatch
 
-**Entry point**: `hares-io::weather::parse_weather(path)` — auto-detects format
+**Entry point**: `hares-input::weather::parse_weather(path)`, auto-detecting format
 and dispatches to the appropriate parser.
 
 Detection logic (`detect_weather_format()`):
@@ -57,7 +57,7 @@ Dwelling construction uses the unified entry point: `parse_weather(&config.weath
 
 ## EPW Parsing
 
-**Entry point**: `hares-io::epw::parse()`
+**Entry point**: `hares-input::epw::parse()`
 
 ### Fields Extracted
 
@@ -97,7 +97,7 @@ mm → m. Record count must be exactly 8760 (standard year) or 8784 (leap year).
 
 ## PSM3 Parsing
 
-**Entry point**: `hares-io::psm3::parse_psm3()`
+**Entry point**: `hares-input::psm3::parse_psm3()`
 
 Parses NREL's Physical Solar Model v3 (PSM3/NSRDB) CSV format, which provides
 native sub-hourly solar data at 5, 15, 30, or 60-minute intervals — eliminating
@@ -322,9 +322,9 @@ The +6°F offset accounts for ground buffering above outdoor average.
 
 | File | Purpose |
 |------|---------|
-| `hares-io/src/epw.rs` | EPW parser, Clark-Allen sky temp, DOE-2 ground temp |
-| `hares-io/src/psm3.rs` | PSM3/NSRDB parser, sub-hourly native solar |
-| `hares-io/src/weather.rs` | WeatherTimeSeries, WeatherFormat dispatch, resampling |
+| `hares-input/src/epw.rs` | EPW parser, Clark-Allen sky temp, DOE-2 ground temp |
+| `hares-input/src/psm3.rs` | PSM3/NSRDB parser, sub-hourly native solar |
+| `hares-input/src/weather.rs` | WeatherTimeSeries, WeatherFormat dispatch, resampling |
 | `hares-core/src/environment.rs` | EnvironmentManager, offset alignment, DST schedule indexing |
 | `hares-physics/src/solar.rs` | Solar position (Spencer), Perez tilted irradiance |
 | `hares-physics/src/psychrometrics.rs` | Humidity ratio, wet-bulb, enthalpy |

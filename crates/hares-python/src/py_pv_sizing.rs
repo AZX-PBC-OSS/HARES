@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use hares_io::PvPanelDefaults;
+use hares_input::PvPanelDefaults;
 use hares_physics::pv_sizing::{
     self, PvCandidate, PvSizingError, PvSizingResult, RoofInfo, RoofPlane, RoofShape,
     UsableRoofArea,

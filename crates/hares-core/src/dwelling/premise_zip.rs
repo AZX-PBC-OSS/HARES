@@ -47,7 +47,7 @@
 //! expectation stands in for it.
 
 use hares_equipment::{Equipment, ExpectedMeanPower};
-use hares_io::schedule::ScheduleTimeSeries;
+use hares_input::schedule::ScheduleTimeSeries;
 use hares_physics::zip::ZipLoad;
 
 /// The premise-level aggregate ZIP and the equipment roster it was formed

@@ -132,7 +132,7 @@ the references' differing scopes.
 - **Measured impact:** the identity holds exactly on the corpus's PV
   exporters (the resstock_smoke invariants, 5/5); the failure the fix removed
   is a home reporting 0.0 consumption while serving real load.
-- **Pinning tests:** `crates/hares-io/src/output/metrics.rs`
+- **Pinning tests:** `crates/hares-output/src/metrics.rs`
   (`finish_separates_net_consumption_and_pv_generation`,
   `renewable_fraction_uses_abs_for_negative_pv`,
   `zero_net_with_high_gross_consumption_and_pv_is_correct`,
@@ -291,7 +291,7 @@ the references' differing scopes.
   A file without a `SiteType` is suburban, OS-HPXML's default
   (`defaults.rb:817-818`), with a warning in the dwelling's log; a value
   outside rural, suburban and urban is a parse error (`parse_site_type`,
-  `hares-io/src/hpxml/building.rs`).
+  `hares-input/src/hpxml/building.rs`).
   This follows OS-HPXML and departs from OCHRE.
 - **Justification:** the input states the terrain. A suburban house does
   not see open-country wind.
@@ -341,7 +341,7 @@ the references' differing scopes.
   also be well determined: a 0.25 % error in the walls' area (a heuristic,
   three times that largest disagreement) may move it by at most 10 %, which
   rejects a footprint near a square (`gable_rise_m`,
-  `hares-io/src/hpxml/zone_geometry.rs`). Where the input does not
+  `hares-input/src/hpxml/zone_geometry.rs`). Where the input does not
   determine the span (an attic over a garage, floors that do not match the
   footprint, a smaller upper storey, no floor counts, gable ends that
   disagree with the span or are of different sizes, a footprint near a
@@ -751,7 +751,7 @@ the references' differing scopes.
 - **Pinning tests:** `tests/conditioned_basement.rs`
   (`conditioned_basement_is_held_at_the_setpoint`,
   `conditioned_basement_loads_reach_the_hvac`),
-  `crates/hares-io/tests/hpxml_parsing_tests.rs`
+  `crates/hares-input/tests/hpxml_parsing_tests.rs`
   (`conditioned_basement_merges_into_the_conditioned_zone`). Each fails
   when the label parse reverts to a separate unheated foundation zone.
 
@@ -847,7 +847,7 @@ the references' differing scopes.
   washer's draw is 0 that day) and the water heater draws 1.01 kWh.
 - **HARES behavior:** the fixtures' normalized draw reaches the tank:
   `normalize_draw_profile` scales the schedule fractions to the RESNET
-  daily volume (`crates/hares-io/src/draw_profile.rs`), and the storage
+  daily volume (`crates/hares-input/src/draw_profile.rs`), and the storage
   water heaters pull it through the tempered-draw path
   (`crates/hares-equipment/src/water_heater/tank.rs` `step_tempered`,
   the TMV volume ratio of OCHRE Water.py:303-325). The tank draws
@@ -920,7 +920,7 @@ the references' differing scopes.
   heat-gain diagnostics (`tests/freefloat_oracle.rs`,
   `tests/conditioned_oracle.rs`, observe builds) carry the per-scenario
   means; the weather state's ground temperature binding is pinned by
-  the EPW weather parity tests (`crates/hares-io/tests/
+  the EPW weather parity tests (`crates/hares-input/tests/
   weather_parity.rs`).
 
 ---
@@ -981,7 +981,7 @@ the references' differing scopes.
   BEopt/OCHRE-format input's declared microwave moves 43.2% of its input
   power radiant (0.6 of the 0.72 sensible) instead of none of it.
 - **Pinning tests:**
-  `crates/hares-io/src/schedule_resolve.rs`
+  `crates/hares-input/src/schedule_resolve.rs`
   (`an_os_hpxml_schedules_microwave_column_counts_only_the_residual_mels`,
   `the_microwave_column_is_unknown_only_outside_the_beopt_family`,
   `microwave_csv_column_creates_spec_with_event_schedule_and_nonzero_energy`
@@ -1067,7 +1067,7 @@ the references' differing scopes.
   there is the fan's capacity-proportional flow (`staging.rs:466`); the
   peak residual is the ER dispatch difference established in
   `tests/parity/mod.rs`.
-- **Pinning tests:** `crates/hares-io/tests/hvac_csv_tests.rs`
+- **Pinning tests:** `crates/hares-input/tests/hvac_csv_tests.rs`
   (`shipped_multispeed_rows_match_ochre_verbatim` fails when any row
   OCHRE ships reverts to a re-derivation, provenance included;
   `mshp_heater_rows_match_ochre_capacity_ratios_and_cops` covers all
@@ -1118,7 +1118,7 @@ the references' differing scopes.
   [4.8, 5.0] or a low-power HPWH, so no golden moves; the divergence is
   on new inputs, where a UEF of 4.95 gets 75% of the low-power curves
   instead of OCHRE's standard-coefficient hard no at 4.9 exactly.
-- **Pinning tests:** `crates/hares-io/tests/hpxml_parity.rs`
+- **Pinning tests:** `crates/hares-input/tests/hpxml_parity.rs`
   (`low_power_hpwh_auto_detected_from_uef_without_hardcoded_presets`),
   which fails when the parser reverts to the sentinel's preset
   substitution and COP.
@@ -1190,7 +1190,7 @@ the references' differing scopes.
   EPW at import (`ochre/utils/schedule.py:172-175`, "leap year, remove
   Feb 29 data"), keeping 8760 rows.
 - **HARES behavior:** the EPW parser keeps the full 8784 rows
-  (`crates/hares-io/src/epw.rs`, the leap-year handling); annual
+  (`crates/hares-input/src/epw.rs`, the leap-year handling); annual
   simulations run 366 days and the schedule and weather indexing wrap
   modularly across the year boundary.
 - **Justification:** class (a). The reference keeps the 8760-row year by
@@ -1203,7 +1203,7 @@ the references' differing scopes.
   other committed input is a leap-year EPW.
 - **Pinning tests:** the leap-year golden frame (bitwise, both
   profiles, via `frame_golden compare-all`) and
-  `crates/hares-io/tests/weather_parity.rs`'s leap-year series-length
+  `crates/hares-input/tests/weather_parity.rs`'s leap-year series-length
   checks.
 
 ## D-025: Zone capacitance density from the site's pressure, not a constant
@@ -1582,7 +1582,7 @@ the references' differing scopes.
   unit"; resstock homes name it and "other heated space", the fleet's
   bldg0000004/6/7 among them), and the committed goldens carry the
   resulting physics unchanged.
-- **Pinning tests:** `crates/hares-io/src/hpxml/building.rs`'s rewrite
+- **Pinning tests:** `crates/hares-input/src/hpxml/building.rs`'s rewrite
   tests (the "other housing unit" adjacency pair collapsing to its
   neighbor, the both-sides case to conditioned) pin the OCHRE rewrite
   the treatment stands on.

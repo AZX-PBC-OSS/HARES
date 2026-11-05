@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use hares_core::{DwellingBlueprint, DwellingBlueprintBuilder, DwellingConfig};
-use hares_io::{DefaultsSource, ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather};
+use hares_input::{DefaultsSource, ParsedDefaults, ParsedHpxml, ParsedSchedule, ParsedWeather};
 use hares_types::EndUse;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -228,7 +228,7 @@ impl PyDwellingBlueprint {
 /// resolved once from the HPXML building and the weather header.
 pub(crate) fn builder_inputs(
     inputs: &crate::py_config::ConstructorInputs,
-) -> Result<hares_io::ParsedInputs, hares_types::HaresError> {
+) -> Result<hares_input::ParsedInputs, hares_types::HaresError> {
     let defaults_handle: Arc<ParsedDefaults> = match &inputs.defaults {
         DefaultsArg::Parsed(handle) => Arc::clone(handle),
         DefaultsArg::Source(source) => Arc::new(ParsedDefaults::parse(source)?),
@@ -249,7 +249,7 @@ pub(crate) fn builder_inputs(
         )?)),
         None => None,
     };
-    let mut parsed = hares_io::ParsedInputs::from_handles(
+    let mut parsed = hares_input::ParsedInputs::from_handles(
         hpxml_handle,
         schedule_handle,
         weather_handle,
@@ -351,7 +351,7 @@ pub(crate) fn schedule_arg_maybe(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Opt
     }
 }
 
-fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<hares_io::EquipmentSpec> {
+fn py_any_to_equipment_spec(obj: &Bound<'_, PyAny>) -> PyResult<hares_input::EquipmentSpec> {
     if let Ok(f) = obj.extract::<PyRef<'_, PyGasFurnace>>() {
         return gas_furnace_spec_from_py(&f);
     }
@@ -409,7 +409,7 @@ pub(crate) fn resolved_model_to_py(
     py: Python<'_>,
     model: &hares_core::ResolvedModel,
 ) -> PyResult<Py<PyAny>> {
-    use hares_io::hpxml::BoundaryType;
+    use hares_input::hpxml::BoundaryType;
 
     let site = PyDict::new(py);
     for (value, name, source) in [
@@ -487,8 +487,8 @@ pub(crate) fn resolved_model_to_py(
     // non-None is the side's source, `None` when no side source resolved.
     let side_source = |side: fn(
         &hares_core::resolved::ResolvedEquipment,
-    ) -> &Option<hares_io::SetpointSource>|
-     -> Option<hares_io::SetpointSource> {
+    ) -> &Option<hares_input::SetpointSource>|
+     -> Option<hares_input::SetpointSource> {
         model.equipment.iter().find_map(|e| side(e).clone())
     };
 

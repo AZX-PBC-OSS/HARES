@@ -56,11 +56,11 @@ fn sim_config(
         start_time,
         duration: Duration::days(days),
         time_res: Duration::seconds(time_res_s),
-        reports: vec![hares_io::ReportSpec {
+        reports: vec![hares_input::ReportSpec {
             name: "frame".to_owned(),
-            selection: hares_io::Selection::Verbosity(2),
+            selection: hares_input::Selection::Verbosity(2),
             frequency: Default::default(),
-            destination: hares_io::Destination::Memory,
+            destination: hares_input::Destination::Memory,
         }],
         diagnostics: false,
         metrics: false,
@@ -68,12 +68,12 @@ fn sim_config(
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: civil_timezone.map(str::to_owned),
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
@@ -84,17 +84,17 @@ fn cz4a_config(
     civil_timezone: Option<&str>,
 ) -> DwellingConfig {
     DwellingConfig {
-        hpxml: hares_io::InputSource::Path(cz4a().join("building.xml")),
-        schedule: Some(hares_io::InputSource::Path(cz4a().join("schedule.csv"))),
-        weather: hares_io::WeatherInput::Path(cz4a().join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
+        hpxml: hares_input::InputSource::Path(cz4a().join("building.xml")),
+        schedule: Some(hares_input::InputSource::Path(cz4a().join("schedule.csv"))),
+        weather: hares_input::WeatherInput::Path(cz4a().join("weather.epw")),
+        defaults: hares_input::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             // The warm-up rides the sim config's warmup field: on for the
             // callers that pass a day count, disabled for the rest.
             sim_config: {
                 let mut sim = sim_config(start_time, days, 900, civil_timezone);
                 if warmup_s.is_some() {
-                    sim.warmup = hares_io::Warmup::default();
+                    sim.warmup = hares_input::Warmup::default();
                 }
                 sim
             },
@@ -180,36 +180,38 @@ fn assert_frames_bitwise_equal(expected: &RecordBatch, actual: &RecordBatch, con
 /// One set of shared cz4a handles: the weather, schedule, defaults and
 /// HPXML parsed once, shared by every blueprint the tests build from them.
 struct SharedCz4a {
-    weather: Arc<hares_io::ParsedWeather>,
-    schedule: Arc<hares_io::ParsedSchedule>,
-    defaults: Arc<hares_io::ParsedDefaults>,
-    hpxml: Arc<hares_io::ParsedHpxml>,
+    weather: Arc<hares_input::ParsedWeather>,
+    schedule: Arc<hares_input::ParsedSchedule>,
+    defaults: Arc<hares_input::ParsedDefaults>,
+    hpxml: Arc<hares_input::ParsedHpxml>,
 }
 
 impl SharedCz4a {
     fn new() -> Self {
         let weather = Arc::new(
-            hares_io::ParsedWeather::parse(&hares_io::WeatherInput::Path(
+            hares_input::ParsedWeather::parse(&hares_input::WeatherInput::Path(
                 cz4a().join("weather.epw"),
             ))
             .expect("weather parses"),
         );
         let schedule = Arc::new(
-            hares_io::ParsedSchedule::parse(
-                &hares_io::InputSource::Path(cz4a().join("schedule.csv")),
+            hares_input::ParsedSchedule::parse(
+                &hares_input::InputSource::Path(cz4a().join("schedule.csv")),
                 Some(weather.meta()),
             )
             .expect("schedule parses"),
         );
         let defaults = Arc::new(
-            hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
+            hares_input::ParsedDefaults::parse(&hares_input::DefaultsSource::directory(
                 repo_root().join("python/hares/defaults"),
             ))
             .expect("defaults load"),
         );
         let hpxml = Arc::new(
-            hares_io::ParsedHpxml::parse(&hares_io::InputSource::Path(cz4a().join("building.xml")))
-                .expect("hpxml parses"),
+            hares_input::ParsedHpxml::parse(&hares_input::InputSource::Path(
+                cz4a().join("building.xml"),
+            ))
+            .expect("hpxml parses"),
         );
         Self {
             weather,
@@ -222,7 +224,7 @@ impl SharedCz4a {
     /// A blueprint over the shared handles with the settings given: the
     /// construction whose forcing resolution the tests measure.
     fn blueprint(&self, settings: DwellingSettings) -> Arc<DwellingBlueprint> {
-        let inputs = hares_io::ParsedInputs::from_handles(
+        let inputs = hares_input::ParsedInputs::from_handles(
             Arc::clone(&self.hpxml),
             Some(Arc::clone(&self.schedule)),
             Arc::clone(&self.weather),
@@ -339,16 +341,16 @@ fn forcing_table_run_equals_uncached_run_consumer_shape() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let config = DwellingConfig {
-        hpxml: hares_io::InputSource::Path(
+        hpxml: hares_input::InputSource::Path(
             repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227/home.xml"),
         ),
-        schedule: Some(hares_io::InputSource::Path(
+        schedule: Some(hares_input::InputSource::Path(
             repo_root().join("tests/fixtures/resstock/2025.1/bldg0176227/in.schedules.csv"),
         )),
-        weather: hares_io::WeatherInput::Path(
+        weather: hares_input::WeatherInput::Path(
             repo_root().join("tests/fixtures/resstock/2025.1/weather/G0600770_2018.csv"),
         ),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
+        defaults: hares_input::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             sim_config: sim_config(start_at("2018-01-01T00:00:00-08:00"), 1, 900, None),
             overrides: Some(serde_json::json!({"Gas Water Heater": {"ua_w_per_k": 2.0}})),
@@ -372,8 +374,8 @@ fn forcing_key_differs_by_first_hour() {
     let shared = SharedCz4a::new();
     let mut first_settings = cz4a_settings(start_at("2024-02-27T00:00:00-07:00"), 1);
     let mut second_settings = first_settings.clone();
-    first_settings.sim_config.first_hour_interpolation = hares_io::FirstHour::Hour24;
-    second_settings.sim_config.first_hour_interpolation = hares_io::FirstHour::Hour1;
+    first_settings.sim_config.first_hour_interpolation = hares_input::FirstHour::Hour24;
+    second_settings.sim_config.first_hour_interpolation = hares_input::FirstHour::Hour1;
 
     let first = shared.blueprint(first_settings).build().expect("build");
     let second = shared.blueprint(second_settings).build().expect("build");
@@ -439,9 +441,9 @@ fn forcing_key_differs_by_utc_offset_at_equal_instant() {
     let shared = SharedCz4a::new();
     let settings_at_offset = |offset_h: f64, start: &str| {
         let mut settings = cz4a_settings(start_at(start), 2);
-        settings.sim_config.site_location = hares_io::SiteLocationOverride {
+        settings.sim_config.site_location = hares_input::SiteLocationOverride {
             utc_offset_h: Some(offset_h),
-            ..hares_io::SiteLocationOverride::default()
+            ..hares_input::SiteLocationOverride::default()
         };
         settings
     };
@@ -476,9 +478,9 @@ fn forcing_key_differs_by_utc_offset_at_equal_instant() {
     // Each offset's run equals its per-step run bitwise.
     let config_at_offset = |offset_h: f64, start: &str| {
         let mut config = cz4a_config(start_at(start), 2, None, None);
-        config.settings.sim_config.site_location = hares_io::SiteLocationOverride {
+        config.settings.sim_config.site_location = hares_input::SiteLocationOverride {
             utc_offset_h: Some(offset_h),
-            ..hares_io::SiteLocationOverride::default()
+            ..hares_input::SiteLocationOverride::default()
         };
         config
     };
@@ -543,7 +545,7 @@ struct ForcingKeyFields {
 
 #[cfg(feature = "dst")]
 impl ForcingKeyFields {
-    fn of(key: &hares_io::ForcingKey) -> Self {
+    fn of(key: &hares_input::ForcingKey) -> Self {
         Self {
             time_res_secs: key.time_res_secs,
             local_start: key.local_start,
@@ -566,20 +568,20 @@ fn blueprints_from_different_hpxml_share_forcing() {
         .unwrap_or_else(PoisonError::into_inner);
     let inputs = SharedInputs::new();
     let weather = Arc::new(
-        hares_io::ParsedWeather::parse(&hares_io::WeatherInput::Path(
+        hares_input::ParsedWeather::parse(&hares_input::WeatherInput::Path(
             inputs.dir.path().join("weather.epw"),
         ))
         .expect("weather parses"),
     );
     let schedule = Arc::new(
-        hares_io::ParsedSchedule::parse(
-            &hares_io::InputSource::Path(inputs.dir.path().join("schedule.csv")),
+        hares_input::ParsedSchedule::parse(
+            &hares_input::InputSource::Path(inputs.dir.path().join("schedule.csv")),
             Some(weather.meta()),
         )
         .expect("schedule parses"),
     );
     let defaults = Arc::new(
-        hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
+        hares_input::ParsedDefaults::parse(&hares_input::DefaultsSource::directory(
             repo_root().join("python/hares/defaults"),
         ))
         .expect("defaults load"),
@@ -593,10 +595,12 @@ fn blueprints_from_different_hpxml_share_forcing() {
 
     let blueprint_for = |hpxml_path: &Path| {
         let hpxml = Arc::new(
-            hares_io::ParsedHpxml::parse(&hares_io::InputSource::Path(hpxml_path.to_path_buf()))
-                .expect("hpxml parses"),
+            hares_input::ParsedHpxml::parse(&hares_input::InputSource::Path(
+                hpxml_path.to_path_buf(),
+            ))
+            .expect("hpxml parses"),
         );
-        let parsed = hares_io::ParsedInputs::from_handles(
+        let parsed = hares_input::ParsedInputs::from_handles(
             hpxml,
             Some(Arc::clone(&schedule)),
             Arc::clone(&weather),
@@ -642,20 +646,20 @@ fn azimuth_change_shares_the_table() {
     std::fs::write(&turned_path, &turned).expect("write the turned HPXML");
 
     let weather = Arc::new(
-        hares_io::ParsedWeather::parse(&hares_io::WeatherInput::Path(
+        hares_input::ParsedWeather::parse(&hares_input::WeatherInput::Path(
             inputs.dir.path().join("weather.epw"),
         ))
         .expect("weather parses"),
     );
     let schedule = Arc::new(
-        hares_io::ParsedSchedule::parse(
-            &hares_io::InputSource::Path(inputs.dir.path().join("schedule.csv")),
+        hares_input::ParsedSchedule::parse(
+            &hares_input::InputSource::Path(inputs.dir.path().join("schedule.csv")),
             Some(weather.meta()),
         )
         .expect("schedule parses"),
     );
     let defaults = Arc::new(
-        hares_io::ParsedDefaults::parse(&hares_io::DefaultsSource::directory(
+        hares_input::ParsedDefaults::parse(&hares_input::DefaultsSource::directory(
             repo_root().join("python/hares/defaults"),
         ))
         .expect("defaults load"),
@@ -668,10 +672,12 @@ fn azimuth_change_shares_the_table() {
     };
     let blueprint_for = |hpxml_path: &Path| {
         let hpxml = Arc::new(
-            hares_io::ParsedHpxml::parse(&hares_io::InputSource::Path(hpxml_path.to_path_buf()))
-                .expect("hpxml parses"),
+            hares_input::ParsedHpxml::parse(&hares_input::InputSource::Path(
+                hpxml_path.to_path_buf(),
+            ))
+            .expect("hpxml parses"),
         );
-        let parsed = hares_io::ParsedInputs::from_handles(
+        let parsed = hares_input::ParsedInputs::from_handles(
             hpxml,
             Some(Arc::clone(&schedule)),
             Arc::clone(&weather),
@@ -753,12 +759,12 @@ impl SharedInputs {
 /// schedule.
 fn base_config(hpxml_path: &Path, inputs: &SharedInputs) -> DwellingConfig {
     DwellingConfig {
-        hpxml: hares_io::InputSource::Path(hpxml_path.to_path_buf()),
-        schedule: Some(hares_io::InputSource::Path(
+        hpxml: hares_input::InputSource::Path(hpxml_path.to_path_buf()),
+        schedule: Some(hares_input::InputSource::Path(
             inputs.dir.path().join("schedule.csv"),
         )),
-        weather: hares_io::WeatherInput::Path(inputs.dir.path().join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
+        weather: hares_input::WeatherInput::Path(inputs.dir.path().join("weather.epw")),
+        defaults: hares_input::DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings {
             sim_config: sim_config(start_at("2023-01-01T00:00:00-07:00"), 1, 900, None),
             overrides: None,
@@ -870,7 +876,7 @@ fn dropped_dwellings_drop_their_forcing_tables() {
         .unwrap_or_else(PoisonError::into_inner);
     const DISTINCT_WEATHERS: usize = 40;
 
-    let before_live = hares_io::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
+    let before_live = hares_input::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
     let before_computations = hares_core::FORCING_COMPUTATIONS.load(Ordering::Relaxed);
 
     let dir = tempfile::tempdir().expect("temp dir");
@@ -882,12 +888,14 @@ fn dropped_dwellings_drop_their_forcing_tables() {
         std::fs::write(&weather_path, build_epw_8760_variant(variant as i32))
             .expect("write weather");
         let config = DwellingConfig {
-            hpxml: hares_io::InputSource::Path(
+            hpxml: hares_input::InputSource::Path(
                 repo_root().join("tests/fixtures/hpxml/ochre_samples/base.xml"),
             ),
-            schedule: Some(hares_io::InputSource::Path(dir.path().join("schedule.csv"))),
-            weather: hares_io::WeatherInput::Path(weather_path.clone()),
-            defaults: hares_io::DefaultsSource::directory(
+            schedule: Some(hares_input::InputSource::Path(
+                dir.path().join("schedule.csv"),
+            )),
+            weather: hares_input::WeatherInput::Path(weather_path.clone()),
+            defaults: hares_input::DefaultsSource::directory(
                 repo_root().join("python/hares/defaults"),
             ),
             settings: DwellingSettings {
@@ -900,7 +908,7 @@ fn dropped_dwellings_drop_their_forcing_tables() {
         dwellings.push(Dwelling::from_config(config).expect("build"));
     }
 
-    let during_live = hares_io::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
+    let during_live = hares_input::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
     assert_eq!(
         during_live,
         before_live + DISTINCT_WEATHERS as u64,
@@ -911,7 +919,7 @@ fn dropped_dwellings_drop_their_forcing_tables() {
 
     drop(dwellings);
 
-    let after_live = hares_io::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
+    let after_live = hares_input::FORCING_TABLES_LIVE.load(Ordering::Relaxed);
     assert_eq!(
         after_live,
         before_live,

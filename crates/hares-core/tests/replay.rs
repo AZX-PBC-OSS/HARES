@@ -11,7 +11,7 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use hares_core::replay;
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings, RunResult, derive_dwelling_rng, rng};
-use hares_io::{DefaultsSource, InputSource, SimulationConfig, WeatherFormat, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, SimulationConfig, WeatherFormat, WeatherInput};
 use hares_types::{HaresError, ReplayBlocker};
 use serde_json::json;
 
@@ -195,7 +195,7 @@ fn replay_export_reproduces_frame_bitwise() {
 fn replay_export_writes_dwelling_settings() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
     let mut config = consumer_shape_config(inputs.path(), 4 * 3600, false);
-    config.settings.patches = Some(hares_io::HpxmlDataPatches {
+    config.settings.patches = Some(hares_input::HpxmlDataPatches {
         number_of_bedrooms: Some(3.0),
     });
     let original = run(config);
@@ -228,7 +228,7 @@ fn replay_export_writes_dwelling_settings() {
     );
     assert_eq!(
         replayed.config.settings.patches,
-        Some(hares_io::HpxmlDataPatches {
+        Some(hares_input::HpxmlDataPatches {
             number_of_bedrooms: Some(3.0)
         }),
         "the patches round trip"
@@ -668,7 +668,7 @@ fn replay_export_rejects_a_caller_actor_added_with_equipment() {
 /// received.
 #[test]
 fn replay_of_a_callback_report_replays_memory_batches_bitwise() {
-    use hares_io::output::callback::{BatchCallback, BatchContext, CallbackError};
+    use hares_output::callback::{BatchCallback, BatchContext, CallbackError};
     use std::sync::{Arc, Mutex};
 
     struct Collecting {
@@ -737,7 +737,7 @@ fn replay_of_a_file_report_replays_the_file_byte_identical() {
     let inputs = tempfile::tempdir().expect("the inputs directory");
     let outputs = tempfile::tempdir().expect("the outputs directory");
     let mut config = consumer_shape_config(inputs.path(), 3600, false);
-    config.settings.sim_config.reports[0].destination = hares_io::Destination::Csv {
+    config.settings.sim_config.reports[0].destination = hares_input::Destination::Csv {
         path: outputs.path().join("frame_output.csv"),
         overwrite: false,
     };

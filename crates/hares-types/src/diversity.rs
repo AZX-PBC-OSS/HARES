@@ -19,7 +19,7 @@
 //! (Occupancy Table C.3(5), lighting Tables C.3(3)/(4), the appliance and
 //! water-heating rows of the vendored OS-HPXML v1.12.0 Default Schedule
 //! Parameters.csv; the provenance contract and its pins live on
-//! `hares_io::schedule_resolve::inject_occupancy_schedule`). The SPREADS
+//! `hares_input::schedule_resolve`). The SPREADS
 //! below are this record's calibrated choice, not published values: each
 //! scale is drawn mean-one BEFORE its clamp (a lognormal with mu =
 //! -sigma^2/2), so the unclamped draw's mean is exactly one, and the

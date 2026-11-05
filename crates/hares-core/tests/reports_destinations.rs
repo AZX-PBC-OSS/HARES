@@ -13,7 +13,7 @@ use arrow::array::Float64Array;
 use arrow::record_batch::RecordBatch;
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
 use hares_equipment::{Equipment, EquipmentConfig};
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use hares_types::{
     ControlCapabilities, CoreCapabilities, CoreOutput, EndUse, EnvironmentState,
     EquipmentDescriptor, EquipmentId, ExecutionStage, FuelType, HaresError, OperatingMode,
@@ -57,7 +57,7 @@ fn dwelling_config(sim_toml: &str) -> DwellingConfig {
         weather: WeatherInput::Path(home.join("weather.epw")),
         defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
+            hares_input::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
             None,
             1,
             None,
@@ -377,14 +377,14 @@ fn multi_report_each_destination_carries_its_own_selection() {
 
     // Each selection resolves against the dwelling's own catalogue.
     let catalogue = dwelling.catalogue();
-    let probe_selection = hares_io::Selection::Named(vec![
+    let probe_selection = hares_input::Selection::Named(vec![
         "Total Electric Power (kW)".to_string(),
         "Outdoor Dry Bulb (C)".to_string(),
     ]);
-    let full_selection = hares_io::Selection::Verbosity(2);
-    let probe_names = hares_io::resolve_selection(&probe_selection, &catalogue)
+    let full_selection = hares_input::Selection::Verbosity(2);
+    let probe_names = hares_output::resolve_selection(&probe_selection, &catalogue)
         .expect("the probe selection resolves");
-    let full_names = hares_io::resolve_selection(&full_selection, &catalogue)
+    let full_names = hares_output::resolve_selection(&full_selection, &catalogue)
         .expect("the full selection resolves");
     assert_ne!(
         probe_names.len(),

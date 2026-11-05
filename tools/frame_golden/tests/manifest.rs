@@ -157,7 +157,7 @@ fn manifest_fleet_requires_weight_and_fleet_table() {
     let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &full).unwrap();
     assert_eq!(
         manifest.fleet.as_ref().expect("validated").frequency,
-        hares_io::Frequency::Hourly
+        hares_input::Frequency::Hourly
     );
 
     // The minutes spelling round-trips too.
@@ -165,7 +165,7 @@ fn manifest_fleet_requires_weight_and_fleet_table() {
     let manifest = GoldenManifest::parse(std::path::Path::new("fixture.toml"), &minutes).unwrap();
     assert_eq!(
         manifest.fleet.as_ref().expect("validated").frequency,
-        hares_io::Frequency::Minutes(15.try_into().expect("15"))
+        hares_input::Frequency::Minutes(15.try_into().expect("15"))
     );
 
     // A frequency string outside the enum is rejected.

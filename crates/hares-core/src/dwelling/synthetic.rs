@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use hares_io::{
+use hares_input::{
     Building, ColumnAggregation, ScheduleTimeSeries, SimulationConfig, WeatherMeta,
     WeatherTimeSeries,
 };
@@ -445,8 +445,8 @@ fn default_schedule_value() -> f64 {
     1.0
 }
 
-fn parse_zone_type(s: &str) -> hares_io::hpxml::ZoneType {
-    use hares_io::hpxml::ZoneType;
+fn parse_zone_type(s: &str) -> hares_input::hpxml::ZoneType {
+    use hares_input::hpxml::ZoneType;
     match s {
         "Conditioned" => ZoneType::Conditioned,
         "Outdoor" => ZoneType::Outdoor,
@@ -458,8 +458,8 @@ fn parse_zone_type(s: &str) -> hares_io::hpxml::ZoneType {
     }
 }
 
-fn parse_boundary_type(s: &str) -> hares_io::hpxml::BoundaryType {
-    use hares_io::hpxml::BoundaryType;
+fn parse_boundary_type(s: &str) -> hares_input::hpxml::BoundaryType {
+    use hares_input::hpxml::BoundaryType;
     match s {
         "Wall" => BoundaryType::Wall,
         "Roof" => BoundaryType::Roof,
@@ -539,7 +539,7 @@ pub(crate) fn build_synthetic_building(
     event_probability_schedule_col: Option<usize>,
     ventilation_flow_schedule_col: Option<usize>,
 ) -> Result<Building> {
-    use hares_io::hpxml::{Boundary, BoundaryType, MaterialLayer, Site, Window, Zone, ZoneType};
+    use hares_input::hpxml::{Boundary, BoundaryType, MaterialLayer, Site, Window, Zone, ZoneType};
     use hares_physics::units as conv;
 
     // ── Range validation ────────────────────────────────────────────────
@@ -734,13 +734,13 @@ pub(crate) fn build_synthetic_building(
     let mut hvac_children = Vec::new();
     if has_heating {
         let mut heating_children = vec![
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "HeatingSystemType".to_string(),
                 attrs: HashMap::new(),
                 text: config.hvac.equipment_name.clone(),
                 children: Vec::new(),
             },
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "HeatingSystemFuel".to_string(),
                 attrs: HashMap::new(),
                 text: fuel.clone(),
@@ -752,7 +752,7 @@ pub(crate) fn build_synthetic_building(
         // triggering ACCA Manual S-based autosizing from building UA and
         // design temperatures (autosize.rs).
         if let Some(btu_h) = heating_capacity_btu_h {
-            heating_children.push(hares_io::hpxml::building::XmlNode {
+            heating_children.push(hares_input::hpxml::building::XmlNode {
                 name: "HeatingCapacity".to_string(),
                 attrs: HashMap::new(),
                 text: btu_h.to_string(),
@@ -768,18 +768,18 @@ pub(crate) fn build_synthetic_building(
             "natural gas" | "propane" | "fuel oil" | "wood" | "wood pellets" | "coal"
         );
         if is_combustion {
-            heating_children.push(hares_io::hpxml::building::XmlNode {
+            heating_children.push(hares_input::hpxml::building::XmlNode {
                 name: "AnnualHeatingEfficiency".to_string(),
                 attrs: HashMap::new(),
                 text: String::new(),
                 children: vec![
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "Units".to_string(),
                         attrs: HashMap::new(),
                         text: "AFUE".to_string(),
                         children: Vec::new(),
                     },
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "Value".to_string(),
                         attrs: HashMap::new(),
                         text: "0.80".to_string(),
@@ -792,18 +792,18 @@ pub(crate) fn build_synthetic_building(
             // at the appliance per ASHRAE HVAC Systems & Equipment 2020 Ch. 33.
             // The HPXML resolver now requires explicit efficiency — a silent
             // default is no longer permitted.
-            heating_children.push(hares_io::hpxml::building::XmlNode {
+            heating_children.push(hares_input::hpxml::building::XmlNode {
                 name: "AnnualHeatingEfficiency".to_string(),
                 attrs: HashMap::new(),
                 text: String::new(),
                 children: vec![
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "Units".to_string(),
                         attrs: HashMap::new(),
                         text: "Percent".to_string(),
                         children: Vec::new(),
                     },
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "Value".to_string(),
                         attrs: HashMap::new(),
                         text: "1.0".to_string(),
@@ -813,7 +813,7 @@ pub(crate) fn build_synthetic_building(
             });
         }
 
-        hvac_children.push(hares_io::hpxml::building::XmlNode {
+        hvac_children.push(hares_input::hpxml::building::XmlNode {
             name: "HeatingSystem".to_string(),
             attrs: HashMap::new(),
             text: String::new(),
@@ -822,13 +822,13 @@ pub(crate) fn build_synthetic_building(
     }
     if has_cooling {
         let mut cooling_children = vec![
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "CoolingSystemType".to_string(),
                 attrs: HashMap::new(),
                 text: "central air conditioner".to_string(),
                 children: Vec::new(),
             },
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "CoolingSystemFuel".to_string(),
                 attrs: HashMap::new(),
                 text: "electricity".to_string(),
@@ -839,14 +839,14 @@ pub(crate) fn build_synthetic_building(
         // When absent, the HPXML resolver sets autosize_cooling = true,
         // allowing cooling to be sized independently from heating.
         if let Some(btu_h) = heating_capacity_btu_h {
-            cooling_children.push(hares_io::hpxml::building::XmlNode {
+            cooling_children.push(hares_input::hpxml::building::XmlNode {
                 name: "CoolingCapacity".to_string(),
                 attrs: HashMap::new(),
                 text: btu_h.to_string(),
                 children: Vec::new(),
             });
         }
-        hvac_children.push(hares_io::hpxml::building::XmlNode {
+        hvac_children.push(hares_input::hpxml::building::XmlNode {
             name: "CoolingSystem".to_string(),
             attrs: HashMap::new(),
             text: String::new(),
@@ -854,11 +854,11 @@ pub(crate) fn build_synthetic_building(
         });
     }
 
-    let mut details_children = vec![hares_io::hpxml::building::XmlNode {
+    let mut details_children = vec![hares_input::hpxml::building::XmlNode {
         name: "Systems".to_string(),
         attrs: HashMap::new(),
         text: String::new(),
-        children: vec![hares_io::hpxml::building::XmlNode {
+        children: vec![hares_input::hpxml::building::XmlNode {
             name: "HVAC".to_string(),
             attrs: HashMap::new(),
             text: String::new(),
@@ -872,24 +872,24 @@ pub(crate) fn build_synthetic_building(
     {
         let annual_kwh = internal_gains_w * 8760.0 / 1000.0;
         let mut plug_children = vec![
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "PlugLoadType".to_string(),
                 attrs: HashMap::new(),
                 text: "other".to_string(),
                 children: Vec::new(),
             },
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "Load".to_string(),
                 attrs: HashMap::new(),
                 text: String::new(),
                 children: vec![
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "Units".to_string(),
                         attrs: HashMap::new(),
                         text: "kWh/year".to_string(),
                         children: Vec::new(),
                     },
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "Value".to_string(),
                         attrs: HashMap::new(),
                         text: annual_kwh.to_string(),
@@ -952,19 +952,19 @@ pub(crate) fn build_synthetic_building(
                 let flat_24 = std::iter::repeat_n("0.04167", 24)
                     .collect::<Vec<_>>()
                     .join(", ");
-                ext_children.push(hares_io::hpxml::building::XmlNode {
+                ext_children.push(hares_input::hpxml::building::XmlNode {
                     name: "WeekdayScheduleFractions".to_string(),
                     attrs: HashMap::new(),
                     text: flat_24.clone(),
                     children: Vec::new(),
                 });
-                ext_children.push(hares_io::hpxml::building::XmlNode {
+                ext_children.push(hares_input::hpxml::building::XmlNode {
                     name: "WeekendScheduleFractions".to_string(),
                     attrs: HashMap::new(),
                     text: flat_24,
                     children: Vec::new(),
                 });
-                ext_children.push(hares_io::hpxml::building::XmlNode {
+                ext_children.push(hares_input::hpxml::building::XmlNode {
                     name: "MonthlyScheduleMultipliers".to_string(),
                     attrs: HashMap::new(),
                     text: std::iter::repeat_n("1.0", 12)
@@ -974,13 +974,13 @@ pub(crate) fn build_synthetic_building(
                 });
             }
             if let Some(sf) = sensible_frac {
-                ext_children.push(hares_io::hpxml::building::XmlNode {
+                ext_children.push(hares_input::hpxml::building::XmlNode {
                     name: "FracSensible".to_string(),
                     attrs: HashMap::new(),
                     text: sf.to_string(),
                     children: Vec::new(),
                 });
-                ext_children.push(hares_io::hpxml::building::XmlNode {
+                ext_children.push(hares_input::hpxml::building::XmlNode {
                     name: "FracLatent".to_string(),
                     attrs: HashMap::new(),
                     text: (1.0 - sf).max(0.0).to_string(),
@@ -988,14 +988,14 @@ pub(crate) fn build_synthetic_building(
                 });
             }
             if let Some(rf) = radiant_frac_toplevel_or_infilt {
-                ext_children.push(hares_io::hpxml::building::XmlNode {
+                ext_children.push(hares_input::hpxml::building::XmlNode {
                     name: "FracRadiant".to_string(),
                     attrs: HashMap::new(),
                     text: rf.to_string(),
                     children: Vec::new(),
                 });
             }
-            plug_children.push(hares_io::hpxml::building::XmlNode {
+            plug_children.push(hares_input::hpxml::building::XmlNode {
                 name: "extension".to_string(),
                 attrs: HashMap::new(),
                 text: String::new(),
@@ -1003,11 +1003,11 @@ pub(crate) fn build_synthetic_building(
             });
         }
 
-        details_children.push(hares_io::hpxml::building::XmlNode {
+        details_children.push(hares_input::hpxml::building::XmlNode {
             name: "MiscLoads".to_string(),
             attrs: HashMap::new(),
             text: String::new(),
-            children: vec![hares_io::hpxml::building::XmlNode {
+            children: vec![hares_input::hpxml::building::XmlNode {
                 name: "PlugLoad".to_string(),
                 attrs: HashMap::new(),
                 text: String::new(),
@@ -1029,20 +1029,20 @@ pub(crate) fn build_synthetic_building(
         // `active_power_kw`: an in-memory tree never crosses the document
         // scan that rejects the removed element, so a stale name here would
         // drop the declared power onto the equipment's default silently.
-        let mut extension_children: Vec<hares_io::hpxml::building::XmlNode> = vec![
-            hares_io::hpxml::building::XmlNode {
+        let mut extension_children: Vec<hares_input::hpxml::building::XmlNode> = vec![
+            hares_input::hpxml::building::XmlNode {
                 name: "active_power_w".to_string(),
                 attrs: HashMap::new(),
                 text: el.active_power_w.to_string(),
                 children: Vec::new(),
             },
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "active_duration_s".to_string(),
                 attrs: HashMap::new(),
                 text: el.active_duration_s.to_string(),
                 children: Vec::new(),
             },
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "cooldown_duration_s".to_string(),
                 attrs: HashMap::new(),
                 text: el.cooldown_duration_s.to_string(),
@@ -1055,14 +1055,14 @@ pub(crate) fn build_synthetic_building(
         // The column index must match the position in the schedule's columns
         // vector exactly — parse_event_schedule_sources reads it as a usize.
         if let Some(col_idx) = event_window_schedule_col {
-            extension_children.push(hares_io::hpxml::building::XmlNode {
+            extension_children.push(hares_input::hpxml::building::XmlNode {
                 name: "event_window_schedule_col".to_string(),
                 attrs: HashMap::new(),
                 text: col_idx.to_string(),
                 children: Vec::new(),
             });
         } else {
-            extension_children.push(hares_io::hpxml::building::XmlNode {
+            extension_children.push(hares_input::hpxml::building::XmlNode {
                 name: "event_window_source".to_string(),
                 attrs: HashMap::new(),
                 text: "constant".to_string(),
@@ -1071,26 +1071,26 @@ pub(crate) fn build_synthetic_building(
         }
 
         if let Some(col_idx) = event_probability_schedule_col {
-            extension_children.push(hares_io::hpxml::building::XmlNode {
+            extension_children.push(hares_input::hpxml::building::XmlNode {
                 name: "event_probability_source".to_string(),
                 attrs: HashMap::new(),
                 text: "column".to_string(),
                 children: Vec::new(),
             });
-            extension_children.push(hares_io::hpxml::building::XmlNode {
+            extension_children.push(hares_input::hpxml::building::XmlNode {
                 name: "event_probability_schedule_col".to_string(),
                 attrs: HashMap::new(),
                 text: col_idx.to_string(),
                 children: Vec::new(),
             });
         } else {
-            extension_children.push(hares_io::hpxml::building::XmlNode {
+            extension_children.push(hares_input::hpxml::building::XmlNode {
                 name: "event_probability_source".to_string(),
                 attrs: HashMap::new(),
                 text: "constant".to_string(),
                 children: Vec::new(),
             });
-            extension_children.push(hares_io::hpxml::building::XmlNode {
+            extension_children.push(hares_input::hpxml::building::XmlNode {
                 name: "event_probability_constant".to_string(),
                 attrs: HashMap::new(),
                 text: el.event_probability.to_string(),
@@ -1099,13 +1099,13 @@ pub(crate) fn build_synthetic_building(
         }
 
         extension_children.extend([
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "sensible_gain_fraction".to_string(),
                 attrs: HashMap::new(),
                 text: el.sensible_gain_fraction.to_string(),
                 children: Vec::new(),
             },
-            hares_io::hpxml::building::XmlNode {
+            hares_input::hpxml::building::XmlNode {
                 name: "latent_gain_fraction".to_string(),
                 attrs: HashMap::new(),
                 text: el.latent_gain_fraction.to_string(),
@@ -1120,41 +1120,41 @@ pub(crate) fn build_synthetic_building(
         let flat_24 = std::iter::repeat_n("0.04167", 24)
             .collect::<Vec<_>>()
             .join(", ");
-        extension_children.push(hares_io::hpxml::building::XmlNode {
+        extension_children.push(hares_input::hpxml::building::XmlNode {
             name: "WeekdayScheduleFractions".to_string(),
             attrs: HashMap::new(),
             text: flat_24.clone(),
             children: Vec::new(),
         });
-        extension_children.push(hares_io::hpxml::building::XmlNode {
+        extension_children.push(hares_input::hpxml::building::XmlNode {
             name: "WeekendScheduleFractions".to_string(),
             attrs: HashMap::new(),
             text: flat_24,
             children: Vec::new(),
         });
 
-        details_children.push(hares_io::hpxml::building::XmlNode {
+        details_children.push(hares_input::hpxml::building::XmlNode {
             name: "Appliances".to_string(),
             attrs: HashMap::new(),
             text: String::new(),
-            children: vec![hares_io::hpxml::building::XmlNode {
+            children: vec![hares_input::hpxml::building::XmlNode {
                 name: "CookingRange".to_string(),
                 attrs: HashMap::new(),
                 text: String::new(),
                 children: vec![
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "FuelType".to_string(),
                         attrs: HashMap::new(),
                         text: "electricity".to_string(),
                         children: Vec::new(),
                     },
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "RatedAnnualkWh".to_string(),
                         attrs: HashMap::new(),
                         text: "0".to_string(),
                         children: Vec::new(),
                     },
-                    hares_io::hpxml::building::XmlNode {
+                    hares_input::hpxml::building::XmlNode {
                         name: "extension".to_string(),
                         attrs: HashMap::new(),
                         text: String::new(),
@@ -1165,7 +1165,7 @@ pub(crate) fn build_synthetic_building(
         });
     }
 
-    let details_xml = hares_io::hpxml::building::XmlNode {
+    let details_xml = hares_input::hpxml::building::XmlNode {
         name: "BuildingDetails".to_string(),
         attrs: HashMap::new(),
         text: String::new(),
@@ -1175,15 +1175,15 @@ pub(crate) fn build_synthetic_building(
             // appliance energies; OCHRE's hpxml.py:263 reads the HPXML
             // field with a direct index), so the synthetic input carries
             // it like any other required field.
-            details_children.push(hares_io::hpxml::building::XmlNode {
+            details_children.push(hares_input::hpxml::building::XmlNode {
                 name: "BuildingSummary".to_string(),
                 attrs: HashMap::new(),
                 text: String::new(),
-                children: vec![hares_io::hpxml::building::XmlNode {
+                children: vec![hares_input::hpxml::building::XmlNode {
                     name: "BuildingConstruction".to_string(),
                     attrs: HashMap::new(),
                     text: String::new(),
-                    children: vec![hares_io::hpxml::building::XmlNode {
+                    children: vec![hares_input::hpxml::building::XmlNode {
                         name: "NumberofBedrooms".to_string(),
                         attrs: HashMap::new(),
                         text: config.geometry.number_of_bedrooms.to_string(),
@@ -1818,7 +1818,7 @@ pub(crate) fn build_synthetic_weather(
     if let Some(epw_rel) = &config.weather.epw_path {
         let base_dir = toml_path.parent().unwrap_or(Path::new("."));
         let epw_path = base_dir.join(epw_rel);
-        return hares_io::parse_epw(&epw_path)
+        return hares_input::parse_epw(&epw_path)
             .map_err(|err| hares_types::HaresError::Io(format!("EPW load failed: {err}")));
     }
 
@@ -1831,8 +1831,8 @@ pub(crate) fn build_synthetic_weather(
         elevation_m: 0.0,
         wf_allows_leap_years: true,
         source_step_secs: 3600,
-        record_label: hares_io::RecordLabel::IntervalEnd,
-        data_period: hares_io::DataPeriod::complete_year(),
+        record_label: hares_input::RecordLabel::IntervalEnd,
+        data_period: hares_input::DataPeriod::complete_year(),
         has_embedded_location: true,
         station_wmo: None,
     };
@@ -1853,9 +1853,9 @@ pub(crate) fn build_synthetic_weather(
     // 33(3/4):321-336. Coefficient values 0.758 / 0.521 / 0.625 are the
     // recalibrated set from Li, Jiang & Coimbra (2017), Solar Energy 144:40-48,
     // as used by EnergyPlus (Engineering Reference, Sky Radiation Modeling).
-    let eps_clear = hares_io::berdahl_martin_sky_emissivity(dew_point_c);
-    let t_air_k = outdoor_temp_c + hares_io::KELVIN_OFFSET_C;
-    let horizontal_ir_w_m2 = eps_clear * hares_io::STEFAN_BOLTZMANN * t_air_k.powi(4);
+    let eps_clear = hares_input::berdahl_martin_sky_emissivity(dew_point_c);
+    let t_air_k = outdoor_temp_c + hares_input::KELVIN_OFFSET_C;
+    let horizontal_ir_w_m2 = eps_clear * hares_input::STEFAN_BOLTZMANN * t_air_k.powi(4);
 
     // Compute sky temperature from the IR we just computed, using the same
     // Stefan-Boltzmann inversion as the EPW/TMY3 pipeline.
@@ -1872,13 +1872,13 @@ pub(crate) fn build_synthetic_weather(
     // Radiation for Clear and Cloudy Skies", Proc. 2nd National Passive Solar
     // Conference, pp. 675-678.
     // Cite: EnergyPlus WeatherManager.cc:3113 (sky temp recomputation).
-    let sky_temp_c = hares_io::compute_sky_temp_c(
+    let sky_temp_c = hares_input::compute_sky_temp_c(
         horizontal_ir_w_m2,
         outdoor_temp_c,
         dew_point_c,
         50.0, // rel_humidity_pct — not used (IR path always active for synthetic)
         0.0,  // opaque_sky_cover = 0 (clear sky)
-        hares_io::SkyTempModel::default(),
+        hares_input::SkyTempModel::default(),
     );
 
     // Clear-sky solar irradiance via the ASHRAE 2013 model.
@@ -2290,8 +2290,8 @@ fn process_vm_hwm_kb() -> std::result::Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hares_io::hpxml::building::XmlNode;
-    use hares_io::hpxml::{BoundaryType, ZoneType};
+    use hares_input::hpxml::building::XmlNode;
+    use hares_input::hpxml::{BoundaryType, ZoneType};
     use std::collections::HashSet;
 
     fn find_xml_child<'a>(children: &'a [XmlNode], name: &'a str) -> Option<&'a XmlNode> {
@@ -2780,7 +2780,7 @@ equipment_name = "None"
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         assert_eq!(
             config.simulation.warmup,
-            hares_io::Warmup::Converge(hares_io::WarmupConfig::default()),
+            hares_input::Warmup::Converge(hares_input::WarmupConfig::default()),
             "an omitted warmup key means the default converging warm-up"
         );
     }
@@ -2809,7 +2809,7 @@ equipment_name = "None"
         let config: SyntheticTomlConfig = toml::from_str(toml).expect("parse");
         assert_eq!(
             config.simulation.warmup,
-            hares_io::Warmup::Disabled,
+            hares_input::Warmup::Disabled,
             "the disabled form parses to Warmup::Disabled"
         );
     }
@@ -2866,7 +2866,7 @@ equipment_name = "None"
         let dwelling = Dwelling::from_toml_config(&fixture).expect("the fixture builds");
         assert_eq!(
             dwelling.sim_config.warmup,
-            hares_io::Warmup::Converge(hares_io::WarmupConfig::default()),
+            hares_input::Warmup::Converge(hares_input::WarmupConfig::default()),
             "the fixture's positive warm-up seconds became the default converging warm-up"
         );
     }
@@ -2883,7 +2883,7 @@ equipment_name = "None"
     #[test]
     fn synthetic_toml_validate_fires_like_from_toml_per_check_class() {
         use crate::dwelling::Dwelling;
-        use hares_io::SimulationConfig;
+        use hares_input::SimulationConfig;
         use std::fs;
 
         // Each case: (name, the [simulation] table's text as the synthetic
@@ -3563,8 +3563,8 @@ dew_point_c = 5.0
         let ir = weather.horizontal_infrared_w_m2[0];
         let sky_temp_c = weather.sky_temp_c[0];
         // Stefan-Boltzmann inversion: T_sky_K = (IR / σ)^0.25
-        let sky_temp_k = (ir / hares_io::STEFAN_BOLTZMANN).powf(0.25);
-        let sky_temp_c_check = sky_temp_k - hares_io::KELVIN_OFFSET_C;
+        let sky_temp_k = (ir / hares_input::STEFAN_BOLTZMANN).powf(0.25);
+        let sky_temp_c_check = sky_temp_k - hares_input::KELVIN_OFFSET_C;
         assert!(
             (sky_temp_c - sky_temp_c_check).abs() < 0.01,
             "sky_temp_c ({sky_temp_c}) inconsistent with IR ({ir}): \
@@ -4720,7 +4720,7 @@ equipment_name = "None"
 
         // Assemble the RC network and verify capacitance nodes exist
         // in the diagnostics.
-        let store = hares_io::DefaultsStore::empty();
+        let store = hares_input::DefaultsStore::empty();
         let boundary_inputs = crate::dwelling::conversions::building_to_boundary_inputs(
             &building, 1, &store, 2.0, 10.0, 10.0,
         )
@@ -4816,7 +4816,7 @@ equipment_name = "None"
             })
             .count();
 
-        let store = hares_io::DefaultsStore::empty();
+        let store = hares_input::DefaultsStore::empty();
         let boundary_inputs = crate::dwelling::conversions::building_to_boundary_inputs(
             &building, 1, &store, 2.0, 10.0, 10.0,
         )
@@ -4932,7 +4932,7 @@ occupancy = 1.0
         let building =
             build_synthetic_building(&config, None, None, None).expect("build synthetic building");
 
-        let store = hares_io::DefaultsStore::empty();
+        let store = hares_input::DefaultsStore::empty();
         let boundary_inputs = crate::dwelling::conversions::building_to_boundary_inputs(
             &building, 1, &store, 2.0, 10.0, 10.0,
         )

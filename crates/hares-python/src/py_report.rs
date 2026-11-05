@@ -6,7 +6,7 @@
 //! (`[[simulation.reports]]`). The variants this entry adds are the ones
 //! that can run; every later variant's constructor lands with its entry.
 
-use hares_io::output::report::{Destination, Frequency, ReportSpec, Selection};
+use hares_input::{Destination, Frequency, ReportSpec, Selection};
 use pyo3::prelude::*;
 use std::hash::{Hash, Hasher};
 

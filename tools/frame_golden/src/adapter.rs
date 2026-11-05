@@ -21,7 +21,7 @@ use arrow::array::{Float64Builder, Int64Array, RecordBatch, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use hares_core::{DwellingBlueprint, DwellingConfig, DwellingSettings, SimulationEngine};
 use hares_fleet::{Fleet, FleetBuildReport};
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 
 use crate::defaults;
 use crate::error::{FrameGoldenError, FrameGoldenResult};
@@ -118,7 +118,7 @@ pub struct RunRequest<'a> {
 }
 
 fn apply_duration_override(
-    sim: &mut hares_io::SimulationConfig,
+    sim: &mut hares_input::SimulationConfig,
     override_s: Option<i64>,
 ) -> FrameGoldenResult<()> {
     let Some(secs) = override_s else {
@@ -144,7 +144,7 @@ pub fn run(req: RunRequest) -> FrameGoldenResult<RunProducts> {
     }
 }
 
-fn prepare_sim_config(req: &RunRequest) -> FrameGoldenResult<hares_io::SimulationConfig> {
+fn prepare_sim_config(req: &RunRequest) -> FrameGoldenResult<hares_input::SimulationConfig> {
     let mut sim = req.manifest.simulation_config()?;
     apply_duration_override(&mut sim, req.duration_override_s)?;
     if req.output == RunOutput::Discard {
@@ -161,7 +161,7 @@ fn prepare_sim_config(req: &RunRequest) -> FrameGoldenResult<hares_io::Simulatio
 /// `[defaults_files]`), alive as long as the run holds the tree.
 fn home_config(
     req: &RunRequest,
-    sim: hares_io::SimulationConfig,
+    sim: hares_input::SimulationConfig,
     home: &HomeEntry,
     defaults_dir: &Path,
 ) -> DwellingConfig {

@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
 use hares_equipment::EquipmentConfig;
-use hares_io::EquipmentSpec;
+use hares_input::EquipmentSpec;
 use hares_types::{DayFilter, FuelType};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -39,11 +39,11 @@ pub(crate) fn is_sim_config_field_keyword(key: &str) -> bool {
 /// own unexpected-keyword refusal.
 pub(crate) fn unexpected_keyword_error(surface: &str, key: &str) -> PyErr {
     for scope in [
-        hares_io::KeyScope::DwellingTable,
-        hares_io::KeyScope::SimulationConfig,
-        hares_io::KeyScope::PythonKeyword,
+        hares_input::KeyScope::DwellingTable,
+        hares_input::KeyScope::SimulationConfig,
+        hares_input::KeyScope::PythonKeyword,
     ] {
-        if let Some(replacement) = hares_io::removed_key(scope, key) {
+        if let Some(replacement) = hares_input::removed_key(scope, key) {
             return PyTypeError::new_err(format!(
                 "configuration keyword '{key}' was removed: {replacement}"
             ));
@@ -70,8 +70,8 @@ pub(crate) fn unexpected_equipment_keyword_error(
     config_type: &str,
     key: &str,
 ) -> PyErr {
-    if let Some(replacement) = hares_io::removed_key(
-        hares_io::KeyScope::EquipmentConfig,
+    if let Some(replacement) = hares_input::removed_key(
+        hares_input::KeyScope::EquipmentConfig,
         &format!("{config_type}.{key}"),
     ) {
         return PyTypeError::new_err(format!(

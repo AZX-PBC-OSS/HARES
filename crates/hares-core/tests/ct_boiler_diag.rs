@@ -17,11 +17,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use hares_core::DwellingSettings;
-    use hares_io::{DefaultsSource, InputSource, WeatherInput};
+    use hares_input::{DefaultsSource, InputSource, WeatherInput};
 
     use chrono::{Duration, FixedOffset, TimeZone};
     use hares_core::{Dwelling, DwellingConfig, SimulationConfig};
-    use hares_io::Destination;
+    use hares_input::Destination;
 
     fn project_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -84,10 +84,10 @@ mod tests {
                         .unwrap(),
                     duration: Duration::hours(24),
                     time_res: Duration::minutes(15),
-                    reports: vec![hares_io::ReportSpec {
+                    reports: vec![hares_input::ReportSpec {
                         name: "frame".to_string(),
-                        selection: hares_io::Selection::Verbosity(4),
-                        frequency: hares_io::Frequency::default(),
+                        selection: hares_input::Selection::Verbosity(4),
+                        frequency: hares_input::Frequency::default(),
                         destination: Destination::Csv {
                             path: output.clone(),
                             overwrite: false,
@@ -99,12 +99,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 42,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
                     first_hour_interpolation: Default::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::default(),
                 },
                 None,
                 300,

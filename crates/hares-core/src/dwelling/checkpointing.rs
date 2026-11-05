@@ -5,7 +5,8 @@ use std::collections::HashMap;
 
 use chrono_tz::Tz;
 use hares_envelope::FluidSolver;
-use hares_io::{Destination, MetricsCalculator};
+use hares_input::Destination;
+use hares_output::MetricsCalculator;
 use hares_types::{EnvironmentState, HaresError, ZoneId};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;

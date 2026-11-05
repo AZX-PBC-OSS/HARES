@@ -4,7 +4,7 @@ mod bestest_cases;
 mod bestest_reference_bands;
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_core::{Actor, Dwelling, DwellingConfig, SimulationEngine, StepResult};
-use hares_io::SimulationConfig;
+use hares_input::SimulationConfig;
 use hares_types::{ControlSignal, DRLevel, EndUse, OperatingMode, TelemetryField};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
@@ -594,15 +594,15 @@ fn run_fixture_to_columns_with_verbosity(
     // the output in the temporary directory above, not into the tree.
     let verbosity = verbosity_override
         .or_else(|| match &sim_config.reports.first().map(|r| &r.selection) {
-            Some(hares_io::Selection::Verbosity(v)) => Some(*v),
+            Some(hares_input::Selection::Verbosity(v)) => Some(*v),
             _ => None,
         })
         .unwrap_or(3);
-    sim_config.reports = vec![hares_io::ReportSpec {
+    sim_config.reports = vec![hares_input::ReportSpec {
         name: "frame".to_string(),
-        selection: hares_io::Selection::Verbosity(verbosity),
-        frequency: hares_io::Frequency::default(),
-        destination: hares_io::Destination::Parquet {
+        selection: hares_input::Selection::Verbosity(verbosity),
+        frequency: hares_input::Frequency::default(),
+        destination: hares_input::Destination::Parquet {
             path: csv_path.clone(),
             overwrite: false,
         },

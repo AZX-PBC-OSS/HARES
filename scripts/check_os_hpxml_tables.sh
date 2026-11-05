@@ -2,18 +2,18 @@
 set -euo pipefail
 
 # check_os_hpxml_tables.sh: regenerate the OpenStudio-HPXML station tables
-# under crates/hares-io/data from the pinned upstream release and fail if
+# under crates/hares-input/data from the pinned upstream release and fail if
 # the committed copies differ.
 #
 # Usage: ./scripts/check_os_hpxml_tables.sh          (check)
 #        ./scripts/check_os_hpxml_tables.sh --write  (regenerate in place)
 #
 # Source: OpenStudio-HPXML v1.12.0, HPXMLtoOpenStudio/resources/data/
-# (BSD-3-Clause; notice in crates/hares-io/data/OS-HPXML-LICENSE.md).
+# (BSD-3-Clause; notice in crates/hares-input/data/OS-HPXML-LICENSE.md).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DATA_DIR="$REPO_ROOT/crates/hares-io/data"
+DATA_DIR="$REPO_ROOT/crates/hares-input/data"
 BASE_URL="https://raw.githubusercontent.com/NREL/OpenStudio-HPXML/v1.12.0/HPXMLtoOpenStudio/resources/data"
 ZIPCODE_SHA256="d453ec428e9ddf21375dc1a3c606cb7ec628eed280cd49ca26d3e2c5ff094ecd"
 WSF_SHA256="94e64f002695bd24a4ee1a10ad0425726fe35c7b822aabbc62f6d1a2bba9edbb"

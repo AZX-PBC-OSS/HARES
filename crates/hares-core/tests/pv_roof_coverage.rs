@@ -5,7 +5,7 @@
 //! roof's area, and every failure names its inputs.
 
 use hares_core::{COLLECTOR_AREA_PER_W, Dwelling, DwellingConfig, DwellingSettings};
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -13,8 +13,8 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn sim_config() -> hares_io::SimulationConfig {
-    hares_io::SimulationConfig::from_toml(
+fn sim_config() -> hares_input::SimulationConfig {
+    hares_input::SimulationConfig::from_toml(
         r#"
 start_time = "2023-06-01T00:00:00-07:00"
 duration = 21600

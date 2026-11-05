@@ -8,7 +8,7 @@ use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 
-use hares_io::{WeatherFormat, WeatherInput};
+use hares_input::{WeatherFormat, WeatherInput};
 
 use crate::py_inputs::PyParsedWeather;
 
@@ -63,7 +63,7 @@ fn weather_format(name: &str) -> PyResult<WeatherFormat> {
 /// `DwellingBlueprint.validate()`'s `site` entry carries. A missing
 /// coordinate is a `KeyError` naming it; the dict's source keys, when
 /// present, are not read (no source changes the resampled weather).
-fn site_arg(obj: &Bound<'_, PyAny>) -> PyResult<hares_io::SiteLocation> {
+fn site_arg(obj: &Bound<'_, PyAny>) -> PyResult<hares_input::SiteLocation> {
     let dict = obj
         .cast::<PyDict>()
         .map_err(|_| PyTypeError::new_err("site must be a dict of the resolved site's values"))?;
@@ -83,8 +83,8 @@ fn site_arg(obj: &Bound<'_, PyAny>) -> PyResult<hares_io::SiteLocation> {
     let utc_offset_h = field("utc_offset_h")?;
     // The caller supplied every value: every field's source is the
     // caller's override.
-    let source = hares_io::FieldSource::CallerOverride;
-    Ok(hares_io::SiteLocation {
+    let source = hares_input::FieldSource::CallerOverride;
+    Ok(hares_input::SiteLocation {
         latitude_deg,
         longitude_deg,
         elevation_m,

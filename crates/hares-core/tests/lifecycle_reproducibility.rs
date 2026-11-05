@@ -357,7 +357,7 @@ fn checkpoint_roundtrip_continues_across_the_lognormal_day_roll() {
 /// only the power a short dwell carries within its step.
 #[test]
 fn event_start_rate_follows_the_normalization_at_every_resolution() {
-    use hares_io::EquipmentSpec;
+    use hares_input::EquipmentSpec;
     use hares_types::FuelType;
 
     let days = 30_u64;
@@ -469,14 +469,16 @@ fn dwelling_config_resstock(time_res_s: u64, days: u64) -> DwellingConfig {
     use chrono::TimeZone as _;
     let fixture = project_root().join("tests/fixtures/resstock/2025.1/bldg0000007");
     DwellingConfig {
-        hpxml: hares_io::InputSource::Path(fixture.join("home.xml")),
-        schedule: Some(hares_io::InputSource::Path(
+        hpxml: hares_input::InputSource::Path(fixture.join("home.xml")),
+        schedule: Some(hares_input::InputSource::Path(
             fixture.join("in.schedules.csv"),
         )),
-        weather: hares_io::WeatherInput::Path(
+        weather: hares_input::WeatherInput::Path(
             project_root().join("tests/fixtures/resstock/2025.1/weather/G1500030_2018.csv"),
         ),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        defaults: hares_input::DefaultsSource::directory(
+            project_root().join("python/hares/defaults"),
+        ),
         settings: DwellingSettings::new(
             SimulationConfig {
                 scenario_seed: None,
@@ -495,12 +497,12 @@ fn dwelling_config_resstock(time_res_s: u64, days: u64) -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed: 7,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             100,

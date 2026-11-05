@@ -2,7 +2,7 @@
 //! with the state the checkpointed one held.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -532,11 +532,11 @@ fn resumable_dwelling_config(case: &ResumeCase) -> DwellingConfig {
                     .expect("valid start time"),
                 duration: Duration::minutes(15 * RESUME_TOTAL_STEPS as i64),
                 time_res: Duration::minutes(15),
-                reports: vec![hares_io::ReportSpec {
+                reports: vec![hares_input::ReportSpec {
                     name: "frame".to_string(),
-                    selection: hares_io::Selection::Verbosity(8),
-                    frequency: hares_io::Frequency::default(),
-                    destination: hares_io::Destination::Memory,
+                    selection: hares_input::Selection::Verbosity(8),
+                    frequency: hares_input::Frequency::default(),
+                    destination: hares_input::Destination::Memory,
                 }],
                 diagnostics: false,
                 metrics: false,
@@ -544,12 +544,12 @@ fn resumable_dwelling_config(case: &ResumeCase) -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             176_227,
@@ -835,12 +835,12 @@ fn the_boiler_fluid_publish_marker_survives_a_checkpoint_restore() {
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             2,

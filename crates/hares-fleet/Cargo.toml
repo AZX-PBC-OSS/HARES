@@ -10,7 +10,8 @@ observe = []
 
 [dependencies]
 hares-core = { workspace = true }
-hares-io = { workspace = true }
+hares-input = { workspace = true }
+hares-output = { workspace = true }
 hares-types = { workspace = true }
 rayon = { workspace = true }
 tracing = { workspace = true }

@@ -8,7 +8,7 @@
 //! attributable to the streams alone.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::{Path, PathBuf};
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -55,12 +55,12 @@ fn dwelling_config(hpxml: &Path) -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed: 7,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             100,
@@ -69,7 +69,7 @@ fn dwelling_config(hpxml: &Path) -> DwellingConfig {
     }
 }
 
-fn probe_spec(class: &str) -> hares_io::EquipmentSpec {
+fn probe_spec(class: &str) -> hares_input::EquipmentSpec {
     let parameters = json!({
         "active_power_kw": 1000.0,
         "active_duration_s": 1800.0,
@@ -79,7 +79,7 @@ fn probe_spec(class: &str) -> hares_io::EquipmentSpec {
         "event_probability_constant": 0.3,
         "sensible_gain_fraction": 0.0,
     });
-    hares_io::EquipmentSpec {
+    hares_input::EquipmentSpec {
         name: class.to_string(),
         instance_name: None,
         fuel_type: FuelType::Electric,
@@ -100,7 +100,7 @@ fn probe_spec(class: &str) -> hares_io::EquipmentSpec {
 
 fn try_build_from(
     hpxml: &Path,
-    specs: Vec<hares_io::EquipmentSpec>,
+    specs: Vec<hares_input::EquipmentSpec>,
 ) -> Result<Dwelling, HaresError> {
     let mut blueprint =
         DwellingBlueprintBuilder::from_config(dwelling_config(hpxml)).expect("blueprint");
@@ -110,7 +110,7 @@ fn try_build_from(
     blueprint.build()
 }
 
-fn try_build(specs: Vec<hares_io::EquipmentSpec>) -> Result<Dwelling, HaresError> {
+fn try_build(specs: Vec<hares_input::EquipmentSpec>) -> Result<Dwelling, HaresError> {
     try_build_from(&fixture_dir().join("home.xml"), specs)
 }
 
@@ -118,8 +118,8 @@ fn build(classes: &[&str]) -> Dwelling {
     try_build(classes.iter().map(|class| probe_spec(class)).collect()).expect("build dwelling")
 }
 
-fn named_probe(class: &str, instance_name: &str) -> hares_io::EquipmentSpec {
-    hares_io::EquipmentSpec {
+fn named_probe(class: &str, instance_name: &str) -> hares_input::EquipmentSpec {
+    hares_input::EquipmentSpec {
         instance_name: Some(instance_name.to_string()),
         ..probe_spec(class)
     }

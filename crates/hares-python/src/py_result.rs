@@ -18,8 +18,8 @@ use hares_core::{
     RunResult as RustRunResult, WarmupOutcome as RustWarmupOutcome,
     WarmupResiduals as RustWarmupResiduals, ZoneClosureRow as RustZoneClosureRow,
 };
-use hares_io::InputRecord as RustInputRecord;
-use hares_io::InputRecordSource as RustInputRecordSource;
+use hares_input::InputRecord as RustInputRecord;
+use hares_input::InputRecordSource as RustInputRecordSource;
 use hares_types::Warning as RustWarning;
 
 use crate::py_config::PySimulationConfig;
@@ -30,7 +30,7 @@ use crate::py_report::PyFrequency;
 /// The weather format's serde spelling: the string the record's own
 /// serialisation uses, so a Python reader and a TOML reader spell the
 /// format identically.
-fn weather_format_name(format: hares_io::WeatherFormat) -> String {
+fn weather_format_name(format: hares_input::WeatherFormat) -> String {
     serde_json::to_string(&format)
         .expect("a WeatherFormat always serialises")
         .trim_matches('"')
@@ -59,7 +59,7 @@ pub struct PyRunResult {
     pub(crate) inner: Arc<RustRunResult>,
     /// The run's catalogue: the dwelling's own, read at the finalisation
     /// (the run never changes it).
-    pub(crate) catalogue: Arc<hares_io::Catalogue>,
+    pub(crate) catalogue: Arc<hares_output::Catalogue>,
 }
 
 #[pymethods]
@@ -806,7 +806,7 @@ impl PyProvenance {
         dict.set_item("weather_format", weather_format_name(inputs.weather_format))?;
         dict.set_item(
             "defaults_files_sha256",
-            hares_io::input::hex(&inputs.defaults_files_sha256),
+            hares_input::input::hex(&inputs.defaults_files_sha256),
         )?;
         let replacements = PyList::new(
             py,
@@ -911,7 +911,7 @@ impl PyEquipmentProvenance {
 #[cfg(test)]
 mod tests {
     use hares_core::DwellingSettings;
-    use hares_io::{DefaultsSource, InputSource, WeatherInput};
+    use hares_input::{DefaultsSource, InputSource, WeatherInput};
     use std::path::PathBuf;
     use std::sync::OnceLock;
 
@@ -1101,7 +1101,7 @@ mod tests {
         let report = hares_core::ReportResult {
             name: "rechunk".to_string(),
             output: hares_core::ReportOutput::Memory(batches.clone()),
-            frequency: hares_io::Frequency::Timestep,
+            frequency: hares_input::Frequency::Timestep,
             rows: 8,
             batches_delivered: 3,
         };
@@ -1162,7 +1162,7 @@ mod tests {
                     None,
                     false,
                     false,
-                    hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                    hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
                     None,
                     None,
                     0,
@@ -1170,7 +1170,7 @@ mod tests {
                     "on",
                     None,
                     None,
-                    hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     None,
                     crate::py_config::PyWarmupArg::Absent,
                     "hour24",

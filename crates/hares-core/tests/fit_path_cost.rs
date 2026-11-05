@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use chrono::{FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingBlueprintBuilder, DwellingConfig, DwellingSettings};
-use hares_io::{
+use hares_input::{
     DefaultsSource, InputSource, ParsedDefaults, ParsedHpxml, ParsedInputs, ParsedSchedule,
     ParsedWeather, SimulationConfig, WeatherInput,
 };
@@ -42,12 +42,12 @@ fn sim_config() -> SimulationConfig {
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 

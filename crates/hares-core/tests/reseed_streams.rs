@@ -16,12 +16,14 @@ fn project_root() -> PathBuf {
 fn cz5a_config(master_seed: u64, warmup: bool) -> DwellingConfig {
     let fixture = project_root().join("tests/fixtures/parity/cz5a_ev_charging");
     DwellingConfig {
-        hpxml: hares_io::InputSource::Path(fixture.join("building.xml")),
-        schedule: Some(hares_io::InputSource::Path(fixture.join("schedule.csv"))),
-        weather: hares_io::WeatherInput::Path(fixture.join("weather.epw")),
-        defaults: hares_io::DefaultsSource::directory(project_root().join("python/hares/defaults")),
+        hpxml: hares_input::InputSource::Path(fixture.join("building.xml")),
+        schedule: Some(hares_input::InputSource::Path(fixture.join("schedule.csv"))),
+        weather: hares_input::WeatherInput::Path(fixture.join("weather.epw")),
+        defaults: hares_input::DefaultsSource::directory(
+            project_root().join("python/hares/defaults"),
+        ),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig {
+            hares_input::SimulationConfig {
                 max_memory_rows: None,
                 scenario_seed: None,
                 schedule_diversity: Default::default(),
@@ -36,19 +38,19 @@ fn cz5a_config(master_seed: u64, warmup: bool) -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
+                weather_year: hares_input::WeatherYear::default(),
                 // Warm-up on for the stepped dwelling; disabled for the
                 // fresh build whose construction assignment the reseeded
                 // streams must equal (a warmed build's streams have
                 // already advanced past their starts).
                 warmup: if warmup {
-                    hares_io::Warmup::default()
+                    hares_input::Warmup::default()
                 } else {
-                    hares_io::Warmup::Disabled
+                    hares_input::Warmup::Disabled
                 },
             },
             None,

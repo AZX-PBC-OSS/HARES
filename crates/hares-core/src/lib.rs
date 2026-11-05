@@ -60,8 +60,8 @@ pub use environment::{
     EnvironmentInitOptions, EnvironmentManager, FORCE_PER_STEP_FORCING, FORCING_COMPUTATIONS,
     FORCING_NANOS, resample_weather,
 };
-pub use hares_io::SimulationConfig;
-pub use hares_io::{InputRecord, InputRecordSource, InputRecords};
+pub use hares_input::SimulationConfig;
+pub use hares_input::{InputRecord, InputRecordSource, InputRecords};
 #[cfg(feature = "profiling")]
 pub use health::{ActorTiming, ActorTimings};
 pub use health::{

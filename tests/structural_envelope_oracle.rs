@@ -16,13 +16,13 @@ mod tests {
     use hares_envelope::{
         ExteriorTarget, InteriorLwrMethod, RCPath, assemble_building_rc, derive_zone_capacitances,
     };
-    use hares_io::envelope_lut::resolve_boundary_name;
-    use hares_io::hpxml::{BoundaryType, ZoneType};
-    use hares_io::{DefaultsStore, parse_hpxml};
+    use hares_input::envelope_lut::resolve_boundary_name;
+    use hares_input::hpxml::{BoundaryType, ZoneType};
+    use hares_input::{DefaultsStore, parse_hpxml};
     use hares_physics::air_properties::standard_pressure_pa;
 
     /// Compute site pressure from building elevation, falling back to sea level.
-    fn site_pressure_for_building(building: &hares_io::Building) -> f64 {
+    fn site_pressure_for_building(building: &hares_input::Building) -> f64 {
         standard_pressure_pa(building.site.elevation_m.unwrap_or(0.0))
     }
 
@@ -106,7 +106,7 @@ mod tests {
         );
     }
 
-    fn zone_index(building: &hares_io::Building, zone_type: ZoneType) -> usize {
+    fn zone_index(building: &hares_input::Building, zone_type: ZoneType) -> usize {
         building
             .zones
             .iter()

@@ -25,8 +25,8 @@
 //!    U-factor or SHGC, tested by constructing a `Building` with the gap and
 //!    verifying the construction fails.
 
-use hares_io::hpxml::building::parse_building;
-use hares_io::hpxml::validation::validate_building_ranges;
+use hares_input::hpxml::building::parse_building;
+use hares_input::hpxml::validation::validate_building_ranges;
 
 // ---------------------------------------------------------------------------
 // Helpers

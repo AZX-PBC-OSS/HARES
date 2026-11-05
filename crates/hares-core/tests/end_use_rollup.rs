@@ -12,7 +12,7 @@
 //! end-use word (`"Television"`, `"Pool Heater"`) was misgrouped.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,7 +49,7 @@ fn run_fixture(hpxml_name: &str) -> Arc<RunResult> {
         ),
         defaults: DefaultsSource::directory(project_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(
+            hares_input::SimulationConfig::from_toml(
                 "start_time = \"2023-01-01T00:00:00-07:00\"\n\
                  duration = 172800\n\
                  time_res = 3600\n\

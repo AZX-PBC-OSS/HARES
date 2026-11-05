@@ -3,7 +3,7 @@
 //! its declared aggregation, fed from the frozen row plan's step stream.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use arrow::array::{Array, Float64Array, RecordBatch};
@@ -11,11 +11,11 @@ use arrow::datatypes::Schema;
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_control::DispatchRequest;
 use hares_core::{Actor, Dwelling, DwellingConfig};
-use hares_io::output::reduce::{PeriodCalendar, PeriodReducer, PeriodRow, TimeRule};
-use hares_io::{
-    Catalogue, Destination, Frequency, ReportSpec, Selection, SimulationConfig,
-    SiteLocationOverride,
+use hares_input::{
+    Destination, Frequency, ReportSpec, Selection, SimulationConfig, SiteLocationOverride,
 };
+use hares_output::Catalogue;
+use hares_output::reduce::{PeriodCalendar, PeriodReducer, PeriodRow, TimeRule};
 use hares_types::{
     AcrossHomes, Aggregation, EnumLabels, EnvironmentState, Sampling, Telemetry, TelemetryField,
     Unit, VariableKind,
@@ -56,11 +56,11 @@ fn sim_config(
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 

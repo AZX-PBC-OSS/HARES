@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
-use hares_io::SimulationConfig;
+use hares_input::SimulationConfig;
 use hares_types::HaresError;
 use hares_types::panic_hook::{self, PanicHookGuard, record_double_panic_prevented};
 

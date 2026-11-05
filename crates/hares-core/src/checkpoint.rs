@@ -282,7 +282,7 @@ pub struct DwellingCheckpoint {
     /// exactly when the run requested metrics (`SimulationConfig::metrics`):
     /// a section without the request, or the request without a section, is
     /// a typed restore error naming the section.
-    pub metrics: Option<hares_io::MetricsSnapshot>,
+    pub metrics: Option<hares_output::MetricsSnapshot>,
     /// One section per configured report, in `reports` order: the report's
     /// name and its recorder's row stream. A `Memory` report's rows restore
     /// so the resumed run's frame continues the written run's; rows the
@@ -308,7 +308,7 @@ pub struct ReportSection {
     /// configured reports.
     pub name: String,
     /// The recorder's row stream.
-    pub rows: hares_io::ReportRowsSnapshot,
+    pub rows: hares_output::ReportRowsSnapshot,
 }
 
 /// The electrical domain's between-steps state: the aggregate solver's
@@ -523,9 +523,9 @@ mod tests {
                 total_import_kwh: 103.25,
                 total_export_kwh: 21.5,
             }],
-            metrics: Some(hares_io::MetricsSnapshot {
+            metrics: Some(hares_output::MetricsSnapshot {
                 time_res_secs: 900,
-                plan: hares_io::MetricsPlanSnapshot {
+                plan: hares_output::MetricsPlanSnapshot {
                     total_electric_power_slot: 0,
                     total_gas_power_slot: Some(1),
                     grid_power_slot: 0,
@@ -549,7 +549,7 @@ mod tests {
                     hvac_cooling_kw_slot: None,
                     battery_kw_slot: None,
                 },
-                accumulators: hares_io::MetricsAccumulatorsSnapshot {
+                accumulators: hares_output::MetricsAccumulatorsSnapshot {
                     total_electric_energy_j: 14.829_037_328_432_975,
                     total_gas_energy_j: 3.25,
                     total_consumption_j: 15.1,
@@ -563,7 +563,7 @@ mod tests {
                     ]),
                     comfort_step_count: 10.0,
                     unmet_step_count: 2.0,
-                    rolling_peak: hares_io::MetricsRollingPeakSnapshot {
+                    rolling_peak: hares_output::MetricsRollingPeakSnapshot {
                         buffer: vec![1.0, 2.0, 3.0, 4.0],
                         head: 2,
                         count: 4,
@@ -593,7 +593,7 @@ mod tests {
             }),
             reports: vec![ReportSection {
                 name: "frame".into(),
-                rows: hares_io::ReportRowsSnapshot {
+                rows: hares_output::ReportRowsSnapshot {
                     timestamps: vec![1_000, 2_000, 3_000, 4_000],
                     values: vec![1.5, -0.25, 2.5, -0.5, 3.5, 0.75, 4.5, -1.0],
                     valid: vec![true, true, true, true, true, false, true, false],
@@ -692,7 +692,7 @@ mod tests {
                 .trace_simple_type::<crate::health::WarmupOutcome>()
                 .map(|_| ())?;
             tracer
-                .trace_simple_type::<hares_io::MetricsDeadbandSnapshot>()
+                .trace_simple_type::<hares_output::MetricsDeadbandSnapshot>()
                 .map(|_| ())?;
             // The actor-facing environment maps' nested enums: the
             // equipment telemetry's and core outputs' power, fuel and

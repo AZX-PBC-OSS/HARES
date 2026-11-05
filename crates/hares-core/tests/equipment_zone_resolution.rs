@@ -7,7 +7,7 @@
 //! with no modeled zone can join a dwelling that has already stepped.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 
 use chrono::{Duration, FixedOffset, TimeZone};
@@ -16,9 +16,9 @@ use hares_equipment::{
     ConfigPayload, DHW_DEMAND_LOOP, ElectricResistanceWaterHeaterConfig, Equipment,
     EquipmentConfig, EquipmentRegistry,
 };
-use hares_io::defaults::DefaultsStore;
-use hares_io::hpxml::building::parse_building;
-use hares_io::hpxml::equipment::resolve_equipment;
+use hares_input::defaults::DefaultsStore;
+use hares_input::hpxml::building::parse_building;
+use hares_input::hpxml::equipment::resolve_equipment;
 use hares_types::{EndUse, EnvironmentState, LoopId, PortType};
 
 fn project_root() -> PathBuf {
@@ -52,12 +52,12 @@ fn bldg0000007_config() -> DwellingConfig {
                 setpoint_deadband_c: None,
                 master_seed: 0,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             100,
@@ -183,7 +183,7 @@ const ZONE_SWEEP_SAMPLES: &[&str] = &[
     "base-dhw-indirect.xml",
 ];
 
-fn is_zoned_class(spec: &hares_io::EquipmentSpec) -> bool {
+fn is_zoned_class(spec: &hares_input::EquipmentSpec) -> bool {
     let name = spec.name.as_str();
     name.contains("Furnace")
         || name.contains("Baseboard")
@@ -336,12 +336,13 @@ fn hvac_ebm_max_energy(clear_zone_ids: bool, multiplier: Option<f64>) -> Vec<(St
     // zone_id, the descriptor's zone resolved from its declared zone.
     if clear_zone_ids {
         let building =
-            hares_io::parse_hpxml(config.hpxml.path().expect("the config's HPXML is a path"))
+            hares_input::parse_hpxml(config.hpxml.path().expect("the config's HPXML is a path"))
                 .expect("HPXML readable");
-        let defaults = hares_io::DefaultsStore::load(&project_root().join("python/hares/defaults"))
-            .expect("the defaults load");
+        let defaults =
+            hares_input::DefaultsStore::load(&project_root().join("python/hares/defaults"))
+                .expect("the defaults load");
         let mut warnings = Vec::new();
-        let specs = hares_io::hpxml::equipment::resolve_equipment(
+        let specs = hares_input::hpxml::equipment::resolve_equipment(
             &building,
             building.climate_zone_iecc.as_deref(),
             None,

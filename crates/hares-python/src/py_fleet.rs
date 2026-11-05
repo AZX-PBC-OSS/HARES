@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use arrow::record_batch::RecordBatch;
 use hares_fleet::{Coverage, Fleet, FleetReport, FleetResult};
-use hares_io::ResStockVersion as IoResStockVersion;
+use hares_input::ResStockVersion as IoResStockVersion;
 use pyo3::Python;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -909,7 +909,7 @@ mod tests {
     use std::path::PathBuf;
 
     use hares_core::{DwellingConfig, DwellingSettings};
-    use hares_io::{DefaultsSource, Frequency, InputSource, Selection, WeatherInput};
+    use hares_input::{DefaultsSource, Frequency, InputSource, Selection, WeatherInput};
     use pyo3::Python;
     use pyo3::exceptions::PyIndexError;
     use pyo3::types::PyTypeMethods;
@@ -1018,7 +1018,7 @@ mod tests {
         let report = hares_fleet::FleetReport {
             selection: Selection::Verbosity(2),
             frequency: Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            health_policy: hares_input::HealthPolicy::default(),
         };
         fleet
             .simulate(&report, 1, NonZeroUsize::new(64).expect("64"))

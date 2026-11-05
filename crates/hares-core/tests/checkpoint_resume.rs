@@ -11,7 +11,7 @@
 //! January billing period and inside an afternoon price period, mid-hour.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ use arrow::array::{Array, Float64Array, TimestampMillisecondArray};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
 use hares_core::{Dwelling, DwellingConfig, RunResult};
-use hares_io::{
+use hares_input::{
     Destination, Frequency, ReportSpec, Selection, SimulationConfig, SiteLocationOverride,
 };
 
@@ -58,11 +58,11 @@ fn sim_config() -> SimulationConfig {
         master_seed: 0,
         civil_timezone: None,
         site_location: SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     };
     config.validate().expect("config validates");
     config
@@ -329,7 +329,7 @@ fn restore_resumes_tariff_price_index() {
 /// included.
 #[test]
 fn restore_mid_hour_matches_uninterrupted_hourly_report() {
-    use hares_io::output::reduce::{PeriodCalendar, PeriodReducer, TimeRule};
+    use hares_output::reduce::{PeriodCalendar, PeriodReducer, TimeRule};
     use hares_types::Aggregation;
 
     let (continuous_result, _continuous, resumed_result, _resumed) =

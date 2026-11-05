@@ -19,7 +19,7 @@
 ///   `drive_cancelled` counter.
 ///
 /// Verbosity floor: the SOC column is emitted only at
-/// `verbosity >= 3` (hares-io output columns); every current caller
+/// `verbosity >= 3` (hares-output output columns); every current caller
 /// runs verbosity 5. A below-3 caller fails on the `expect` below, which
 /// names the requirement rather than panicking on a mystery missing
 /// column.

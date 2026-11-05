@@ -12,12 +12,12 @@ use hares_core::{
     Dwelling, DwellingBlueprintBuilder, DwellingConfig, DwellingSettings, DwellingTelemetry,
     RunResult, SimulationEngine, StepResult, WarmupOutcome,
 };
-use hares_io::Frequency;
-use hares_io::output::reduce::PeriodCalendar;
-use hares_io::{
+use hares_input::Frequency;
+use hares_input::{
     DefaultsSource, InputSource, ResStockBuilding, ResStockVersion, SampleWeightClass, Selection,
     SimulationConfig, WeatherInput, classify_sample_weight, parse_resstock_metadata,
 };
+use hares_output::reduce::PeriodCalendar;
 use hares_types::ControlSignal;
 use hares_types::HaresError;
 use hares_types::PriceSignal;
@@ -372,7 +372,7 @@ impl Fleet {
     /// weather file cannot be resolved or read is a fleet construction
     /// error, one error naming every failing building with its county.
     ///
-    /// The release declares the weather-year rule (`hares_io::WeatherYear`):
+    /// The release declares the weather-year rule (`hares_input::WeatherYear`):
     /// 2025.1 ships actual-meteorological-year (AMY 2018) CSV files and declares
     /// `Actual`; 2024.x ships typical (TMY3) EPW files and declares
     /// `Typical`. Every home starts Jan 1 00:00 local standard time at its
@@ -423,19 +423,19 @@ impl Fleet {
         // any file is read.
         let weather_year = resstock_weather_year(version);
         let typical_start_year = match (weather_year, typical_year) {
-            (hares_io::WeatherYear::Typical, None) => {
+            (hares_input::WeatherYear::Typical, None) => {
                 return Err(FleetError::TypicalYearRequired {
                     version: version.to_string(),
                 });
             }
-            (hares_io::WeatherYear::Actual, Some(year)) => {
+            (hares_input::WeatherYear::Actual, Some(year)) => {
                 return Err(FleetError::TypicalYearConflict {
                     version: version.to_string(),
                     year,
                 });
             }
-            (hares_io::WeatherYear::Actual, None) => None,
-            (hares_io::WeatherYear::Typical, Some(year)) => Some(year),
+            (hares_input::WeatherYear::Actual, None) => None,
+            (hares_input::WeatherYear::Typical, Some(year)) => Some(year),
         };
 
         let buildings = parse_resstock_metadata(metadata_path, version, buildings_dir)
@@ -491,8 +491,14 @@ impl Fleet {
             // actual-year release, read from the file's dated stamps
             // (B-1c); the caller's `typical_year` for a typical-year one.
             let start_year = match weather_year {
-                hares_io::WeatherYear::Actual => {
-                    match hares_io::parse_weather_with_location(&weather_path, 0.0, 0.0, 0.0, 0.0) {
+                hares_input::WeatherYear::Actual => {
+                    match hares_input::parse_weather_with_location(
+                        &weather_path,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ) {
                         Ok(series) => match series.file_year() {
                             Some(year) => year,
                             None => {
@@ -514,7 +520,7 @@ impl Fleet {
                         }
                     }
                 }
-                hares_io::WeatherYear::Typical => typical_start_year
+                hares_input::WeatherYear::Typical => typical_start_year
                     .expect("checked above: a typical-year release requires the year"),
             };
 
@@ -523,7 +529,7 @@ impl Fleet {
             let offset = match hares_core::dwelling::site_offset_from_inputs(
                 &InputSource::Path(building.hpxml_path.clone()),
                 &WeatherInput::Path(weather_path.clone()),
-                &hares_io::SiteLocationOverride::default(),
+                &hares_input::SiteLocationOverride::default(),
             ) {
                 Ok(offset) => offset,
                 Err(err) => {
@@ -563,9 +569,11 @@ impl Fleet {
                         ),
                         None,
                         building.bldg_id,
-                        Some(hares_io::HpxmlDataPatches::from_resstock_characteristics(
-                            &building.characteristics,
-                        )),
+                        Some(
+                            hares_input::HpxmlDataPatches::from_resstock_characteristics(
+                                &building.characteristics,
+                            ),
+                        ),
                     ),
                 },
                 sample_weight: building.sample_weight,
@@ -667,7 +675,7 @@ impl Fleet {
     /// Patches sample weights for all fleet entries.
     ///
     /// Each weight is validated with the same rule the ResStock ingestion path
-    /// uses ([`hares_io::classify_sample_weight`]): a NaN, infinite, or negative
+    /// uses ([`hares_input::classify_sample_weight`]): a NaN, infinite, or negative
     /// weight is rejected because it would silently corrupt fleet-level weighted
     /// aggregation, and a zero weight is accepted with a warning (it contributes
     /// nothing but the dwelling may still be useful for standalone simulation).
@@ -862,7 +870,7 @@ impl Fleet {
         // The construction's shared parses: one parse per unique input.
         // The weather and the defaults are the fleet's (the homes share
         // them), the HPXML and the schedule documents one chunk's.
-        let shared_parses = hares_io::ParsedInputsCache::new();
+        let shared_parses = hares_input::ParsedInputsCache::new();
 
         for chunk in self.entries.chunks(chunk_size.get()) {
             let restrictions = matcher.restrictions(chunk, &shared_parses);
@@ -1019,7 +1027,7 @@ impl SelectionMatcher {
     fn restrictions(
         &mut self,
         chunk: &[FleetEntry],
-        shared_parses: &hares_io::ParsedInputsCache,
+        shared_parses: &hares_input::ParsedInputsCache,
     ) -> Vec<Restricted> {
         match &self.selection {
             Selection::Verbosity(verbosity) => chunk
@@ -1045,7 +1053,7 @@ impl SelectionMatcher {
     fn restrict_entry(
         &mut self,
         entry: &FleetEntry,
-        shared_parses: &hares_io::ParsedInputsCache,
+        shared_parses: &hares_input::ParsedInputsCache,
     ) -> Restricted {
         let dwelling = match build_dwelling(&entry.config, shared_parses) {
             Ok(dwelling) => dwelling,
@@ -1064,9 +1072,11 @@ impl SelectionMatcher {
                 restricted_from_names(kept)
             }
             Selection::Pattern(pattern) => {
-                let matched =
-                    hares_io::resolve_selection(&Selection::Pattern(pattern.clone()), &catalogue)
-                        .unwrap_or_default();
+                let matched = hares_output::resolve_selection(
+                    &Selection::Pattern(pattern.clone()),
+                    &catalogue,
+                )
+                .unwrap_or_default();
                 if matched.is_empty() {
                     Restricted::NotApplicable
                 } else {
@@ -1414,17 +1424,17 @@ fn period_span(period_start: i64, frequency: &Frequency) -> i64 {
 /// The fleet report's `ReportSpec` for one home: the restricted selection
 /// at the `Timestep` frequency, to a callback destination. `None` when the
 /// home's restricted selection holds no variable.
-fn fleet_report_spec(restriction: &Restricted) -> Option<hares_io::ReportSpec> {
+fn fleet_report_spec(restriction: &Restricted) -> Option<hares_input::ReportSpec> {
     let selection = match restriction {
         Restricted::NotApplicable => return None,
         Restricted::Names(names) => Selection::Named(names.clone()),
         Restricted::Verbosity(verbosity) => Selection::Verbosity(*verbosity),
     };
-    Some(hares_io::ReportSpec {
+    Some(hares_input::ReportSpec {
         name: FLEET_REPORT_NAME.to_string(),
         selection,
-        frequency: hares_io::Frequency::Timestep,
-        destination: hares_io::Destination::Callback,
+        frequency: hares_input::Frequency::Timestep,
+        destination: hares_input::Destination::Callback,
     })
 }
 
@@ -1522,7 +1532,7 @@ fn run_home(
     report: &FleetReport,
     restriction: &Restricted,
     fold_alignment: &HomeFoldAlignment,
-    shared_parses: &hares_io::ParsedInputsCache,
+    shared_parses: &hares_input::ParsedInputsCache,
     progress: &ProgressTracker<'_>,
 ) -> HomeRun {
     let caught = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -1589,7 +1599,7 @@ fn run_home_inner(
     report: &FleetReport,
     restriction: &Restricted,
     fold_alignment: &HomeFoldAlignment,
-    shared_parses: &hares_io::ParsedInputsCache,
+    shared_parses: &hares_input::ParsedInputsCache,
     progress: &ProgressTracker<'_>,
 ) -> HomeRun {
     let run = run_home_body(entry, report, restriction, fold_alignment, shared_parses);
@@ -1602,9 +1612,9 @@ fn run_home_inner(
 /// from the frozen blueprint.
 fn build_dwelling(
     config: &DwellingConfig,
-    shared_parses: &hares_io::ParsedInputsCache,
+    shared_parses: &hares_input::ParsedInputsCache,
 ) -> std::result::Result<Dwelling, HaresError> {
-    let generation = hares_io::ScheduleGeneration {
+    let generation = hares_input::ScheduleGeneration {
         start: config.settings.sim_config.start_time,
         duration: config.settings.sim_config.duration,
         interval: std::time::Duration::from_secs(
@@ -1632,7 +1642,7 @@ fn run_home_body(
     report: &FleetReport,
     restriction: &Restricted,
     fold_alignment: &HomeFoldAlignment,
-    shared_parses: &hares_io::ParsedInputsCache,
+    shared_parses: &hares_input::ParsedInputsCache,
 ) -> HomeRun {
     let failed = |message: String| HomeRun {
         bldg_id: entry.config.settings.bldg_id,
@@ -1765,7 +1775,7 @@ impl SteppableFleet {
 
         // The construction's shared parses: one parse per unique input
         // across the whole steppable fleet.
-        let shared_parses = hares_io::ParsedInputsCache::new();
+        let shared_parses = hares_input::ParsedInputsCache::new();
 
         for config in configs {
             let bldg_id = config.settings.bldg_id;
@@ -2293,7 +2303,7 @@ fn step_dwellings_parallel_into(
 fn resstock_sim_config(
     duration: chrono::Duration,
     start_time: DateTime<FixedOffset>,
-    weather_year: hares_io::WeatherYear,
+    weather_year: hares_input::WeatherYear,
     master_seed: u64,
 ) -> SimulationConfig {
     SimulationConfig {
@@ -2310,12 +2320,12 @@ fn resstock_sim_config(
         setpoint_deadband_c: None,
         master_seed,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
-        first_hour_interpolation: hares_io::FirstHour::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
+        first_hour_interpolation: hares_input::FirstHour::default(),
         weather_year,
-        warmup: hares_io::Warmup::default(),
+        warmup: hares_input::Warmup::default(),
     }
 }
 
@@ -2323,10 +2333,10 @@ fn resstock_sim_config(
 /// 2025.1 ships actual-meteorological-year (AMY 2018) CSV files and
 /// declares `Actual`; 2024.x ships typical (TMY3) EPW files and declares
 /// `Typical`.
-fn resstock_weather_year(version: ResStockVersion) -> hares_io::WeatherYear {
+fn resstock_weather_year(version: ResStockVersion) -> hares_input::WeatherYear {
     match version {
-        ResStockVersion::V2024_1 | ResStockVersion::V2024_2 => hares_io::WeatherYear::Typical,
-        ResStockVersion::V2025_1 => hares_io::WeatherYear::Actual,
+        ResStockVersion::V2024_1 | ResStockVersion::V2024_2 => hares_input::WeatherYear::Typical,
+        ResStockVersion::V2025_1 => hares_input::WeatherYear::Actual,
     }
 }
 
@@ -2484,9 +2494,9 @@ fn validate_fleet_building_zone(
     // One IECC resolution path for the dwelling and the fleet: the HPXML's
     // declared zone, else the weather station's zone (the OS-HPXML default
     // the dwelling build derives in `apply_climate_zone_default`).
-    let station_wmo = hares_io::parse_epw_station_wmo(weather_path);
-    let declared_zone = hares_io::parse_iecc_climate_zone(hpxml_path);
-    let building_zone = hares_io::hpxml::climate_zone::resolve_iecc_climate_zone(
+    let station_wmo = hares_input::parse_epw_station_wmo(weather_path);
+    let declared_zone = hares_input::parse_iecc_climate_zone(hpxml_path);
+    let building_zone = hares_input::hpxml::climate_zone::resolve_iecc_climate_zone(
         declared_zone.as_deref(),
         station_wmo.as_deref(),
     );
@@ -2494,7 +2504,7 @@ fn validate_fleet_building_zone(
         return ZoneMatchStatus::Skipped;
     };
 
-    let Some(epw_state) = hares_io::parse_epw_location_state(weather_path) else {
+    let Some(epw_state) = hares_input::parse_epw_location_state(weather_path) else {
         return ZoneMatchStatus::Skipped;
     };
 
@@ -2711,11 +2721,11 @@ mod tests {
             start_time: fixture_start::fixture_start(),
             duration: Duration::hours(1),
             time_res: Duration::minutes(1),
-            reports: vec![hares_io::ReportSpec {
+            reports: vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(0),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Csv {
+                selection: hares_input::Selection::Verbosity(0),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Csv {
                     path: csv_path,
                     overwrite: false,
                 },
@@ -2726,12 +2736,12 @@ mod tests {
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-            first_hour_interpolation: hares_io::FirstHour::default(),
-            weather_year: hares_io::WeatherYear::default(),
-            warmup: hares_io::Warmup::Disabled,
+            site_location: hares_input::SiteLocationOverride::default(),
+            max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_input::HealthPolicy::default(),
+            first_hour_interpolation: hares_input::FirstHour::default(),
+            weather_year: hares_input::WeatherYear::default(),
+            warmup: hares_input::Warmup::Disabled,
         }
     }
 
@@ -2781,9 +2791,9 @@ mod tests {
     /// homes' tier 0 declares, folded to quarter hours.
     fn test_report() -> crate::fold::FleetReport {
         crate::fold::FleetReport {
-            selection: hares_io::Selection::Verbosity(0),
-            frequency: hares_io::Frequency::Minutes(std::num::NonZeroU32::new(15).expect("15")),
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Verbosity(0),
+            frequency: hares_input::Frequency::Minutes(std::num::NonZeroU32::new(15).expect("15")),
+            health_policy: hares_input::HealthPolicy::default(),
         }
     }
 
@@ -2993,7 +3003,7 @@ mod tests {
         let mut configs = build_valid_configs(dir.path(), 64);
         for config in &mut configs {
             for spec in &mut config.settings.sim_config.reports {
-                if let hares_io::Destination::Csv { overwrite, .. } = &mut spec.destination {
+                if let hares_input::Destination::Csv { overwrite, .. } = &mut spec.destination {
                     *overwrite = true;
                 }
             }
@@ -4100,14 +4110,14 @@ mod tests {
             "LOCATION,USA_CO_Denver.Intl.AP.725650_TMY3,CO,USA,TMY3,725650,39.83,-104.65,-7.0,1609.0",
         );
 
-        let zone = hares_io::parse_iecc_climate_zone(&hpxml_path);
+        let zone = hares_input::parse_iecc_climate_zone(&hpxml_path);
         assert_eq!(
             zone.as_deref(),
             Some("5B"),
             "should extract IECC climate zone from HPXML"
         );
 
-        let state = hares_io::parse_epw_location_state(&epw_path);
+        let state = hares_input::parse_epw_location_state(&epw_path);
         assert_eq!(
             state.as_deref(),
             Some("CO"),
@@ -4327,7 +4337,7 @@ mod tests {
                         .with_ymd_and_hms(2018, 1, 1, 0, 0, 0)
                         .single()
                         .expect("valid start"),
-                    hares_io::WeatherYear::Actual,
+                    hares_input::WeatherYear::Actual,
                     0,
                 ),
                 None,
@@ -4537,9 +4547,9 @@ mod tests {
         let result = fleet
             .simulate(
                 &crate::fold::FleetReport {
-                    selection: hares_io::Selection::Verbosity(0),
-                    frequency: hares_io::Frequency::Hourly,
-                    health_policy: hares_io::HealthPolicy::default(),
+                    selection: hares_input::Selection::Verbosity(0),
+                    frequency: hares_input::Frequency::Hourly,
+                    health_policy: hares_input::HealthPolicy::default(),
                 },
                 1,
                 chunk,
@@ -4670,11 +4680,11 @@ mod tests {
             fleet
                 .simulate(
                     &crate::fold::FleetReport {
-                        selection: hares_io::Selection::Verbosity(2),
-                        frequency: hares_io::Frequency::Minutes(
+                        selection: hares_input::Selection::Verbosity(2),
+                        frequency: hares_input::Frequency::Minutes(
                             std::num::NonZeroU32::new(1).expect("1"),
                         ),
-                        health_policy: hares_io::HealthPolicy::default(),
+                        health_policy: hares_input::HealthPolicy::default(),
                     },
                     1,
                     std::num::NonZeroUsize::new(1).expect("1"),
@@ -4867,7 +4877,7 @@ mod tests {
             );
             assert_eq!(
                 sim.weather_year,
-                hares_io::WeatherYear::Actual,
+                hares_input::WeatherYear::Actual,
                 "the AMY release declares the actual-year rule"
             );
         }
@@ -4965,9 +4975,9 @@ mod tests {
         let result = fleet
             .simulate(
                 &crate::fold::FleetReport {
-                    selection: hares_io::Selection::Verbosity(2),
-                    frequency: hares_io::Frequency::Hourly,
-                    health_policy: hares_io::HealthPolicy::default(),
+                    selection: hares_input::Selection::Verbosity(2),
+                    frequency: hares_input::Frequency::Hourly,
+                    health_policy: hares_input::HealthPolicy::default(),
                 },
                 1,
                 chunk(2),
@@ -4981,7 +4991,7 @@ mod tests {
         );
 
         // The file's own Jan 1 records, parsed from the same EPW copy.
-        let series = hares_io::parse_weather(&epw).expect("the typical file parses");
+        let series = hares_input::parse_weather(&epw).expect("the typical file parses");
         let jan1: Vec<f64> = series.dry_bulb_c[..24].to_vec();
 
         let aggregate = &result.aggregate;
@@ -5102,11 +5112,11 @@ mod tests {
                         .expect("valid start"),
                     duration: Duration::days(2),
                     time_res: Duration::seconds(300),
-                    reports: vec![hares_io::ReportSpec {
+                    reports: vec![hares_input::ReportSpec {
                         name: "frame".to_string(),
-                        selection: hares_io::Selection::Verbosity(2),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Memory,
+                        selection: hares_input::Selection::Verbosity(2),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Memory,
                     }],
                     diagnostics: false,
                     metrics: true,
@@ -5114,12 +5124,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::default(),
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::default(),
                 },
                 None,
                 bldg_id,
@@ -5142,9 +5153,9 @@ mod tests {
 
     fn minutes_15() -> FleetReport {
         FleetReport {
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::Minutes(std::num::NonZeroU32::new(15).expect("15")),
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::Minutes(std::num::NonZeroU32::new(15).expect("15")),
+            health_policy: hares_input::HealthPolicy::default(),
         }
     }
 
@@ -5392,11 +5403,11 @@ mod tests {
         // The first home's own Timestep memory report of the same
         // selection, run standalone.
         let mut home_config = golden_fleet_config(1, "G0600770_2018.csv");
-        home_config.settings.sim_config.reports = vec![hares_io::ReportSpec {
+        home_config.settings.sim_config.reports = vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::Timestep,
-            destination: hares_io::Destination::Memory,
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::Timestep,
+            destination: hares_input::Destination::Memory,
         }];
         let mut dwelling = Dwelling::from_config(home_config).expect("the home builds");
         let engine = SimulationEngine::new();
@@ -5482,12 +5493,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
@@ -5501,11 +5513,11 @@ mod tests {
         // partition by seed and building id.
         let standalone = |bldg_id: i64, schedule: PathBuf| {
             let mut config = home(bldg_id, schedule);
-            config.settings.sim_config.reports = vec![hares_io::ReportSpec {
+            config.settings.sim_config.reports = vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(2),
-                frequency: hares_io::Frequency::Timestep,
-                destination: hares_io::Destination::Memory,
+                selection: hares_input::Selection::Verbosity(2),
+                frequency: hares_input::Frequency::Timestep,
+                destination: hares_input::Destination::Memory,
             }];
             let mut dwelling = Dwelling::from_config(config).expect("the home builds");
             let engine = SimulationEngine::new();
@@ -5568,11 +5580,11 @@ mod tests {
         let result = fleet
             .simulate(
                 &FleetReport {
-                    selection: hares_io::Selection::Verbosity(2),
-                    frequency: hares_io::Frequency::Minutes(
+                    selection: hares_input::Selection::Verbosity(2),
+                    frequency: hares_input::Frequency::Minutes(
                         std::num::NonZeroU32::new(15).expect("15"),
                     ),
-                    health_policy: hares_io::HealthPolicy::default(),
+                    health_policy: hares_input::HealthPolicy::default(),
                 },
                 1,
                 chunk(64),
@@ -5612,12 +5624,12 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let fleet = golden_fleet();
         let report = FleetReport {
-            selection: hares_io::Selection::Named(vec![
+            selection: hares_input::Selection::Named(vec![
                 "Total Electric Power (kW)".to_string(),
                 "Temperature - Indoor (C)".to_string(),
             ]),
-            frequency: hares_io::Frequency::Daily,
-            health_policy: hares_io::HealthPolicy::default(),
+            frequency: hares_input::Frequency::Daily,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -5691,12 +5703,12 @@ mod tests {
         let fleet = Fleet::from_buildings(vec![plain_home, battery_home])
             .expect("the homes carry no reserved report or shared destination");
         let report = FleetReport {
-            selection: hares_io::Selection::Named(vec![
+            selection: hares_input::Selection::Named(vec![
                 battery_variable.clone(),
                 "Total Electric Power (kW)".to_string(),
             ]),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -5723,9 +5735,9 @@ mod tests {
             .expect("the configs carry no reserved report or shared destination");
 
         let named = FleetReport {
-            selection: hares_io::Selection::Named(vec!["No Such Variable (kW)".to_string()]),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Named(vec!["No Such Variable (kW)".to_string()]),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let err = fleet
             .simulate(&named, 1, chunk(64))
@@ -5736,9 +5748,9 @@ mod tests {
         );
 
         let pattern = FleetReport {
-            selection: hares_io::Selection::Pattern("NoSuchVariable*".to_string()),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Pattern("NoSuchVariable*".to_string()),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let err = fleet
             .simulate(&pattern, 1, chunk(64))
@@ -5768,11 +5780,11 @@ mod tests {
                     max_memory_rows: None,
                     scenario_seed: None,
                     schedule_diversity: Default::default(),
-                    reports: vec![hares_io::ReportSpec {
+                    reports: vec![hares_input::ReportSpec {
                         name: format!("report-{bldg_id}"),
-                        selection: hares_io::Selection::Verbosity(0),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Parquet {
+                        selection: hares_input::Selection::Verbosity(0),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Parquet {
                             path: shared.clone(),
                             overwrite: false,
                         },
@@ -5812,11 +5824,11 @@ mod tests {
             .settings
             .sim_config
             .reports
-            .push(hares_io::ReportSpec {
+            .push(hares_input::ReportSpec {
                 name: "fleet".to_string(),
-                selection: hares_io::Selection::Verbosity(0),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Memory,
+                selection: hares_input::Selection::Verbosity(0),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Memory,
             });
         let err = Fleet::from_buildings(vec![config])
             .expect_err("the reserved report name is rejected at construction");
@@ -5842,18 +5854,18 @@ mod tests {
             .settings
             .sim_config
             .reports
-            .push(hares_io::ReportSpec {
+            .push(hares_input::ReportSpec {
                 name: "mine".to_string(),
-                selection: hares_io::Selection::Verbosity(0),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Callback,
+                selection: hares_input::Selection::Verbosity(0),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Callback,
             });
         let fleet = Fleet::from_buildings(configs)
             .expect("the configs carry no reserved report or shared destination");
         let report = FleetReport {
-            selection: hares_io::Selection::Verbosity(0),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Verbosity(0),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -5894,7 +5906,7 @@ mod tests {
         let examples = repo_root().join("data/examples");
         let config = |bldg_id: i64,
                       start: chrono::DateTime<FixedOffset>,
-                      forced: hares_io::SiteLocationOverride| {
+                      forced: hares_input::SiteLocationOverride| {
             DwellingConfig {
                 hpxml: InputSource::Path(fixture_hpxml_path()),
                 schedule: Some(InputSource::Path(
@@ -5919,11 +5931,11 @@ mod tests {
                         civil_timezone: None,
                         site_location: forced,
                         max_consecutive_step_failures:
-                            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                        health_policy: hares_io::HealthPolicy::default(),
-                        first_hour_interpolation: hares_io::FirstHour::default(),
-                        weather_year: hares_io::WeatherYear::default(),
-                        warmup: hares_io::Warmup::Disabled,
+                            hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                        health_policy: hares_input::HealthPolicy::default(),
+                        first_hour_interpolation: hares_input::FirstHour::default(),
+                        weather_year: hares_input::WeatherYear::default(),
+                        warmup: hares_input::Warmup::Disabled,
                     },
                     None,
                     bldg_id,
@@ -5946,12 +5958,12 @@ mod tests {
             .single()
             .expect("valid start");
         assert_eq!(start_a, start_b, "the two starts name one instant");
-        let forced = hares_io::SiteLocationOverride {
+        let forced = hares_input::SiteLocationOverride {
             utc_offset_h: Some(-5.0),
-            ..hares_io::SiteLocationOverride::default()
+            ..hares_input::SiteLocationOverride::default()
         };
         let fleet = Fleet::from_buildings(vec![
-            config(1, start_a, hares_io::SiteLocationOverride::default()),
+            config(1, start_a, hares_input::SiteLocationOverride::default()),
             config(2, start_b, forced),
         ])
         .expect("the homes carry no reserved report or shared destination")
@@ -5962,9 +5974,9 @@ mod tests {
         ));
 
         let report = FleetReport {
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -6172,12 +6184,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
@@ -6198,9 +6211,9 @@ mod tests {
 
     fn report_24h_hourly() -> crate::fold::FleetReport {
         crate::fold::FleetReport {
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         }
     }
 
@@ -6231,23 +6244,24 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
                 None,
             ),
         };
-        config.settings.sim_config.reports = vec![hares_io::ReportSpec {
+        config.settings.sim_config.reports = vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::Timestep,
-            destination: hares_io::Destination::Memory,
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::Timestep,
+            destination: hares_input::Destination::Memory,
         }];
         let mut dwelling = Dwelling::from_config(config).expect("the home builds");
         let engine = SimulationEngine::new();
@@ -6542,13 +6556,13 @@ mod tests {
                         setpoint_deadband_c: None,
                         master_seed: 0,
                         civil_timezone: None,
-                        site_location: hares_io::SiteLocationOverride::default(),
+                        site_location: hares_input::SiteLocationOverride::default(),
                         max_consecutive_step_failures:
-                            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                        health_policy: hares_io::HealthPolicy::default(),
-                        first_hour_interpolation: hares_io::FirstHour::default(),
-                        weather_year: hares_io::WeatherYear::default(),
-                        warmup: hares_io::Warmup::Disabled,
+                            hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                        health_policy: hares_input::HealthPolicy::default(),
+                        first_hour_interpolation: hares_input::FirstHour::default(),
+                        weather_year: hares_input::WeatherYear::default(),
+                        warmup: hares_input::Warmup::Disabled,
                     },
                     overrides,
                     bldg_id,
@@ -6596,9 +6610,9 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let (fleet, battery_variable) = battery_fleet(false, false);
         let report = crate::fold::FleetReport {
-            selection: hares_io::Selection::Named(vec![battery_variable]),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Named(vec![battery_variable]),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -6632,11 +6646,11 @@ mod tests {
     /// column names alongside.
     fn standalone_home_hourly(config: &DwellingConfig) -> (Vec<String>, Vec<Vec<Option<f64>>>) {
         let mut config = config.clone();
-        config.settings.sim_config.reports = vec![hares_io::ReportSpec {
+        config.settings.sim_config.reports = vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::Timestep,
-            destination: hares_io::Destination::Memory,
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::Timestep,
+            destination: hares_input::Destination::Memory,
         }];
         let mut dwelling = Dwelling::from_config(config).expect("the home builds");
         let engine = SimulationEngine::new();
@@ -6733,9 +6747,9 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let (fleet, _battery_variable) = battery_fleet(true, false);
         let report = crate::fold::FleetReport {
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -6775,12 +6789,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 None,
                 1,
@@ -7000,12 +7015,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
@@ -7097,12 +7113,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::default(),
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::default(),
                 },
                 None,
                 bldg_id,
@@ -7125,17 +7142,17 @@ mod tests {
 
     fn hourly_named_common() -> FleetReport {
         FleetReport {
-            selection: hares_io::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
-            frequency: hares_io::Frequency::Hourly,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
+            frequency: hares_input::Frequency::Hourly,
+            health_policy: hares_input::HealthPolicy::default(),
         }
     }
 
     fn daily_named_common() -> FleetReport {
         FleetReport {
-            selection: hares_io::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
-            frequency: hares_io::Frequency::Daily,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
+            frequency: hares_input::Frequency::Daily,
+            health_policy: hares_input::HealthPolicy::default(),
         }
     }
 
@@ -7412,9 +7429,9 @@ mod tests {
             FixedOffset::west_opt(7 * 3600).expect("valid offset"),
         ));
         let report = FleetReport {
-            selection: hares_io::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
-            frequency: hares_io::Frequency::Daily,
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Named(vec!["Total Electric Power (kW)".to_string()]),
+            frequency: hares_input::Frequency::Daily,
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -7584,12 +7601,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::default(),
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::default(),
                 },
                 None,
                 bldg_id,
@@ -7778,12 +7796,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 None,
                 bldg_id,
@@ -7824,7 +7843,7 @@ mod tests {
     /// homes sharing one HPXML file, one weather file and one defaults
     /// tree produce one weather parse, one defaults load and one profile
     /// load, and one HPXML parse per unique file. The parse counts are the
-    /// proof instrument (`hares_io::parse_counts`).
+    /// proof instrument (`hares_input::parse_counts`).
     #[test]
     fn many_home_construction_parses_each_unique_input_once() {
         let _parse_count_exclusive = PARSE_COUNT_EXCLUSIVITY
@@ -7832,12 +7851,12 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let configs = build_valid_configs(dir.path(), 3);
-        let before = hares_io::parse_counts::parse_counts();
+        let before = hares_input::parse_counts::parse_counts();
         let (fleet, errors) =
             SteppableFleet::from_configs(configs, 0).expect("at least one home builds");
         assert!(errors.is_empty(), "no home errors: {errors:?}");
         drop(fleet);
-        let after = hares_io::parse_counts::parse_counts();
+        let after = hares_input::parse_counts::parse_counts();
 
         assert_eq!(
             after.weather - before.weather,
@@ -7871,13 +7890,13 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         let dir = tempdir().expect("temp dir");
         let configs = build_valid_configs(dir.path(), 3);
-        let before = hares_io::parse_counts::parse_counts();
+        let before = hares_input::parse_counts::parse_counts();
         let fleet = Fleet::from_buildings(configs)
             .expect("the configs carry no reserved report or shared destination");
         let result = fleet
             .simulate(&test_report(), 0, chunk(3))
             .expect("the fleet runs");
-        let after = hares_io::parse_counts::parse_counts();
+        let after = hares_input::parse_counts::parse_counts();
         for home in &result.homes {
             assert_eq!(
                 home.status,
@@ -7942,12 +7961,13 @@ mod tests {
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
-                    first_hour_interpolation: hares_io::FirstHour::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
+                    first_hour_interpolation: hares_input::FirstHour::default(),
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 Some(serde_json::json!({})),
                 bldg_id,
@@ -8028,11 +8048,11 @@ mod tests {
             .settings
             .sim_config
             .reports
-            .push(hares_io::ReportSpec {
+            .push(hares_input::ReportSpec {
                 name: "fleet".to_string(),
-                selection: hares_io::Selection::Verbosity(0),
-                frequency: hares_io::Frequency::Timestep,
-                destination: hares_io::Destination::Callback,
+                selection: hares_input::Selection::Verbosity(0),
+                frequency: hares_input::Frequency::Timestep,
+                destination: hares_input::Destination::Callback,
             });
         let mut dwelling = Dwelling::from_config(config.clone()).expect("the home builds");
         dwelling
@@ -8042,7 +8062,7 @@ mod tests {
             }))
             .expect("the probe actor registers");
         let state = Arc::new(Mutex::new(HomeFoldState::new(&HomeFoldAlignment {
-            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            frequency: hares_input::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
             step_ms: 300_000,
             calendar: PeriodCalendar::home(),
             key_offset_s: 0,
@@ -8117,8 +8137,8 @@ mod tests {
         // fold must follow.
         let enum_labels: BTreeMap<String, usize> = {
             let dwelling = Dwelling::from_config(configs[0].clone()).expect("the home builds");
-            let names = hares_io::resolve_selection(
-                &hares_io::Selection::Verbosity(3),
+            let names = hares_output::resolve_selection(
+                &hares_input::Selection::Verbosity(3),
                 &dwelling.catalogue(),
             )
             .expect("the tier resolves");
@@ -8150,9 +8170,9 @@ mod tests {
             .with_sample_weights(weights.to_vec())
             .expect("the weights are finite and non-negative");
         let report = crate::fold::FleetReport {
-            selection: hares_io::Selection::Verbosity(3),
-            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
-            health_policy: hares_io::HealthPolicy::default(),
+            selection: hares_input::Selection::Verbosity(3),
+            frequency: hares_input::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -8263,11 +8283,11 @@ mod tests {
             .settings
             .sim_config
             .reports
-            .push(hares_io::ReportSpec {
+            .push(hares_input::ReportSpec {
                 name: "fleet".to_string(),
-                selection: hares_io::Selection::Verbosity(0),
-                frequency: hares_io::Frequency::Timestep,
-                destination: hares_io::Destination::Callback,
+                selection: hares_input::Selection::Verbosity(0),
+                frequency: hares_input::Frequency::Timestep,
+                destination: hares_input::Destination::Callback,
             });
         let mut dwelling = Dwelling::from_config(config.clone()).expect("the home builds");
         dwelling
@@ -8277,7 +8297,7 @@ mod tests {
             }))
             .expect("the probe actor registers");
         let state = Arc::new(Mutex::new(HomeFoldState::new(&HomeFoldAlignment {
-            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            frequency: hares_input::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
             step_ms: 300_000,
             calendar: PeriodCalendar::home(),
             key_offset_s: 0,
@@ -8336,7 +8356,7 @@ mod tests {
     /// quantities meaning, the enums in Mode) agree with the unit-keyed
     /// ones, so the run carries the pinned columns beside the moving
     /// ones.
-    fn declared_kinds_selection() -> (Vec<DwellingConfig>, hares_io::Selection) {
+    fn declared_kinds_selection() -> (Vec<DwellingConfig>, hares_input::Selection) {
         let weathers = [
             "G0600770_2018.csv",
             "G0600650_2018.csv",
@@ -8351,8 +8371,9 @@ mod tests {
             .expect("the home builds")
             .catalogue()
             .clone();
-        let mut names = hares_io::resolve_selection(&hares_io::Selection::Verbosity(8), &catalogue)
-            .expect("the tier resolves");
+        let mut names =
+            hares_output::resolve_selection(&hares_input::Selection::Verbosity(8), &catalogue)
+                .expect("the tier resolves");
         for channel in [
             "Outdoor Pressure (kPa)",
             "Outdoor Humidity Ratio (kg/kg)",
@@ -8364,7 +8385,7 @@ mod tests {
             );
             names.push(channel.to_string());
         }
-        (configs, hares_io::Selection::Named(names))
+        (configs, hares_input::Selection::Named(names))
     }
 
     /// The fleet's cells follow the declared kinds. The test first asserts
@@ -8391,7 +8412,8 @@ mod tests {
             .expect("the home builds")
             .catalogue()
             .clone();
-        let names = hares_io::resolve_selection(&selection, &catalogue).expect("the names resolve");
+        let names =
+            hares_output::resolve_selection(&selection, &catalogue).expect("the names resolve");
         let mut ratios = 0_usize;
         let mut intensive = 0_usize;
         for name in &names {
@@ -8427,8 +8449,8 @@ mod tests {
             .expect("the weights are finite and non-negative");
         let report = crate::fold::FleetReport {
             selection,
-            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
-            health_policy: hares_io::HealthPolicy::default(),
+            frequency: hares_input::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -8512,8 +8534,8 @@ mod tests {
             .expect("the weights are finite and non-negative");
         let report = crate::fold::FleetReport {
             selection,
-            frequency: hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
-            health_policy: hares_io::HealthPolicy::default(),
+            frequency: hares_input::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            health_policy: hares_input::HealthPolicy::default(),
         };
         let result = fleet
             .simulate(&report, 1, chunk(64))
@@ -8570,20 +8592,20 @@ mod tests {
     /// reported.
     fn home_period_values(
         config: &DwellingConfig,
-        selection: &hares_io::Selection,
+        selection: &hares_input::Selection,
     ) -> BTreeMap<String, Vec<Option<f64>>> {
-        use hares_io::output::reduce::{PeriodReducer, TimeRule};
+        use hares_output::reduce::{PeriodReducer, TimeRule};
 
         let mut run_config = config.clone();
         run_config
             .settings
             .sim_config
             .reports
-            .push(hares_io::ReportSpec {
+            .push(hares_input::ReportSpec {
                 name: "frame".to_string(),
                 selection: selection.clone(),
-                frequency: hares_io::Frequency::Timestep,
-                destination: hares_io::Destination::Memory,
+                frequency: hares_input::Frequency::Timestep,
+                destination: hares_input::Destination::Memory,
             });
         let mut dwelling = Dwelling::from_config(run_config).expect("the home builds");
         let catalogue = dwelling.catalogue().clone();
@@ -8614,7 +8636,7 @@ mod tests {
             })
             .collect();
         let mut reducer = PeriodReducer::new(
-            hares_io::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
+            hares_input::Frequency::Minutes(NonZeroU32::new(15).expect("15 divides 60")),
             PeriodCalendar::home(),
             rules,
         )
@@ -8659,7 +8681,7 @@ mod tests {
         config: &DwellingConfig,
         enum_labels: &BTreeMap<String, usize>,
     ) -> BTreeMap<String, Vec<Option<f64>>> {
-        let all = home_period_values(config, &hares_io::Selection::Verbosity(3));
+        let all = home_period_values(config, &hares_input::Selection::Verbosity(3));
         enum_labels
             .keys()
             .map(|name| {

@@ -15,8 +15,9 @@ use hares_core::actors::{
     IdealThermostat, Occupant, SafetyMonitor, SolverFeedbackActor,
 };
 use hares_core::{ChaCha8Rng, Dwelling};
-use hares_io::output::build_catalogue;
-use hares_io::{CatalogueActor, CatalogueEquipment, CatalogueInput, EquipmentSpec};
+use hares_input::EquipmentSpec;
+use hares_output::build_catalogue;
+use hares_output::{CatalogueActor, CatalogueEquipment, CatalogueInput};
 use hares_types::{
     AcrossHomes, Aggregation, BmsMode, ChargingStrategy, CoreCapabilities, EndUse, EquipmentId,
     FuelType, GridExportRule, PlugInPolicy, Sampling, ScheduleSource, Telemetry, TelemetryField,
@@ -136,7 +137,7 @@ fn constructed_class_surface(spec_name: &str) -> (EndUse, CoreCapabilities, Vec<
         },
     )
 }
-fn all_classes_catalogue() -> hares_io::Catalogue {
+fn all_classes_catalogue() -> hares_output::Catalogue {
     let input = CatalogueInput {
         equipment: all_classes_specs()
             .iter()
@@ -182,7 +183,7 @@ fn catalogue_schema_equals_pinned_schema_at_every_verbosity() {
             .unwrap_or_else(|err| panic!("schema pin missing at {path}: {err}"));
         let pins: Vec<Value> = serde_json::from_str(&raw).expect("pin JSON parses");
 
-        let schema = hares_io::build_schema(&catalogue, verbosity, false);
+        let schema = hares_output::build_schema(&catalogue, verbosity, false);
         let actual: Vec<(&str, String, bool)> = schema
             .fields()
             .iter()
@@ -250,11 +251,11 @@ fn catalogue_queryable_before_run() {
         chrono::Duration::minutes(1),
         chrono::Duration::hours(1),
         None,
-        vec![hares_io::ReportSpec {
+        vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(verbosity),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Memory,
+            selection: hares_input::Selection::Verbosity(verbosity),
+            frequency: hares_input::Frequency::default(),
+            destination: hares_input::Destination::Memory,
         }],
         std::path::Path::new("../../python/hares/defaults")
             .canonicalize()
@@ -299,7 +300,7 @@ fn catalogue_queryable_before_run() {
 fn every_written_channel_is_declared_and_every_declared_variable_is_written() {
     let catalogue = all_classes_catalogue();
     for verbosity in 0..=8u8 {
-        let schema = hares_io::build_schema(&catalogue, verbosity, false);
+        let schema = hares_output::build_schema(&catalogue, verbosity, false);
         for field in schema.fields() {
             let name = field.name().as_str();
             if name == "Time" {
@@ -475,7 +476,7 @@ fn every_quantity_declares_across_homes_and_power_units_are_power() {
     }
 }
 
-fn kind_entry(name: &str, def: &hares_io::VariableDef) -> Value {
+fn kind_entry(name: &str, def: &hares_output::VariableDef) -> Value {
     let mut entry = match &def.kind {
         VariableKind::Energy => serde_json::json!({ "kind": "energy" }),
         VariableKind::Power => serde_json::json!({ "kind": "power" }),
@@ -565,7 +566,7 @@ fn write_kinds_pin() {
 fn write_schema_pins() {
     let catalogue = all_classes_catalogue();
     for verbosity in 0..=8u8 {
-        let schema = hares_io::build_schema(&catalogue, verbosity, false);
+        let schema = hares_output::build_schema(&catalogue, verbosity, false);
         let fields: Vec<Value> = schema
             .fields()
             .iter()
@@ -700,7 +701,7 @@ fn ev_code_columns_carry_the_declared_code_unit_end_to_end() {
 
     // The schema field metadata carries the same symbol at the verbosity
     // that emits the columns.
-    let schema = hares_io::build_schema(&catalogue, 8, false);
+    let schema = hares_output::build_schema(&catalogue, 8, false);
     for field in schema.fields() {
         let name = field.name().as_str();
         if name.ends_with("Connection State (-)") || name.ends_with("Charging Level (-)") {

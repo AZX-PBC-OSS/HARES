@@ -13,7 +13,8 @@ graph TD
     control[hares-control]
     envelope[hares-envelope]
     equipment[hares-equipment]
-    io[hares-io]
+    input[hares-input]
+    output[hares-output]
     tariff[hares-tariff]
     core[hares-core]
     fleet[hares-fleet]
@@ -26,28 +27,34 @@ graph TD
     equipment --> types
     equipment --> physics
     equipment --> control
-    io --> types
-    io --> physics
-    io --> control
-    io --> envelope
-    io --> equipment
+    input --> types
+    input --> physics
+    input --> envelope
+    input --> equipment
+    output --> input
+    output --> types
+    output --> physics
+    output --> equipment
     tariff --> types
     core --> types
     core --> physics
     core --> control
     core --> envelope
     core --> equipment
-    core --> io
+    core --> input
+    core --> output
     core --> tariff
     fleet --> core
-    fleet --> io
+    fleet --> input
+    fleet --> output
     fleet --> types
     python --> core
     python --> fleet
     python --> control
     python --> equipment
     python --> types
-    python --> io
+    python --> input
+    python --> output
     python --> tariff
 
     style types fill:#e8f4fd,stroke:#2196F3
@@ -55,7 +62,8 @@ graph TD
     style control fill:#e8f4fd,stroke:#2196F3
     style envelope fill:#fff3e0,stroke:#FF9800
     style equipment fill:#e8f5e9,stroke:#4CAF50
-    style io fill:#fce4ec,stroke:#E91E63
+    style input fill:#fce4ec,stroke:#E91E63
+    style output fill:#fce4ec,stroke:#E91E63
     style core fill:#f3e5f5,stroke:#9C27B0
     style fleet fill:#f3e5f5,stroke:#9C27B0
     style python fill:#fff9c4,stroke:#FFC107
@@ -68,7 +76,8 @@ graph TD
 | **hares-control** | Control signal definitions, capability bitflags, dispatch routing |
 | **hares-envelope** | RC thermal network, state-space discretization, thermal/humidity/electrical/fluid domain solvers |
 | **hares-equipment** | `Equipment` trait + implementations: HVAC, battery, PV, water heater, EV, generators, scheduled/event loads |
-| **hares-io** | I/O parsers: HPXML building geometry, EPW weather, CSV schedules, ResStock metadata, defaults/LUT, Arrow output |
+| **hares-input** | Input parsers: HPXML building geometry, EPW/TMY3/PSM3 weather, CSV schedules, ResStock metadata, defaults/LUT, the simulation config |
+| **hares-output** | Output writing: the streaming Arrow/Parquet/CSV recorder, the variable catalogue, metrics, period reducers |
 | **hares-tariff** | Electric and gas tariffs: URDB parsing, time-of-use evaluation, demand charges, billing summaries |
 | **hares-core** | Dwelling orchestrator, simulation engine, environment manager, clock, checkpointing |
 | **hares-fleet** | Parallel multi-dwelling simulation via Rayon, aggregation, progress tracking |
@@ -389,7 +398,7 @@ Conservation-law invariant checks, the zero-cost observer system for deep step-l
 
 ```mermaid
 graph TD
-    HPXML["HPXML File"] --> Parser["hares-io::hpxml::parse()"]
+    HPXML["HPXML File"] --> Parser["hares-input::hpxml::parse()"]
     Parser --> Building["Building struct"]
     Building --> Zones["Vec&lt;Zone&gt;<br/>Conditioned, Attic, Garage, Foundation"]
     Building --> Boundaries["Vec&lt;Boundary&gt;<br/>Wall, Roof, Floor, Door, Slab, RimJoist"]
@@ -642,7 +651,7 @@ graph TB
         DEF["Defaults<br/>(equipment curves)"]
     end
 
-    subgraph "Parsing (hares-io)"
+    subgraph "Parsing (hares-input)"
         HP --> Building
         EPW --> Weather["WeatherTimeSeries"]
         SCHED --> Schedule["ScheduleTimeSeries"]

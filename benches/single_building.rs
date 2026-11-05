@@ -73,30 +73,30 @@ fn bench_output_destination(c: &mut Criterion) {
                 );
                 cfg.settings.sim_config.reports = match label {
                     "no_report" => Vec::new(),
-                    "memory" => vec![hares_io::ReportSpec {
+                    "memory" => vec![hares_input::ReportSpec {
                         name: "frame".to_string(),
-                        selection: hares_io::Selection::Verbosity(2),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Memory,
+                        selection: hares_input::Selection::Verbosity(2),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Memory,
                     }],
                     other => {
                         let ext = if other == "csv" { "csv" } else { "parquet" };
                         let path = common::numbered_path(dir, "hares-bench-report", ext);
                         let destination = if other == "csv" {
-                            hares_io::Destination::Csv {
+                            hares_input::Destination::Csv {
                                 path,
                                 overwrite: true,
                             }
                         } else {
-                            hares_io::Destination::Parquet {
+                            hares_input::Destination::Parquet {
                                 path,
                                 overwrite: true,
                             }
                         };
-                        vec![hares_io::ReportSpec {
+                        vec![hares_input::ReportSpec {
                             name: "file".to_string(),
-                            selection: hares_io::Selection::Verbosity(2),
-                            frequency: hares_io::Frequency::default(),
+                            selection: hares_input::Selection::Verbosity(2),
+                            frequency: hares_input::Frequency::default(),
                             destination,
                         }]
                     }

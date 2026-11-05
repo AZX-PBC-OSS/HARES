@@ -8,7 +8,7 @@
 
 use chrono::Duration;
 use hares_core::DwellingConfig;
-use hares_io::{HealthPolicy, ReportSpec, SimulationConfig, SiteLocationOverride};
+use hares_input::{HealthPolicy, ReportSpec, SimulationConfig, SiteLocationOverride};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyType};
@@ -74,14 +74,14 @@ impl<'a, 'py> FromPyObject<'a, 'py> for WholeSeconds {
 fn unexpected_keyword_error(
     class: &str,
     unexpected: &Bound<'_, PyDict>,
-    scopes: &[hares_io::KeyScope],
+    scopes: &[hares_input::KeyScope],
 ) -> PyResult<()> {
     // The first unexpected keyword is the one named, as Python's own
     // check does; the rest are irrelevant to the raised error.
     if let Some(key) = unexpected.keys().into_iter().next() {
         let key_str: String = key.extract()?;
         for scope in scopes {
-            if let Some(message) = hares_io::removed_key_message(*scope, &key_str) {
+            if let Some(message) = hares_input::removed_key_message(*scope, &key_str) {
                 return Err(PyTypeError::new_err(message));
             }
         }
@@ -99,7 +99,7 @@ fn unexpected_keyword_error(
 }
 
 /// The explicit site-location override, one frozen Python object over
-/// [`hares_io::SiteLocationOverride`]. Its constructor runs the same
+/// [`hares_input::SiteLocationOverride`]. Its constructor runs the same
 /// site-location check `SimulationConfig::validate` runs and raises that
 /// message as `ValueError`.
 #[pyclass(name = "SiteLocationOverride", frozen, from_py_object)]
@@ -279,7 +279,7 @@ pub struct PySimulationConfig(pub SimulationConfig);
 pub enum PyWarmupArg {
     Absent,
     ExplicitNone,
-    Config(hares_io::WarmupConfig),
+    Config(hares_input::WarmupConfig),
 }
 
 impl<'a, 'py> FromPyObject<'a, 'py> for PyWarmupArg {
@@ -305,11 +305,11 @@ impl<'a, 'py> FromPyObject<'a, 'py> for PyWarmupArg {
 
 impl PyWarmupArg {
     /// The `Warmup` the argument stands for; absent is the Rust default.
-    fn into_warmup(self) -> hares_io::Warmup {
+    fn into_warmup(self) -> hares_input::Warmup {
         match self {
-            Self::Absent => hares_io::Warmup::default(),
-            Self::ExplicitNone => hares_io::Warmup::Disabled,
-            Self::Config(config) => hares_io::Warmup::Converge(config),
+            Self::Absent => hares_input::Warmup::default(),
+            Self::ExplicitNone => hares_input::Warmup::Disabled,
+            Self::Config(config) => hares_input::Warmup::Converge(config),
         }
     }
 }
@@ -319,17 +319,17 @@ impl PyWarmupArg {
 /// construction keeps the Rust defaults for the fields left unset.
 #[pyclass(name = "WarmupConfig", frozen, from_py_object)]
 #[derive(Debug, Clone)]
-pub struct PyWarmupConfig(pub hares_io::WarmupConfig);
+pub struct PyWarmupConfig(pub hares_input::WarmupConfig);
 
 #[pymethods]
 impl PyWarmupConfig {
     #[new]
     #[pyo3(signature = (
         *,
-        temperature_tolerance_c = hares_io::DEFAULT_TEMPERATURE_TOLERANCE_C,
-        loads_tolerance = hares_io::DEFAULT_LOADS_TOLERANCE,
-        min_days = hares_io::DEFAULT_MIN_WARMUP_DAYS,
-        max_days = hares_io::DEFAULT_MAX_WARMUP_DAYS,
+        temperature_tolerance_c = hares_input::DEFAULT_TEMPERATURE_TOLERANCE_C,
+        loads_tolerance = hares_input::DEFAULT_LOADS_TOLERANCE,
+        min_days = hares_input::DEFAULT_MIN_WARMUP_DAYS,
+        max_days = hares_input::DEFAULT_MAX_WARMUP_DAYS,
         **unexpected
     ))]
     pub fn new(
@@ -342,7 +342,7 @@ impl PyWarmupConfig {
         if let Some(unexpected) = unexpected {
             unexpected_keyword_error("WarmupConfig", unexpected, &[])?;
         }
-        let config = hares_io::WarmupConfig {
+        let config = hares_input::WarmupConfig {
             temperature_tolerance_c,
             loads_tolerance,
             min_days,
@@ -397,11 +397,11 @@ impl PySimulationConfig {
         *,
         start_time,
         duration,
-        time_res = WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
+        time_res = WholeSeconds(hares_input::DEFAULT_TIME_RES_SECS),
         reports = None,
         diagnostics = false,
         metrics = false,
-        output_chunk_size = hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+        output_chunk_size = hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
         max_memory_rows = None,
         setpoint_deadband_c = None,
         master_seed = 0,
@@ -409,7 +409,7 @@ impl PySimulationConfig {
         schedule_diversity = "on",
         civil_timezone = None,
         site_location = None,
-        max_consecutive_step_failures = hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        max_consecutive_step_failures = hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
         health_policy = None,
         warmup = PyWarmupArg::Absent,
         first_hour_interpolation = "hour24",
@@ -445,8 +445,8 @@ impl PySimulationConfig {
                 "SimulationConfig",
                 unexpected,
                 &[
-                    hares_io::KeyScope::SimulationConfig,
-                    hares_io::KeyScope::PythonKeyword,
+                    hares_input::KeyScope::SimulationConfig,
+                    hares_input::KeyScope::PythonKeyword,
                 ],
             )?;
         }
@@ -461,8 +461,8 @@ impl PySimulationConfig {
         let start = parse_datetime_str(start_time)?;
 
         let first_hour = match first_hour_interpolation {
-            "hour24" => hares_io::FirstHour::Hour24,
-            "hour1" => hares_io::FirstHour::Hour1,
+            "hour24" => hares_input::FirstHour::Hour24,
+            "hour1" => hares_input::FirstHour::Hour1,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "first_hour_interpolation must be 'hour24' or 'hour1', got '{other}'"
@@ -471,8 +471,8 @@ impl PySimulationConfig {
         };
 
         let weather_year = match weather_year {
-            "typical" => hares_io::WeatherYear::Typical,
-            "actual" => hares_io::WeatherYear::Actual,
+            "typical" => hares_input::WeatherYear::Typical,
+            "actual" => hares_input::WeatherYear::Actual,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "weather_year must be 'typical' or 'actual', got '{other}'"
@@ -481,8 +481,8 @@ impl PySimulationConfig {
         };
 
         let schedule_diversity = match schedule_diversity {
-            "on" => hares_io::ScheduleDiversity::On,
-            "off" => hares_io::ScheduleDiversity::Off,
+            "on" => hares_input::ScheduleDiversity::On,
+            "off" => hares_input::ScheduleDiversity::Off,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "schedule_diversity must be 'on' or 'off', got '{other}'"
@@ -702,16 +702,16 @@ impl PySimulationConfig {
     #[getter]
     pub fn schedule_diversity(&self) -> String {
         match self.0.schedule_diversity {
-            hares_io::ScheduleDiversity::On => "on".to_string(),
-            hares_io::ScheduleDiversity::Off => "off".to_string(),
+            hares_input::ScheduleDiversity::On => "on".to_string(),
+            hares_input::ScheduleDiversity::Off => "off".to_string(),
         }
     }
 
     #[setter]
     pub fn set_schedule_diversity(&mut self, value: &str) -> PyResult<()> {
         let mode = match value {
-            "on" => hares_io::ScheduleDiversity::On,
-            "off" => hares_io::ScheduleDiversity::Off,
+            "on" => hares_input::ScheduleDiversity::On,
+            "off" => hares_input::ScheduleDiversity::Off,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "schedule_diversity must be 'on' or 'off', got '{other}'"
@@ -736,16 +736,16 @@ impl PySimulationConfig {
     #[getter]
     pub fn weather_year(&self) -> String {
         match self.0.weather_year {
-            hares_io::WeatherYear::Typical => "typical".to_string(),
-            hares_io::WeatherYear::Actual => "actual".to_string(),
+            hares_input::WeatherYear::Typical => "typical".to_string(),
+            hares_input::WeatherYear::Actual => "actual".to_string(),
         }
     }
 
     #[setter]
     pub fn set_weather_year(&mut self, value: &str) -> PyResult<()> {
         let year = match value {
-            "typical" => hares_io::WeatherYear::Typical,
-            "actual" => hares_io::WeatherYear::Actual,
+            "typical" => hares_input::WeatherYear::Typical,
+            "actual" => hares_input::WeatherYear::Actual,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "weather_year must be 'typical' or 'actual', got '{other}'"
@@ -768,8 +768,8 @@ impl PySimulationConfig {
     #[setter]
     pub fn set_warmup(&mut self, value: Option<PyWarmupConfig>) -> PyResult<()> {
         let warmup = match value {
-            None => hares_io::Warmup::Disabled,
-            Some(config) => hares_io::Warmup::Converge(config.0),
+            None => hares_input::Warmup::Disabled,
+            Some(config) => hares_input::Warmup::Converge(config.0),
         };
         self.assign(move |cfg| cfg.warmup = warmup)
     }
@@ -915,9 +915,11 @@ impl PyDwellingConfig {
             weather: crate::py_inputs::weather_arg(weather)?,
             defaults: match defaults {
                 Some(path) => crate::py_inputs::defaults_arg(path)?,
-                None => crate::py_inputs::DefaultsArg::Source(hares_io::DefaultsSource::directory(
-                    crate::py_inputs::packaged_defaults_dir(hpxml.py())?,
-                )),
+                None => {
+                    crate::py_inputs::DefaultsArg::Source(hares_input::DefaultsSource::directory(
+                        crate::py_inputs::packaged_defaults_dir(hpxml.py())?,
+                    ))
+                }
             },
             config,
             bldg_id,
@@ -1011,9 +1013,9 @@ impl PyDwellingConfig {
                 "DwellingConfig",
                 unexpected,
                 &[
-                    hares_io::KeyScope::DwellingTable,
-                    hares_io::KeyScope::SimulationConfig,
-                    hares_io::KeyScope::PythonKeyword,
+                    hares_input::KeyScope::DwellingTable,
+                    hares_input::KeyScope::SimulationConfig,
+                    hares_input::KeyScope::PythonKeyword,
                 ],
             )?;
         }
@@ -1030,7 +1032,7 @@ impl PyDwellingConfig {
                 crate::py_inputs::ScheduleArg::Parsed(ref handle) => handle
                     .record()
                     .cloned()
-                    .unwrap_or_else(|| hares_io::InputSource::Text(std::sync::Arc::from(""))),
+                    .unwrap_or_else(|| hares_input::InputSource::Text(std::sync::Arc::from(""))),
             }),
             weather: match args.weather {
                 crate::py_inputs::WeatherArg::Source(source) => source,
@@ -1063,7 +1065,7 @@ pub(crate) struct ConstructorInputs {
     pub schedule: Option<crate::py_inputs::ScheduleArg>,
     pub weather: crate::py_inputs::WeatherArg,
     pub defaults: crate::py_inputs::DefaultsArg,
-    pub generation: Option<hares_io::ScheduleGeneration>,
+    pub generation: Option<hares_input::ScheduleGeneration>,
 }
 
 /// The one dwelling-constructor resolution the Python-facing constructors
@@ -1079,7 +1081,7 @@ pub(crate) struct ConstructorInputs {
 pub(crate) fn resolve_args(
     args: DwellingConfigArgs<'_>,
 ) -> PyResult<(DwellingConfig, ConstructorInputs)> {
-    let generation = hares_io::ScheduleGeneration {
+    let generation = hares_input::ScheduleGeneration {
         start: args.config.0.start_time,
         duration: args.config.0.duration,
         interval: std::time::Duration::from_secs(
@@ -1112,7 +1114,7 @@ mod tests {
     use super::PyWarmupArg;
     use super::WholeSeconds;
     use hares_core::Dwelling;
-    use hares_io::SimulationConfig;
+    use hares_input::SimulationConfig;
 
     /// The Python constructor with only the two required keywords: the same
     /// logical configuration the TOML string carries.
@@ -1120,11 +1122,11 @@ mod tests {
         let cfg = PySimulationConfig::new(
             start_time,
             WholeSeconds(duration),
-            WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
+            WholeSeconds(hares_input::DEFAULT_TIME_RES_SECS),
             None,
             false,
             false,
-            hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+            hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
             None,
             None,
             0,
@@ -1132,7 +1134,7 @@ mod tests {
             "on",
             None,
             None,
-            hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
             None,
             crate::py_config::PyWarmupArg::Absent,
             "hour24",
@@ -1188,11 +1190,11 @@ mod tests {
                 let err = PySimulationConfig::new(
                     "2024-01-01T00:00:00Z",
                     WholeSeconds(3600),
-                    WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
+                    WholeSeconds(hares_input::DEFAULT_TIME_RES_SECS),
                     None,
                     false,
                     false,
-                    hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                    hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
                     None,
                     None,
                     0,
@@ -1200,7 +1202,7 @@ mod tests {
                     "on",
                     None,
                     None,
-                    hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                     None,
                     PyWarmupArg::Absent,
                     "hour24",
@@ -1223,11 +1225,11 @@ mod tests {
             let err = PySimulationConfig::new(
                 "2024-01-01T00:00:00Z",
                 WholeSeconds(3600),
-                WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
+                WholeSeconds(hares_input::DEFAULT_TIME_RES_SECS),
                 None,
                 false,
                 false,
-                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 None,
                 0,
@@ -1235,7 +1237,7 @@ mod tests {
                 "on",
                 None,
                 None,
-                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
                 PyWarmupArg::Absent,
                 "hour24",
@@ -1260,11 +1262,11 @@ mod tests {
             let py_err = PySimulationConfig::new(
                 "2024-01-01T00:00:00Z",
                 WholeSeconds(3600),
-                WholeSeconds(hares_io::DEFAULT_TIME_RES_SECS),
+                WholeSeconds(hares_input::DEFAULT_TIME_RES_SECS),
                 None,
                 false,
                 false,
-                hares_io::DEFAULT_OUTPUT_CHUNK_SIZE,
+                hares_input::DEFAULT_OUTPUT_CHUNK_SIZE,
                 None,
                 None,
                 0,
@@ -1272,7 +1274,7 @@ mod tests {
                 "on",
                 None,
                 None,
-                hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
                 None,
                 PyWarmupArg::Absent,
                 "hour24",
@@ -1296,9 +1298,11 @@ mod tests {
             };
             // Each surface prefixes its own exception class; the removed-key
             // message both raise is the one string the table carries.
-            let canonical =
-                hares_io::removed_key_message(hares_io::KeyScope::SimulationConfig, "duration_s")
-                    .expect("duration_s is a removed key of the simulation config");
+            let canonical = hares_input::removed_key_message(
+                hares_input::KeyScope::SimulationConfig,
+                "duration_s",
+            )
+            .expect("duration_s is a removed key of the simulation config");
             assert!(
                 py_err.to_string().contains(&canonical) && toml_err.contains(&canonical),
                 "one removed key, one message, on both surfaces; python gives \

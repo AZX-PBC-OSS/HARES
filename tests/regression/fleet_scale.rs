@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 
 use chrono::Duration;
 use hares_fleet::{Fleet, FleetReport};
-use hares_io::{Frequency, Selection};
+use hares_input::{Frequency, Selection};
 
 use super::helpers;
 
@@ -36,7 +36,7 @@ pub fn run_fleet_scale_check() -> Result<(), Vec<String>> {
     let report = FleetReport {
         selection: Selection::Verbosity(0),
         frequency: Frequency::Hourly,
-        health_policy: hares_io::HealthPolicy::default(),
+        health_policy: hares_input::HealthPolicy::default(),
     };
     let result = fleet
         .simulate(&report, 0, NonZeroUsize::new(64).expect("64"))

@@ -51,22 +51,25 @@ use hares_equipment::{
     ActorSeed, BatteryLutType, ConfigPayload, Equipment, EquipmentConfig, EquipmentRegistry,
     OcvTable, RegularGridInterpolator, SetpointReconciliation, UNegTable,
 };
-use hares_io::output::OutputError;
-use hares_io::output::callback::{BatchCallback, CallbackAttachment};
-use hares_io::{
-    Building, CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
-    DEFROST_STATE_SUFFIX, DefaultsSource, Destination, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX,
-    ER_CAPACITY_SUFFIX, ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
+use hares_input::{
+    Building, DefaultsSource, Destination, InputSource, PvPanelDefaults, SetpointSource,
+    SimulationConfig, WeatherInput,
+};
+use hares_output::OutputError;
+use hares_output::callback::{BatchCallback, CallbackAttachment};
+use hares_output::{
+    CAPACITY_SUFFIX, COMPRESSOR_POWER_KW_SUFFIX, COMPRESSOR_POWER_W_SUFFIX, COP_SUFFIX,
+    DEFROST_STATE_SUFFIX, ELECTRIC_POWER_SUFFIX, ENERGY_SUFFIX, ER_CAPACITY_SUFFIX,
+    ER_POWER_SUFFIX, EV_CHARGING_LEVEL_SUFFIX, EV_CONNECTION_STATE_SUFFIX,
     FAN_ELECTRIC_POWER_SUFFIX, FAN_POWER_SUFFIX, FAN_POWER_W_SUFFIX, GAS_POWER_SUFFIX,
-    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, InputSource, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX,
+    HP_CAPACITY_SUFFIX, HVAC_DUCT_LOSSES_COL, LATENT_GAINS_SUFFIX, MAIN_POWER_SUFFIX,
     MIN_OFF_TIME_SUFFIX, MIN_ON_TIME_SUFFIX, MODE_SUFFIX, MetricsCalculator,
     PAN_HEATER_POWER_SUFFIX, POWER_FACTOR_SUFFIX, PV_DC_POWER_SUFFIX, PV_IRRADIANCE_SUFFIX,
-    PvPanelDefaults, REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
+    REACTIVE_POWER_SUFFIX, RETURN_TEMP_SUFFIX, RUNTIME_COOLING_SETPOINT_COL,
     RUNTIME_FRACTION_SUFFIX, RUNTIME_HEATING_SETPOINT_COL, RowWriter, SCHEDULE_SUFFIX,
     SCHEDULED_COOLING_SETPOINT_COL, SCHEDULED_HEATING_SETPOINT_COL, SETPOINT_SUFFIX, SHR_SUFFIX,
-    SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, SetpointSource,
-    SimulationConfig, StreamingRecorder, WeatherInput, end_use_electric_power_column,
-    is_reserved_output_column_name,
+    SOC_SUFFIX, SPEED_SUFFIX, SUPPLY_AIR_TEMP_SUFFIX, SUPPLY_TEMP_SUFFIX, StreamingRecorder,
+    end_use_electric_power_column, is_reserved_output_column_name,
 };
 
 use hares_physics::constants::{
@@ -183,7 +186,7 @@ const PV_RE_EVAL_MIN_STEP_SECS: f64 = 300.0;
 /// SystemIdentifier id, else the instance name its caller gave it, else its
 /// class name. Two event loads with the same identity are rejected at
 /// assembly rather than told apart by their order.
-fn rng_identity(spec: &hares_io::EquipmentSpec) -> String {
+fn rng_identity(spec: &hares_input::EquipmentSpec) -> String {
     spec.system_id
         .as_ref()
         .or(spec.instance_name.as_ref())
@@ -212,10 +215,10 @@ fn create_equipment_from_config(
 /// for the absent case, and misdirects a user who wrote a malformed value
 /// (or an explicit 0) to delete the field instead of correcting it.
 /// Re-uses the assignment pass's classifier
-/// (`hares_io::hpxml::equipment::explicit_equipment_id`) so the diagnosis
+/// (`hares_input::hpxml::equipment::explicit_equipment_id`) so the diagnosis
 /// and the pass's leave-untouched decision can never disagree.
-fn unassigned_equipment_id_rejection(spec: &hares_io::EquipmentSpec, name: &str) -> HaresError {
-    use hares_io::hpxml::equipment::{ExplicitEquipmentId, explicit_equipment_id};
+fn unassigned_equipment_id_rejection(spec: &hares_input::EquipmentSpec, name: &str) -> HaresError {
+    use hares_input::hpxml::equipment::{ExplicitEquipmentId, explicit_equipment_id};
     let prefix = format!(
         "equipment '{name}' has an unassigned equipment id (0): ids are \
          assigned by the dwelling assembly and are not configurable; "
@@ -286,7 +289,7 @@ pub struct DwellingSettings {
     /// Fields supplement or correct HPXML-parsed data when the source
     /// document contains missing or invalid values.
     /// `None` for direct HPXML use where no external metadata is available.
-    pub patches: Option<hares_io::HpxmlDataPatches>,
+    pub patches: Option<hares_input::HpxmlDataPatches>,
 }
 
 /// The dwelling keys as the input schema publishes them: the fields a
@@ -415,7 +418,7 @@ impl DwellingSettings {
         sim_config: SimulationConfig,
         overrides: Option<serde_json::Value>,
         bldg_id: i64,
-        patches: Option<hares_io::HpxmlDataPatches>,
+        patches: Option<hares_input::HpxmlDataPatches>,
     ) -> Self {
         Self {
             sim_config,
@@ -677,7 +680,7 @@ enum RecordedValue {
 fn enrich_schema_with_telemetry_units(
     schema: Schema,
     equipment: &[&dyn Equipment],
-    catalogue: &hares_io::Catalogue,
+    catalogue: &hares_output::Catalogue,
 ) -> Schema {
     // Compute instance-qualified names matching the catalogue's convention.
     let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -781,7 +784,7 @@ fn enrich_schema_with_telemetry_units(
 }
 
 /// Build column index maps for each equipment piece using instance-qualified
-/// names (matching `hares_io::output::columns::instance_qualified_names`).
+/// names (matching `hares_output::columns::instance_qualified_names`).
 /// Schema membership rule, single home for the column-map builder and
 /// record_step's column invariants: an equipment is schema-known iff the
 /// schema emitted its unconditional per-equipment column under its own
@@ -858,7 +861,7 @@ fn plan_equipment_columns(
             // "{name} Gas Power (therms/hour)" column iff this returns true,
             // so resolving with the same predicate guarantees every emitted
             // column is populated.
-            let families = hares_io::EquipmentColumnFamilies::of_descriptor(desc);
+            let families = hares_output::EquipmentColumnFamilies::of_descriptor(desc);
             let has_gas = families.has_gas;
             let is_hvac = families.is_hvac;
             let is_cooling = families.is_cooling;
@@ -1342,7 +1345,7 @@ fn build_diagnostics_bindings(schema: &Schema) -> Option<DiagnosticsBindings> {
     for (slot, field) in schema.fields().iter().skip(1).enumerate() {
         if !field
             .metadata()
-            .contains_key(hares_io::DIAGNOSTICS_METADATA_KEY)
+            .contains_key(hares_output::DIAGNOSTICS_METADATA_KEY)
         {
             continue;
         }
@@ -1614,7 +1617,7 @@ struct ZoneColumnCaches {
 
 fn build_zone_column_caches(
     zones: &[hares_types::ZoneState],
-    zone_types: &[hares_io::hpxml::ZoneType],
+    zone_types: &[hares_input::hpxml::ZoneType],
     indoor_zone: ZoneId,
     column_index: &HashMap<String, usize>,
 ) -> ZoneColumnCaches {
@@ -2331,7 +2334,7 @@ fn actor_equipment<'a>(equipment: &[&'a dyn Equipment]) -> Vec<crate::ActorEquip
 /// is computed for them. PV orientations use quantised surface IDs that differ
 /// from the sequential envelope boundary IDs.
 fn register_pv_surfaces(
-    specs: &[hares_io::EquipmentSpec],
+    specs: &[hares_input::EquipmentSpec],
     env: &mut EnvironmentManager,
 ) -> Result<()> {
     for spec in specs.iter().filter(|s| s.name == "PV") {
@@ -2350,7 +2353,9 @@ fn register_pv_surfaces(
 
 /// A PV spec's array orientations, read from the same typed config the PV
 /// equipment initialises from.
-fn pv_orientations(spec: &hares_io::EquipmentSpec) -> Result<Vec<hares_equipment::PvOrientation>> {
+fn pv_orientations(
+    spec: &hares_input::EquipmentSpec,
+) -> Result<Vec<hares_equipment::PvOrientation>> {
     let owner = spec.instance_name.as_deref().unwrap_or(&spec.name);
     conversions::equipment_config_from_spec(spec)?
         .require_typed::<hares_equipment::PvConfig>("PV")?
@@ -2383,12 +2388,12 @@ pub const COLLECTOR_AREA_PER_W: f64 = 2.0 / 420.0;
 /// matches no roof attaches to none, and the run's warning log names it
 /// and the nearest roof's azimuth (when it has one) and tilt differences.
 fn attach_pv_to_roofs(
-    specs: &mut [hares_io::EquipmentSpec],
+    specs: &mut [hares_input::EquipmentSpec],
     building: &Building,
     geometry: &[crate::environment::SurfaceGeometry],
     warnings: &mut WarningLog,
 ) -> Result<()> {
-    use hares_io::hpxml::building::BoundaryType;
+    use hares_input::hpxml::building::BoundaryType;
 
     // The roof candidates as the envelope registered them: the surface
     // geometry is index-aligned with the building's boundaries and each
@@ -2560,7 +2565,7 @@ fn attach_pv_to_roofs(
 /// coverage registers on the surface id the environment scales (the
 /// envelope's registered surface geometry's id for that roof).
 fn register_pv_roof_shading(
-    specs: &[hares_io::EquipmentSpec],
+    specs: &[hares_input::EquipmentSpec],
     building: &Building,
     geometry: &[crate::environment::SurfaceGeometry],
     env: &mut EnvironmentManager,
@@ -3289,7 +3294,7 @@ pub struct Dwelling {
     /// dwelling, never a process global shared across runs or threads.
     observation_warn_once: ObservationWarnOnce,
     /// Output config retained for schema rebuilds when equipment changes.
-    reports: Vec<hares_io::ReportSpec>,
+    reports: Vec<hares_input::ReportSpec>,
     /// Whether the run requested the diagnostics report: the diagnostics
     /// variables join the schema and the row plan, and the per-step
     /// diagnostics recording runs. Without it the run pays nothing for
@@ -3303,7 +3308,7 @@ pub struct Dwelling {
     /// The input records the parse read, carried to the run's provenance.
     /// `None` when the dwelling was built from pre-parsed data whose files
     /// the parse did not read (the synthetic TOML dwellings).
-    inputs: Option<hares_io::InputRecords>,
+    inputs: Option<hares_input::InputRecords>,
     #[cfg(feature = "profiling")]
     profiling: DwellingProfilingSummary,
     /// Run-total per-actor scheduler-entry timings (one slot per registered
@@ -3434,7 +3439,7 @@ impl Dwelling {
         time_res: Duration,
         duration: Duration,
         overrides: Option<Value>,
-        reports: Vec<hares_io::ReportSpec>,
+        reports: Vec<hares_input::ReportSpec>,
         defaults_path: PathBuf,
     ) -> Result<Self> {
         let HpxmlInputs {
@@ -3456,12 +3461,12 @@ impl Dwelling {
             setpoint_deadband_c: None,
             master_seed: 0,
             civil_timezone: None,
-            site_location: hares_io::SiteLocationOverride::default(),
-            max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-            health_policy: hares_io::HealthPolicy::default(),
-            first_hour_interpolation: hares_io::FirstHour::default(),
-            weather_year: hares_io::WeatherYear::default(),
-            warmup: hares_io::Warmup::default(),
+            site_location: hares_input::SiteLocationOverride::default(),
+            max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+            health_policy: hares_input::HealthPolicy::default(),
+            first_hour_interpolation: hares_input::FirstHour::default(),
+            weather_year: hares_input::WeatherYear::default(),
+            warmup: hares_input::Warmup::default(),
         };
 
         let config = DwellingConfig {
@@ -3505,7 +3510,7 @@ impl Dwelling {
     /// output-write override.
     pub fn from_toml_config_with_reports(
         path: &Path,
-        reports_override: Option<Vec<hares_io::ReportSpec>>,
+        reports_override: Option<Vec<hares_input::ReportSpec>>,
     ) -> Result<Self> {
         let toml_str = std::fs::read_to_string(path)
             .map_err(|err| HaresError::Io(format!("failed to read TOML config: {err}")))?;
@@ -3516,9 +3521,9 @@ impl Dwelling {
         // raises for the same key).
         let table: toml::Table = toml::from_str(&toml_str)
             .map_err(|err| HaresError::Io(format!("failed to parse TOML config: {err}")))?;
-        hares_io::check_removed_toml_keys(
+        hares_input::check_removed_toml_keys(
             &table,
-            hares_io::KeyScope::DwellingTable,
+            hares_input::KeyScope::DwellingTable,
             "the dwelling table",
         )
         .map_err(|err| HaresError::Io(err.to_string()))?;
@@ -3528,7 +3533,7 @@ impl Dwelling {
             .ok_or_else(|| HaresError::Io("TOML config has no [simulation] table".to_string()))?;
         for key in sim_table.keys() {
             if let Some(message) =
-                hares_io::removed_key_message(hares_io::KeyScope::SimulationConfig, key)
+                hares_input::removed_key_message(hares_input::KeyScope::SimulationConfig, key)
             {
                 return Err(HaresError::Io(message));
             }
@@ -3540,8 +3545,8 @@ impl Dwelling {
         // own boundary reads).
         if let Some(event_load) = table.get("event_load").and_then(|v| v.as_table()) {
             for key in event_load.keys() {
-                if let Some(message) = hares_io::removed_key_message(
-                    hares_io::KeyScope::EquipmentConfig,
+                if let Some(message) = hares_input::removed_key_message(
+                    hares_input::KeyScope::EquipmentConfig,
                     &format!("EventBasedLoad.{key}"),
                 ) {
                     return Err(HaresError::Io(message));
@@ -3567,16 +3572,16 @@ impl Dwelling {
         )?;
         let weather = build_synthetic_weather(&config, path)?;
         let dwelling_config = DwellingConfig {
-            hpxml: hares_io::InputSource::Path(path.to_path_buf()),
+            hpxml: hares_input::InputSource::Path(path.to_path_buf()),
             // The synthetic schedule is built below from the TOML definition
             // and handed to the builder directly; the config's schedule
             // source is never read on this path.
             schedule: None,
-            weather: hares_io::WeatherInput::Path(path.to_path_buf()),
+            weather: hares_input::WeatherInput::Path(path.to_path_buf()),
             // The defaults field is never read on this path: the inputs
             // below are assembled from parts around the empty handle, so
             // the field records the empty base no file is read from.
-            defaults: hares_io::DefaultsSource::directory(PathBuf::new()),
+            defaults: hares_input::DefaultsSource::directory(PathBuf::new()),
             settings: DwellingSettings::new(
                 config.simulation.clone(),
                 config.overrides.clone(),
@@ -3592,13 +3597,13 @@ impl Dwelling {
         // store through a missing file: a defaults load failure is an
         // error naming the path.
         let effective_zone = hpxml_building.climate_zone_iecc.clone();
-        let inputs = hares_io::ParsedInputs::from_parts_with_zone(
-            Arc::new(hares_io::ParsedHpxml::from_building(hpxml_building)),
-            Arc::new(hares_io::ParsedSchedule::from_series(
+        let inputs = hares_input::ParsedInputs::from_parts_with_zone(
+            Arc::new(hares_input::ParsedHpxml::from_building(hpxml_building)),
+            Arc::new(hares_input::ParsedSchedule::from_series(
                 schedule_result.schedule,
             )),
-            Arc::new(hares_io::ParsedWeather::from_series(weather)),
-            Arc::new(hares_io::ParsedDefaults::empty()),
+            Arc::new(hares_input::ParsedWeather::from_series(weather)),
+            Arc::new(hares_input::ParsedDefaults::empty()),
             effective_zone,
         );
         let builder = DwellingBlueprintBuilder::new(inputs, dwelling_config.settings.clone())?;
@@ -3755,7 +3760,7 @@ fn compare_warmup_days(
     today: &WarmupDayRecord,
     zone_ids: impl Iterator<Item = ZoneId>,
     day: u32,
-    warmup: &hares_io::WarmupConfig,
+    warmup: &hares_input::WarmupConfig,
 ) -> Result<DayComparison> {
     let mut converged = true;
     let mut failing = Vec::new();
@@ -4240,7 +4245,7 @@ fn assemble_from_blueprint_with_seed(
     // before equipment creation (it sets capacities on equipment specs).
     // ACCA Manual S-2017 oversizing factors applied: 1.4x heating, 1.15x cooling.
     {
-        let duct_params = hares_io::hpxml::resolve_hvac::compute_duct_dse_params(
+        let duct_params = hares_input::hpxml::resolve_hvac::compute_duct_dse_params(
             &bp.building,
             Some(&site_location),
         )
@@ -4286,7 +4291,7 @@ fn assemble_from_blueprint_with_seed(
         // per-bedroom FHR values (DOE 10 CFR Part 430 App E test procedure
         // bases sizing on the dwelling, not on occupancy).
         let n_bedrooms =
-            hares_io::hpxml::extract_bedroom_count(&bp.building, config.patches.as_ref())
+            hares_input::hpxml::extract_bedroom_count(&bp.building, config.patches.as_ref())
                 .map_err(|err| HaresError::Dwelling(format!("water heater autosizing: {err}")))?;
         crate::dwelling::autosize::autosize_water_heater_capacities(
             &mut equipment_specs,
@@ -4307,12 +4312,12 @@ fn assemble_from_blueprint_with_seed(
     // call returns hand the injection the basis OpenStudio-HPXML computes
     // its peaks from, so the period removes volume instead of spreading it
     // over the remaining days.
-    let pre_period_columns = hares_io::apply_unavailable_periods(
+    let pre_period_columns = hares_input::apply_unavailable_periods(
         environment.schedule_mut(),
         &bp.building.unavailable_periods,
     )?;
     let schedule_upsample_factor = environment.schedule_upsample_factor();
-    hares_io::inject_schedule_into_specs_with_pre_period(
+    hares_input::inject_schedule_into_specs_with_pre_period(
         &mut equipment_specs,
         environment.schedule_mut(),
         pre_period_columns.as_deref(),
@@ -4332,8 +4337,8 @@ fn assemble_from_blueprint_with_seed(
 
     // Construction-time invariants: run in every build profile.
     {
-        hares_io::check_hvac_setpoint_invariants(&equipment_specs);
-        hares_io::check_foundation_zone_invariant(&bp.building);
+        hares_input::check_hvac_setpoint_invariants(&equipment_specs);
+        hares_input::check_foundation_zone_invariant(&bp.building);
         let equipment_names: Vec<String> = equipment_specs.iter().map(|s| s.name.clone()).collect();
         check_basement_lighting_foundation(
             &equipment_names,
@@ -4432,7 +4437,7 @@ fn assemble_from_blueprint_with_seed(
     // Build zone-to-role map for equipment auto-routing.
     // Maps semantic zone roles (Indoor, Garage, Basement, etc.) to concrete
     // ZoneId values derived from the sorted building zone list. The last
-    // zone of a role wins: `appliance_site` in hares-io resolves an
+    // zone of a role wins: `appliance_site` in hares-input resolves an
     // appliance's zone by the same rule, so the two never name different
     // zones for one role.
     let zone_map = {
@@ -4440,24 +4445,24 @@ fn assemble_from_blueprint_with_seed(
         for (idx, zone) in bp.building.zones.iter().enumerate() {
             let id = ZoneId(u16::try_from(idx + 1).unwrap_or(u16::MAX));
             match &zone.zone_type {
-                hares_io::hpxml::ZoneType::Conditioned => {
+                hares_input::hpxml::ZoneType::Conditioned => {
                     map.insert(ZoneRole::Indoor, id);
                 }
-                hares_io::hpxml::ZoneType::Garage => {
+                hares_input::hpxml::ZoneType::Garage => {
                     map.insert(ZoneRole::Garage, id);
                 }
-                hares_io::hpxml::ZoneType::Foundation => {
+                hares_input::hpxml::ZoneType::Foundation => {
                     map.insert(ZoneRole::Basement, id);
                     map.insert(ZoneRole::Crawlspace, id);
                 }
-                hares_io::hpxml::ZoneType::Attic => {
+                hares_input::hpxml::ZoneType::Attic => {
                     map.insert(ZoneRole::Attic, id);
                 }
                 // Not modelled thermal zones — intentionally excluded from ZoneMap.
-                hares_io::hpxml::ZoneType::Outdoor
-                | hares_io::hpxml::ZoneType::Ground
-                | hares_io::hpxml::ZoneType::Adjacent => {}
-                hares_io::hpxml::ZoneType::Other(_) => {}
+                hares_input::hpxml::ZoneType::Outdoor
+                | hares_input::hpxml::ZoneType::Ground
+                | hares_input::hpxml::ZoneType::Adjacent => {}
+                hares_input::hpxml::ZoneType::Other(_) => {}
             }
         }
         // A conditioned foundation merged into the conditioned space (a
@@ -4482,7 +4487,7 @@ fn assemble_from_blueprint_with_seed(
     // declaration.
     //
     // Known limitation: this block emits observability logs but does not assert.
-    // The fix at crates/hares-io/src/hpxml/building.rs (T-0206) makes the
+    // The fix at crates/hares-input/src/hpxml/building.rs (T-0206) makes the
     // `ensure_referenced_zones_exist` / `build_zone_map` divergence structurally
     // impossible — both paths now set `vented: true` for attics — so a runtime
     // assertion would never fire in practice. The `tracing::debug!` log remains as
@@ -4490,7 +4495,7 @@ fn assemble_from_blueprint_with_seed(
     #[cfg(debug_assertions)]
     {
         for zone in &bp.building.zones {
-            if zone.zone_type == hares_io::hpxml::ZoneType::Attic {
+            if zone.zone_type == hares_input::hpxml::ZoneType::Attic {
                 tracing::debug!(
                     vented = zone.vented,
                     floor_area_m2 = zone.floor_area_m2,
@@ -4508,7 +4513,7 @@ fn assemble_from_blueprint_with_seed(
     // Blueprint callers may add specs with the same name (e.g. two "PV"
     // arrays) via add_equipment_spec(); assign canonical "Name #N" instance
     // names so the duplicate-detection pass below sees distinct names.
-    hares_io::hpxml::equipment::assign_instance_names(&mut equipment_specs);
+    hares_input::hpxml::equipment::assign_instance_names(&mut equipment_specs);
 
     // Dwelling-assigned equipment identity: inject a unique id into each
     // spec's config channel (raw parameters / typed payload) before
@@ -4517,7 +4522,7 @@ fn assemble_from_blueprint_with_seed(
     // addresses equipment individually instead of collapsing onto a single
     // shared id. Assembly-time only: blueprint callers can add specs after
     // parse, so the population is not final until here.
-    hares_io::hpxml::equipment::assign_equipment_ids(&mut equipment_specs);
+    hares_input::hpxml::equipment::assign_equipment_ids(&mut equipment_specs);
 
     // Equipment names whose loads are handled outside the registry (e.g. directly in the
     // simulation loop) -- silently skip them rather than emitting a warning.
@@ -4533,7 +4538,7 @@ fn assemble_from_blueprint_with_seed(
     // so a wildcard parameter is admitted only when some equipment built
     // below reads it.
     {
-        let population: Vec<&hares_io::EquipmentSpec> = equipment_specs
+        let population: Vec<&hares_input::EquipmentSpec> = equipment_specs
             .iter()
             .filter(|s| !HANDLED_OUTSIDE_REGISTRY.contains(&s.name.as_str()))
             .collect();
@@ -4732,7 +4737,7 @@ fn assemble_from_blueprint_with_seed(
             // override layers set a constant setpoint on a side, the merge
             // removed the resolution's source for that side and the
             // constant replaces it in the record.
-            let layers = hares_io::hpxml::override_layers(
+            let layers = hares_input::hpxml::override_layers(
                 override_root.as_object().unwrap_or(&override_root_empty),
                 &spec.name,
             )?;
@@ -4822,7 +4827,7 @@ fn assemble_from_blueprint_with_seed(
     allocated_loop_ids.insert(hares_equipment::DHW_DEMAND_LOOP.0);
     validate_equipment_loops(&declarations, &allocated_loop_ids)?;
 
-    let (roof_info, wall_azimuths) = hares_io::pv_sizing::extract_roof_info(&bp.building);
+    let (roof_info, wall_azimuths) = hares_input::pv_sizing::extract_roof_info(&bp.building);
     let latitude_deg = bp.building.site.latitude_deg;
     let facility_type = bp.building.residential_facility_type.clone();
     let solver_feedback_actor = SolverFeedbackActor::new();
@@ -4953,7 +4958,7 @@ fn assemble_from_blueprint_with_seed(
             bp.building
                 .zones
                 .iter()
-                .map(|z| z.zone_type == hares_io::hpxml::ZoneType::Conditioned)
+                .map(|z| z.zone_type == hares_input::hpxml::ZoneType::Conditioned)
                 .collect()
         },
         island_unserved_w: 0.0,
@@ -7078,7 +7083,7 @@ impl Dwelling {
     ///
     /// The outcome (days run, convergence, the final day's residuals) is
     /// recorded on [`Self::health`] at every return path once warm-up runs.
-    pub fn run_warmup_converged(&mut self, warmup: &hares_io::WarmupConfig) -> Result<u32> {
+    pub fn run_warmup_converged(&mut self, warmup: &hares_input::WarmupConfig) -> Result<u32> {
         self.record_replay_blocker(hares_types::ReplayBlocker::StateRestored);
         self.run_warmup_converged_inner(warmup)
     }
@@ -7087,7 +7092,7 @@ impl Dwelling {
     /// own warm-up runs through here (a caller's
     /// [`Self::run_warmup_converged`] records the state-restored replay
     /// blocker first, the build's own warm-up records nothing).
-    fn run_warmup_converged_inner(&mut self, warmup: &hares_io::WarmupConfig) -> Result<u32> {
+    fn run_warmup_converged_inner(&mut self, warmup: &hares_input::WarmupConfig) -> Result<u32> {
         let steps_per_day = steps_per_day_exact(self.clock.time_res.num_milliseconds())?;
 
         self.is_warming_up = true;
@@ -7579,7 +7584,7 @@ impl Dwelling {
         // the way a callback error at a flush is.
         if self.clock.current_step() == 0 && !self.is_warming_up {
             for (report, recorder) in self.reports.iter().zip(&self.recorders) {
-                if matches!(report.destination, hares_io::Destination::Callback)
+                if matches!(report.destination, hares_input::Destination::Callback)
                     && !recorder.has_attachment()
                 {
                     let err = HaresError::Callback {
@@ -10471,11 +10476,11 @@ fn discarded_thermal_w(rolled_back: &PortSlots, restored: &PortSlots) -> f64 {
 fn zone_display_name(
     zone: ZoneId,
     indoor_zone: ZoneId,
-    zone_type: Option<&hares_io::hpxml::ZoneType>,
+    zone_type: Option<&hares_input::hpxml::ZoneType>,
 ) -> String {
     if zone == indoor_zone {
         "Indoor".to_string()
-    } else if matches!(zone_type, Some(hares_io::hpxml::ZoneType::Attic)) {
+    } else if matches!(zone_type, Some(hares_input::hpxml::ZoneType::Attic)) {
         "Attic".to_string()
     } else {
         format!("Zone_{}", zone.0)
@@ -10802,7 +10807,7 @@ destination = "memory"
                 weather: WeatherInput::Path(home.join("weather.epw")),
                 defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
                 settings: DwellingSettings::new(
-                    hares_io::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
+                    hares_input::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
                     None,
                     1,
                     None,
@@ -10955,19 +10960,19 @@ destination = "memory"
             "cz4a_ashp_hpwh",
             "2024-02-27T00:00:00-07:00",
             900,
-            hares_io::Warmup::default(),
+            hares_input::Warmup::default(),
         );
         let mut dwelling = Dwelling::from_config(config).expect("the candidate builds");
 
         // The construction ran the default converging warm-up, so every
         // first-ever allocation in the phase is already paid here.
         dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .run_warmup_converged(&hares_input::WarmupConfig::default())
             .expect("the baseline warm-up runs");
         let baseline = dwelling.snapshot_allocation_totals().state_snapshot_phase;
 
         let days = dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .run_warmup_converged(&hares_input::WarmupConfig::default())
             .expect("the measured warm-up runs");
         let after = dwelling.snapshot_allocation_totals().state_snapshot_phase;
         assert_eq!(
@@ -11225,12 +11230,13 @@ destination = "memory"
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
                     first_hour_interpolation: Default::default(),
-                    weather_year: hares_io::WeatherYear::default(),
-                    warmup: hares_io::Warmup::Disabled,
+                    weather_year: hares_input::WeatherYear::default(),
+                    warmup: hares_input::Warmup::Disabled,
                 },
                 Some(serde_json::json!({
                     "Battery": {"bms_mode": "{\"SelfConsumption\": {\"min_soc\": 0.1, \
@@ -16722,7 +16728,7 @@ occupancy = 1.0
     /// available, so this error path only triggers when all sources are missing.
     #[test]
     fn occupied_dwelling_no_occupancy_data_source_errors_at_construction() {
-        use hares_io::hpxml::building::XmlNode;
+        use hares_input::hpxml::building::XmlNode;
         use std::collections::HashMap;
 
         // Load a fixture with occupants_present = false so the schedule
@@ -16871,14 +16877,14 @@ occupancy = 1.0
             ),
         };
 
-        let inputs = hares_io::ParsedInputs::from_parts_with_zone(
-            Arc::new(hares_io::ParsedHpxml::from_building(building)),
-            Arc::new(hares_io::ParsedSchedule::from_series(
+        let inputs = hares_input::ParsedInputs::from_parts_with_zone(
+            Arc::new(hares_input::ParsedHpxml::from_building(building)),
+            Arc::new(hares_input::ParsedSchedule::from_series(
                 schedule_result.schedule,
             )),
-            Arc::new(hares_io::ParsedWeather::from_series(weather)),
+            Arc::new(hares_input::ParsedWeather::from_series(weather)),
             Arc::new(
-                hares_io::ParsedDefaults::parse(&dwelling_config.defaults)
+                hares_input::ParsedDefaults::parse(&dwelling_config.defaults)
                     .expect("the no-occupancy defaults load"),
             ),
             None,
@@ -16944,7 +16950,7 @@ occupancy = 1.0
     #[test]
     fn dwelling_equipment_creation_errors_on_unknown_class() {
         let registry = EquipmentRegistry::new();
-        let spec = hares_io::EquipmentSpec {
+        let spec = hares_input::EquipmentSpec {
             instance_name: None,
             name: "Imaginary Widget".to_string(),
             fuel_type: hares_types::FuelType::Electric,
@@ -16977,7 +16983,7 @@ occupancy = 1.0
 
     #[test]
     fn attic_temperature_column_uses_zone_type_not_zone_id() {
-        use hares_io::hpxml::ZoneType;
+        use hares_input::hpxml::ZoneType;
 
         let zones = vec![
             ZoneState {
@@ -16994,7 +17000,7 @@ occupancy = 1.0
             },
         ];
         let zone_types = vec![ZoneType::Conditioned, ZoneType::Attic];
-        let schema = hares_io::build_schema_for_specs(
+        let schema = hares_output::build_schema_for_specs(
             &[],
             2,
             &[
@@ -17021,7 +17027,7 @@ occupancy = 1.0
 
     #[test]
     fn per_zone_hvac_columns_written_from_port_accumulators() {
-        use hares_io::hpxml::ZoneType;
+        use hares_input::hpxml::ZoneType;
         use hares_types::ports::PortContribution;
 
         let zones = vec![ZoneState {
@@ -17031,7 +17037,8 @@ occupancy = 1.0
             volume_m3: 200.0,
         }];
         let zone_types = vec![ZoneType::Conditioned];
-        let schema = hares_io::build_schema_for_specs(&[], 6, &[(ZoneId(1), "Indoor".to_string())]);
+        let schema =
+            hares_output::build_schema_for_specs(&[], 6, &[(ZoneId(1), "Indoor".to_string())]);
         let column_index = build_output_column_index(&schema);
         let caches = build_zone_column_caches(&zones, &zone_types, ZoneId(1), &column_index);
 
@@ -17103,19 +17110,19 @@ occupancy = 1.0
         // The catalogue merges the actor's declarations: the schema at
         // verbosity 0 (minimum columns) carries the actor columns.
         let actor_refs: Vec<&dyn Actor> = actors.iter().map(AsRef::as_ref).collect();
-        let input = hares_io::CatalogueInput {
+        let input = hares_output::CatalogueInput {
             equipment: Vec::new(),
             zones: Vec::new(),
             actors: actor_refs
                 .iter()
-                .map(|a| hares_io::CatalogueActor {
+                .map(|a| hares_output::CatalogueActor {
                     name: std::sync::Arc::from(a.name()),
                     output_variables: a.output_variables().to_vec(),
                 })
                 .collect(),
         };
-        let catalogue = hares_io::build_catalogue(&input).expect("the actor catalogue builds");
-        let extended = hares_io::build_schema(&catalogue, 0, false);
+        let catalogue = hares_output::build_catalogue(&input).expect("the actor catalogue builds");
+        let extended = hares_output::build_schema(&catalogue, 0, false);
         let extended_fields = extended.fields().len();
 
         // Schema must gain columns (one per actor telemetry key) beside
@@ -17175,8 +17182,8 @@ occupancy = 1.0
     fn zone_map_from_multi_zone_building_routes_equipment_correctly() {
         use chrono::TimeZone;
         use hares_equipment::scheduled_load::ScheduledLoad;
-        use hares_io::hpxml::building::XmlNode;
-        use hares_io::hpxml::{Site, Zone, ZoneType};
+        use hares_input::hpxml::building::XmlNode;
+        use hares_input::hpxml::{Site, Zone, ZoneType};
         use hares_types::{EndUse, ZoneMap, ZoneRole};
         use std::collections::HashMap;
 
@@ -19752,7 +19759,7 @@ occupancy = 0.0
         );
     }
 
-    fn pv_spec(tilt_deg: Option<f64>, resolution_deg: Option<f64>) -> hares_io::EquipmentSpec {
+    fn pv_spec(tilt_deg: Option<f64>, resolution_deg: Option<f64>) -> hares_input::EquipmentSpec {
         let config = hares_equipment::PvConfig {
             equipment_id: None,
             zone_id: None,
@@ -19773,11 +19780,11 @@ occupancy = 0.0
             arrays: None,
             der_1547: None,
         };
-        hares_io::hpxml::build_typed_spec(
+        hares_input::hpxml::build_typed_spec(
             "PV".to_string(),
             FuelType::Electric,
             config,
-            &hares_io::DefaultsStore::empty(),
+            &hares_input::DefaultsStore::empty(),
         )
         .expect("PV spec")
     }
@@ -20156,11 +20163,11 @@ occupancy = 0.0
     #[test]
     fn restore_truncates_memory_results_to_checkpoint_step() {
         let memory_reports = || {
-            vec![hares_io::ReportSpec {
+            vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(2),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Memory,
+                selection: hares_input::Selection::Verbosity(2),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Memory,
             }]
         };
         let mut past = bestest_with_reports(memory_reports());
@@ -20195,7 +20202,7 @@ occupancy = 0.0
     }
 
     /// A bestest dwelling carrying one report per `specs`.
-    fn bestest_with_reports(specs: Vec<hares_io::ReportSpec>) -> Dwelling {
+    fn bestest_with_reports(specs: Vec<hares_input::ReportSpec>) -> Dwelling {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         Dwelling::from_toml_config_with_reports(&base_path, Some(specs)).expect("build bestest")
@@ -20208,11 +20215,11 @@ occupancy = 0.0
     fn restore_with_file_destination_is_a_typed_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let csv_reports = || {
-            vec![hares_io::ReportSpec {
+            vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(2),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Csv {
+                selection: hares_input::Selection::Verbosity(2),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Csv {
                     path: tmp.path().join("frame.csv"),
                     overwrite: true,
                 },
@@ -20253,11 +20260,11 @@ occupancy = 0.0
     fn restore_with_parquet_destination_is_a_typed_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let parquet_reports = || {
-            vec![hares_io::ReportSpec {
+            vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(2),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Parquet {
+                selection: hares_input::Selection::Verbosity(2),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Parquet {
                     path: tmp.path().join("frame.parquet"),
                     overwrite: true,
                 },
@@ -20295,9 +20302,9 @@ occupancy = 0.0
     impl BatchCallback for SilentCallback {
         fn on_batch(
             &mut self,
-            _ctx: &hares_io::output::callback::BatchContext<'_>,
+            _ctx: &hares_output::callback::BatchContext<'_>,
             _batch: &arrow::array::RecordBatch,
-        ) -> std::result::Result<(), hares_io::output::callback::CallbackError> {
+        ) -> std::result::Result<(), hares_output::callback::CallbackError> {
             Ok(())
         }
     }
@@ -20305,11 +20312,11 @@ occupancy = 0.0
     #[test]
     fn restore_with_callback_destination_is_a_typed_error() {
         let callback_reports = || {
-            vec![hares_io::ReportSpec {
+            vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(2),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Callback,
+                selection: hares_input::Selection::Verbosity(2),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Callback,
             }]
         };
         let mut source = bestest_with_reports(callback_reports());
@@ -20553,7 +20560,7 @@ destination = "memory"
             weather: WeatherInput::Path(home.join("weather.epw")),
             defaults: DefaultsSource::directory(root.join("python/hares/defaults")),
             settings: DwellingSettings::new(
-                hares_io::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
+                hares_input::SimulationConfig::from_toml(&sim_toml).expect("sim config parses"),
                 None,
                 1,
                 None,
@@ -21152,7 +21159,7 @@ destination = "memory"
         let mut recorder = StreamingRecorder::new(
             schema.clone(),
             10,
-            hares_io::Destination::Csv {
+            hares_input::Destination::Csv {
                 path: tmp.path().join("drift.csv"),
                 overwrite: false,
             },
@@ -21167,11 +21174,11 @@ destination = "memory"
         // verbosity-3 tier. The frozen schema the bindings resolve against
         // spans the Electric Power and Mode columns but not the SOC column
         // the tier promises.
-        dwelling.reports = vec![hares_io::ReportSpec {
+        dwelling.reports = vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(3),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Csv {
+            selection: hares_input::Selection::Verbosity(3),
+            frequency: hares_input::Frequency::default(),
+            destination: hares_input::Destination::Csv {
                 path: tmp.path().join("drift.csv"),
                 overwrite: false,
             },
@@ -21636,17 +21643,17 @@ destination = "memory"
         let tmp = tempfile::tempdir().expect("tempdir");
         let missing_parent = tmp.path().join("missing").join("out.csv");
         for report in &mut dwelling.reports {
-            report.destination = hares_io::Destination::Csv {
+            report.destination = hares_input::Destination::Csv {
                 path: missing_parent.clone(),
                 overwrite: false,
             };
         }
         if dwelling.reports.is_empty() {
-            dwelling.reports = vec![hares_io::ReportSpec {
+            dwelling.reports = vec![hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(2),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Csv {
+                selection: hares_input::Selection::Verbosity(2),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Csv {
                     path: missing_parent,
                     overwrite: false,
                 },
@@ -21728,11 +21735,11 @@ destination = "memory"
         // The next roster plan fails at the recorder: the summary digest
         // before and after the rejected set_tariff must match on bits.
         let tmp = tempfile::tempdir().expect("tempdir");
-        dwelling.reports = vec![hares_io::ReportSpec {
+        dwelling.reports = vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Csv {
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::default(),
+            destination: hares_input::Destination::Csv {
                 path: tmp.path().join("missing").join("out.csv"),
                 overwrite: false,
             },
@@ -23471,10 +23478,10 @@ latent_gain_fraction = 0.08
         // repeats a day bit for bit, so the run is non-converging by
         // construction.
         let days = dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig {
+            .run_warmup_converged(&hares_input::WarmupConfig {
                 temperature_tolerance_c: 0.0,
                 max_days: 2,
-                ..hares_io::WarmupConfig::default()
+                ..hares_input::WarmupConfig::default()
             })
             .expect("warm-up runs to its day cap");
 
@@ -23515,10 +23522,10 @@ latent_gain_fraction = 0.08
         let mut dwelling = bestest_dwelling();
 
         let days = dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig {
+            .run_warmup_converged(&hares_input::WarmupConfig {
                 temperature_tolerance_c: 0.5,
                 max_days: 3,
-                ..hares_io::WarmupConfig::default()
+                ..hares_input::WarmupConfig::default()
             })
             .expect("warm-up runs");
 
@@ -23604,7 +23611,7 @@ latent_gain_fraction = 0.08
         dwelling.clock.time_res = chrono::Duration::milliseconds(500);
 
         let err = dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .run_warmup_converged(&hares_input::WarmupConfig::default())
             .expect_err("a 500 ms resolution cannot divide the day");
         assert!(
             err.to_string().contains("500 ms"),
@@ -23663,7 +23670,7 @@ latent_gain_fraction = 0.08
         fixture: &str,
         start: &str,
         step_s: i64,
-        warmup: hares_io::Warmup,
+        warmup: hares_input::Warmup,
     ) -> DwellingConfig {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/parity")
@@ -23690,11 +23697,12 @@ latent_gain_fraction = 0.08
                     setpoint_deadband_c: None,
                     master_seed: 0,
                     civil_timezone: None,
-                    site_location: hares_io::SiteLocationOverride::default(),
-                    max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                    health_policy: hares_io::HealthPolicy::default(),
+                    site_location: hares_input::SiteLocationOverride::default(),
+                    max_consecutive_step_failures:
+                        hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                    health_policy: hares_input::HealthPolicy::default(),
                     first_hour_interpolation: Default::default(),
-                    weather_year: hares_io::WeatherYear::default(),
+                    weather_year: hares_input::WeatherYear::default(),
                     warmup,
                 },
                 None,
@@ -23822,7 +23830,7 @@ latent_gain_fraction = 0.08
                 "cz4a_ashp_hpwh",
                 "2024-02-27T00:00:00-07:00",
                 900,
-                hares_io::Warmup::default(),
+                hares_input::Warmup::default(),
             );
             let dwelling = Dwelling::from_config(config).expect("the candidate builds");
             match &dwelling.health().warmup {
@@ -23844,9 +23852,9 @@ latent_gain_fraction = 0.08
             "cz4a_ashp_hpwh",
             "2024-02-27T00:00:00-07:00",
             900,
-            hares_io::Warmup::Converge(hares_io::WarmupConfig {
+            hares_input::Warmup::Converge(hares_input::WarmupConfig {
                 min_days: 5,
-                ..hares_io::WarmupConfig::default()
+                ..hares_input::WarmupConfig::default()
             }),
         );
         let dwelling = Dwelling::from_config(config).expect("the candidate builds");
@@ -23873,9 +23881,9 @@ latent_gain_fraction = 0.08
             "cz2a_gas_furnace_ac_res_wh",
             "2023-01-01T00:00:00-07:00",
             3600,
-            hares_io::Warmup::Converge(hares_io::WarmupConfig {
+            hares_input::Warmup::Converge(hares_input::WarmupConfig {
                 max_days: 2,
-                ..hares_io::WarmupConfig::default()
+                ..hares_input::WarmupConfig::default()
             }),
         );
         let dwelling = Dwelling::from_config(config).expect("the candidate builds");
@@ -23924,12 +23932,12 @@ latent_gain_fraction = 0.08
             "cz2a_gas_furnace_ac_res_wh",
             "2023-01-01T00:00:00-07:00",
             3600,
-            hares_io::Warmup::Disabled,
+            hares_input::Warmup::Disabled,
         );
         let mut dwelling = Dwelling::from_config(config).expect("the candidate builds");
         warmup_test_hooks::arm_nan_daily_max(1, 1);
         let err = dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig::default())
+            .run_warmup_converged(&hares_input::WarmupConfig::default())
             .expect_err("the day-2 comparison meets the NaN residual");
         assert!(
             matches!(
@@ -23983,7 +23991,7 @@ latent_gain_fraction = 0.08
         let mut dwelling = bestest_dwelling();
         assert_eq!(
             dwelling.sim_config.health_policy,
-            hares_io::HealthPolicy::default(),
+            hares_input::HealthPolicy::default(),
             "a dwelling built without a policy carries the empty one"
         );
         let failing = FlakyPortEquipment::new("FlakyEq", 500.0, &[true]);
@@ -24016,7 +24024,7 @@ latent_gain_fraction = 0.08
     #[test]
     fn strict_policy_escalates_port_rollback_naming_step_and_source() {
         let mut dwelling = bestest_dwelling();
-        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        dwelling.sim_config.health_policy = hares_input::HealthPolicy::strict();
         let failing = FlakyPortEquipment::new("FlakyEq", 500.0, &[true]);
         replace_equipment_for_test(&mut dwelling, vec![Box::new(failing)]);
 
@@ -24053,9 +24061,9 @@ latent_gain_fraction = 0.08
     #[test]
     fn limit_allows_count_up_to_limit() {
         let mut dwelling = bestest_dwelling();
-        dwelling.sim_config.health_policy = hares_io::HealthPolicy {
+        dwelling.sim_config.health_policy = hares_input::HealthPolicy {
             max_port_rollbacks: Some(2),
-            ..hares_io::HealthPolicy::default()
+            ..hares_input::HealthPolicy::default()
         };
         // The failure budget is raised out of the way: the policy is the subject.
         dwelling.sim_config.max_consecutive_step_failures = 10;
@@ -24103,9 +24111,9 @@ latent_gain_fraction = 0.08
     #[test]
     fn the_policy_escalation_wins_over_the_failure_budget_on_the_same_step() {
         let mut dwelling = bestest_dwelling();
-        dwelling.sim_config.health_policy = hares_io::HealthPolicy {
+        dwelling.sim_config.health_policy = hares_input::HealthPolicy {
             max_port_rollbacks: Some(0),
-            ..hares_io::HealthPolicy::default()
+            ..hares_input::HealthPolicy::default()
         };
         // A zero budget tolerates no failure, so the first failing step
         // crosses the policy and the budget at once: only the violation
@@ -24147,16 +24155,16 @@ latent_gain_fraction = 0.08
     #[test]
     fn strict_policy_escalates_warmup_nonconvergence() {
         let mut dwelling = bestest_dwelling();
-        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        dwelling.sim_config.health_policy = hares_input::HealthPolicy::strict();
 
         // A one-iteration budget cannot converge: the criterion compares
         // two consecutive warm-up days' end states, so warm-up exits
         // without meeting it and the strict policy escalates.
         let err = dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig {
+            .run_warmup_converged(&hares_input::WarmupConfig {
                 temperature_tolerance_c: 1e-9,
                 max_days: 1,
-                ..hares_io::WarmupConfig::default()
+                ..hares_input::WarmupConfig::default()
             })
             .expect_err("the strict policy escalates the non-convergence");
 
@@ -24241,7 +24249,7 @@ occupancy = 1.0
             .expect("build a dwelling without a warm-up");
         assert_eq!(
             dwelling.sim_config.health_policy,
-            hares_io::HealthPolicy::strict(),
+            hares_input::HealthPolicy::strict(),
             "the TOML table spells the strict policy"
         );
         assert_eq!(
@@ -24266,7 +24274,7 @@ occupancy = 1.0
     #[test]
     fn strict_policy_escalates_rejected_control_signals_naming_the_target() {
         let mut dwelling = bestest_dwelling();
-        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        dwelling.sim_config.health_policy = hares_input::HealthPolicy::strict();
         let mut eq = TestEquipment::new(
             "LoadA",
             ControlCapabilities::POWER_SETPOINT | ControlCapabilities::SOC_TARGET,
@@ -24313,9 +24321,9 @@ occupancy = 1.0
     #[test]
     fn rejected_signal_limit_counts_across_passes_naming_the_run_total() {
         let mut dwelling = bestest_dwelling();
-        dwelling.sim_config.health_policy = hares_io::HealthPolicy {
+        dwelling.sim_config.health_policy = hares_input::HealthPolicy {
             max_rejected_control_signals: Some(2),
-            ..hares_io::HealthPolicy::default()
+            ..hares_input::HealthPolicy::default()
         };
         let mut eq = TestEquipment::new(
             "LoadA",
@@ -24373,7 +24381,7 @@ occupancy = 1.0
         dwelling
             .record_clamped_actions(2)
             .expect("counted clamps stay counted under the empty policy");
-        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        dwelling.sim_config.health_policy = hares_input::HealthPolicy::strict();
         let err = dwelling
             .record_clamped_actions(1)
             .expect_err("the strict policy escalates the clamp");
@@ -24403,7 +24411,7 @@ occupancy = 1.0
         use hares_equipment::{CentralAirConditionerConfig, DuctConfig, HvacSetpointConfig};
 
         let mut dwelling = bestest_dwelling();
-        dwelling.sim_config.health_policy = hares_io::HealthPolicy::strict();
+        dwelling.sim_config.health_policy = hares_input::HealthPolicy::strict();
         let config = EquipmentConfig::from_typed(
             "AC1".to_string(),
             "Air Conditioner".to_string(),
@@ -24552,9 +24560,9 @@ occupancy = 1.0
         replace_equipment_for_test(&mut dwelling, vec![Box::new(eq)]);
 
         let err = dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig {
+            .run_warmup_converged(&hares_input::WarmupConfig {
                 max_days: 2,
-                ..hares_io::WarmupConfig::default()
+                ..hares_input::WarmupConfig::default()
             })
             .expect_err("a NaN zone temperature during warm-up must fail the run");
 
@@ -24576,9 +24584,9 @@ occupancy = 1.0
         dwelling.set_hvac_negative_energy_failure_for_test();
 
         let err = dwelling
-            .run_warmup_converged(&hares_io::WarmupConfig {
+            .run_warmup_converged(&hares_input::WarmupConfig {
                 max_days: 2,
-                ..hares_io::WarmupConfig::default()
+                ..hares_input::WarmupConfig::default()
             })
             .expect_err("the armed seam must fail the warm-up run");
 
@@ -25459,15 +25467,15 @@ occupancy = 0.0
         // the freeze builds it: from the dwelling's catalogue, whose actor
         // block already carries the actor columns.
         let catalogue = dwelling.catalogue();
-        let schema = hares_io::build_schema(&catalogue, 8, false);
+        let schema = hares_output::build_schema(&catalogue, 8, false);
         let schema = enrich_schema_with_telemetry_units(schema, &equipment, &catalogue);
         let column_name = "Total Electric Power (kW)";
         let selections = [
-            hares_io::Selection::Named(vec![column_name.to_string()]),
-            hares_io::Selection::Verbosity(8),
+            hares_input::Selection::Named(vec![column_name.to_string()]),
+            hares_input::Selection::Verbosity(8),
         ];
         let row_plan =
-            hares_io::RowPlan::build(&selections, &hares_io::SchemaSurface::new(&schema))
+            hares_output::RowPlan::build(&selections, &hares_output::SchemaSurface::new(&schema))
                 .expect("plan builds");
         let expected: std::collections::HashSet<String> = schema
             .fields()
@@ -25483,13 +25491,13 @@ occupancy = 0.0
         // the full tier-8 schema. Both are memory destinations, so both
         // frames retain every batch.
         let named_schema =
-            hares_io::build_schema_for_columns(&catalogue, &[column_name.to_string()]);
+            hares_output::build_schema_for_columns(&catalogue, &[column_name.to_string()]);
         let named_schema = enrich_schema_with_telemetry_units(named_schema, &equipment, &catalogue);
         let named_recorder =
-            StreamingRecorder::new(named_schema, 10, hares_io::Destination::Memory)
+            StreamingRecorder::new(named_schema, 10, hares_input::Destination::Memory)
                 .expect("named recorder");
         let full_recorder =
-            StreamingRecorder::new(schema.clone(), 10, hares_io::Destination::Memory)
+            StreamingRecorder::new(schema.clone(), 10, hares_input::Destination::Memory)
                 .expect("full recorder");
         dwelling.recorders = vec![named_recorder, full_recorder];
         dwelling.roster.row_plan = row_plan;
@@ -25570,14 +25578,14 @@ occupancy = 0.0
         // freeze builds it: from the dwelling's catalogue, whose actor
         // block already carries the actor columns.
         let catalogue = dwelling.catalogue();
-        let schema = hares_io::build_schema(&catalogue, 2, false);
+        let schema = hares_output::build_schema(&catalogue, 2, false);
         let schema = enrich_schema_with_telemetry_units(schema, &equipment, &catalogue);
         // The golden column indices: every value column's position by name,
         // the map the freeze resolved against.
         let golden_columns = build_output_column_index(&schema);
-        let row_plan = hares_io::RowPlan::build(
-            &[hares_io::Selection::Verbosity(2)],
-            &hares_io::SchemaSurface::new(&schema),
+        let row_plan = hares_output::RowPlan::build(
+            &[hares_input::Selection::Verbosity(2)],
+            &hares_output::SchemaSurface::new(&schema),
         )
         .expect("plan builds");
         let bindings = build_output_row_bindings(
@@ -25588,15 +25596,15 @@ occupancy = 0.0
         )
         .expect("bindings resolve");
 
-        let recorder = StreamingRecorder::new(schema.clone(), 1, hares_io::Destination::Memory)
+        let recorder = StreamingRecorder::new(schema.clone(), 1, hares_input::Destination::Memory)
             .expect("recorder");
         dwelling.recorders = vec![recorder];
         // The step's record gate reads the configured reports.
-        dwelling.reports = vec![hares_io::ReportSpec {
+        dwelling.reports = vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(2),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Memory,
+            selection: hares_input::Selection::Verbosity(2),
+            frequency: hares_input::Frequency::default(),
+            destination: hares_input::Destination::Memory,
         }];
         dwelling.roster.row_plan = row_plan;
         dwelling.roster.record_projections = dwelling.roster.row_plan.projections().to_vec();
@@ -25679,11 +25687,11 @@ occupancy = 0.0
         let mut dwelling = bestest_dwelling();
         // One memory report at verbosity 0: the freeze the swaps' roster
         // plans rebuild the bindings through.
-        dwelling.reports = vec![hares_io::ReportSpec {
+        dwelling.reports = vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(0),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Memory,
+            selection: hares_input::Selection::Verbosity(0),
+            frequency: hares_input::Frequency::default(),
+            destination: hares_input::Destination::Memory,
         }];
         dwelling.output_chunk_size = 1;
 
@@ -25830,7 +25838,7 @@ occupancy = 0.0
     #[test]
     fn plan_equipment_columns_v7_all_columns_resolved_for_applicable_equipment() {
         let specs = vec![
-            hares_io::EquipmentSpec {
+            hares_input::EquipmentSpec {
                 instance_name: None,
                 name: "ASHP Heater".to_string(),
                 fuel_type: FuelType::Electric,
@@ -25844,7 +25852,7 @@ occupancy = 0.0
                 heating_setpoint_source: None,
                 cooling_setpoint_source: None,
             },
-            hares_io::EquipmentSpec {
+            hares_input::EquipmentSpec {
                 instance_name: None,
                 name: "Battery".to_string(),
                 fuel_type: FuelType::Electric,
@@ -25859,7 +25867,7 @@ occupancy = 0.0
                 cooling_setpoint_source: None,
             },
         ];
-        let schema = hares_io::build_schema_for_specs(&specs, 7, &[]);
+        let schema = hares_output::build_schema_for_specs(&specs, 7, &[]);
         let column_index = build_output_column_index(&schema);
 
         let mut eq1 = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
@@ -25917,7 +25925,7 @@ occupancy = 0.0
     /// For every `FuelType` variant, the schema emits a
     /// `"{name} Gas Power (therms/hour)"` column if and only if
     /// `plan_equipment_columns` resolves it. Both sites share
-    /// `hares_io::fuel_reports_gas_power_column`; this test guards against the
+    /// `hares_output::fuel_reports_gas_power_column`; this test guards against the
     /// predicate being forked again (previously Wood/Coal/WoodPellet equipment
     /// got a schema column that was never populated).
     #[test]
@@ -25928,7 +25936,7 @@ occupancy = 0.0
             .chain(std::iter::once(FuelType::None));
         for fuel in all_fuels {
             let name = "Test Load";
-            let specs = vec![hares_io::EquipmentSpec {
+            let specs = vec![hares_input::EquipmentSpec {
                 instance_name: None,
                 name: name.to_string(),
                 fuel_type: fuel,
@@ -25942,7 +25950,7 @@ occupancy = 0.0
                 heating_setpoint_source: None,
                 cooling_setpoint_source: None,
             }];
-            let schema = hares_io::build_schema_for_specs(&specs, 1, &[]);
+            let schema = hares_output::build_schema_for_specs(&specs, 1, &[]);
             let column_index = build_output_column_index(&schema);
             let schema_has_gas_col =
                 column_index.contains_key(&format!("{name} {GAS_POWER_SUFFIX}"));
@@ -25965,7 +25973,7 @@ occupancy = 0.0
             );
             assert_eq!(
                 schema_has_gas_col,
-                hares_io::fuel_reports_gas_power_column(fuel),
+                hares_output::fuel_reports_gas_power_column(fuel),
                 "fuel {fuel:?}: schema must follow the shared predicate"
             );
         }
@@ -25974,7 +25982,7 @@ occupancy = 0.0
     /// At verbosity 0, per-equipment columns are not in the schema.
     #[test]
     fn plan_equipment_columns_v0_all_per_equipment_columns_none() {
-        let schema = hares_io::build_schema_for_specs(&[], 0, &[]);
+        let schema = hares_output::build_schema_for_specs(&[], 0, &[]);
         let column_index = build_output_column_index(&schema);
         let eq = TestEquipment::new("ASHP Heater", ControlCapabilities::empty());
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
@@ -26004,7 +26012,7 @@ occupancy = 0.0
     /// fuel type.
     #[test]
     fn gas_equipment_reactive_and_power_factor_columns_resolve_at_verbosity_5() {
-        let specs = vec![hares_io::EquipmentSpec {
+        let specs = vec![hares_input::EquipmentSpec {
             instance_name: None,
             name: "Gas Furnace".to_string(),
             fuel_type: FuelType::Gas,
@@ -26018,7 +26026,7 @@ occupancy = 0.0
             heating_setpoint_source: None,
             cooling_setpoint_source: None,
         }];
-        let schema = hares_io::build_schema_for_specs(&specs, 5, &[]);
+        let schema = hares_output::build_schema_for_specs(&specs, 5, &[]);
         let column_index = build_output_column_index(&schema);
         let mut eq = TestEquipment::new("Gas Furnace", ControlCapabilities::empty());
         eq.descriptor.end_use = EndUse::HVAC_HEATING;
@@ -26040,7 +26048,7 @@ occupancy = 0.0
             "gas furnace blower emits Q — power factor column must resolve"
         );
         // Below verbosity 5 the columns are absent for all equipment.
-        let schema_v4 = hares_io::build_schema_for_specs(&specs, 4, &[]);
+        let schema_v4 = hares_output::build_schema_for_specs(&specs, 4, &[]);
         let column_index_v4 = build_output_column_index(&schema_v4);
         let mut eq_v4 = TestEquipment::new("Gas Furnace", ControlCapabilities::empty());
         eq_v4.descriptor.end_use = EndUse::HVAC_HEATING;
@@ -26059,7 +26067,7 @@ occupancy = 0.0
     /// A typo in a column name string results in `None` index.
     #[test]
     fn column_name_typo_results_in_none_column_index() {
-        let specs = vec![hares_io::EquipmentSpec {
+        let specs = vec![hares_input::EquipmentSpec {
             instance_name: None,
             name: "ASHP Heater".to_string(),
             fuel_type: FuelType::Electric,
@@ -26073,7 +26081,7 @@ occupancy = 0.0
             heating_setpoint_source: None,
             cooling_setpoint_source: None,
         }];
-        let schema = hares_io::build_schema_for_specs(&specs, 1, &[]);
+        let schema = hares_output::build_schema_for_specs(&specs, 1, &[]);
         let column_index = build_output_column_index(&schema);
         assert!(column_index.contains_key("ASHP Heater Electric Power (kW)"));
         assert!(!column_index.contains_key("ASHP Heater Electrix Power (kW)"));
@@ -26082,7 +26090,7 @@ occupancy = 0.0
     /// Column suffix constants produce names matching the schema.
     #[test]
     fn column_suffix_constants_match_build_schema_output() {
-        let specs = vec![hares_io::EquipmentSpec {
+        let specs = vec![hares_input::EquipmentSpec {
             instance_name: None,
             name: "Air Conditioner".to_string(),
             fuel_type: FuelType::Electric,
@@ -26096,7 +26104,7 @@ occupancy = 0.0
             heating_setpoint_source: None,
             cooling_setpoint_source: None,
         }];
-        let schema = hares_io::build_schema_for_specs(&specs, 7, &[]);
+        let schema = hares_output::build_schema_for_specs(&specs, 7, &[]);
         let column_index = build_output_column_index(&schema);
         let name = "Air Conditioner";
         assert!(column_index.contains_key(&format!("{name} {ELECTRIC_POWER_SUFFIX}")));
@@ -26115,10 +26123,10 @@ occupancy = 0.0
     /// `HVAC_DUCT_LOSSES_COL` constant resolves in the schema at v5+.
     #[test]
     fn duct_losses_column_uses_shared_constant() {
-        let schema_v5 = hares_io::build_schema_for_specs(&[], 5, &[]);
+        let schema_v5 = hares_output::build_schema_for_specs(&[], 5, &[]);
         let col_idx_v5 = build_output_column_index(&schema_v5);
         assert!(col_idx_v5.contains_key(HVAC_DUCT_LOSSES_COL));
-        let schema_v4 = hares_io::build_schema_for_specs(&[], 4, &[]);
+        let schema_v4 = hares_output::build_schema_for_specs(&[], 4, &[]);
         let col_idx_v4 = build_output_column_index(&schema_v4);
         assert!(!col_idx_v4.contains_key(HVAC_DUCT_LOSSES_COL));
     }
@@ -26134,9 +26142,9 @@ occupancy = 0.0
     #[test]
     fn all_output_scope_keys_have_column_mappings_at_max_verbosity() {
         use hares_types::telemetry_keys::{self as tk};
-        let specs: Vec<hares_io::EquipmentSpec> = vec![
+        let specs: Vec<hares_input::EquipmentSpec> = vec![
             // HVAC with compressor (heat pump)
-            hares_io::EquipmentSpec {
+            hares_input::EquipmentSpec {
                 instance_name: Some("ASHP Heater".to_string()),
                 name: "ASHP Heater".to_string(),
                 fuel_type: FuelType::Electric,
@@ -26151,7 +26159,7 @@ occupancy = 0.0
                 cooling_setpoint_source: None,
             },
             // PV
-            hares_io::EquipmentSpec {
+            hares_input::EquipmentSpec {
                 instance_name: Some("PV".to_string()),
                 name: "PV".to_string(),
                 fuel_type: FuelType::Electric,
@@ -26166,7 +26174,7 @@ occupancy = 0.0
                 cooling_setpoint_source: None,
             },
             // EV
-            hares_io::EquipmentSpec {
+            hares_input::EquipmentSpec {
                 instance_name: Some("EV".to_string()),
                 name: "EV".to_string(),
                 fuel_type: FuelType::Electric,
@@ -26181,7 +26189,7 @@ occupancy = 0.0
                 cooling_setpoint_source: None,
             },
         ];
-        let schema = hares_io::build_schema_for_specs(&specs, 8, &[]);
+        let schema = hares_output::build_schema_for_specs(&specs, 8, &[]);
         let column_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
 
         // Build the expected column set from the schema and the
@@ -26307,13 +26315,13 @@ occupancy = 0.0
 
     /// A catalogue built from live equipment descriptors, for the enrich
     /// tests.
-    fn catalogue_from_equipment(equipment: &[Box<dyn Equipment>]) -> hares_io::Catalogue {
-        let input = hares_io::CatalogueInput {
+    fn catalogue_from_equipment(equipment: &[Box<dyn Equipment>]) -> hares_output::Catalogue {
+        let input = hares_output::CatalogueInput {
             equipment: equipment_refs(equipment)
                 .iter()
                 .map(|eq| {
                     let d = eq.descriptor();
-                    hares_io::CatalogueEquipment {
+                    hares_output::CatalogueEquipment {
                         name: d.name.clone(),
                         instance_name: None,
                         id: d.id,
@@ -26327,7 +26335,7 @@ occupancy = 0.0
             zones: Vec::new(),
             actors: Vec::new(),
         };
-        hares_io::build_catalogue(&input).expect("the test catalogue builds")
+        hares_output::build_catalogue(&input).expect("the test catalogue builds")
     }
 
     #[test]
@@ -26342,7 +26350,7 @@ occupancy = 0.0
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
 
         let catalogue = catalogue_from_equipment(&equipment);
-        let schema = hares_io::build_schema(&catalogue, 5, false);
+        let schema = hares_output::build_schema(&catalogue, 5, false);
         let enriched =
             enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment), &catalogue);
         let reactive_col = enriched
@@ -26368,7 +26376,7 @@ occupancy = 0.0
         let equipment: Vec<Box<dyn Equipment>> = vec![Box::new(eq)];
 
         let catalogue = catalogue_from_equipment(&equipment);
-        let schema = hares_io::build_schema(&catalogue, 5, false);
+        let schema = hares_output::build_schema(&catalogue, 5, false);
         let enriched =
             enrich_schema_with_telemetry_units(schema, &equipment_refs(&equipment), &catalogue);
         let reactive_col = enriched
@@ -26394,7 +26402,7 @@ occupancy = 0.0
         // the catalogue; the specs path carries no equipment declarations,
         // so the columns hold the static per-capability table's `code`
         // declaration.
-        let specs = [hares_io::EquipmentSpec {
+        let specs = [hares_input::EquipmentSpec {
             instance_name: None,
             name: "EV".to_string(),
             fuel_type: FuelType::Electric,
@@ -26409,11 +26417,11 @@ occupancy = 0.0
             cooling_setpoint_source: None,
         }];
         let zones = vec![(ZoneId(1), "Indoor".to_string())];
-        let input = hares_io::CatalogueInput {
+        let input = hares_output::CatalogueInput {
             equipment: specs
                 .iter()
                 .enumerate()
-                .map(|(i, s)| hares_io::CatalogueEquipment {
+                .map(|(i, s)| hares_output::CatalogueEquipment {
                     name: s.name.clone(),
                     instance_name: None,
                     id: EquipmentId(u32::try_from(i + 1).expect("equipment count")),
@@ -26430,8 +26438,8 @@ occupancy = 0.0
             zones,
             actors: Vec::new(),
         };
-        let catalogue = hares_io::build_catalogue(&input).expect("the specs catalogue builds");
-        let schema = hares_io::build_schema(&catalogue, 8, false);
+        let catalogue = hares_output::build_catalogue(&input).expect("the specs catalogue builds");
+        let schema = hares_output::build_schema(&catalogue, 8, false);
 
         let make = |unit_declaration: TelemetryField| -> Vec<Box<dyn Equipment>> {
             make_multiple(vec![unit_declaration])
@@ -26627,11 +26635,11 @@ occupancy = 1.0"#,
     #[test]
     fn probe_level0_union_schema() {
         let mut dwelling = bestest_dwelling();
-        dwelling.reports = vec![hares_io::ReportSpec {
+        dwelling.reports = vec![hares_input::ReportSpec {
             name: "frame".to_string(),
-            selection: hares_io::Selection::Verbosity(0),
-            frequency: hares_io::Frequency::default(),
-            destination: hares_io::Destination::Memory,
+            selection: hares_input::Selection::Verbosity(0),
+            frequency: hares_input::Frequency::default(),
+            destination: hares_input::Destination::Memory,
         }];
         let mut load = TestEquipment::new("Sole Load", ControlCapabilities::empty());
         load.init(&EquipmentConfig::default(), &dwelling.latest_env)

@@ -16,7 +16,7 @@ use arrow::array::Float64Array;
 use arrow::record_batch::RecordBatch;
 use chrono::{Duration, Timelike};
 use hares_fleet::{Fleet, FleetReport};
-use hares_io::{Frequency, Selection};
+use hares_input::{Frequency, Selection};
 
 use super::helpers;
 
@@ -39,11 +39,11 @@ fn standalone_home_periods(
         duration,
         seed,
     );
-    config.settings.sim_config.reports = vec![hares_io::ReportSpec {
+    config.settings.sim_config.reports = vec![hares_input::ReportSpec {
         name: "frame".to_string(),
         selection: Selection::Verbosity(2),
         frequency: Frequency::Timestep,
-        destination: hares_io::Destination::Memory,
+        destination: hares_input::Destination::Memory,
     }];
     let mut dwelling = hares_core::Dwelling::from_config(config).expect("the home builds");
     let sim_config = dwelling.sim_config().clone();
@@ -153,7 +153,7 @@ pub fn run_aggregation_check() -> Result<(), Vec<String>> {
         .collect();
     // The fourth home's schedule does not exist: the home fails.
     configs.push(hares_core::DwellingConfig {
-        schedule: Some(hares_io::InputSource::Path(
+        schedule: Some(hares_input::InputSource::Path(
             scratch.path().join("no-such-schedule.csv"),
         )),
         ..helpers::build_dwelling_config(
@@ -173,7 +173,7 @@ pub fn run_aggregation_check() -> Result<(), Vec<String>> {
     let report = FleetReport {
         selection: Selection::Verbosity(2),
         frequency: Frequency::Hourly,
-        health_policy: hares_io::HealthPolicy::default(),
+        health_policy: hares_input::HealthPolicy::default(),
     };
     let result = match fleet.simulate(&report, 1, std::num::NonZeroUsize::new(64).expect("64")) {
         Ok(result) => result,

@@ -2,7 +2,7 @@ mod corpus;
 mod tolerance;
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use arrow::array::{Array, Float64Array};
 use corpus::{DiscoveredFixture, ParityFixture, discover_fixtures};
 use hares_core::{DwellingConfig, SimulationEngine};
-use hares_io::{SimulationConfig, parse_hpxml, resolve_equipment};
-use hares_io::{defaults::DefaultsStore, hpxml::ZoneType};
+use hares_input::{SimulationConfig, parse_hpxml, resolve_equipment};
+use hares_input::{defaults::DefaultsStore, hpxml::ZoneType};
 use hares_types::telemetry_keys as tk;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
@@ -453,9 +453,9 @@ fn reconcile_fixture(fixture: &ParityFixture) -> Result<(), Vec<String>> {
     // and overrides; the reference comparison's verbosity-3 frame is the
     // corpus test's business, not this run's.
     sim_config.reports = match sim_config.reports.first().cloned() {
-        Some(report) => vec![hares_io::ReportSpec {
-            selection: hares_io::Selection::Verbosity(8),
-            destination: hares_io::Destination::Parquet {
+        Some(report) => vec![hares_input::ReportSpec {
+            selection: hares_input::Selection::Verbosity(8),
+            destination: hares_input::Destination::Parquet {
                 path: frame_path.clone(),
                 overwrite: false,
             },
@@ -1312,8 +1312,8 @@ fn run_and_compare_fixture(fixture: &ParityFixture) -> Result<FixtureRunResult, 
     // The harness reads the run's parquet file: the fixture's report (its
     // verbosity selection) redirected to the harness's own destination.
     sim_config.reports = match sim_config.reports.first().cloned() {
-        Some(report) => vec![hares_io::ReportSpec {
-            destination: hares_io::Destination::Parquet {
+        Some(report) => vec![hares_input::ReportSpec {
+            destination: hares_input::Destination::Parquet {
                 path: csv_path.clone(),
                 overwrite: false,
             },

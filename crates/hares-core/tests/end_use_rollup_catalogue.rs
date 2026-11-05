@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use hares_io::{CatalogueEquipment, CatalogueInput, build_catalogue};
+use hares_output::{CatalogueEquipment, CatalogueInput, build_catalogue};
 use hares_types::{EndUse, EquipmentId, FuelType};
 
 /// `misleadingly_named_equipment_classifies_by_its_descriptor`: one

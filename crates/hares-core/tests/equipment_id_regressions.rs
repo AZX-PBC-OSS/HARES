@@ -27,7 +27,7 @@
 //!    while the long run still fails.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -103,11 +103,11 @@ fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> S
         time_res: Duration::seconds(900),
         reports: csv_path
             .into_iter()
-            .map(|path| hares_io::ReportSpec {
+            .map(|path| hares_input::ReportSpec {
                 name: "frame".to_string(),
-                selection: hares_io::Selection::Verbosity(verbosity),
-                frequency: hares_io::Frequency::default(),
-                destination: hares_io::Destination::Csv {
+                selection: hares_input::Selection::Verbosity(verbosity),
+                frequency: hares_input::Frequency::default(),
+                destination: hares_input::Destination::Csv {
                     path,
                     overwrite: false,
                 },
@@ -119,12 +119,12 @@ fn sim_config(duration: Duration, csv_path: Option<PathBuf>, verbosity: u8) -> S
         setpoint_deadband_c: None,
         master_seed: 0,
         civil_timezone: None,
-        site_location: hares_io::SiteLocationOverride::default(),
-        max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-        health_policy: hares_io::HealthPolicy::default(),
+        site_location: hares_input::SiteLocationOverride::default(),
+        max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+        health_policy: hares_input::HealthPolicy::default(),
         first_hour_interpolation: Default::default(),
-        weather_year: hares_io::WeatherYear::default(),
-        warmup: hares_io::Warmup::Disabled,
+        weather_year: hares_input::WeatherYear::default(),
+        warmup: hares_input::Warmup::Disabled,
     }
 }
 
@@ -676,14 +676,14 @@ fn add_equipment_rejects_equipment_whose_identity_write_does_not_land() {
 
 /// A hand-built Dehumidifier spec (minimal typed config carrying the zone
 /// init requires plus an explicit id) going through the blueprint entrance.
-fn dehumidifier_spec(instance: &str, equipment_id: u32) -> hares_io::EquipmentSpec {
+fn dehumidifier_spec(instance: &str, equipment_id: u32) -> hares_input::EquipmentSpec {
     let config: hares_equipment::DehumidifierConfig =
         serde_json::from_value(serde_json::json!({ "equipment_id": equipment_id, "zone_id": 1 }))
             .expect("minimal DehumidifierConfig");
     let typed =
         EquipmentConfig::from_typed(instance.to_string(), "Dehumidifier".to_string(), config)
             .expect("typed config");
-    hares_io::EquipmentSpec {
+    hares_input::EquipmentSpec {
         name: "Dehumidifier".to_string(),
         instance_name: Some(instance.to_string()),
         fuel_type: FuelType::Electric,
@@ -1433,7 +1433,7 @@ fn end_use_aggregates_match_per_equipment_columns_after_midrun_remove() {
         }
     }
     for (end_use, members) in &by_end_use {
-        let agg_name = hares_io::end_use_electric_power_column(end_use);
+        let agg_name = hares_output::end_use_electric_power_column(end_use);
         // The frozen schema emits aggregates for the end-uses present at
         // freeze time; a survivor's end-use was present then too (only
         // equipment was removed), so the column must exist.

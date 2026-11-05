@@ -1841,7 +1841,7 @@ mod tests {
 
     use super::*;
     use hares_core::Actor;
-    use hares_io::{CatalogueActor, CatalogueInput, build_catalogue};
+    use hares_output::{CatalogueActor, CatalogueInput, build_catalogue};
     use hares_types::{AcrossHomes, Aggregation, Unit, VariableKind};
     use pyo3::types::PyModule;
 

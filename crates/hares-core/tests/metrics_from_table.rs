@@ -10,7 +10,7 @@
 // function is missing.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,9 +21,10 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, TimeUnit};
 use chrono::Duration;
 use hares_core::{Dwelling, DwellingConfig, RunMetrics};
-use hares_io::output::metrics::metrics_from_table;
-use hares_io::output::reduce::{PeriodCalendar, PeriodReducer, TimeRule};
-use hares_io::{Catalogue, Frequency};
+use hares_input::Frequency;
+use hares_output::Catalogue;
+use hares_output::metrics::metrics_from_table;
+use hares_output::reduce::{PeriodCalendar, PeriodReducer, TimeRule};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -67,7 +68,7 @@ fn dwelling_config(sim_toml: &str) -> DwellingConfig {
         weather: WeatherInput::Path(home.join("weather.epw")),
         defaults: DefaultsSource::directory(repo_root().join("python/hares/defaults")),
         settings: DwellingSettings::new(
-            hares_io::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
+            hares_input::SimulationConfig::from_toml(sim_toml).expect("sim config parses"),
             None,
             1,
             None,
@@ -378,7 +379,7 @@ fn hourly_table(batches: &[RecordBatch], catalogue: &Catalogue) -> Vec<RecordBat
     let mut reducer = PeriodReducer::new(Frequency::Hourly, PeriodCalendar::default(), rules)
         .expect("reducer builds");
     let mut rows: Vec<(i64, Vec<f64>)> = Vec::new();
-    let mut emit = |row: hares_io::output::reduce::PeriodRow<'_>| {
+    let mut emit = |row: hares_output::reduce::PeriodRow<'_>| {
         rows.push((row.start_local_ms, row.values.to_vec()));
     };
     for batch in batches {

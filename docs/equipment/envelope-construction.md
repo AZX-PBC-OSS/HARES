@@ -8,7 +8,7 @@ This document traces the complete path from HPXML input to a discretized state-s
 
 ```mermaid
 graph TD
-    HPXML["HPXML File"] --> PARSE["hpxml::parse()<br/>(hares-io)"]
+    HPXML["HPXML File"] --> PARSE["hpxml::parse()<br/>(hares-input)"]
     PARSE --> BLDG["Building"]
     BLDG --> BOUND["Vec&lt;Boundary&gt;<br/>(material layers, R-values,<br/>construction type)"]
     BLDG --> WIN["Vec&lt;Window&gt;<br/>(U-factor, SHGC, shading)"]
@@ -48,7 +48,7 @@ graph TD
 
 ## 1. HPXML Parsing: Boundary & Material Identification
 
-**Source**: `crates/hares-io/src/hpxml/building.rs`
+**Source**: `crates/hares-input/src/hpxml/building.rs`
 
 ### Boundary Struct
 
@@ -123,7 +123,7 @@ The parser extracts metadata used to match boundaries against the OCHRE material
 
 ## 2. Envelope LUT: OCHRE Material Database Lookup
 
-**Source**: `crates/hares-io/src/envelope_lut.rs`
+**Source**: `crates/hares-input/src/envelope_lut.rs`
 
 The envelope LUT maps HPXML boundary descriptions to pre-computed RC parameters from OCHRE's material database, loaded from CSV files in the `defaults/envelope/` directory.
 

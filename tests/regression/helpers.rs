@@ -5,7 +5,7 @@
 //! meaningful.
 
 use hares_core::DwellingSettings;
-use hares_io::{DefaultsSource, InputSource, WeatherInput};
+use hares_input::{DefaultsSource, InputSource, WeatherInput};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -88,17 +88,17 @@ pub fn build_beopt_dwelling_config(
                 duration,
                 time_res: Duration::minutes(1),
                 reports: vec![
-                    hares_io::ReportSpec {
+                    hares_input::ReportSpec {
                         name: "frame".to_string(),
-                        selection: hares_io::Selection::Verbosity(0),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Memory,
+                        selection: hares_input::Selection::Verbosity(0),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Memory,
                     },
-                    hares_io::ReportSpec {
+                    hares_input::ReportSpec {
                         name: "file".to_string(),
-                        selection: hares_io::Selection::Verbosity(0),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Csv {
+                        selection: hares_input::Selection::Verbosity(0),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Csv {
                             path: csv_path(output_dir, bldg_id),
                             // The harness reruns a scenario (the determinism
                             // sweep's thread counts) into the same directory;
@@ -114,12 +114,12 @@ pub fn build_beopt_dwelling_config(
                 setpoint_deadband_c: None,
                 master_seed: seed,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             bldg_id,
@@ -148,17 +148,17 @@ pub fn build_resstock_dwelling_config(
                 duration,
                 time_res: Duration::minutes(1),
                 reports: vec![
-                    hares_io::ReportSpec {
+                    hares_input::ReportSpec {
                         name: "frame".to_string(),
-                        selection: hares_io::Selection::Verbosity(0),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Memory,
+                        selection: hares_input::Selection::Verbosity(0),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Memory,
                     },
-                    hares_io::ReportSpec {
+                    hares_input::ReportSpec {
                         name: "file".to_string(),
-                        selection: hares_io::Selection::Verbosity(0),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Csv {
+                        selection: hares_input::Selection::Verbosity(0),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Csv {
                             path: csv_path(output_dir, bldg_id),
                             // The harness reruns a scenario (the determinism
                             // sweep's thread counts) into the same directory;
@@ -174,12 +174,12 @@ pub fn build_resstock_dwelling_config(
                 setpoint_deadband_c: None,
                 master_seed: seed,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             bldg_id,
@@ -301,17 +301,17 @@ pub fn build_dwelling_config(
                 duration,
                 time_res: Duration::minutes(1),
                 reports: vec![
-                    hares_io::ReportSpec {
+                    hares_input::ReportSpec {
                         name: "frame".to_string(),
-                        selection: hares_io::Selection::Verbosity(0),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Memory,
+                        selection: hares_input::Selection::Verbosity(0),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Memory,
                     },
-                    hares_io::ReportSpec {
+                    hares_input::ReportSpec {
                         name: "file".to_string(),
-                        selection: hares_io::Selection::Verbosity(0),
-                        frequency: hares_io::Frequency::default(),
-                        destination: hares_io::Destination::Csv {
+                        selection: hares_input::Selection::Verbosity(0),
+                        frequency: hares_input::Frequency::default(),
+                        destination: hares_input::Destination::Csv {
                             path: csv_path(output_dir, bldg_id),
                             // The harness reruns a scenario (the determinism
                             // sweep's thread counts) into the same directory;
@@ -327,12 +327,12 @@ pub fn build_dwelling_config(
                 setpoint_deadband_c: None,
                 master_seed: seed,
                 civil_timezone: None,
-                site_location: hares_io::SiteLocationOverride::default(),
-                max_consecutive_step_failures: hares_io::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
-                health_policy: hares_io::HealthPolicy::default(),
+                site_location: hares_input::SiteLocationOverride::default(),
+                max_consecutive_step_failures: hares_input::DEFAULT_MAX_CONSECUTIVE_STEP_FAILURES,
+                health_policy: hares_input::HealthPolicy::default(),
                 first_hour_interpolation: Default::default(),
-                weather_year: hares_io::WeatherYear::default(),
-                warmup: hares_io::Warmup::Disabled,
+                weather_year: hares_input::WeatherYear::default(),
+                warmup: hares_input::Warmup::Disabled,
             },
             None,
             bldg_id,
